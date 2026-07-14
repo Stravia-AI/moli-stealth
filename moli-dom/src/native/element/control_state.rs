@@ -1,6 +1,7 @@
 use super::Attribute;
 use crate::forms::{input_type_has_value_sanitization, sanitize_input_value_for_type};
 use indexmap::IndexSet;
+use moli_html_input_type::InputType;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SelectedFile {
@@ -205,7 +206,7 @@ impl ElementControlState {
         };
 
         if local_name == "input" {
-            let input_type = attribute("type").unwrap_or("text");
+            let input_type = InputType::from_attribute_value(attribute("type"));
             state.input_value = Some(sanitize_input_value_for_type(
                 input_type,
                 attribute("value").unwrap_or_default(),
@@ -808,7 +809,7 @@ impl ElementControlState {
         &mut self,
         namespace: &str,
         local_name: &str,
-        input_type: &str,
+        input_type: InputType,
         attribute_name: &str,
         attribute_value: Option<&str>,
     ) {

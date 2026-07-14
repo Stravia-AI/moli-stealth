@@ -1,4 +1,5 @@
 use super::*;
+use crate::forms::InputType;
 use crate::native::{CustomElementState, SelectedFile};
 
 impl DomHost {
@@ -642,7 +643,7 @@ impl DomHost {
                         .and_then(Node::as_element)
                         .is_some_and(|element| {
                             element.is_html_input()
-                                && element.input_type() == "radio"
+                                && element.input_type() == InputType::Radio
                                 && element.checked()
                         })
                 })
@@ -662,7 +663,7 @@ impl DomHost {
                     .and_then(Node::as_element)
                     .is_some_and(|element| {
                         element.is_html_input()
-                            && element.input_type() == "radio"
+                            && element.input_type() == InputType::Radio
                             && element.checked()
                     });
             if !is_still_checked_radio || self.form_control_owner(radio) == previous_form_owner {
