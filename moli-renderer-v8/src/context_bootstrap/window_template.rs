@@ -83,6 +83,17 @@ struct WindowEarlyTemplateMethodsDeclaration {
 
 #[derive(WebApiFunctionTemplate)]
 #[webapi(name = "Window", enumerable)]
+struct WindowObsoleteTemplateMethodsDeclaration {
+    #[webapi(method, length = 0, callback = window_obsolete_noop_callback)]
+    capture_events: (),
+
+    #[webapi(method, length = 0, callback = window_obsolete_noop_callback)]
+    release_events: (),
+}
+
+#[allow(dead_code)]
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "Window", enumerable)]
 struct WindowPostNetworkTemplateMethodsDeclaration {
     #[webapi(
         method = "createImageBitmap",
@@ -335,6 +346,7 @@ pub(crate) fn install_window_own_template_bindings<'s>(
     // functions the actual WindowProxy as `this`.
     WindowIdentityAccessorsDeclaration::initialize_prototype_template(scope, window_template);
     WindowEarlyTemplateMethodsDeclaration::initialize_prototype_template(scope, window_template);
+    WindowObsoleteTemplateMethodsDeclaration::initialize_prototype_template(scope, window_template);
     network_host::install_window_network_bindings(scope, window_template);
     WindowPostNetworkTemplateMethodsDeclaration::initialize_prototype_template(
         scope,

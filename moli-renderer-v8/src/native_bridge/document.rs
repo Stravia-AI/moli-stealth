@@ -640,6 +640,17 @@ struct DocumentCollectionQueryPrototypeDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "Document", enumerable)]
+struct DocumentObsoleteMethodsPrototypeDeclaration {
+    #[webapi(method, length = 0, callback = document_obsolete_noop_callback)]
+    clear: (),
+    #[webapi(method, length = 0, callback = document_obsolete_noop_callback)]
+    capture_events: (),
+    #[webapi(method, length = 0, callback = document_obsolete_noop_callback)]
+    release_events: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "DocumentFragment")]
 struct DocumentFragmentCollectionQueryPrototypeDeclaration {
     #[webapi(method, length = 1, callback = node_get_element_by_id_callback)]
@@ -683,6 +694,18 @@ fn document_receiver_runtime_and_handle<'s>(
         return None;
     }
     Some((runtime_ptr, handle))
+}
+
+fn document_obsolete_noop_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if document_receiver_runtime_and_handle(scope, args.this()).is_none() {
+        throw_type_error(scope, "Illegal invocation");
+        return;
+    }
+    rv.set_undefined();
 }
 
 fn document_forwarded_target_handle(
@@ -1640,6 +1663,9 @@ pub(crate) fn install_document_template_bindings<'s>(
             scope, prototype,
         );
         DocumentCollectionQueryPrototypeDeclaration::initialize_prototype_template(
+            scope, prototype,
+        );
+        DocumentObsoleteMethodsPrototypeDeclaration::initialize_prototype_template(
             scope, prototype,
         );
     }
