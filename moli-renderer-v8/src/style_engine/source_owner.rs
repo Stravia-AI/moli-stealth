@@ -1,7 +1,7 @@
 use crate::{
     context_bootstrap::evaluate_match_media_query_list_with_viewport,
     document_runtime::DomHandle,
-    dom::native::{DomHost, Node},
+    dom::native::{DomHost, Element, Node},
     protocol_types::EmulatedMediaOverrides,
     style_engine::StyleViewport,
 };
@@ -16,6 +16,19 @@ pub(crate) fn link_rel_qualifies_as_stylesheet(rel: Option<&str>, title: Option<
     };
     includes_token("stylesheet")
         && (!includes_token("alternate") || title.is_some_and(|title| !title.is_empty()))
+}
+
+pub(crate) fn stylesheet_owner_type_is_supported(element: &Element) -> bool {
+    let type_attribute = element.attribute("type");
+    if element.is_html_element("style")
+        || (element.namespace() == "http://www.w3.org/2000/svg" && element.local_name() == "style")
+    {
+        return moli_web_mime::is_css_style_element_type_attribute(type_attribute);
+    }
+    if element.is_html_element("link") {
+        return moli_web_mime::is_css_stylesheet_type_hint(type_attribute);
+    }
+    false
 }
 
 pub(super) fn stylesheet_owner_is_stylesheet_source_enabled(
@@ -57,14 +70,12 @@ fn style_element_is_stylesheet_source_enabled(
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
-    let Some(node) = host.node(handle) else {
+    let Some(element) = host.node(handle).and_then(Node::as_element) else {
         return false;
     };
-    node.as_element()
-        .is_some_and(|element| element.is_inline_style_element())
-        && moli_web_mime::is_stylesheet_type_attribute(
-            host.get_attribute(handle, "type").as_deref(),
-        )
+    element.is_inline_style_element()
+        && host.get_attribute(handle, "disabled").is_none()
+        && stylesheet_owner_type_is_supported(element)
         && stylesheet_source_media_matches(media_text, emulated_media, viewport)
 }
 

@@ -22,8 +22,7 @@ use crate::{
 use moli_encoding::decode_text_for_legacy_web;
 use moli_v8_util::throw_type_error;
 use moli_web_mime::{
-    MimeSniffingContext, data_url_body_and_computed_mime_type, is_css_mime,
-    is_stylesheet_type_attribute, mime_charset,
+    MimeSniffingContext, data_url_body_and_computed_mime_type, is_css_mime, mime_charset,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -92,13 +91,15 @@ fn sync_shadow_root_style_sheets<'s>(
 ) {
     let mut sheets = Vec::new();
     for sheet_handle in shadow_root_style_sheet_handles_in_tree_order(runtime, root) {
+        let Some(element) = runtime
+            .dom_host()
+            .node(sheet_handle)
+            .and_then(crate::dom::native::Node::as_element)
+        else {
+            continue;
+        };
         if !runtime.dom_host().is_connected(sheet_handle)
-            || !is_stylesheet_type_attribute(
-                runtime
-                    .dom_host()
-                    .get_attribute(sheet_handle, "type")
-                    .as_deref(),
-            )
+            || !crate::style_engine::stylesheet_owner_type_is_supported(element)
         {
             continue;
         }
@@ -124,19 +125,17 @@ fn sync_detached_shadow_root_style_sheets<'s>(
 ) {
     let mut sheets = Vec::new();
     for sheet_handle in shadow_root_style_sheet_handles_in_tree_order(runtime, root) {
-        if !is_stylesheet_type_attribute(
-            runtime
-                .dom_host()
-                .get_attribute(sheet_handle, "type")
-                .as_deref(),
-        ) {
-            continue;
-        }
-        if runtime
+        let Some(element) = runtime
             .dom_host()
             .node(sheet_handle)
-            .and_then(|node| node.local_name())
-            .is_some_and(|name| name.eq_ignore_ascii_case("link"))
+            .and_then(crate::dom::native::Node::as_element)
+        else {
+            continue;
+        };
+        if !crate::style_engine::stylesheet_owner_type_is_supported(element) {
+            continue;
+        }
+        if element.local_name().eq_ignore_ascii_case("link")
             && !runtime
                 .dom_host()
                 .get_attribute(sheet_handle, "rel")

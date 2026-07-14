@@ -1386,7 +1386,7 @@ impl HtmlPreloadScannerSink {
         if !is_stylesheet && !is_style_preload {
             return;
         }
-        if !moli_web_mime::is_stylesheet_type_attribute(
+        if !moli_web_mime::is_css_stylesheet_type_hint(
             html_attr_value(&tag.attrs, "type").as_deref(),
         ) {
             return;

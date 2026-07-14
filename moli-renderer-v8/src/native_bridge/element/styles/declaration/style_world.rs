@@ -1,7 +1,5 @@
 use std::rc::Rc;
 
-use moli_web_mime::is_stylesheet_type_attribute;
-
 use crate::{
     document_runtime::DomHandle,
     dom::native::{DomHost, Node},
@@ -9,7 +7,7 @@ use crate::{
         FullStyleWorldSnapshot, IncrementalStyleWorldUpdate, PreparedStyleWorldUpdate,
         StyleSourceId, StyleTreeScopeVersions, StyleViewport, StyleWorldEnvironment,
         StyleWorldUpdatePlan, StyloStyleEnvironment, StyloStylesheetSource,
-        link_rel_qualifies_as_stylesheet,
+        link_rel_qualifies_as_stylesheet, stylesheet_owner_type_is_supported,
     },
     stylesheet_blocking::link_rel_includes_token,
 };
@@ -301,9 +299,7 @@ pub(super) fn active_stylesheet_handles(
                 element.is_html_element("link") && link_stylesheet_is_enabled(runtime, *handle);
             (style || link)
                 && (include_detached || stylesheet_is_active_in_scope(runtime, root, *handle))
-                && is_stylesheet_type_attribute(
-                    runtime.dom_host().get_attribute(*handle, "type").as_deref(),
-                )
+                && stylesheet_owner_type_is_supported(element)
         })
         .collect::<Vec<_>>();
     let preferred_title = handles

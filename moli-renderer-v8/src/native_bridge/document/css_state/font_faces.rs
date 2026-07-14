@@ -37,10 +37,9 @@ pub(super) fn owner_font_face_projection(
     owner: DomHandle,
 ) -> Option<OwnerFontFaceProjection> {
     let dom_host = host.dom_host();
+    let element = dom_host.node(owner)?.as_element()?;
     if !dom_host.is_connected(owner)
-        || !moli_web_mime::is_stylesheet_type_attribute(
-            dom_host.get_attribute(owner, "type").as_deref(),
-        )
+        || !crate::style_engine::stylesheet_owner_type_is_supported(element)
     {
         return None;
     }

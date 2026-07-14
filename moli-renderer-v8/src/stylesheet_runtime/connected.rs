@@ -1842,7 +1842,7 @@ fn connected_style_owner_kind(
     if super::is_inline_style_element(element) {
         return if is_declarative_css_module_style_element(element) {
             Some(ConnectedStyleOwnerKind::DeclarativeCssModule)
-        } else if moli_web_mime::is_stylesheet_type_attribute(element.attribute("type")) {
+        } else if crate::style_engine::stylesheet_owner_type_is_supported(element) {
             Some(ConnectedStyleOwnerKind::ClassicStyle)
         } else {
             None

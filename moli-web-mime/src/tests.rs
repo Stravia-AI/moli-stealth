@@ -190,12 +190,21 @@ fn matches_script_and_form_content_types() {
     assert!(is_text_mime("Text/Plain; charset=utf-8"));
     assert!(is_text_mime_essence("text/csv"));
     assert!(!is_text_mime("application/json"));
-    assert!(is_stylesheet_type_attribute(None));
-    assert!(is_stylesheet_type_attribute(Some("")));
-    assert!(is_stylesheet_type_attribute(Some(
+    assert!(is_css_style_element_type_attribute(None));
+    assert!(is_css_style_element_type_attribute(Some("")));
+    assert!(is_css_style_element_type_attribute(Some("TeXt/CsS")));
+    assert!(!is_css_style_element_type_attribute(Some(" text/css ")));
+    assert!(!is_css_style_element_type_attribute(Some(
+        "text/css; charset=utf-8"
+    )));
+    assert!(!is_css_style_element_type_attribute(Some("text/plain")));
+
+    assert!(is_css_stylesheet_type_hint(None));
+    assert!(is_css_stylesheet_type_hint(Some("")));
+    assert!(is_css_stylesheet_type_hint(Some(
         " Text/CSS ; charset=utf-8 "
     )));
-    assert!(!is_stylesheet_type_attribute(Some("text/plain")));
+    assert!(!is_css_stylesheet_type_hint(Some("text/plain")));
 
     assert!(is_image_mime("Image/PNG; charset=binary"));
     assert!(is_image_mime_essence("image/svg+xml"));

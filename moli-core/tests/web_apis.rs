@@ -477,7 +477,7 @@ async fn style_link_stylesheet_accessors_keep_link_sheet_null_without_source() -
         page.serialize_html_async()
             .await
             .unwrap()
-            .contains("data-style-accessors=\"text/css:text/css:screen:render:true:false\"")
+            .contains("data-style-accessors=\":text/css:screen:render:true:false\"")
     );
     assert!(
         page.serialize_html_async()

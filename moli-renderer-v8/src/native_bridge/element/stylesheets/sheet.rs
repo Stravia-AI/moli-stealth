@@ -8,10 +8,9 @@ use crate::style_engine::link_rel_qualifies_as_stylesheet;
 use crate::util::{
     context_host_ptr_from_global_bridge, get_private_value, set_private_value, throw_type_error,
 };
-use moli_web_mime::is_stylesheet_type_attribute;
+use moli_web_mime::is_css_stylesheet_type_hint;
 
 use super::super::super::node::node_runtime_and_handle_from_object;
-use super::super::element_attribute;
 
 pub(super) const STYLE_SHEET_CACHE_SLOT: &str = "__moliStyleSheet";
 
@@ -134,7 +133,7 @@ pub(crate) fn style_sheet_for_element<'s>(
     let is_css_link = element.is_html_element("link")
         && link_rel_qualifies_as_stylesheet(element.attribute("rel"), element.attribute("title"));
     if (!is_style && !is_css_link)
-        || !is_stylesheet_type_attribute(element_attribute(runtime, handle, "type").as_deref())
+        || !crate::style_engine::stylesheet_owner_type_is_supported(element)
         || (is_css_link
             && runtime
                 .dom_host()
@@ -283,7 +282,7 @@ fn style_sheet_for_processing_instruction<'s>(
         return None;
     }
     let type_attr = processing_instruction_pseudo_attribute(data, "type");
-    if !is_stylesheet_type_attribute(type_attr.as_deref()) {
+    if !is_css_stylesheet_type_hint(type_attr.as_deref()) {
         return None;
     }
     processing_instruction_pseudo_attribute(data, "href")?;

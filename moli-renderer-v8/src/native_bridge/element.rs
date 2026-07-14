@@ -637,7 +637,6 @@ pub(crate) fn computed_style_property_for_handle(
 use stylesheets::{
     link_disabled_getter_function, link_disabled_setter_function, style_blocking_getter_function,
     style_blocking_setter_function, style_disabled_getter_function, style_disabled_setter_function,
-    style_type_getter_function, style_type_setter_function,
 };
 pub(super) use template_install::{
     install_specialized_instance_properties, install_specialized_template,
@@ -4034,8 +4033,9 @@ struct HtmlLinkElementUrlPrototypeDeclaration {
 struct HtmlStyleElementPrototypeDeclaration {
     #[webapi(
         accessor_property,
-        getter = style_type_getter_function,
-        setter = style_type_setter_function
+        getter = dom_string_reflection_getter_function,
+        setter = dom_string_reflection_setter_function,
+        data = DomStringReflection::StyleType
     )]
     r#type: (),
     #[webapi(

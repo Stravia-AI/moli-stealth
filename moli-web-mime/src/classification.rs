@@ -51,7 +51,17 @@ pub fn is_text_mime_essence(input: &str) -> bool {
     input.starts_with("text/")
 }
 
-pub fn is_stylesheet_type_attribute(value: Option<&str>) -> bool {
+/// Whether a `style` element's raw `type` attribute selects classic CSS.
+///
+/// HTML's update-a-style-block algorithm compares the untrimmed attribute
+/// value directly; unlike a MIME type hint, parameters and surrounding ASCII
+/// whitespace are not accepted.
+pub fn is_css_style_element_type_attribute(value: Option<&str>) -> bool {
+    value.is_none_or(|value| value.is_empty() || value.eq_ignore_ascii_case("text/css"))
+}
+
+/// Whether a stylesheet link or processing-instruction MIME hint selects CSS.
+pub fn is_css_stylesheet_type_hint(value: Option<&str>) -> bool {
     let Some(value) = value else {
         return true;
     };

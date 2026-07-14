@@ -4,7 +4,6 @@ use crate::runtime::page_surface::{
     RendererStyleSheetHeader, RendererStyleSheetInventoryUpdate, RendererStyleSheetPayload,
 };
 use crate::stylesheet_blocking::link_rel_includes_token;
-use moli_web_mime::is_stylesheet_type_attribute;
 use std::collections::HashSet;
 
 impl PageVm {
@@ -120,7 +119,7 @@ impl PageVm {
         let dom_host = self.vm().document_runtime.dom_host();
         let node = dom_host.node(handle)?;
         let element = node.as_element()?;
-        if !is_stylesheet_type_attribute(element.attribute("type")) {
+        if !crate::style_engine::stylesheet_owner_type_is_supported(element) {
             return None;
         }
 

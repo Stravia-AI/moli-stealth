@@ -20,7 +20,3 @@ pub(super) fn object_bool_property(
     }
     Some(value.boolean_value(scope))
 }
-
-pub(super) fn style_is_css_type(value: Option<String>) -> bool {
-    moli_web_mime::is_stylesheet_type_attribute(value.as_deref())
-}

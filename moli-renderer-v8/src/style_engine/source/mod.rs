@@ -522,6 +522,18 @@ impl MoliStyleEngine {
                     );
                 } else if matches!(
                     change.kind(),
+                    DomStylesheetOwnerChangeKind::Attribute {
+                        namespace: None,
+                        local_name,
+                    } if local_name == "type"
+                ) {
+                    // The type attribute changes whether the already-parsed
+                    // owner source participates in its TreeScope. The source
+                    // text and identity stay stable, but retained worlds must
+                    // refresh their active stylesheet projection immediately.
+                    self.invalidate_owner_stylesheet_set_for_owner_with_host(host, owner);
+                } else if matches!(
+                    change.kind(),
                     DomStylesheetOwnerChangeKind::Unregistered
                         | DomStylesheetOwnerChangeKind::TreeConnectionChanged { connected: false }
                 ) {

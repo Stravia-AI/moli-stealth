@@ -7383,7 +7383,7 @@ fn cssom_linkstyle_math_and_svg_element_surfaces_match_idlharness() {
 
     assert_eq!(
         result,
-        "function|true|true|true|function|true|true|true|true"
+        "function|true|true|false|function|true|true|true|true"
     );
 }
 

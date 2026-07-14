@@ -7137,7 +7137,7 @@ fn detached_resource_template_accessors_use_owner_prototypes() {
     for (const name of ["type", "media", "blocking", "disabled"]) {
       assert(!own(style, name), `style.${name} should not be own before set`);
     }
-    assert(style.type === "text/css", "style type default");
+    assert(style.type === "", "style type default");
     style.type = "text/less";
     style.media = "print";
     style.blocking = "render";

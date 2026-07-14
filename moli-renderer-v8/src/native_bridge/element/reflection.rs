@@ -233,6 +233,7 @@ pub(super) enum DomStringReflection {
     SourceSizes,
     SourceType,
     StyleMedia,
+    StyleType,
     TableBorder,
     TableCellAbbr,
     TableCellAxis,
@@ -622,6 +623,15 @@ const DOM_STRING_REFLECTION_DESCRIPTORS: &[(DomStringReflection, DomStringReflec
         (
             DomStringReflection::StyleMedia,
             DomStringReflectionDescriptor::new("HTMLStyleElement", "media", "media"),
+        ),
+        (
+            DomStringReflection::StyleType,
+            DomStringReflectionDescriptor::new_html_element(
+                "HTMLStyleElement",
+                "style",
+                "type",
+                "type",
+            ),
         ),
         (
             DomStringReflection::TableBorder,

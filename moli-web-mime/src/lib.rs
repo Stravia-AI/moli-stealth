@@ -10,10 +10,10 @@ mod sniffing;
 
 pub use classification::{
     is_audio_mime, is_audio_mime_essence, is_binary_document_mime_type, is_css_mime,
-    is_dom_parser_xml_mime, is_font_mime, is_font_mime_essence, is_form_urlencoded_mime,
-    is_html_document_mime, is_image_mime, is_image_mime_essence, is_javascript_mime,
-    is_javascript_mime_essence, is_json_module_mime, is_multipart_form_data_mime,
-    is_png_image_mime, is_png_image_mime_essence, is_stylesheet_type_attribute,
+    is_css_style_element_type_attribute, is_css_stylesheet_type_hint, is_dom_parser_xml_mime,
+    is_font_mime, is_font_mime_essence, is_form_urlencoded_mime, is_html_document_mime,
+    is_image_mime, is_image_mime_essence, is_javascript_mime, is_javascript_mime_essence,
+    is_json_module_mime, is_multipart_form_data_mime, is_png_image_mime, is_png_image_mime_essence,
     is_supported_document_mime_type, is_svg_image_mime, is_svg_image_mime_essence, is_text_mime,
     is_text_mime_essence, is_video_mime, is_video_mime_essence, is_webassembly_mime,
     multipart_form_data_boundary,

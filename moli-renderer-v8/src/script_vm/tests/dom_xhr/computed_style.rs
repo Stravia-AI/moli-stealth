@@ -356,6 +356,56 @@ fn computed_style_exposes_root_pointer_events() {
     assert_eq!(result, "none|none|true");
 }
 
+#[test]
+fn style_element_type_attribute_uses_raw_exact_css_match() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-type-attribute.test/",
+        r#"<!doctype html>
+<html><head>
+  <style id="missing">#missing-target { color: rgb(0, 128, 0); }</style>
+  <style id="empty" type="">#empty-target { color: rgb(0, 128, 0); }</style>
+  <style id="mixed" type="TeXt/CsS">#mixed-target { color: rgb(0, 128, 0); }</style>
+  <style id="spaced" type=" text/css ">#spaced-target { color: rgb(0, 128, 0); }</style>
+  <style id="parameter" type="text/css; charset=utf-8">#parameter-target { color: rgb(0, 128, 0); }</style>
+</head><body>
+  <div id="missing-target"></div><div id="empty-target"></div>
+  <div id="mixed-target"></div><div id="spaced-target"></div>
+  <div id="parameter-target"></div>
+</body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const names = ['missing', 'empty', 'mixed', 'spaced', 'parameter'];
+  const green = 'rgb(0, 128, 0)';
+  const applied = name => getComputedStyle(document.getElementById(`${name}-target`)).color === green;
+  const styles = names.map(name => document.getElementById(name));
+  const initial = {
+    applied: names.map(applied),
+    sheets: styles.map(style => style.sheet !== null),
+    count: document.styleSheets.length,
+    reflected: styles.map(style => style.type)
+  };
+
+  const spaced = document.getElementById('spaced');
+  spaced.type = 'text/css';
+  const valid = [applied('spaced'), spaced.sheet !== null, document.styleSheets.length];
+  spaced.type = ' text/css ';
+  const invalid = [applied('spaced'), spaced.sheet === null, document.styleSheets.length];
+  return JSON.stringify({ initial, valid, invalid });
+})()
+"#,
+        )
+        .expect("style type attribute semantics should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"initial":{"applied":[true,true,true,false,false],"sheets":[true,true,true,false,false],"count":3,"reflected":["","","TeXt/CsS"," text/css ","text/css; charset=utf-8"]},"valid":[true,true,4],"invalid":[false,true,3]}"#
+    );
+}
+
 fn child_document_handle_for_frame_id(vm: &ScriptVm, frame_id: &str) -> DomHandle {
     let frame = element_handle_by_id(vm, frame_id);
     vm._context_host

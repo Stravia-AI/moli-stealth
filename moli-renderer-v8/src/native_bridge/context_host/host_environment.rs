@@ -1214,11 +1214,10 @@ impl JsContextHost {
         owner: DomHandle,
     ) -> Option<std::sync::Arc<[crate::style_engine::StylesheetFontFaceDescriptor]>> {
         let dom_host = self.dom_host();
+        let element = dom_host.node(owner).and_then(Node::as_element)?;
         if !dom_host.is_connected(owner)
             || dom_host.get_attribute(owner, "disabled").is_some()
-            || !moli_web_mime::is_stylesheet_type_attribute(
-                dom_host.get_attribute(owner, "type").as_deref(),
-            )
+            || !crate::style_engine::stylesheet_owner_type_is_supported(element)
         {
             return None;
         }
@@ -1227,7 +1226,7 @@ impl JsContextHost {
                 .owner_style_sheet_processing_source(owner)
                 .map(|source| source.font_faces());
         }
-        if dom_host.is_html_element_named(owner, "link") {
+        if element.is_html_element("link") {
             return self
                 .linked_stylesheet_source_for_owner(owner)
                 .map(|source| source.font_faces());

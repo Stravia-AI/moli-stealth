@@ -1,4 +1,4 @@
-use super::shared::{STYLE_SHEETS_SLOT, object_bool_property, style_is_css_type};
+use super::shared::{STYLE_SHEETS_SLOT, object_bool_property};
 use crate::{
     context_bootstrap::set_style_sheet_list_contents,
     document_runtime::DomHandle,
@@ -24,10 +24,10 @@ pub(super) fn sync_document_style_sheets<'s>(
         let Some(node) = dom_host.node(sheet_handle) else {
             continue;
         };
-        let Some(local_name) = node.local_name() else {
+        let Some(element) = node.as_element() else {
             continue;
         };
-        if !style_is_css_type(dom_host.get_attribute(sheet_handle, "type")) {
+        if !crate::style_engine::stylesheet_owner_type_is_supported(element) {
             continue;
         }
         let wrapper = if document_is_connected {
@@ -40,7 +40,8 @@ pub(super) fn sync_document_style_sheets<'s>(
         let Some(wrapper) = wrapper else {
             continue;
         };
-        if local_name == "link" && object_bool_property(scope, wrapper, "disabled").unwrap_or(false)
+        if element.local_name() == "link"
+            && object_bool_property(scope, wrapper, "disabled").unwrap_or(false)
         {
             continue;
         }
