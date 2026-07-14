@@ -2541,6 +2541,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     "title",
     "lang",
     "autocapitalize",
+    "autocorrect",
     "translate",
     "dir",
     "hidden",
@@ -2563,6 +2564,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     descriptors.title.set.call(element, "Title");
     descriptors.lang.set.call(element, "en");
     descriptors.autocapitalize.set.call(element, "WORDS");
+    descriptors.autocorrect.set.call(element, false);
     descriptors.dir.set.call(element, "rtl");
     descriptors.accessKey.set.call(element, "k");
     descriptors.enterKeyHint.set.call(element, "send");
@@ -2577,6 +2579,7 @@ fn detached_global_html_attributes_use_html_element_prototype_accessors() {
     assert(descriptors.title.get.call(element) === "Title", `${label}.title`);
     assert(descriptors.lang.get.call(element) === "en", `${label}.lang`);
     assert(descriptors.autocapitalize.get.call(element) === "words", `${label}.autocapitalize`);
+    assert(descriptors.autocorrect.get.call(element) === false, `${label}.autocorrect`);
     assert(descriptors.dir.get.call(element) === "rtl", `${label}.dir`);
     assert(descriptors.accessKey.get.call(element) === "k", `${label}.accessKey`);
     assert(descriptors.enterKeyHint.get.call(element) === "send", `${label}.enterKeyHint`);

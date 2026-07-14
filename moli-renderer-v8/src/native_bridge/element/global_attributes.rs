@@ -1824,7 +1824,7 @@ fn canonical_autocapitalize_value(raw: Option<&str>) -> &'static str {
     }
 }
 
-fn autocapitalize_inherits_from_form(local_name: &str) -> bool {
+fn text_input_hint_inherits_from_form(local_name: &str) -> bool {
     matches!(
         local_name,
         "button" | "fieldset" | "input" | "output" | "select" | "textarea"
@@ -1855,7 +1855,7 @@ pub(in crate::native_bridge) fn node_autocapitalize_getter_function<'s>(
 
     let own_value = element.attribute_ns("", "autocapitalize");
     let raw = if own_value.is_some_and(|value| !value.is_empty())
-        || !autocapitalize_inherits_from_form(element.local_name())
+        || !text_input_hint_inherits_from_form(element.local_name())
     {
         own_value
     } else {
@@ -1897,6 +1897,75 @@ pub(in crate::native_bridge) fn node_autocapitalize_setter_function<'s>(
         return;
     };
     set_reflected_attribute(scope, runtime_ptr, handle, "autocapitalize", &value);
+    rv.set_undefined();
+}
+
+pub(in crate::native_bridge) fn node_autocorrect_getter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Ok((runtime_ptr, handle)) =
+        node_runtime_and_handle_from_object_or_detached(scope, args.this())
+    else {
+        throw_incompatible_getter_receiver(scope, "HTMLElement", "autocorrect");
+        return;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    let Some(element) = runtime
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .filter(|element| element.namespace() == "http://www.w3.org/1999/xhtml")
+    else {
+        throw_incompatible_getter_receiver(scope, "HTMLElement", "autocorrect");
+        return;
+    };
+
+    if element.is_html_input()
+        && matches!(element.input_type().as_str(), "email" | "password" | "url")
+    {
+        rv.set_bool(false);
+        return;
+    }
+    let own_value = element.attribute_ns("", "autocorrect");
+    let raw = if own_value.is_some() || !text_input_hint_inherits_from_form(element.local_name()) {
+        own_value
+    } else {
+        form_associated_form_owner(runtime, handle)
+            .and_then(|form| runtime.dom_host().node(form))
+            .and_then(Node::as_element)
+            .and_then(|form| form.attribute_ns("", "autocorrect"))
+    };
+    rv.set_bool(!raw.is_some_and(|value| value.eq_ignore_ascii_case("off")));
+}
+
+pub(in crate::native_bridge) fn node_autocorrect_setter_function<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    let Ok((runtime_ptr, handle)) =
+        node_runtime_and_handle_from_object_or_detached(scope, args.this())
+    else {
+        throw_incompatible_setter_receiver(scope, "HTMLElement", "autocorrect");
+        return;
+    };
+    let is_html_element = unsafe { &*runtime_ptr }
+        .dom_host()
+        .node(handle)
+        .and_then(Node::as_element)
+        .is_some_and(|element| element.namespace() == "http://www.w3.org/1999/xhtml");
+    if !is_html_element {
+        throw_incompatible_setter_receiver(scope, "HTMLElement", "autocorrect");
+        return;
+    }
+    let value = if args.get(0).boolean_value(scope) {
+        "on"
+    } else {
+        "off"
+    };
+    set_reflected_attribute(scope, runtime_ptr, handle, "autocorrect", value);
     rv.set_undefined();
 }
 

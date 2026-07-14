@@ -435,6 +435,7 @@ pub(super) use global_attributes::{
     node_access_key_label_getter_function, node_access_key_setter_function,
     node_allow_fullscreen_getter_function, node_allow_fullscreen_setter_function,
     node_autocapitalize_getter_function, node_autocapitalize_setter_function,
+    node_autocorrect_getter_function, node_autocorrect_setter_function,
     node_autofocus_getter_function, node_autofocus_setter_function,
     node_content_editable_getter_function, node_content_editable_setter_function,
     node_credentialless_getter_function, node_credentialless_setter_function,
@@ -1426,6 +1427,13 @@ struct HtmlElementStandardPrototypeDeclaration {
         setter = node_autocapitalize_setter_function
     )]
     autocapitalize: (),
+    #[webapi(
+        accessor_property,
+        enumerable,
+        getter = node_autocorrect_getter_function,
+        setter = node_autocorrect_setter_function
+    )]
+    autocorrect: (),
     #[webapi(
         accessor_property,
         enumerable,

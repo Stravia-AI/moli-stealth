@@ -711,6 +711,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
                 "title",
                 "lang",
                 "autocapitalize",
+                "autocorrect",
                 "translate",
                 "dir",
                 "hidden",
@@ -752,6 +753,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               div.title = "hello";
               div.lang = "en-US";
               div.autocapitalize = "WORDS";
+              div.autocorrect = false;
               div.translate = false;
               div.dir = "RTL";
               div.hidden = true;
@@ -769,6 +771,7 @@ fn htmlelement_standard_accessors_live_on_owner_prototypes() {
               assert(div.title === "hello", "title behavior");
               assert(div.lang === "en-US", "lang behavior");
               assert(div.autocapitalize === "words" && div.getAttribute("autocapitalize") === "WORDS", "autocapitalize behavior");
+              assert(div.autocorrect === false && div.getAttribute("autocorrect") === "off", "autocorrect behavior");
               assert(div.translate === false && div.getAttribute("translate") === "no", "translate behavior");
               assert(div.dir === "rtl", "dir behavior");
               assert(div.hidden === true && div.hasAttribute("hidden"), "hidden behavior");

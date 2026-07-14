@@ -3196,6 +3196,95 @@ fn detached_native_xml_text_content_queues_child_list_record() {
     assert_eq!(result, "4|foo|3|foo");
 }
 #[test]
+fn autocorrect_reflects_boolean_and_inherits_from_form_owner() {
+    let mut vm = new_parsed_test_vm(
+        "https://autocorrect.test/",
+        "<!doctype html><html><body></body></html>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const div = document.createElement('div');
+  const canonical = [null, 'on', 'ON', 'off', 'OFF', 'invalid', ''].map(value => {
+    if (value === null) div.removeAttribute('autocorrect');
+    else div.setAttribute('autocorrect', value);
+    return div.autocorrect;
+  });
+
+  div.autocorrect = 'hello';
+  const truthy = [div.autocorrect, div.getAttribute('autocorrect')];
+  div.autocorrect = 0;
+  const falsy = [div.autocorrect, div.getAttribute('autocorrect')];
+
+  const form = document.createElement('form');
+  form.id = 'owner';
+  form.setAttribute('autocorrect', 'off');
+  document.body.appendChild(form);
+  const inheritedNames = ['button', 'fieldset', 'input', 'output', 'select', 'textarea'];
+  const inherited = inheritedNames.map(name => {
+    const child = document.createElement(name);
+    form.appendChild(child);
+    const external = document.createElement(name);
+    external.setAttribute('form', 'owner');
+    external.setAttributeNS('urn:test', 'autocorrect', 'on');
+    document.body.appendChild(external);
+    const values = [child.autocorrect, external.autocorrect];
+    child.setAttribute('autocorrect', '');
+    values.push(child.autocorrect);
+    child.setAttribute('autocorrect', 'off');
+    values.push(child.autocorrect);
+    return values.join(':');
+  });
+
+  const nonInherited = ['img', 'object'].map(name => {
+    const element = document.createElement(name);
+    form.appendChild(element);
+    return element.autocorrect;
+  });
+  const forcedOff = ['password', 'email', 'url'].map(type => {
+    const input = document.createElement('input');
+    input.type = type;
+    input.autocorrect = true;
+    return input.autocorrect;
+  });
+
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'autocorrect');
+  const incompatible = operation => {
+    try {
+      operation(document.createElementNS('urn:test', 'div'));
+      return 'none';
+    } catch (error) {
+      return error.name;
+    }
+  };
+
+  return JSON.stringify({
+    descriptor: [descriptor.enumerable, descriptor.configurable],
+    canonical,
+    truthy,
+    falsy,
+    inherited,
+    nonInherited,
+    forcedOff,
+    incompatible: [
+      incompatible(receiver => descriptor.get.call(receiver)),
+      incompatible(receiver => descriptor.set.call(receiver, true))
+    ]
+  });
+})()
+"#,
+        )
+        .expect("autocorrect semantics should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"descriptor":[true,true],"canonical":[true,true,true,false,false,true,true],"truthy":[true,"on"],"falsy":[false,"off"],"inherited":["false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false","false:false:true:false"],"nonInherited":[true,true],"forcedOff":[false,false,false],"incompatible":["TypeError","TypeError"]}"#
+    );
+}
+
+#[test]
 fn set_range_text_preserve_mode_adjusts_selection_by_replacement_delta() {
     let mut vm = new_storage_test_vm("https://forms-selection-set-range-text.test/");
 
