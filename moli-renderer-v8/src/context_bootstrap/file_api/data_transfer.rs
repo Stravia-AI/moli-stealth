@@ -528,6 +528,7 @@ fn initialize_data_transfer_object<'s>(
     DataTransferObjectDeclaration::new(empty_files, items)
         .initialize(scope, owner)
         .ok()?;
+    sync_data_transfer_surface(scope, items);
     Some(items)
 }
 
@@ -837,6 +838,7 @@ fn sync_data_transfer_surface<'s>(
     let types = data_transfer_types_from_items(&summaries);
     let types_array = crate::util::serialize_v8_array(scope, types.as_slice())
         .unwrap_or_else(|| v8::Array::new(scope, 0));
+    let _ = types_array.set_integrity_level(scope, v8::IntegrityLevel::Frozen);
     set_private_value(scope, owner, DATA_TRANSFER_TYPES_SLOT, types_array.into());
 
     if let Some(file_list) = get_private_object(scope, owner, DATA_TRANSFER_FILES_SLOT) {
@@ -1131,6 +1133,7 @@ pub(crate) fn data_transfer_clear_data_callback<'s>(
 
     let next = v8::Array::new(scope, 0);
     let mut next_index = 0u32;
+    let mut removed_item = false;
     for index in 0..item_array.length() {
         let Some(value) = item_array.get_index(scope, index) else {
             continue;
@@ -1141,10 +1144,14 @@ pub(crate) fn data_transfer_clear_data_callback<'s>(
         let remove = clear_data_removes_item(&item_summary(scope, item), target_type.as_deref());
         if remove {
             disable_data_transfer_item(scope, item);
+            removed_item = true;
             continue;
         }
         let _ = next.set_index(scope, next_index, item.into());
         next_index += 1;
+    }
+    if !removed_item {
+        return;
     }
     set_private_value(
         scope,

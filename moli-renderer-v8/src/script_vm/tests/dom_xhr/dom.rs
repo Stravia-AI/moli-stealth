@@ -4375,6 +4375,57 @@ fn drag_event_data_transfer_init_enforces_nullable_interface_conversion() {
 }
 
 #[test]
+fn data_transfer_types_is_a_cached_frozen_array_per_item_list_mutation() {
+    let mut vm = new_storage_test_vm("https://data-transfer-types-cache.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const transfer = new DataTransfer();
+  const otherTransfer = new DataTransfer();
+  const initial = transfer.types;
+  const otherInitial = otherTransfer.types;
+
+  transfer.clearData();
+  transfer.items.clear();
+  transfer.items.remove(0);
+  const afterEmptyNoOps = transfer.types;
+
+  transfer.setData('text/plain', 'alpha');
+  const afterAdd = transfer.types;
+  transfer.clearData('text/html');
+  const afterMissingClear = transfer.types;
+  transfer.setData('text/plain', 'beta');
+  const afterReplace = transfer.types;
+  transfer.items.clear();
+  const afterClear = transfer.types;
+  transfer.items.clear();
+
+  return JSON.stringify({
+    arrays: [Array.isArray(initial), Object.isFrozen(initial)],
+    initialIdentity: [transfer !== otherTransfer, initial !== otherInitial],
+    emptyNoOpsPreserveIdentity: initial === afterEmptyNoOps,
+    addReplacesIdentity: initial !== afterAdd,
+    missingClearPreservesIdentity: afterAdd === afterMissingClear,
+    replacementReplacesIdentity: afterMissingClear !== afterReplace,
+    clearReplacesIdentity: afterReplace !== afterClear,
+    finalNoOpPreservesIdentity: afterClear === transfer.types,
+    snapshots: [initial.join(','), afterAdd.join(','), afterReplace.join(','), afterClear.join(',')],
+    frozenAfterMutations: [afterAdd, afterReplace, afterClear].every(Object.isFrozen)
+  });
+})()
+"#,
+        )
+        .expect("DataTransfer types FrozenArray semantics should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"arrays":[true,true],"initialIdentity":[true,true],"emptyNoOpsPreserveIdentity":true,"addReplacesIdentity":true,"missingClearPreservesIdentity":true,"replacementReplacesIdentity":true,"clearReplacesIdentity":true,"finalNoOpPreservesIdentity":true,"snapshots":["","text/plain","text/plain",""],"frozenAfterMutations":true}"#
+    );
+}
+
+#[test]
 fn data_transfer_file_list_reference_tracks_item_mutations() {
     let mut vm = new_storage_test_vm("https://data-transfer-live-files.test/");
 
