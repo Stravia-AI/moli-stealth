@@ -781,6 +781,13 @@ fn performance_root_slots_ignore_reflection_and_spoofing() {
                   && descriptor.configurable === true
                   && !Object.prototype.hasOwnProperty.call(receiver, name);
               };
+              const capture = callback => {
+                try {
+                  return String(callback());
+                } catch (error) {
+                  return error.name;
+                }
+              };
               const timing = performance.timing;
               const navigation = performance.navigation;
               const eventCounts = performance.eventCounts;
@@ -844,8 +851,8 @@ fn performance_root_slots_ignore_reflection_and_spoofing() {
                 eventCountsFirstEntry: `${firstEntry[0]}:${firstEntry[1]}`,
                 jsonTimeOriginStable: json.timeOrigin === timeOrigin,
                 jsonNavigationType: json.navigation.type,
-                fakeTimeOrigin: String(timeOriginGetter.call(fakePerformance)),
-                fakeTiming: String(timingGetter.call(fakePerformance)),
+                fakeTimeOrigin: capture(() => timeOriginGetter.call(fakePerformance)),
+                fakeTiming: capture(() => timingGetter.call(fakePerformance)),
                 fakeNavigationType: String(navigationTypeGetter.call(fakeNavigation)),
                 fakeEventCountsGet: String(eventCountsPrototype.get.call(fakeEventCounts, "click")),
                 fakeEventCountsValue: String(eventCountsPrototype.values.call(fakeEventCounts).next().value)
@@ -857,7 +864,7 @@ fn performance_root_slots_ignore_reflection_and_spoofing() {
 
     assert_eq!(
         result,
-        r#"{"initialPerformanceNames":[],"initialNavigationNames":[],"initialEventCountsNames":[],"timeOriginSpoofIgnored":true,"timingStable":true,"navigationStable":true,"eventCountsStable":true,"performanceDescriptorsStable":true,"entriesSpoofIgnored":1,"navigationType":0,"navigationRedirectCount":0,"navigationDescriptorsStable":true,"eventCountsClick":0,"eventCountsFirstValue":0,"eventCountsFirstEntry":"auxclick:0","jsonTimeOriginStable":true,"jsonNavigationType":0,"fakeTimeOrigin":"undefined","fakeTiming":"undefined","fakeNavigationType":"undefined","fakeEventCountsGet":"0","fakeEventCountsValue":"0"}"#
+        r#"{"initialPerformanceNames":[],"initialNavigationNames":[],"initialEventCountsNames":[],"timeOriginSpoofIgnored":true,"timingStable":true,"navigationStable":true,"eventCountsStable":true,"performanceDescriptorsStable":true,"entriesSpoofIgnored":1,"navigationType":0,"navigationRedirectCount":0,"navigationDescriptorsStable":true,"eventCountsClick":0,"eventCountsFirstValue":0,"eventCountsFirstEntry":"auxclick:0","jsonTimeOriginStable":true,"jsonNavigationType":0,"fakeTimeOrigin":"TypeError","fakeTiming":"TypeError","fakeNavigationType":"undefined","fakeEventCountsGet":"0","fakeEventCountsValue":"0"}"#
     );
 }
 

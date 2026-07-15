@@ -217,13 +217,6 @@ struct WorkerGlobalConsoleDeclaration<'scope> {
     console: v8::Local<'scope, v8::Object>,
 }
 
-#[derive(WebApiObject)]
-#[webapi(interface = "Object")]
-struct WorkerGlobalPerformanceDeclaration<'scope> {
-    #[webapi(data_property)]
-    performance: v8::Local<'scope, v8::Object>,
-}
-
 #[derive(Default, WebApiObject)]
 #[webapi(interface = "Object")]
 struct WorkerConsoleObjectDeclaration {
@@ -269,15 +262,6 @@ struct WorkerConsoleObjectDeclaration {
     profile: (),
     #[webapi(method, enumerable, callback = console_profile_end_callback)]
     profile_end: (),
-}
-
-#[derive(WebApiObject)]
-#[webapi(interface = "Object")]
-struct WorkerPerformanceObjectDeclaration {
-    #[webapi(data_property, readonly)]
-    time_origin: f64,
-    #[webapi(method, callback = worker_performance_now_callback, data = self.time_origin)]
-    now: (),
 }
 
 #[derive(Default, WebApiObject)]
@@ -2989,7 +2973,6 @@ pub(super) fn install_worker_global_scope<'s>(
     )
     .initialize(scope, global)
     .map_err(|error| anyhow!("failed to initialize worker global bootstrap properties: {error}"))?;
-    install_worker_performance(scope, global)?;
     install_worker_global_scope_constructors(scope, global, &global_kind)?;
     let realm_kind = match &global_kind {
         super::thread::WorkerGlobalKind::Dedicated { .. } => {
@@ -3024,6 +3007,7 @@ pub(super) fn install_worker_global_scope<'s>(
         install_service_worker_extendable_event_constructors(scope, global)?;
     }
     crate::context_bootstrap::initialize_worker_fetch_realm_state(scope, global)?;
+    crate::context_bootstrap::initialize_worker_performance_realm_state(scope, global)?;
     let subtle_crypto_available = secure_context;
     crate::context_bootstrap::initialize_worker_crypto_realm_state(
         scope,
@@ -6718,34 +6702,6 @@ fn install_console<'s>(
     WorkerGlobalConsoleDeclaration::new(console)
         .initialize(scope, global)
         .map_err(|error| anyhow!("failed to initialize worker console: {error}"))
-}
-
-fn install_worker_performance<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    global: v8::Local<'s, v8::Object>,
-) -> Result<()> {
-    let time_origin = monotonic_unix_epoch_millis();
-    let performance = WorkerPerformanceObjectDeclaration::new(time_origin)
-        .bind(scope)
-        .map_err(|error| anyhow!("failed to create worker performance: {error}"))?;
-    WorkerGlobalPerformanceDeclaration::new(performance)
-        .initialize(scope, global)
-        .map_err(|error| anyhow!("failed to initialize worker performance: {error}"))
-}
-
-fn worker_performance_now_callback<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
-) {
-    let time_origin = args.data().number_value(scope).unwrap_or(0.0);
-    rv.set(
-        v8::Number::new(
-            scope,
-            (monotonic_unix_epoch_millis() - time_origin).max(0.0),
-        )
-        .into(),
-    );
 }
 
 fn unix_epoch_millis() -> f64 {

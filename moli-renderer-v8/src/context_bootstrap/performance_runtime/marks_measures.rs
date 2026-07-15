@@ -124,7 +124,7 @@ pub(in crate::context_bootstrap) fn performance_mark_constructor_callback<'s>(
     ) else {
         return;
     };
-    let Some(performance) = window_performance_value(scope) else {
+    let Some(performance) = ensure_current_performance_for_api(scope) else {
         webidl::throw_type_error(scope, "Failed to construct 'PerformanceMark'.");
         return;
     };
@@ -186,7 +186,7 @@ fn prepare_performance_mark<'s>(
         );
         return None;
     }
-    if performance_slot_object(scope, performance, PERFORMANCE_TIMING_SLOT).is_some()
+    if install::is_window_performance(scope, performance)
         && install::PERFORMANCE_TIMING_ATTRIBUTE_NAMES.contains(&name)
     {
         webidl::throw_dom_exception(
@@ -528,10 +528,10 @@ fn resolve_named_measure_boundary<'s>(
     performance: v8::Local<'s, v8::Object>,
     name: &str,
 ) -> Result<f64, ()> {
-    if let Some(start_time) = find_latest_performance_mark_start(scope, performance, name) {
-        return Ok(start_time);
-    }
     if !install::PERFORMANCE_TIMING_ATTRIBUTE_NAMES.contains(&name) {
+        if let Some(start_time) = find_latest_performance_mark_start(scope, performance, name) {
+            return Ok(start_time);
+        }
         webidl::throw_dom_exception(
             scope,
             "SyntaxError",
@@ -539,12 +539,30 @@ fn resolve_named_measure_boundary<'s>(
         );
         return Err(());
     }
-    let Some(timing) = performance_slot_object(scope, performance, PERFORMANCE_TIMING_SLOT) else {
+
+    if !install::is_window_performance(scope, performance) {
         webidl::throw_type_error(
             scope,
             "PerformanceTiming names can only be resolved in a Window global.",
         );
         return Err(());
+    }
+    let timing = match super::lazy_subobjects::ensure_performance_subobject(
+        scope,
+        performance,
+        super::lazy_subobjects::PerformanceSubobject::Timing,
+    ) {
+        Ok(value) => match v8::Local::<v8::Object>::try_from(value) {
+            Ok(timing) => timing,
+            Err(_) => {
+                webidl::throw_type_error(scope, "Failed to materialize PerformanceTiming.");
+                return Err(());
+            }
+        },
+        Err(error) => {
+            webidl::throw_type_error(scope, &error.to_string());
+            return Err(());
+        }
     };
     let Some(key) = v8_string(scope, name) else {
         return Err(());
