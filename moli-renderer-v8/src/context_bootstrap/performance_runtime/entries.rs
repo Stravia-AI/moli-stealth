@@ -563,10 +563,11 @@ fn performance_entry_attribute_getter<'s>(
     slot: &'static str,
     rv: &mut v8::ReturnValue<'_, v8::Value>,
 ) {
-    rv.set(
-        performance_entry_slot_value(scope, object, slot)
-            .unwrap_or_else(|| v8::undefined(scope).into()),
-    );
+    let Some(value) = performance_entry_slot_value(scope, object, slot) else {
+        throw_type_error(scope, "Illegal invocation");
+        return;
+    };
+    rv.set(value);
 }
 
 pub(in crate::context_bootstrap) fn performance_entry_slot_value<'s>(
@@ -754,6 +755,27 @@ pub(super) fn create_performance_entry<'s>(
         let _ = entry.set_prototype(scope, prototype.into());
     }
     entry
+}
+
+pub(super) fn initialize_performance_entry_slots<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    entry: v8::Local<'s, v8::Object>,
+    entry_type: &str,
+    name: &str,
+    start_time: f64,
+    duration: f64,
+    detail: Option<v8::Local<'s, v8::Value>>,
+) {
+    let detail = detail.unwrap_or_else(|| v8::null(scope).into());
+    PerformanceEntryObjectDeclaration {
+        name,
+        entry_type,
+        start_time,
+        duration,
+        detail,
+    }
+    .initialize(scope, entry)
+    .expect("PerformanceEntry declaration should initialize object");
 }
 
 pub(super) fn push_performance_entry<'s>(

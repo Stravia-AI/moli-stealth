@@ -1,4 +1,7 @@
-use super::entries::{create_performance_entry, find_latest_performance_mark_start};
+use super::entries::{
+    create_performance_entry, find_latest_performance_mark_start,
+    initialize_performance_entry_slots,
+};
 use super::*;
 use crate::context_bootstrap::structured_clone_value;
 use crate::util::serialize_v8_iter_array;
@@ -7,6 +10,13 @@ use crate::webidl;
 #[derive(webidl::WebIdlArgs)]
 #[webidl(prefix = "Performance.mark")]
 struct PerformanceMarkArgs {
+    #[webidl(required)]
+    name: String,
+}
+
+#[derive(webidl::WebIdlArgs)]
+#[webidl(prefix = "PerformanceMark")]
+struct PerformanceMarkConstructorArgs {
     #[webidl(required)]
     name: String,
 }
@@ -69,56 +79,137 @@ pub(in crate::context_bootstrap) fn performance_mark_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let Some(performance) = require_performance_receiver(scope, args.this()) else {
+        return;
+    };
     let Some(parsed) = webidl::parse_args::<PerformanceMarkArgs>(scope, &args) else {
         return;
     };
-    let options =
-        match webidl::dictionary_arg(&args, 1, webidl::Context::argument("Performance.mark", 2)) {
-            Ok(Some(options)) => {
-                match webidl::parse_dictionary_object::<PerformanceMarkOptions>(scope, options) {
-                    Ok(options) => options,
-                    Err(error) => {
-                        webidl::throw_error(scope, &error);
-                        return;
-                    }
+    let Some(options) = parse_performance_mark_options(
+        scope,
+        &args,
+        webidl::Context::argument("Performance.mark", 2),
+    ) else {
+        return;
+    };
+    let Some((start_time, detail)) =
+        prepare_performance_mark(scope, performance, &parsed.name, options)
+    else {
+        return;
+    };
+    let entry = create_performance_entry(scope, "mark", &parsed.name, start_time, 0.0, detail);
+    push_performance_entry(scope, performance, entry);
+    rv.set(entry.into());
+}
+
+pub(in crate::context_bootstrap) fn performance_mark_constructor_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if !args.is_construct_call() {
+        webidl::throw_type_error(
+            scope,
+            "Failed to construct 'PerformanceMark': Please use the 'new' operator.",
+        );
+        return;
+    }
+    let Some(parsed) = webidl::parse_args::<PerformanceMarkConstructorArgs>(scope, &args) else {
+        return;
+    };
+    let Some(options) = parse_performance_mark_options(
+        scope,
+        &args,
+        webidl::Context::argument("PerformanceMark", 2),
+    ) else {
+        return;
+    };
+    let Some(performance) = window_performance_value(scope) else {
+        webidl::throw_type_error(scope, "Failed to construct 'PerformanceMark'.");
+        return;
+    };
+    let Some((start_time, detail)) =
+        prepare_performance_mark(scope, performance, &parsed.name, options)
+    else {
+        return;
+    };
+    initialize_performance_entry_slots(
+        scope,
+        args.this(),
+        "mark",
+        &parsed.name,
+        start_time,
+        0.0,
+        detail,
+    );
+    rv.set(args.this().into());
+}
+
+fn parse_performance_mark_options<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    context: webidl::Context,
+) -> Option<PerformanceMarkOptions<'s>> {
+    match webidl::dictionary_arg(args, 1, context) {
+        Ok(Some(options)) => {
+            match webidl::parse_dictionary_object::<PerformanceMarkOptions>(scope, options) {
+                Ok(options) => Some(options),
+                Err(error) => {
+                    webidl::throw_error(scope, &error);
+                    None
                 }
             }
-            Ok(None) => PerformanceMarkOptions::default(),
-            Err(error) => {
-                webidl::throw_error(scope, &error);
-                return;
-            }
-        };
+        }
+        Ok(None) => Some(PerformanceMarkOptions::default()),
+        Err(error) => {
+            webidl::throw_error(scope, &error);
+            None
+        }
+    }
+}
+
+fn prepare_performance_mark<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    performance: v8::Local<'s, v8::Object>,
+    name: &str,
+    options: PerformanceMarkOptions<'s>,
+) -> Option<(f64, Option<v8::Local<'s, v8::Value>>)> {
     let start_time = options.start_time.unwrap_or_else(|| {
         unix_epoch_millis()
-            - performance_slot_number(scope, args.this(), PERFORMANCE_TIME_ORIGIN_SLOT)
+            - performance_slot_number(scope, performance, PERFORMANCE_TIME_ORIGIN_SLOT)
                 .unwrap_or(0.0)
     });
     if start_time < 0.0 {
         webidl::throw_type_error(
             scope,
-            &format!("'{}' cannot have a negative start time.", parsed.name),
+            &format!("'{name}' cannot have a negative start time."),
         );
-        return;
+        return None;
     }
-    if install::PERFORMANCE_TIMING_ATTRIBUTE_NAMES.contains(&parsed.name.as_str()) {
+    if performance_slot_object(scope, performance, PERFORMANCE_TIMING_SLOT).is_some()
+        && install::PERFORMANCE_TIMING_ATTRIBUTE_NAMES.contains(&name)
+    {
         webidl::throw_dom_exception(
             scope,
             "SyntaxError",
             &format!(
-                "'{}' is part of the PerformanceTiming interface and cannot be used as a mark name.",
-                parsed.name
+                "'{name}' is part of the PerformanceTiming interface and cannot be used as a mark name."
             ),
         );
-        return;
+        return None;
     }
-    let detail = match clone_user_timing_detail(scope, options.detail) {
-        Some(detail) => detail,
-        None => return,
-    };
-    let entry = create_performance_entry(scope, "mark", &parsed.name, start_time, 0.0, detail);
-    push_performance_entry(scope, args.this(), entry);
-    rv.set(entry.into());
+    clone_user_timing_detail(scope, options.detail).map(|detail| (start_time, detail))
+}
+
+fn require_performance_receiver<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    receiver: v8::Local<'s, v8::Object>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    if performance_slot_array(scope, receiver, PERFORMANCE_ENTRIES_SLOT).is_none() {
+        webidl::throw_type_error(scope, "Illegal invocation");
+        return None;
+    }
+    Some(receiver)
 }
 
 pub(in crate::context_bootstrap) fn performance_clear_marks_callback<'s>(
@@ -126,13 +217,14 @@ pub(in crate::context_bootstrap) fn performance_clear_marks_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let Some(performance) = require_performance_receiver(scope, args.this()) else {
+        return;
+    };
     let Some(parsed) = webidl::parse_args::<PerformanceClearMarksArgs>(scope, &args) else {
         return;
     };
-    let Some(entries) = performance_slot_array(scope, args.this(), PERFORMANCE_ENTRIES_SLOT) else {
-        rv.set_undefined();
-        return;
-    };
+    let entries = performance_slot_array(scope, performance, PERFORMANCE_ENTRIES_SLOT)
+        .expect("branded Performance receiver should retain its entries slot");
     let mut next = Vec::new();
     for index in 0..entries.length() {
         let Some(entry) = entries.get_index(scope, index) else {
@@ -161,7 +253,7 @@ pub(in crate::context_bootstrap) fn performance_clear_marks_callback<'s>(
         }
     }
     let next = serialize_v8_iter_array(scope, next).unwrap_or_else(|| v8::Array::new(scope, 0));
-    set_performance_slot_value(scope, args.this(), PERFORMANCE_ENTRIES_SLOT, next.into());
+    set_performance_slot_value(scope, performance, PERFORMANCE_ENTRIES_SLOT, next.into());
     rv.set_undefined();
 }
 
@@ -170,6 +262,9 @@ pub(in crate::context_bootstrap) fn performance_measure_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let Some(performance) = require_performance_receiver(scope, args.this()) else {
+        return;
+    };
     let Some(parsed) = webidl::parse_args::<PerformanceMeasureArgs>(scope, &args) else {
         return;
     };
@@ -177,16 +272,16 @@ pub(in crate::context_bootstrap) fn performance_measure_callback<'s>(
         return;
     };
     let now = unix_epoch_millis()
-        - performance_slot_number(scope, args.this(), PERFORMANCE_TIME_ORIGIN_SLOT).unwrap_or(0.0);
+        - performance_slot_number(scope, performance, PERFORMANCE_TIME_ORIGIN_SLOT).unwrap_or(0.0);
     let start = match parsed_measure.start.as_ref() {
-        Some(start) => match resolve_measure_boundary(scope, args.this(), &parsed.name, start) {
+        Some(start) => match resolve_measure_boundary(scope, performance, &parsed.name, start) {
             Ok(start) => start,
             Err(()) => return,
         },
         None => 0.0,
     };
     let end = match parsed_measure.end.as_ref() {
-        Some(end) => match resolve_measure_boundary(scope, args.this(), &parsed.name, end) {
+        Some(end) => match resolve_measure_boundary(scope, performance, &parsed.name, end) {
             Ok(end) => end,
             Err(()) => return,
         },
@@ -209,7 +304,7 @@ pub(in crate::context_bootstrap) fn performance_measure_callback<'s>(
         end_time - start_time,
         detail,
     );
-    push_performance_entry(scope, args.this(), entry);
+    push_performance_entry(scope, performance, entry);
     rv.set(entry.into());
 }
 
@@ -218,13 +313,14 @@ pub(in crate::context_bootstrap) fn performance_clear_measures_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let Some(performance) = require_performance_receiver(scope, args.this()) else {
+        return;
+    };
     let Some(parsed) = webidl::parse_args::<PerformanceClearMeasuresArgs>(scope, &args) else {
         return;
     };
-    let Some(entries) = performance_slot_array(scope, args.this(), PERFORMANCE_ENTRIES_SLOT) else {
-        rv.set_undefined();
-        return;
-    };
+    let entries = performance_slot_array(scope, performance, PERFORMANCE_ENTRIES_SLOT)
+        .expect("branded Performance receiver should retain its entries slot");
     let mut next = Vec::new();
     for index in 0..entries.length() {
         let Some(entry) = entries.get_index(scope, index) else {
@@ -253,7 +349,7 @@ pub(in crate::context_bootstrap) fn performance_clear_measures_callback<'s>(
         }
     }
     let next = serialize_v8_iter_array(scope, next).unwrap_or_else(|| v8::Array::new(scope, 0));
-    set_performance_slot_value(scope, args.this(), PERFORMANCE_ENTRIES_SLOT, next.into());
+    set_performance_slot_value(scope, performance, PERFORMANCE_ENTRIES_SLOT, next.into());
     rv.set_undefined();
 }
 
