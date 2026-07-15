@@ -61,6 +61,20 @@ pub(super) fn install_lazy_trusted_types_runtime_state<'s>(
         return Ok(());
     }
     install_trusted_script_code_like_constructor(scope, global)?;
+    let policy_constructor = TrustedTypePolicyInterfaceDeclaration {
+        name: (),
+        create_html: (),
+        create_script: (),
+        create_script_url: (),
+    }
+    .bind(scope, global)
+    .map_err(|error| anyhow!("failed to bind TrustedTypePolicy interface: {error}"))?;
+    set_private_value(
+        scope,
+        global,
+        TRUSTED_TYPE_POLICY_CONSTRUCTOR_SLOT,
+        policy_constructor.into(),
+    );
     let policy_factory_constructor = TrustedTypePolicyFactoryInterfaceDeclaration {
         create_policy: (),
         is_html: (),
@@ -68,6 +82,7 @@ pub(super) fn install_lazy_trusted_types_runtime_state<'s>(
         is_script_url: (),
         empty_html: (),
         empty_script: (),
+        default_policy: (),
     }
     .bind(scope, global)
     .map_err(|error| anyhow!("failed to bind TrustedTypePolicyFactory interface: {error}"))?;
