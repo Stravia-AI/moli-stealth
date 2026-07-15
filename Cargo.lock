@@ -2440,6 +2440,7 @@ dependencies = [
  "percent-encoding",
  "selectors",
  "serde_json",
+ "strum",
  "thin-vec",
  "url",
 ]
