@@ -3951,13 +3951,6 @@ url/a-element.html?include=file
 url/a-element.html?include=javascript
 url/a-element.html?include=mailto
 url/failure.html
-user-timing/invoke_with_timing_attributes.html
-user-timing/mark_exceptions.html
-user-timing/measure-exceptions.html
-user-timing/measure_associated_with_navigation_timing.html
-user-timing/measure_exception.html
-user-timing/measure_exceptions_navigation_timing.html
-user-timing/measure_navigation_timing.html
 viewport/viewport-segments.html
 wasm/core/memory64/table64.wast.js.html
 wasm/jsapi/functions/entry-different-function-realm.html

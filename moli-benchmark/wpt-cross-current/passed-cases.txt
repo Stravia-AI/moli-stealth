@@ -7684,10 +7684,17 @@ url/a-element-origin.html
 url/data-uri-fragment.html
 user-timing/clearMarks.html
 user-timing/clearMeasures.html
+user-timing/invoke_with_timing_attributes.html
 user-timing/invoke_without_parameter.html
 user-timing/mark-measure-feature-detection.html
 user-timing/mark.html
+user-timing/mark_exceptions.html
+user-timing/measure-exceptions.html
 user-timing/measure.html
+user-timing/measure_associated_with_navigation_timing.html
+user-timing/measure_exception.html
+user-timing/measure_exceptions_navigation_timing.html
+user-timing/measure_navigation_timing.html
 user-timing/measures.html
 user-timing/user-timing-tojson.html
 vibration/api-is-present.html

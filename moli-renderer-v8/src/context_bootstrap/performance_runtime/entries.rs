@@ -702,7 +702,7 @@ pub(super) fn filtered_performance_entries<'s>(
     filtered_entry_list_entries(scope, entries, expected_type, expected_name)
 }
 
-pub(super) fn find_latest_performance_entry_start<'s>(
+pub(super) fn find_latest_performance_mark_start<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     performance: v8::Local<'s, v8::Object>,
     name: &str,
@@ -712,8 +712,10 @@ pub(super) fn find_latest_performance_entry_start<'s>(
     for index in 0..entries.length() {
         let entry = entries.get_index(scope, index)?;
         let entry = v8::Local::<v8::Object>::try_from(entry).ok()?;
-        if performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_NAME_SLOT).as_deref()
-            == Some(name)
+        if performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_TYPE_SLOT).as_deref()
+            == Some("mark")
+            && performance_entry_slot_string(scope, entry, PERFORMANCE_ENTRY_NAME_SLOT).as_deref()
+                == Some(name)
         {
             found = performance_entry_slot_number(scope, entry, PERFORMANCE_ENTRY_START_TIME_SLOT);
         }
