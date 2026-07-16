@@ -6138,6 +6138,70 @@ async fn popover_toggle_events_coalesce_within_one_task() {
     assert_eq!(after, "closed->open");
 }
 
+#[tokio::test]
+async fn removing_popover_attribute_cancels_pending_toggle_event() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://popover-attribute-removal-toggle.test/",
+        &loader,
+    );
+
+    let before = vm
+        .eval(
+            r#"
+            (() => {
+              const popover = document.createElement("div");
+              popover.popover = "auto";
+              const html = document.appendChild(document.createElement("html"));
+              html.appendChild(document.createElement("body")).appendChild(popover);
+              globalThis.__lmPopoverAttributeRemovalEvents = [];
+              for (const type of ["beforetoggle", "toggle"]) {
+                popover.addEventListener(type, event => {
+                  globalThis.__lmPopoverAttributeRemovalEvents.push(
+                    `${event.type}:${event.oldState}->${event.newState}`
+                  );
+                });
+              }
+              popover.showPopover();
+              popover.hidePopover();
+              popover.removeAttribute("popover");
+              return JSON.stringify({
+                events: globalThis.__lmPopoverAttributeRemovalEvents,
+                open: popover.matches(":popover-open"),
+                hasAttribute: popover.hasAttribute("popover")
+              });
+            })()
+            "#,
+        )
+        .expect("popover attribute removal setup should evaluate");
+
+    assert_eq!(
+        before,
+        r#"{"events":["beforetoggle:closed->open","beforetoggle:open->closed"],"open":false,"hasAttribute":false}"#
+    );
+
+    assert!(
+        !vm.has_ready_timeout(),
+        "popover toggle events must not create synthetic Page timers"
+    );
+    assert!(
+        !vm.run_one_dom_manipulation_task_executor_turn(
+            PageDomManipulationTestFamily::ElementToggle,
+            &loader,
+        )
+        .await
+        .expect("canceled popover toggle tasks should drain")
+    );
+
+    let after = vm
+        .eval("JSON.stringify(__lmPopoverAttributeRemovalEvents)")
+        .expect("popover attribute removal event log should evaluate");
+    assert_eq!(
+        after,
+        r#"["beforetoggle:closed->open","beforetoggle:open->closed"]"#
+    );
+}
+
 #[test]
 fn window_name_default_and_assignment_match_browser_expectation() {
     let mut vm = new_storage_test_vm("https://example.com/");

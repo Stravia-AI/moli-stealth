@@ -13,7 +13,7 @@ use super::super::node::{
 };
 use super::super::throw_dom_exception;
 use super::focus::{focus_element, is_focusable, update_focus};
-use super::toggle_event::queue_element_toggle_event;
+use super::toggle_event::{cancel_element_toggle_event, queue_element_toggle_event};
 use super::{
     JsContextHost, dispatch_public_event, element_attribute, element_has_attribute,
     remove_reflected_attribute, set_reflected_attribute,
@@ -35,7 +35,7 @@ fn is_manual_popover(runtime: &JsContextHost, handle: DomHandle) -> bool {
         .is_some_and(|value| canonical_popover_state(value) == "manual")
 }
 
-fn popover_is_open(runtime: &JsContextHost, handle: DomHandle) -> bool {
+pub(super) fn popover_is_open(runtime: &JsContextHost, handle: DomHandle) -> bool {
     runtime
         .dom_host()
         .node(handle)
@@ -213,6 +213,38 @@ fn set_popover_open_state(
         );
     }
     open
+}
+
+pub(crate) fn handle_popover_attribute_change(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    handle: DomHandle,
+    namespace: Option<&str>,
+    local_name: &str,
+    old_value: Option<&str>,
+    new_value: Option<&str>,
+) {
+    if namespace.is_some() || !local_name.eq_ignore_ascii_case("popover") {
+        return;
+    }
+    let old_type = old_value.map(canonical_popover_state);
+    let new_type = new_value.map(canonical_popover_state);
+    if old_type == new_type {
+        return;
+    }
+    if popover_is_open(unsafe { &*runtime_ptr }, handle) {
+        let _ = set_popover_open_state(scope, runtime_ptr, handle, false, None);
+    }
+    if new_value.is_none() {
+        // Blink drops PopoverData when the attribute is removed. Its task
+        // handle owns and cancels any coalesced toggle event at that point.
+        cancel_element_toggle_event(
+            scope,
+            runtime_ptr,
+            RendererPageElementToggleEventKind::Popover,
+            handle,
+        );
+    }
 }
 
 fn autofocus_popover_descendant(
