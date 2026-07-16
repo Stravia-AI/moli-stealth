@@ -7618,6 +7618,7 @@ trusted-types/TrustedTypePolicyFactory-getAttributeType-svg.html
 trusted-types/TrustedTypePolicyFactory-isXXX.html
 trusted-types/Window-block-eval-function-constructor.html
 trusted-types/Window-setTimeout-setInterval.html
+trusted-types/block-string-assignment-to-DOMParser-parseFromString.html
 trusted-types/block-string-assignment-to-DedicatedWorker-setTimeout-setInterval.html
 trusted-types/block-string-assignment-to-Document-parseHTMLUnsafe.html
 trusted-types/block-string-assignment-to-Element-insertAdjacentHTML.html
@@ -7672,6 +7673,7 @@ trusted-types/trusted-types-duplicate-names-without-enforcement.html
 trusted-types/trusted-types-duplicate-names.html
 trusted-types/trusted-types-reporting-check-report-DedicatedWorker-create-policy.html
 trusted-types/trusted-types-reporting-clipping-of-sample.html
+trusted-types/trusted-types-reporting-for-DOMParser-parseFromString.html
 trusted-types/trusted-types-reporting-for-DedicatedWorker-DedicatedWorker-constructor.html
 trusted-types/trusted-types-reporting-for-DedicatedWorker-eval.html
 trusted-types/trusted-types-reporting-for-DedicatedWorker-function-constructor.html
