@@ -3868,12 +3868,7 @@ trusted-types/block-string-assignment-to-attribute-via-attribute-node.html
 trusted-types/eval-function-constructor-untrusted-arguments-and-applying-default-policy.html
 trusted-types/inheriting-csp-for-local-schemes.html
 trusted-types/modify-attributes-in-callback.html
-trusted-types/navigate-to-javascript-url-001.html
-trusted-types/navigate-to-javascript-url-002.html
-trusted-types/navigate-to-javascript-url-003.html
-trusted-types/navigate-to-javascript-url-004.html
 trusted-types/navigate-to-javascript-url-005.html
-trusted-types/navigate-to-javascript-url-008.html
 trusted-types/navigate-to-javascript-url-csp-headers.html
 trusted-types/require-trusted-types-for-TypeError-belongs-to-the-global-object-realm.html
 trusted-types/set-attributes-require-trusted-types-default-policy.html
