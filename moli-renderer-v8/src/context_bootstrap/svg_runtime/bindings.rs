@@ -493,6 +493,26 @@ struct SvgLengthTemplateAccessorsDeclaration {
 }
 
 #[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGAnimatedString", enumerable)]
+struct SvgAnimatedStringTemplateAccessorsDeclaration {
+    #[webapi(
+        accessor_property = "baseVal",
+        getter = svg_animated_string_getter,
+        setter = svg_animated_string_setter,
+        data = callback_data_index_value(scope, 0)
+    )]
+    base_val: (),
+
+    #[webapi(
+        accessor_property = "animVal",
+        getter = svg_animated_string_getter,
+        data = callback_data_index_value(scope, 1)
+    )]
+    anim_val: (),
+}
+
+#[allow(dead_code)]
+#[derive(WebApiFunctionTemplate)]
 #[webapi(name = "SVGAnimatedLength", enumerable)]
 struct SvgAnimatedLengthTemplateAccessorsDeclaration {
     #[webapi(
@@ -869,6 +889,23 @@ struct SvgGraphicsBoxElementPrototypeAccessorsDeclaration {
     height: (),
 }
 
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGElement", enumerable)]
+struct SvgElementPrototypeAccessorsDeclaration {
+    #[webapi(
+        accessor_property = "className",
+        getter = svg_element_class_name_getter
+    )]
+    class_name: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGURIReference", enumerable)]
+struct SvgUriReferencePrototypeAccessorsDeclaration {
+    #[webapi(accessor_property = "href", getter = svg_uri_href_getter)]
+    href: (),
+}
+
 pub(super) fn install_svg_length_bindings<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
     template: v8::Local<'s, v8::FunctionTemplate>,
@@ -893,6 +930,14 @@ pub(super) fn install_svg_number_bindings<'s>(
 ) {
     let proto = template.prototype_template(scope);
     SvgNumberTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
+}
+
+pub(super) fn install_svg_animated_string_bindings<'s>(
+    scope: &mut v8::PinScope<'s, '_, ()>,
+    template: v8::Local<'s, v8::FunctionTemplate>,
+) {
+    let proto = template.prototype_template(scope);
+    SvgAnimatedStringTemplateAccessorsDeclaration::initialize_prototype_template(scope, proto);
 }
 
 pub(super) fn install_svg_animated_length_list_bindings<'s>(
@@ -1061,6 +1106,9 @@ pub(super) fn install_svg_element_accessor_bindings<'s>(
             SvgPatternElementPrototypeAccessorsDeclaration::initialize_prototype_template(
                 scope, prototype,
             );
+            SvgUriReferencePrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
         }
         "SVGGradientElement" => {
             SvgGradientElementPrototypeAccessorsDeclaration::initialize_prototype_template(
@@ -1087,7 +1135,28 @@ pub(super) fn install_svg_element_accessor_bindings<'s>(
                 scope, prototype,
             );
         }
-        "SVGImageElement" | "SVGUseElement" | "SVGForeignObjectElement" => {
+        "SVGElement" => {
+            SvgElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGAElement"
+        | "SVGLinearGradientElement"
+        | "SVGRadialGradientElement"
+        | "SVGScriptElement" => {
+            SvgUriReferencePrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGImageElement" | "SVGUseElement" => {
+            SvgGraphicsBoxElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+            SvgUriReferencePrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGForeignObjectElement" => {
             SvgGraphicsBoxElementPrototypeAccessorsDeclaration::initialize_prototype_template(
                 scope, prototype,
             );
