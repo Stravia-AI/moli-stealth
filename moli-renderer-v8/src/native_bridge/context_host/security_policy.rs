@@ -72,6 +72,47 @@ impl JsContextHost {
         Some(crate::document_runtime::DocumentConnectPolicySnapshot::from_policy_container(&policy))
     }
 
+    pub(crate) fn trusted_types_for_script_requirements_for_owner(
+        &self,
+        owner: OwnerDispatchScope,
+    ) -> Option<TrustedTypesForScriptRequirements> {
+        match owner {
+            OwnerDispatchScope::Top => {
+                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                Some(unsafe { &*self.runtime }.trusted_types_for_script_requirements())
+            }
+            OwnerDispatchScope::Child(handle) => {
+                let response_policies =
+                    self.child_effective_response_content_security_policies(handle);
+                let report_only_policies =
+                    self.child_effective_response_content_security_report_only_policies(handle);
+                let reporting_endpoints =
+                    self.child_effective_content_security_reporting_endpoints(handle);
+                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                Some(
+                    unsafe { &*self.runtime }.trusted_types_for_script_requirements_for_document(
+                        self.child_browsing_context_document_handle(handle),
+                        &response_policies,
+                        &report_only_policies,
+                        &reporting_endpoints,
+                    ),
+                )
+            }
+            OwnerDispatchScope::LightweightPopup(popup_id) => {
+                let policy = self.lightweight_popup_policy_container(popup_id)?;
+                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                Some(
+                    unsafe { &*self.runtime }.trusted_types_for_script_requirements_for_document(
+                        self.lightweight_popup_document_handle(popup_id),
+                        &policy.response_content_security_policies,
+                        &policy.response_content_security_report_only_policies,
+                        &policy.content_security_reporting_endpoints,
+                    ),
+                )
+            }
+        }
+    }
+
     pub(crate) fn cross_origin_embedder_policy(
         &self,
     ) -> crate::cross_origin_isolation::CrossOriginEmbedderPolicy {

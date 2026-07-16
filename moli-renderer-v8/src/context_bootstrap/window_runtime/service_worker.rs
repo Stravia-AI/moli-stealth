@@ -340,18 +340,30 @@ pub(in crate::context_bootstrap) fn navigator_service_worker_register_callback<'
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
 ) {
-    let Some(resolver) = v8::PromiseResolver::new(scope) else {
-        return;
-    };
-    let promise = resolver.get_promise(scope);
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+        let Some(resolver) = v8::PromiseResolver::new(scope) else {
+            return;
+        };
+        let promise = resolver.get_promise(scope);
         reject_service_worker_promise(scope, resolver, "failed to get native bridge");
         rv.set(promise.into());
         return;
     };
-    let host = unsafe { &mut *host_ptr };
+    if args.length() == 0 {
+        throw_type_error(
+            scope,
+            "Failed to execute 'register' on 'ServiceWorkerContainer': 1 argument required, but only 0 present.",
+        );
+        return;
+    }
     let owner = service_worker_container_owner_scope(scope, args.this());
-    let Some(request_context) = host.service_worker_window_request_context(owner) else {
+    let Some(request_context) =
+        (unsafe { &mut *host_ptr }).service_worker_window_request_context(owner)
+    else {
+        let Some(resolver) = v8::PromiseResolver::new(scope) else {
+            return;
+        };
+        let promise = resolver.get_promise(scope);
         reject_service_worker_promise_with_type_error(
             scope,
             resolver,
@@ -360,7 +372,36 @@ pub(in crate::context_bootstrap) fn navigator_service_worker_register_callback<'
         rv.set(promise.into());
         return;
     };
-    let Some(script_url) = service_worker_script_url(scope, request_context.document_url(), &args)
+    let Some(requirements) =
+        (unsafe { &*host_ptr }).trusted_types_for_script_requirements_for_owner(owner)
+    else {
+        let Some(resolver) = v8::PromiseResolver::new(scope) else {
+            return;
+        };
+        let promise = resolver.get_promise(scope);
+        reject_service_worker_promise_with_type_error(
+            scope,
+            resolver,
+            "service worker document is no longer current",
+        );
+        rv.set(promise.into());
+        return;
+    };
+    let Some(script) = crate::context_bootstrap::trusted_script_url_string_or_throw(
+        scope,
+        args.get(0),
+        requirements,
+        "ServiceWorkerContainer register",
+        "register",
+    ) else {
+        return;
+    };
+    let Some(resolver) = v8::PromiseResolver::new(scope) else {
+        return;
+    };
+    let promise = resolver.get_promise(scope);
+    let Some(script_url) =
+        resolve_service_worker_script_url(request_context.document_url(), &script)
     else {
         reject_service_worker_promise(
             scope,
@@ -388,6 +429,7 @@ pub(in crate::context_bootstrap) fn navigator_service_worker_register_callback<'
     };
     let scope_url =
         service_worker_scope_url(scope, request_context.document_url(), &script_url, &args);
+    let host = unsafe { &mut *host_ptr };
     let Some(request_client) = host
         .document_resource_loader_for_window_owner(request_context.owner().window_document_owner())
         .map(|loader| loader.request_client().clone())
@@ -2036,16 +2078,8 @@ fn reject_service_worker_navigation_preload_state_error(
     }
 }
 
-fn service_worker_script_url(
-    scope: &mut v8::PinScope<'_, '_>,
-    document_url: &url::Url,
-    args: &v8::FunctionCallbackArguments<'_>,
-) -> Option<url::Url> {
-    let script = args
-        .get(0)
-        .to_string(scope)
-        .map(|value| value.to_rust_string_lossy(scope))?;
-    let mut script_url = document_url.join(&script).ok()?;
+fn resolve_service_worker_script_url(document_url: &url::Url, script: &str) -> Option<url::Url> {
+    let mut script_url = document_url.join(script).ok()?;
     script_url.set_fragment(None);
     Some(script_url)
 }

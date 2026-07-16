@@ -842,3 +842,64 @@ fn script_execution_violation_outside_javascript_stack_avoids_v8_frame_probe() {
         r#"{"blockedURI":"trusted-types-sink","sample":"HTMLScriptElement text|untrusted-source"}"#
     );
 }
+
+#[test]
+fn service_worker_register_gates_script_url_before_url_resolution() {
+    let mut vm = new_storage_test_vm("https://service-worker-register-trusted-types.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const errorName = callback => {
+    try {
+      callback();
+      return "none";
+    } catch (error) {
+      return error && error.name;
+    }
+  };
+  const policy = trustedTypes.createPolicy("service-worker-register", {
+    createHTML: value => value,
+    createScriptURL: value => value
+  });
+  const blockedString = errorName(() => navigator.serviceWorker.register("worker.js"));
+  const blockedWrongType = errorName(() =>
+    navigator.serviceWorker.register(policy.createHTML("worker.js"))
+  );
+  const missing = errorName(() => navigator.serviceWorker.register());
+
+  const trustedPromise = navigator.serviceWorker.register(
+    policy.createScriptURL("http://[")
+  );
+  trustedPromise.catch(() => {});
+
+  const defaultCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScriptURL: (value, type, sink) => {
+      defaultCalls.push([value, type, sink]);
+      return "http://[";
+    }
+  });
+  const defaultPromise = navigator.serviceWorker.register("worker.potato");
+  defaultPromise.catch(() => {});
+
+  return JSON.stringify({
+    blockedString,
+    blockedWrongType,
+    missing,
+    trustedPromise: trustedPromise instanceof Promise,
+    defaultPromise: defaultPromise instanceof Promise,
+    defaultCalls
+  });
+})()
+"#,
+        )
+        .expect("ServiceWorkerContainer.register TrustedScriptURL probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"blockedString":"TypeError","blockedWrongType":"TypeError","missing":"TypeError","trustedPromise":true,"defaultPromise":true,"defaultCalls":[["worker.potato","TrustedScriptURL","ServiceWorkerContainer register"]]}"#
+    );
+}

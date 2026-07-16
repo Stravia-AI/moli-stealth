@@ -3908,7 +3908,6 @@ trusted-types/HTMLElement-generic.html
 trusted-types/ServiceWorkerContainer-register-from-DedicatedWorker.https.html
 trusted-types/ServiceWorkerContainer-register-from-ServiceWorker.https.html
 trusted-types/ServiceWorkerContainer-register-from-SharedWorker.https.html
-trusted-types/ServiceWorkerContainer-register.https.html
 trusted-types/TrustedType-AttributeNodes.html
 trusted-types/TrustedTypePolicyFactory-constants.html
 trusted-types/TrustedTypePolicyFactory-createPolicy-cspTests-none.html

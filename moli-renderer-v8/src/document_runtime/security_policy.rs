@@ -1373,6 +1373,29 @@ impl DocumentRuntime {
         )
     }
 
+    pub(crate) fn trusted_types_for_script_requirements_for_document(
+        &self,
+        document_handle: Option<DomHandle>,
+        response_policies: &[String],
+        report_only_policies: &[String],
+        reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+    ) -> TrustedTypesForScriptRequirements {
+        let enforced_policies = self
+            .document_content_security_policy_strings_for_optional_document(
+                document_handle,
+                response_policies,
+                reporting_endpoints,
+            );
+        let report_only_policies = document_response_content_security_policy_strings(
+            report_only_policies,
+            reporting_endpoints,
+        );
+        TrustedTypesForScriptRequirements::new(
+            document_policies_require_trusted_types_for_script(&enforced_policies),
+            document_policies_require_trusted_types_for_script(&report_only_policies),
+        )
+    }
+
     pub(crate) fn requires_trusted_types_for_script(&self) -> bool {
         let policies = self.document_content_security_policy_strings_for_optional_document(
             Some(self.document_handle()),

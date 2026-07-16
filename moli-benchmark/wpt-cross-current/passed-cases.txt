@@ -7531,6 +7531,7 @@ trusted-types/SVGScriptElement-internal-slot.html
 trusted-types/ServiceWorker-block-eval-function-constructor.https.html
 trusted-types/ServiceWorker-eval.https.html
 trusted-types/ServiceWorker-importScripts.https.html
+trusted-types/ServiceWorkerContainer-register.https.html
 trusted-types/SharedWorker-block-eval-function-constructor.html
 trusted-types/SharedWorker-eval.html
 trusted-types/SharedWorker-importScripts.html
