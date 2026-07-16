@@ -3867,7 +3867,6 @@ trusted-types/block-string-assignment-to-HTMLIFrameElement-srcdoc.html
 trusted-types/block-string-assignment-to-attribute-via-attribute-node.html
 trusted-types/eval-function-constructor-untrusted-arguments-and-applying-default-policy.html
 trusted-types/inheriting-csp-for-local-schemes.html
-trusted-types/legacy-trusted-script-urls.html
 trusted-types/modify-attributes-in-callback.html
 trusted-types/navigate-to-javascript-url-001.html
 trusted-types/navigate-to-javascript-url-002.html
