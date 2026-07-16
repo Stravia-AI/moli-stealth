@@ -4222,6 +4222,56 @@ fn global_drag_event_handlers_cover_window_document_and_elements() {
 }
 
 #[test]
+fn global_touch_event_handlers_live_on_mixin_owners() {
+    let mut vm = new_parsed_test_vm(
+        "https://global-touch-event-handlers.test/",
+        "<!doctype html><html><head></head><body></body></html>",
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const names = ['ontouchstart', 'ontouchend', 'ontouchmove', 'ontouchcancel'];
+  const owners = [window, HTMLElement.prototype, SVGElement.prototype, Document.prototype];
+  const descriptorIsEventHandler = (owner, name) => {
+    const descriptor = Object.getOwnPropertyDescriptor(owner, name);
+    return !!descriptor &&
+      typeof descriptor.get === 'function' &&
+      typeof descriptor.set === 'function' &&
+      descriptor.enumerable && descriptor.configurable;
+  };
+  const ownAccessors = names.every(name =>
+    owners.every(owner => descriptorIsEventHandler(owner, name))
+  );
+  const absentFromElement = names.every(name => !(name in Element.prototype));
+
+  const div = document.createElement('div');
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  const calls = [];
+  for (const [label, target] of [
+    ['window', window],
+    ['document', document],
+    ['html', div],
+    ['svg', svg]
+  ]) {
+    target.ontouchstart = event => calls.push(`${label}:${event.type}`);
+    target.dispatchEvent(new Event('touchstart'));
+  }
+
+  return JSON.stringify({ ownAccessors, absentFromElement, calls });
+})()
+"#,
+        )
+        .expect("GlobalEventHandlers touch surface should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"ownAccessors":true,"absentFromElement":true,"calls":["window:touchstart","document:touchstart","html:touchstart","svg:touchstart"]}"#
+    );
+}
+
+#[test]
 fn media_accessors_live_on_owner_prototypes() {
     let mut vm = new_parsed_test_vm(
         "https://example.com/base/page.html",

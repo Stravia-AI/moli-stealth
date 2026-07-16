@@ -7510,6 +7510,7 @@ svg/types/scripted/SVGLengthList-getItem.html
 svg/types/scripted/SVGPathElement.getTotalLength-01.html
 touch-events/expose-legacy-touch-event-apis.html
 touch-events/historical.html
+touch-events/touch-globaleventhandler-interface.html
 touch-events/touch-touchevent-constructor.html
 trusted-types/DOMParser-parseFromString.html
 trusted-types/DedicatedWorker-block-eval-function-constructor.html
