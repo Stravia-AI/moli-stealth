@@ -5719,11 +5719,14 @@ html/semantics/interactive-elements/the-details-element/details.html
 html/semantics/interactive-elements/the-details-element/display-table-with-rt-crash.html
 html/semantics/interactive-elements/the-details-element/name-attribute.html
 html/semantics/interactive-elements/the-details-element/toggleEvent.html
+html/semantics/interactive-elements/the-dialog-element/dialog-active-document.html
 html/semantics/interactive-elements/the-dialog-element/dialog-close-event-async.html
 html/semantics/interactive-elements/the-dialog-element/dialog-close-event.html
 html/semantics/interactive-elements/the-dialog-element/dialog-close.html
 html/semantics/interactive-elements/the-dialog-element/dialog-enabled.html
+html/semantics/interactive-elements/the-dialog-element/dialog-focusing-steps-disconnected.html
 html/semantics/interactive-elements/the-dialog-element/dialog-form-submission-unusual.html
+html/semantics/interactive-elements/the-dialog-element/dialog-no-throw-requested-state.html
 html/semantics/interactive-elements/the-dialog-element/dialog-open-2.html
 html/semantics/interactive-elements/the-dialog-element/dialog-open.html
 html/semantics/interactive-elements/the-dialog-element/dialog-return-value.html

@@ -1,5 +1,73 @@
 use super::*;
 
+#[test]
+fn dialog_show_methods_enforce_requested_state_and_active_document() {
+    let mut vm = new_storage_test_vm("https://dialog-requested-state.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const outcome = callback => {
+    try {
+      callback();
+      return "ok";
+    } catch (error) {
+      return `${error.name}:${error.code}:${error instanceof DOMException}`;
+    }
+  };
+
+  const disconnected = document.createElement("dialog");
+  const disconnectedModal = [outcome(() => disconnected.showModal()), disconnected.open];
+  disconnected.show();
+  const disconnectedNonModal = [
+    outcome(() => disconnected.show()),
+    outcome(() => disconnected.showModal()),
+    disconnected.open
+  ];
+  disconnected.close();
+
+  const connected = document.createElement("dialog");
+  (document.body || document.documentElement || document).appendChild(connected);
+  connected.show();
+  const nonModal = [
+    outcome(() => connected.show()),
+    outcome(() => connected.showModal()),
+    connected.open
+  ];
+  connected.close();
+
+  connected.showModal();
+  const modal = [
+    outcome(() => connected.showModal()),
+    outcome(() => connected.show()),
+    connected.open
+  ];
+  connected.close();
+
+  const inactiveDocument = document.implementation.createHTMLDocument("");
+  const inactive = inactiveDocument.createElement("dialog");
+  inactiveDocument.body.appendChild(inactive);
+  const inactiveModal = [outcome(() => inactive.showModal()), inactive.open];
+
+  return JSON.stringify({
+    disconnectedModal,
+    disconnectedNonModal,
+    nonModal,
+    modal,
+    inactiveModal
+  });
+})()
+"#,
+        )
+        .expect("dialog show state transitions should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"disconnectedModal":["InvalidStateError:11:true",false],"disconnectedNonModal":["ok","InvalidStateError:11:true",true],"nonModal":["ok","InvalidStateError:11:true",true],"modal":["ok","InvalidStateError:11:true",true],"inactiveModal":["InvalidStateError:11:true",false]}"#
+    );
+}
+
 #[tokio::test]
 async fn dialog_form_submission_closes_with_submitter_result_and_queues_reentrant_close_events() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");

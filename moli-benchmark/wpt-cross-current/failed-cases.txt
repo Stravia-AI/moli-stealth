@@ -3328,16 +3328,13 @@ html/semantics/interactive-elements/the-dialog-element/abspos-dialog-layout.html
 html/semantics/interactive-elements/the-dialog-element/centering.html
 html/semantics/interactive-elements/the-dialog-element/child-sequential-focus.html
 html/semantics/interactive-elements/the-dialog-element/default-color.html
-html/semantics/interactive-elements/the-dialog-element/dialog-active-document.html
 html/semantics/interactive-elements/the-dialog-element/dialog-autofocus-just-once.html
 html/semantics/interactive-elements/the-dialog-element/dialog-focus-previous-outside.html
 html/semantics/interactive-elements/the-dialog-element/dialog-focus-shadow-double-nested.html
 html/semantics/interactive-elements/the-dialog-element/dialog-focus-shadow.html
-html/semantics/interactive-elements/the-dialog-element/dialog-focusing-steps-disconnected.html
 html/semantics/interactive-elements/the-dialog-element/dialog-focusing-steps-inert.html
 html/semantics/interactive-elements/the-dialog-element/dialog-focusing-steps-prevent-autofocus.html
 html/semantics/interactive-elements/the-dialog-element/dialog-inert.html
-html/semantics/interactive-elements/the-dialog-element/dialog-no-throw-requested-state.html
 html/semantics/interactive-elements/the-dialog-element/dialog-overlay.html
 html/semantics/interactive-elements/the-dialog-element/dialog-requestclose-recurse.html
 html/semantics/interactive-elements/the-dialog-element/dialog-showModal.html

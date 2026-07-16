@@ -8,7 +8,9 @@ use crate::{
     webidl,
 };
 
-use super::super::{JsContextHost, node::node_runtime_and_handle_from_object_or_detached};
+use super::super::{
+    JsContextHost, node::node_runtime_and_handle_from_object_or_detached, throw_dom_exception,
+};
 use super::toggle_event::queue_element_toggle_event;
 use super::{
     element_has_attribute, html_element_getter_receiver, html_element_setter_receiver,
@@ -221,11 +223,29 @@ fn dialog_set_open_state<'s>(
     let Ok((runtime_ptr, handle)) = dialog_runtime_and_handle_from_object(scope, object) else {
         return;
     };
+    dialog_set_open_state_for_handle(scope, runtime_ptr, handle, open, modal);
+}
+
+fn dialog_set_open_state_for_handle(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    handle: DomHandle,
+    open: bool,
+    modal: bool,
+) {
     set_reflected_boolean_attribute(scope, runtime_ptr, handle, "open", open);
     let runtime = unsafe { &mut *runtime_ptr };
     let _ = runtime
         .dom_host_mut()
         .set_dialog_modal(handle, open && modal);
+}
+
+fn dialog_is_modal(runtime: &JsContextHost, handle: DomHandle) -> bool {
+    runtime
+        .dom_host()
+        .node(handle)
+        .and_then(|node| node.as_element())
+        .is_some_and(|element| element.dialog_modal())
 }
 
 pub(super) fn details_open_getter_function<'s>(
@@ -333,16 +353,56 @@ pub(super) fn dialog_show_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    dialog_set_open_state(scope, args.this(), true, false);
+    let Ok((runtime_ptr, handle)) = dialog_runtime_and_handle_from_object(scope, args.this())
+    else {
+        return;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    if element_has_attribute(runtime, handle, "open") {
+        if dialog_is_modal(runtime, handle) {
+            throw_dom_exception(
+                scope,
+                "InvalidStateError",
+                11,
+                "The dialog is already open as a modal dialog.",
+            );
+        }
+        return;
+    }
+    dialog_set_open_state_for_handle(scope, runtime_ptr, handle, true, false);
 }
 
 pub(super) fn dialog_show_modal_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    rv: v8::ReturnValue<'_, v8::Value>,
+    _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let _ = rv;
-    dialog_set_open_state(scope, args.this(), true, true);
+    let Ok((runtime_ptr, handle)) = dialog_runtime_and_handle_from_object(scope, args.this())
+    else {
+        return;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    if element_has_attribute(runtime, handle, "open") {
+        if !dialog_is_modal(runtime, handle) {
+            throw_dom_exception(
+                scope,
+                "InvalidStateError",
+                11,
+                "The dialog is already open as a non-modal dialog.",
+            );
+        }
+        return;
+    }
+    if !runtime.dom_host().is_connected(handle) {
+        throw_dom_exception(
+            scope,
+            "InvalidStateError",
+            11,
+            "The dialog is not connected to a fully active document.",
+        );
+        return;
+    }
+    dialog_set_open_state_for_handle(scope, runtime_ptr, handle, true, true);
 }
 
 pub(super) fn dialog_close_callback<'s>(

@@ -5867,10 +5867,15 @@ fn detached_simple_structural_accessors_use_owner_prototypes() {
     assert(dialog.open === true, `${label}.dialog show behavior`);
     dialog.close("closed");
     assert(dialog.open === false && dialog.returnValue === "closed", `${label}.dialog close behavior`);
-    dialog.showModal();
-    assert(dialog.open === true, `${label}.dialog showModal behavior`);
-    dialog.close();
-    assert(dialog.open === false, `${label}.dialog close after showModal`);
+    let showModalError;
+    try {
+      dialog.showModal();
+    } catch (error) {
+      showModalError = error;
+    }
+    assert(showModalError instanceof DOMException, `${label}.dialog showModal DOMException`);
+    assert(showModalError.name === "InvalidStateError", `${label}.dialog showModal error name`);
+    assert(dialog.open === false, `${label}.dialog showModal keeps disconnected dialog closed`);
   }
   return "ok";
 })()
