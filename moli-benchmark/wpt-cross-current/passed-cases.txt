@@ -147,6 +147,8 @@ content-security-policy/securitypolicyviolation/constructor-required-fields.html
 content-security-policy/securitypolicyviolation/inside-dedicated-worker.html
 content-security-policy/securitypolicyviolation/inside-service-worker.https.html
 content-security-policy/securitypolicyviolation/inside-shared-worker.html
+content-security-policy/securitypolicyviolation/source-file-blob-scheme.html
+content-security-policy/securitypolicyviolation/source-file-data-scheme.html
 content-security-policy/securitypolicyviolation/source-file.html
 content-security-policy/securitypolicyviolation/style-sample-no-opt-in.html
 content-security-policy/securitypolicyviolation/style-sample.html

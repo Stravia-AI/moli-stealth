@@ -38,8 +38,6 @@ content-security-policy/sandbox/window-reuse-sandboxed.html
 content-security-policy/script-src/nonce-enforce-blocked.html
 content-security-policy/script-src/script-src-trusted_types_eval_DedicatedWorker.html
 content-security-policy/securitypolicyviolation/blockeduri-inline.html
-content-security-policy/securitypolicyviolation/source-file-blob-scheme.html
-content-security-policy/securitypolicyviolation/source-file-data-scheme.html
 content-security-policy/unsafe-eval/eval-blocked-in-about-blank-iframe.html
 content-security-policy/webrtc/webrtc-allowed-default-src-none.html
 content-security-policy/webrtc/webrtc-allowed-explicit.html
