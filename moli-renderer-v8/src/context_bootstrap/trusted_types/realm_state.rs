@@ -82,6 +82,7 @@ pub(super) fn install_lazy_trusted_types_runtime_state<'s>(
         is_script_url: (),
         empty_html: (),
         empty_script: (),
+        get_attribute_type: (),
         default_policy: (),
     }
     .bind(scope, global)
