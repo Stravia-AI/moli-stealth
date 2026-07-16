@@ -326,27 +326,35 @@ fn trusted_script_string_for_code_generation(
     scope: &mut v8::PinScope<'_, '_>,
     original: &str,
 ) -> Option<String> {
-    let Some(callback_input) = function_constructor_callback_input(original) else {
+    let Some(function_source) = function_constructor_code_generation_source(original) else {
         return trusted_script_string_for_eval_source(scope, original);
     };
     if let Some(default_value) = apply_default_trusted_type_policy(
         scope,
-        callback_input,
+        function_source.default_policy_input,
         TrustedTypeKind::Script,
         "Function",
         TrustedTypeErrorKind::Eval,
     ) {
-        if default_value == callback_input {
+        if default_value == function_source.default_policy_input {
             return Some(original.to_owned());
         }
-        dispatch_trusted_types_sink_violation_event(scope, "Function", callback_input);
+        dispatch_trusted_types_sink_violation_event(
+            scope,
+            "Function",
+            function_source.violation_sample,
+        );
         throw_eval_error(
             scope,
             "Trusted Types default policy must not transform strings passed to Function.",
         );
         return None;
     }
-    dispatch_trusted_types_sink_violation_event(scope, "Function", callback_input);
+    dispatch_trusted_types_sink_violation_event(
+        scope,
+        "Function",
+        function_source.violation_sample,
+    );
     throw_trusted_type_error(
         scope,
         TrustedTypeErrorKind::Eval,
@@ -357,19 +365,29 @@ fn trusted_script_string_for_code_generation(
     None
 }
 
-fn function_constructor_callback_input(source: &str) -> Option<&str> {
-    let source = source
+struct FunctionConstructorCodeGenerationSource<'a> {
+    default_policy_input: &'a str,
+    violation_sample: &'a str,
+}
+
+fn function_constructor_code_generation_source(
+    source: &str,
+) -> Option<FunctionConstructorCodeGenerationSource<'_>> {
+    let default_policy_input = source
         .strip_prefix('(')
         .and_then(|source| source.strip_suffix(')'))?;
-    [
-        "function anonymous",
-        "async function anonymous",
-        "function* anonymous",
-        "async function* anonymous",
+    let generated_prefix = [
+        "(function anonymous",
+        "(async function anonymous",
+        "(function* anonymous",
+        "(async function* anonymous",
     ]
     .into_iter()
-    .any(|prefix| source.starts_with(prefix))
-    .then_some(source)
+    .find(|prefix| source.starts_with(prefix))?;
+    Some(FunctionConstructorCodeGenerationSource {
+        default_policy_input,
+        violation_sample: &source[generated_prefix.len()..],
+    })
 }
 
 fn trusted_script_string_for_eval_source(

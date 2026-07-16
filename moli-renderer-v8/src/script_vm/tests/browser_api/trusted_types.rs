@@ -786,6 +786,58 @@ fn rejected_default_policy_reports_both_dispositions_and_enforces_once() {
 }
 
 #[test]
+fn function_constructor_violations_sample_only_parameters_and_body() {
+    let mut vm = new_storage_test_vm("https://function-constructor-violation.test/");
+    vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const samples = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    if (event.blockedURI === "trusted-types-sink") {
+      samples.push(event.sample);
+    }
+  });
+  globalThis.__functionConstructorViolationSamples = samples;
+
+  const constructors = [
+    Function,
+    async function() {}.constructor,
+    function*() {}.constructor,
+    async function*() {}.constructor
+  ];
+  const errors = constructors.map(Constructor => {
+    try {
+      new Constructor(`return${";".repeat(100)}`);
+      return "none";
+    } catch (error) {
+      return `${error.name}:${error instanceof EvalError}`;
+    }
+  });
+  return JSON.stringify({ errors, samples });
+})()
+"#,
+        )
+        .expect("Function constructor violation probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"errors":["EvalError:true","EvalError:true","EvalError:true","EvalError:true"],"samples":[]}"#
+    );
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        4
+    );
+    assert_eq!(
+        vm.eval("JSON.stringify(globalThis.__functionConstructorViolationSamples)")
+            .expect("queued Function constructor violations should be observable"),
+        r#"["Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;","Function|(\n) {\nreturn;;;;;;;;;;;;;;;;;;;;;;;;;;;;"]"#
+    );
+}
+
+#[test]
 fn script_execution_violation_outside_javascript_stack_avoids_v8_frame_probe() {
     let mut vm = new_storage_test_vm("https://script-execution-violation.test/");
     vm.set_response_content_security_policies(&["require-trusted-types-for 'script'".to_owned()]);

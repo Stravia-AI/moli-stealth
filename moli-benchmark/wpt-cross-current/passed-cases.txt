@@ -7628,6 +7628,7 @@ trusted-types/trusted-types-reporting-for-SharedWorker-setTimeout-setInterval.ht
 trusted-types/trusted-types-reporting-for-Window-DedicatedWorker-constructor.html
 trusted-types/trusted-types-reporting-for-Window-SharedWorker-constructor.html
 trusted-types/trusted-types-reporting-for-Window-eval.html
+trusted-types/trusted-types-reporting-for-Window-function-constructor.html
 trusted-types/trusted-types-reporting-for-Window-setTimeout-setInterval.html
 trusted-types/trusted-types-sandbox-allow-scripts.html
 trusted-types/trusted-types-sandbox-no-allow-scripts.html
