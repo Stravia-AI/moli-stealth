@@ -1,5 +1,7 @@
 use super::*;
-use crate::native::serialize::is_void_html_element;
+use crate::native::serialize::{
+    escape_html_attribute, escape_html_text, is_void_html_element, serialize_cdata_section,
+};
 
 pub type ShadowRootRegistryAttributePolicy<'a> =
     dyn Fn(DomHandle, DomHandle, &ShadowRootInit) -> bool + 'a;
@@ -302,9 +304,12 @@ impl DomHost {
                 }
             }
             NodeData::CDataSection(cdata) => {
-                out.push_str("<![CDATA[");
-                out.push_str(cdata.data());
-                out.push_str("]]>");
+                serialize_cdata_section(
+                    cdata.data(),
+                    out,
+                    raw_text_parent,
+                    self.node_document_is_html_document(handle).unwrap_or(false),
+                );
             }
             NodeData::Comment(comment) => {
                 out.push_str("<!--");
@@ -399,30 +404,6 @@ impl DomHost {
 fn is_raw_text_element(namespace: &str, local_name: &str) -> bool {
     namespace == "http://www.w3.org/1999/xhtml"
         && matches!(local_name, "script" | "style" | "textarea" | "title")
-}
-
-fn escape_html_text(value: &str, out: &mut String) {
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '\u{00A0}' => out.push_str("&nbsp;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn escape_html_attribute(value: &str, out: &mut String) {
-    for ch in value.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
 }
 
 #[cfg(test)]

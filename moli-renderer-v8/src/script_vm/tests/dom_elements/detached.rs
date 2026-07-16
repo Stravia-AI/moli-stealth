@@ -74,6 +74,41 @@ fn detached_domparser_query_and_element_collections_use_native_handles() {
 }
 
 #[test]
+fn adopted_xml_cdata_uses_html_fragment_serialization() {
+    let mut vm = new_storage_test_vm("https://adopted-xml-cdata.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const parsed = new DOMParser().parseFromString(
+    '<svg xmlns="http://www.w3.org/2000/svg"><![CDATA[<img>]]></svg>',
+    'application/xml'
+  );
+  const element = parsed.documentElement;
+  const before = element.outerHTML;
+  const adopted = document.adoptNode(element);
+  return JSON.stringify({
+    before,
+    after: adopted.outerHTML,
+    declarationValue: adopted.getAttributeNS(
+      'http://www.w3.org/2000/xmlns/',
+      'xmlns'
+    ),
+    cdataNodeType: adopted.firstChild && adopted.firstChild.nodeType
+  });
+})()
+"#,
+        )
+        .expect("adopted XML CDATA serialization probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"before":"<svg xmlns=\"http://www.w3.org/2000/svg\"><![CDATA[<img>]]></svg>","after":"<svg xmlns=\"http://www.w3.org/2000/svg\">&lt;img&gt;</svg>","declarationValue":"http://www.w3.org/2000/svg","cdataNodeType":4}"#
+    );
+}
+
+#[test]
 fn detached_query_brand_checks_accept_standard_prototype_methods() {
     let mut vm = new_storage_test_vm("https://detached-query-brand-check.test/");
 

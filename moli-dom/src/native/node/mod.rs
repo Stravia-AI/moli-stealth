@@ -9,7 +9,10 @@ use std::num::NonZeroU32;
 
 use super::NativeDom;
 use super::element::Element;
-use super::serialize::is_void_html_element;
+use super::serialize::{
+    HtmlSerializationSink, escape_html_attribute, escape_html_text, is_void_html_element,
+    serialize_cdata_section,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NativeNodeId(NonZeroU32);
@@ -716,26 +719,6 @@ impl Node {
     }
 }
 
-trait HtmlSerializationSink {
-    fn push_str(&mut self, value: &str);
-    fn push(&mut self, value: char);
-    fn limit_exceeded(&self) -> bool;
-}
-
-impl HtmlSerializationSink for String {
-    fn push_str(&mut self, value: &str) {
-        String::push_str(self, value);
-    }
-
-    fn push(&mut self, value: char) {
-        String::push(self, value);
-    }
-
-    fn limit_exceeded(&self) -> bool {
-        false
-    }
-}
-
 struct BoundedHtmlSerialization {
     output: String,
     max_bytes: usize,
@@ -873,9 +856,12 @@ fn serialize_html_node_frame<'a, S>(
             }
         }
         NodeData::CDataSection(cdata) => {
-            out.push_str("<![CDATA[");
-            out.push_str(cdata.data());
-            out.push_str("]]>");
+            serialize_cdata_section(
+                cdata.data(),
+                out,
+                raw_text_parent,
+                dom.node_document_is_html_document(node_id).unwrap_or(false),
+            );
         }
         NodeData::Comment(comment) => {
             out.push_str("<!--");
@@ -995,40 +981,4 @@ fn sibling_document_order(dom: &NativeDom, left: NativeNodeId, right: NativeNode
 fn is_raw_text_element(namespace: &str, local_name: &str) -> bool {
     namespace == "http://www.w3.org/1999/xhtml"
         && matches!(local_name, "script" | "style" | "noscript")
-}
-
-fn escape_html_text<S>(value: &str, out: &mut S)
-where
-    S: HtmlSerializationSink,
-{
-    for ch in value.chars() {
-        if out.limit_exceeded() {
-            return;
-        }
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '\u{00A0}' => out.push_str("&nbsp;"),
-            _ => out.push(ch),
-        }
-    }
-}
-
-fn escape_html_attribute<S>(value: &str, out: &mut S)
-where
-    S: HtmlSerializationSink,
-{
-    for ch in value.chars() {
-        if out.limit_exceeded() {
-            return;
-        }
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            _ => out.push(ch),
-        }
-    }
 }

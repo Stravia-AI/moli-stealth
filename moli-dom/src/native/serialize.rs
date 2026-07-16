@@ -19,6 +19,83 @@ impl std::fmt::Display for HtmlSerializationLimitExceeded {
 
 impl std::error::Error for HtmlSerializationLimitExceeded {}
 
+pub(super) trait HtmlSerializationSink {
+    fn push_str(&mut self, value: &str);
+    fn push(&mut self, value: char);
+    fn limit_exceeded(&self) -> bool;
+}
+
+impl HtmlSerializationSink for String {
+    fn push_str(&mut self, value: &str) {
+        String::push_str(self, value);
+    }
+
+    fn push(&mut self, value: char) {
+        String::push(self, value);
+    }
+
+    fn limit_exceeded(&self) -> bool {
+        false
+    }
+}
+
+pub(super) fn escape_html_text<S>(value: &str, out: &mut S)
+where
+    S: HtmlSerializationSink + ?Sized,
+{
+    for ch in value.chars() {
+        if out.limit_exceeded() {
+            return;
+        }
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '\u{00A0}' => out.push_str("&nbsp;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+pub(super) fn escape_html_attribute<S>(value: &str, out: &mut S)
+where
+    S: HtmlSerializationSink + ?Sized,
+{
+    for ch in value.chars() {
+        if out.limit_exceeded() {
+            return;
+        }
+        match ch {
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            _ => out.push(ch),
+        }
+    }
+}
+
+pub(super) fn serialize_cdata_section<S>(
+    value: &str,
+    out: &mut S,
+    raw_text_parent: bool,
+    html_document: bool,
+) where
+    S: HtmlSerializationSink + ?Sized,
+{
+    if html_document {
+        if raw_text_parent {
+            out.push_str(value);
+        } else {
+            escape_html_text(value, out);
+        }
+    } else {
+        out.push_str("<![CDATA[");
+        out.push_str(value);
+        out.push_str("]]>");
+    }
+}
+
 pub(super) fn is_void_html_element(namespace: &str, local_name: &str) -> bool {
     namespace == "http://www.w3.org/1999/xhtml"
         && matches!(
@@ -279,6 +356,54 @@ mod tests {
         assert_eq!(
             host.get_html(container, false, &[]).as_deref(),
             Some(expected)
+        );
+    }
+
+    #[test]
+    fn html_serializers_escape_adopted_cdata_as_text() {
+        const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
+        const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+
+        let mut xml_dom = NativeDom::new_xml(test_url());
+        let xml_svg = xml_dom
+            .create_element_ns(Some(SVG_NAMESPACE), "svg")
+            .expect("XML SVG element");
+        assert!(xml_dom.set_attribute_ns(
+            xml_svg,
+            Some(XMLNS_NAMESPACE),
+            None,
+            "xmlns",
+            SVG_NAMESPACE,
+        ));
+        let xml_cdata = xml_dom.create_cdata_section("<img>&");
+        assert!(xml_dom.append_child(xml_svg, xml_cdata));
+        assert_eq!(
+            xml_dom.outer_html(xml_svg).as_deref(),
+            Some(r#"<svg xmlns="http://www.w3.org/2000/svg"><![CDATA[<img>&]]></svg>"#)
+        );
+
+        let mut html_dom = NativeDom::new_html(test_url());
+        let html_svg = html_dom
+            .create_element_ns(Some(SVG_NAMESPACE), "svg")
+            .expect("HTML-document SVG element");
+        assert!(html_dom.set_attribute_ns(
+            html_svg,
+            Some(XMLNS_NAMESPACE),
+            None,
+            "xmlns",
+            SVG_NAMESPACE,
+        ));
+        let adopted_cdata = html_dom.create_cdata_section("<img>&");
+        assert!(html_dom.append_child(html_svg, adopted_cdata));
+        assert_eq!(
+            html_dom.outer_html(html_svg).as_deref(),
+            Some(r#"<svg xmlns="http://www.w3.org/2000/svg">&lt;img&gt;&amp;</svg>"#)
+        );
+
+        let host = DomHost::from_dom(html_dom);
+        assert_eq!(
+            host.get_html(html_svg, false, &[]).as_deref(),
+            Some("&lt;img&gt;&amp;")
         );
     }
 }
