@@ -357,6 +357,48 @@ fn computed_style_exposes_root_pointer_events() {
 }
 
 #[test]
+fn computed_style_exposes_non_inherited_touch_action() {
+    let mut vm = new_parsed_test_vm(
+        "https://touch-action-computed.test/",
+        r#"<!doctype html>
+<style>#parent { touch-action: none; }</style>
+<div id="parent"><div id="child"></div></div>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const parent = document.getElementById('parent');
+  const child = document.getElementById('child');
+  const initial = getComputedStyle(child);
+  const values = [
+    'touch-action' in initial,
+    'touchAction' in initial,
+    CSS.supports('touch-action', 'pan-y pan-x'),
+    getComputedStyle(parent).touchAction,
+    initial.touchAction
+  ];
+
+  child.style.touchAction = 'pinch-zoom pan-y pan-x';
+  values.push(child.style.touchAction, getComputedStyle(child).touchAction);
+  child.style.touchAction = 'pan-x pan-left';
+  values.push(child.style.touchAction);
+  child.style.touchAction = 'inherit';
+  values.push(getComputedStyle(child).touchAction);
+  return values.join('|');
+})()
+"#,
+        )
+        .expect("touch-action computed style should evaluate");
+
+    assert_eq!(
+        result,
+        "true|true|true|none|auto|manipulation|manipulation|manipulation|none"
+    );
+}
+
+#[test]
 fn style_element_type_attribute_uses_raw_exact_css_match() {
     let mut vm = new_parsed_test_vm(
         "https://style-type-attribute.test/",

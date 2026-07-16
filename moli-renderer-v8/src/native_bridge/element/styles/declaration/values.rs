@@ -820,12 +820,23 @@ fn normalize_stylo_computed_style_value_with_resolution(
         return computed_text_size_adjust_specified_value(runtime, handle, value)
             .or_else(|| Some(value.to_owned()));
     }
+    if property == "touch-action" {
+        return Some(normalize_touch_action_serialization(property, value));
+    }
     if color_property_is_resolved_color(property) {
         return Some(resolve_computed_color_property_value(
             runtime, handle, property, value, resolution,
         ));
     }
     Some(value.to_owned())
+}
+
+fn normalize_touch_action_serialization(property: &str, value: &str) -> String {
+    if property == "touch-action" && value == "pan-x pan-y pinch-zoom" {
+        "manipulation".to_owned()
+    } else {
+        value.to_owned()
+    }
 }
 
 fn normalized_stylo_computed_pseudo_style_value(
@@ -859,9 +870,10 @@ fn inline_style_property_value_for_inline_style(
     if let Some(state) = runtime.element_inline_style_declaration_state(handle)
         && let Some(value) = inline_state_property_value_with_pdb(state, &property)
     {
-        return Some(value);
+        return Some(normalize_touch_action_serialization(&property, &value));
     }
-    inline_style_entry_for_inline_style(runtime, handle, &property).map(|entry| entry.value)
+    inline_style_entry_for_inline_style(runtime, handle, &property)
+        .map(|entry| normalize_touch_action_serialization(&property, &entry.value))
 }
 
 pub(crate) fn raw_inline_style_property_value(
@@ -1352,6 +1364,7 @@ pub(super) fn computed_style_default_value(
         "pointer-events" => {
             inherited_computed_style_value(runtime, handle, "pointer-events", "auto")
         }
+        "touch-action" => "auto".to_owned(),
         "accent-color" => "auto".to_owned(),
         "appearance" | "-webkit-appearance" => "none".to_owned(),
         "color" => inherited_computed_style_value(runtime, handle, "color", "rgb(0, 0, 0)"),
@@ -1531,11 +1544,11 @@ pub(in crate::native_bridge::element::styles) fn style_property_value_with_viewp
     if let Some(state) = runtime.element_inline_style_declaration_state(handle)
         && let Some(value) = inline_state_property_value_with_pdb(state, &property)
     {
-        return value;
+        return normalize_touch_action_serialization(&property, &value);
     }
     let entries = style_entries(runtime, handle);
     if let Some(value) = style_entries_property_value_with_pdb(&entries, &property) {
-        return value;
+        return normalize_touch_action_serialization(&property, &value);
     }
     if property == "overflow" {
         if let Some(entry) = inline_style_entry_for_inline_style(runtime, handle, &property) {

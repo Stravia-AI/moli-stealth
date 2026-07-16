@@ -3600,9 +3600,7 @@ permissions-policy/policy-extends-to-sandbox.html
 permissions-policy/reporting/fullscreen-reporting.html
 permissions-policy/reporting/sync-xhr-report-only.html
 permissions-policy/reporting/sync-xhr-reporting.html
-pointerevents/compat/pointerevent_touch-action-verification.html
 pointerevents/pointerevent_on_event_handlers.html
-pointerevents/pointerevent_touch-action-verification.html
 preload/modulepreload-sri-importmap.html
 preload/modulepreload-sri.html
 quirks/line-height-calculation.html

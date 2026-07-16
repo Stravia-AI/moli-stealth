@@ -453,6 +453,7 @@ const LIGHTWEIGHT_STYLE_PROPERTIES: &[&str] = &[
     "text-underline-position",
     "tab-size",
     "top",
+    "touch-action",
     "transform",
     "transform-origin",
     "transform-style",
