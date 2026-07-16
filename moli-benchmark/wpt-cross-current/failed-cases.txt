@@ -3876,8 +3876,6 @@ trusted-types/navigate-to-javascript-url-005.html
 trusted-types/navigate-to-javascript-url-008.html
 trusted-types/navigate-to-javascript-url-csp-headers.html
 trusted-types/require-trusted-types-for-TypeError-belongs-to-the-global-object-realm.html
-trusted-types/script-enforcement-006.html
-trusted-types/script-enforcement-007.html
 trusted-types/script-enforcement-010.html
 trusted-types/script-enforcement-011.html
 trusted-types/set-attributes-require-trusted-types-default-policy.html
