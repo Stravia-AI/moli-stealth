@@ -6344,6 +6344,7 @@ html/syntax/parsing/template/clearing-the-stack-back-to-a-given-context/clearing
 html/syntax/parsing/template/clearing-the-stack-back-to-a-given-context/clearing-stack-back-to-a-table-row-context.html
 html/syntax/parsing/unclosed-svg-script.html
 html/syntax/parsing/zero.html
+html/syntax/serializing-html-fragments/escaping.html
 html/syntax/serializing-html-fragments/initial-linefeed-pre.html
 html/syntax/serializing-html-fragments/outerHTML.html
 html/syntax/serializing-html-fragments/serializing-cdata-in-html-document.html

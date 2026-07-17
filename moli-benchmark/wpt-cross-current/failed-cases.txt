@@ -3417,7 +3417,6 @@ html/syntax/parsing/template/additions-to-the-in-body-insertion-mode/ignore-body
 html/syntax/parsing/template/additions-to-the-in-body-insertion-mode/ignore-head-token.html
 html/syntax/parsing/template/creating-an-element-for-the-token/template-owner-document.html
 html/syntax/parsing/the-end.html
-html/syntax/serializing-html-fragments/escaping.html
 html/syntax/serializing-html-fragments/serializing.html
 html/syntax/serializing-xml-fragments/outerHTML.html
 html/syntax/xmldecl/xmldecl-1.html

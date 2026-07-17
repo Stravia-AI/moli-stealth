@@ -2004,15 +2004,15 @@ impl Drop for ParserRuntimeDomTargetStep<'_> {
 }
 
 impl ParserStreamHtmlTreeSinkTarget {
-    fn new(final_url: Url) -> Self {
-        Self::new_with_declarative_shadow_roots(final_url, true)
-    }
-
-    pub(super) fn new_with_declarative_shadow_roots(
+    pub(super) fn new_with_declarative_shadow_roots_and_scripting(
         final_url: Url,
         allow_declarative_shadow_roots: bool,
+        scripting_enabled: bool,
     ) -> Self {
-        let dom_host = DomHost::from_dom(NativeDom::new(final_url.clone()));
+        let dom_host = DomHost::from_dom(NativeDom::new_html_with_scripting(
+            final_url.clone(),
+            scripting_enabled,
+        ));
         let document_handle = dom_host.document_handle();
         Self {
             owned_dom_host: Some(dom_host),
@@ -3523,8 +3523,13 @@ impl ParserStreamHtmlTreeSinkTarget {
 
 pub(super) fn new_parser_stream_html_tree_sink_target(
     final_url: Url,
+    scripting_enabled: bool,
 ) -> ParserStreamHtmlTreeSinkTarget {
-    ParserStreamHtmlTreeSinkTarget::new(final_url)
+    ParserStreamHtmlTreeSinkTarget::new_with_declarative_shadow_roots_and_scripting(
+        final_url,
+        true,
+        scripting_enabled,
+    )
 }
 
 pub(super) fn new_parser_stream_html_tree_sink_stream(
@@ -3532,7 +3537,7 @@ pub(super) fn new_parser_stream_html_tree_sink_stream(
     scripting_enabled: bool,
 ) -> HtmlTreeSinkStream {
     HtmlTreeSinkStream::from_target_with_scripting(
-        new_parser_stream_html_tree_sink_target(final_url),
+        new_parser_stream_html_tree_sink_target(final_url, scripting_enabled),
         scripting_enabled,
     )
 }
