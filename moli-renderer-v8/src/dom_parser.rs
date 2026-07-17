@@ -23,8 +23,19 @@ const PARSER_ERROR_DETAIL_STYLE: &str = "font-family:monospace;font-size:12px";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DetachedDocumentKind {
+    Document,
     Html,
     Xml,
+}
+
+impl DetachedDocumentKind {
+    fn bridge_kind(self) -> &'static str {
+        match self {
+            Self::Document => "plain",
+            Self::Html => "html",
+            Self::Xml => "xml",
+        }
+    }
 }
 
 #[derive(Clone, Copy, webidl::WebIdlEnum)]
@@ -191,7 +202,7 @@ pub(super) fn parse_detached_document_from_string<'s>(
     build_detached_document_with_content_type(
         scope,
         parsed,
-        DetachedDocumentKind::Xml,
+        DetachedDocumentKind::Document,
         false,
         Some(mime),
     )
@@ -421,13 +432,9 @@ fn build_detached_document_with_content_type<'s>(
     content_type: Option<&str>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let _ = expose_declarative_shadow_roots;
-    let kind = match kind {
-        DetachedDocumentKind::Html => "html",
-        DetachedDocumentKind::Xml => "xml",
-    };
     build_detached_document_object_from_dom_host_with_content_type(
         scope,
-        kind,
+        kind.bridge_kind(),
         DomHost::from_dom(parsed),
         content_type,
         None,
@@ -441,11 +448,7 @@ fn build_detached_document_from_dom_host<'s>(
     expose_declarative_shadow_roots: bool,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let _ = expose_declarative_shadow_roots;
-    let kind = match kind {
-        DetachedDocumentKind::Html => "html",
-        DetachedDocumentKind::Xml => "xml",
-    };
-    build_detached_document_object_from_dom_host(scope, kind, parsed)
+    build_detached_document_object_from_dom_host(scope, kind.bridge_kind(), parsed)
 }
 
 fn build_detached_document_from_dom_host_with_content_type<'s>(
@@ -457,13 +460,9 @@ fn build_detached_document_from_dom_host_with_content_type<'s>(
     character_set: Option<&str>,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let _ = expose_declarative_shadow_roots;
-    let kind = match kind {
-        DetachedDocumentKind::Html => "html",
-        DetachedDocumentKind::Xml => "xml",
-    };
     build_detached_document_object_from_dom_host_with_content_type(
         scope,
-        kind,
+        kind.bridge_kind(),
         parsed,
         content_type,
         character_set,
