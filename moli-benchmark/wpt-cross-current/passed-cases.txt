@@ -4906,6 +4906,7 @@ fetch/api/response/multi-globals/url-parsing.html
 fetch/api/response/response-body-read-task-handling.html
 fetch/api/response/response-form-data.html
 fetch/content-length/content-length.html
+fetch/security/dangling-markup/media.html
 focus/activeelement-after-focusing-different-site-iframe-then-immediately-focusing-back.html
 focus/anchor-remove-href.html
 focus/focus-already-focused-iframe-deep-different-site.html

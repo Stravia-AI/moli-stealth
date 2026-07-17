@@ -6,6 +6,7 @@ use super::super::{
     html_media_element_setter_receiver, parsed_url_like_attribute, property_dom_string_value,
     property_usv_string_value, remove_reflected_attribute, resolve_url_like_attribute,
     set_reflected_attribute, set_reflected_boolean_attribute,
+    should_block_dangling_markup_subresource,
 };
 use crate::document_runtime::DocumentSubresourceCspKind;
 use crate::native_bridge::{
@@ -444,7 +445,7 @@ fn start_media_load(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     handle: crate::document_runtime::DomHandle,
-    selected_source: Option<url::Url>,
+    selected_source: Option<SelectedMediaSource>,
 ) {
     let pending = {
         let runtime = unsafe { &mut *runtime_ptr };
@@ -472,7 +473,8 @@ fn start_media_load(
     }
     let start = selected_source
         .ok_or_else(|| "media resource selection found no supported URL".to_owned())
-        .and_then(|request_url| {
+        .and_then(|selected_source| {
+            let request_url = selected_source.request_url;
             if unsafe { &mut *runtime_ptr }
                 .check_top_document_subresource_csp(
                     scope,
@@ -481,6 +483,14 @@ fn start_media_load(
                 )
                 .blocks_request()
             {
+                return Ok(crate::network_host::MediaElementResourceFetchStart::Local {
+                    successful: false,
+                });
+            }
+            if should_block_dangling_markup_subresource(
+                &request_url,
+                &selected_source.original_input,
+            ) {
                 return Ok(crate::network_host::MediaElementResourceFetchStart::Local {
                     successful: false,
                 });
@@ -760,10 +770,15 @@ fn media_load_target_for_source_change(
         .map(|_| parent)
 }
 
+struct SelectedMediaSource {
+    request_url: url::Url,
+    original_input: String,
+}
+
 fn selected_media_source(
     runtime: &JsContextHost,
     handle: crate::document_runtime::DomHandle,
-) -> Result<Option<url::Url>, ()> {
+) -> Result<Option<SelectedMediaSource>, ()> {
     let element = runtime
         .dom_host()
         .node(handle)
@@ -774,7 +789,12 @@ fn selected_media_source(
             return Err(());
         }
         return parsed_url_like_attribute(runtime, handle, "src")
-            .map(Some)
+            .map(|request_url| {
+                Some(SelectedMediaSource {
+                    request_url,
+                    original_input: src.to_owned(),
+                })
+            })
             .ok_or(());
     }
     for child in runtime.dom_host().child_handles(handle) {
@@ -793,7 +813,12 @@ fn selected_media_source(
             continue;
         }
         return parsed_url_like_attribute(runtime, child, "src")
-            .map(Some)
+            .map(|request_url| {
+                Some(SelectedMediaSource {
+                    request_url,
+                    original_input: src.to_owned(),
+                })
+            })
             .ok_or(());
     }
     Ok(None)

@@ -2906,7 +2906,6 @@ fetch/api/policies/referrer-origin-when-cross-origin-worker.html
 fetch/api/policies/referrer-origin-worker.html
 fetch/api/policies/referrer-unsafe-url-worker.html
 fetch/nosniff/importscripts.html
-fetch/security/dangling-markup/media.html
 fetch/security/dangling-markup/option.html
 fetch/security/dangling-markup/textarea.html
 focus/activeelement-after-focusing-different-site-iframe-contentwindow.html

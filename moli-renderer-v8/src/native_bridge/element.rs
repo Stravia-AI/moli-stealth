@@ -652,7 +652,7 @@ use url_attributes::{
     iframe_has_inactive_child_context, iframe_is_in_own_child_document,
     iframe_is_inside_its_own_child_context_document, iframe_uses_detached_content_cache,
     normalize_url_default_port, parsed_url_like_attribute, resolve_url_like_attribute,
-    set_resolved_url_attribute,
+    set_resolved_url_attribute, should_block_dangling_markup_subresource,
 };
 
 #[derive(WebApiFunctionTemplate)]

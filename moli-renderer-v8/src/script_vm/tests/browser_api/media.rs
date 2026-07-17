@@ -209,6 +209,108 @@ async fn media_invalid_request_url_fails_before_load() {
     );
 }
 
+#[tokio::test]
+async fn media_blocks_http_dangling_markup_without_blocking_safe_url_inputs() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://media-dangling-markup.test/page.html",
+        &loader,
+    );
+
+    vm.eval(
+        r#"
+(() => {
+  globalThis.__lmMediaDanglingMarkupEvents = [];
+  const probes = [
+    ["audio", "blocked", "asset.mp3?\n<", false],
+    ["video", "blocked", "asset.mp4?<\tkey", false],
+    ["video", "child-source", "asset.mp4?\n<", true],
+    ["audio", "data", "data:audio/mp3,bytes\n<", false]
+  ];
+  for (const [localName, name, source, useChildSource] of probes) {
+    const media = document.createElement(localName);
+    media.onerror = () => __lmMediaDanglingMarkupEvents.push(`${localName}:${name}:error`);
+    media.oncanplay = () => __lmMediaDanglingMarkupEvents.push(`${localName}:${name}:canplay`);
+    if (useChildSource) {
+      const sourceElement = document.createElement("source");
+      sourceElement.src = source;
+      media.appendChild(sourceElement);
+    } else {
+      media.src = source;
+    }
+    (document.body || document.documentElement || document).appendChild(media);
+  }
+})()
+"#,
+    )
+    .expect("media dangling markup setup should evaluate");
+
+    for turn in 0..10 {
+        run_next_page_media_element_event_for_test(
+            &mut vm,
+            &loader,
+            &format!("dangling-markup media event turn {turn}"),
+        )
+        .await;
+    }
+
+    assert_eq!(
+        vm.eval(r#"__lmMediaDanglingMarkupEvents.sort().join("|")"#)
+            .expect("media dangling markup events should evaluate"),
+        "audio:blocked:error|audio:data:canplay|video:blocked:error|video:child-source:error"
+    );
+}
+
+#[tokio::test]
+async fn media_dangling_markup_still_dispatches_report_only_csp() {
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://media-dangling-csp.test/page.html",
+        &loader,
+    );
+    vm.set_response_content_security_report_only_policies(&["media-src 'none'".to_owned()]);
+
+    vm.eval(
+        r#"
+(() => {
+  globalThis.__lmMediaDanglingCspEvents = [];
+  document.addEventListener("securitypolicyviolation", event => {
+    __lmMediaDanglingCspEvents.push(`csp:${event.disposition}:${event.effectiveDirective}`);
+  });
+  const video = document.createElement("video");
+  video.onerror = () => __lmMediaDanglingCspEvents.push("error");
+  video.oncanplay = () => __lmMediaDanglingCspEvents.push("canplay");
+  video.src = "asset.mp4?\n<";
+  (document.body || document.documentElement || document).appendChild(video);
+})()
+"#,
+    )
+    .expect("media dangling markup CSP setup should evaluate");
+
+    assert_eq!(
+        drain_pre_domcontentloaded_non_script_page_tasks_for_test(&mut vm),
+        1
+    );
+    run_next_page_media_element_event_for_test(
+        &mut vm,
+        &loader,
+        "report-only dangling-markup media loadstart turn",
+    )
+    .await;
+    run_next_page_media_element_event_for_test(
+        &mut vm,
+        &loader,
+        "report-only dangling-markup media error turn",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval(r#"__lmMediaDanglingCspEvents.join("|")"#)
+            .expect("media dangling markup CSP events should evaluate"),
+        "csp:report:media-src|error"
+    );
+}
+
 #[test]
 fn media_play_returns_a_fulfilled_promise() {
     let mut vm = new_storage_test_vm("https://media-play-promise.test/");

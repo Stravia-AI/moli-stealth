@@ -47,6 +47,20 @@ pub(in crate::native_bridge::element) fn parsed_url_like_attribute(
     parse_url_with_document_query_encoding(runtime, handle, &base, &value).ok()
 }
 
+/// Reconstructs Chromium's URL-parser flag after `url::Url` has removed raw
+/// URL whitespace and percent-encoded the `<` in its serialized result.
+pub(in crate::native_bridge::element) fn should_block_dangling_markup_subresource(
+    request_url: &Url,
+    original_input: &str,
+) -> bool {
+    matches!(request_url.scheme(), "http" | "https")
+        && original_input.as_bytes().contains(&b'<')
+        && original_input
+            .as_bytes()
+            .iter()
+            .any(|byte| matches!(byte, b'\r' | b'\n' | b'\t'))
+}
+
 fn parse_url_with_document_query_encoding(
     runtime: &JsContextHost,
     handle: DomHandle,
@@ -129,4 +143,36 @@ pub(in crate::native_bridge::element) fn set_resolved_url_attribute(
     url: &Url,
 ) {
     set_reflected_attribute(scope, runtime_ptr, handle, name, url.as_ref());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dangling_markup_subresource_gate_preserves_url_parser_flag_semantics() {
+        let http = Url::parse("https://example.test/resource").unwrap();
+        assert!(should_block_dangling_markup_subresource(
+            &http,
+            "resource?\n<"
+        ));
+        assert!(should_block_dangling_markup_subresource(
+            &http,
+            "resource?<\tkey"
+        ));
+        assert!(!should_block_dangling_markup_subresource(
+            &http,
+            "resource?<"
+        ));
+        assert!(!should_block_dangling_markup_subresource(
+            &http,
+            "resource?\r%3C"
+        ));
+
+        let data = Url::parse("data:text/plain,resource").unwrap();
+        assert!(!should_block_dangling_markup_subresource(
+            &data,
+            "data:text/plain,resource\n<"
+        ));
+    }
 }
