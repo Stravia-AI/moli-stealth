@@ -141,23 +141,37 @@ pub(super) unsafe extern "C" fn wasm_code_generation_check_callback(
     host.allows_wasm_code_generation_by_csp(scope)
 }
 
-pub(super) unsafe extern "C" fn string_code_generation_check_callback(
+pub(crate) unsafe extern "C" fn string_code_generation_check_callback(
     context: v8::Local<'_, v8::Context>,
     source: v8::Local<'_, v8::Value>,
     is_code_like: bool,
     modified_source: *mut *const v8::String,
 ) -> bool {
     v8::callback_scope!(unsafe scope, context);
-    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
-        return true;
-    };
-    if crate::context_bootstrap::consume_internal_javascript_url_eval(scope) {
-        return true;
-    }
-    let trusted_types_requirements =
-        unsafe { &*host_ptr }.trusted_types_for_script_requirements(scope);
+    let worker_trusted_types_requirements =
+        crate::worker::worker_trusted_types_for_script_requirements(scope);
+    let (trusted_types_requirements, allow_trusted_types_eval, host_ptr) =
+        if let Some(requirements) = worker_trusted_types_requirements {
+            (
+                requirements,
+                crate::worker::worker_allows_trusted_types_eval(scope).unwrap_or(false),
+                None,
+            )
+        } else {
+            let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+                return true;
+            };
+            if crate::context_bootstrap::consume_internal_javascript_url_eval(scope) {
+                return true;
+            }
+            (
+                unsafe { &*host_ptr }.trusted_types_for_script_requirements(scope),
+                unsafe { &*host_ptr }.allows_trusted_types_eval(scope),
+                Some(host_ptr),
+            )
+        };
     let action = if trusted_types_requirements.requires_conversion() {
-        if unsafe { &*host_ptr }.allows_trusted_types_eval(scope) {
+        if allow_trusted_types_eval {
             // The keyword relaxes Trusted Types conversion, but it does not
             // override another CSP policy. The per-policy CSP gate still runs.
             if source.is_string() {
@@ -246,11 +260,20 @@ pub(super) unsafe extern "C" fn string_code_generation_check_callback(
             source,
             modified_source: replacement,
         } => {
-            if !unsafe { &mut *host_ptr }.allows_eval_code_generation_by_csp(
-                scope,
-                allow_trusted_types_eval,
-                source.as_deref(),
-            ) {
+            let allowed = match host_ptr {
+                Some(host_ptr) => unsafe { &mut *host_ptr }.allows_eval_code_generation_by_csp(
+                    scope,
+                    allow_trusted_types_eval,
+                    source.as_deref(),
+                ),
+                None => crate::worker::worker_allows_eval_code_generation_by_csp(
+                    scope,
+                    allow_trusted_types_eval,
+                    source.as_deref(),
+                )
+                .unwrap_or(false),
+            };
+            if !allowed {
                 return false;
             }
             if let Some(replacement) = replacement {

@@ -439,34 +439,6 @@ pub(crate) enum TrustedTypesCodeGenerationCheck {
     Block,
 }
 
-pub(crate) unsafe extern "C" fn trusted_types_code_generation_check_callback(
-    context: v8::Local<'_, v8::Context>,
-    source: v8::Local<'_, v8::Value>,
-    is_code_like: bool,
-    modified_source: *mut *const v8::String,
-) -> bool {
-    v8::callback_scope!(unsafe scope, context);
-    if trusted_types_eval_is_allowed(scope) && source.is_string() {
-        return true;
-    }
-    let requirements = trusted_types_for_script_requirements(scope);
-    match trusted_types_code_generation_check(scope, source, is_code_like, requirements) {
-        TrustedTypesCodeGenerationCheck::AllowOriginal => true,
-        TrustedTypesCodeGenerationCheck::AllowModified(source) => {
-            let Some(source) = v8_string(scope, &source) else {
-                return false;
-            };
-            if !modified_source.is_null() {
-                unsafe {
-                    *modified_source = &*source;
-                }
-            }
-            true
-        }
-        TrustedTypesCodeGenerationCheck::Block => false,
-    }
-}
-
 pub(crate) fn trusted_types_code_generation_check<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     source: v8::Local<'s, v8::Value>,
@@ -1417,8 +1389,8 @@ fn trusted_types_for_script_is_required(scope: &mut v8::PinScope<'_, '_>) -> boo
 fn trusted_types_for_script_requirements(
     scope: &mut v8::PinScope<'_, '_>,
 ) -> TrustedTypesForScriptRequirements {
-    if let Some(required) = crate::worker::worker_requires_trusted_types_for_script(scope) {
-        return TrustedTypesForScriptRequirements::enforced_only(required);
+    if let Some(requirements) = crate::worker::worker_trusted_types_for_script_requirements(scope) {
+        return requirements;
     }
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         return TrustedTypesForScriptRequirements::default();
