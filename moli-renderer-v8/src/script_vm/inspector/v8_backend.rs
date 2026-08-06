@@ -313,6 +313,7 @@ impl RendererInspectorSessionExecutorLocal {
         };
         let _command_dispatch = self.target.pause_ref().begin_command_dispatch(
             command.command_id(),
+            command.agent_token,
             command.ticket(),
             command.pause_effect(),
             Some(command.response().call_id()),
@@ -403,6 +404,7 @@ impl RendererInspectorSessionExecutorLocal {
         };
         let _command_dispatch = self.target.pause_ref().begin_command_dispatch(
             command.command_id(),
+            command.agent_token,
             command.ticket(),
             command.pause_effect(),
             command.response().map(|response| response.call_id()),

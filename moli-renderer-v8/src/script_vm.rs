@@ -7220,7 +7220,7 @@ impl ScriptVm {
         self.page_inspector
             .devtools_target()
             .pause_ref()
-            .finish_owner_turn();
+            .finish_owner_turn(self.page_inspector.agent_token());
         self.sync_runtime_observable_source_events()
             .expect("runtime observable source synchronization should be infallible");
         let environment = self.renderer_page_script_environment.as_ref()?;

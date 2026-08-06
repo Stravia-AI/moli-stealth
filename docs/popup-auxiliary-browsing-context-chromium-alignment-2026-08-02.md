@@ -7695,6 +7695,85 @@ git diff --check
 聚焦 run 190c814e-3403-489c-9e67-111dd1798e02 为 500/500，最终全仓复跑通过，未把无关 isolated-world
 修复混入 G1。
 
+##### G1 rebase：shared-isolate pause bridge 与 exact Debugger response ordering
+
+G1 提交后按 topic 约定执行 `git pull -r origin master`，从 `origin/master@25326b1c12` rebase 到
+`origin/master@45c532c5eb`，61 个 popup topic commit 被重放。master 新增
+`fix(cdp): order debugger transitions after response`，它原先建立在“一份 pause bridge 只有一个 Page route”的
+模型上；popup topic 则已经让 related Pages 共享 isolate/pause loop，并用
+`RendererDevToolsAgentToken -> Page output journal` 保存多个 route。冲突不能选择任一侧覆盖另一侧，否则分别会
+丢失 response ordering 或重新引入 opener/popup route replacement。
+
+最终合并保持以下 ownership：
+
+1. nested V8 pause loop 仍是 isolate/script-agent scope，一次只 dispatch 一个控制命令；
+2. `Debugger.resume`/step transition 在 dispatch 时只 snapshot **发起命令 agent** 已报告 pause 的 frontend
+   sessions。同一 Page 的 primary/attached sessions 共享 exact renderer call cause；related Page 即使同一 isolate，
+   也不跨独立 Page output residence 认领该 cause；
+3. `mark_command_response` 同时校验 agent token、Inspector session 和 renderer call id，避免两个 related target 的
+   session-local call id 碰撞；
+4. `finish_owner_turn` 从 isolate-global clear 改成 agent-scoped terminal。popup 的普通 owner settlement 不能提前
+   清除 opener 的 step transition；发起 Page 到达 turn terminal 时仍会清除没有 repause 的 bounded cause；
+5. session/Page detach 从 active/pending transition 精确移除对应 session；关闭 related Page 不终结其他 Page 的
+   transition，关闭发起 Page 又不会留下永远等待的 cause；
+6. protocol 继续维持“不同 Page stream 是独立 ordering domain，不用一条 command response 隐式 join 两个
+   residences”的既有不变量。master 新增 barrier 只持有发起 Page 的 `AfterCommandResponse` batch。
+
+rebase 还暴露一个测试侧签名冲突：master 新增 barrier 回归显式传入 `source_renderer_agent`，而 popup topic 已把
+agent identity 收进 `RendererProtocolObservation::RuntimeInspector(batch)` 并删除重复参数。最终回归改用三参数
+constructor，没有把旧 carrier 重新加回生产 API。
+
+本次 post-rebase 聚焦证据：
+
+```bash
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(/script_vm::inspector_pause::tests/)' --no-fail-fast
+# run 4dc4c99b-c7be-4685-8bef-3a37699b49e3：17 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  -p lightmount-protocol-cdp -p lightmount-protocol -p lightmount \
+  -E 'test(debugger_execution_controls_admit_exact_command_output_barriers) | \
+      test(renderer_inspector_batches_keep_their_command_response_side) | \
+      test(debugger_transition_messages_wait_for_the_exact_command_response) | \
+      test(websocket_cdp_debugger_step_out_responds_before_resumed_and_caller_pause)'
+# run 8d285de8-a8a3-421c-a009-390eee80ca22：4 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount \
+  websocket_cdp_debugger_step_out_responds_before_resumed_and_caller_pause \
+  --stress-count 500 --test-threads 1 --flaky-result fail --max-fail 1
+# run a1746b4a-3946-4fc0-af87-290151c1d33f：500/500 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  -p lightmount-renderer-v8 -p lightmount-protocol \
+  -E 'test(coop_commit_switches_related_page_group_and_disconnects_old_window_proxy) | \
+      test(popup_coop_commit_keeps_target_session_and_severs_old_group_proxy) | \
+      test(/prepared_live_page_replacement/) | \
+      test(related_page_script_agent_experiment_shares_isolate_and_survives_source_close) | \
+      test(coop_group_swap_matrix_matches_chromium_for_committed_and_initial_empty_documents)'
+# run 1b6cdb06-183c-4279-95c8-b57560c7f52e：9 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+  popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
+  --stress-count 500 --test-threads 8 --flaky-result fail --max-fail 1
+# run c423cef4-674d-4a0f-a8a2-17c52a5392ee：500/500 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# run 16845c59-1653-47ef-9009-da8648fe4b95：16174 passed、18 skipped；98.943s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/.tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 31s。
+
+git diff --check
+# passed。
+```
+
+Chromium 对照 checkout 仍是 `a03603fe9af6`；这次只同步 Lightmount master，没有对照基线漂移。post-rebase
+workspace 门禁已按新 Rust 基线完整复跑，不能沿用 rebase 前的 16165/18 结果。
+
 这些是 renderer/protocol integration evidence，不是 upstream WPT 结果。G1 的 exit condition 是“本地真实 Page
 在最终 response commit 时有唯一 group/agent sever transaction”，不是完整 COOP/remote 结束。G2 至少仍需：
 

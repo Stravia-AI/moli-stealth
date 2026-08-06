@@ -208,6 +208,7 @@ impl RendererInspectorPauseBridge {
     pub(crate) fn begin_command_dispatch(
         &self,
         command_id: u64,
+        agent_token: RendererDevToolsAgentToken,
         ticket: &RendererInspectorIngressTicket,
         effect: RendererInspectorPauseCommandEffect,
         response_call_id: Option<i32>,
@@ -229,7 +230,12 @@ impl RendererInspectorPauseBridge {
             call_id,
         );
         let mut state = self.shared.state.lock();
-        let awaiting_resumed = state.paused_sessions_awaiting_resumed.clone();
+        let awaiting_resumed = state
+            .paused_sessions_awaiting_resumed
+            .iter()
+            .filter(|(paused_agent_token, _)| *paused_agent_token == agent_token)
+            .cloned()
+            .collect();
         assert!(
             state.active_command_dispatch.is_none(),
             "Inspector pause commands must dispatch serially in the nested loop"
@@ -237,6 +243,7 @@ impl RendererInspectorPauseBridge {
         state.active_command_dispatch = Some(RendererInspectorPauseCommandDispatch {
             command_id,
             transition: RendererInspectorPauseCommandTransition {
+                agent_token,
                 causal_identity,
                 effect,
                 response_succeeded: false,
@@ -273,27 +280,36 @@ impl RendererInspectorPauseBridge {
 
     fn mark_command_response(
         &self,
+        agent_token: RendererDevToolsAgentToken,
         inspector_session_id: Option<&str>,
         call_id: i32,
         succeeded: bool,
     ) {
         let mut state = self.shared.state.lock();
-        let matches = |cause: &RendererRuntimeCommandCausalIdentity| {
-            cause.call_id() == call_id && cause.inspector_session_id() == inspector_session_id
+        let matches = |transition: &RendererInspectorPauseCommandTransition| {
+            transition.agent_token == agent_token
+                && transition.causal_identity.call_id() == call_id
+                && transition.causal_identity.inspector_session_id() == inspector_session_id
         };
         if let Some(dispatch) = state.active_command_dispatch.as_mut()
-            && matches(&dispatch.transition.causal_identity)
+            && matches(&dispatch.transition)
         {
             dispatch.transition.response_succeeded = succeeded;
         }
     }
 
-    /// Ends the bounded handoff from a resume/step command to the renderer turn
-    /// it released. A step that reaches the end of its task may never enter a
-    /// new pause; owner settlement is the terminal that prevents its cause from
-    /// leaking into a later, unrelated pause.
-    pub(crate) fn finish_owner_turn(&self) {
-        self.shared.state.lock().pending_command_transition = None;
+    /// Ends only this Page's bounded resume/step handoff. A related Page can
+    /// settle an owner turn on the same isolate without terminating the
+    /// initiating Page's transition.
+    pub(crate) fn finish_owner_turn(&self, agent_token: RendererDevToolsAgentToken) {
+        let mut state = self.shared.state.lock();
+        if state
+            .pending_command_transition
+            .as_ref()
+            .is_some_and(|transition| transition.agent_token == agent_token)
+        {
+            state.pending_command_transition = None;
+        }
     }
 
     fn stage_pause_preface(
@@ -651,6 +667,7 @@ impl RendererInspectorSessionOutboundRoute {
 
     pub(crate) fn mark_command_response(&self, call_id: i32, succeeded: bool) {
         self.target.pause_ref().mark_command_response(
+            self.agent_token,
             self.session.wire_session_id(),
             call_id,
             succeeded,

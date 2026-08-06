@@ -48,12 +48,21 @@ fn outbound_route_with_io(
         .next()
         .copied()
         .unwrap_or_else(RendererDevToolsAgentToken::allocate);
+    outbound_route_for_agent_with_io(bridge, io_ingress, agent_token, DevToolsSessionKey::Primary)
+}
+
+fn outbound_route_for_agent_with_io(
+    bridge: &RendererInspectorPauseBridge,
+    io_ingress: crate::devtools::ingress::io::RendererInspectorIoIngress,
+    agent_token: RendererDevToolsAgentToken,
+    session: DevToolsSessionKey,
+) -> RendererInspectorSessionOutboundRoute {
     crate::devtools::target::RendererDevToolsTargetHandle::new(
         bridge.clone(),
         main_ingress(bridge),
         io_ingress,
     )
-    .outbound_route(agent_token, DevToolsSessionKey::Primary)
+    .outbound_route(agent_token, session)
 }
 
 fn enqueue_command(
@@ -84,6 +93,41 @@ fn route_paused(bridge: &RendererInspectorPauseBridge) -> RendererInspectorPause
         "method": "Debugger.paused",
         "params": {"callFrames": []},
     }))
+}
+
+fn dispatch_control_command(
+    bridge: &RendererInspectorPauseBridge,
+    io_ingress: &crate::devtools::ingress::io::RendererInspectorIoIngress,
+    outbound: &RendererInspectorSessionOutboundRoute,
+    agent_token: RendererDevToolsAgentToken,
+    inspector_session_id: Option<String>,
+    call_id: i32,
+    method: &str,
+    succeeded: bool,
+) -> crate::devtools::ingress::io::RendererRuntimeInspectorIoCommandRoute {
+    let (response, _response_rx) = response_sender(call_id);
+    let command_route = enqueue_command(
+        io_ingress,
+        agent_token,
+        inspector_session_id,
+        format!(r#"{{"id":{call_id},"method":"{method}","params":{{}}}}"#),
+        response,
+    );
+    let mut command = io_ingress
+        .wait_and_claim_for_pause(bridge)
+        .expect("the nested pause loop should claim the control command");
+    let first_dispatch = io_ingress.first_dispatch_guard(&mut command);
+    let dispatch = bridge.begin_command_dispatch(
+        command.command_id(),
+        command.agent_token,
+        command.ticket(),
+        command.pause_effect(),
+        command.response().map(|response| response.call_id()),
+    );
+    outbound.mark_command_response(call_id, succeeded);
+    drop(dispatch);
+    drop(first_dispatch);
+    command_route
 }
 
 fn response_sender(
@@ -120,7 +164,7 @@ fn expect_immediate_command_output(
 fn step_transition_keeps_the_exact_command_cause_through_repause() {
     let bridge = RendererInspectorPauseBridge::default();
     let io_ingress = io_ingress(&bridge);
-    configure_page(&bridge, PageId::new_for_testing(1));
+    let agent_token = configure_page(&bridge, PageId::new_for_testing(1));
     let outbound = outbound_route_with_io(&bridge, io_ingress.clone());
     assert!(
         expect_immediate_preface(outbound.route_notification(&json!({
@@ -137,7 +181,7 @@ fn step_transition_keeps_the_exact_command_cause_through_repause() {
     let (response, _response_rx) = response_sender(41);
     let command_route = enqueue_command(
         &io_ingress,
-        RendererDevToolsAgentToken::allocate(),
+        agent_token,
         None,
         r#"{"id":41,"method":"Debugger.stepOut","params":{}}"#.to_owned(),
         response,
@@ -153,6 +197,7 @@ fn step_transition_keeps_the_exact_command_cause_through_repause() {
     assert_eq!(command.ticket(), command_route.ticket());
     let dispatch = bridge.begin_command_dispatch(
         command.command_id(),
+        command.agent_token,
         command.ticket(),
         command.pause_effect(),
         command.response().map(|response| response.call_id()),
@@ -188,10 +233,10 @@ fn step_transition_keeps_the_exact_command_cause_through_repause() {
 }
 
 #[test]
-fn step_cause_ends_with_the_owner_turn_when_no_repause_occurs() {
+fn step_cause_ends_with_the_initiating_page_owner_turn() {
     let bridge = RendererInspectorPauseBridge::default();
     let io_ingress = io_ingress(&bridge);
-    configure_page(&bridge, PageId::new_for_testing(1));
+    let agent_token = configure_page(&bridge, PageId::new_for_testing(1));
     let outbound = outbound_route_with_io(&bridge, io_ingress.clone());
     assert!(
         expect_immediate_preface(outbound.route_notification(&json!({
@@ -208,7 +253,7 @@ fn step_cause_ends_with_the_owner_turn_when_no_repause_occurs() {
     let (response, _response_rx) = response_sender(43);
     let command_route = enqueue_command(
         &io_ingress,
-        RendererDevToolsAgentToken::allocate(),
+        agent_token,
         None,
         r#"{"id":43,"method":"Debugger.stepOut","params":{}}"#.to_owned(),
         response,
@@ -219,6 +264,7 @@ fn step_cause_ends_with_the_owner_turn_when_no_repause_occurs() {
     let first_dispatch = io_ingress.first_dispatch_guard(&mut command);
     let dispatch = bridge.begin_command_dispatch(
         command.command_id(),
+        command.agent_token,
         command.ticket(),
         command.pause_effect(),
         command.response().map(|response| response.call_id()),
@@ -234,7 +280,7 @@ fn step_cause_ends_with_the_owner_turn_when_no_repause_occurs() {
         .is_some()
     );
 
-    bridge.finish_owner_turn();
+    bridge.finish_owner_turn(agent_token);
     assert!(
         expect_immediate_command_output(outbound.route_notification(&json!({
             "method": "Debugger.paused",
@@ -250,7 +296,7 @@ fn step_cause_ends_with_the_owner_turn_when_no_repause_occurs() {
 fn failed_step_command_does_not_own_a_later_resume_transition() {
     let bridge = RendererInspectorPauseBridge::default();
     let io_ingress = io_ingress(&bridge);
-    configure_page(&bridge, PageId::new_for_testing(1));
+    let agent_token = configure_page(&bridge, PageId::new_for_testing(1));
     let outbound = outbound_route_with_io(&bridge, io_ingress.clone());
     assert!(
         expect_immediate_preface(outbound.route_notification(&json!({
@@ -267,7 +313,7 @@ fn failed_step_command_does_not_own_a_later_resume_transition() {
     let (response, _response_rx) = response_sender(42);
     let command_route = enqueue_command(
         &io_ingress,
-        RendererDevToolsAgentToken::allocate(),
+        agent_token,
         None,
         r#"{"id":42,"method":"Debugger.stepOut","params":{}}"#.to_owned(),
         response,
@@ -278,6 +324,7 @@ fn failed_step_command_does_not_own_a_later_resume_transition() {
     let first_dispatch = io_ingress.first_dispatch_guard(&mut command);
     let dispatch = bridge.begin_command_dispatch(
         command.command_id(),
+        command.agent_token,
         command.ticket(),
         command.pause_effect(),
         command.response().map(|response| response.call_id()),
@@ -301,6 +348,182 @@ fn failed_step_command_does_not_own_a_later_resume_transition() {
         )
         .is_none(),
         "a failed step response must not own a later resumed event"
+    );
+    drop(command_route);
+}
+
+#[test]
+fn related_page_notifications_do_not_cross_the_initiating_page_barrier() {
+    let bridge = RendererInspectorPauseBridge::default();
+    let io_ingress = io_ingress(&bridge);
+    let opener_agent = configure_page(&bridge, PageId::new_for_testing(1));
+    let popup_agent = configure_page(&bridge, PageId::new_for_testing(2));
+    let opener_outbound = outbound_route_for_agent_with_io(
+        &bridge,
+        io_ingress.clone(),
+        opener_agent,
+        DevToolsSessionKey::Primary,
+    );
+    let popup_outbound = outbound_route_for_agent_with_io(
+        &bridge,
+        io_ingress.clone(),
+        popup_agent,
+        DevToolsSessionKey::Primary,
+    );
+    let paused = json!({
+        "method": "Debugger.paused",
+        "params": {"callFrames": []},
+    });
+    assert!(expect_immediate_preface(opener_outbound.route_notification(&paused)).is_empty());
+    assert!(expect_immediate_preface(popup_outbound.route_notification(&paused)).is_empty());
+    assert_eq!(
+        bridge.enter_pause(),
+        Some(RendererInspectorPauseLoopPolicy::MainAndIo)
+    );
+
+    let command_route = dispatch_control_command(
+        &bridge,
+        &io_ingress,
+        &opener_outbound,
+        opener_agent,
+        None,
+        44,
+        "Debugger.stepOut",
+        true,
+    );
+    bridge.leave_pause();
+
+    assert!(
+        expect_immediate_command_output(popup_outbound.route_notification(&json!({
+            "method": "Debugger.resumed",
+            "params": {},
+        })))
+        .is_none(),
+        "a related Page owns an independent renderer output stream and response barrier"
+    );
+    let resumed = expect_immediate_command_output(opener_outbound.route_notification(&json!({
+        "method": "Debugger.resumed",
+        "params": {},
+    })))
+    .expect("the initiating Page's resumed event must retain the command cause");
+    assert_eq!(
+        resumed.causal_identity,
+        RendererRuntimeCommandCausalIdentity::new(None, 44)
+    );
+    assert!(expect_immediate_command_output(popup_outbound.route_notification(&paused)).is_none());
+    assert!(expect_immediate_command_output(opener_outbound.route_notification(&paused)).is_some());
+    drop(command_route);
+}
+
+#[test]
+fn all_sessions_on_the_initiating_page_share_the_exact_step_cause() {
+    let bridge = RendererInspectorPauseBridge::default();
+    let io_ingress = io_ingress(&bridge);
+    let agent_token = configure_page(&bridge, PageId::new_for_testing(1));
+    let primary = outbound_route_for_agent_with_io(
+        &bridge,
+        io_ingress.clone(),
+        agent_token,
+        DevToolsSessionKey::Primary,
+    );
+    let attached_session_id = "frontend-2".to_owned();
+    let attached = outbound_route_for_agent_with_io(
+        &bridge,
+        io_ingress.clone(),
+        agent_token,
+        DevToolsSessionKey::Attached(attached_session_id.clone()),
+    );
+    let paused = json!({
+        "method": "Debugger.paused",
+        "params": {"callFrames": []},
+    });
+    assert!(expect_immediate_preface(primary.route_notification(&paused)).is_empty());
+    assert!(expect_immediate_preface(attached.route_notification(&paused)).is_empty());
+    assert_eq!(
+        bridge.enter_pause(),
+        Some(RendererInspectorPauseLoopPolicy::MainAndIo)
+    );
+
+    let command_route = dispatch_control_command(
+        &bridge,
+        &io_ingress,
+        &attached,
+        agent_token,
+        Some(attached_session_id.clone()),
+        46,
+        "Debugger.stepOut",
+        true,
+    );
+    bridge.leave_pause();
+
+    let expected = RendererRuntimeCommandCausalIdentity::new(Some(attached_session_id), 46);
+    for outbound in [&primary, &attached] {
+        let resumed = expect_immediate_command_output(outbound.route_notification(&json!({
+            "method": "Debugger.resumed",
+            "params": {},
+        })))
+        .expect("every initiating Page session must retain the resumed cause");
+        assert_eq!(resumed.causal_identity, expected);
+    }
+    for outbound in [&primary, &attached] {
+        let repause = expect_immediate_command_output(outbound.route_notification(&paused))
+            .expect("every initiating Page session must retain the repause cause");
+        assert_eq!(repause.causal_identity, expected);
+    }
+    assert!(
+        bridge
+            .shared
+            .state
+            .lock()
+            .pending_command_transition
+            .is_none()
+    );
+    drop(command_route);
+}
+
+#[test]
+fn related_page_owner_settlement_does_not_end_the_initiating_page_transition() {
+    let bridge = RendererInspectorPauseBridge::default();
+    let io_ingress = io_ingress(&bridge);
+    let opener_agent = configure_page(&bridge, PageId::new_for_testing(1));
+    let popup_agent = configure_page(&bridge, PageId::new_for_testing(2));
+    let opener_outbound = outbound_route_for_agent_with_io(
+        &bridge,
+        io_ingress.clone(),
+        opener_agent,
+        DevToolsSessionKey::Primary,
+    );
+    assert!(
+        expect_immediate_preface(opener_outbound.route_notification(&json!({
+            "method": "Debugger.paused",
+            "params": {"callFrames": []},
+        })))
+        .is_empty()
+    );
+    assert_eq!(
+        bridge.enter_pause(),
+        Some(RendererInspectorPauseLoopPolicy::MainAndIo)
+    );
+    let command_route = dispatch_control_command(
+        &bridge,
+        &io_ingress,
+        &opener_outbound,
+        opener_agent,
+        None,
+        45,
+        "Debugger.stepOut",
+        true,
+    );
+    bridge.leave_pause();
+
+    bridge.finish_owner_turn(popup_agent);
+    assert!(
+        expect_immediate_command_output(opener_outbound.route_notification(&json!({
+            "method": "Debugger.resumed",
+            "params": {},
+        })))
+        .is_some(),
+        "settling a related Page must not clear the opener's transition"
     );
     drop(command_route);
 }
