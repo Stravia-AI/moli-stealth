@@ -223,9 +223,6 @@ into DOM-neutral immutable data, then discards the pass-local layout and paint
 state. There's no incremental layout tree, damage graph, retained display
 list, GPU compositor, or persistent window.
 
-See [workspace-crate-map-current.md](docs/workspace-crate-map-current.md) for
-the subsystem ownership map.
-
 ## Evidence
 
 Two recorded snapshots illustrate Moli's intended operating point, against
