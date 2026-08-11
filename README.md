@@ -8,58 +8,12 @@
 
 <h1 align="center">Moli</h1>
 
-Moli is a production-ready, structured-first browser engine for AI agents.
+Moli is a **production-ready**, structured-first browser engine for AI agents.
 
 It runs real JavaScript, DOM, and browser APIs by default, and computes layout
 or pixels only when requested.
 
 Use it through CLI, CDP, WebDriver Classic, or WebDriver BiDi.
-
-## Why Moli
-
-Most browser automation needs page structure, not a continuously rendered
-visual world. Moli keeps the native DOM and style state as its source of truth,
-then runs layout or software paint only for operations that need them.
-
-| Agent request | What Moli does |
-| --- | --- |
-| Extract HTML/Markdown, query the DOM, run JS, inspect network/storage | Reads the browser runtime directly — no layout or paint |
-| Read an element's box, hit-test a point, send coordinate input | Runs one layout pass, keeps only the latest geometry snapshot |
-| Capture a screenshot or refresh a screencast | Rebuilds from current DOM/style, renders one fresh frame, discards it |
-
-<p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
-    <img
-      src="assets/moli_ondemand_rendering_flow.svg"
-      alt="How Moli handles a request: DOM-first by default, with layout and paint built fresh only on demand"
-      width="680"
-    />
-  </a>
-</p>
-
-Moli still includes V8, CSS, layout, text shaping, hit-testing, and software
-paint. The difference is when visual work runs and how long its state is kept.
-This cost model targets crawling, browser-use agents, retrieval pipelines,
-evaluation environments, and reinforcement-learning workloads.
-
-## What works today
-
-- **Real web runtime** — streaming HTML parsing, native DOM, V8 JavaScript,
-  modules/timers/microtasks/events, iframes and workers, CSS cascade,
-  Fetch/XHR/WebSocket, cookies, WebCrypto, and profile-scoped storage
-  (localStorage, IndexedDB, OPFS).
-- **Extraction-first outputs** — HTML, Markdown, JSON, semantic text trees,
-  frame-aware serialization, selector/script/response waits, and network
-  tracing, all from the CLI.
-- **One automation binary** — CDP, WebDriver Classic, and WebDriver BiDi share
-  the same kernel and scheduler. No separate ChromeDriver, geckodriver, or
-  browser install required.
-- **Real visual surfaces on demand** — with `--layout`: box construction,
-  Taffy layout, Parley text layout, layout-backed hit-testing/input, viewport
-  screenshots, and low-frequency CPU-rendered DevTools screencast frames.
-- **Operational controls** — profiles, cookies, HTTP cache, proxies, resource
-  families, connection limits, timeouts, private-network policy, user-agent
-  overrides, structured logging, and network diagnostics.
 
 ## Showcase
 
@@ -67,36 +21,29 @@ evaluation environments, and reinforcement-learning workloads.
   <a href="assets/moli-game.jpg">
     <img
       src="assets/moli-game.jpg"
-      alt="Moli running an HTML5 game while connected to Chrome DevTools"
+      alt="An HTML5 game rendered by Moli and inspected through Chrome DevTools"
       width="1200"
     />
   </a>
 </p>
 
 <p align="center">
-  <sub>An HTML5 game running in Moli, with Chrome DevTools attached to the same live browser runtime.</sub>
+  <sub>An HTML5 game rendered by Moli and inspected live through Chrome DevTools.</sub>
 </p>
 
 <p align="center">
   <a href="assets/moli-devtools-rust-lang.jpg">
     <img
       src="assets/moli-devtools-rust-lang.jpg"
-      alt="Chrome DevTools connected to Moli while inspecting and rendering rust-lang.org"
+      alt="rust-lang.org rendered by Moli and inspected through Chrome DevTools"
       width="1200"
     />
   </a>
 </p>
 
 <p align="center">
-  <sub>Chrome DevTools connected to Moli: rendered page, live DOM, CSS, and geometry from the same browser runtime.</sub>
+  <sub>rust-lang.org rendered by Moli, with its live DOM, CSS, and geometry available in Chrome DevTools.</sub>
 </p>
-
-## Moli and Lexmount
-
-Moli is Lexmount’s open-source browser engine. Lexmount Browser is the managed
-cloud runtime and control plane built around it.
-
-**The open-source engine is fully usable without Lexmount Browser.**
 
 ## Quick start
 
@@ -157,6 +104,68 @@ console.log(await page.locator("body").innerText());
 
 await browser.close();
 ```
+
+## Why Moli
+
+Moli combines three qualities that matter for agent workloads:
+
+- **Full-featured** — real JavaScript, DOM, CSS, networking, storage, layout,
+  screenshots, and standard automation protocols in one browser engine.
+- **Fast** — structure-first operations skip layout and paint, avoiding visual
+  work that most automation requests do not need.
+- **Resource-efficient** — layout and pixels are created only on demand, so
+  Moli does not continuously retain and update a rendered visual world.
+
+Most browser automation needs page structure, not a continuously rendered
+visual world. Moli keeps the native DOM and style state as its source of truth,
+then runs layout or software paint only for operations that need them.
+
+| Agent request | What Moli does |
+| --- | --- |
+| Extract HTML/Markdown, query the DOM, run JS, inspect network/storage | Reads the browser runtime directly — no layout or paint |
+| Read an element's box, hit-test a point, send coordinate input | Runs one layout pass, keeps only the latest geometry snapshot |
+| Capture a screenshot or refresh a screencast | Rebuilds from current DOM/style, renders one fresh frame, discards it |
+
+<p align="center">
+  <a href="assets/moli_ondemand_rendering_flow.svg">
+    <img
+      src="assets/moli_ondemand_rendering_flow.svg"
+      alt="How Moli handles a request: DOM-first by default, with layout and paint built fresh only on demand"
+      width="680"
+    />
+  </a>
+</p>
+
+Moli still includes V8, CSS, layout, text shaping, hit-testing, and software
+paint. The difference is when visual work runs and how long its state is kept.
+This cost model targets crawling, browser-use agents, retrieval pipelines,
+evaluation environments, and reinforcement-learning workloads.
+
+## What works today
+
+- **Real web runtime** — streaming HTML parsing, native DOM, V8 JavaScript,
+  modules/timers/microtasks/events, iframes and workers, CSS cascade,
+  Fetch/XHR/WebSocket, cookies, WebCrypto, and profile-scoped storage
+  (localStorage, IndexedDB, OPFS).
+- **Extraction-first outputs** — HTML, Markdown, JSON, semantic text trees,
+  frame-aware serialization, selector/script/response waits, and network
+  tracing, all from the CLI.
+- **One automation binary** — CDP, WebDriver Classic, and WebDriver BiDi share
+  the same kernel and scheduler. No separate ChromeDriver, geckodriver, or
+  browser install required.
+- **Real visual surfaces on demand** — with `--layout`: box construction,
+  Taffy layout, Parley text layout, layout-backed hit-testing/input, viewport
+  screenshots, and low-frequency CPU-rendered DevTools screencast frames.
+- **Operational controls** — profiles, cookies, HTTP cache, proxies, resource
+  families, connection limits, timeouts, private-network policy, user-agent
+  overrides, structured logging, and network diagnostics.
+
+## Moli and Lexmount
+
+Moli is Lexmount’s open-source browser engine. Lexmount Browser is the managed
+cloud runtime and control plane built around it.
+
+**The open-source engine is fully usable without Lexmount Browser.**
 
 ## Cost controls
 
