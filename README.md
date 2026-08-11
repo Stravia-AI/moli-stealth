@@ -1,7 +1,7 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner-v2.png"
-    alt="Moli Browser — Structure first. Pixels on demand."
+    src="assets/moli-browser-banner.jpg"
+    alt="Moli Browser — Structure first. Pixels on demand. Open source browser for AI agents."
     width="1086"
   />
 </p>
