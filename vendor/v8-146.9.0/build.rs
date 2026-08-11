@@ -506,7 +506,7 @@ fn build_moli_v8_ext(sources: &[PathBuf]) {
     .warnings(false)
     .include(".")
     .include("v8/include")
-    .flag_if_supported("-std=c++20")
+    .std("c++20")
     .flag_if_supported("-w");
   for source in sources {
     build.file(source);
