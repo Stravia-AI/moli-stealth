@@ -26,7 +26,7 @@ use super::events::{
 use super::*;
 use crate::runtime::RendererPageContextCancelReason;
 use crossbeam_channel::{after, bounded, never, select};
-use moli_fetch::{BrowserRequestMetadata, FetchCancelHandle};
+use moli_fetch::{BrowserRequestMetadata, FetchCancelHandle, RequestMode};
 use std::{thread, time::Duration};
 
 pub(super) fn xhr_send_callback<'s>(
@@ -402,8 +402,27 @@ fn send_synchronous_network_xhr(
         Err(error) => Err(format!("failed to spawn sync XHR fetch thread: {error}")),
     };
 
+    let result = result.and_then(|response| {
+        crate::network_host::validate_fetch_response_security_policy_with_body(
+            &prepared.document_url,
+            &response.final_url,
+            &response.headers,
+            response.body_bytes(),
+            RequestMode::Cors,
+            prepared.credentials_mode,
+            prepared.policy_context,
+        )?;
+        Ok(response)
+    });
+
     match result {
         Ok(response) => {
+            let observable_headers = crate::network_host::filter_cors_exposed_response_headers(
+                &prepared.document_url,
+                &response.final_url,
+                &response.headers,
+                prepared.credentials_mode,
+            );
             host.record_subresource_network(
                 SubresourceNetworkRecord::success_with_body(
                     prepared.frame_id,
@@ -432,6 +451,8 @@ fn send_synchronous_network_xhr(
                 .with_from_cache(response.from_cache)
                 .with_negotiated_http_version(response.negotiated_http_version),
             );
+            let mut response = response;
+            response.headers = observable_headers;
             apply_xhr_response(scope, xhr, response);
         }
         Err(error_text) => {

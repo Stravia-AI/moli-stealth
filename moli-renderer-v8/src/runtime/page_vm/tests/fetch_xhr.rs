@@ -2,6 +2,13 @@ use super::*;
 use moli_browser_profile::DEFAULT_SEC_CH_UA_PLATFORM;
 
 fn synchronous_xhr_failure_probe_expression(url: &str) -> String {
+    synchronous_xhr_failure_probe_expression_with_credentials(url, false)
+}
+
+fn synchronous_xhr_failure_probe_expression_with_credentials(
+    url: &str,
+    with_credentials: bool,
+) -> String {
     let url_literal = serde_json::to_string(url).expect("serialize synchronous XHR URL");
     format!(
         r#"
@@ -14,6 +21,7 @@ fn synchronous_xhr_failure_probe_expression(url: &str) -> String {
             xhr.upload.addEventListener(type, () => events.push(`upload.${{type}}`));
           }}
           xhr.open("GET", {url_literal}, false);
+          xhr.withCredentials = {with_credentials};
           let error = null;
           try {{
             xhr.send("ignored GET body");
@@ -63,6 +71,74 @@ fn assert_synchronous_xhr_network_error_surface(observed: &str, url: &str) {
             "allHeaders": "",
         })
     );
+}
+
+fn synchronous_xhr_success_probe_expression(url: &str, with_credentials: bool) -> String {
+    let url_literal = serde_json::to_string(url).expect("serialize synchronous XHR URL");
+    format!(
+        r#"
+        (() => {{
+          const xhr = new XMLHttpRequest();
+          xhr.open("GET", {url_literal}, false);
+          xhr.withCredentials = {with_credentials};
+          xhr.send();
+          return JSON.stringify({{
+            readyState: xhr.readyState,
+            status: xhr.status,
+            responseText: xhr.responseText,
+            responseURL: xhr.responseURL,
+          }});
+        }})()
+        "#
+    )
+}
+
+async fn evaluate_synchronous_xhr_probe(
+    document_url: Url,
+    expression: String,
+) -> (String, ScriptNetworkOutput) {
+    let mut page_vm = test_page_vm_with_document_url(document_url);
+    let local_executor = page_vm.local_executor.clone();
+    local_executor
+        .run(async move {
+            let observed = page_vm.vm_mut().eval(&expression)?;
+            Ok::<_, anyhow::Error>((observed, page_vm.vm_mut().take_network_output()))
+        })
+        .await
+        .expect("synchronous XHR probe should run on owner lane")
+}
+
+fn assert_synchronous_xhr_success_surface(observed: &str, url: &str, body: &str) {
+    assert_eq!(
+        observed,
+        format!(
+            r#"{{"readyState":4,"status":200,"responseText":{},"responseURL":{}}}"#,
+            serde_json::to_string(body).expect("serialize XHR response body"),
+            serde_json::to_string(url).expect("serialize XHR response URL"),
+        )
+    );
+}
+
+fn assert_single_synchronous_xhr_network_failure(
+    network_output: ScriptNetworkOutput,
+    expected_error: &str,
+) {
+    let (records, _, _) = split_network_output_items(network_output);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome(),
+        SubresourceNetworkOutcome::Failure { error_text }
+            if error_text.contains(expected_error)
+    ));
+}
+
+fn assert_single_synchronous_xhr_network_success(network_output: ScriptNetworkOutput) {
+    let (records, _, _) = split_network_output_items(network_output);
+    assert_eq!(records.len(), 1);
+    assert!(matches!(
+        records[0].outcome(),
+        SubresourceNetworkOutcome::Success { status: 200, .. }
+    ));
 }
 
 fn read_blocking_http_request_head(stream: &mut std::net::TcpStream) -> String {
@@ -161,6 +237,42 @@ fn spawn_blocking_redirect_loop_http_server(
             }
         })
         .expect("spawn blocking redirect-loop HTTP server");
+    (format!("http://{addr}"), server)
+}
+
+fn spawn_blocking_xhr_response_server(
+    path: &'static str,
+    body: &'static str,
+    response_headers: Vec<(&'static str, &'static str)>,
+) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Write;
+
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("bind blocking XHR response server");
+    let addr = listener
+        .local_addr()
+        .expect("blocking XHR response server address");
+    let server = std::thread::Builder::new()
+        .name("sync-xhr-response-server".to_owned())
+        .spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("accept blocking XHR response request");
+            let request = read_blocking_http_request_head(&mut stream);
+            assert!(request.starts_with(&format!("GET {path} HTTP/1.1\r\n")));
+            let response_headers = response_headers
+                .into_iter()
+                .map(|(name, value)| format!("{name}: {value}\r\n"))
+                .collect::<String>();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\n{response_headers}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write blocking XHR response");
+        })
+        .expect("spawn blocking XHR response server");
     (format!("http://{addr}"), server)
 }
 
@@ -2666,6 +2778,286 @@ async fn synchronous_xhr_blocks_send_and_returns_materialized_response() {
             panic!("expected sync XHR network success, got {:?}", record.outcome());
         };
         assert_eq!(*status, 200);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_rejects_cross_origin_response_without_cors_headers() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-deny",
+            "cross-origin-secret",
+            vec![],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-deny");
+        let document_url = Url::parse("http://source.test/page.html").expect("document url");
+        let mut page_vm = test_page_vm_with_document_url(document_url);
+        let local_executor = page_vm.local_executor.clone();
+        let expression = synchronous_xhr_failure_probe_expression(&xhr_url);
+
+        let (observed, network_output) = local_executor
+            .run(async move {
+                let observed = page_vm.vm_mut().eval(&expression)?;
+                Ok::<_, anyhow::Error>((observed, page_vm.vm_mut().take_network_output()))
+            })
+            .await
+            .expect("cross-origin synchronous XHR probe should run on owner lane");
+
+        server
+            .join()
+            .expect("cross-origin synchronous XHR server should finish");
+        assert_synchronous_xhr_network_error_surface(&observed, &xhr_url);
+        let (records, _, _) = split_network_output_items(network_output);
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].outcome(),
+            SubresourceNetworkOutcome::Failure { error_text }
+                if error_text.contains("CORS check failed: no Access-Control-Allow-Origin")
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_allows_cross_origin_response_with_matching_cors_origin() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-allow",
+            "cors-visible",
+            vec![
+                ("Access-Control-Allow-Origin", "http://source.test"),
+                ("Access-Control-Expose-Headers", "X-Visible-Token"),
+                ("X-Visible-Token", "public-value"),
+                ("X-Internal-Token", "private-value"),
+            ],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-allow");
+        let xhr_url_literal = serde_json::to_string(&xhr_url).expect("serialize XHR URL");
+        let document_url = Url::parse("http://source.test/page.html").expect("document url");
+        let mut page_vm = test_page_vm_with_document_url(document_url);
+        let local_executor = page_vm.local_executor.clone();
+
+        let (observed, network_output) = local_executor
+            .run(async move {
+                let observed = page_vm.vm_mut().eval(&format!(
+                    r#"
+                    (() => {{
+                        const xhr = new XMLHttpRequest();
+                        xhr.open("GET", {xhr_url_literal}, false);
+                        xhr.send();
+                        return JSON.stringify({{
+                            readyState: xhr.readyState,
+                            status: xhr.status,
+                            responseText: xhr.responseText,
+                            responseURL: xhr.responseURL,
+                            visibleToken: xhr.getResponseHeader("X-Visible-Token"),
+                            internalToken: xhr.getResponseHeader("X-Internal-Token"),
+                            allowOrigin: xhr.getResponseHeader("Access-Control-Allow-Origin"),
+                        }});
+                    }})()
+                    "#,
+                ))?;
+                Ok::<_, anyhow::Error>((observed, page_vm.vm_mut().take_network_output()))
+            })
+            .await
+            .expect("allowed cross-origin synchronous XHR should run on owner lane");
+
+        server
+            .join()
+            .expect("allowed cross-origin synchronous XHR server should finish");
+        assert_eq!(
+            observed,
+            format!(
+                r#"{{"readyState":4,"status":200,"responseText":"cors-visible","responseURL":"{xhr_url}","visibleToken":"public-value","internalToken":null,"allowOrigin":null}}"#
+            )
+        );
+        let (records, _, _) = split_network_output_items(network_output);
+        assert_eq!(records.len(), 1);
+        assert!(matches!(
+            records[0].outcome(),
+            SubresourceNetworkOutcome::Success { status: 200, .. }
+        ));
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_rejects_cross_origin_response_with_mismatched_cors_origin() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-mismatch",
+            "must-not-be-visible",
+            vec![("Access-Control-Allow-Origin", "http://other.test")],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-mismatch");
+        let observed_and_network = evaluate_synchronous_xhr_probe(
+            Url::parse("http://source.test/page.html").expect("document url"),
+            synchronous_xhr_failure_probe_expression(&xhr_url),
+        )
+        .await;
+
+        server
+            .join()
+            .expect("mismatched-origin synchronous XHR server should finish");
+        let (observed, network_output) = observed_and_network;
+        assert_synchronous_xhr_network_error_surface(&observed, &xhr_url);
+        assert_single_synchronous_xhr_network_failure(
+            network_output,
+            "Access-Control-Allow-Origin `http://other.test` does not allow http://source.test",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_allows_wildcard_cors_without_credentials() {
+    run_page_vm_async_test(async move {
+        let body = "wildcard-visible";
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-wildcard",
+            body,
+            vec![("Access-Control-Allow-Origin", "*")],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-wildcard");
+        let (observed, network_output) = evaluate_synchronous_xhr_probe(
+            Url::parse("http://source.test/page.html").expect("document url"),
+            synchronous_xhr_success_probe_expression(&xhr_url, false),
+        )
+        .await;
+
+        server
+            .join()
+            .expect("wildcard synchronous XHR server should finish");
+        assert_synchronous_xhr_success_surface(&observed, &xhr_url, body);
+        assert_single_synchronous_xhr_network_success(network_output);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_rejects_wildcard_cors_with_credentials() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-wildcard-credentials",
+            "must-not-be-visible",
+            vec![
+                ("Access-Control-Allow-Origin", "*"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-wildcard-credentials");
+        let (observed, network_output) = evaluate_synchronous_xhr_probe(
+            Url::parse("http://source.test/page.html").expect("document url"),
+            synchronous_xhr_failure_probe_expression_with_credentials(&xhr_url, true),
+        )
+        .await;
+
+        server
+            .join()
+            .expect("credentialed wildcard synchronous XHR server should finish");
+        assert_synchronous_xhr_network_error_surface(&observed, &xhr_url);
+        assert_single_synchronous_xhr_network_failure(
+            network_output,
+            "wildcard Access-Control-Allow-Origin does not allow credentialed requests",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_requires_allow_credentials_for_credentialed_cors() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-missing-credentials",
+            "must-not-be-visible",
+            vec![("Access-Control-Allow-Origin", "http://source.test")],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-missing-credentials");
+        let (observed, network_output) = evaluate_synchronous_xhr_probe(
+            Url::parse("http://source.test/page.html").expect("document url"),
+            synchronous_xhr_failure_probe_expression_with_credentials(&xhr_url, true),
+        )
+        .await;
+
+        server
+            .join()
+            .expect("missing-credentials synchronous XHR server should finish");
+        assert_synchronous_xhr_network_error_surface(&observed, &xhr_url);
+        assert_single_synchronous_xhr_network_failure(
+            network_output,
+            "require Access-Control-Allow-Credentials: true",
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_allows_credentialed_cors_with_explicit_opt_in() {
+    run_page_vm_async_test(async move {
+        let body = "credentialed-visible";
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-cors-credentials-allow",
+            body,
+            vec![
+                ("Access-Control-Allow-Origin", "http://source.test"),
+                ("Access-Control-Allow-Credentials", "true"),
+            ],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-cors-credentials-allow");
+        let (observed, network_output) = evaluate_synchronous_xhr_probe(
+            Url::parse("http://source.test/page.html").expect("document url"),
+            synchronous_xhr_success_probe_expression(&xhr_url, true),
+        )
+        .await;
+
+        server
+            .join()
+            .expect("credentialed synchronous XHR server should finish");
+        assert_synchronous_xhr_success_surface(&observed, &xhr_url, body);
+        assert_single_synchronous_xhr_network_success(network_output);
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn synchronous_xhr_same_origin_response_keeps_non_cors_headers_visible() {
+    run_page_vm_async_test(async move {
+        let (target_base_url, server) = spawn_blocking_xhr_response_server(
+            "/sync-xhr-same-origin-headers",
+            "same-origin-visible",
+            vec![("X-Same-Origin-Token", "same-origin-secret")],
+        );
+        let xhr_url = format!("{target_base_url}/sync-xhr-same-origin-headers");
+        let xhr_url_literal = serde_json::to_string(&xhr_url).expect("serialize XHR URL");
+        let expression = format!(
+            r#"
+            (() => {{
+                const xhr = new XMLHttpRequest();
+                xhr.open("GET", {xhr_url_literal}, false);
+                xhr.send();
+                return JSON.stringify({{
+                    status: xhr.status,
+                    responseText: xhr.responseText,
+                    token: xhr.getResponseHeader("X-Same-Origin-Token"),
+                }});
+            }})()
+            "#,
+        );
+        let (observed, network_output) = evaluate_synchronous_xhr_probe(
+            Url::parse(&format!("{target_base_url}/page.html")).expect("document url"),
+            expression,
+        )
+        .await;
+
+        server
+            .join()
+            .expect("same-origin synchronous XHR server should finish");
+        assert_eq!(
+            observed,
+            r#"{"status":200,"responseText":"same-origin-visible","token":"same-origin-secret"}"#
+        );
+        assert_single_synchronous_xhr_network_success(network_output);
     })
     .await;
 }
