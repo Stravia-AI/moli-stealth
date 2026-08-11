@@ -31,13 +31,13 @@ untested.
    Linux or macOS:
 
    ```bash
-   scripts/release.sh --version 0.1.0
+   scripts/release.sh --version 0.1.1
    ```
 
    Windows PowerShell:
 
    ```powershell
-   python scripts/release.py --version 0.1.0 --no-default-features
+   python scripts/release.py --version 0.1.1 --no-default-features
    ```
 
    Artifacts are written to `dist/`. The packager rejects a version that does
