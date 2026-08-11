@@ -997,6 +997,7 @@ fn env_flags_are_fallbacks_and_cli_flags_take_priority() {
             .env("MOLI_TEST_ENV_FLAG_CASE", case)
             .env("MOLI_LAYOUT", layout)
             .env("MOLI_RESOURCE", resource)
+            .env("MOLI_BLOCK_PRIVATE_NETWORKS", resource)
             .output()
             .unwrap();
 
@@ -1016,7 +1017,13 @@ fn parse_env_flags_in_child_process() {
     };
 
     let args = if case == "cli-overrides-env" {
-        vec!["moli", "serve", "--layout", "--resource"]
+        vec![
+            "moli",
+            "serve",
+            "--layout",
+            "--resource",
+            "--block-private-networks",
+        ]
     } else {
         vec!["moli", "serve"]
     };
@@ -1028,6 +1035,7 @@ fn parse_env_flags_in_child_process() {
 
     assert_eq!(args.common.layout, expected);
     assert_eq!(args.common.resource, expected);
+    assert_eq!(args.common.block_private_networks, expected);
 }
 
 #[test]

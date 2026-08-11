@@ -337,7 +337,7 @@ pub struct CommonArgs {
     #[arg(long)]
     pub document_start_script_file: Vec<String>,
 
-    #[arg(long)]
+    #[arg(long, env = "MOLI_BLOCK_PRIVATE_NETWORKS")]
     pub block_private_networks: bool,
 
     #[arg(long)]
