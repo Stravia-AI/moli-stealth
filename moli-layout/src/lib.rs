@@ -82,7 +82,7 @@ pub use style::{
 };
 pub use text::{
     DocumentLayoutServices, SystemFontPolicy, WebFontFace, WebFontRegistration,
-    WebFontRegistrationError, WebFontRegistrationOutcome, WebFontStyle,
+    WebFontRegistrationError, WebFontRegistrationOutcome, WebFontStyle, WebFontUnicodeRange,
 };
 pub use world::{
     LayoutAnonymousReason, LayoutBox, LayoutBoxId, LayoutBoxKind, LayoutCapabilityDiagnostic,

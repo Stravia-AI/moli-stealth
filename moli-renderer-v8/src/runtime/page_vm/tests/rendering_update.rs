@@ -2640,6 +2640,86 @@ document.close();
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn same_family_unicode_range_faces_shape_mixed_text_with_both_subsets() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        loader.set_optional_resource_fetch_mask(
+            crate::protocol_types::OptionalResourceFetchMask::FONT,
+        );
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/segmented-web-font.html")?,
+        );
+        let latin = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-ahem.ttf"
+        ));
+        let cjk = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../moli-layout/tests/fixtures/moli-cjk.ttf"
+        ));
+        let latin = base64::engine::general_purpose::STANDARD.encode(latin);
+        let cjk = base64::engine::general_purpose::STANDARD.encode(cjk);
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.head.innerHTML = `<style>
+@font-face {{
+  font-family: MoliSegmented;
+  src: url(data:font/ttf;base64,{latin}) format('truetype');
+  font-weight: 400;
+  unicode-range: U+0000-00FF;
+}}
+@font-face {{
+  font-family: MoliSegmented;
+  src: url(data:font/ttf;base64,{cjk}) format('truetype');
+  font-weight: 400;
+  unicode-range: U+4E00-9FFF;
+}}
+body {{ margin: 0; font: 32px/40px MoliSegmented, sans-serif; }}
+</style>`;
+document.body.textContent = 'R中';
+'installed'
+"#
+        ))?;
+
+        let snapshot = page_vm
+            .vm_mut()
+            .screenshot_layout_snapshot(moli_layout::PaintViewport::new(160, 80, 1.0))?
+            .expect("segmented web-font fixture should have a layout root");
+        let used_fonts = snapshot
+            .fragments
+            .iter()
+            .filter_map(|fragment| match fragment {
+                moli_layout::PaintFragment::GlyphRun(run) => snapshot.font(run.font),
+                _ => None,
+            })
+            .map(|font| font.font.data.as_ref())
+            .collect::<Vec<_>>();
+        assert!(
+            used_fonts.iter().any(|font| *font
+                == include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../moli-layout/tests/fixtures/moli-ahem.ttf"
+                ))),
+            "the Latin character must use the Latin subset"
+        );
+        assert!(
+            used_fonts.iter().any(|font| *font
+                == include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../moli-layout/tests/fixtures/moli-cjk.ttf"
+                ))),
+            "the CJK character must use the CJK subset"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("segmented web-font layout test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn cjk_regular_face_uses_chromium_synthetic_bold_threshold() {
     run_page_vm_async_test(async move {
         let loader =

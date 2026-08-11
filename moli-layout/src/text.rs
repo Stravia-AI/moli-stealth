@@ -5,7 +5,7 @@
 // - packages/blitz-dom/src/node/text.rs
 // - packages/blitz-paint/src/text.rs
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{borrow::Cow, collections::BTreeMap, sync::Arc};
 
 use parley::{
     FontContext, FontFamily, FontFamilyName, LayoutContext, TextStyle,
@@ -23,10 +23,46 @@ pub(crate) struct ParleyDocumentServices {
     pub(crate) font_context: FontContext,
     pub(crate) layout_context: LayoutContext<TextBrush>,
     system_font_family_resolver: Option<SystemFontFamilyResolver>,
+    web_font_families: BTreeMap<String, SegmentedWebFontFamily>,
     inline_font_metrics_cache: Vec<(
         TextStyle<'static, 'static, TextBrush>,
         Option<InlineFontMetrics>,
     )>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct WebFontCapabilities {
+    width: FontWidth,
+    style: FontStyle,
+    weight: FontWeight,
+}
+
+#[derive(Clone, Debug)]
+struct SegmentedWebFontFace {
+    internal_family_name: String,
+    unicode_ranges: Vec<WebFontUnicodeRange>,
+}
+
+impl SegmentedWebFontFace {
+    fn contains(&self, character: char) -> bool {
+        self.unicode_ranges.is_empty()
+            || self
+                .unicode_ranges
+                .iter()
+                .any(|range| range.contains(character))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SegmentedWebFontCapabilityGroup {
+    capabilities: WebFontCapabilities,
+    selector_font_identities: Vec<(u64, u32)>,
+    faces: Vec<SegmentedWebFontFace>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct SegmentedWebFontFamily {
+    groups: Vec<SegmentedWebFontCapabilityGroup>,
 }
 
 /// Primary-font metrics attached to one resolved Parley text style.
@@ -51,14 +87,129 @@ impl ParleyDocumentServices {
         self.inline_font_metrics_cache.clear();
     }
 
-    pub(crate) fn resolve_system_font_families(
+    /// Resolves CSS downloadable-font families into the selected segmented
+    /// face, then applies explicit platform-family substitutions.
+    ///
+    /// Blink first chooses one font-capability group (width/style/weight),
+    /// then considers only that group's faces whose `unicode-range` contains
+    /// the character. Fontique has no segmented-face abstraction, so each
+    /// physical face is registered under an internal family and this method
+    /// preserves that capability-before-range behavior before shaping.
+    pub(crate) fn resolve_font_families(
         &mut self,
         style: &mut TextStyle<'static, 'static, TextBrush>,
+        character: Option<char>,
     ) {
+        self.resolve_segmented_web_font_families(style, character);
         let Some(resolver) = self.system_font_family_resolver.as_mut() else {
             return;
         };
         resolver.resolve_text_style(&mut self.font_context.collection, style);
+    }
+
+    pub(crate) fn requires_character_font_resolution(
+        &self,
+        style: &TextStyle<'static, 'static, TextBrush>,
+    ) -> bool {
+        let family_uses_ranges = |family: &FontFamilyName<'_>| {
+            let FontFamilyName::Named(name) = family else {
+                return false;
+            };
+            self.web_font_families
+                .get(&normalized_web_font_family_name(name))
+                .is_some_and(|family| {
+                    family.groups.iter().any(|group| {
+                        group
+                            .faces
+                            .iter()
+                            .any(|face| !face.unicode_ranges.is_empty())
+                    })
+                })
+        };
+        match &style.font_family {
+            FontFamily::Single(family) => family_uses_ranges(family),
+            FontFamily::List(families) => families.iter().any(family_uses_ranges),
+            FontFamily::Source(source) => FontFamilyName::parse_css_list(source)
+                .filter_map(Result::ok)
+                .any(|family| family_uses_ranges(&family)),
+        }
+    }
+
+    fn resolve_segmented_web_font_families(
+        &mut self,
+        style: &mut TextStyle<'static, 'static, TextBrush>,
+        character: Option<char>,
+    ) {
+        let parsed_source;
+        let families = match &style.font_family {
+            FontFamily::Single(family) => vec![family.clone()],
+            FontFamily::List(families) => families.iter().cloned().collect(),
+            FontFamily::Source(source) => {
+                parsed_source = FontFamilyName::parse_css_list(source)
+                    .filter_map(Result::ok)
+                    .map(FontFamilyName::into_owned)
+                    .collect::<Vec<_>>();
+                parsed_source
+            }
+        };
+        let attributes = Attributes::new(style.font_width, style.font_style, style.font_weight);
+        let mut resolved = Vec::with_capacity(families.len());
+        for family in families {
+            let FontFamilyName::Named(name) = &family else {
+                resolved.push(family);
+                continue;
+            };
+            let family_key = normalized_web_font_family_name(name);
+            if !self.web_font_families.contains_key(&family_key) {
+                resolved.push(family);
+                continue;
+            }
+
+            let selected_identity = {
+                let FontContext {
+                    collection,
+                    source_cache,
+                } = &mut self.font_context;
+                let mut query = collection.query(source_cache);
+                query.set_families([QueryFamily::Named(name)]);
+                query.set_attributes(attributes);
+                let mut identity = None;
+                query.matches_with(|font| {
+                    identity = Some((font.blob.id(), font.index));
+                    QueryStatus::Stop
+                });
+                identity
+            };
+            let Some(selected_identity) = selected_identity else {
+                resolved.push(family);
+                continue;
+            };
+            let Some(group) = self.web_font_families[&family_key]
+                .groups
+                .iter()
+                .find(|group| group.selector_font_identities.contains(&selected_identity))
+            else {
+                resolved.push(family);
+                continue;
+            };
+            let default_uses_latin_metrics =
+                character.is_none() && group.faces.iter().any(|face| face.contains('x'));
+            resolved.extend(
+                group
+                    .faces
+                    .iter()
+                    .rev()
+                    .filter(|face| match character {
+                        Some(character) => face.contains(character),
+                        None if default_uses_latin_metrics => face.contains('x'),
+                        None => true,
+                    })
+                    .map(|face| {
+                        FontFamilyName::Named(Cow::Owned(face.internal_family_name.clone()))
+                    }),
+            );
+        }
+        style.font_family = FontFamily::List(Cow::Owned(resolved));
     }
 
     pub(crate) fn inline_font_metrics(
@@ -191,6 +342,37 @@ pub enum WebFontStyle {
     Oblique(Option<f32>),
 }
 
+/// One inclusive CSS `unicode-range` interval attached to a downloadable
+/// font face.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WebFontUnicodeRange {
+    start: u32,
+    end: u32,
+}
+
+impl WebFontUnicodeRange {
+    pub const fn new(start: u32, end: u32) -> Self {
+        Self { start, end }
+    }
+
+    pub const fn start(self) -> u32 {
+        self.start
+    }
+
+    pub const fn end(self) -> u32 {
+        self.end
+    }
+
+    pub const fn contains(self, character: char) -> bool {
+        let codepoint = character as u32;
+        self.start <= codepoint && codepoint <= self.end
+    }
+
+    const fn is_valid(self) -> bool {
+        self.start <= self.end && self.end <= char::MAX as u32
+    }
+}
+
 impl WebFontStyle {
     fn to_fontique(self) -> FontStyle {
         match self {
@@ -212,6 +394,7 @@ pub struct WebFontFace {
     weight: Option<f32>,
     stretch: Option<f32>,
     style: Option<WebFontStyle>,
+    unicode_ranges: Vec<WebFontUnicodeRange>,
 }
 
 impl WebFontFace {
@@ -221,6 +404,7 @@ impl WebFontFace {
             weight: None,
             stretch: None,
             style: None,
+            unicode_ranges: Vec::new(),
         }
     }
 
@@ -239,6 +423,16 @@ impl WebFontFace {
         self
     }
 
+    /// Sets the face's CSS `unicode-range` intervals. An empty list means the
+    /// full Unicode range, matching the descriptor's initial value.
+    pub fn with_unicode_ranges(
+        mut self,
+        ranges: impl IntoIterator<Item = WebFontUnicodeRange>,
+    ) -> Self {
+        self.unicode_ranges = ranges.into_iter().collect();
+        self
+    }
+
     pub fn family_name(&self) -> &str {
         &self.family_name
     }
@@ -253,6 +447,10 @@ impl WebFontFace {
 
     pub const fn style(&self) -> Option<WebFontStyle> {
         self.style
+    }
+
+    pub fn unicode_ranges(&self) -> &[WebFontUnicodeRange] {
+        &self.unicode_ranges
     }
 
     fn validate(&self) -> Result<(), WebFontRegistrationError> {
@@ -284,12 +482,17 @@ impl WebFontFace {
                 detail: "font-style oblique angle must be finite".to_owned(),
             });
         }
+        if self.unicode_ranges.iter().any(|range| !range.is_valid()) {
+            return Err(WebFontRegistrationError::InvalidDescriptor {
+                detail: "unicode-range intervals must be ordered Unicode scalar bounds".to_owned(),
+            });
+        }
         Ok(())
     }
 
-    fn fontique_override(&self) -> FontInfoOverride<'_> {
+    fn fontique_override_for_family<'a>(&self, family_name: &'a str) -> FontInfoOverride<'a> {
         FontInfoOverride {
-            family_name: Some(&self.family_name),
+            family_name: Some(family_name),
             width: self.stretch.map(FontWidth::from_percentage),
             style: self.style.map(WebFontStyle::to_fontique),
             weight: self.weight.map(FontWeight::new),
@@ -499,13 +702,81 @@ fn build_parley_services(
         collection,
         source_cache: Default::default(),
     };
-    for font in web_fonts.values() {
-        register_font(&mut font_context, font);
+    let mut web_font_families = BTreeMap::<String, SegmentedWebFontFamily>::new();
+    for (source_order, font) in web_fonts.values().enumerate() {
+        let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(Arc::clone(&font.sfnt_bytes));
+        let blob = Blob::new(data);
+        let selector_fonts = font_context.collection.register_fonts(
+            blob.clone(),
+            Some(
+                font.face
+                    .fontique_override_for_family(font.face.family_name()),
+            ),
+        );
+        if selector_fonts.is_empty() {
+            continue;
+        }
+
+        let internal_family_name = format!("\0moli-web-font:{source_order}");
+        if font_context
+            .collection
+            .register_fonts(
+                blob.clone(),
+                Some(
+                    font.face
+                        .fontique_override_for_family(&internal_family_name),
+                ),
+            )
+            .is_empty()
+        {
+            continue;
+        }
+
+        let family = web_font_families
+            .entry(normalized_web_font_family_name(font.face.family_name()))
+            .or_default();
+        for (_, fonts) in selector_fonts {
+            for selector_font in fonts {
+                let capabilities = WebFontCapabilities {
+                    width: selector_font.width(),
+                    style: selector_font.style(),
+                    weight: selector_font.weight(),
+                };
+                let group_index = family
+                    .groups
+                    .iter()
+                    .position(|group| group.capabilities == capabilities)
+                    .unwrap_or_else(|| {
+                        let index = family.groups.len();
+                        family.groups.push(SegmentedWebFontCapabilityGroup {
+                            capabilities,
+                            selector_font_identities: Vec::new(),
+                            faces: Vec::new(),
+                        });
+                        index
+                    });
+                let group = &mut family.groups[group_index];
+                group
+                    .selector_font_identities
+                    .push((blob.id(), selector_font.index()));
+                if !group
+                    .faces
+                    .iter()
+                    .any(|face| face.internal_family_name == internal_family_name)
+                {
+                    group.faces.push(SegmentedWebFontFace {
+                        internal_family_name: internal_family_name.clone(),
+                        unicode_ranges: font.face.unicode_ranges.clone(),
+                    });
+                }
+            }
+        }
     }
     ParleyDocumentServices {
         font_context,
         layout_context: LayoutContext::new(),
         system_font_family_resolver,
+        web_font_families,
         inline_font_metrics_cache: Vec::new(),
     }
 }
@@ -514,8 +785,18 @@ fn register_font(font_context: &mut FontContext, font: &RegisteredWebFont) -> bo
     let data: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(Arc::clone(&font.sfnt_bytes));
     !font_context
         .collection
-        .register_fonts(Blob::new(data), Some(font.face.fontique_override()))
+        .register_fonts(
+            Blob::new(data),
+            Some(
+                font.face
+                    .fontique_override_for_family(font.face.family_name()),
+            ),
+        )
         .is_empty()
+}
+
+fn normalized_web_font_family_name(name: &str) -> String {
+    name.chars().flat_map(char::to_lowercase).collect()
 }
 
 fn validate_registered_font(
@@ -595,6 +876,107 @@ mod tests {
         assert!(
             parley.inline_font_metrics(&style, Some('中')).is_some(),
             "the style's actual glyph should recover metrics from a primary font without x"
+        );
+    }
+
+    fn web_font_style(family: &'static str, weight: f32) -> TextStyle<'static, 'static, TextBrush> {
+        TextStyle {
+            font_family: FontFamily::Single(FontFamilyName::Named(Cow::Borrowed(family))),
+            font_weight: FontWeight::new(weight),
+            ..TextStyle::default()
+        }
+    }
+
+    fn shape_one_character(
+        parley: &mut ParleyDocumentServices,
+        mut style: TextStyle<'static, 'static, TextBrush>,
+        character: char,
+    ) -> Vec<u8> {
+        parley.resolve_font_families(&mut style, Some(character));
+        let text = character.to_string();
+        let mut builder =
+            parley
+                .layout_context
+                .style_run_builder(&mut parley.font_context, &text, 1.0, true);
+        let style_index = builder.push_style(style);
+        builder.push_style_run(style_index, ..);
+        let mut layout = builder.build(&text);
+        layout.break_all_lines(None);
+        layout
+            .lines()
+            .next()
+            .expect("one line")
+            .runs()
+            .next()
+            .expect("one shaped run")
+            .font()
+            .data
+            .as_ref()
+            .to_vec()
+    }
+
+    #[test]
+    fn segmented_web_font_faces_select_the_range_for_each_character() {
+        let mut services =
+            DocumentLayoutServices::with_system_font_policy(SystemFontPolicy::Disabled);
+        services
+            .register_web_font(WebFontRegistration::new(
+                "latin",
+                WebFontFace::new("Moli Segmented")
+                    .with_unicode_ranges([WebFontUnicodeRange::new(0x0000, 0x00ff)]),
+                TEST_TTF.to_vec(),
+            ))
+            .unwrap();
+        services
+            .register_web_font(WebFontRegistration::new(
+                "cjk",
+                WebFontFace::new("Moli Segmented")
+                    .with_unicode_ranges([WebFontUnicodeRange::new(0x4e00, 0x9fff)]),
+                TEST_CJK_TTF.to_vec(),
+            ))
+            .unwrap();
+        let parley = services.parley_mut();
+
+        assert_eq!(
+            shape_one_character(parley, web_font_style("Moli Segmented", 400.0), 'R'),
+            TEST_TTF
+        );
+        assert_eq!(
+            shape_one_character(parley, web_font_style("moli segmented", 400.0), '中'),
+            TEST_CJK_TTF,
+            "CSS family matching and segmented range selection must both be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn capability_matching_precedes_unicode_range_selection_like_blink() {
+        let mut services =
+            DocumentLayoutServices::with_system_font_policy(SystemFontPolicy::Disabled);
+        services
+            .register_web_font(WebFontRegistration::new(
+                "regular-latin",
+                WebFontFace::new("Moli Capability First")
+                    .with_weight(400.0)
+                    .with_unicode_ranges([WebFontUnicodeRange::new(0x0000, 0x00ff)]),
+                TEST_TTF.to_vec(),
+            ))
+            .unwrap();
+        services
+            .register_web_font(WebFontRegistration::new(
+                "bold-cjk",
+                WebFontFace::new("Moli Capability First")
+                    .with_weight(700.0)
+                    .with_unicode_ranges([WebFontUnicodeRange::new(0x4e00, 0x9fff)]),
+                TEST_CJK_TTF.to_vec(),
+            ))
+            .unwrap();
+        let parley = services.parley_mut();
+        let mut style = web_font_style("Moli Capability First", 700.0);
+        parley.resolve_font_families(&mut style, Some('R'));
+
+        assert!(
+            matches!(&style.font_family, FontFamily::List(families) if families.is_empty()),
+            "the regular face must not be used after the bold capability group wins but does not cover the character"
         );
     }
 
@@ -716,6 +1098,10 @@ mod tests {
             WebFontFace::new("Bad Weight").with_weight(0.0),
             WebFontFace::new("Bad Stretch").with_stretch(f32::NAN),
             WebFontFace::new("Bad Style").with_style(WebFontStyle::Oblique(Some(f32::INFINITY))),
+            WebFontFace::new("Bad Range")
+                .with_unicode_ranges([WebFontUnicodeRange::new(0x100, 0xff)]),
+            WebFontFace::new("Too High")
+                .with_unicode_ranges([WebFontUnicodeRange::new(0, 0x11_0000)]),
         ] {
             let error = services
                 .register_web_font(WebFontRegistration::new("slot", face, TEST_TTF.to_vec()))

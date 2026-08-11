@@ -1305,6 +1305,48 @@ struct InlineBuildInput {
     root_style: LayoutBoxId,
 }
 
+fn intern_resolved_inline_style(
+    styles: &mut Vec<TextStyle<'static, 'static, TextBrush>>,
+    style_parents: &mut Vec<LayoutBoxId>,
+    style_samples: &mut Vec<Option<char>>,
+    style: TextStyle<'static, 'static, TextBrush>,
+    structural_parent: LayoutBoxId,
+    sample: Option<char>,
+) -> usize {
+    let style_slot = styles
+        .iter()
+        .enumerate()
+        .position(|(index, candidate)| {
+            *candidate == style && style_parents[index] == structural_parent
+        })
+        .unwrap_or_else(|| {
+            let index = styles.len();
+            styles.push(style);
+            style_parents.push(structural_parent);
+            style_samples.push(None);
+            index
+        });
+    if style_samples[style_slot].is_none() {
+        style_samples[style_slot] = sample;
+    }
+    style_slot
+}
+
+fn append_resolved_inline_run(
+    runs: &mut Vec<(Range<usize>, usize)>,
+    range: Range<usize>,
+    style_slot: usize,
+) {
+    match runs.last_mut() {
+        Some((previous_range, previous_slot))
+            if *previous_slot == style_slot && previous_range.end == range.start =>
+        {
+            previous_range.end = range.end;
+        }
+        _ => runs.push((range, style_slot)),
+    }
+}
+
 impl InlineBuildInput {
     fn build<N>(
         mut self,
@@ -1318,34 +1360,56 @@ impl InlineBuildInput {
         let mut root_text_style = world.boxes[self.root_style.index()]
             .style
             .parley_text_style();
-        parley.resolve_system_font_families(&mut root_text_style);
+        parley.resolve_font_families(&mut root_text_style, None);
         let quantize = true;
         let mut styles = Vec::new();
         let mut style_parents = Vec::new();
-        let mut style_slots = Vec::with_capacity(self.units.len());
+        let mut style_samples = Vec::new();
+        let mut resolved_runs = Vec::<(Range<usize>, usize)>::new();
         for unit in &self.units {
-            let mut style = world.boxes[unit.style_box.index()]
+            let mut base_style = world.boxes[unit.style_box.index()]
                 .style
                 .parley_text_style();
             // `vertical-align` belongs to the structural inline box, not to
             // each descendant glyph. Keep glyphs baseline-aligned within their
             // direct box state; closing that state moves the complete subtree.
-            style.brush.paint = !unit.control;
-            parley.resolve_system_font_families(&mut style);
+            base_style.brush.paint = !unit.control;
             let structural_parent = unit.ancestors.last().copied().unwrap_or(self.root_style);
-            let style_slot = styles
-                .iter()
-                .enumerate()
-                .position(|(index, candidate)| {
-                    *candidate == style && style_parents[index] == structural_parent
-                })
-                .unwrap_or_else(|| {
-                    let index = styles.len();
-                    styles.push(style);
-                    style_parents.push(structural_parent);
-                    index
-                });
-            style_slots.push(style_slot);
+            if !parley.requires_character_font_resolution(&base_style) {
+                let sample = (!unit.control)
+                    .then(|| self.text[unit.output_range.clone()].chars().next())
+                    .flatten();
+                parley.resolve_font_families(&mut base_style, None);
+                let style_slot = intern_resolved_inline_style(
+                    &mut styles,
+                    &mut style_parents,
+                    &mut style_samples,
+                    base_style,
+                    structural_parent,
+                    sample,
+                );
+                append_resolved_inline_run(
+                    &mut resolved_runs,
+                    unit.output_range.clone(),
+                    style_slot,
+                );
+                continue;
+            }
+            for (relative_start, character) in self.text[unit.output_range.clone()].char_indices() {
+                let start = unit.output_range.start + relative_start;
+                let end = start + character.len_utf8();
+                let mut style = base_style.clone();
+                parley.resolve_font_families(&mut style, Some(character));
+                let style_slot = intern_resolved_inline_style(
+                    &mut styles,
+                    &mut style_parents,
+                    &mut style_samples,
+                    style,
+                    structural_parent,
+                    (!unit.control).then_some(character),
+                );
+                append_resolved_inline_run(&mut resolved_runs, start..end, style_slot);
+            }
         }
         let mut builder = parley.layout_context.style_run_builder(
             &mut parley.font_context,
@@ -1357,24 +1421,13 @@ impl InlineBuildInput {
             .iter()
             .map(|style| builder.push_style(style.clone()))
             .collect::<Vec<_>>();
-        if self.units.is_empty() {
+        if resolved_runs.is_empty() {
             let style_index = builder.push_style(root_text_style.clone());
             builder.push_style_run(style_index, 0..0);
         } else {
-            let mut run_start = 0;
-            let mut current_slot = style_slots[0];
-            for (index, unit) in self.units.iter().enumerate().skip(1) {
-                if style_slots[index] == current_slot {
-                    continue;
-                }
-                builder.push_style_run(
-                    style_indices[current_slot],
-                    run_start..unit.output_range.start,
-                );
-                run_start = unit.output_range.start;
-                current_slot = style_slots[index];
+            for (range, style_slot) in &resolved_runs {
+                builder.push_style_run(style_indices[*style_slot], range.clone());
             }
-            builder.push_style_run(style_indices[current_slot], run_start..self.text.len());
         }
         for (object_id, (byte_index, _, kind)) in self.objects.iter().enumerate() {
             builder.push_inline_box(InlineBox {
@@ -1386,12 +1439,6 @@ impl InlineBuildInput {
             });
         }
         let layout = builder.build(&self.text);
-        let mut style_samples = vec![None; styles.len()];
-        for (unit, style_slot) in self.units.iter().zip(&style_slots) {
-            if style_samples[*style_slot].is_none() && !unit.control {
-                style_samples[*style_slot] = self.text[unit.output_range.clone()].chars().next();
-            }
-        }
         let font_metrics = styles
             .iter()
             .zip(style_samples)
@@ -1408,7 +1455,7 @@ impl InlineBuildInput {
                 continue;
             }
             let mut style = world.boxes[object.box_id.index()].style.parley_text_style();
-            parley.resolve_system_font_families(&mut style);
+            parley.resolve_font_families(&mut style, None);
             structural_boxes.push(InlineStructuralBox {
                 box_id: object.box_id,
                 parent: object.ancestors.last().copied().unwrap_or(self.root_style),

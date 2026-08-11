@@ -1,12 +1,12 @@
 use std::collections::HashSet;
 
-use cssparser::{Parser, ParserInput, Token};
+use cssparser::{Parser, ParserInput, Token, UnicodeRange};
 use moli_crypto::sha256_hex;
 use moli_css_parse::{
     DeclarationParseOptions, parse_declaration_list, parse_font_face_rule_view_with_stylo,
     parse_font_faces, parse_stylesheet_rule_snapshots_with_stylo,
 };
-use moli_layout::{WebFontFace, WebFontRegistration, WebFontStyle};
+use moli_layout::{WebFontFace, WebFontRegistration, WebFontStyle, WebFontUnicodeRange};
 use url::Url;
 
 use crate::protocol_types::OptionalResourceFetchMask;
@@ -198,6 +198,7 @@ struct ParsedWebFontFace {
     weight: Option<f32>,
     stretch: Option<f32>,
     style: Option<WebFontStyle>,
+    unicode_ranges: Vec<WebFontUnicodeRange>,
 }
 
 impl ParsedWebFontFace {
@@ -216,7 +217,7 @@ impl ParsedWebFontFace {
         if let Some(style) = self.style {
             face = face.with_style(style);
         }
-        face
+        face.with_unicode_ranges(self.unicode_ranges)
     }
 }
 
@@ -244,7 +245,21 @@ fn parsed_web_font_face(css_text: &str) -> Option<ParsedWebFontFace> {
         weight: descriptor("font-weight").and_then(parse_font_weight_lower_bound),
         stretch: descriptor("font-stretch").and_then(parse_font_stretch_lower_bound),
         style: descriptor("font-style").and_then(parse_font_style_lower_bound),
+        unicode_ranges: descriptor("unicode-range")
+            .and_then(parse_font_unicode_ranges)
+            .unwrap_or_default(),
     })
+}
+
+fn parse_font_unicode_ranges(value: &str) -> Option<Vec<WebFontUnicodeRange>> {
+    let mut input = ParserInput::new(value);
+    let mut input = Parser::new(&mut input);
+    input
+        .parse_comma_separated(|input| {
+            let range = UnicodeRange::parse(input)?;
+            Ok::<_, cssparser::ParseError<'_, ()>>(WebFontUnicodeRange::new(range.start, range.end))
+        })
+        .ok()
 }
 
 fn parse_font_weight_lower_bound(value: &str) -> Option<f32> {
@@ -621,6 +636,7 @@ mod tests {
                     font-weight: 625 800;
                     font-stretch: semi-condensed expanded;
                     font-style: oblique 30deg 45deg;
+                    unicode-range: U+0000-00FF, U+4E??;
                 }
                 @font-face {
                     font-family: DemoBold;
@@ -665,6 +681,37 @@ mod tests {
         assert_eq!(
             web_font.face().style(),
             Some(WebFontStyle::Oblique(Some(30.0)))
+        );
+        assert_eq!(
+            web_font.face().unicode_ranges(),
+            [
+                WebFontUnicodeRange::new(0x0000, 0x00ff),
+                WebFontUnicodeRange::new(0x4e00, 0x4eff),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_unicode_range_falls_back_to_the_full_font_face_range() {
+        let resources = stylesheet_load_blocking_resources(
+            r#"
+                @font-face {
+                    font-family: Demo;
+                    src: url(fonts/demo.woff2);
+                    unicode-range: U+110000-120000;
+                }
+            "#,
+            &base_url(),
+            OptionalResourceFetchMask::FONT,
+        );
+        assert_eq!(resources.len(), 1);
+        assert!(
+            resources[0]
+                .web_font()
+                .expect("font metadata")
+                .face()
+                .unicode_ranges()
+                .is_empty()
         );
     }
 
