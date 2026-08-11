@@ -48,7 +48,7 @@ const DUMP_MODES: &[&str] = &[
 #[command(
     name = "moli",
     version,
-    about = "A Rust headless browser runtime scaffold",
+    about = "A structured-first headless browser engine for AI agents",
     subcommand_required = true,
     disable_help_subcommand = true
 )]
@@ -501,6 +501,16 @@ fn normalize_dump_flag(args: &mut Vec<OsString>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn help_uses_the_public_product_description() {
+        let help = Cli::try_parse_from(["moli", "--help"])
+            .unwrap_err()
+            .to_string();
+
+        assert!(help.contains("A structured-first headless browser engine for AI agents"));
+        assert!(!help.contains("scaffold"));
+    }
 
     #[test]
     fn delay_ms_infers_fetch_command() {

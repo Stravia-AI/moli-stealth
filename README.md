@@ -1,71 +1,27 @@
-<p align="center">
-  <img
-    src="assets/moli-browser-banner.png"
-    alt="Moli Browser — Fast, Lightweight, Headless"
-    width="1086"
-  />
-</p>
-
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <strong>A browser engine built for AI agents.</strong>
+  <strong>Structure first. Pixels on demand.</strong>
 </p>
 
-<p align="center">
-  Real JavaScript, DOM, and browser APIs · One-shot, non-retained layout and CPU rendering ·
-  CLI, CDP, WebDriver Classic, and WebDriver BiDi
-</p>
+Moli is a production-ready, structured-first browser engine for AI agents.
 
-Moli is a headless browser built from the ground up in Rust for AI agent.
-It runs real page JavaScript on V8, maintains a native DOM and CSS
-state, and handles storage and networking — exposing the page through
-structured data first, and pixels only when you ask for them.
+It runs real JavaScript, DOM, and browser APIs by default, and computes layout
+or pixels only when requested.
 
-**DOM and structured page data are on by default; pixels are opt-in.**
-Reading a document, extracting Markdown, walking an accessibility tree, or
-running JavaScript doesn't require keeping a GUI browser's layout, paint, and
-compositor machinery alive. When geometry or pixels do matter, Moli runs a
-fresh layout pass and renders a frame on demand.
+Use it through CLI, MCP, CDP, WebDriver Classic, or WebDriver BiDi.
 
 ## Why Moli
 
-Conventional browsers assume any loaded page might need to be displayed,
-animated, or scrolled at any moment, so they keep visual machinery warm at all
-times — even when an automation task just wants a title, a list of links, or
-a JavaScript result.
-
-Agents typically work in three stages:
-
-1. **Understand the page** — DOM, text, links, forms, network responses,
-   storage, JavaScript state.
-2. **Act on the page** — fill, select, submit, navigate, or execute code via
-   DOM-backed controls.
-3. **Look at the page, when needed** — geometry for spatial reasoning, pixels
-   for a screenshot.
-
-Moli only does the visual work a given request actually needs:
+Most browser automation needs page structure, not a continuously rendered
+visual world. Moli keeps the native DOM and style state as its source of truth,
+then runs layout or software paint only for operations that need them.
 
 | Agent request | What Moli does |
 | --- | --- |
 | Extract HTML/Markdown, query the DOM, run JS, inspect network/storage | Reads the browser runtime directly — no layout or paint |
 | Read an element's box, hit-test a point, send coordinate input | Runs one layout pass, keeps only the latest geometry snapshot |
 | Capture a screenshot or refresh a screencast | Rebuilds from current DOM/style, renders one fresh frame, discards it |
-
-This isn't a browser with rendering stripped out — Moli still has a real DOM,
-V8, CSS, layout, text shaping, hit-testing, and software paint. What changes
-is *when* those systems run and how long their state sticks around: DOM state
-is the default; layout and pixels are paid for only on request.
-
-That cost model matters for high-density crawling, browser-use agents,
-retrieval pipelines, eval environments, and RL workloads — where startup time,
-idle memory, and per-page footprint decide how many sessions a machine can run.
-
-## On-demand, non-retained rendering
-
-Moli never keeps a visual world alive "just in case." Native DOM and Stylo
-state are the single source of truth; layout and pixels are built only when
-an operation actually needs them.
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
@@ -77,20 +33,10 @@ an operation actually needs them.
   </a>
 </p>
 
-By default, Moli uses `LayoutPolicy::Mock` and never touches the real layout
-or paint pipeline. `--layout` switches to `LayoutPolicy::OnDemand`, unlocking
-real geometry, hit-testing, coordinate input, screenshots, and screencast —
-but it still isn't a continuously rendering browser.
-
-A cold geometry request rebuilds layout once and keeps only the latest
-snapshot. Later geometry reads may reuse that snapshot; screenshots and
-screencast frames always rebuild fresh from the current DOM and style. Even
-screencast is a low-frequency repeat of the same one-shot pipeline, not a
-retained 60 FPS compositor.
-
-The payoff: extraction, DOM inspection, JS execution, and most agent actions
-skip both the CPU cost of rendering unused frames and the memory cost of
-retained layout/paint/compositor state.
+Moli still includes V8, CSS, layout, text shaping, hit-testing, and software
+paint. The difference is when visual work runs and how long its state is kept.
+This cost model targets crawling, browser-use agents, retrieval pipelines,
+evaluation environments, and reinforcement-learning workloads.
 
 ## What works today
 
@@ -127,6 +73,13 @@ retained layout/paint/compositor state.
 <p align="center">
   <sub>Chrome DevTools connected to Moli: rendered page, live DOM, CSS, and geometry from the same browser runtime.</sub>
 </p>
+
+## Moli and Lexmount
+
+Moli is Lexmount’s open-source browser engine. Lexmount Browser is the managed
+cloud runtime and control plane built around it.
+
+**The open-source engine is fully usable without Lexmount Browser.**
 
 ## Quick start
 
@@ -248,7 +201,7 @@ count.
 | Lightpanda | 85 | 44.3% | 0.97 s | 40 MiB |
 | Obscura | 57 | 29.7% | 1.30 s | 39 MiB |
 
-### Sampled internal agent episode
+### Sample agent workload
 
 | Metric | Moli | Chromium |
 | --- | ---: | ---: |
@@ -262,8 +215,9 @@ full run recorded **1.612 million passing tests**.
 
 ## Project scope
 
-Moli is in active development — a practical agent browser, not a drop-in
-replacement for every Chrome feature.
+Moli is production-ready for its documented agent-browser scope and remains
+under active development. It is not a drop-in replacement for every Chrome
+feature.
 
 Current intentional boundaries:
 
