@@ -1,16 +1,12 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.png"
-    alt="Moli Browser — Fast, Lightweight, Headless"
+    src="assets/moli-browser-banner-v2.png"
+    alt="Moli Browser — Structure first. Pixels on demand."
     width="1086"
   />
 </p>
 
 <h1 align="center">Moli</h1>
-
-<p align="center">
-  <strong>Structure first. Pixels on demand.</strong>
-</p>
 
 Moli is a production-ready, structured-first browser engine for AI agents.
 
