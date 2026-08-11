@@ -61,6 +61,22 @@ evaluation environments, and reinforcement-learning workloads.
   families, connection limits, timeouts, private-network policy, user-agent
   overrides, structured logging, and network diagnostics.
 
+## Showcase
+
+<p align="center">
+  <a href="assets/moli-game.jpg">
+    <img
+      src="assets/moli-game.jpg"
+      alt="Moli running an HTML5 game while connected to Chrome DevTools"
+      width="1200"
+    />
+  </a>
+</p>
+
+<p align="center">
+  <sub>An HTML5 game running in Moli, with Chrome DevTools attached to the same live browser runtime.</sub>
+</p>
+
 <p align="center">
   <a href="assets/moli-devtools-rust-lang.jpg">
     <img
