@@ -215,8 +215,7 @@ full run recorded **1.612 million passing tests**.
 ## Project scope
 
 Moli is production-ready for its documented agent-browser scope and remains
-under active development. It is not a drop-in replacement for every Chrome
-feature.
+under active development.
 
 Current intentional boundaries:
 
