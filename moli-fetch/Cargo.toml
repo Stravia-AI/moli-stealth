@@ -24,13 +24,18 @@ moli-trace = { path = "../moli-trace" }
 moli-url = { path = "../moli-url" }
 moli-url-policy = { path = "../moli-url-policy" }
 moli-web-mime = { path = "../moli-web-mime" }
-openssl-sys = { version = "0.9", features = ["vendored"] }
 parking_lot = "0.12"
 strum = { version = "0.28.0", features = ["derive"] }
 tokio = { version = "1.51.0", features = ["rt", "sync"] }
 tracing = "0.1.41"
 url = "2.5.7"
 wildcard = "0.3.0"
+
+[target.'cfg(windows)'.dependencies]
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[target.'cfg(not(windows))'.dependencies]
+openssl-sys = "0.9"
 
 [dev-dependencies]
 h2 = "0.4"
