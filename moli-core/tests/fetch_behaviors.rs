@@ -261,11 +261,10 @@ async fn large_static_query_selector_all_subset_does_not_eagerly_wrap_every_node
 
     assert!(html.contains("data-done=\"true\""), "html={html}");
     assert!(html.contains("data-node-count=\"12000\""), "html={html}");
-    assert!(html.contains("data-checksum=\""), "html={html}");
+    assert!(html.contains("data-checksum=\"60\""), "html={html}");
     // Keep page-visible timing fields as diagnostics, but do not make this
     // correctness gate depend on full-workspace nextest scheduling load.
     let _script_elapsed = extract_data_attr_u64(&html, "data-elapsed-ms")?;
-    let _names_elapsed = extract_data_attr_u64(&html, "data-names-elapsed-ms")?;
     let _checks_elapsed = extract_data_attr_u64(&html, "data-checks-elapsed-ms")?;
 
     server.shutdown().await;

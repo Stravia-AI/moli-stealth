@@ -279,23 +279,16 @@ pub(super) async fn encoding_large_static_nodelist_subset_page() -> Html<String>
         body.push_str(&format!("{index:X}"));
         body.push_str("\" data-bytes=\"A1 A1\">x</span>");
     }
+    // Keep the DOM large so eager wrapper creation remains expensive, while the
+    // script reads only a small prefix. Traversing every entry would test full
+    // iteration instead and make the watchdog outcome depend on host load.
     body.push_str(
         r#"<script>
 	try {
 	  const started = Date.now();
 	  const nodes = document.querySelectorAll("span");
-	  const namesStarted = Date.now();
-	  let names = 0;
 	  let checksum = 0;
 	  function simpleDecoder(bytes) { return bytes; }
-	  for (let i = 0; i < nodes.length; i++) {
-	    const name = "U+" + nodes[i].dataset.cp + " " +
-	      String.fromCodePoint(parseInt(nodes[i].dataset.cp, 16)) + " " +
-	      simpleDecoder(nodes[i].dataset.bytes) + " " +
-	      nodes[i].dataset.bytes;
-	    names += name.length;
-	  }
-	  const namesElapsed = Date.now() - namesStarted;
 	  const checksStarted = Date.now();
 	  for (let i = 0; i < 10; i++) {
 	    checksum += nodes[i].textContent.length;
@@ -304,8 +297,6 @@ pub(super) async fn encoding_large_static_nodelist_subset_page() -> Html<String>
 	  const checksElapsed = Date.now() - checksStarted;
 	  document.body.setAttribute("data-node-count", String(nodes.length));
 	  document.body.setAttribute("data-checksum", String(checksum));
-	  document.body.setAttribute("data-name-bytes", String(names));
-	  document.body.setAttribute("data-names-elapsed-ms", String(namesElapsed));
 	  document.body.setAttribute("data-checks-elapsed-ms", String(checksElapsed));
 	  document.body.setAttribute("data-done", "true");
 	  document.body.setAttribute("data-elapsed-ms", String(Date.now() - started));
