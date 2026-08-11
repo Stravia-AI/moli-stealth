@@ -17,7 +17,7 @@ use crate::conn::{
     PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
     PendingSubresourceFetchResponseRequest, RuntimeBindingDefinition,
 };
-use crate::devtools_runtime::DevToolsNetworkInterceptId;
+use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
 #[cfg(test)]
 use moli_core::page::RendererServiceWorkerVersionStatus;
@@ -1556,6 +1556,29 @@ impl<'a> TargetSessionOwnerMut<'a> {
         }
     }
 
+    pub(super) fn apply_renderer_document_title(&mut self, title: String) -> Option<bool> {
+        match self {
+            Self::ActiveTarget {
+                browser_context, ..
+            } => Some(
+                browser_context
+                    .active_target
+                    .owner_state
+                    .commit_document_title(title),
+            ),
+            Self::BackgroundTarget {
+                browser_context,
+                target_id,
+                ..
+            } => Some(
+                browser_context.mutate_parked_target_owner_state(target_id, |owner_state| {
+                    owner_state.commit_document_title(title)
+                }),
+            ),
+            Self::NoLoadedBrowserContext => None,
+        }
+    }
+
     pub(super) fn navigation_history_entry_url(&mut self, entry_id: i32) -> Option<String> {
         match self {
             Self::ActiveTarget {
@@ -1833,7 +1856,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                         fetch_snapshot
                             .matching_request_stage_pause_sessions(
                                 default_session_id.as_deref(),
-                                "Document",
+                                DevToolsNetworkResourceType::Document,
                                 requested_url,
                             )
                             .into_iter()
@@ -1845,7 +1868,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                         fetch_snapshot
                             .matching_response_stage_pause_sessions(
                                 default_session_id.as_deref(),
-                                "Document",
+                                DevToolsNetworkResourceType::Document,
                                 requested_url,
                             )
                             .into_iter()
@@ -1956,7 +1979,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                         fetch_snapshot
                             .matching_request_stage_pause_sessions(
                                 target_session_id.as_deref(),
-                                "Document",
+                                DevToolsNetworkResourceType::Document,
                                 requested_url,
                             )
                             .into_iter()
@@ -1968,7 +1991,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                         fetch_snapshot
                             .matching_response_stage_pause_sessions(
                                 target_session_id.as_deref(),
-                                "Document",
+                                DevToolsNetworkResourceType::Document,
                                 requested_url,
                             )
                             .into_iter()
@@ -2234,6 +2257,8 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 target_id,
                 ..
             } => {
+                let committed_document_post_response_continuation =
+                    page.take_committed_document_post_response_continuation();
                 let previous_page_owner = TargetPageResidenceIdentity::new(
                     browser_context.id.clone(),
                     Some(target_id.clone()),
@@ -2246,11 +2271,28 @@ impl<'a> TargetSessionOwnerMut<'a> {
                     .background_target(target_id)?
                     .session_id()
                     .map(str::to_owned);
+                let previous_title = browser_context
+                    .parked_target_owner_state(target_id)
+                    .and_then(|owner_state| {
+                        owner_state.committed_document_title().map(str::to_owned)
+                    })
+                    .or_else(|| {
+                        browser_context
+                            .background_target(target_id)?
+                            .runtime_slot()
+                            .loaded_page()
+                            .map(Page::document_title)
+                    });
+                let committed_document_title = page.document_title();
                 let page_snapshot = (history_url.to_string(), page.document_title());
                 browser_context.mutate_parked_target_owner_state(target_id, |owner_state| {
                     owner_state.mark_initial_empty_document_exited();
+                    if let Some(previous_title) = previous_title {
+                        owner_state.refresh_current_navigation_history_title(previous_title);
+                    }
                     owner_state.record_loaded_page_navigation_history(page_snapshot);
                     owner_state.clear_committed_document_navigation_state();
+                    owner_state.commit_document_title(committed_document_title);
                 });
                 browser_context.mutate_parked_page_session_state(target_id, |state| {
                     clear_parked_page_loaded_document_session_state(state);
@@ -2321,6 +2363,7 @@ impl<'a> TargetSessionOwnerMut<'a> {
                 }
                 Some(Ok(LoadedNavigationPageCommit {
                     replaced_page_owner,
+                    committed_document_post_response_continuation,
                 }))
             }
             Self::NoLoadedBrowserContext => None,
@@ -3356,6 +3399,19 @@ impl CdpConnection {
     ) -> Option<(usize, Vec<PageNavigationHistoryEntry>)> {
         self.target_session_owner_mut(session_id)?
             .navigation_history_snapshot()
+    }
+
+    pub(crate) fn apply_renderer_document_title_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        change: &moli_core::RendererDocumentTitleChanged,
+    ) -> Option<bool> {
+        self.target_root_document_protocol_attachment_identity_for_session(
+            session_id,
+            change.source_document,
+        )?;
+        self.target_session_owner_mut(session_id)?
+            .apply_renderer_document_title(change.title.clone())
     }
 
     pub(crate) fn target_session_owner_navigation_history_entry_url(

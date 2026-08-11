@@ -43,12 +43,14 @@ impl PreparedProtocolOutputs {
     pub(in crate::domains::activity) fn from_renderer_network_observation(
         conn: &mut CdpConnection,
         session_id: Option<&str>,
+        source_renderer_page: Option<crate::conn::RendererPageResidenceIdentity>,
         source_document: moli_core::RendererDocumentLifecycleIdentity,
         item: &moli_core::page::ScriptNetworkOutputItem,
     ) -> Option<Self> {
         let renderer_live = conn
-            .ingest_renderer_network_output_item_and_prepare_live_delivery_for_session_owner(
+            .ingest_renderer_page_network_output_item_and_prepare_live_delivery_for_session_owner(
                 session_id,
+                source_renderer_page,
                 source_document,
                 item,
             )?;
@@ -77,6 +79,12 @@ impl PreparedProtocolOutputs {
                     commit.clone(),
                     &mut prepared,
                 );
+            }
+            RendererProtocolObservation::DocumentTitleChanged(change) => {
+                crate::domains::page::PagePreparedOutputs::from_renderer_document_title_change(
+                    change.clone(),
+                )
+                .append_to_document_title_output_sink(&mut prepared);
             }
             RendererProtocolObservation::DocumentLifecycle(event) => {
                 crate::domains::page::PagePreparedOutputs::from_renderer_document_lifecycle_event(

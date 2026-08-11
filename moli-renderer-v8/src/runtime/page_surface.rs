@@ -1610,11 +1610,15 @@ impl RendererCommandTurnOutput {
     /// before the matching protocol response is exposed.
     ///
     /// This is deliberately a stream cursor, not a process-global watermark.
-    /// It is present only when the separately transported Page publication
-    /// contains command-owned records; unrelated records cannot make a
-    /// response wait for a broader Page watermark.
+    /// It covers the Page-stream prefix that preceded command admission plus
+    /// any records settled by the command itself. Later Page work receives a
+    /// later cursor and cannot delay this response.
     pub fn renderer_output_predecessor(&self) -> Option<RendererOutputFence> {
         self.renderer_output_predecessor.clone()
+    }
+
+    pub(crate) fn merge_renderer_output_predecessor(&mut self, predecessor: RendererOutputFence) {
+        predecessor.merge_into_same_stream_tail(&mut self.renderer_output_predecessor);
     }
 
     pub fn runtime_inspector_output(&self) -> Option<&RendererRuntimeCommandOutput> {

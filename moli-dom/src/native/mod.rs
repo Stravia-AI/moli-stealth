@@ -1463,6 +1463,38 @@ mod tests {
     }
 
     #[test]
+    fn shadow_root_reference_target_changes_invalidate_query_state() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        let shadow_host = host.create_element("section");
+        let shadow_root = host
+            .attach_shadow_root(shadow_host, "open")
+            .expect("shadow root");
+        let target = host.create_element("input");
+        assert!(host.set_attribute(target, "id", "forwarded"));
+        assert!(host.append_child(host.document_node_id(), shadow_host));
+        assert!(host.append_child(shadow_root, target));
+
+        let before = host.query_version();
+        assert!(host.set_shadow_root_reference_target(shadow_root, Some("forwarded".to_owned())));
+        assert!(host.query_version() > before);
+        assert_eq!(
+            host.resolve_reference_target_chain(shadow_host),
+            Some(target)
+        );
+
+        let after_change = host.query_version();
+        assert!(!host.set_shadow_root_reference_target(shadow_root, Some("forwarded".to_owned())));
+        assert_eq!(host.query_version(), after_change);
+
+        assert!(host.set_shadow_root_reference_target(shadow_root, None));
+        assert!(host.query_version() > after_change);
+        assert_eq!(
+            host.resolve_reference_target_chain(shadow_host),
+            Some(shadow_host)
+        );
+    }
+
+    #[test]
     fn host_child_mutations_report_slot_assignment_snapshots() {
         let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
         let shadow_host = host.create_element("section");

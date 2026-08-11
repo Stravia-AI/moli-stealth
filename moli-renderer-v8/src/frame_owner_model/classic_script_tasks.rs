@@ -124,6 +124,7 @@ pub(crate) enum FrameDocumentClassicPrepareDropReason {
     StaleDocumentOwner,
     BeginExecutionUnavailable,
     ExecutionActionUnavailable,
+    StaleParserSuspension,
 }
 
 #[derive(Debug, Clone)]
@@ -453,6 +454,7 @@ pub(crate) struct FrameDocumentClassicParserResumeApplication {
 pub(crate) enum FrameDocumentClassicParserResumeSkipReason {
     StaleDocumentOwner,
     StaleRealm,
+    StaleParserSuspension,
     MissingCurrentChildSnapshot,
     MissingLiveParser,
 }

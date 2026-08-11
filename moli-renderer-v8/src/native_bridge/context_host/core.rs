@@ -264,7 +264,6 @@ impl JsContextHost {
             child_browsing_context_document_handles: HashMap::new(),
             document_domain_override: None,
             next_child_browsing_context_id: 1,
-            next_child_document_loader_id: 1,
             next_child_document_load_id: 0,
             next_child_classic_script_load_id: 0,
             pending_child_document_navigations: HashMap::new(),
@@ -519,7 +518,6 @@ impl JsContextHost {
         {
             let runtime: &mut DocumentRuntime = self;
             runtime.open_document();
-            runtime.start_root_document_parser_stream();
         }
         let retired_descendant_count =
             descendant_count_before.saturating_sub(self.child_browsing_contexts.len());
@@ -530,6 +528,10 @@ impl JsContextHost {
             .frame_owner_store
             .replace_main_document(document_handle, document_url, document_base_url)
             .expect("main document owner must exist before document.open() replacement");
+        {
+            let runtime: &mut DocumentRuntime = self;
+            runtime.start_root_document_parser_stream(transition.current_owner());
+        }
         self.dom_agent_state
             .reset_for_document_replacement(transition.current_owner().document_id);
         self.replace_main_document_resource_loader(transition);

@@ -10,10 +10,12 @@ use std::time::Duration;
 use super::conn::{
     BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition,
     CdpSchedulerEvent, CdpTurnOutcome, CommandDispatchContext, CommandResponseFlushPermit,
-    ParsedCdpCommand, PendingCdpCommandDispatch, RuntimeInspectorResponseReady,
+    LoadedNavigationRendererAttachmentCommit, ParsedCdpCommand, PendingCdpCommandDispatch,
+    RuntimeInspectorResponseReady,
 };
+use crate::devtools_runtime::{DevToolsCommand, DevToolsCommandResult, DevToolsError};
 use crate::domains::activity::{
-    ProtocolSchedulerWork, RuntimeCommandOutputBarrierCompletion,
+    ProtocolSchedulerWork, ProtocolSchedulerWorkKind, RuntimeCommandOutputBarrierCompletion,
     RuntimeCommandOutputBarrierPermit, RuntimeCommandOutputBarriers,
 };
 use moli_core::{
@@ -310,30 +312,36 @@ impl TestContext {
             .expect("navigation fixture requires an installed browser context");
         let target_id = target_id.expect("navigation fixture requires an exact target");
         let renderer_output_predecessor = navigation.renderer_output_predecessor;
-        let renderer_page = crate::conn::RendererPageResidenceIdentity::from_page(&navigation.page);
         let navigation_engine = navigation.navigation_engine.take();
         let page_creation_artifacts = navigation.page_creation_artifacts;
-        self.conn
-            .runtime_session_owner_slot_mut(session_id)
-            .expect("navigation fixture target must remain installed")
-            .set_loaded_page_for_test(navigation.page);
-        assert_eq!(
-            self.conn
-                .renderer_page_residence_identity_for_session_owner(session_id),
-            Some(renderer_page),
-            "navigation fixture must install the exact renderer Page before binding its output stream"
-        );
-        // The production navigation transaction binds a reserved renderer
-        // Page before its first publication can reach protocol ingress. This
-        // synchronous fixture has no concurrent ingress, so install the Page
-        // first and then bind the exact residence instead of manufacturing a
-        // test-only "unowned but about to be installed" compatibility state.
-        let page_owner = self
+        let final_url = navigation.final_url;
+        let main_document_commit = navigation
+            .main_document_commit
+            .expect("navigation fixture must retain its frozen Document commit identity");
+        let page_commit = self
             .conn
-            .target_page_residence_identity_for_session(session_id)
-            .expect("navigation fixture must retain its exact target Page owner");
-        self.conn
-            .bind_renderer_page_output_owner(renderer_page, page_owner);
+            .commit_loaded_navigation_page_for_session_owner_async(
+                session_id,
+                navigation.page,
+                LoadedNavigationRendererAttachmentCommit::Prepare(None),
+                &final_url,
+            )
+            .await
+            .expect("navigation fixture target must remain installed")
+            .expect("navigation fixture Page commit must succeed");
+        assert!(
+            page_commit
+                .committed_document_post_response_continuation
+                .is_none(),
+            "lifecycle-target fixture must not retain a DocumentCommit response gate"
+        );
+        let _ = self
+            .conn
+            .commit_loaded_navigation_target_identity_for_session_owner(
+                session_id,
+                &main_document_commit,
+                &final_url,
+            );
         let (binding, _) = self
             .conn
             .bind_renderer_document_lifecycle_for_session_owner(
@@ -874,6 +882,26 @@ impl TestContext {
         predecessor: RendererOutputFence,
     ) {
         Box::pin(self.route_renderer_output_predecessor_before_command_response(predecessor)).await;
+    }
+
+    /// Completes one protocol-neutral command across the same concrete
+    /// renderer-output boundary as the production actor.
+    pub(crate) async fn execute_devtools_command_through_renderer_fence_for_test(
+        &mut self,
+        command: DevToolsCommand,
+    ) -> Result<DevToolsCommandResult, DevToolsError> {
+        let (result, scheduler_events, protocol_events, renderer_output_predecessor) = self
+            .conn
+            .execute_devtools_command(command)
+            .await
+            .into_complete_parts();
+        if let Some(predecessor) = renderer_output_predecessor {
+            self.route_direct_command_renderer_predecessor_for_test(predecessor)
+                .await;
+        }
+        self.route_direct_command_output_for_test(protocol_events, scheduler_events)
+            .await;
+        result
     }
 
     /// Routes an explicitly completed command turn through the same ordered
@@ -1418,18 +1446,37 @@ impl TestContext {
         &mut self,
         work: &mut VecDeque<TestSchedulerWork>,
     ) {
-        while let Some(ready) = self
-            .pending_protocol_scheduler_work
-            .front()
-            .map(ProtocolSchedulerWork::is_ready)
-        {
-            if !ready {
-                return;
-            }
+        loop {
+            let selected_index = match self.pending_protocol_scheduler_work.front() {
+                Some(front) if front.is_ready() => 0,
+                Some(front)
+                    if front.kind() == ProtocolSchedulerWorkKind::MainDocumentLoadOwnerAction =>
+                {
+                    let Some(index) =
+                        self.pending_protocol_scheduler_work
+                            .iter()
+                            .position(|candidate| {
+                                candidate.is_ready()
+                                    && candidate.is_top_level_location_navigation_owner_action()
+                            })
+                    else {
+                        return;
+                    };
+                    // Production checks the pending load observer out of the
+                    // FIFO while it waits for the renderer. An unconstrained
+                    // location owner action may then run and replace that
+                    // exact source Document, which completes the observer as
+                    // Superseded. Keeping the pending observer at the front in
+                    // this protocol-only harness would deadlock the action
+                    // needed to make it terminal.
+                    index
+                }
+                Some(_) | None => return,
+            };
             if !self.background_navigation_scheduler_enabled
                 && self
                     .pending_protocol_scheduler_work
-                    .front()
+                    .get(selected_index)
                     .is_some_and(ProtocolSchedulerWork::requires_background_navigation_scheduler)
             {
                 // The default protocol fixture has no owner task lane. Keep
@@ -1442,7 +1489,7 @@ impl TestContext {
             }
             let protocol_work = self
                 .pending_protocol_scheduler_work
-                .pop_front()
+                .remove(selected_index)
                 .expect("ready protocol work must remain resident");
             let (events, scheduler_events, renderer_output_predecessor) = self
                 .conn
@@ -1828,7 +1875,7 @@ fn enqueue_scheduler_events_like_scheduler(
             CdpSchedulerEvent::ProtocolWorkPublished { work } => {
                 queue.push_back(TestDeferredSchedulerWork(work));
             }
-            CdpSchedulerEvent::BackgroundNavigationStarted { key: _ } => {}
+            CdpSchedulerEvent::BackgroundNavigationStarted { .. } => {}
             CdpSchedulerEvent::PageScreencastStarted { .. } => {}
         }
     }

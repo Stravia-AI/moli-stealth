@@ -11,7 +11,7 @@ use crate::conn::{
     PendingFetchResponseBodyStreamReadStart, PendingSubresourceFetchAuthRequest,
     PendingSubresourceFetchRequest, PendingSubresourceFetchResponseRequest, TargetRuntimeSlot,
 };
-use crate::devtools_runtime::DevToolsNetworkInterceptId;
+use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use crate::domains::network::TargetIoStreamRead;
 
 pub(crate) type SessionOwnerPendingFetchState = (
@@ -903,7 +903,7 @@ impl CdpConnection {
         &self,
         target_id: &str,
         request_stage: FetchRequestStage,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &url::Url,
     ) -> Vec<DevToolsNetworkInterceptId> {
         self.target_fetch_config_for_target(target_id)

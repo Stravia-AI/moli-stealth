@@ -21,10 +21,11 @@ pub use moli_page_types::{LayoutPolicy, OptionalResourceFetchMask};
 pub use moli_renderer_v8::renderer_output_transport_channel;
 pub use moli_renderer_v8::{
     PageId, RendererBrowserContextRuntimeId, RendererDocumentLifecycleIdentity,
-    RendererOutputCursor, RendererOutputFence, RendererOutputFenceLeaseId, RendererOutputItem,
-    RendererOutputPublication, RendererOutputPublicationOrdering, RendererOutputRecord,
-    RendererOutputResidenceIdentity, RendererOutputStreamCloseReason, RendererOutputStreamControl,
-    RendererOutputStreamEpoch, RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
+    RendererDocumentTitleChanged, RendererOutputCursor, RendererOutputFence,
+    RendererOutputFenceLeaseId, RendererOutputItem, RendererOutputPublication,
+    RendererOutputPublicationOrdering, RendererOutputRecord, RendererOutputResidenceIdentity,
+    RendererOutputStreamCloseReason, RendererOutputStreamControl, RendererOutputStreamEpoch,
+    RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
     RendererOutputTransportMessage, RendererOutputTransportReceiver,
     RendererOutputTransportSendError, RendererOutputTransportSender, RendererOwnerAction,
     RendererOwnerLocalHostId, RendererOwnerResourceActivitySource,

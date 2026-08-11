@@ -53,37 +53,27 @@ async fn runtime_discard_console_entries_suppresses_buffered_runtime_events() {
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_discard_console_entries_is_page_target_local() {
     let mut ctx = TestContext::new();
-    let active_page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<script>console.log('active-discard-peer')</script>",
-        )
-        .await
-        .expect("active page should load");
-    let background_page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<script>console.log('background-discard-owner')</script>",
-        )
-        .await
-        .expect("background page should load");
-    let background_url = background_page.final_url().as_str().to_owned();
-    let mut background_target = crate::conn::BackgroundTarget::with_url(
+    let background_target = crate::conn::BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        background_url,
+        "about:blank".to_owned(),
     );
-    background_target.replace_loaded_page(Some(background_page));
 
     let mut browser_context = BrowserContext::new("BID-1".to_owned());
     browser_context.set_active_target_id("TID-active");
     browser_context.attach_active_session("SID-active");
-    browser_context
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(active_page));
     browser_context.background_targets.push(background_target);
     ctx.conn.browser_context = Some(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<script>console.log('active-discard-peer')</script>",
+        Some("SID-active"),
+    )
+    .await;
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<script>console.log('background-discard-owner')</script>",
+        Some("SID-background"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({

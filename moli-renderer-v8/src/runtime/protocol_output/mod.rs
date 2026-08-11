@@ -13,7 +13,8 @@ pub use identity::{
 };
 pub(crate) use item::PendingRendererOutputRecord;
 pub use item::{
-    RendererOutputItem, RendererOutputRecord, RendererOwnerAction, RendererProtocolObservation,
+    RendererDocumentTitleChanged, RendererOutputItem, RendererOutputRecord, RendererOwnerAction,
+    RendererProtocolObservation,
 };
 pub use transport::{
     RendererOutputTransportDiagnostics, RendererOutputTransportMessage,

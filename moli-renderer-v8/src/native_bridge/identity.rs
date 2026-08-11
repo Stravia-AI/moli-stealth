@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    hash::{Hash, Hasher},
+    rc::Rc,
+};
 
 use super::super::{
     document_runtime::DomHandle,
@@ -213,7 +218,7 @@ impl LiveCollectionQueryKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub(super) struct LiveCollectionDescriptor {
     pub(super) collection_kind: CollectionKind,
     pub(super) query_kind: LiveCollectionQueryKind,
@@ -222,10 +227,67 @@ pub(super) struct LiveCollectionDescriptor {
     pub(super) query: Option<String>,
     pub(super) include_root: bool,
     pub(super) tag_name_html_document: Option<bool>,
+    pub(super) resolution_cache: LiveCollectionResolutionCache,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct LiveCollectionResolutionCache(
+    Rc<RefCell<Option<LiveCollectionResolutionCacheEntry>>>,
+);
+
+#[derive(Debug)]
+struct LiveCollectionResolutionCacheEntry {
+    runtime_generation: u64,
+    query_version: u64,
+    handles: Rc<[DomHandle]>,
+}
+
+impl PartialEq for LiveCollectionDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.collection_kind == other.collection_kind
+            && self.query_kind == other.query_kind
+            && self.root == other.root
+            && self.generation == other.generation
+            && self.query == other.query
+            && self.include_root == other.include_root
+            && self.tag_name_html_document == other.tag_name_html_document
+    }
+}
+
+impl Eq for LiveCollectionDescriptor {}
+
+impl Hash for LiveCollectionDescriptor {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.collection_kind.hash(state);
+        self.query_kind.hash(state);
+        self.root.hash(state);
+        self.generation.hash(state);
+        self.query.hash(state);
+        self.include_root.hash(state);
+        self.tag_name_html_document.hash(state);
+    }
 }
 
 impl LiveCollectionDescriptor {
-    pub(super) fn resolve(&self, host: &JsContextHost) -> Vec<DomHandle> {
+    pub(super) fn resolve(&self, host: &JsContextHost) -> Rc<[DomHandle]> {
+        let runtime_generation = host.runtime_reset_generation();
+        if self.generation != runtime_generation {
+            return Rc::from(Vec::<DomHandle>::new());
+        }
+        let query_version = host.dom_host().query_version();
+        if let Some(handles) = self
+            .resolution_cache
+            .0
+            .borrow()
+            .as_ref()
+            .filter(|entry| {
+                entry.runtime_generation == runtime_generation
+                    && entry.query_version == query_version
+            })
+            .map(|entry| entry.handles.clone())
+        {
+            return handles;
+        }
         let handles = if self.query_kind == LiveCollectionQueryKind::TagName {
             let query = self.query.as_deref().unwrap_or("*");
             match self.tag_name_html_document {
@@ -269,7 +331,13 @@ impl LiveCollectionDescriptor {
                 )
                 .unwrap_or_default()
         };
-        host.filter_parser_visible_handles(handles)
+        let handles = Rc::<[DomHandle]>::from(handles);
+        *self.resolution_cache.0.borrow_mut() = Some(LiveCollectionResolutionCacheEntry {
+            runtime_generation,
+            query_version,
+            handles: handles.clone(),
+        });
+        handles
     }
 }
 

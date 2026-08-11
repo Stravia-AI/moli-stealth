@@ -694,6 +694,7 @@ fn spawn_captured_body_replay(
 pub(crate) struct BackgroundNavigationLoadJob {
     engine: NavigationEngine,
     page_reservation: RendererPageReservationToken,
+    cancellation: BackgroundNavigationCancellation,
     early_result: Option<BackgroundNavigationEarlyResult>,
     load_inputs: TargetNavigationLoadInputs,
     method: String,
@@ -807,6 +808,10 @@ impl BackgroundNavigationEarlyResult {
 }
 
 impl BackgroundNavigationLoadJob {
+    pub(crate) fn cancellation(&self) -> BackgroundNavigationCancellation {
+        self.cancellation.clone()
+    }
+
     fn emit_early_result_for_successful_document(
         early_result: &mut Option<BackgroundNavigationEarlyResult>,
         navigation: &Result<NavigationLoadOutcome, String>,
@@ -899,6 +904,7 @@ impl BackgroundNavigationLoadJob {
                     self.body,
                     self.request_headers.clone(),
                     None,
+                    self.cancellation.fetch_cancel_handle(),
                 )
                 .await;
             let navigation_response = match navigation_response {
@@ -2124,7 +2130,8 @@ impl CdpConnection {
         &mut self,
         raw_url: &str,
     ) -> Result<LoadedNavigation, String> {
-        self.load_navigation_via_runtime_for_session_owner_async(None, raw_url)
+        let load_inputs = self.navigation_load_inputs_for_session_owner(None);
+        self.load_navigation_via_runtime_with_load_inputs_async(None, raw_url, load_inputs)
             .await
     }
 
@@ -2135,25 +2142,44 @@ impl CdpConnection {
     /// inserting it later. The latter cannot model renderer output ownership:
     /// the Page stream is opened while the page is built and must already be
     /// bound to its target before any concrete publication is consumed.
+    #[cfg(test)]
     pub(crate) async fn load_navigation_via_runtime_for_session_owner_async(
         &mut self,
         session_id: Option<&str>,
         raw_url: &str,
     ) -> Result<LoadedNavigation, String> {
-        let request_headers = self
-            .navigation_load_inputs_for_session_owner(session_id)
-            .extra_http_headers;
+        let load_inputs = self.navigation_fixture_load_inputs_for_session_owner(session_id)?;
+        self.load_navigation_via_runtime_with_load_inputs_async(session_id, raw_url, load_inputs)
+            .await
+    }
+
+    async fn load_navigation_via_runtime_with_load_inputs_async(
+        &mut self,
+        session_id: Option<&str>,
+        raw_url: &str,
+        load_inputs: TargetNavigationLoadInputs,
+    ) -> Result<LoadedNavigation, String> {
+        let request_headers = load_inputs.extra_http_headers.clone();
         let navigation = self
-            .load_navigation_request_via_runtime_with_network_events_async(
+            .load_navigation_request_via_runtime_with_network_events_and_load_inputs_async(
                 session_id,
+                load_inputs,
                 "GET",
                 raw_url,
                 None,
                 request_headers,
                 MainDocumentBodyProgressSource::default(),
-                NavigationRequestLoadPolicy::DocumentInitiated,
             )
             .await?;
+        self.commit_navigation_load_outcome_for_session_owner_async(session_id, navigation)
+            .await
+    }
+
+    async fn commit_navigation_load_outcome_for_session_owner_async(
+        &mut self,
+        session_id: Option<&str>,
+        navigation: NavigationLoadOutcome,
+    ) -> Result<LoadedNavigation, String> {
         match navigation {
             NavigationLoadOutcome::ResponseCommitReady(navigation) => {
                 let navigation = *navigation;
@@ -2365,6 +2391,7 @@ impl CdpConnection {
         BackgroundNavigationLoadJob {
             engine,
             page_reservation,
+            cancellation: BackgroundNavigationCancellation::new(),
             early_result,
             load_inputs,
             method: navigation.request_method.clone(),
@@ -2696,29 +2723,7 @@ impl CdpConnection {
         response_headers: Vec<(String, String)>,
         response_body: String,
     ) -> Result<LoadedNavigation, String> {
-        self.build_loaded_navigation_from_buffered_response_for_session_owner_async(
-            None,
-            requested_url,
-            request_method,
-            request_headers,
-            response_status,
-            response_headers,
-            response_body,
-        )
-        .await
-    }
-
-    pub(crate) async fn build_loaded_navigation_from_buffered_response_for_session_owner_async(
-        &mut self,
-        session_id: Option<&str>,
-        requested_url: Url,
-        request_method: String,
-        request_headers: Vec<(String, String)>,
-        response_status: u16,
-        response_headers: Vec<(String, String)>,
-        response_body: String,
-    ) -> Result<LoadedNavigation, String> {
-        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let load_inputs = self.navigation_load_inputs_for_session_owner(None);
         let initial_request_cookie_report =
             load_inputs.request_cookie_report_for_navigation(&requested_url, &request_method, true);
         self.build_loaded_navigation_from_buffered_response_with_request_cookie_report_async(
@@ -2733,6 +2738,58 @@ impl CdpConnection {
             initial_request_cookie_report,
         )
         .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn build_loaded_navigation_from_buffered_response_for_session_owner_async(
+        &mut self,
+        session_id: Option<&str>,
+        requested_url: Url,
+        request_method: String,
+        request_headers: Vec<(String, String)>,
+        response_status: u16,
+        response_headers: Vec<(String, String)>,
+        response_body: String,
+    ) -> Result<LoadedNavigation, String> {
+        let load_inputs = self.navigation_fixture_load_inputs_for_session_owner(session_id)?;
+        let initial_request_cookie_report =
+            load_inputs.request_cookie_report_for_navigation(&requested_url, &request_method, true);
+        let navigation = self
+            .build_navigation_from_buffered_body_source_with_load_inputs_async(
+                session_id,
+                &load_inputs,
+                requested_url.clone(),
+                requested_url,
+                request_method,
+                request_headers,
+                response_status,
+                response_headers,
+                CapturedBody::from_string(response_body),
+                initial_request_cookie_report,
+                NetworkObservationJournal::default(),
+                MainDocumentBodyProgressSource::default(),
+            )
+            .await?;
+        self.commit_navigation_load_outcome_for_session_owner_async(session_id, navigation)
+            .await
+    }
+
+    #[cfg(test)]
+    fn navigation_fixture_load_inputs_for_session_owner(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<TargetNavigationLoadInputs, String> {
+        let load_inputs = self.navigation_load_inputs_for_session_owner(session_id);
+        let frame_id = load_inputs.root_frame_id.clone().ok_or_else(|| {
+            "navigation fixture requires an installed target root frame".to_owned()
+        })?;
+        Ok(load_inputs.with_main_document_commit_seed(
+            RendererMainDocumentCommitSeed::from_navigation_fixture(
+                frame_id,
+                DEFAULT_LOADER_ID.to_owned(),
+                monotonic_timestamp_seconds(),
+            ),
+        ))
     }
 
     /// Replays an already-buffered document response into the phase-one parser

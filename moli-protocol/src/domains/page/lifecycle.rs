@@ -177,7 +177,7 @@ fn emit_renderer_navigation_domcontentloaded_background_events(
 }
 
 pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
-    conn: &CdpConnection,
+    conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
     owner_session_id: Option<&str>,
     binding: &CommittedRendererDocumentBinding,

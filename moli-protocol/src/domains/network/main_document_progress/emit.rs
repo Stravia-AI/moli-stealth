@@ -1,6 +1,6 @@
 use crate::devtools_runtime::{
-    AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsRequestId, DevToolsTargetId,
-    NetworkRedirectResponseEvent, NetworkRequestEvent,
+    AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsNetworkResourceType,
+    DevToolsRequestId, DevToolsTargetId, NetworkRedirectResponseEvent, NetworkRequestEvent,
 };
 use moli_cookie_jar::{StoredCookieQueryReport, StoredCookieSetReport};
 use moli_core::page::{
@@ -207,7 +207,7 @@ pub(super) fn emit_main_document_request_will_be_sent(
             ),
             redirect_has_extra_info,
             request_cookie_report: cookie_access_report.cloned(),
-            resource_type: Some("Document".to_owned()),
+            resource_type: Some(DevToolsNetworkResourceType::Document),
             timestamp: Some(timestamp),
             wall_time: Some(timestamp),
             status: None,
@@ -319,7 +319,7 @@ pub(super) fn emit_main_document_response_received(
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some("Document".to_owned()),
+            resource_type: Some(DevToolsNetworkResourceType::Document),
             timestamp: Some(timestamp),
             wall_time: None,
             status: Some(status),
@@ -360,7 +360,7 @@ pub(super) fn emit_body_finished(
         loader_id,
         timestamp,
         encoded_data_length,
-        Some("Document"),
+        DevToolsNetworkResourceType::Document,
     );
 }
 
@@ -390,7 +390,7 @@ pub(super) fn emit_loading_failed(
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some("Document".to_owned()),
+            resource_type: Some(DevToolsNetworkResourceType::Document),
             timestamp: Some(timestamp),
             wall_time: None,
             status: None,

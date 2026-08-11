@@ -33,6 +33,7 @@ impl DocumentRuntime {
         self.precedes_in_document_order_against_ancestor_chain(left, &right_chain)
     }
 
+    #[cfg(test)]
     pub(in crate::document_runtime) fn precedes_in_document_order_against_ancestor_chain(
         &self,
         left: DomHandle,
@@ -71,6 +72,7 @@ impl DocumentRuntime {
         false
     }
 
+    #[cfg(test)]
     pub(in crate::document_runtime) fn ancestor_chain(&self, node: DomHandle) -> Vec<DomHandle> {
         let mut chain = Vec::new();
         let mut current = Some(node);

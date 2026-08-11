@@ -3031,6 +3031,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
             body_progress_source,
             early_result,
         );
+        let cancellation = job.cancellation();
         let none_session_owner_route = completion_state
             .navigate_session_id
             .is_none()
@@ -3039,6 +3040,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         conn.record_background_navigation_started_scheduler_event(
             &document_navigation_token,
             &completion_state,
+            cancellation,
         );
         tokio::task::spawn_local(async move {
             let body_completion_sink = crate::conn::BackgroundNavigationBodyCompletionSink::new(

@@ -3671,8 +3671,7 @@ async fn protocol_neutral_query_selector_targets_child_frame_context() {
     let child_frame_id = child_frame_id_for_single_iframe_async(&mut ctx, 2).await;
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::QuerySelector(
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::QuerySelector(
             DevToolsQuerySelectorCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverClassic,
@@ -3686,8 +3685,6 @@ async fn protocol_neutral_query_selector_targets_child_frame_context() {
             },
         ))
         .await
-        .into_parts()
-        .0
         .expect("child frame query selector should run");
 
     let DevToolsCommandResult::QuerySelector(result) = result else {
@@ -4143,8 +4140,7 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
     };
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::QuerySelector(
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::QuerySelector(
             DevToolsQuerySelectorCommand {
                 context: context.clone(),
                 root: None,
@@ -4153,8 +4149,6 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
             },
         ))
         .await
-        .into_parts()
-        .0
         .expect("child frame query selector should run");
 
     let DevToolsCommandResult::QuerySelector(result) = result else {
@@ -4347,28 +4341,28 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
         .unwrap_or_else(|| panic!("expected child frame node object id: {:?}", result.object));
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::CallFunction(DevToolsCallFunctionCommand {
-            context: context.clone(),
-            realm_id: None,
-            world_name: None,
-            object_id: Some(DevToolsRemoteHandleId::from(object_id.clone())),
-            this_parameter: None,
-            function_declaration:
-                "function() { return this.id + ':' + getComputedStyle(this).display; }".to_owned(),
-            arguments: Vec::new(),
-            await_promise: false,
-            user_gesture: false,
-            webdriver_bidi_file_prompt_handler: None,
-            result_ownership: DevToolsResultOwnership::None,
-            object_group: None,
-            preserve_remote_metadata: false,
-            materialize_bidi_script_result: false,
-            serialization_options: None,
-        }))
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CallFunction(
+            DevToolsCallFunctionCommand {
+                context: context.clone(),
+                realm_id: None,
+                world_name: None,
+                object_id: Some(DevToolsRemoteHandleId::from(object_id.clone())),
+                this_parameter: None,
+                function_declaration:
+                    "function() { return this.id + ':' + getComputedStyle(this).display; }"
+                        .to_owned(),
+                arguments: Vec::new(),
+                await_promise: false,
+                user_gesture: false,
+                webdriver_bidi_file_prompt_handler: None,
+                result_ownership: DevToolsResultOwnership::None,
+                object_group: None,
+                preserve_remote_metadata: false,
+                materialize_bidi_script_result: false,
+                serialization_options: None,
+            },
+        ))
         .await
-        .into_parts()
-        .0
         .expect("child frame callFunctionOn should run");
 
     let DevToolsCommandResult::Script(result) = result else {
@@ -4526,28 +4520,28 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
         });
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::CallFunction(DevToolsCallFunctionCommand {
-            context: context.clone(),
-            realm_id: None,
-            world_name: None,
-            object_id: Some(DevToolsRemoteHandleId::from(high_backend_object_id)),
-            this_parameter: None,
-            function_declaration:
-                "function() { return this.id + ':' + getComputedStyle(this).display; }".to_owned(),
-            arguments: Vec::new(),
-            await_promise: false,
-            user_gesture: false,
-            webdriver_bidi_file_prompt_handler: None,
-            result_ownership: DevToolsResultOwnership::None,
-            object_group: None,
-            preserve_remote_metadata: false,
-            materialize_bidi_script_result: false,
-            serialization_options: None,
-        }))
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CallFunction(
+            DevToolsCallFunctionCommand {
+                context: context.clone(),
+                realm_id: None,
+                world_name: None,
+                object_id: Some(DevToolsRemoteHandleId::from(high_backend_object_id)),
+                this_parameter: None,
+                function_declaration:
+                    "function() { return this.id + ':' + getComputedStyle(this).display; }"
+                        .to_owned(),
+                arguments: Vec::new(),
+                await_promise: false,
+                user_gesture: false,
+                webdriver_bidi_file_prompt_handler: None,
+                result_ownership: DevToolsResultOwnership::None,
+                object_group: None,
+                preserve_remote_metadata: false,
+                materialize_bidi_script_result: false,
+                serialization_options: None,
+            },
+        ))
         .await
-        .into_parts()
-        .0
         .expect("child frame high backend callFunctionOn should run");
     let DevToolsCommandResult::Script(result) = result else {
         panic!("expected script result");
@@ -4558,15 +4552,14 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
     assert_eq!(value.value, json!("inside-frame:grid"));
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::DomGeometry(DevToolsDomGeometryCommand {
-            context: context.clone(),
-            reference: DevToolsDomNodeReference::BackendNodeId(renderer_backend_node_id),
-            operation: DevToolsDomGeometryOperation::GetBoxModel,
-        }))
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::DomGeometry(
+            DevToolsDomGeometryCommand {
+                context: context.clone(),
+                reference: DevToolsDomNodeReference::BackendNodeId(renderer_backend_node_id),
+                operation: DevToolsDomGeometryOperation::GetBoxModel,
+            },
+        ))
         .await
-        .into_parts()
-        .0
         .expect("child frame high backend geometry should run");
     let DevToolsCommandResult::DomGeometry(result) = result else {
         panic!("expected child high backend geometry result");
@@ -4581,19 +4574,16 @@ async fn protocol_neutral_resolve_node_targets_child_frame_context() {
     assert!(result.quads.is_empty());
 
     let result = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::ScrollIntoViewIfNeeded(
-            DevToolsScrollIntoViewIfNeededCommand {
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::ScrollIntoViewIfNeeded(DevToolsScrollIntoViewIfNeededCommand {
                 context,
                 reference: Some(DevToolsDomNodeReference::BackendNodeId(
                     renderer_backend_node_id,
                 )),
                 rect: None,
-            },
-        ))
+            }),
+        )
         .await
-        .into_parts()
-        .0
         .expect("child frame high backend scrollIntoViewIfNeeded should run");
     assert!(matches!(result, DevToolsCommandResult::Empty));
 }

@@ -23,8 +23,6 @@ impl ConcurrentParseTimeRuntime {
         let bootstrap_executor = local_executor.clone();
         let bootstrap = Box::pin(async move {
             let (page_vm, triggered_navigation) = {
-                let stream = state.parser_session.stream_handle();
-                let mut stream = stream.borrow_mut();
                 let buffered_document_preloads = &mut state.buffered_document_preloads;
                 let service_worker_preload_context = state.service_worker_preload_context.as_ref();
                 PageVm::new_from_parser_stream_and_run_document_start(
@@ -33,7 +31,7 @@ impl ConcurrentParseTimeRuntime {
                     &loader,
                     &env,
                     runtime_hooks,
-                    &mut stream,
+                    &mut state.parser_session,
                     started,
                     |page_vm| {
                         admit_pending_preloads(
@@ -127,6 +125,86 @@ impl ConcurrentParseTimeRuntime {
         // Keep the current phase-1 parse/runtime hand-off in one explicit runtime object.
         // That makes the control flow easier to evolve than leaving the parser stream, ready
         // queue drain, and DOM resynchronization as three unrelated helper calls in `from_html`.
+        finish_phase_one_creation_on_execution_context(
+            Self::new_parser_owner(loader.clone(), stage, state, page_vm),
+            started,
+        )
+        .await
+    }
+
+    pub(in crate::runtime) async fn finish_creation_from_xml_bootstrap(
+        page_id: PageId,
+        local_executor: JsLocalExecutor,
+        loader: &ResourceRequestClient,
+        env: &PageVmEnvConfig,
+        runtime_hooks: PageVmRuntimeHooks,
+        final_url: Url,
+        document_content_type: String,
+        stage: PageVmInitStage,
+        source: String,
+        started: Instant,
+    ) -> Result<ParseTimePageVmCreationOutcome> {
+        let mut state = ParseTimeDriverState::new_xml(final_url.clone());
+        state
+            .parser_session
+            .set_xml_document_content_type(document_content_type);
+        state
+            .buffered_document_preloads
+            .set_script_fetch_interception_enabled(
+                env.fetch_subresource_interception_enabled
+                    && env.fetch_subresource_interception_resource_type.is_none_or(
+                        |resource_type| {
+                            resource_type.has_same_cdp_fetch_interception_type(
+                                crate::types::SubresourceResourceType::Script,
+                            )
+                        },
+                    ),
+            );
+        state
+            .buffered_document_preloads
+            .set_response_csp_requires_parser_admission(
+                !env.response_content_security_policies.is_empty(),
+            );
+        state.buffered_document_preloads.bind_resource_runtime(
+            runtime_hooks.owner_wake(),
+            runtime_hooks.resource_task_runner(),
+        );
+        let service_worker_preload_context =
+            env.reserved_service_worker_client_id.map(|client_id| {
+                ServiceWorkerScriptPreloadContext::new(
+                    runtime_hooks.browser_context_runtime.clone(),
+                    client_id,
+                    final_url.clone(),
+                    runtime_hooks.owner_wake(),
+                )
+            });
+        state.service_worker_preload_context = service_worker_preload_context.clone();
+        state
+            .buffered_document_preloads
+            .append_to_main_document_scan_with_service_worker_context(
+                &final_url,
+                &source,
+                loader,
+                service_worker_preload_context.as_ref(),
+            );
+        state.parser_session.queue_arrived_chunk(source);
+        state.parser_session.declare_eof();
+        state.input_closed = true;
+        let (state, page_vm, triggered_navigation) =
+            Self::bootstrap_page_vm_from_state_on_fresh_local_task(
+                page_id,
+                local_executor.clone(),
+                loader.clone(),
+                env.clone(),
+                runtime_hooks,
+                state,
+                started,
+                "XML bootstrap local task channel closed",
+            )
+            .await?;
+        if triggered_navigation {
+            return Ok(ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage });
+        }
         finish_phase_one_creation_on_execution_context(
             Self::new_parser_owner(loader.clone(), stage, state, page_vm),
             started,

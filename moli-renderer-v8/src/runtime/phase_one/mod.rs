@@ -1,17 +1,12 @@
 use super::*;
 #[cfg(test)]
 use crate::DocumentBlockingStylesheetSignature;
-use crate::document_runtime::ParserStreamHandle;
 use crate::document_script_scheduler::{
     ParseTimeTurn, ParseTimeTurnTrigger, ParseVisibleReadyTurnDisposition,
     ParseVisibleReadyTurnPhase,
 };
-use crate::live_document_parser::DocumentParserSession;
-#[cfg(test)]
-use crate::live_document_parser::ParserInputBuffer;
+use crate::live_document_parser::{DocumentParserSession, ParserStopReason};
 use crate::page_task_queue::PostParsePageOwnedWork;
-#[cfg(test)]
-use crate::parser::HtmlParser;
 #[cfg(test)]
 use crate::parser::ScriptSource;
 #[cfg(test)]
@@ -81,7 +76,7 @@ use self::parser_turn::{PageTaskTurnResult, ParserDriver};
 use self::parser_turn::{
     ParserStepAdvanceOutcome, ScriptHandoffOutcome, bind_parser_owned_script_handle,
 };
-pub(super) use self::pending_residence::PendingPhaseOneResidence;
+pub(super) use self::pending_residence::{PendingPhaseOneResidence, PendingPhaseOneResumeOutcome};
 pub(super) use self::state::ConcurrentParseTimeRuntime;
 use self::state::{ParseTimeDriverState, ParseTimeOwner, PendingParsingBlockingWait};
 pub use self::streaming::ExternalRawDocumentBodyStream;
@@ -1437,7 +1432,7 @@ document.body.setAttribute('data-error-state', [
 
         assert!(matches!(
             parser_blocking_execution::resolve_main_parser_blocking_classic_after_runtime_gate(
-                harness.state.parser_session.stream_handle(),
+                &mut harness.state.parser_session,
                 &mut harness.page_vm,
                 &mut runner,
                 "stale owner test must not execute",
@@ -1804,6 +1799,29 @@ document.body.setAttribute('data-error-state', [
                 "modulepreload should reserve the native module map entry instead of becoming reusable script text"
             );
         });
+    }
+
+    #[test]
+    fn buffered_module_script_scan_waits_for_native_module_map_admission() {
+        let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
+        let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
+        let mut cache = BufferedDocumentPreloadState::default();
+
+        cache.append_to_main_document_scan(
+            &final_url,
+            r#"<script type="module" src="/entry.mjs"></script>"#,
+            &loader,
+        );
+
+        assert!(
+            cache.entries.is_empty(),
+            "module scripts must not start in the legacy SharedScriptSourceLoad cache"
+        );
+        assert_eq!(
+            preload_request_urls(cache.take_pending_script_preloads_for_test()),
+            vec![Url::parse("https://example.test/entry.mjs").expect("module url")],
+            "PageVm bootstrap must receive the scanned module and register it in the native module map"
+        );
     }
 
     #[test]
@@ -4160,11 +4178,14 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
                 );
             let mut pending_runner =
                 PendingParsingBlockingClassicScriptRunner::new_parser_blocking(Vec::new());
-            let stream = state.parser_session.stream_handle();
+            let parser_insertion_controller =
+                crate::document_runtime::ParserInsertionController::for_session(
+                    &state.parser_session,
+                );
             let mut owner = super::parser_blocking_document_script::MainParserBlockingDocumentScriptOwner::new(
                 &mut page_vm,
                 &mut pending_runner,
-                stream,
+                parser_insertion_controller,
                 "test source failure",
             );
 
@@ -4477,10 +4498,8 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let preload = state
                 .buffered_document_preloads
                 .entries
-                .get(&classic_preload_key(script_url.as_str()))
-                .expect("preload scanner should start the parser-blocking script")
-                .load
-                .clone();
+                .load_for_key(&classic_preload_key(script_url.as_str()))
+                .expect("preload scanner should start the parser-blocking script");
             let preload_outcome = tokio::time::timeout(
                 std::time::Duration::from_secs(2),
                 preload.wait_outcome(),
@@ -4965,10 +4984,8 @@ globalThis.__outerDocumentWriteScriptContinued = true;
 
         let preload = cache
             .entries
-            .get(&classic_preload_key(script_url.as_str()))
-            .expect("main-document scan should create script preload")
-            .load
-            .clone();
+            .load_for_key(&classic_preload_key(script_url.as_str()))
+            .expect("main-document scan should create script preload");
         let outcome =
             tokio::time::timeout(std::time::Duration::from_secs(2), preload.wait_outcome())
                 .await
@@ -5056,10 +5073,8 @@ globalThis.__outerDocumentWriteScriptContinued = true;
         let preload = driver
             .buffered_document_preloads
             .entries
-            .get(&classic_preload_key(script_url.as_str()))
-            .expect("document.write insertion should create script preload")
-            .load
-            .clone();
+            .load_for_key(&classic_preload_key(script_url.as_str()))
+            .expect("document.write insertion should create script preload");
         let outcome =
             tokio::time::timeout(std::time::Duration::from_secs(2), preload.wait_outcome())
                 .await
@@ -5337,16 +5352,17 @@ globalThis.__outerDocumentWriteScriptContinued = true;
             let local_executor = page_vm.local_executor.clone();
             let page_vm_ptr: *mut PageVm = &mut page_vm;
             let scheduler_ptr = &mut state.scheduler as *mut _;
-            let stream = state.parser_session.stream_handle().clone();
+            let parser_session_ptr = &state.parser_session as *const DocumentParserSession;
             let result = super::access::run_named_owner_local_task(
                 local_executor,
                 "phase-one async credit document drain local task channel closed",
                 async move {
                     let page_vm = unsafe { &mut *page_vm_ptr };
                     let scheduler = unsafe { &mut *scheduler_ptr };
+                    let parser_session = unsafe { &*parser_session_ptr };
                     let mut context = DocumentTurnContext {
                         scheduler,
-                        stream,
+                        parser_session,
                     };
                     let result = tokio::time::timeout(
                         std::time::Duration::from_millis(50),

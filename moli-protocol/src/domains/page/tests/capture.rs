@@ -135,10 +135,10 @@ async fn capture_screenshot_uses_pending_renderer_page_command_residence() {
     else {
         panic!("captureScreenshot should complete after one renderer page command");
     };
-    assert!(
-        command_context.take_renderer_output_predecessor().is_none(),
-        "a screenshot turn that publishes no renderer event needs no concrete output fence"
-    );
+    if let Some(predecessor) = command_context.take_renderer_output_predecessor() {
+        ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
+            .await;
+    }
 
     let mut out = Vec::new();
     plan.emit_into(&mut out, cmd.id, cmd.session_id);
@@ -487,38 +487,45 @@ async fn capture_screenshot_uses_emulated_device_metrics() {
 #[tokio::test(flavor = "multi_thread")]
 async fn capture_screenshot_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<title>Background Screenshot</title><main>background</main>",
-        )
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-screenshot-background".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
-    bc.replace_parked_page_session_state(
-        "TID-background".to_owned(),
-        crate::conn::ParkedPageSessionState {
-            emulated_device_metrics: Some(EmulatedDeviceMetrics {
-                width: 320,
-                height: 240,
-                device_scale_factor: 2.0,
-                screen_width: 320,
-                screen_height: 240,
-            }),
-            ..Default::default()
-        },
-    );
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<title>Background Screenshot</title><main>background</main>",
+        Some("SID-background"),
+    )
+    .await;
+    ctx.wait_for_scheduler_message("background screenshot fixture load", |message| {
+        message["method"] == json!("Page.loadEventFired")
+            && message["sessionId"] == json!("SID-background")
+    })
+    .await;
+    ctx.sent.clear();
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .expect("browser context")
+        .replace_parked_page_session_state(
+            "TID-background".to_owned(),
+            crate::conn::ParkedPageSessionState {
+                emulated_device_metrics: Some(EmulatedDeviceMetrics {
+                    width: 320,
+                    height: 240,
+                    device_scale_factor: 2.0,
+                    screen_width: 320,
+                    screen_height: 240,
+                }),
+                ..Default::default()
+            },
+        );
 
     ctx.process_async(json!({
         "id": 114,
@@ -761,18 +768,14 @@ async fn install_active_screenshot_page(
     url: &str,
 ) {
     load_bc_with_session(ctx, browser_context_id, target_id, session_id, url);
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(url)
-        .await
-        .expect("screenshot page should load");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
+    ctx.install_navigation_fixture_for_session_owner(url, Some(session_id))
+        .await;
+    ctx.wait_for_scheduler_message("screenshot fixture load", |message| {
+        message["method"] == json!("Page.loadEventFired")
+            && message["sessionId"] == json!(session_id)
+    })
+    .await;
+    ctx.sent.clear();
 }
 
 async fn set_screenshot_viewport(
@@ -949,17 +952,11 @@ async fn get_layout_metrics_queries_live_renderer_for_loaded_pages() {
 async fn get_layout_metrics_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
     let page_url = "data:text/html,<html style='width:2300px;height:1700px'><body style='margin:0;width:2300px;height:1700px'><div style='width:2300px;height:1700px'></div></body></html>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(page_url)
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -967,6 +964,9 @@ async fn get_layout_metrics_targets_loaded_background_owner_without_promotion() 
     bc.set_target_url("data:text/html,<body>active</body>".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-background"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 121,
@@ -1011,20 +1011,14 @@ async fn get_layout_metrics_targets_loaded_background_owner_without_promotion() 
 async fn get_layout_metrics_targets_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
     let page_url = "data:text/html,<html style='width:2100px;height:1600px'><body style='margin:0;width:2100px;height:1600px'><div style='width:2100px;height:1600px'></div></body></html>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(page_url)
-        .await
-        .expect("inactive page should load");
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
-    inactive
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
+    inactive.set_target_url("about:blank".to_owned());
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 121,

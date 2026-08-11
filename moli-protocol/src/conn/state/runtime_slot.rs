@@ -12,8 +12,9 @@ use crate::{
         log_output_state::{TargetLogOutputQueueState, TargetNetworkLogEntry},
         network::{
             CapturedRequestBody, CapturedResponseBody, NetworkBacklogPreferredRequestId,
-            PendingNetworkBacklogDeliverySnapshot, TargetIoStreamRead, TargetNetworkAgentState,
-            TargetNetworkArtifacts, TargetNetworkBacklogPreparedDelivery,
+            PendingNetworkBacklogDeliverySnapshot, RetiringTargetNetworkAgentState,
+            TargetIoStreamRead, TargetNetworkAgentState, TargetNetworkArtifacts,
+            TargetNetworkBacklogPreparedDelivery,
         },
         observable_output::{
             TargetRuntimeObservableQueueState, TargetRuntimeObservableSourceOutput,
@@ -38,6 +39,14 @@ pub(crate) struct FinishedRendererDocumentNavigation {
     pub(crate) renderer_call_replacements: Option<PreparedRendererCallReplacements>,
 }
 
+#[derive(Debug)]
+struct RetiringRendererDocumentOutput {
+    renderer_page: RendererPageResidenceIdentity,
+    loaded_page_generation: u64,
+    binding: CommittedRendererDocumentBinding,
+    network_agent: RetiringTargetNetworkAgentState,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(in crate::conn::state) struct TargetNetworkRequestCounters {
     pub(in crate::conn::state) next_fetch_request_id: u32,
@@ -51,6 +60,7 @@ pub(crate) struct TargetRuntimeSlot {
     pending_renderer_call_replacements: PreparedRendererCallReplacements,
     javascript_dialog_scope: TargetJavaScriptDialogScope,
     network_agent: TargetNetworkAgentState,
+    retiring_renderer_document_outputs: Vec<RetiringRendererDocumentOutput>,
     log_output_queue: TargetLogOutputQueueState,
     observable_queue: TargetRuntimeObservableQueueState,
     request_counters: TargetNetworkRequestCounters,
@@ -199,9 +209,35 @@ impl TargetRuntimeSlot {
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
         self.javascript_dialog_scope.retire();
         let mut page = page;
+        let retiring_document = self
+            .page_slot
+            .loaded_page()
+            .zip(self.page_slot.renderer_document_lifecycle_binding())
+            .map(|(loaded_page, binding)| {
+                (
+                    RendererPageResidenceIdentity::from_page(loaded_page),
+                    self.page_slot.loaded_page_generation(),
+                    binding.clone(),
+                )
+            });
+        let retiring_document =
+            retiring_document.map(|(renderer_page, loaded_page_generation, binding)| {
+                RetiringRendererDocumentOutput {
+                    renderer_page,
+                    loaded_page_generation,
+                    binding,
+                    network_agent: self.network_agent.rotate_document_for_replacement(),
+                }
+            });
         self.ensure_renderer_attachment_for_replacement(page.as_mut());
         let previous = self.page_slot.replace_loaded_page(page);
-        self.reset_document_output_state();
+        if let Some(retiring_document) = retiring_document {
+            self.retiring_renderer_document_outputs
+                .push(retiring_document);
+            self.reset_replacement_document_output_state();
+        } else {
+            self.reset_document_output_state();
+        }
         self.ingest_owner_page_observable_output_updates();
         previous
     }
@@ -227,6 +263,10 @@ impl TargetRuntimeSlot {
     /// retain response bodies nor rediscover errors from an older Document.
     fn reset_document_output_state(&mut self) {
         self.network_agent.reset_output_queue();
+        self.reset_replacement_document_output_state();
+    }
+
+    fn reset_replacement_document_output_state(&mut self) {
         self.log_output_queue.reset();
         self.observable_queue.reset_output_queue();
     }
@@ -432,11 +472,47 @@ impl TargetRuntimeSlot {
         self.devtools_renderer_channel.current()
     }
 
-    pub(crate) fn routes_renderer_page(
+    pub(crate) fn routes_current_renderer_page_owner(
         &self,
         renderer_page: RendererPageResidenceIdentity,
+        loaded_page_generation: u64,
     ) -> bool {
-        self.page_slot.routes_renderer_page(renderer_page)
+        self.page_slot.loaded_page_generation() == loaded_page_generation
+            && self.page_slot.routes_renderer_page(renderer_page)
+    }
+
+    pub(crate) fn routes_retiring_renderer_page_owner(
+        &self,
+        renderer_page: RendererPageResidenceIdentity,
+        loaded_page_generation: u64,
+    ) -> bool {
+        self.retiring_renderer_document_outputs.iter().any(|entry| {
+            entry.renderer_page == renderer_page
+                && entry.loaded_page_generation == loaded_page_generation
+        })
+    }
+
+    pub(crate) fn finish_renderer_page_output_retirement(
+        &mut self,
+        renderer_page: RendererPageResidenceIdentity,
+    ) {
+        self.retiring_renderer_document_outputs.retain(|entry| {
+            if entry.renderer_page != renderer_page {
+                return true;
+            }
+            let unterminated_requests = entry
+                .network_agent
+                .unterminated_document_bound_request_diagnostics();
+            if !unterminated_requests.is_empty() {
+                tracing::warn!(
+                    ?renderer_page,
+                    renderer_document = ?entry.binding.renderer_document_identity(),
+                    ?unterminated_requests,
+                    "retired renderer Page closed before all subresource terminals reached protocol ingress"
+                );
+            }
+            false
+        });
     }
 
     pub(crate) fn attach_page_renderer_agent_as_current(
@@ -640,6 +716,7 @@ impl TargetRuntimeSlot {
     /// merely because it occupies the same Page residence.
     pub(crate) fn ingest_renderer_network_output_item_and_prepare_live_delivery(
         &mut self,
+        source_renderer_page: Option<RendererPageResidenceIdentity>,
         source_document: RendererDocumentLifecycleIdentity,
         item: &ScriptNetworkOutputItem,
         trigger_session_id: Option<&str>,
@@ -647,20 +724,47 @@ impl TargetRuntimeSlot {
         preferred_request_id: Option<NetworkBacklogPreferredRequestId<'_>>,
         network_request_id_allocator: &mut ConnectionNetworkRequestIdAllocator,
     ) -> Option<TargetNetworkBacklogPreparedDelivery> {
-        let binding = self.page_slot.renderer_document_lifecycle_binding()?;
-        if binding.renderer_document_identity() != source_document {
-            return None;
+        let current_renderer_page = self
+            .page_slot
+            .loaded_page()
+            .map(RendererPageResidenceIdentity::from_page);
+        if let Some(binding) = self.page_slot.renderer_document_lifecycle_binding()
+            && binding.renderer_document_identity() == source_document
+            && source_renderer_page.is_none_or(|page| Some(page) == current_renderer_page)
+        {
+            let loader_id = binding.loader_id.clone();
+            self.log_output_queue
+                .ingest_renderer_network_output_item(item);
+            return Some(
+                self.network_agent
+                    .ingest_renderer_output_item_and_prepare_live_delivery(
+                        item,
+                        &loader_id,
+                        trigger_session_id,
+                        primary_session_id,
+                        preferred_request_id,
+                        network_request_id_allocator,
+                    ),
+            );
         }
-        let loader_id = binding.loader_id.clone();
-        self.log_output_queue
-            .ingest_renderer_network_output_item(item);
+
+        let event_session_ids = self
+            .network_agent
+            .event_session_ids(trigger_session_id, primary_session_id);
+        let retiring = self
+            .retiring_renderer_document_outputs
+            .iter_mut()
+            .find(|entry| {
+                entry.binding.renderer_document_identity() == source_document
+                    && source_renderer_page.is_none_or(|page| entry.renderer_page == page)
+            })?;
         Some(
-            self.network_agent
+            retiring
+                .network_agent
                 .ingest_renderer_output_item_and_prepare_live_delivery(
                     item,
-                    &loader_id,
-                    trigger_session_id,
-                    primary_session_id,
+                    &retiring.binding.loader_id,
+                    event_session_ids,
                     preferred_request_id,
                     network_request_id_allocator,
                 ),
@@ -668,6 +772,10 @@ impl TargetRuntimeSlot {
     }
 
     pub(crate) fn renderer_subresources_are_idle(&self) -> bool {
+        // The armed network-idle lifecycle binding belongs to the current
+        // loader. A predecessor queue is retained only to deliver its final
+        // protocol facts; detached keepalive work from that Document must not
+        // hold the successor loader's network-idle milestone.
         self.network_agent.renderer_subresources_are_idle()
     }
 
@@ -1253,7 +1361,12 @@ impl TargetRuntimeSlot {
 
 #[cfg(test)]
 mod tests {
-    use moli_core::page::RendererDevToolsAgentToken;
+    use moli_core::page::{
+        RendererDevToolsAgentToken, RendererDocumentToken, RendererFrameToken,
+        RendererLifecycleEpoch, ScriptNetworkOutputItem, SubresourceRequestInitiatorType,
+        SubresourceRequestStarted, SubresourceResourceType,
+    };
+    use url::Url;
 
     use super::*;
 
@@ -1280,6 +1393,67 @@ mod tests {
                 .attach_current(RendererDevToolsAgentToken::allocate())
                 .is_ok(),
             "reusing the physical active slot for a new target must allocate a fresh channel"
+        );
+    }
+
+    #[test]
+    fn successor_network_idle_ignores_retained_predecessor_delivery_state() {
+        let page_id = moli_core::PageId::new_for_testing(41);
+        let handle = SubresourceNetworkRequestHandle::new(7);
+        let document_url = Url::parse("https://old.example/").expect("document URL should parse");
+        let request_url =
+            Url::parse("https://old.example/keepalive").expect("request URL should parse");
+        let started = ScriptNetworkOutputItem::SubresourceRequestStarted(Box::new(
+            SubresourceRequestStarted::new(
+                handle,
+                None,
+                document_url,
+                request_url,
+                "POST".to_owned(),
+                Vec::new(),
+                None,
+                SubresourceResourceType::Fetch,
+                SubresourceRequestInitiatorType::Script,
+                None,
+            ),
+        ));
+        let mut predecessor_agent = TargetNetworkAgentState::default();
+        predecessor_agent.ingest_renderer_output_item(&started, "LOADER-old");
+        let retiring_agent = predecessor_agent.rotate_document_for_replacement();
+        assert_eq!(
+            retiring_agent
+                .unterminated_document_bound_request_diagnostics()
+                .len(),
+            1
+        );
+
+        let mut slot = TargetRuntimeSlot::default();
+        slot.retiring_renderer_document_outputs
+            .push(RetiringRendererDocumentOutput {
+                renderer_page: RendererPageResidenceIdentity::new(
+                    moli_core::RendererOwnerLocalHostId::new_for_testing(3),
+                    page_id,
+                ),
+                loaded_page_generation: 1,
+                binding: CommittedRendererDocumentBinding {
+                    renderer_frame: RendererFrameToken { page_id },
+                    renderer_document: RendererDocumentToken {
+                        page_id,
+                        generation: 1,
+                    },
+                    renderer_epoch: RendererLifecycleEpoch(1),
+                    navigation: None,
+                    frame_id: "FRAME-old".to_owned(),
+                    loader_id: "LOADER-old".to_owned(),
+                    page_attachment_id: TargetPageAttachmentId::from_raw_for_test(1),
+                    document_open_replacement_epoch: None,
+                },
+                network_agent: retiring_agent,
+            });
+
+        assert!(
+            slot.renderer_subresources_are_idle(),
+            "predecessor delivery state must not hold the current loader's network-idle milestone"
         );
     }
 }

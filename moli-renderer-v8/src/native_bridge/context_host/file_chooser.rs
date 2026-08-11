@@ -13,6 +13,12 @@ impl JsContextHost {
             };
             activation.backend_node_id = backend_node_id;
             activation.node_id = Some(handle);
+            assert!(
+                self.backend_node_registry
+                    .borrow_mut()
+                    .retain_detached_resolution(backend_node_id),
+                "file chooser backend node id must exist before it is exposed"
+            );
         }
         let published = self.append_live_turn_owner_action(
             crate::runtime::RendererOwnerAction::FileChooser(activation.clone()),

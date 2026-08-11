@@ -284,6 +284,20 @@ impl RendererDomAgentState {
         backend_nodes.borrow().key_for_id(backend_node_id)
     }
 
+    pub(crate) fn retain_detached_backend_node_resolution(&self, backend_node_id: u32) -> bool {
+        let backend_nodes = self.inner.borrow().backend_nodes.clone();
+        backend_nodes
+            .borrow_mut()
+            .retain_detached_resolution(backend_node_id)
+    }
+
+    pub(crate) fn backend_node_resolves_while_detached(&self, backend_node_id: u32) -> bool {
+        let backend_nodes = self.inner.borrow().backend_nodes.clone();
+        backend_nodes
+            .borrow()
+            .resolves_while_detached(backend_node_id)
+    }
+
     pub(crate) fn remove_stale_backend_node_id(
         &self,
         backend_node_id: u32,

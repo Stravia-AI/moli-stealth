@@ -881,6 +881,7 @@ impl TargetInitialEmptyDocumentState {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TargetOwnerState {
     pub(crate) initial_empty_document: Option<TargetInitialEmptyDocumentState>,
+    pub(crate) committed_document_title: Option<String>,
     pub(crate) next_document_start_script_id: u32,
     pub(crate) document_start_scripts: Vec<(String, DocumentStartScript)>,
     pub(crate) isolated_worlds: Vec<IsolatedWorldDefinition>,
@@ -897,6 +898,18 @@ pub(crate) struct TargetOwnerState {
 }
 
 impl TargetOwnerState {
+    pub(crate) fn committed_document_title(&self) -> Option<&str> {
+        self.committed_document_title.as_deref()
+    }
+
+    pub(crate) fn commit_document_title(&mut self, title: String) -> bool {
+        let changed = self.committed_document_title.as_deref().unwrap_or_default() != title;
+        self.committed_document_title = Some(title.clone());
+        self.navigation_history_state
+            .refresh_current_entry_title(title);
+        changed
+    }
+
     pub(crate) fn has_bidi_channel_preload_script(&self) -> bool {
         self.document_start_scripts
             .iter()
@@ -1047,15 +1060,29 @@ impl TargetOwnerState {
         }
     }
 
-    fn ensure_navigation_history_seeded(&mut self, page_snapshot: Option<(String, String)>) {
-        if !self.navigation_history_state.is_empty() {
-            return;
-        }
-        let Some(page_snapshot) = page_snapshot else {
+    fn reconcile_navigation_history_page_snapshot(
+        &mut self,
+        page_snapshot: Option<(String, String)>,
+    ) {
+        let Some(mut page_snapshot) = page_snapshot else {
             return;
         };
+        if let Some(title) = self.committed_document_title() {
+            page_snapshot.1 = title.to_owned();
+        }
+        if !self.navigation_history_state.is_empty() {
+            let (_, title) = page_snapshot;
+            self.navigation_history_state
+                .refresh_current_entry_title(title);
+            return;
+        }
         let entry = self.navigation_history_entry_for_page_snapshot(page_snapshot);
         self.navigation_history_state.seed_entry(entry);
+    }
+
+    pub(crate) fn refresh_current_navigation_history_title(&mut self, title: String) -> bool {
+        self.navigation_history_state
+            .refresh_current_entry_title(title)
     }
 
     pub(crate) fn mark_next_navigation_history_replace_current(&mut self) {
@@ -1081,7 +1108,7 @@ impl TargetOwnerState {
         page_snapshot: Option<(String, String)>,
         entry_id: i32,
     ) -> Option<String> {
-        self.ensure_navigation_history_seeded(page_snapshot);
+        self.reconcile_navigation_history_page_snapshot(page_snapshot);
         self.navigation_history_state.entry_url(entry_id)
     }
 
@@ -1089,7 +1116,7 @@ impl TargetOwnerState {
         &mut self,
         page_snapshot: Option<(String, String)>,
     ) -> (usize, Vec<PageNavigationHistoryEntry>) {
-        self.ensure_navigation_history_seeded(page_snapshot);
+        self.reconcile_navigation_history_page_snapshot(page_snapshot);
         self.navigation_history_state.snapshot()
     }
 
@@ -1097,7 +1124,7 @@ impl TargetOwnerState {
         &mut self,
         page_snapshot: Option<(String, String)>,
     ) -> bool {
-        self.ensure_navigation_history_seeded(page_snapshot);
+        self.reconcile_navigation_history_page_snapshot(page_snapshot);
         self.navigation_history_state.prune_all_but_current()
     }
 
@@ -1105,7 +1132,7 @@ impl TargetOwnerState {
         &mut self,
         page_snapshot: Option<(String, String)>,
     ) -> bool {
-        self.ensure_navigation_history_seeded(page_snapshot);
+        self.reconcile_navigation_history_page_snapshot(page_snapshot);
         self.navigation_history_state.can_prune_all_but_current()
     }
 
@@ -1122,6 +1149,7 @@ impl TargetOwnerState {
     }
 
     pub(crate) fn clear_committed_document_navigation_state(&mut self) {
+        self.committed_document_title = None;
         self.clear_observable_output_state();
         self.clear_loaded_document_context_state();
     }
@@ -1130,10 +1158,13 @@ impl TargetOwnerState {
         &mut self,
         page_snapshot: Option<(String, String)>,
         url: String,
-        title: String,
+        mut title: String,
         history_update: moli_core::page::SameDocumentHistoryUpdate,
     ) {
-        self.ensure_navigation_history_seeded(page_snapshot);
+        self.reconcile_navigation_history_page_snapshot(page_snapshot);
+        if let Some(committed_title) = self.committed_document_title() {
+            title = committed_title.to_owned();
+        }
         let _ =
             self.navigation_history_state
                 .record_same_document_update(url, title, history_update);
@@ -1190,6 +1221,7 @@ impl TargetOwnerState {
 
     pub(crate) fn is_default(&self) -> bool {
         self.initial_empty_document.is_none()
+            && self.committed_document_title.is_none()
             && self.next_document_start_script_id == 0
             && self.document_start_scripts.is_empty()
             && self.isolated_worlds.is_empty()

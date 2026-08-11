@@ -13,8 +13,7 @@ use super::owner_local_store::{
     RendererPageCommandDispatch, RendererPageCreationResolution, RendererPageLocalEntry,
     RendererPageLocalEntryCheckoutError, RendererPageScheduledTurn, RendererPageToken,
     RendererPageTurnAdmission, RendererPageTurnCheckoutError, RendererPendingPageCreation,
-    RendererPreparedDocumentRequest, RendererPreparedDocumentResidence,
-    advance_document_lifecycle_one_page_turn_via_local_task,
+    RendererPreparedDocumentResidence, advance_document_lifecycle_one_page_turn_via_local_task,
     advance_dom_stable_wait_turn_on_entry_via_local_task,
     advance_network_idle_wait_turn_on_entry_via_local_task,
     advance_page_owner_one_turn_via_local_task,
@@ -65,9 +64,7 @@ use super::phase_one::{
     StreamingHtmlPageCreationResult, StreamingNavigationPageCreationResult,
     response_headers_indicate_download,
 };
-use super::post_parse_runtime_inputs::InitialDocumentScriptOwnerInput;
 use super::*;
-use crate::DocumentOwnedBlockingStylesheetDiscoveryInput;
 use crate::RendererTopLevelNavigationDispatch;
 use crate::document_runtime::{
     response_content_security_policies_from_headers,
@@ -207,55 +204,11 @@ pub struct RendererCreateStreamingRawPageRequest {
     pub reserved_service_worker_client: Option<RendererReservedServiceWorkerClient>,
 }
 
-#[derive(Debug, Clone)]
-pub struct RendererCreateDocumentPageRequest {
-    pub root_frame_id: Option<String>,
-    pub main_document_commit: Option<RendererMainDocumentCommit>,
-    pub requested_url: Url,
-    pub navigation_initiator_url: Option<Url>,
-    pub navigation_redirected: bool,
-    pub navigation_redirect_count: usize,
-    pub response_status: u16,
-    pub response_headers: Vec<(String, String)>,
-    pub loader: ResourceRequestClient,
-    pub web_storage: crate::RendererWebStorageHandles,
-    pub document: NativeDom,
-    pub parser_document_handoffs: Vec<crate::parser::ParserDocumentHandoff>,
-    pub parser_blocking_stylesheet_inputs: Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-    pub document_start_scripts: Vec<DocumentStartScript>,
-    pub runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-    pub runtime_inspector_session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
-    pub runtime_isolated_worlds: Vec<crate::protocol_types::RuntimeIsolatedWorldDefinition>,
-    pub permission_overrides: Vec<crate::protocol_types::PermissionOverrideRegistration>,
-    pub extra_http_headers: Vec<(String, String)>,
-    pub locale_override: Option<String>,
-    pub timezone_override: Option<String>,
-    pub script_execution_disabled: bool,
-    pub bypass_content_security_policy: bool,
-    pub emulated_media: crate::protocol_types::EmulatedMediaOverrides,
-    pub idle_override: Option<crate::protocol_types::EmulatedIdleOverride>,
-    pub viewport_surface: Option<crate::protocol_types::ViewportSurface>,
-    pub cpu_throttling_rate: f64,
-    pub network_offline: bool,
-    pub blocked_url_patterns: Vec<String>,
-    pub indexed_db_manager: Option<crate::context_bootstrap::WeakIndexedDbManager>,
-    pub storage_bucket_store: Option<crate::context_bootstrap::SharedStorageBucketStore>,
-    pub fetch_subresource_interception_enabled: bool,
-    pub fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
-    pub layout_policy: LayoutPolicy,
-    pub wpt_extensions_enabled: bool,
-    pub stage: PageVmInitStage,
-}
-
 pub enum RendererOwnerCommand {
     CreateHtmlPage(RendererCreateHtmlPageRequest),
     PrepareStreamingRawDocument {
         token: RendererPageReservationToken,
         request: RendererCreateStreamingRawPageRequest,
-    },
-    PrepareNativeDomDocument {
-        token: RendererPageReservationToken,
-        request: RendererCreateDocumentPageRequest,
     },
     UpdatePreparedRendererDocumentCommitConfiguration {
         token: RendererPageReservationToken,
@@ -329,7 +282,7 @@ enum RenderRuntimeDispatchOutcome {
     Reply(Box<Result<RendererOwnerReply>>),
     PageCreatedAndContinueNavigation {
         page: Box<RendererAttachedPage>,
-        turn: Box<RenderRuntimeTurn>,
+        continuation: RenderRuntimePageCreationContinuation,
     },
     BackgroundComplete(Result<()>),
     PageCreationNavigationFailurePublished {
@@ -346,6 +299,40 @@ enum RenderRuntimeDispatchOutcome {
         turn: Box<RenderRuntimeTurn>,
         wake_token: RendererPageToken,
     },
+    ContinueCommittedDocumentParserAfterPageWake {
+        turn: Box<RenderRuntimeTurn>,
+        wake_token: RendererPageToken,
+    },
+}
+
+enum RenderRuntimePageCreationContinuation {
+    NextTurn(Box<RenderRuntimeTurn>),
+    AfterCommittedDocumentResponse {
+        turn: Box<RenderRuntimeTurn>,
+        wake_token: RendererPageToken,
+    },
+}
+
+impl RenderRuntimePageCreationContinuation {
+    fn next_turn(turn: RenderRuntimeTurn) -> Self {
+        Self::NextTurn(Box::new(turn))
+    }
+
+    fn into_turn(self) -> RenderRuntimeTurn {
+        match self {
+            Self::NextTurn(turn) | Self::AfterCommittedDocumentResponse { turn, .. } => *turn,
+        }
+    }
+
+    fn turn(&self) -> &RenderRuntimeTurn {
+        match self {
+            Self::NextTurn(turn) | Self::AfterCommittedDocumentResponse { turn, .. } => turn,
+        }
+    }
+
+    fn requires_committed_document_response_release(&self) -> bool {
+        matches!(self, Self::AfterCommittedDocumentResponse { .. })
+    }
 }
 
 enum LivePageNavigationFailureDisposition {
@@ -371,6 +358,7 @@ struct RenderRuntimePendingTurn {
     reply_tx: Option<oneshot::Sender<Result<RendererOwnerReply>>>,
     turn: RenderRuntimeTurn,
     allow_command_overtake: bool,
+    command_admission_output_predecessor: Option<RendererOutputFence>,
 }
 
 impl RenderRuntimePendingTurn {
@@ -432,17 +420,58 @@ struct RenderRuntimeParkedTurn {
     wake_token: RendererPageToken,
     ready_at: Option<Instant>,
     condition: RenderRuntimeParkCondition,
+    command_admission_output_predecessor: Option<RendererOutputFence>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RenderRuntimeParkCondition {
     PageActivity,
+    CommittedDocumentParserContinuation { parser_unblocked: bool },
     ReplacementDocumentViewSettlement { expected_vm_creation_id: u64 },
 }
 
 impl RenderRuntimeParkCondition {
     const fn admits_page_activity(self) -> bool {
-        matches!(self, Self::PageActivity)
+        matches!(
+            self,
+            Self::PageActivity
+                | Self::CommittedDocumentParserContinuation {
+                    parser_unblocked: true
+                }
+        )
+    }
+
+    const fn blocks_page_activity_until_parser_unblocked(self) -> bool {
+        matches!(
+            self,
+            Self::CommittedDocumentParserContinuation {
+                parser_unblocked: false
+            }
+        )
+    }
+
+    const fn allows_command_overtake(self) -> bool {
+        !matches!(self, Self::CommittedDocumentParserContinuation { .. })
+    }
+
+    const fn is_unblocked_committed_document_parser_continuation(self) -> bool {
+        matches!(
+            self,
+            Self::CommittedDocumentParserContinuation {
+                parser_unblocked: true
+            }
+        )
+    }
+
+    fn unblock_committed_document_parser(&mut self) -> bool {
+        let Self::CommittedDocumentParserContinuation { parser_unblocked } = self else {
+            return false;
+        };
+        if *parser_unblocked {
+            return false;
+        }
+        *parser_unblocked = true;
+        true
     }
 
     const fn admits_replacement_view_settlement(self, vm_creation_id: u64) -> bool {
@@ -500,18 +529,6 @@ enum RenderRuntimeTurn {
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
         navigation_reply_policy: PageCreationNavigationReplyPolicy,
-    },
-    FinishDocumentCreatePage {
-        requested_url: Url,
-        navigation_initiator_url: Option<Url>,
-        navigation_redirected: bool,
-        navigation_redirect_count: usize,
-        response_status: u16,
-        response_headers: Vec<(String, String)>,
-        page_vm: Box<PageVm>,
-        script_owner_input: Box<InitialDocumentScriptOwnerInput>,
-        stage: PageVmInitStage,
-        started: Instant,
     },
     DrainSharedWorkerServiceLane,
     DrainServiceWorkerServiceLane,
@@ -782,6 +799,30 @@ impl From<Result<RendererOwnerReply>> for RenderRuntimeDispatchOutcome {
     fn from(value: Result<RendererOwnerReply>) -> Self {
         Self::Reply(Box::new(value))
     }
+}
+
+fn renderer_command_admission_page_token(
+    command: &RendererOwnerCommand,
+) -> Option<RendererPageToken> {
+    match command {
+        RendererOwnerCommand::RunAsyncPageCommand { token, .. }
+        | RendererOwnerCommand::RunProtocolPageCommand { token, .. }
+        | RendererOwnerCommand::WaitForNetworkIdle { token, .. }
+        | RendererOwnerCommand::WaitForDomStable { token, .. } => Some(*token),
+        _ => None,
+    }
+}
+
+fn merge_command_admission_output_predecessor(
+    mut result: Result<RendererOwnerReply>,
+    predecessor: Option<RendererOutputFence>,
+) -> Result<RendererOwnerReply> {
+    if let (Some(predecessor), Ok(RendererOwnerReply::AsyncPageCommandRan(output))) =
+        (predecessor, &mut result)
+    {
+        output.merge_renderer_output_predecessor(predecessor);
+    }
+    result
 }
 
 #[derive(Debug)]
@@ -1198,8 +1239,6 @@ impl RendererOwnerHandle {
         };
         entry.set_top_level_navigation_dispatch(top_level_navigation_dispatch);
         self.restore_live_page_entry(token, entry);
-        let admission = pending_phase_one_admission_after_restore_on_bound_owner_local_store(token);
-        self.signal_pending_phase_one_admission(token, admission);
 
         if matches!(
             reply_boundary,
@@ -1207,16 +1246,25 @@ impl RendererOwnerHandle {
         ) {
             self.publish_pending_page_creation_and_continue(
                 pending,
-                RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
-                    token,
-                    follow_count: 0,
-                    completion: LivePagePendingNavigationCompletion::PublishedPageCreation {
-                        navigation_reply_policy,
-                    },
+                RenderRuntimePageCreationContinuation::AfterCommittedDocumentResponse {
+                    turn: Box::new(
+                        RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
+                            token,
+                            follow_count: 0,
+                            completion:
+                                LivePagePendingNavigationCompletion::PublishedPageCreation {
+                                    navigation_reply_policy,
+                                },
+                        },
+                    ),
+                    wake_token: token,
                 },
             )
             .await
         } else {
+            let admission =
+                pending_phase_one_admission_after_restore_on_bound_owner_local_store(token);
+            self.signal_pending_phase_one_admission(token, admission);
             RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                 turn: Box::new(
                     RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
@@ -1293,14 +1341,16 @@ impl RendererOwnerHandle {
             self.restore_live_page_entry(token, entry);
             self.publish_pending_page_creation_and_continue(
                 pending,
-                RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
-                    token,
-                    stage,
-                    follow_count: 0,
-                    completion: LivePagePendingNavigationCompletion::PublishedPageCreation {
-                        navigation_reply_policy,
+                RenderRuntimePageCreationContinuation::next_turn(
+                    RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
+                        token,
+                        stage,
+                        follow_count: 0,
+                        completion: LivePagePendingNavigationCompletion::PublishedPageCreation {
+                            navigation_reply_policy,
+                        },
                     },
-                },
+                ),
             )
             .await
         } else {
@@ -1344,7 +1394,7 @@ impl RendererOwnerHandle {
         if should_resume_lifecycle {
             RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
                 page: Box::new(attached_page),
-                turn: Box::new(
+                continuation: RenderRuntimePageCreationContinuation::next_turn(
                     RenderRuntimeTurn::ResumeLivePageDocumentLifecycleAfterReply {
                         token,
                         document,
@@ -1372,11 +1422,11 @@ impl RendererOwnerHandle {
     async fn publish_pending_page_creation_and_continue(
         &self,
         pending: RendererPendingPageCreation,
-        turn: RenderRuntimeTurn,
+        continuation: RenderRuntimePageCreationContinuation,
     ) -> RenderRuntimeDispatchOutcome {
         let token = pending.token;
         if matches!(
-            &turn,
+            continuation.turn(),
             RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
                 follow_count: 0,
                 ..
@@ -1395,7 +1445,7 @@ impl RendererOwnerHandle {
         {
             Ok(attached_page) => RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
                 page: Box::new(attached_page),
-                turn: Box::new(turn),
+                continuation,
             },
             Err(error) => self.retire_failed_page_creation(token, error).await,
         }
@@ -1986,76 +2036,6 @@ impl RendererOwnerHandle {
         }
     }
 
-    pub fn build_create_document_page_request(
-        &self,
-        requested_url: Url,
-        navigation_initiator_url: Option<Url>,
-        navigation_redirected: bool,
-        navigation_redirect_count: usize,
-        response_status: u16,
-        response_headers: Vec<(String, String)>,
-        loader: &ResourceRequestClient,
-        web_storage: crate::RendererWebStorageHandles,
-        document: NativeDom,
-        parser_document_handoffs: Vec<crate::parser::ParserDocumentHandoff>,
-        parser_blocking_stylesheet_inputs: Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-        document_start_scripts: Vec<DocumentStartScript>,
-        runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
-        runtime_inspector_session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
-        extra_http_headers: Vec<(String, String)>,
-        locale_override: Option<String>,
-        timezone_override: Option<String>,
-        script_execution_disabled: bool,
-        bypass_content_security_policy: bool,
-        cpu_throttling_rate: f64,
-        emulated_media: crate::protocol_types::EmulatedMediaOverrides,
-        viewport_surface: Option<crate::protocol_types::ViewportSurface>,
-        network_offline: bool,
-        blocked_url_patterns: Vec<String>,
-        fetch_subresource_interception_enabled: bool,
-        fetch_subresource_interception_resource_type: Option<crate::SubresourceResourceType>,
-        stage: PageVmInitStage,
-    ) -> RendererCreateDocumentPageRequest {
-        RendererCreateDocumentPageRequest {
-            root_frame_id: None,
-            main_document_commit: None,
-            requested_url,
-            navigation_initiator_url,
-            navigation_redirected,
-            navigation_redirect_count,
-            response_status,
-            response_headers,
-            loader: loader.clone(),
-            web_storage,
-            document,
-            parser_document_handoffs,
-            parser_blocking_stylesheet_inputs,
-            document_start_scripts,
-            runtime_bindings,
-            runtime_inspector_session_restore_snapshots,
-            runtime_isolated_worlds: Vec::new(),
-            permission_overrides: Vec::new(),
-            extra_http_headers,
-            locale_override,
-            timezone_override,
-            script_execution_disabled,
-            bypass_content_security_policy,
-            cpu_throttling_rate,
-            emulated_media,
-            idle_override: None,
-            viewport_surface,
-            network_offline,
-            blocked_url_patterns,
-            indexed_db_manager: None,
-            storage_bucket_store: None,
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
-            layout_policy: self.seal_layout_policy_for_page_creation(),
-            wpt_extensions_enabled: false,
-            stage,
-        }
-    }
-
     pub fn refresh_page_view_on_slot_for_testing(
         &self,
         slot: &RendererPageSlotHandle,
@@ -2184,8 +2164,7 @@ impl RendererOwnerHandle {
     fn release_rejected_command_output_reservation(&self, command: &RendererOwnerCommand) {
         let reservation = match command {
             RendererOwnerCommand::CreateHtmlPage(request) => Some(request.page_reservation),
-            RendererOwnerCommand::PrepareStreamingRawDocument { token, .. }
-            | RendererOwnerCommand::PrepareNativeDomDocument { token, .. } => Some(*token),
+            RendererOwnerCommand::PrepareStreamingRawDocument { token, .. } => Some(*token),
             _ => None,
         };
         if let Some(reservation) = reservation {
@@ -2214,18 +2193,7 @@ impl RendererOwnerHandle {
                 let outcome = self
                     .prepare_renderer_document_on_owner_local_store(
                         token,
-                        RendererPreparedDocumentRequest::StreamingRaw(request),
-                        owner_local_store,
-                    )
-                    .await;
-                self.release_page_output_reservation(token);
-                outcome
-            }
-            RendererOwnerCommand::PrepareNativeDomDocument { token, request } => {
-                let outcome = self
-                    .prepare_renderer_document_on_owner_local_store(
-                        token,
-                        RendererPreparedDocumentRequest::NativeDom(request),
+                        request,
                         owner_local_store,
                     )
                     .await;
@@ -2512,6 +2480,34 @@ impl RendererOwnerHandle {
                         continue;
                     }
                     if let Some(token) = pending_turn.turn.committed_page_view_command_token()
+                        && parked_turns.iter().any(|turn| {
+                            turn.wake_token == token
+                                && matches!(
+                                    turn.condition,
+                                    RenderRuntimeParkCondition::CommittedDocumentParserContinuation {
+                                        ..
+                                    }
+                                )
+                        })
+                    {
+                        // A command observed the committed Page through the
+                        // browser-side response path, but its parser handoff
+                        // has not run yet. Park the command on the same durable
+                        // Page activity edge. The response-release wake puts
+                        // the parser turn and continuation in front of it.
+                        parked_turns.push_back(RenderRuntimeParkedTurn {
+                            reply_tx: pending_turn.reply_tx,
+                            turn: pending_turn.turn,
+                            wake_token: token,
+                            ready_at: None,
+                            condition: RenderRuntimeParkCondition::PageActivity,
+                            command_admission_output_predecessor: pending_turn
+                                .command_admission_output_predecessor
+                                .take(),
+                        });
+                        continue;
+                    }
+                    if let Some(token) = pending_turn.turn.committed_page_view_command_token()
                         && let Some(expected_vm_creation_id) =
                             owner_local_store.page_uncommitted_vm_creation_id(token)
                         && pending_turn
@@ -2534,6 +2530,9 @@ impl RendererOwnerHandle {
                                 RenderRuntimeParkCondition::ReplacementDocumentViewSettlement {
                                     expected_vm_creation_id,
                                 },
+                            command_admission_output_predecessor: pending_turn
+                                .command_admission_output_predecessor
+                                .take(),
                         });
                         continue;
                     }
@@ -2543,7 +2542,10 @@ impl RendererOwnerHandle {
                         .await;
                     match outcome {
                         RenderRuntimeDispatchOutcome::Reply(result) => {
-                            let result = *result;
+                            let result = merge_command_admission_output_predecessor(
+                                *result,
+                                pending_turn.command_admission_output_predecessor.take(),
+                            );
                             if let Some(reply_tx) = pending_turn.reply_tx {
                                 let _ = reply_tx.send(result);
                             } else if let Err(error) = result {
@@ -2553,22 +2555,36 @@ impl RendererOwnerHandle {
                             }
                         }
                         RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
-                            page,
-                            turn,
+                            mut page,
+                            continuation,
                         } => {
                             match pending_turn.reply_tx {
                                 Some(reply_tx) => {
+                                    let token = page.token;
+                                    if continuation.requires_committed_document_response_release() {
+                                        page.defer_committed_document_parser_until_response(
+                                            self.state.page_wake_tx.clone(),
+                                        );
+                                    }
                                     if reply_tx
                                         .send(Ok(RendererOwnerReply::PageCreated(page)))
                                         .is_ok()
                                     {
-                                        pending_turns.push_back(RenderRuntimePendingTurn {
-                                            reply_tx: None,
-                                            turn: *turn,
-                                            allow_command_overtake: true,
-                                        });
+                                        self.enqueue_page_creation_continuation(
+                                            continuation,
+                                            &mut pending_turns,
+                                            &mut parked_turns,
+                                        );
                                     } else {
-                                        self.cancel_pending_turn_on_owner_local_store(*turn);
+                                        // The attached Page never crossed its
+                                        // ownership handoff, so there is no
+                                        // browser-side handle that can retire
+                                        // it later. This differs from a live
+                                        // navigation command observer going
+                                        // away after Page publication: that
+                                        // continuation is detached below and
+                                        // keeps running in the background.
+                                        remove_page_on_bound_owner_local_store(token);
                                     }
                                 }
                                 None => {
@@ -2584,8 +2600,9 @@ impl RendererOwnerHandle {
                                     drop(page);
                                     pending_turns.push_back(RenderRuntimePendingTurn {
                                         reply_tx: None,
-                                        turn: *turn,
+                                        turn: continuation.into_turn(),
                                         allow_command_overtake: true,
+                                        command_admission_output_predecessor: None,
                                     });
                                 }
                             }
@@ -2639,6 +2656,9 @@ impl RendererOwnerHandle {
                                     reply_tx: pending_turn.reply_tx,
                                     turn: *turn,
                                     allow_command_overtake: true,
+                                    command_admission_output_predecessor: pending_turn
+                                        .command_admission_output_predecessor
+                                        .take(),
                                 });
                             }
                         }
@@ -2647,47 +2667,48 @@ impl RendererOwnerHandle {
                             wake_token,
                             ready_at,
                         } => {
-                            if pending_turn
-                                .reply_tx
-                                .as_ref()
-                                .is_some_and(|tx| tx.is_closed())
-                            {
-                                self.detach_navigation_or_cancel_pending_turn(
-                                    *turn,
-                                    &mut pending_turns,
-                                );
-                            } else {
-                                parked_turns.push_back(RenderRuntimeParkedTurn {
-                                    reply_tx: pending_turn.reply_tx,
-                                    turn: *turn,
-                                    wake_token,
-                                    ready_at: Some(ready_at),
-                                    condition: RenderRuntimeParkCondition::PageActivity,
-                                });
-                            }
+                            self.park_or_cancel_turn(
+                                pending_turn.reply_tx,
+                                *turn,
+                                wake_token,
+                                Some(ready_at),
+                                RenderRuntimeParkCondition::PageActivity,
+                                pending_turn.command_admission_output_predecessor.take(),
+                                &mut parked_turns,
+                                &mut pending_turns,
+                            );
                         }
                         RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                             turn,
                             wake_token,
                         } => {
-                            if pending_turn
-                                .reply_tx
-                                .as_ref()
-                                .is_some_and(|tx| tx.is_closed())
-                            {
-                                self.detach_navigation_or_cancel_pending_turn(
-                                    *turn,
-                                    &mut pending_turns,
-                                );
-                            } else {
-                                parked_turns.push_back(RenderRuntimeParkedTurn {
-                                    reply_tx: pending_turn.reply_tx,
-                                    turn: *turn,
-                                    wake_token,
-                                    ready_at: None,
-                                    condition: RenderRuntimeParkCondition::PageActivity,
-                                });
-                            }
+                            self.park_or_cancel_turn(
+                                pending_turn.reply_tx,
+                                *turn,
+                                wake_token,
+                                None,
+                                RenderRuntimeParkCondition::PageActivity,
+                                pending_turn.command_admission_output_predecessor.take(),
+                                &mut parked_turns,
+                                &mut pending_turns,
+                            );
+                        }
+                        RenderRuntimeDispatchOutcome::ContinueCommittedDocumentParserAfterPageWake {
+                            turn,
+                            wake_token,
+                        } => {
+                            self.park_or_cancel_turn(
+                                pending_turn.reply_tx,
+                                *turn,
+                                wake_token,
+                                None,
+                                RenderRuntimeParkCondition::CommittedDocumentParserContinuation {
+                                    parser_unblocked: true,
+                                },
+                                pending_turn.command_admission_output_predecessor.take(),
+                                &mut parked_turns,
+                                &mut pending_turns,
+                            );
                         }
                     }
                     if let Some(token) = completed_page_turn_token {
@@ -2829,6 +2850,9 @@ impl RendererOwnerHandle {
             RendererOwnerCommand::RemovePage { token } => Some(*token),
             _ => None,
         };
+        let mut command_admission_output_predecessor =
+            renderer_command_admission_page_token(&envelope.command)
+                .and_then(renderer_output_fence_for_tail_on_bound_owner_local_store);
         let command_future = Box::pin(
             self.dispatch_command_inline_on_owner_local_store(envelope.command, owner_local_store),
         );
@@ -2842,21 +2866,34 @@ impl RendererOwnerHandle {
         }
         match outcome {
             RenderRuntimeDispatchOutcome::Reply(result) => {
-                let _ = envelope.reply_tx.send(*result);
+                let result = merge_command_admission_output_predecessor(
+                    *result,
+                    command_admission_output_predecessor.take(),
+                );
+                let _ = envelope.reply_tx.send(result);
             }
-            RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation { page, turn } => {
+            RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
+                mut page,
+                continuation,
+            } => {
+                let token = page.token;
+                if continuation.requires_committed_document_response_release() {
+                    page.defer_committed_document_parser_until_response(
+                        self.state.page_wake_tx.clone(),
+                    );
+                }
                 if envelope
                     .reply_tx
                     .send(Ok(RendererOwnerReply::PageCreated(page)))
                     .is_ok()
                 {
-                    pending_turns.push_back(RenderRuntimePendingTurn {
-                        reply_tx: None,
-                        turn: *turn,
-                        allow_command_overtake: true,
-                    });
+                    self.enqueue_page_creation_continuation(
+                        continuation,
+                        pending_turns,
+                        parked_turns,
+                    );
                 } else {
-                    self.cancel_pending_turn_on_owner_local_store(*turn);
+                    remove_page_on_bound_owner_local_store(token);
                 }
             }
             RenderRuntimeDispatchOutcome::BackgroundComplete(result) => {
@@ -2890,6 +2927,8 @@ impl RendererOwnerHandle {
                         // by the command cannot inherit an already-pending
                         // command and then yield to a second one.
                         allow_command_overtake: false,
+                        command_admission_output_predecessor: command_admission_output_predecessor
+                            .take(),
                     });
                 }
             }
@@ -2898,30 +2937,45 @@ impl RendererOwnerHandle {
                 wake_token,
                 ready_at,
             } => {
-                if envelope.reply_tx.is_closed() {
-                    self.detach_navigation_or_cancel_pending_turn(*turn, pending_turns);
-                } else {
-                    parked_turns.push_back(RenderRuntimeParkedTurn {
-                        reply_tx: Some(envelope.reply_tx),
-                        turn: *turn,
-                        wake_token,
-                        ready_at: Some(ready_at),
-                        condition: RenderRuntimeParkCondition::PageActivity,
-                    });
-                }
+                self.park_or_cancel_turn(
+                    Some(envelope.reply_tx),
+                    *turn,
+                    wake_token,
+                    Some(ready_at),
+                    RenderRuntimeParkCondition::PageActivity,
+                    command_admission_output_predecessor.take(),
+                    parked_turns,
+                    pending_turns,
+                );
             }
             RenderRuntimeDispatchOutcome::ContinueAfterPageWake { turn, wake_token } => {
-                if envelope.reply_tx.is_closed() {
-                    self.detach_navigation_or_cancel_pending_turn(*turn, pending_turns);
-                } else {
-                    parked_turns.push_back(RenderRuntimeParkedTurn {
-                        reply_tx: Some(envelope.reply_tx),
-                        turn: *turn,
-                        wake_token,
-                        ready_at: None,
-                        condition: RenderRuntimeParkCondition::PageActivity,
-                    });
-                }
+                self.park_or_cancel_turn(
+                    Some(envelope.reply_tx),
+                    *turn,
+                    wake_token,
+                    None,
+                    RenderRuntimeParkCondition::PageActivity,
+                    command_admission_output_predecessor.take(),
+                    parked_turns,
+                    pending_turns,
+                );
+            }
+            RenderRuntimeDispatchOutcome::ContinueCommittedDocumentParserAfterPageWake {
+                turn,
+                wake_token,
+            } => {
+                self.park_or_cancel_turn(
+                    Some(envelope.reply_tx),
+                    *turn,
+                    wake_token,
+                    None,
+                    RenderRuntimeParkCondition::CommittedDocumentParserContinuation {
+                        parser_unblocked: true,
+                    },
+                    command_admission_output_predecessor.take(),
+                    parked_turns,
+                    pending_turns,
+                );
             }
         }
         if let Some(token) = removed_page_token {
@@ -2931,13 +2985,20 @@ impl RendererOwnerHandle {
 
     fn cancel_dispatch_outcome_for_context_shutdown(&self, outcome: RenderRuntimeDispatchOutcome) {
         match outcome {
-            RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation { page, turn } => {
+            RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
+                page,
+                continuation,
+            } => {
                 drop(page);
-                self.cancel_pending_turn_on_owner_local_store(*turn);
+                self.cancel_pending_turn_on_owner_local_store(continuation.into_turn());
             }
             RenderRuntimeDispatchOutcome::ContinueNextTurn(turn)
             | RenderRuntimeDispatchOutcome::ContinueAfterPageWakeOrDeadline { turn, .. }
-            | RenderRuntimeDispatchOutcome::ContinueAfterPageWake { turn, .. } => {
+            | RenderRuntimeDispatchOutcome::ContinueAfterPageWake { turn, .. }
+            | RenderRuntimeDispatchOutcome::ContinueCommittedDocumentParserAfterPageWake {
+                turn,
+                ..
+            } => {
                 self.cancel_pending_turn_on_owner_local_store(*turn);
             }
             RenderRuntimeDispatchOutcome::Reply(_)
@@ -3070,6 +3131,64 @@ impl RendererOwnerHandle {
         next_owner_maintenance_deadline_on_bound_owner_local_store()
     }
 
+    fn enqueue_page_creation_continuation(
+        &self,
+        continuation: RenderRuntimePageCreationContinuation,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+        parked_turns: &mut VecDeque<RenderRuntimeParkedTurn>,
+    ) {
+        match continuation {
+            RenderRuntimePageCreationContinuation::NextTurn(turn) => {
+                pending_turns.push_back(RenderRuntimePendingTurn {
+                    reply_tx: None,
+                    turn: *turn,
+                    allow_command_overtake: true,
+                    command_admission_output_predecessor: None,
+                });
+            }
+            RenderRuntimePageCreationContinuation::AfterCommittedDocumentResponse {
+                turn,
+                wake_token,
+            } => {
+                parked_turns.push_back(RenderRuntimeParkedTurn {
+                    reply_tx: None,
+                    turn: *turn,
+                    wake_token,
+                    ready_at: None,
+                    condition: RenderRuntimeParkCondition::CommittedDocumentParserContinuation {
+                        parser_unblocked: false,
+                    },
+                    command_admission_output_predecessor: None,
+                });
+            }
+        }
+    }
+
+    fn park_or_cancel_turn(
+        &self,
+        reply_tx: Option<oneshot::Sender<Result<RendererOwnerReply>>>,
+        turn: RenderRuntimeTurn,
+        wake_token: RendererPageToken,
+        ready_at: Option<Instant>,
+        condition: RenderRuntimeParkCondition,
+        command_admission_output_predecessor: Option<RendererOutputFence>,
+        parked_turns: &mut VecDeque<RenderRuntimeParkedTurn>,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+    ) {
+        if reply_tx.as_ref().is_some_and(|tx| tx.is_closed()) {
+            self.detach_navigation_or_cancel_pending_turn(turn, pending_turns);
+            return;
+        }
+        parked_turns.push_back(RenderRuntimeParkedTurn {
+            reply_tx,
+            turn,
+            wake_token,
+            ready_at,
+            condition,
+            command_admission_output_predecessor,
+        });
+    }
+
     /// Admit one detached page turn. Producer wakes remain in the
     /// owner channel while a page turn is pending, so every legacy wake gets a
     /// bounded adapter turn without being merged into an inferred continuation.
@@ -3078,8 +3197,31 @@ impl RendererOwnerHandle {
         &self,
         token: RendererPageToken,
         trigger: PageTurnTrigger,
+        allow_command_overtake: bool,
         pending_turns: &mut RenderRuntimePendingTurnQueue,
     ) {
+        if let Some(turn) = self.admit_page_turn(token, trigger, allow_command_overtake) {
+            pending_turns.push_back(turn);
+        }
+    }
+
+    fn enqueue_page_turn_before_commands(
+        &self,
+        token: RendererPageToken,
+        trigger: PageTurnTrigger,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+    ) {
+        if let Some(turn) = self.admit_page_turn(token, trigger, false) {
+            pending_turns.push_front(turn);
+        }
+    }
+
+    fn admit_page_turn(
+        &self,
+        token: RendererPageToken,
+        trigger: PageTurnTrigger,
+        allow_command_overtake: bool,
+    ) -> Option<RenderRuntimePendingTurn> {
         match schedule_page_turn_on_bound_owner_local_store(token, trigger) {
             RendererPageTurnAdmission::EnqueueOwnerTurn => {}
             RendererPageTurnAdmission::AlreadyScheduled => {
@@ -3094,14 +3236,15 @@ impl RendererOwnerHandle {
                     ?trigger,
                     "discarded stale page turn trigger"
                 );
-                return;
+                return None;
             }
         }
-        pending_turns.push_back(RenderRuntimePendingTurn {
+        Some(RenderRuntimePendingTurn {
             reply_tx: None,
             turn: RenderRuntimeTurn::RunPageTurn { token },
-            allow_command_overtake: true,
-        });
+            allow_command_overtake,
+            command_admission_output_predecessor: None,
+        })
     }
 
     fn handle_page_owner_wake(
@@ -3112,6 +3255,26 @@ impl RendererOwnerHandle {
     ) {
         match wake {
             RendererOwnerWake::Page { token, source } => {
+                if parked_turns.iter().any(|turn| {
+                    turn.wake_token == token
+                        && turn.condition.blocks_page_activity_until_parser_unblocked()
+                }) {
+                    // The source payload remains resident. Its edge wake is
+                    // reconciled after the commit caller observes the Page,
+                    // so parser work cannot outrun the DocumentCommit reply.
+                    return;
+                }
+                let allow_command_overtake = !parked_turns.iter().any(|turn| {
+                    turn.wake_token == token
+                        && turn.condition.admits_page_activity()
+                        && !turn.condition.allows_command_overtake()
+                });
+                let committed_document_parser_handoff = self
+                    .enqueue_unblocked_committed_document_parser_continuation_before_commands(
+                        token,
+                        parked_turns,
+                        pending_turns,
+                    );
                 if matches!(source, RendererOwnerWakeSource::ParseTimeDocumentScriptWork) {
                     // Parse-time script payloads live inside the parked
                     // continuation. Admitting a generic Page turn for this
@@ -3141,10 +3304,29 @@ impl RendererOwnerHandle {
                     // lifecycle observers capture that settled boundary
                     // before the next lifecycle turn can advance into load.
                     self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
-                    self.enqueue_page_turn(token, PageTurnTrigger::producer(source), pending_turns);
+                    self.enqueue_page_turn(
+                        token,
+                        PageTurnTrigger::producer(source),
+                        allow_command_overtake,
+                        pending_turns,
+                    );
                     return;
                 }
-                self.enqueue_page_turn(token, PageTurnTrigger::producer(source), pending_turns);
+                if committed_document_parser_handoff {
+                    self.enqueue_page_turn_before_commands(
+                        token,
+                        PageTurnTrigger::producer(source),
+                        pending_turns,
+                    );
+                    self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
+                    return;
+                }
+                self.enqueue_page_turn(
+                    token,
+                    PageTurnTrigger::producer(source),
+                    allow_command_overtake,
+                    pending_turns,
+                );
                 self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
             }
             RendererOwnerWake::PostResponseDocumentLifecycle { token, document } => {
@@ -3167,6 +3349,7 @@ impl RendererOwnerHandle {
                             reply_tx: None,
                             turn: RenderRuntimeTurn::RunPageTurn { token },
                             allow_command_overtake: true,
+                            command_admission_output_predecessor: None,
                         });
                     }
                     RendererPageTurnAdmission::AlreadyScheduled => {
@@ -3178,6 +3361,25 @@ impl RendererOwnerHandle {
                     }
                 }
                 self.enqueue_parked_turns_for_wake(token, parked_turns, pending_turns);
+            }
+            RendererOwnerWake::CommittedDocumentParserUnblocked { token } => {
+                let mut unblocked = false;
+                for parked_turn in parked_turns
+                    .iter_mut()
+                    .filter(|turn| turn.wake_token == token)
+                {
+                    unblocked |= parked_turn.condition.unblock_committed_document_parser();
+                }
+                if !unblocked {
+                    tracing::trace!(
+                        page_id = token.page_id.as_u64(),
+                        "discarded stale committed-Document parser release"
+                    );
+                    return;
+                }
+                let admission =
+                    pending_phase_one_admission_after_restore_on_bound_owner_local_store(token);
+                self.signal_pending_phase_one_admission(token, admission);
             }
             RendererOwnerWake::RuntimeInspectorResponsePublication { token, publication } => {
                 let renderer_output_predecessor =
@@ -3204,6 +3406,7 @@ impl RendererOwnerHandle {
                         handoff,
                     },
                     allow_command_overtake: false,
+                    command_admission_output_predecessor: None,
                 });
             }
             RendererOwnerWake::ReplacementDocumentViewSettled {
@@ -3331,6 +3534,7 @@ impl RendererOwnerHandle {
             reply_tx: None,
             turn: RenderRuntimeTurn::DrainSharedWorkerServiceLane,
             allow_command_overtake: false,
+            command_admission_output_predecessor: None,
         });
     }
 
@@ -3342,6 +3546,7 @@ impl RendererOwnerHandle {
             reply_tx: None,
             turn: RenderRuntimeTurn::DrainServiceWorkerServiceLane,
             allow_command_overtake: false,
+            command_admission_output_predecessor: None,
         });
     }
 
@@ -3381,19 +3586,65 @@ impl RendererOwnerHandle {
         parked_turn: RenderRuntimeParkedTurn,
         pending_turns: &mut RenderRuntimePendingTurnQueue,
     ) {
+        if let Some(turn) = self.pending_turn_from_parked(parked_turn, pending_turns) {
+            pending_turns.push_back(turn);
+        }
+    }
+
+    fn pending_turn_from_parked(
+        &self,
+        parked_turn: RenderRuntimeParkedTurn,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+    ) -> Option<RenderRuntimePendingTurn> {
         if parked_turn
             .reply_tx
             .as_ref()
             .is_some_and(|tx| tx.is_closed())
         {
             self.detach_navigation_or_cancel_pending_turn(parked_turn.turn, pending_turns);
+            None
         } else {
-            pending_turns.push_back(RenderRuntimePendingTurn {
+            let allow_command_overtake = parked_turn.condition.allows_command_overtake();
+            Some(RenderRuntimePendingTurn {
                 reply_tx: parked_turn.reply_tx,
                 turn: parked_turn.turn,
-                allow_command_overtake: true,
-            });
+                allow_command_overtake,
+                command_admission_output_predecessor: parked_turn
+                    .command_admission_output_predecessor,
+            })
         }
+    }
+
+    fn enqueue_unblocked_committed_document_parser_continuation_before_commands(
+        &self,
+        token: RendererPageToken,
+        parked_turns: &mut VecDeque<RenderRuntimeParkedTurn>,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+    ) -> bool {
+        let mut index = 0;
+        let mut admitted = 0usize;
+        while index < parked_turns.len() {
+            let matches = parked_turns[index].wake_token == token
+                && parked_turns[index]
+                    .condition
+                    .is_unblocked_committed_document_parser_continuation();
+            if matches {
+                let parked_turn = parked_turns
+                    .remove(index)
+                    .expect("matching committed-Document continuation must remain parked");
+                if let Some(turn) = self.pending_turn_from_parked(parked_turn, pending_turns) {
+                    pending_turns.push_front(turn);
+                    admitted += 1;
+                }
+            } else {
+                index += 1;
+            }
+        }
+        debug_assert!(
+            admitted <= 1,
+            "one Page cannot retain multiple committed-Document parser continuations"
+        );
+        admitted != 0
     }
 
     fn enqueue_due_parked_turns(
@@ -3893,7 +4144,7 @@ impl RendererOwnerHandle {
         let tokens = snapshot_due_page_task_tokens_on_bound_owner_local_store(due_at_or_before);
         let admitted = !tokens.is_empty();
         for token in tokens {
-            self.enqueue_page_turn(token, PageTurnTrigger::Deadline, pending_turns);
+            self.enqueue_page_turn(token, PageTurnTrigger::Deadline, true, pending_turns);
         }
         admitted
     }
@@ -3914,6 +4165,7 @@ impl RendererOwnerHandle {
             reply_tx: None,
             turn: RenderRuntimeTurn::RunOwnerMaintenance { task },
             allow_command_overtake: true,
+            command_admission_output_predecessor: None,
         });
         true
     }
@@ -3949,6 +4201,7 @@ impl RendererOwnerHandle {
                 reply_tx: None,
                 turn,
                 allow_command_overtake: true,
+                command_admission_output_predecessor: None,
             });
         } else {
             self.cancel_pending_turn_on_owner_local_store(turn);
@@ -3992,14 +4245,8 @@ impl RendererOwnerHandle {
                 }
             }
             RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
-                token,
-                completion,
-                ..
+                token, ..
             } => {
-                debug_assert!(
-                    completion.retires_page_on_navigation_failure(),
-                    "detached phase-one navigation must continue as background work"
-                );
                 if let Some(mut entry) = self.checkout_live_page_entry_for_cancellation(
                     token,
                     "phase-one location navigation",
@@ -4013,19 +4260,10 @@ impl RendererOwnerHandle {
                     self.restore_live_page_entry(token, entry);
                 }
             }
-            RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
-                token,
-                completion,
-                ..
-            } => {
-                debug_assert!(
-                    completion.retires_page_on_navigation_failure(),
-                    "live navigation with a detached command observer should continue as background work"
-                );
+            RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle { token, .. } => {
                 remove_page_on_bound_owner_local_store(token);
             }
             RenderRuntimeTurn::FinishHtmlCreatePage { .. }
-            | RenderRuntimeTurn::FinishDocumentCreatePage { .. }
             | RenderRuntimeTurn::DrainSharedWorkerServiceLane
             | RenderRuntimeTurn::DrainServiceWorkerServiceLane
             | RenderRuntimeTurn::RunPageTurn { .. }
@@ -4098,14 +4336,14 @@ impl RendererOwnerHandle {
             "renderer command records must settle into the concrete Page stream before completion"
         );
         // Chromium flushes every notification already queued by the current
-        // DevTools command before exposing its response.  The concrete batch
+        // DevTools command before exposing its response. The concrete batch
         // settled here is the exact Moli equivalent of that queue
-        // prefix.  Do not require a Runtime-only causal marker: DOM commands
+        // prefix. Do not require a Runtime-only causal marker: DOM commands
         // and WebAPI side effects (for example mutation, CSP and Log records)
         // are produced during this owner turn but do not all carry a
         // `RendererRuntimeCommandCausalIdentity`.
         //
-        // This remains a narrow fence.  It names this command turn's one
+        // This remains a narrow fence. It names this command turn's one
         // publication, not a Page-wide watermark, and a later independent
         // task necessarily settles into a later stream sequence.
         let renderer_output_cursor = concrete_output
@@ -5593,16 +5831,18 @@ impl RendererOwnerHandle {
                             self.signal_internal_document_lifecycle_turn(token);
                             self.publish_pending_page_creation_and_continue(
                                 pending,
-                                RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
-                                    token,
-                                    document,
-                                    target_stage,
-                                    follow_count: 0,
-                                    completion:
-                                        LivePagePendingNavigationCompletion::PublishedPageCreation {
-                                            navigation_reply_policy,
-                                        },
-                                },
+                                RenderRuntimePageCreationContinuation::next_turn(
+                                    RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
+                                        token,
+                                        document,
+                                        target_stage,
+                                        follow_count: 0,
+                                        completion:
+                                            LivePagePendingNavigationCompletion::PublishedPageCreation {
+                                                navigation_reply_policy,
+                                            },
+                                    },
+                                ),
                             )
                             .await
                         } else {
@@ -5633,16 +5873,18 @@ impl RendererOwnerHandle {
                             let token = pending.token;
                             self.publish_pending_page_creation_and_continue(
                                 pending,
-                                RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
-                                    token,
-                                    document,
-                                    target_stage,
-                                    follow_count: 0,
-                                    completion:
-                                        LivePagePendingNavigationCompletion::PublishedPageCreation {
-                                            navigation_reply_policy,
-                                        },
-                                },
+                                RenderRuntimePageCreationContinuation::next_turn(
+                                    RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
+                                        token,
+                                        document,
+                                        target_stage,
+                                        follow_count: 0,
+                                        completion:
+                                            LivePagePendingNavigationCompletion::PublishedPageCreation {
+                                                navigation_reply_policy,
+                                            },
+                                    },
+                                ),
                             )
                             .await
                         } else {
@@ -5674,15 +5916,17 @@ impl RendererOwnerHandle {
                                 let token = pending.token;
                                 self.publish_pending_page_creation_and_continue(
                                     pending,
-                                    RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
-                                        token,
-                                        stage,
-                                        follow_count: 0,
-                                        completion:
-                                            LivePagePendingNavigationCompletion::PublishedPageCreation {
-                                                navigation_reply_policy,
-                                            },
-                                    },
+                                    RenderRuntimePageCreationContinuation::next_turn(
+                                        RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
+                                            token,
+                                            stage,
+                                            follow_count: 0,
+                                            completion:
+                                                LivePagePendingNavigationCompletion::PublishedPageCreation {
+                                                    navigation_reply_policy,
+                                                },
+                                        },
+                                    ),
                                 )
                                 .await
                             }
@@ -5727,69 +5971,6 @@ impl RendererOwnerHandle {
                 )
                 .await
             }
-            RenderRuntimeTurn::FinishDocumentCreatePage {
-                requested_url,
-                navigation_initiator_url,
-                navigation_redirected,
-                navigation_redirect_count,
-                response_status,
-                response_headers,
-                page_vm,
-                script_owner_input,
-                stage,
-                started,
-            } => {
-                let (page_vm, page_tasks) = match self
-                    .run_owner_lane_local_task(async move {
-                        let mut page_vm = *page_vm;
-                        if page_vm.vm().has_pending_location_navigation() {
-                            return Ok((page_vm, None));
-                        }
-                        let page_tasks = (*script_owner_input).finalize(&mut page_vm).await;
-                        Ok((page_vm, Some(page_tasks)))
-                    })
-                    .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(error) => return Err(error).into(),
-                };
-                let Some(page_tasks) = page_tasks else {
-                    return self
-                        .continue_page_creation_with_pending_navigation(
-                            requested_url,
-                            navigation_initiator_url,
-                            navigation_redirected,
-                            navigation_redirect_count,
-                            response_status,
-                            response_headers,
-                            page_vm,
-                            stage,
-                            crate::RendererPageCreationReplyBoundary::LifecycleTarget,
-                            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-                            PageCreationNavigationReplyPolicy::FollowBeforeReply,
-                        )
-                        .await;
-                };
-                RenderRuntimeDispatchOutcome::ContinueNextTurn(Box::new(
-                    RenderRuntimeTurn::FinishHtmlCreatePage {
-                        requested_url,
-                        navigation_initiator_url,
-                        navigation_redirected,
-                        navigation_redirect_count,
-                        response_status,
-                        response_headers,
-                        page_vm: Box::new(page_vm),
-                        page_tasks,
-                        stage,
-                        started,
-                        reply_boundary: crate::RendererPageCreationReplyBoundary::LifecycleTarget,
-                        top_level_navigation_dispatch:
-                            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-                        navigation_reply_policy:
-                            PageCreationNavigationReplyPolicy::FollowBeforeReply,
-                    },
-                ))
-            }
             RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
                 token,
                 follow_count,
@@ -5813,16 +5994,24 @@ impl RendererOwnerHandle {
                             pending_phase_one_admission_after_restore_on_bound_owner_local_store(
                                 wake_token,
                             );
+                        let continues_committed_document_parser_prefix = completion
+                            .continues_committed_document_parser_prefix()
+                            && admission == PhaseOneResidenceAdmission::ReadyPageTurn;
                         self.signal_pending_phase_one_admission(wake_token, admission);
-                        RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
-                            turn: Box::new(
-                                RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
-                                    token,
-                                    follow_count,
-                                    completion,
-                                },
-                            ),
-                            wake_token,
+                        let turn = Box::new(
+                            RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
+                                token,
+                                follow_count,
+                                completion,
+                            },
+                        );
+                        if continues_committed_document_parser_prefix {
+                            RenderRuntimeDispatchOutcome::ContinueCommittedDocumentParserAfterPageWake {
+                                turn,
+                                wake_token,
+                            }
+                        } else {
+                            RenderRuntimeDispatchOutcome::ContinueAfterPageWake { turn, wake_token }
                         }
                     }
                     Ok(LivePagePendingNavigationPhaseOneAdvance::TriggeredNavigation { stage }) => {
@@ -6295,7 +6484,7 @@ impl RendererOwnerHandle {
     async fn prepare_renderer_document_on_owner_local_store(
         &self,
         token: RendererPageReservationToken,
-        request: RendererPreparedDocumentRequest,
+        request: RendererCreateStreamingRawPageRequest,
         owner_local_store: &mut RendererOwnerLocalStore,
     ) -> RenderRuntimeDispatchOutcome {
         if token.local_host_id() != self.state.owner_local_host_id {
@@ -6354,30 +6543,15 @@ impl RendererOwnerHandle {
             isolate_bootstrap,
             isolate_reservation,
         } = residence;
-        match request {
-            RendererPreparedDocumentRequest::StreamingRaw(request) => {
-                self.create_page_reply_from_streaming_raw_request_on_owner_local_store(
-                    page_id,
-                    request,
-                    isolate_allocator,
-                    isolate_bootstrap,
-                    isolate_reservation,
-                    owner_local_store,
-                )
-                .await
-            }
-            RendererPreparedDocumentRequest::NativeDom(request) => {
-                self.create_page_reply_from_prepared_document_request_on_owner_local_store(
-                    page_id,
-                    request,
-                    isolate_allocator,
-                    isolate_bootstrap,
-                    isolate_reservation,
-                    owner_local_store,
-                )
-                .await
-            }
-        }
+        self.create_page_reply_from_streaming_raw_request_on_owner_local_store(
+            page_id,
+            request,
+            isolate_allocator,
+            isolate_bootstrap,
+            isolate_reservation,
+            owner_local_store,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6533,7 +6707,7 @@ impl RendererOwnerHandle {
                 };
                 let bootstrap = Box::pin(async move {
                     let started = Instant::now();
-                    ConcurrentParseTimeRuntime::finish_creation_from_external_raw_document_response(
+                    ConcurrentParseTimeRuntime::create_external_raw_document_response_at_reply_boundary(
                         page_id,
                         local_executor,
                         &loader,
@@ -6545,6 +6719,7 @@ impl RendererOwnerHandle {
                         response_status,
                         response_headers,
                         raw_body,
+                        reply_boundary,
                     )
                     .await
                 });
@@ -6626,210 +6801,6 @@ impl RendererOwnerHandle {
                         },
                     )),
                 }
-            }
-            Err(error) => Err(error).into(),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    async fn create_page_reply_from_prepared_document_request_on_owner_local_store(
-        &self,
-        page_id: PageId,
-        request: RendererCreateDocumentPageRequest,
-        allocator: RendererDocumentIsolateAllocator,
-        bootstrap: RendererDocumentIsolateBootstrap,
-        reservation: RendererDocumentIsolateReservation,
-        _owner_local_store: &mut RendererOwnerLocalStore,
-    ) -> RenderRuntimeDispatchOutcome {
-        let RendererCreateDocumentPageRequest {
-            root_frame_id,
-            main_document_commit,
-            requested_url,
-            navigation_initiator_url,
-            navigation_redirected,
-            navigation_redirect_count,
-            response_status,
-            response_headers,
-            loader,
-            web_storage,
-            document,
-            parser_document_handoffs,
-            parser_blocking_stylesheet_inputs,
-            document_start_scripts,
-            runtime_bindings,
-            runtime_inspector_session_restore_snapshots,
-            runtime_isolated_worlds,
-            permission_overrides,
-            extra_http_headers,
-            locale_override,
-            timezone_override,
-            script_execution_disabled,
-            bypass_content_security_policy,
-            cpu_throttling_rate,
-            emulated_media,
-            idle_override,
-            viewport_surface,
-            network_offline,
-            blocked_url_patterns,
-            indexed_db_manager,
-            storage_bucket_store,
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
-            layout_policy,
-            wpt_extensions_enabled,
-            stage,
-        } = request;
-        let loader = loader_for_new_page(
-            &loader,
-            &extra_http_headers,
-            network_offline,
-            &blocked_url_patterns,
-        );
-        let document_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            crate::content_security_policy::content_security_policy_headers(&response_headers)
-        };
-        let response_content_security_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_policies_from_headers(&response_headers)
-        };
-        let response_content_security_report_only_policies = if bypass_content_security_policy {
-            Vec::new()
-        } else {
-            response_content_security_report_only_policies_from_headers(&response_headers)
-        };
-        let response_referrer_policy = response_referrer_policy_from_headers(&response_headers);
-        let reporting_endpoint_base_url = document
-            .final_url()
-            .cloned()
-            .unwrap_or_else(|| requested_url.clone());
-        let content_security_reporting_endpoints = if bypass_content_security_policy {
-            Default::default()
-        } else {
-            crate::content_security_policy::content_security_policy_reporting_endpoints_from_headers(
-                &response_headers,
-                &reporting_endpoint_base_url,
-            )
-        };
-        let cross_origin_embedder_policy =
-            crate::cross_origin_isolation::cross_origin_embedder_policy_from_headers(
-                &response_headers,
-            );
-        let document_isolation_policy =
-            crate::cross_origin_isolation::document_isolation_policy_from_headers(
-                &response_headers,
-            );
-        let cross_origin_isolated =
-            crate::cross_origin_isolation::response_headers_enable_cross_origin_isolation(
-                &reporting_endpoint_base_url,
-                &response_headers,
-            );
-        let document_default_language =
-            crate::document_language::document_default_language_from_headers(&response_headers);
-        let document_last_modified =
-            crate::document_last_modified::document_last_modified_from_headers(&response_headers);
-        let owner = self.clone();
-        match self
-            .run_owner_lane_local_task(async move {
-                let owner_local_context = owner.owner_local_context()?;
-                let owner_wake = owner.owner_wake_sender_for_page(&owner_local_context, page_id);
-                let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
-                    owner_wake,
-                    owner.state.browser_context_runtime.clone(),
-                )
-                .with_renderer_document_isolate_allocator(allocator)
-                .with_prepared_renderer_document_isolate(bootstrap, reservation)?;
-                debug!(stage = ?stage, "starting page VM creation from document");
-                let started = Instant::now();
-                let env = PageVmEnvConfig {
-                    web_storage,
-                    document_start_scripts,
-                    runtime_bindings,
-                    runtime_inspector_session_restore_snapshots,
-                    runtime_isolated_worlds,
-                    permission_overrides,
-                    extra_http_headers,
-                    document_content_security_policies,
-                    response_content_security_policies,
-                    response_content_security_report_only_policies,
-                    response_referrer_policy,
-                    content_security_reporting_endpoints,
-                    cross_origin_embedder_policy,
-                    document_isolation_policy,
-                    cross_origin_isolated,
-                    document_default_language,
-                    document_last_modified,
-                    locale_override,
-                    timezone_override,
-                    script_execution_disabled,
-                    bypass_content_security_policy,
-                    cpu_throttling_rate,
-                    emulated_media,
-                    idle_override,
-                    viewport_surface,
-                    network_offline,
-                    blocked_url_patterns,
-                    indexed_db_manager,
-                    storage_bucket_store,
-                    fetch_subresource_interception_enabled,
-                    fetch_subresource_interception_resource_type,
-                    layout_policy,
-                    wpt_extensions_enabled,
-                    root_frame_id,
-                    main_document_commit,
-                    top_level_storage_key: None,
-                    navigation_bootstrap_entry: None,
-                    reserved_service_worker_client_id: None,
-                };
-                let mut page_vm = PageVm::new(
-                    page_id,
-                    owner.state.local_executor.clone(),
-                    &loader,
-                    &env,
-                    runtime_hooks,
-                    crate::dom::native::DomHost::from_dom(document),
-                    started,
-                )?;
-                let script_owner_input = InitialDocumentScriptOwnerInput::accept(
-                    &mut page_vm,
-                    &loader,
-                    parser_document_handoffs,
-                    parser_blocking_stylesheet_inputs,
-                )?;
-                page_vm.set_target_stage(stage);
-                page_vm.install_stored_runtime_isolated_worlds_on_named_owner_lane()?;
-                page_vm.install_stored_runtime_bindings_on_named_owner_lane()?;
-                let document_start_scripts = page_vm.document_start_scripts.clone();
-                let _ = page_vm.run_document_start_scripts_on_named_owner_lane(
-                    &document_start_scripts,
-                    |_| {},
-                )?;
-                debug!(
-                    phase = "document start scripts",
-                    elapsed_ms = started.elapsed().as_millis(),
-                    "document start scripts finished"
-                );
-                Ok((page_vm, script_owner_input, started))
-            })
-            .await
-        {
-            Ok((page_vm, script_owner_input, started)) => {
-                RenderRuntimeDispatchOutcome::ContinueNextTurn(Box::new(
-                    RenderRuntimeTurn::FinishDocumentCreatePage {
-                        requested_url,
-                        navigation_initiator_url,
-                        navigation_redirected,
-                        navigation_redirect_count,
-                        response_status,
-                        response_headers,
-                        page_vm: Box::new(page_vm),
-                        script_owner_input: Box::new(script_owner_input),
-                        stage,
-                        started,
-                    },
-                ))
             }
             Err(error) => Err(error).into(),
         }
@@ -6948,6 +6919,7 @@ mod tests {
             reply_tx: None,
             turn: RenderRuntimeTurn::RunOwnerMaintenance { task },
             allow_command_overtake: true,
+            command_admission_output_predecessor: None,
         });
 
         assert!(pending.has_owner_maintenance_turn());

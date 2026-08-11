@@ -1,7 +1,7 @@
 use crate::devtools_runtime::{
     AutomationEvent, DevToolsFetchRequestId, DevToolsFrameId, DevToolsLoaderId,
-    DevToolsNetworkInterceptId, DevToolsRequestId, DevToolsTargetId, NetworkRedirectResponseEvent,
-    NetworkRequestEvent,
+    DevToolsNetworkInterceptId, DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId,
+    NetworkRedirectResponseEvent, NetworkRequestEvent,
 };
 use moli_cookie_jar::StoredCookieSetReport;
 use moli_core::page::{
@@ -267,7 +267,7 @@ pub(crate) fn emit_request_will_be_sent(
     method: &str,
     request_body: Option<&str>,
     request_headers: &[(String, String)],
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
     request_initiator_type: SubresourceRequestInitiatorType,
     redirect_response: Option<(
         &Url,
@@ -322,7 +322,7 @@ pub(crate) fn emit_request_will_be_sent(
             ),
             redirect_has_extra_info,
             request_cookie_report: cookie_access_report.cloned(),
-            resource_type: Some(resource_type.to_owned()),
+            resource_type: Some(resource_type),
             timestamp: Some(timestamp),
             wall_time: Some(timestamp),
             status: None,
@@ -359,7 +359,7 @@ pub(crate) fn fetch_subresource_initial_request_network_events(
     session_id: Option<&str>,
     output: &TargetSubresourceFetchPauseNetworkOutput,
 ) -> Vec<BackgroundProtocolEvent> {
-    let resource_type = output.resource_type().as_cdp_type();
+    let resource_type = output.resource_type().into();
     let event = NetworkRequestEvent {
         target_id: DevToolsTargetId::from(output.frame_id()),
         frame_id: Some(DevToolsFrameId::from(output.frame_id())),
@@ -382,7 +382,7 @@ pub(crate) fn fetch_subresource_initial_request_network_events(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: output.request_cookie_report().cloned(),
-        resource_type: Some(resource_type.to_owned()),
+        resource_type: Some(resource_type),
         timestamp: Some(output.timestamp()),
         wall_time: Some(output.timestamp()),
         status: None,
@@ -467,7 +467,7 @@ pub(crate) fn emit_response_received(
     from_cache: bool,
     negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
     network_extra_info_available: bool,
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
     blocked_intercepts: &[DevToolsNetworkInterceptId],
     fetch_request_id: Option<&str>,
 ) {
@@ -510,7 +510,7 @@ pub(crate) fn emit_response_received_without_extra_info_event(
     from_cache: bool,
     negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
     network_extra_info_available: bool,
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
 ) {
     emit_response_received_with_extra_info_delivery(
         out,
@@ -553,7 +553,7 @@ fn emit_response_received_with_extra_info_delivery(
     negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
     network_extra_info_available: bool,
     emit_extra_info_event: bool,
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
     blocked_intercepts: &[DevToolsNetworkInterceptId],
     fetch_request_id: Option<&str>,
 ) {
@@ -578,7 +578,7 @@ fn emit_response_received_with_extra_info_delivery(
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some(resource_type.to_owned()),
+            resource_type: Some(resource_type),
             timestamp: Some(timestamp),
             wall_time: None,
             status: Some(status),
@@ -620,7 +620,7 @@ pub(crate) fn emit_body_finished(
     loader_id: &str,
     timestamp: f64,
     encoded_data_length: usize,
-    resource_type: Option<&str>,
+    resource_type: DevToolsNetworkResourceType,
 ) {
     emit_data_received(
         out,
@@ -650,7 +650,7 @@ pub(crate) fn emit_loading_finished(
     loader_id: &str,
     timestamp: f64,
     encoded_data_length: usize,
-    resource_type: Option<&str>,
+    resource_type: DevToolsNetworkResourceType,
 ) {
     emit_cdp_network_automation_event(
         out,
@@ -669,7 +669,7 @@ pub(crate) fn emit_loading_finished(
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: resource_type.map(str::to_owned),
+            resource_type: Some(resource_type),
             timestamp: Some(timestamp),
             wall_time: None,
             status: None,
@@ -757,7 +757,7 @@ pub(crate) fn emit_loading_failed(
     loader_id: &str,
     timestamp: f64,
     error_text: &str,
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
 ) {
     emit_cdp_network_automation_event(
         out,
@@ -776,7 +776,7 @@ pub(crate) fn emit_loading_failed(
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some(resource_type.to_owned()),
+            resource_type: Some(resource_type),
             timestamp: Some(timestamp),
             wall_time: None,
             status: None,
@@ -828,7 +828,10 @@ pub(crate) fn emit_cdp_network_automation_event(
                     "requestId": network_event.request_id.as_str(),
                     "loaderId": network_event.loader_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
                     "timestamp": network_event.timestamp.unwrap_or_default(),
-                    "type": network_event.resource_type.as_deref().unwrap_or_default(),
+                    "type": network_event
+                        .resource_type
+                        .map(DevToolsNetworkResourceType::as_cdp_type)
+                        .unwrap_or_default(),
                     "frameId": network_event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
                     "response": {
                         "url": network_event.url.as_str(),
@@ -877,7 +880,10 @@ pub(crate) fn emit_cdp_network_automation_event(
             let params = json!({
                 "requestId": network_event.request_id.as_str(),
                 "timestamp": network_event.timestamp.unwrap_or_default(),
-                "type": network_event.resource_type.as_deref().unwrap_or_default(),
+                "type": network_event
+                    .resource_type
+                    .map(DevToolsNetworkResourceType::as_cdp_type)
+                    .unwrap_or_default(),
                 "errorText": network_event.error_text.as_deref().unwrap_or_default(),
                 "canceled": network_event.loading_failed_canceled,
             });
@@ -941,7 +947,10 @@ fn emit_network_before_request_sent(
                 .unwrap_or("other")
         },
         "redirectHasExtraInfo": network_event.redirect_has_extra_info,
-        "type": network_event.resource_type.as_deref().unwrap_or_default(),
+        "type": network_event
+            .resource_type
+            .map(DevToolsNetworkResourceType::as_cdp_type)
+            .unwrap_or_default(),
         "frameId": network_event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         "hasUserGesture": false,
     });
@@ -973,7 +982,10 @@ pub fn fetch_auth_required_params(network_event: &NetworkRequestEvent) -> Value 
         "requestId": network_event.request_id.as_str(),
         "frameId": network_event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         "request": fetch_request_payload(network_event),
-        "resourceType": network_event.resource_type.as_deref().unwrap_or_default(),
+        "resourceType": network_event
+            .resource_type
+            .map(DevToolsNetworkResourceType::as_cdp_type)
+            .unwrap_or_default(),
         "authChallenge": fetch_auth_challenge_payload(network_event),
     })
 }
@@ -983,7 +995,10 @@ pub fn fetch_request_paused_params(network_event: &NetworkRequestEvent) -> Value
         "requestId": network_event.request_id.as_str(),
         "frameId": network_event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or(""),
         "request": fetch_request_payload(network_event),
-        "resourceType": network_event.resource_type.as_deref().unwrap_or_default(),
+        "resourceType": network_event
+            .resource_type
+            .map(DevToolsNetworkResourceType::as_cdp_type)
+            .unwrap_or_default(),
     });
     if let Some(network_id) = network_event.network_id.as_ref() {
         params["networkId"] = json!(network_id.as_str());
@@ -1280,7 +1295,7 @@ mod tests {
 
     use crate::devtools_runtime::{
         AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsNetworkInterceptId,
-        DevToolsRequestId, DevToolsTargetId, NetworkRequestEvent,
+        DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId, NetworkRequestEvent,
     };
     use crate::domains::network::TargetSubresourceFetchPauseNetworkOutput;
 
@@ -1382,7 +1397,7 @@ mod tests {
                 if event.request_id.as_str() == "REQ-42"
                     && event.method.as_deref() == Some("POST")
                     && event.request_body.as_deref() == Some("body")
-                    && event.resource_type.as_deref() == Some("Fetch")
+                    && event.resource_type == Some(DevToolsNetworkResourceType::Fetch)
                     && event.fetch_request_id.is_none()
         ));
     }
@@ -1410,7 +1425,7 @@ mod tests {
             false,
             Some(moli_fetch::NegotiatedHttpVersion::Http2),
             false,
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
             &[],
             None,
         );
@@ -1463,7 +1478,7 @@ mod tests {
             true,
             None,
             false,
-            "Script",
+            DevToolsNetworkResourceType::Script,
             &[],
             None,
         );
@@ -1509,7 +1524,7 @@ mod tests {
             "GET",
             None,
             &[],
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
             SubresourceRequestInitiatorType::Script,
             Some((
                 &redirect_url,
@@ -1572,7 +1587,7 @@ mod tests {
             false,
             None,
             false,
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
             &[],
             None,
         );
@@ -1604,7 +1619,7 @@ mod tests {
             false,
             None,
             false,
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
             &[DevToolsNetworkInterceptId::from("intercept-response")],
             Some("FETCH-42"),
         );
@@ -1653,7 +1668,7 @@ mod tests {
             "LOADER-1",
             44.0,
             256,
-            None,
+            DevToolsNetworkResourceType::Xhr,
         );
         assert!(events[0].clone().into_parts().1.is_none());
         assert!(matches!(
@@ -1661,6 +1676,7 @@ mod tests {
             Some(AutomationEvent::NetworkResponseCompleted(network_event))
                 if network_event.request_id == DevToolsRequestId::from("REQ-42")
                     && network_event.encoded_data_length == Some(256)
+                    && network_event.resource_type == Some(DevToolsNetworkResourceType::Xhr)
         ));
         let out = protocol_messages_from_background_events(events);
 
@@ -1700,7 +1716,7 @@ mod tests {
             "LOADER-1",
             44.0,
             0,
-            None,
+            DevToolsNetworkResourceType::Xhr,
         );
         let out = protocol_messages_from_background_events(events);
 
@@ -1721,7 +1737,7 @@ mod tests {
             "LOADER-1",
             45.0,
             "net::ERR_FAILED",
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
         );
         assert!(matches!(
             events[0].clone().into_parts().1,
@@ -1758,7 +1774,7 @@ mod tests {
             "LOADER-1",
             45.0,
             NET_ERR_ABORTED_ERROR_TEXT,
-            "Fetch",
+            DevToolsNetworkResourceType::Fetch,
         );
         let out = protocol_messages_from_background_events(events);
 
@@ -1789,7 +1805,7 @@ mod tests {
                 redirect_response: None,
                 redirect_has_extra_info: false,
                 request_cookie_report: None,
-                resource_type: Some("Fetch".to_owned()),
+                resource_type: Some(DevToolsNetworkResourceType::Fetch),
                 timestamp: Some(45.0),
                 wall_time: None,
                 status: None,

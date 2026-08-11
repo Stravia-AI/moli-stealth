@@ -98,7 +98,7 @@ impl ConcurrentParseTimeRuntime {
                     .has_parser_blocking_script();
                 let mut context = DocumentTurnContext {
                     scheduler: &mut state.scheduler,
-                    stream: state.parser_session.stream_handle(),
+                    parser_session: &state.parser_session,
                 };
                 let wait_for_wake = parsing_blocking_wait.waits_for_legacy_document_processing();
 

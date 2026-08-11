@@ -8,7 +8,8 @@ use super::streaming::{
 use super::streaming_input::{StreamingDocumentInputEvent, StreamingDocumentInputSource};
 use super::{
     ConcurrentParseTimeRuntime, PageVm, ParseTimePageVmCreationOutcome,
-    ParseTimePageVmStreamingProgress, PendingPhaseOneResidence, ServiceWorkerScriptPreloadContext,
+    ParseTimePageVmStreamingProgress, PendingPhaseOneResidence, PendingPhaseOneResumeOutcome,
+    ServiceWorkerScriptPreloadContext,
 };
 
 /// Exact, parkable continuation for an open main-Document response.
@@ -23,6 +24,7 @@ pub(in crate::runtime) struct PendingStreamingPhaseOneContinuation {
     decoder: HtmlDocumentStreamingDecoder,
     service_worker_preload_context: Option<ServiceWorkerScriptPreloadContext>,
     started: Instant,
+    deferred_main_resource_failure: Option<anyhow::Error>,
 }
 
 impl PendingStreamingPhaseOneContinuation {
@@ -48,6 +50,7 @@ impl PendingStreamingPhaseOneContinuation {
             decoder,
             service_worker_preload_context,
             started,
+            deferred_main_resource_failure: None,
         })
     }
 
@@ -67,41 +70,78 @@ impl PendingStreamingPhaseOneContinuation {
         self.input.has_ready_input()
     }
 
-    pub(in crate::runtime) async fn resume(self) -> Result<ParseTimePageVmCreationOutcome> {
+    pub(in crate::runtime) async fn resume(self) -> Result<PendingPhaseOneResumeOutcome> {
         let Self {
             runtime,
             mut input,
             mut decoder,
             service_worker_preload_context,
             started,
+            mut deferred_main_resource_failure,
         } = self;
         let mut runtime = *runtime;
         let mut input_finished = false;
-        let mut observed_input = false;
-        while let Some(event) = input.try_next()? {
-            observed_input = true;
-            match event {
-                StreamingDocumentInputEvent::Chunks(chunks) => {
-                    for chunk in chunks {
-                        enqueue_streaming_raw_chunk(
-                            &mut runtime,
-                            &mut decoder,
-                            chunk,
-                            service_worker_preload_context.as_ref(),
-                        );
+        let mut observed_input = deferred_main_resource_failure.is_some();
+        if deferred_main_resource_failure.is_none() {
+            while let Some(event) = input.try_next()? {
+                observed_input = true;
+                match event {
+                    StreamingDocumentInputEvent::Chunks(chunks) => {
+                        for chunk in chunks {
+                            enqueue_streaming_raw_chunk(
+                                &mut runtime,
+                                &mut decoder,
+                                chunk,
+                                service_worker_preload_context.as_ref(),
+                            );
+                        }
                     }
-                }
-                StreamingDocumentInputEvent::Finished(result) => {
-                    result.map_err(|message| anyhow!(message))?;
-                    if let Some(tail) = decoder.finish() {
-                        runtime.enqueue_streaming_html_chunk(tail);
+                    StreamingDocumentInputEvent::Finished(result) => {
+                        if let Err(message) = result {
+                            deferred_main_resource_failure = Some(anyhow!(message));
+                            break;
+                        }
+                        if let Some(tail) = decoder.finish() {
+                            runtime.enqueue_streaming_html_chunk(tail);
+                        }
+                        sync_document_character_set_from_decoder(&mut runtime, &decoder);
+                        runtime.close_streaming_html_input();
+                        input_finished = true;
+                        break;
                     }
-                    sync_document_character_set_from_decoder(&mut runtime, &decoder);
-                    runtime.close_streaming_html_input();
-                    input_finished = true;
-                    break;
                 }
             }
+        }
+
+        // A body terminal is sequenced after every chunk produced before it.
+        // If those bytes are resident but their Networking continuation has
+        // not yet been selected by the stable Page scheduler, keep the failed
+        // terminal with this exact parser residence. Applying it now would
+        // destroy parser state before the already-delivered partial DOM can be
+        // materialized. This is an ordering edge, not a retry: the existing
+        // parser task owns the only wake and admission needed to resume us.
+        let selected_main_parser_continuation = runtime
+            .page_vm()
+            .vm()
+            .document_runtime
+            .has_main_parser_continuation_admission();
+        if deferred_main_resource_failure.is_some()
+            && !selected_main_parser_continuation
+            && !runtime.state.parser_session.input_is_empty()
+        {
+            let continuation = Self {
+                runtime: Box::new(runtime),
+                input,
+                decoder,
+                service_worker_preload_context,
+                started,
+                deferred_main_resource_failure,
+            };
+            return Ok(PendingPhaseOneResumeOutcome::progress(
+                ParseTimePageVmCreationOutcome::PendingPhaseOne(
+                    PendingPhaseOneResidence::open_streaming(Box::new(continuation)),
+                ),
+            ));
         }
 
         // Body input and parse-time script terminals wake the same parked
@@ -117,7 +157,36 @@ impl PendingStreamingPhaseOneContinuation {
         let progress = runtime
             .continue_streaming_creation_on_execution_context(started)
             .await?;
-        match progress {
+        if let Some(error) = deferred_main_resource_failure {
+            return Ok(match progress {
+                ParseTimePageVmStreamingProgress::NeedMoreInput(runtime)
+                | ParseTimePageVmStreamingProgress::PendingPageTask(runtime) => {
+                    PendingPhaseOneResumeOutcome::main_resource_load_failed(*runtime, error)
+                }
+                // Script in the bytes delivered before the failed terminal may
+                // replace the Document or start a navigation. The replacement
+                // owns the Page; do not apply the old loader's terminal to it.
+                ParseTimePageVmStreamingProgress::TriggeredNavigation { page_vm, stage } => {
+                    PendingPhaseOneResumeOutcome::progress(
+                        ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage },
+                    )
+                }
+                ParseTimePageVmStreamingProgress::ContinuePhaseTwo {
+                    page_vm,
+                    page_tasks,
+                    stage,
+                    started,
+                } => PendingPhaseOneResumeOutcome::progress(
+                    ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
+                        page_vm,
+                        page_tasks,
+                        stage,
+                        started,
+                    },
+                ),
+            });
+        }
+        let outcome = match progress {
             ParseTimePageVmStreamingProgress::NeedMoreInput(runtime) if !input_finished => {
                 let continuation = Self {
                     runtime,
@@ -125,10 +194,11 @@ impl PendingStreamingPhaseOneContinuation {
                     decoder,
                     service_worker_preload_context,
                     started,
+                    deferred_main_resource_failure: None,
                 };
-                Ok(ParseTimePageVmCreationOutcome::PendingPhaseOne(
+                ParseTimePageVmCreationOutcome::PendingPhaseOne(
                     PendingPhaseOneResidence::open_streaming(Box::new(continuation)),
-                ))
+                )
             }
             ParseTimePageVmStreamingProgress::PendingPageTask(runtime) if !input_finished => {
                 let continuation = Self {
@@ -137,40 +207,44 @@ impl PendingStreamingPhaseOneContinuation {
                     decoder,
                     service_worker_preload_context,
                     started,
+                    deferred_main_resource_failure: None,
                 };
-                Ok(ParseTimePageVmCreationOutcome::PendingPhaseOne(
+                ParseTimePageVmCreationOutcome::PendingPhaseOne(
                     PendingPhaseOneResidence::open_streaming(Box::new(continuation)),
-                ))
+                )
             }
             ParseTimePageVmStreamingProgress::NeedMoreInput(runtime)
                 if runtime.has_pending_parser_blocking_source_load() =>
             {
-                Ok(ParseTimePageVmCreationOutcome::PendingPhaseOne(
+                ParseTimePageVmCreationOutcome::PendingPhaseOne(
                     PendingPhaseOneResidence::parser_blocking_source_load(runtime, started),
-                ))
+                )
             }
             ParseTimePageVmStreamingProgress::PendingPageTask(runtime) => {
-                Ok(ParseTimePageVmCreationOutcome::PendingPhaseOne(
+                ParseTimePageVmCreationOutcome::PendingPhaseOne(
                     PendingPhaseOneResidence::closed_input_page_work(runtime, started),
-                ))
+                )
             }
-            ParseTimePageVmStreamingProgress::NeedMoreInput(_) => Err(anyhow!(
-                "closed streaming html input should not stall waiting for more input"
-            )),
+            ParseTimePageVmStreamingProgress::NeedMoreInput(_) => {
+                return Err(anyhow!(
+                    "closed streaming html input should not stall waiting for more input"
+                ));
+            }
             ParseTimePageVmStreamingProgress::TriggeredNavigation { page_vm, stage } => {
-                Ok(ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage })
+                ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage }
             }
             ParseTimePageVmStreamingProgress::ContinuePhaseTwo {
                 page_vm,
                 page_tasks,
                 stage,
                 started,
-            } => Ok(ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
+            } => ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
                 page_vm,
                 page_tasks,
                 stage,
                 started,
-            }),
-        }
+            },
+        };
+        Ok(PendingPhaseOneResumeOutcome::progress(outcome))
     }
 }

@@ -5,11 +5,13 @@ use super::super::state::{
 };
 use super::super::{BackgroundTarget, BrowserContext, TargetRuntimeSlot};
 use crate::conn::TargetPageResidenceIdentity;
-use moli_core::page::Page;
+use moli_core::page::{Page, RendererPageCommandPostResponseContinuation};
 use url::Url;
 
 pub(crate) struct LoadedNavigationPageCommit {
     pub(crate) replaced_page_owner: Option<TargetPageResidenceIdentity>,
+    pub(crate) committed_document_post_response_continuation:
+        Option<RendererPageCommandPostResponseContinuation>,
 }
 
 pub(crate) enum LoadedNavigationRendererAttachmentCommit {
@@ -171,6 +173,17 @@ impl BrowserContext {
     }
 
     fn record_loaded_page_navigation_history(&mut self, page: &Page, history_url: &Url) {
+        let previous_title = self
+            .active_target
+            .owner_state
+            .committed_document_title()
+            .map(str::to_owned)
+            .or_else(|| self.loaded_page().map(Page::document_title));
+        if let Some(previous_title) = previous_title {
+            self.active_target
+                .owner_state
+                .refresh_current_navigation_history_title(previous_title);
+        }
         self.active_target
             .owner_state
             .record_loaded_page_navigation_history((
@@ -235,6 +248,8 @@ impl BrowserContext {
         renderer_attachment_commit: LoadedNavigationRendererAttachmentCommit,
         history_url: &Url,
     ) -> anyhow::Result<LoadedNavigationPageCommit> {
+        let committed_document_post_response_continuation =
+            page.take_committed_document_post_response_continuation();
         let previous_page_owner = TargetPageResidenceIdentity::new(
             self.id.clone(),
             self.active_target_id_owned(),
@@ -273,6 +288,7 @@ impl BrowserContext {
                 .runtime_slot
                 .install_pending_renderer_call_replacements(replacements);
         }
+        let committed_document_title = page.document_title();
         self.record_loaded_page_navigation_history(&page, history_url);
         let previous = self.replace_loaded_page(Some(page));
         self.reset_subresource_network_cursor();
@@ -280,6 +296,9 @@ impl BrowserContext {
         self.active_target
             .owner_state
             .clear_committed_document_navigation_state();
+        self.active_target
+            .owner_state
+            .commit_document_title(committed_document_title);
         self.clear_active_target_runtime_remote_object_tracking();
         let replaced_page_owner = previous.as_ref().map(|_| previous_page_owner);
         if let Some(page) = previous {
@@ -287,6 +306,7 @@ impl BrowserContext {
         }
         Ok(LoadedNavigationPageCommit {
             replaced_page_owner,
+            committed_document_post_response_continuation,
         })
     }
 

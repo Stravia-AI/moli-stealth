@@ -566,6 +566,7 @@ pub(in crate::native_bridge) fn select_options_getter_function<'s>(
         query: None,
         include_root: false,
         tag_name_html_document: None,
+        resolution_cache: Default::default(),
     };
     let collection = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
     rv.set(collection.into());
@@ -590,6 +591,7 @@ pub(in crate::native_bridge) fn select_selected_options_getter_function<'s>(
         query: None,
         include_root: false,
         tag_name_html_document: None,
+        resolution_cache: Default::default(),
     };
     let collection = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
     rv.set(collection.into());

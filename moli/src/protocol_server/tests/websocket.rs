@@ -1957,6 +1957,155 @@ async fn websocket_cdp_navigation_suspension_matches_chromium_io_command_routing
 }
 
 #[tokio::test]
+async fn websocket_cdp_replacement_retires_hanging_precommit_navigation() {
+    const REPLACEMENT_TIMEOUT: Duration = Duration::from_secs(3);
+
+    let hanging_request_received = Arc::new(tokio::sync::Notify::new());
+    let request_received_for_route = Arc::clone(&hanging_request_received);
+    let fixture_app = Router::new().route(
+        "/hang",
+        get(move || {
+            let request_received_for_route = Arc::clone(&request_received_for_route);
+            async move {
+                request_received_for_route.notify_one();
+                std::future::pending::<()>().await;
+                (
+                    [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                    "unreachable",
+                )
+            }
+        }),
+    );
+    let (fixture_addr, fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "hanging-precommit-replacement");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let session = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+    for (id, method, params) in [
+        (4_u64, "Page.enable", json!({})),
+        (
+            5_u64,
+            "Page.setLifecycleEventsEnabled",
+            json!({ "enabled": true }),
+        ),
+    ] {
+        let _ = send_cdp_command(&mut socket, id, method, Some(&session.session_id), params).await;
+    }
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 6_u64,
+                "method": "Page.navigate",
+                "sessionId": session.session_id,
+                "params": { "url": format!("http://{fixture_addr}/hang") }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send hanging Page.navigate");
+    timeout(REPLACEMENT_TIMEOUT, hanging_request_received.notified())
+        .await
+        .expect("hanging main-document request should reach the fixture");
+
+    let marker = "moli-hanging-precommit-replacement";
+    let replacement_url =
+        format!("data:text/html,<title>{marker}</title><main id='marker'>{marker}</main>");
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 7_u64,
+                "method": "Page.navigate",
+                "sessionId": session.session_id,
+                "params": { "url": replacement_url }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send replacement Page.navigate");
+
+    let mut replacement_messages = timeout(REPLACEMENT_TIMEOUT, async {
+        let mut messages = Vec::new();
+        let mut replacement_loader_id = None::<String>;
+        loop {
+            let message = recv_ws_json(&mut socket).await;
+            if message["id"] == json!(7_u64) {
+                assert!(
+                    message.get("error").is_none(),
+                    "replacement Page.navigate must succeed: {message:#?}"
+                );
+                replacement_loader_id = message["result"]["loaderId"].as_str().map(str::to_owned);
+            }
+            let reached_replacement_load = replacement_loader_id.as_deref().is_some_and(|loader| {
+                message["sessionId"].as_str() == Some(session.session_id.as_str())
+                    && message["method"] == json!("Page.lifecycleEvent")
+                    && message["params"]["name"] == json!("load")
+                    && message["params"]["loaderId"].as_str() == Some(loader)
+            });
+            messages.push(message);
+            if reached_replacement_load {
+                break messages;
+            }
+        }
+    })
+    .await
+    .expect("replacement Document must reach its own load without the hanging response");
+    let replacement_loader_id = replacement_messages
+        .iter()
+        .find(|message| message["id"] == json!(7_u64))
+        .and_then(|message| message["result"]["loaderId"].as_str())
+        .expect("replacement Page.navigate loaderId");
+    assert!(
+        replacement_messages.iter().any(|message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.lifecycleEvent")
+                && message["params"]["name"] == json!("DOMContentLoaded")
+                && message["params"]["loaderId"].as_str() == Some(replacement_loader_id)
+        }),
+        "replacement DCL must precede its load: {replacement_messages:#?}"
+    );
+    if !replacement_messages
+        .iter()
+        .any(|message| message["id"] == json!(6_u64))
+    {
+        replacement_messages.extend(
+            timeout(REPLACEMENT_TIMEOUT, recv_until_id(&mut socket, 6))
+                .await
+                .expect("superseded Page.navigate must receive a terminal response"),
+        );
+    }
+    let superseded_response = replacement_messages
+        .iter()
+        .find(|message| message["id"] == json!(6_u64))
+        .expect("superseded Page.navigate response");
+    assert_eq!(superseded_response["error"]["code"], json!(-32000));
+    assert_eq!(
+        superseded_response["error"]["message"],
+        json!("Navigation aborted")
+    );
+    let replacement_document = cdp_runtime_evaluate_string(
+        &mut socket,
+        &session.session_id,
+        8,
+        "document.querySelector('#marker')?.textContent",
+    )
+    .await;
+    assert_eq!(replacement_document, marker);
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    drop(fixture_server);
+}
+
+#[tokio::test]
 async fn websocket_cdp_runtime_evaluate_after_dcl_is_not_blocked_by_pending_load_stylesheet() {
     async fn page() -> impl IntoResponse {
         (
@@ -2984,6 +3133,166 @@ addEventListener('DOMContentLoaded', () => {
 }
 
 #[tokio::test]
+async fn websocket_cdp_external_writer_with_two_document_writes_reaches_defer_and_dcl() {
+    async fn page() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            r#"<!doctype html>
+<html>
+<head>
+<script>
+globalThis.documentWriteOrder = ['head'];
+document.addEventListener('DOMContentLoaded', () => documentWriteOrder.push('dcl'));
+</script>
+<script src="/writer.js"></script>
+<script>documentWriteOrder.push('tail');</script>
+<script defer src="/defer.js"></script>
+<script>documentWriteOrder.push('after-defer');</script>
+</head>
+<body><main id="ready">ready</main></body>
+</html>"#,
+        )
+    }
+
+    async fn writer() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/javascript")],
+            r#"documentWriteOrder.push('writer-start');
+document.write('<script src="/first.js"></' + 'script>');
+document.write('<script src="/second.js"></' + 'script>');
+documentWriteOrder.push('writer-end');"#,
+        )
+    }
+
+    async fn first() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/javascript")],
+            "documentWriteOrder.push('first');",
+        )
+    }
+
+    async fn second() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/javascript")],
+            "documentWriteOrder.push('second');",
+        )
+    }
+
+    let defer_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let defer_requests_for_route = Arc::clone(&defer_requests);
+    let fixture_app = Router::new()
+        .route("/", get(page))
+        .route("/writer.js", get(writer))
+        .route("/first.js", get(first))
+        .route("/second.js", get(second))
+        .route(
+            "/defer.js",
+            get(move || {
+                let defer_requests_for_route = Arc::clone(&defer_requests_for_route);
+                async move {
+                    defer_requests_for_route.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/javascript")],
+                        "documentWriteOrder.push('defer');",
+                    )
+                }
+            }),
+        );
+    let (fixture_addr, fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "external-writer-two-document-writes");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let session = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+    for (id, method, params) in [
+        (4_u64, "Runtime.enable", json!({})),
+        (5_u64, "Page.enable", json!({})),
+        (
+            6_u64,
+            "Page.setLifecycleEventsEnabled",
+            json!({ "enabled": true }),
+        ),
+    ] {
+        let _ = send_cdp_command(&mut socket, id, method, Some(&session.session_id), params).await;
+    }
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 7_u64,
+                "method": "Page.navigate",
+                "sessionId": session.session_id,
+                "params": { "url": format!("http://{fixture_addr}/") }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send Page.navigate");
+    let dcl_messages = timeout(
+        Duration::from_secs(3),
+        recv_until_match(&mut socket, |message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.lifecycleEvent")
+                && message["params"]["name"] == json!("DOMContentLoaded")
+        }),
+    )
+    .await
+    .expect("nested written scripts must not strand the main parser before DCL");
+    let loader_id = dcl_messages
+        .iter()
+        .find(|message| message["id"] == json!(7_u64))
+        .and_then(|message| message["result"]["loaderId"].as_str())
+        .expect("Page.navigate should return the committed loaderId");
+    assert!(
+        dcl_messages.iter().any(|message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.lifecycleEvent")
+                && message["params"]["name"] == json!("DOMContentLoaded")
+                && message["params"]["loaderId"].as_str() == Some(loader_id)
+        }),
+        "DCL must belong to the exact navigation loader: {dcl_messages:#?}"
+    );
+    assert_eq!(
+        defer_requests.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the parser-deferred source must join the document preload and execute before DCL"
+    );
+
+    let evaluate_messages = send_cdp_command(
+        &mut socket,
+        8,
+        "Runtime.evaluate",
+        Some(&session.session_id),
+        json!({
+            "expression": "JSON.stringify(documentWriteOrder)",
+            "returnByValue": true
+        }),
+    )
+    .await;
+    let response = evaluate_messages
+        .iter()
+        .find(|message| message["id"] == json!(8_u64))
+        .expect("Runtime.evaluate response");
+    assert_eq!(
+        response["result"]["result"]["value"],
+        json!(
+            "[\"head\",\"writer-start\",\"writer-end\",\"first\",\"second\",\"tail\",\"after-defer\",\"defer\",\"dcl\"]"
+        )
+    );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    drop(fixture_server);
+}
+
+#[tokio::test]
 async fn websocket_cdp_runtime_evaluate_runs_while_parser_defer_source_is_blocked() {
     async fn page() -> impl IntoResponse {
         (
@@ -3573,6 +3882,205 @@ addEventListener('DOMContentLoaded', () => fetch('/stale-source-observed'));
     )
     .await;
     assert_eq!(replacement_after_stale_terminal, replacement);
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    drop(fixture_server);
+}
+
+#[tokio::test]
+async fn websocket_cdp_replacement_cancels_source_document_xhrs() {
+    const XHR_COUNT: usize = 4;
+    const SOURCE_DOCUMENT_COUNT: usize = 2;
+
+    async fn source_page() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            r#"<!doctype html>
+<html>
+<body>
+<main>source</main>
+<script>
+const generation = new URL(location.href).searchParams.get('generation');
+for (let index = 0; index < 4; index += 1) {
+  const xhr = new XMLHttpRequest();
+  xhr.open('GET', `/held-xhr?generation=${generation}&index=${index}`);
+  xhr.send();
+}
+</script>
+</body>
+</html>"#,
+        )
+    }
+
+    let (xhr_requested_tx, mut xhr_requested_rx) = tokio::sync::mpsc::unbounded_channel();
+    let release_xhrs = Arc::new(tokio::sync::Notify::new());
+    let release_xhrs_for_route = Arc::clone(&release_xhrs);
+    let fixture_app = Router::new().route("/source", get(source_page)).route(
+        "/held-xhr",
+        get(move || {
+            let xhr_requested_tx = xhr_requested_tx.clone();
+            let release_xhrs = Arc::clone(&release_xhrs_for_route);
+            async move {
+                xhr_requested_tx
+                    .send(())
+                    .expect("held XHR request observer should remain live");
+                release_xhrs.notified().await;
+                "late XHR response"
+            }
+        }),
+    );
+    let (fixture_addr, fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "xhr-document-replacement");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let session = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+    for (id, method) in [(4_u64, "Page.enable"), (5_u64, "Network.enable")] {
+        let _ = send_cdp_command(
+            &mut socket,
+            id,
+            method,
+            Some(&session.session_id),
+            json!({}),
+        )
+        .await;
+    }
+
+    let mut messages = Vec::new();
+    for generation in 0..SOURCE_DOCUMENT_COUNT {
+        let source_url = format!("http://{fixture_addr}/source?generation={generation}");
+        messages.extend(
+            timeout(
+                Duration::from_secs(5),
+                cdp_navigate_and_wait_for_load(
+                    &mut socket,
+                    6 + generation as u64,
+                    &session.session_id,
+                    &source_url,
+                ),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "source document generation {generation} should load while its XHRs remain pending"
+                )
+            }),
+        );
+        for request_index in 0..XHR_COUNT {
+            timeout(Duration::from_secs(2), xhr_requested_rx.recv())
+                .await
+                .unwrap_or_else(|_| {
+                    panic!("held XHR {generation}:{request_index} should reach the fixture server")
+                })
+                .unwrap_or_else(|| {
+                    panic!("held XHR observer closed at request {generation}:{request_index}")
+                });
+        }
+    }
+
+    messages.extend(
+        send_cdp_command(
+            &mut socket,
+            20,
+            "Runtime.evaluate",
+            Some(&session.session_id),
+            json!({ "expression": "document.querySelector('main').textContent" }),
+        )
+        .await,
+    );
+
+    let replacement_url =
+        "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cmain%3Ereplacement%3C%2Fmain%3E";
+    messages.extend(
+        timeout(
+            Duration::from_secs(5),
+            cdp_navigate_and_wait_for_load(&mut socket, 21, &session.session_id, replacement_url),
+        )
+        .await
+        .expect("replacement document should not wait for source-document XHRs"),
+    );
+    messages.extend(
+        send_cdp_command(
+            &mut socket,
+            22,
+            "Runtime.evaluate",
+            Some(&session.session_id),
+            json!({ "expression": "document.querySelector('main').textContent" }),
+        )
+        .await,
+    );
+    release_xhrs.notify_waiters();
+
+    let xhr_requests = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            let url = message["params"]["request"]["url"].as_str()?;
+            (message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Network.requestWillBeSent")
+                && url.contains("/held-xhr?generation="))
+            .then(|| {
+                let generation = usize::from(url.contains("generation=1"));
+                message["params"]["requestId"]
+                    .as_str()
+                    .map(|request_id| (request_id.to_owned(), generation, index))
+            })
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        xhr_requests.len(),
+        XHR_COUNT * SOURCE_DOCUMENT_COUNT,
+        "each source-document XHR should publish one request start: {messages:#?}"
+    );
+    let first_successor_xhr_index = xhr_requests
+        .iter()
+        .filter_map(|(_, generation, index)| (*generation == 1).then_some(*index))
+        .min()
+        .expect("second source Document should publish XHR starts");
+    let final_load_index = messages
+        .iter()
+        .rposition(|message| message["method"] == json!("Page.loadEventFired"))
+        .expect("final replacement should publish load");
+    for (request_id, generation, start_index) in xhr_requests {
+        let terminals = messages
+            .iter()
+            .enumerate()
+            .filter(|message| {
+                message.1["sessionId"].as_str() == Some(session.session_id.as_str())
+                    && message.1["method"] == json!("Network.loadingFailed")
+                    && message.1["params"]["requestId"] == json!(request_id)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            terminals.len(),
+            1,
+            "replacement must publish exactly one canceled terminal for old request {request_id}: {messages:#?}"
+        );
+        let (terminal_index, terminal) = terminals[0];
+        assert_eq!(terminal["params"]["errorText"], json!("net::ERR_ABORTED"));
+        assert_eq!(terminal["params"]["canceled"], json!(true));
+        assert!(
+            terminal_index > start_index,
+            "request terminal must follow its announced start"
+        );
+        let successor_boundary = if generation == 0 {
+            first_successor_xhr_index
+        } else {
+            final_load_index
+        };
+        assert!(
+            terminal_index < successor_boundary,
+            "old request {request_id} must terminate before its successor Document becomes observable: {messages:#?}"
+        );
+    }
 
     let _ = socket.close(None).await;
     abort_test_cdp_server(protocol_server).await;

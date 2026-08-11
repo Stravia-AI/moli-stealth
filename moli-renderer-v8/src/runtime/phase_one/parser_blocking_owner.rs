@@ -44,7 +44,7 @@ pub(super) struct MainParserBlockingExecutionGateOwner<'a> {
 }
 
 pub(super) struct MainParserBlockingBeginExecutionOwner {
-    pub(super) parser_insertion_controller: ParserInsertionController,
+    pub(super) parser_insertion_controller: Option<ParserInsertionController>,
     pub(super) completion_target: MainDocumentClassicScriptTarget,
 }
 

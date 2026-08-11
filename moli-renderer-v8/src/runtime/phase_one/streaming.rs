@@ -212,7 +212,7 @@ impl ConcurrentParseTimeRuntime {
         )))
     }
 
-    pub(in crate::runtime) async fn finish_creation_from_external_raw_document_response(
+    pub(in crate::runtime) async fn create_external_raw_document_response_at_reply_boundary(
         page_id: PageId,
         local_executor: JsLocalExecutor,
         loader: &ResourceRequestClient,
@@ -224,6 +224,7 @@ impl ConcurrentParseTimeRuntime {
         response_status: u16,
         response_headers: Vec<(String, String)>,
         raw_body: ExternalRawDocumentBodyStream,
+        reply_boundary: crate::RendererPageCreationReplyBoundary,
     ) -> Result<StreamingNavigationPageCreationResult> {
         if response_headers_indicate_download(&response_headers) {
             let mut body_source = RawDocumentBodySource::External(raw_body);
@@ -242,7 +243,15 @@ impl ConcurrentParseTimeRuntime {
             ));
         }
 
-        Self::finish_creation_from_committed_external_raw_document_response(
+        let bootstrap_boundary = match reply_boundary {
+            crate::RendererPageCreationReplyBoundary::LifecycleTarget => {
+                CommittedNavigationBootstrapBoundary::ContinuePhaseOne
+            }
+            crate::RendererPageCreationReplyBoundary::DocumentCommit => {
+                CommittedNavigationBootstrapBoundary::DocumentCommit
+            }
+        };
+        Self::create_from_committed_external_raw_document_response(
             page_id,
             local_executor,
             loader,
@@ -254,10 +263,12 @@ impl ConcurrentParseTimeRuntime {
             response_status,
             response_headers,
             raw_body,
+            bootstrap_boundary,
         )
         .await
     }
 
+    #[cfg(test)]
     pub(in crate::runtime) async fn finish_creation_from_committed_external_raw_document_response(
         page_id: PageId,
         local_executor: JsLocalExecutor,
@@ -378,6 +389,32 @@ impl ConcurrentParseTimeRuntime {
                 &final_url,
                 &response_headers,
             );
+        if response_headers_indicate_xml_document(&response_headers) {
+            let body = collect_streaming_raw_body(&mut body_source).await?;
+            let source = String::from_utf8_lossy(&body).into_owned();
+            let content_type = moli_web_mime::response_document_content_type(&response_headers)
+                .unwrap_or_else(|| "application/xml".to_owned());
+            let outcome = Self::finish_creation_from_xml_bootstrap(
+                page_id,
+                local_executor,
+                loader,
+                &env,
+                runtime_hooks,
+                final_url,
+                content_type,
+                stage,
+                source,
+                started,
+            )
+            .await?;
+            return Ok(StreamingNavigationPageCreationResult::Html(Box::new(
+                StreamingHtmlPageCreationResult {
+                    response_status,
+                    response_headers,
+                    outcome,
+                },
+            )));
+        }
         let mut state = ParseTimeDriverState::new(final_url);
         state
             .buffered_document_preloads
@@ -524,6 +561,11 @@ impl ConcurrentParseTimeRuntime {
     }
 }
 
+fn response_headers_indicate_xml_document(headers: &[(String, String)]) -> bool {
+    moli_web_mime::response_document_content_type(headers)
+        .is_some_and(|mime| moli_web_mime::is_dom_parser_xml_mime(&mime))
+}
+
 const EXTERNAL_RAW_DOCUMENT_BODY_BUFFERED_CHUNKS: usize = 8;
 
 pub struct ExternalRawDocumentBodyStream {
@@ -550,6 +592,15 @@ impl ExternalRawDocumentBodyStream {
             body_chunks,
             completion: Some(completion),
         }
+    }
+
+    pub fn from_bytes(body: Vec<u8>) -> Self {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let (body_tx, body_stream) = Self::channel(completion_rx);
+        let _ = body_tx.try_send(body);
+        drop(body_tx);
+        let _ = completion_tx.send(Ok(()));
+        body_stream
     }
 
     fn body_chunk_stream_is_exhausted(&self) -> bool {
@@ -1307,10 +1358,8 @@ mod tests {
             .state
             .buffered_document_preloads
             .entries
-            .get(&classic_preload_key_for_streaming_test(script_url.as_str()))
-            .expect("ready chunk should create script preload")
-            .load
-            .clone();
+            .load_for_key(&classic_preload_key_for_streaming_test(script_url.as_str()))
+            .expect("ready chunk should create script preload");
         let outcome =
             tokio::time::timeout(std::time::Duration::from_secs(2), preload.wait_outcome())
                 .await

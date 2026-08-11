@@ -7,7 +7,9 @@
 use std::{fmt, str::FromStr, sync::Arc};
 
 use moli_cookie_jar::{StoredCookiePartitionKey, StoredCookieQueryReport};
-use moli_core::page::{DomScrollIntoViewRect, SelectedFile, is_renderer_backend_node_id};
+use moli_core::page::{
+    DomScrollIntoViewRect, SelectedFile, SubresourceResourceType, is_renderer_backend_node_id,
+};
 use moli_protocol_cdp::{CdpTargetKindWire, CdpTargetType};
 use serde_json::{Value, json};
 
@@ -2192,6 +2194,185 @@ pub struct NetworkAuthChallengeEvent {
     pub realm: String,
 }
 
+/// The resource classification carried by protocol-neutral network events.
+///
+/// Renderer and fetch internals keep their more precise loader-facing enums.
+/// This enum represents the observable DevTools classification and is only
+/// converted to a CDP token when an event is serialized at the protocol edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DevToolsNetworkResourceType {
+    Document,
+    Stylesheet,
+    Image,
+    Media,
+    Font,
+    Script,
+    TextTrack,
+    Xhr,
+    Fetch,
+    Prefetch,
+    EventSource,
+    WebSocket,
+    Manifest,
+    SignedExchange,
+    Ping,
+    CspViolationReport,
+    Preflight,
+    FedCm,
+    Other,
+}
+
+impl DevToolsNetworkResourceType {
+    pub const fn as_cdp_type(self) -> &'static str {
+        match self {
+            Self::Document => "Document",
+            Self::Stylesheet => "Stylesheet",
+            Self::Image => "Image",
+            Self::Media => "Media",
+            Self::Font => "Font",
+            Self::Script => "Script",
+            Self::TextTrack => "TextTrack",
+            Self::Xhr => "XHR",
+            Self::Fetch => "Fetch",
+            Self::Prefetch => "Prefetch",
+            Self::EventSource => "EventSource",
+            Self::WebSocket => "WebSocket",
+            Self::Manifest => "Manifest",
+            Self::SignedExchange => "SignedExchange",
+            Self::Ping => "Ping",
+            Self::CspViolationReport => "CSPViolationReport",
+            Self::Preflight => "Preflight",
+            Self::FedCm => "FedCM",
+            Self::Other => "Other",
+        }
+    }
+
+    pub fn from_cdp_type(value: &str) -> Option<Self> {
+        Some(match value {
+            "Document" => Self::Document,
+            "Stylesheet" => Self::Stylesheet,
+            "Image" => Self::Image,
+            "Media" => Self::Media,
+            "Font" => Self::Font,
+            "Script" => Self::Script,
+            "TextTrack" => Self::TextTrack,
+            "XHR" => Self::Xhr,
+            "Fetch" => Self::Fetch,
+            "Prefetch" => Self::Prefetch,
+            "EventSource" => Self::EventSource,
+            "WebSocket" => Self::WebSocket,
+            "Manifest" => Self::Manifest,
+            "SignedExchange" => Self::SignedExchange,
+            "Ping" => Self::Ping,
+            "CSPViolationReport" => Self::CspViolationReport,
+            "Preflight" => Self::Preflight,
+            "FedCM" => Self::FedCm,
+            "Other" => Self::Other,
+            _ => return None,
+        })
+    }
+
+    pub fn from_fetch_interception_type(value: SubresourceResourceType) -> Self {
+        match value {
+            SubresourceResourceType::Fetch
+            | SubresourceResourceType::EventSource
+            | SubresourceResourceType::Xhr => Self::Xhr,
+            _ => value.into(),
+        }
+    }
+}
+
+impl From<SubresourceResourceType> for DevToolsNetworkResourceType {
+    fn from(value: SubresourceResourceType) -> Self {
+        match value {
+            SubresourceResourceType::Script => Self::Script,
+            SubresourceResourceType::Stylesheet => Self::Stylesheet,
+            SubresourceResourceType::Image => Self::Image,
+            SubresourceResourceType::Font => Self::Font,
+            SubresourceResourceType::Audio
+            | SubresourceResourceType::Video
+            | SubresourceResourceType::Media => Self::Media,
+            SubresourceResourceType::TextTrack => Self::TextTrack,
+            SubresourceResourceType::Fetch => Self::Fetch,
+            SubresourceResourceType::EventSource => Self::EventSource,
+            SubresourceResourceType::Xhr => Self::Xhr,
+            SubresourceResourceType::Ping => Self::Ping,
+            SubresourceResourceType::CspReport => Self::CspViolationReport,
+            SubresourceResourceType::Dictionary => Self::Other,
+            SubresourceResourceType::Manifest => Self::Manifest,
+            SubresourceResourceType::WebSocket => Self::WebSocket,
+        }
+    }
+}
+
+#[cfg(test)]
+mod network_resource_type_tests {
+    use super::{DevToolsNetworkResourceType, SubresourceResourceType};
+
+    #[test]
+    fn devtools_network_resource_types_round_trip_cdp_tokens() {
+        for (resource_type, token) in [
+            (DevToolsNetworkResourceType::Document, "Document"),
+            (DevToolsNetworkResourceType::Stylesheet, "Stylesheet"),
+            (DevToolsNetworkResourceType::Image, "Image"),
+            (DevToolsNetworkResourceType::Media, "Media"),
+            (DevToolsNetworkResourceType::Font, "Font"),
+            (DevToolsNetworkResourceType::Script, "Script"),
+            (DevToolsNetworkResourceType::TextTrack, "TextTrack"),
+            (DevToolsNetworkResourceType::Xhr, "XHR"),
+            (DevToolsNetworkResourceType::Fetch, "Fetch"),
+            (DevToolsNetworkResourceType::Prefetch, "Prefetch"),
+            (DevToolsNetworkResourceType::EventSource, "EventSource"),
+            (DevToolsNetworkResourceType::WebSocket, "WebSocket"),
+            (DevToolsNetworkResourceType::Manifest, "Manifest"),
+            (
+                DevToolsNetworkResourceType::SignedExchange,
+                "SignedExchange",
+            ),
+            (DevToolsNetworkResourceType::Ping, "Ping"),
+            (
+                DevToolsNetworkResourceType::CspViolationReport,
+                "CSPViolationReport",
+            ),
+            (DevToolsNetworkResourceType::Preflight, "Preflight"),
+            (DevToolsNetworkResourceType::FedCm, "FedCM"),
+            (DevToolsNetworkResourceType::Other, "Other"),
+        ] {
+            assert_eq!(resource_type.as_cdp_type(), token);
+            assert_eq!(
+                DevToolsNetworkResourceType::from_cdp_type(token),
+                Some(resource_type)
+            );
+        }
+        assert_eq!(
+            DevToolsNetworkResourceType::from_cdp_type("FutureResourceType"),
+            None
+        );
+    }
+
+    #[test]
+    fn subresource_resource_types_convert_without_stringly_typed_intermediate_state() {
+        assert_eq!(
+            DevToolsNetworkResourceType::from(SubresourceResourceType::Audio),
+            DevToolsNetworkResourceType::Media
+        );
+        assert_eq!(
+            DevToolsNetworkResourceType::from(SubresourceResourceType::Dictionary),
+            DevToolsNetworkResourceType::Other
+        );
+        for resource_type in [
+            SubresourceResourceType::Fetch,
+            SubresourceResourceType::EventSource,
+            SubresourceResourceType::Xhr,
+        ] {
+            assert_eq!(
+                DevToolsNetworkResourceType::from_fetch_interception_type(resource_type),
+                DevToolsNetworkResourceType::Xhr
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct NetworkRequestEvent {
     pub target_id: DevToolsTargetId,
@@ -2209,7 +2390,7 @@ pub struct NetworkRequestEvent {
     pub redirect_response: Option<NetworkRedirectResponseEvent>,
     pub redirect_has_extra_info: bool,
     pub request_cookie_report: Option<StoredCookieQueryReport>,
-    pub resource_type: Option<String>,
+    pub resource_type: Option<DevToolsNetworkResourceType>,
     pub timestamp: Option<f64>,
     pub wall_time: Option<f64>,
     pub status: Option<u16>,

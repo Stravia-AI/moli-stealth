@@ -18,20 +18,11 @@ use xmlparser::{
     ElementEnd as XmlElementEnd, Token as XmlTokenizerToken, Tokenizer as XmlTokenizer,
 };
 
+use super::{html_chunks, xml_tree_viewer::transform_document_to_xml_tree_view};
 use moli_dom::native::{Attribute as NativeAttribute, DomHost, NativeDom, NativeNodeId, Node};
-use moli_stylesheet_blocking::{
-    DocumentOwnedBlockingStylesheetDiscoveryInput, collect_document_owned_blocking_stylesheets,
-    link_rel_includes_token,
-};
 
-use super::{
-    ParserDocumentHandoff, ParserDocumentHandoffs, html_chunks,
-    stream::prepare_parser_script_handoff_for_static_document,
-    xml_tree_viewer::transform_document_to_xml_tree_view,
-};
-
-const CDATA_MARKER_PI_TARGET: &str = "moli-cdata";
-const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+pub(super) const CDATA_MARKER_PI_TARGET: &str = "moli-cdata";
+pub(super) const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
 #[derive(Debug, Clone, Default)]
 pub struct XmlParser;
@@ -77,68 +68,32 @@ struct XmlLiveTreeSinkTarget<'a> {
     document_handle: NativeNodeId,
     cdata_sections: Vec<String>,
     namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-    ordered_runtime_handoffs: Vec<XmlParserRuntimeHandoff>,
     source_has_unclosed_element_at_eof: bool,
 }
 
-struct XmlNamespaceDeclaration {
-    ordinary_attributes_before: usize,
-    attribute: NativeAttribute,
-}
-
-#[derive(Clone, Copy)]
-enum XmlParserRuntimeHandoff {
-    Script(NativeNodeId),
-    ModulepreloadLink(NativeNodeId),
+pub(super) struct XmlNamespaceDeclaration {
+    pub(super) ordinary_attributes_before: usize,
+    pub(super) attribute: NativeAttribute,
 }
 
 impl XmlParser {
     pub fn parse(&self, final_url: Url, xml: String) -> NativeDom {
-        self.parse_with_script_handoffs(final_url, xml).0
-    }
-
-    pub fn parse_with_script_handoffs(
-        &self,
-        final_url: Url,
-        xml: String,
-    ) -> (NativeDom, Vec<super::ParserScriptHandoff>) {
-        let (document, handoffs) = self.parse_with_document_handoffs(final_url, xml);
-        let (ordered_handoffs, _) = handoffs.into_parts();
-        let script_handoffs = ordered_handoffs
-            .into_iter()
-            .filter_map(|handoff| match handoff {
-                ParserDocumentHandoff::Script(script) => Some(*script),
-                ParserDocumentHandoff::ModulepreloadLink(_) => None,
-            })
-            .collect();
-        (document, script_handoffs)
-    }
-
-    pub fn parse_with_document_handoffs(
-        &self,
-        final_url: Url,
-        xml: String,
-    ) -> (NativeDom, ParserDocumentHandoffs) {
-        self.parse_with_document_handoffs_and_presentation(final_url, xml, false)
+        self.parse_with_presentation(final_url, xml, false)
     }
 
     /// Parses a top-level XML navigation and applies Chromium's source-tree
     /// presentation when the document has no associated style information.
     /// DOMParser and child-document callers must use the raw parser entry point.
-    pub fn parse_top_level_document_with_handoffs(
-        &self,
-        final_url: Url,
-        xml: String,
-    ) -> (NativeDom, ParserDocumentHandoffs) {
-        self.parse_with_document_handoffs_and_presentation(final_url, xml, true)
+    pub fn parse_top_level_document(&self, final_url: Url, xml: String) -> NativeDom {
+        self.parse_with_presentation(final_url, xml, true)
     }
 
-    fn parse_with_document_handoffs_and_presentation(
+    fn parse_with_presentation(
         &self,
         final_url: Url,
         xml: String,
         present_unstyled_xml: bool,
-    ) -> (NativeDom, ParserDocumentHandoffs) {
+    ) -> NativeDom {
         let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(&xml);
         let namespace_declarations = xml_namespace_declarations(&xml);
         let (xml, cdata_sections) = xml_with_cdata_markers(&xml);
@@ -152,45 +107,25 @@ impl XmlParser {
         for chunk in html_chunks(&xml) {
             parser.process(XmlStrTendril::from(chunk));
         }
-        let (mut document, ordered_runtime_handoffs) = parser.finish().finish_document();
+        let mut document = parser.finish().finish_document();
         if present_unstyled_xml {
             document = transform_document_to_xml_tree_view(document);
         }
-        let ordered_handoffs = ordered_runtime_handoffs
-            .into_iter()
-            .map(|handoff| match handoff {
-                XmlParserRuntimeHandoff::Script(node_id) => {
-                    ParserDocumentHandoff::Script(Box::new(
-                        prepare_parser_script_handoff_for_static_document(&document, node_id, 1, 0),
-                    ))
-                }
-                XmlParserRuntimeHandoff::ModulepreloadLink(node_id) => {
-                    ParserDocumentHandoff::ModulepreloadLink(node_id)
-                }
-            })
-            .collect();
-        let blocking_stylesheet_inputs = collect_document_owned_blocking_stylesheets(&document)
-            .iter()
-            .map(DocumentOwnedBlockingStylesheetDiscoveryInput::from)
-            .collect();
-        (
-            document,
-            ParserDocumentHandoffs::new(ordered_handoffs, blocking_stylesheet_inputs),
-        )
+        document
     }
 
-    /// Parses an XML tree directly into an empty XML Document that already
-    /// belongs to `dom_host`.
+    /// Parses an inert XML tree directly into an empty XML Document that
+    /// already belongs to `dom_host`.
     ///
     /// The mutable borrow is retained by the tree sink for exactly this
-    /// synchronous parser call. Returned script handles are discovery facts;
-    /// the caller remains responsible for parser-script ordering and execution.
-    pub fn parse_tree_into_document(
+    /// synchronous parser call. Script elements remain inert; executable
+    /// top-level and child Documents must use `XmlDocumentStream` instead.
+    pub fn parse_inert_tree_into_document(
         &self,
         dom_host: &mut DomHost,
         document_handle: NativeNodeId,
         xml: &str,
-    ) -> Option<Vec<NativeNodeId>> {
+    ) -> Option<()> {
         let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(xml);
         let namespace_declarations = xml_namespace_declarations(xml);
         let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?
@@ -202,7 +137,8 @@ impl XmlParser {
         for chunk in html_chunks(&xml) {
             parser.process(XmlStrTendril::from(chunk));
         }
-        Some(parser.finish().finish_live_tree())
+        parser.finish().finish_live_tree();
+        Some(())
     }
 }
 
@@ -210,7 +146,7 @@ impl XmlParser {
 // on EOF and therefore does not report a still-open element. Keep this check
 // deliberately narrower than a second well-formedness parser: tokenizer errors
 // and mismatched tags defer to xml5ever's own parse-error reporting.
-fn xml_source_has_unclosed_element_at_eof(source: &str) -> bool {
+pub(super) fn xml_source_has_unclosed_element_at_eof(source: &str) -> bool {
     let mut open_elements = Vec::<(String, String)>::new();
     let mut pending_element = None::<(String, String)>;
 
@@ -300,7 +236,7 @@ fn xml_with_cdata_markers(xml: &str) -> (String, Vec<String>) {
 /// however, exposes `xmlns` declarations as Attr nodes in the XMLNS namespace.
 /// Capture them in element-creation order and merge them at the tree-sink
 /// boundary.
-fn xml_namespace_declarations(xml: &str) -> VecDeque<Vec<XmlNamespaceDeclaration>> {
+pub(super) fn xml_namespace_declarations(xml: &str) -> VecDeque<Vec<XmlNamespaceDeclaration>> {
     let mut declarations = VecDeque::new();
     let mut current = None::<(usize, Vec<XmlNamespaceDeclaration>)>;
 
@@ -436,18 +372,17 @@ impl XmlLiveTreeSinkTarget<'static> {
             document_handle,
             cdata_sections,
             namespace_declarations,
-            ordered_runtime_handoffs: Vec::new(),
             source_has_unclosed_element_at_eof,
         }
     }
 
-    fn finish_document(mut self) -> (NativeDom, Vec<XmlParserRuntimeHandoff>) {
+    fn finish_document(mut self) -> NativeDom {
         self.record_unclosed_source_element_error();
         self.restore_cdata_marker_processing_instructions();
         let XmlDomHost::Owned(dom_host) = self.dom_host else {
             unreachable!("owned XML parsing must finish with an owned DOM host")
         };
-        (dom_host.snapshot_document(), self.ordered_runtime_handoffs)
+        dom_host.snapshot_document()
     }
 }
 
@@ -466,7 +401,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
             document_handle,
             cdata_sections: Vec::new(),
             namespace_declarations: VecDeque::new(),
-            ordered_runtime_handoffs: Vec::new(),
             source_has_unclosed_element_at_eof: false,
         })
     }
@@ -492,16 +426,9 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
         self
     }
 
-    fn finish_live_tree(mut self) -> Vec<NativeNodeId> {
+    fn finish_live_tree(mut self) {
         self.record_unclosed_source_element_error();
         self.restore_cdata_marker_processing_instructions();
-        self.ordered_runtime_handoffs
-            .into_iter()
-            .filter_map(|handoff| match handoff {
-                XmlParserRuntimeHandoff::Script(node_id) => Some(node_id),
-                XmlParserRuntimeHandoff::ModulepreloadLink(_) => None,
-            })
-            .collect()
     }
 
     fn record_unclosed_source_element_error(&mut self) {
@@ -556,27 +483,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
             );
         self.dom_host
             .add_attrs_if_missing_for_parser(node_id, attributes);
-        if self
-            .dom_host
-            .node(node_id)
-            .is_some_and(|node| node.is_html_element_named("script"))
-        {
-            self.ordered_runtime_handoffs
-                .push(XmlParserRuntimeHandoff::Script(node_id));
-        } else if self
-            .dom_host
-            .node(node_id)
-            .and_then(Node::as_element)
-            .is_some_and(|element| {
-                element.is_html_element("link")
-                    && element
-                        .attribute("rel")
-                        .is_some_and(|rel| link_rel_includes_token(rel, "modulepreload"))
-            })
-        {
-            self.ordered_runtime_handoffs
-                .push(XmlParserRuntimeHandoff::ModulepreloadLink(node_id));
-        }
         XmlParseHandle::new(node_id, Some(element_name))
     }
 
@@ -978,9 +884,7 @@ impl<'host> XmlTreeSink for XmlDocumentSink<'host> {
 #[cfg(test)]
 mod tests {
     use super::{XmlParser, xml_source_has_unclosed_element_at_eof};
-    use crate::ParserScriptHandoff;
     use moli_dom::native::{DomHost, NativeDom, NativeNodeId, Node, NodeType};
-    use moli_page_types::ScriptMode;
     use url::Url;
 
     #[test]
@@ -1061,8 +965,8 @@ mod tests {
         let child_url = Url::parse("https://child.example.test/document.xml").unwrap();
         let child_document = host.create_detached_xml_document_with_url(child_url.clone());
 
-        let script_handles = parser
-            .parse_tree_into_document(
+        parser
+            .parse_inert_tree_into_document(
                 &mut host,
                 child_document,
                 concat!(
@@ -1074,12 +978,21 @@ mod tests {
                     "</root>"
                 ),
             )
-            .expect("empty XML document accepts a direct parse");
+            .expect("empty XML document accepts a direct inert parse");
 
         assert_eq!(host.child_handles(parent_document).count(), 0);
-        assert_eq!(script_handles.len(), 1);
+        let mut descendants = Vec::new();
+        collect_descendants(&host, child_document, &mut descendants);
+        let script_handle = descendants
+            .iter()
+            .copied()
+            .find(|node_id| {
+                host.node(*node_id)
+                    .is_some_and(|node| node.is_html_element_named("script"))
+            })
+            .expect("XHTML script element");
         assert_eq!(
-            host.node(script_handles[0]).and_then(Node::owner_document),
+            host.node(script_handle).and_then(Node::owner_document),
             Some(child_document)
         );
         assert_eq!(
@@ -1089,8 +1002,6 @@ mod tests {
             Some(&child_url)
         );
 
-        let mut descendants = Vec::new();
-        collect_descendants(&host, child_document, &mut descendants);
         assert!(
             descendants
                 .iter()
@@ -1122,7 +1033,7 @@ mod tests {
 
         assert!(
             parser
-                .parse_tree_into_document(&mut host, html_document, "<root />")
+                .parse_inert_tree_into_document(&mut host, html_document, "<root />")
                 .is_none()
         );
         assert_eq!(host.child_handles(html_document).count(), 0);
@@ -1130,13 +1041,13 @@ mod tests {
         let xml_document = host.create_detached_xml_document();
         assert!(
             parser
-                .parse_tree_into_document(&mut host, xml_document, "<root />")
+                .parse_inert_tree_into_document(&mut host, xml_document, "<root />")
                 .is_some()
         );
         let children_before_retry = host.child_handles(xml_document).collect::<Vec<_>>();
         assert!(
             parser
-                .parse_tree_into_document(&mut host, xml_document, "<replacement />")
+                .parse_inert_tree_into_document(&mut host, xml_document, "<replacement />")
                 .is_none()
         );
         assert_eq!(
@@ -1155,7 +1066,7 @@ mod tests {
         let child_document = host.create_detached_xml_document_with_url(child_url.clone());
 
         parser
-            .parse_tree_into_document(
+            .parse_inert_tree_into_document(
                 &mut host,
                 child_document,
                 concat!(
@@ -1345,42 +1256,5 @@ mod tests {
         dom.child_ids(dom.document_node_id())
             .find(|node_id| dom.node(*node_id).is_some_and(|node| node.is_element()))
             .expect("document element")
-    }
-
-    #[test]
-    fn xml_parser_prepares_xhtml_scripts_from_recorded_tree_builder_handles() {
-        let (_, handoffs) = XmlParser.parse_with_script_handoffs(
-            Url::parse("https://example.test/page.xhtml").unwrap(),
-            concat!(
-                "<html xmlns='http://www.w3.org/1999/xhtml'><head>",
-                "<script type='importmap'>{\"imports\":{\"dep\":\"/dep.js\"}}</script>",
-                "<script defer='defer' src='data:text/javascript,globalThis.deferRan=1'></script>",
-                "<script type='module'>export const value = 1;</script>",
-                "<script async='async' src='data:text/javascript,globalThis.asyncRan=1'></script>",
-                "</head><body /></html>",
-            )
-            .to_owned(),
-        );
-
-        assert_eq!(handoffs.len(), 4);
-        assert!(matches!(
-            &handoffs[0],
-            ParserScriptHandoff::ImportMap { import_map, .. } if import_map.position == 0
-        ));
-        assert!(matches!(
-            &handoffs[1],
-            ParserScriptHandoff::NonAsyncPostParse { script, .. }
-                if script.position == 1 && script.mode == ScriptMode::Defer
-        ));
-        assert!(matches!(
-            &handoffs[2],
-            ParserScriptHandoff::NonAsyncPostParse { script, .. }
-                if script.position == 2 && script.mode == ScriptMode::ModuleDefer
-        ));
-        assert!(matches!(
-            &handoffs[3],
-            ParserScriptHandoff::AsyncPostParse { script, .. }
-                if script.position == 3 && script.mode == ScriptMode::Async
-        ));
     }
 }

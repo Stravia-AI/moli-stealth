@@ -249,6 +249,14 @@ impl Page {
         self.renderer_agent_attachment_id = Some(id);
     }
 
+    #[doc(hidden)]
+    pub fn take_committed_document_post_response_continuation(
+        &mut self,
+    ) -> Option<RendererPageCommandPostResponseContinuation> {
+        self.handle
+            .take_committed_document_post_response_continuation()
+    }
+
     /// Deterministically releases this page from the renderer owner.
     ///
     /// Dropping `Page` also schedules a detached best-effort cleanup, but code

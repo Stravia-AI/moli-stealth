@@ -19,11 +19,17 @@ use moli_parser::{
     ParserElementCreationConsumer, ParserElementCreationRequest, ParserMutationEffectConsumer,
     ParserPumpOutcome,
 };
-use std::{collections::HashSet, rc::Rc};
+use std::collections::HashSet;
 use tracing::debug;
 
 struct DocumentWriteParserPumpStep {
     outcome: ParserPumpOutcome,
+}
+
+enum DocumentWriteParserPumpInput<'a> {
+    Inserted(&'a str),
+    Ordinary(&'a str),
+    QueuedOrBuffered,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -203,6 +209,10 @@ impl ParserDomMutationConsumer for DocumentWriteParserMutationOwner<'_, '_, '_> 
             .create_processing_instruction_in_live_dom_host(target, data)
     }
 
+    fn create_cdata_section(&mut self, data: String) -> DomHandle {
+        self.runtime.create_cdata_section_in_live_dom_host(data)
+    }
+
     fn create_document_type(
         &mut self,
         name: String,
@@ -310,15 +320,20 @@ impl ParserElementCreationConsumer for DocumentWriteParserMutationOwner<'_, '_, 
 // "HTML string -> parser output -> document.write/fragment effects" rather than mixing two different
 // mutation models in one refactor slice.
 impl DocumentRuntime {
-    pub(crate) fn start_root_document_parser_stream(&mut self) {
+    pub(crate) fn start_root_document_parser_stream(
+        &mut self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) {
         debug_assert!(
             self.root_document_parser.is_none(),
             "opening a root document must discard the previous parser stream first"
         );
-        self.root_document_parser = Some(DocumentParserSession::start_open_live_document(
+        let mut parser = DocumentParserSession::start_open_live_document(
             self.document_url().clone(),
             self.document_handle(),
-        ));
+        );
+        parser.bind_owner(owner, self.runtime_reset_generation());
+        self.root_document_parser = Some(parser);
     }
 
     pub(crate) fn close_root_document_parser_stream(
@@ -363,6 +378,14 @@ impl DocumentRuntime {
             .as_ref()
             .is_none_or(|parser| parser.lifetime() != DocumentParserLifetime::Closing)
             || self.has_pending_document_write_parser_blocking_work()
+            || self
+                .root_document_parser
+                .as_ref()
+                .is_some_and(|parser| parser.run_state() != DocumentParserRunState::Ready)
+            || self
+                .root_document_parser
+                .as_ref()
+                .is_some_and(|parser| !parser.input_is_empty())
         {
             return false;
         }
@@ -378,7 +401,7 @@ impl DocumentRuntime {
         {
             return false;
         }
-        let Some(parser) = self.root_document_parser.take() else {
+        let Some(mut parser) = self.root_document_parser.take() else {
             return false;
         };
         let finish_signals = self.with_dom_host_parse_step(|runtime| {
@@ -1295,8 +1318,12 @@ impl DocumentRuntime {
             .insertion
             .parser_insertion_controller
             .input_session()
+            .enqueue_script_input_html(html.to_owned());
+        pending
+            .insertion
+            .parser_insertion_controller
+            .input_session()
             .enqueue_script_input_preload_html(html.to_owned());
-        pending.insertion.pending_html_tail.push_str(html);
         true
     }
 
@@ -1311,8 +1338,12 @@ impl DocumentRuntime {
             .insertion
             .parser_insertion_controller
             .input_session()
+            .enqueue_script_input_html(html.to_owned());
+        pending
+            .insertion
+            .parser_insertion_controller
+            .input_session()
             .enqueue_script_input_preload_html(html.to_owned());
-        pending.insertion.pending_html_tail.push_str(html);
         true
     }
 
@@ -1324,8 +1355,12 @@ impl DocumentRuntime {
             .insertion
             .parser_insertion_controller
             .input_session()
+            .enqueue_script_input_html(html.to_owned());
+        pending
+            .insertion
+            .parser_insertion_controller
+            .input_session()
             .enqueue_script_input_preload_html(html.to_owned());
-        pending.insertion.pending_html_tail.push_str(html);
         true
     }
 
@@ -1515,34 +1550,98 @@ impl DocumentRuntime {
         if self.park_suspended_insertion_behind_reentrant_parser_work(&mut insertion) {
             return true;
         }
+        if !Self::resume_document_write_insertion_permit(&mut insertion) {
+            tracing::debug!(
+                document_handle = ?insertion.document_handle,
+                permit = ?insertion.resume_permit,
+                run_state = ?insertion.parser_insertion_controller.run_state(),
+                "dropping stale document.write parser continuation"
+            );
+            return false;
+        }
         let mut changed = false;
 
-        let mut script_input_tail = String::new();
         let parser_input_session = insertion.parser_insertion_controller.input_session();
         while let Some(script_input_html) = parser_input_session.take_next_script_input_html() {
-            script_input_tail.push_str(&script_input_html);
-        }
-        script_input_tail.push_str(&std::mem::take(&mut insertion.pending_html_tail));
-        let buffered_parser_tail = insertion
-            .parser_insertion_controller
-            .parser_stream()
-            .borrow_mut()
-            .take_buffered_input();
-        script_input_tail.push_str(&buffered_parser_tail);
-        if !script_input_tail.is_empty() {
-            let pending_html_tail = script_input_tail;
             if self.write_html_via_parser_stream(
                 scope,
                 host_ptr,
                 insertion.document_handle,
-                &pending_html_tail,
+                &script_input_html,
+                false,
                 &insertion.parser_insertion_controller,
             ) {
                 changed = true;
             }
+            if self.has_pending_document_write_parser_blocking_work() {
+                return true;
+            }
+        }
+
+        // The blocker yielded from an insertion frame that is still resident
+        // in HtmlParserSession. Draining one frame restores its parent and
+        // reports an input boundary before that parent is pumped. Keep driving
+        // the parser-owned segment stack until the complete input is drained
+        // or another parser-blocking boundary takes ownership.
+        loop {
+            if self.write_html_via_parser_stream(
+                scope,
+                host_ptr,
+                insertion.document_handle,
+                "",
+                true,
+                &insertion.parser_insertion_controller,
+            ) {
+                changed = true;
+            }
+            if self.has_pending_document_write_parser_blocking_work() {
+                return true;
+            }
+            if !insertion
+                .parser_insertion_controller
+                .parser_stream()
+                .borrow()
+                .has_pending_input()
+            {
+                break;
+            }
         }
 
         changed
+    }
+
+    fn resume_document_write_insertion_permit(
+        insertion: &mut SuspendedDocumentWriteInsertion,
+    ) -> bool {
+        if insertion.resume_permit_consumed {
+            return insertion.parser_insertion_controller.run_state()
+                == DocumentParserRunState::Ready;
+        }
+        let resumed = match insertion.parser_insertion_controller.run_state() {
+            DocumentParserRunState::Ready => false,
+            DocumentParserRunState::Suspended { .. } => {
+                insertion
+                    .parser_insertion_controller
+                    .resume(insertion.resume_permit)
+                    == ParserResumeApplication::Resumed
+            }
+            DocumentParserRunState::Pumping { .. }
+            | DocumentParserRunState::Finishing
+            | DocumentParserRunState::Finished
+            | DocumentParserRunState::Stopped(_) => false,
+        };
+        if resumed {
+            insertion.resume_permit_consumed = true;
+        }
+        resumed
+    }
+
+    fn resuspend_document_write_insertion(
+        insertion: &mut SuspendedDocumentWriteInsertion,
+        cause: ParserSuspensionCause,
+    ) {
+        insertion.resume_permit = insertion.parser_insertion_controller.suspend(cause);
+        insertion.resume_permit_consumed = false;
     }
 
     /// A resumed parser script may synchronously create a newer blocking
@@ -1551,40 +1650,12 @@ impl DocumentRuntime {
     /// past a stylesheet or script boundary that Blink keeps closed.
     fn park_suspended_insertion_behind_reentrant_parser_work(
         &mut self,
-        insertion: &mut SuspendedDocumentWriteInsertion,
+        _insertion: &mut SuspendedDocumentWriteInsertion,
     ) -> bool {
-        if !self.has_pending_document_write_parser_blocking_work() {
-            return false;
-        }
-
-        let parser_stream = insertion.parser_insertion_controller.parser_stream();
-        let mut deferred_tail = parser_stream.borrow_mut().take_buffered_input();
-        deferred_tail.push_str(&std::mem::take(&mut insertion.pending_html_tail));
-
-        let pending_insertion = if let Some(pending) =
-            self.pending_document_write_stylesheet_parser_pause.as_mut()
-        {
-            &mut pending.insertion
-        } else if let Some(pending) = self
-            .pending_document_write_stylesheet_blocked_script
-            .as_mut()
-        {
-            &mut pending.insertion
-        } else if let Some(pending) = self.pending_document_write_external_script_load.as_mut() {
-            &mut pending.insertion
-        } else {
-            unreachable!("pending document.write parser work must retain its insertion owner")
-        };
-
-        debug_assert_eq!(pending_insertion.document_handle, insertion.document_handle);
-        debug_assert!(Rc::ptr_eq(
-            &pending_insertion
-                .parser_insertion_controller
-                .parser_stream(),
-            &parser_stream,
-        ));
-        pending_insertion.pending_html_tail.push_str(&deferred_tail);
-        true
+        // Every insertion frame and parent tail already resides in the shared
+        // HtmlParserSession stack. A newer blocking owner therefore parks the
+        // older continuation by ownership alone; there is no tail to move.
+        self.has_pending_document_write_parser_blocking_work()
     }
 
     fn complete_document_write_script_preload(
@@ -1666,10 +1737,19 @@ impl DocumentRuntime {
         let completion_target = completion.target();
         let PendingDocumentWriteExternalScriptLoad {
             start,
-            insertion,
+            mut insertion,
             mut resume_after_completion,
             ..
         } = pending;
+        if !Self::resume_document_write_insertion_permit(&mut insertion) {
+            tracing::debug!(
+                target = ?completion_target,
+                permit = ?insertion.resume_permit,
+                run_state = ?insertion.parser_insertion_controller.run_state(),
+                "rejecting document.write external-script terminal for a stale parser suspension"
+            );
+            return super::DocumentWriteExternalScriptLoadApplication::RejectedStaleTarget;
+        }
         match completion.into_result() {
             Ok(source) => {
                 let csp_request =
@@ -1774,16 +1854,27 @@ impl DocumentRuntime {
         scope: &mut v8::PinScope<'_, '_>,
         host_ptr: *mut JsContextHost,
         stream: &mut DocumentStream,
-        chunk: &str,
+        input: DocumentWriteParserPumpInput<'_>,
     ) -> DocumentWriteParserPumpStep {
-        let outcome = self.with_dom_host_parse_step(|runtime| {
-            let mut mutation_owner = DocumentWriteParserMutationOwner {
-                runtime,
-                scope,
-                host_ptr,
-            };
-            stream.pump_parser_inserted_step_with_runtime_dom_consumer(chunk, &mut mutation_owner)
-        });
+        let outcome =
+            self.with_dom_host_parse_step(|runtime| {
+                let mut mutation_owner = DocumentWriteParserMutationOwner {
+                    runtime,
+                    scope,
+                    host_ptr,
+                };
+                match input {
+                    DocumentWriteParserPumpInput::Inserted(chunk) => stream
+                        .pump_parser_inserted_step_with_runtime_dom_consumer(
+                            chunk,
+                            &mut mutation_owner,
+                        ),
+                    DocumentWriteParserPumpInput::Ordinary(chunk) => stream
+                        .pump_parser_step_with_runtime_dom_consumer(chunk, &mut mutation_owner),
+                    DocumentWriteParserPumpInput::QueuedOrBuffered => stream
+                        .pump_next_parser_step_with_runtime_dom_consumer(0, &mut mutation_owner),
+                }
+            });
         let null_custom_element_registry_elements =
             stream.take_parser_stream_null_custom_element_registry_elements();
         custom_elements::apply_parser_created_null_registry_associations(
@@ -1798,19 +1889,13 @@ impl DocumentRuntime {
         &mut self,
         document_handle: DomHandle,
         parser_insertion_controller: &ParserInsertionController,
-        network_tail: &mut String,
+        cause: ParserSuspensionCause,
     ) -> SuspendedDocumentWriteInsertion {
-        let stream = parser_insertion_controller.parser_stream();
-        let pending_html_tail = stream.borrow_mut().take_buffered_input();
-        if !network_tail.is_empty() {
-            stream
-                .borrow_mut()
-                .prepend_buffered_input(std::mem::take(network_tail));
-        }
         SuspendedDocumentWriteInsertion {
             document_handle,
             parser_insertion_controller: parser_insertion_controller.clone(),
-            pending_html_tail,
+            resume_permit: parser_insertion_controller.suspend(cause),
+            resume_permit_consumed: false,
         }
     }
 
@@ -1823,7 +1908,6 @@ impl DocumentRuntime {
         start_column: u64,
         script: PreparedScript,
         blocking_signatures_before: HashSet<DocumentBlockingStylesheetSignature>,
-        network_tail: &mut String,
     ) -> bool {
         debug_assert!(
             self.pending_document_write_stylesheet_blocked_script
@@ -1835,7 +1919,7 @@ impl DocumentRuntime {
         let insertion = self.take_suspended_document_write_insertion(
             document_handle,
             parser_insertion_controller,
-            network_tail,
+            ParserSuspensionCause::ParserClassicStylesheets { script: node },
         );
         self.pending_document_write_stylesheet_blocked_script =
             Some(PendingDocumentWriteStylesheetBlockedScript {
@@ -1854,8 +1938,8 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         document_handle: DomHandle,
         parser_insertion_controller: &ParserInsertionController,
+        stylesheet_owner: DomHandle,
         blocking_signatures: HashSet<DocumentBlockingStylesheetSignature>,
-        network_tail: &mut String,
     ) -> bool {
         debug_assert!(
             self.pending_document_write_stylesheet_parser_pause
@@ -1865,15 +1949,14 @@ impl DocumentRuntime {
         let insertion = self.take_suspended_document_write_insertion(
             document_handle,
             parser_insertion_controller,
-            network_tail,
+            ParserSuspensionCause::ParserCreatedStylesheet {
+                owner: stylesheet_owner,
+            },
         );
-        let mut preload_html = insertion.pending_html_tail.clone();
-        preload_html.push_str(
-            &parser_insertion_controller
-                .parser_stream()
-                .borrow_mut()
-                .peek_buffered_input(),
-        );
+        let preload_html = parser_insertion_controller
+            .parser_stream()
+            .borrow()
+            .snapshot_pending_input();
         self.scan_document_write_script_preloads(host_ptr, &preload_html, true);
         self.pending_document_write_stylesheet_parser_pause =
             Some(PendingDocumentWriteStylesheetParserPause {
@@ -1894,7 +1977,6 @@ impl DocumentRuntime {
         start_column: u64,
         script: PreparedScript,
         blocking_signatures_before: HashSet<DocumentBlockingStylesheetSignature>,
-        network_tail: &mut String,
     ) -> bool {
         self.note_parser_script_start_position(node, start_line, start_column);
         let _ = self.dom_host_mut().set_script_already_started(node, false);
@@ -1912,7 +1994,7 @@ impl DocumentRuntime {
         let insertion = self.take_suspended_document_write_insertion(
             document_handle,
             parser_insertion_controller,
-            network_tail,
+            ParserSuspensionCause::DocumentWriteExternalScript { script: node },
         );
         self.start_document_write_external_script_load(
             scope,
@@ -1973,8 +2055,11 @@ impl DocumentRuntime {
             start_column,
             script,
             blocking_signatures_before: _,
-            insertion,
+            mut insertion,
         } = pending;
+        if !Self::resume_document_write_insertion_permit(&mut insertion) {
+            return false;
+        }
         self.note_parser_script_start_position(node, start_line, start_column);
         let _ = self.dom_host_mut().set_script_already_started(node, false);
         match self.run_prepared_document_write_connected_script(
@@ -1997,6 +2082,10 @@ impl DocumentRuntime {
                 true
             }
             DocumentWriteScriptRunOutcome::Suspend(start) => {
+                Self::resuspend_document_write_insertion(
+                    &mut insertion,
+                    ParserSuspensionCause::DocumentWriteExternalScript { script: node },
+                );
                 self.start_document_write_external_script_load(
                     scope,
                     host_ptr,
@@ -2019,7 +2108,6 @@ impl DocumentRuntime {
         start_line: u64,
         start_column: u64,
         script: PreparedScript,
-        network_tail: &mut String,
     ) -> bool {
         self.note_parser_script_start_position(node, start_line, start_column);
         let _ = self.dom_host_mut().set_script_already_started(node, false);
@@ -2030,11 +2118,9 @@ impl DocumentRuntime {
             script,
             Some(parser_insertion_controller.clone()),
         ) {
-            DocumentWriteScriptRunOutcome::Complete => self
-                .park_outer_parser_tail_behind_reentrant_document_write_work(
-                    parser_insertion_controller,
-                    network_tail,
-                ),
+            DocumentWriteScriptRunOutcome::Complete => {
+                self.has_pending_document_write_parser_blocking_work()
+            }
             DocumentWriteScriptRunOutcome::Suspend(start) => self
                 .suspend_document_write_parser_handoff(
                     scope,
@@ -2042,37 +2128,8 @@ impl DocumentRuntime {
                     document_handle,
                     parser_insertion_controller,
                     start,
-                    network_tail,
                 ),
         }
-    }
-
-    /// Stop the parser that invoked a script when a nested `document.write()`
-    /// created a new parser-blocking owner.
-    ///
-    /// The nested write has already parked the remainder of the invoking
-    /// parser's current input in the shared stream. `network_tail` was removed
-    /// before that input was pumped, so it belongs strictly after the buffered
-    /// remainder and must be restored in that order. The completion owner of
-    /// the nested work will resume this same parser stream.
-    fn park_outer_parser_tail_behind_reentrant_document_write_work(
-        &mut self,
-        parser_insertion_controller: &ParserInsertionController,
-        network_tail: &mut String,
-    ) -> bool {
-        if !self.has_pending_document_write_parser_blocking_work() {
-            return false;
-        }
-        if network_tail.is_empty() {
-            return true;
-        }
-
-        let stream = parser_insertion_controller.parser_stream();
-        let mut stream = stream.borrow_mut();
-        let mut buffered_parser_tail = stream.take_buffered_input();
-        buffered_parser_tail.push_str(&std::mem::take(network_tail));
-        stream.prepend_buffered_input(buffered_parser_tail);
-        true
     }
     fn queue_document_write_parser_owned_post_parse_script(
         &mut self,
@@ -2119,11 +2176,14 @@ impl DocumentRuntime {
                 );
                 return;
             };
+            let shared_preload = self
+                .main_document_script_preloads
+                .shared_preload_for_script(&script);
             let document_character_set = self.document_character_set().to_owned();
             let Some(start) = self.accept_main_parser_deferred_script(
                 task_owner,
                 script,
-                None,
+                shared_preload,
                 Some(&document_character_set),
                 blocking_signatures_before,
                 load_delay_token,
@@ -2251,12 +2311,12 @@ impl DocumentRuntime {
         document_handle: DomHandle,
         parser_insertion_controller: &ParserInsertionController,
         start: Box<DocumentWriteExternalScriptStart>,
-        network_tail: &mut String,
     ) -> bool {
+        let script = start.node;
         let insertion = self.take_suspended_document_write_insertion(
             document_handle,
             parser_insertion_controller,
-            network_tail,
+            ParserSuspensionCause::DocumentWriteExternalScript { script },
         );
         self.start_document_write_external_script_load(
             scope,
@@ -2274,7 +2334,6 @@ impl DocumentRuntime {
         document_handle: DomHandle,
         parser_insertion_controller: &ParserInsertionController,
         handoff: ParserScriptHandoff,
-        network_tail: &mut String,
     ) -> bool {
         match handoff {
             ParserScriptHandoff::BlockingClassic {
@@ -2298,7 +2357,6 @@ impl DocumentRuntime {
                             start_column,
                             script,
                             blocking_signatures_before,
-                            network_tail,
                         )
                     } else {
                         self.suspend_document_write_stylesheet_blocked_script(
@@ -2309,7 +2367,6 @@ impl DocumentRuntime {
                             start_column,
                             script,
                             blocking_signatures_before,
-                            network_tail,
                         )
                     }
                 } else {
@@ -2322,7 +2379,6 @@ impl DocumentRuntime {
                         start_line,
                         start_column,
                         script,
-                        network_tail,
                     )
                 }
             }
@@ -2410,6 +2466,7 @@ impl DocumentRuntime {
         host_ptr: *mut JsContextHost,
         document_handle: DomHandle,
         html: &str,
+        resume_existing_insertion: bool,
         parser_insertion_controller: &ParserInsertionController,
     ) -> bool {
         let stream = parser_insertion_controller.parser_stream();
@@ -2418,13 +2475,34 @@ impl DocumentRuntime {
 
         let mut chunk = parser_input_session.take_current_script_input_html();
         chunk.push_str(html);
-        if chunk.is_empty() {
+        if chunk.is_empty() && !resume_existing_insertion {
             return true;
         }
         let _parser_insertion_session = self.enter_parser_insertion_session();
-        let mut network_tail = stream.borrow_mut().take_buffered_input();
+        let mut begin_insertion = !chunk.is_empty();
 
         loop {
+            let parser_step = {
+                let _pump_guard = parser_insertion_controller.begin_pump();
+                let input = if begin_insertion {
+                    DocumentWriteParserPumpInput::Inserted(chunk.as_str())
+                } else if resume_existing_insertion && chunk.is_empty() {
+                    // Resuming a parser-inserted frame can expose either the
+                    // tokenizer's buffered parent frame or a later root input
+                    // segment. The parser owns that ordering; selecting its
+                    // next queued input is required to make progress once the
+                    // tokenizer buffer itself is empty.
+                    DocumentWriteParserPumpInput::QueuedOrBuffered
+                } else {
+                    DocumentWriteParserPumpInput::Ordinary(chunk.as_str())
+                };
+                self.pump_document_write_parser_step(
+                    scope,
+                    host_ptr,
+                    &mut stream.borrow_mut(),
+                    input,
+                )
+            };
             let DocumentWriteParserPumpStep {
                 outcome:
                     ParserPumpOutcome {
@@ -2433,12 +2511,7 @@ impl DocumentRuntime {
                         discovered_modulepreload_link_candidates,
                         discovered_blocking_stylesheet_inputs,
                     },
-            } = self.pump_document_write_parser_step(
-                scope,
-                host_ptr,
-                &mut stream.borrow_mut(),
-                chunk.as_str(),
-            );
+            } = parser_step;
             let discovered_parser_meta_csp_candidates = stream
                 .borrow_mut()
                 .drain_discovered_parser_meta_csp_candidates();
@@ -2454,6 +2527,7 @@ impl DocumentRuntime {
             );
             self.run_pending_parser_post_step_runtime_work(scope, host_ptr);
             chunk.clear();
+            begin_insertion = false;
 
             self.note_discovered_document_owned_blocking_stylesheet_inputs(
                 discovered_blocking_stylesheet_inputs.iter(),
@@ -2461,7 +2535,6 @@ impl DocumentRuntime {
 
             match result {
                 ParserPumpStep::InputDrained => {
-                    stream.borrow_mut().prepend_buffered_input(network_tail);
                     return true;
                 }
                 ParserPumpStep::Yield(ParserYield::CustomElementConstruction(_handoff)) => {
@@ -2470,7 +2543,7 @@ impl DocumentRuntime {
                     // behavior until that owner can safely run constructors from a shallow V8
                     // entry.
                 }
-                ParserPumpStep::Yield(ParserYield::BlockingStylesheet(_pause)) => {
+                ParserPumpStep::Yield(ParserYield::BlockingStylesheet(pause)) => {
                     if self.current_document_resource_loader().is_none() {
                         continue;
                     }
@@ -2483,8 +2556,8 @@ impl DocumentRuntime {
                             host_ptr,
                             document_handle,
                             parser_insertion_controller,
+                            pause.node_id,
                             blocking_signatures,
-                            &mut network_tail,
                         )
                     {
                         return true;
@@ -2497,7 +2570,6 @@ impl DocumentRuntime {
                         document_handle,
                         parser_insertion_controller,
                         *handoff,
-                        &mut network_tail,
                     ) {
                         return true;
                     }
@@ -2599,7 +2671,7 @@ impl DocumentRuntime {
         let parser_insertion_controller = self
             .root_document_parser
             .as_ref()
-            .map(|parser| ParserInsertionController::for_stream(parser.stream_handle()))
+            .and_then(ParserInsertionController::for_session)
             .or_else(|| self.current_parser_insertion_controller())
             .expect("document.write() must have a live root stream or parser insertion controller");
         self.write_html_via_parser_stream(
@@ -2607,6 +2679,7 @@ impl DocumentRuntime {
             host_ptr,
             document_handle,
             html,
+            false,
             &parser_insertion_controller,
         )
     }
@@ -2693,7 +2766,13 @@ mod tests {
         let document = HtmlParser.parse(document_url, "<!doctype html>".to_owned());
         let mut runtime = DocumentRuntime::new(&document);
 
-        runtime.start_root_document_parser_stream();
+        runtime.start_root_document_parser_stream(
+            crate::frame_owner_model::FrameDocumentTaskOwner::new(
+                crate::frame_owner_model::FrameSchedulerLaneId(1),
+                crate::frame_owner_model::LocalWindowId(1),
+                crate::frame_owner_model::DocumentId(1),
+            ),
+        );
 
         let parser = runtime
             .root_document_parser

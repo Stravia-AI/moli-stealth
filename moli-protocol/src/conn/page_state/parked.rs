@@ -1354,8 +1354,11 @@ impl BrowserContext {
                 target_id: Some(DevToolsTargetId::from(target_id)),
                 kind: DevToolsTargetKind::Page,
                 title: self
-                    .loaded_page()
-                    .map(|page| page.document_title())
+                    .active_target
+                    .owner_state
+                    .committed_document_title()
+                    .map(str::to_owned)
+                    .or_else(|| self.loaded_page().map(|page| page.document_title()))
                     .unwrap_or_default(),
                 url: self.target_url().to_owned(),
                 attached,
@@ -1393,9 +1396,11 @@ impl BrowserContext {
         Some(DevToolsTargetInfo {
             target_id: Some(DevToolsTargetId::from(target.target_id())),
             kind: DevToolsTargetKind::Page,
-            title: target
-                .loaded_page()
-                .map(|page| page.document_title())
+            title: self
+                .parked_target_owner_state(target.target_id())
+                .and_then(|owner_state| owner_state.committed_document_title())
+                .map(str::to_owned)
+                .or_else(|| target.loaded_page().map(|page| page.document_title()))
                 .unwrap_or_default(),
             url: target.target_url().to_owned(),
             attached,

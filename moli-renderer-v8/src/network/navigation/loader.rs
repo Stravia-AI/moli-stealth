@@ -62,11 +62,26 @@ impl NavigationResourceLoader {
         requested_url: url::Url,
         task_runner: RendererResourceTaskRunner,
     ) -> Self {
+        Self::new_with_cancel_handle(
+            request_client,
+            requested_url,
+            task_runner,
+            FetchCancelHandle::new(),
+        )
+    }
+
+    pub fn new_with_cancel_handle(
+        request_client: ResourceRequestClient,
+        requested_url: url::Url,
+        task_runner: RendererResourceTaskRunner,
+        cancel: FetchCancelHandle,
+    ) -> Self {
         Self::new_with_committed_document_browser_site_context(
             request_client,
             requested_url,
             task_runner,
             None,
+            cancel,
         )
     }
 
@@ -81,6 +96,7 @@ impl NavigationResourceLoader {
             requested_url,
             task_runner,
             browser_site_context,
+            FetchCancelHandle::new(),
         )
     }
 
@@ -89,6 +105,7 @@ impl NavigationResourceLoader {
         requested_url: url::Url,
         task_runner: RendererResourceTaskRunner,
         committed_document_browser_site_context: Option<Arc<BrowserCookieFacadeContext>>,
+        cancel: FetchCancelHandle,
     ) -> Self {
         Self {
             request_client,
@@ -100,7 +117,7 @@ impl NavigationResourceLoader {
                     .fetch_add(1, Ordering::Relaxed)
                     .saturating_add(1),
                 state: Mutex::new(NavigationResourceLoaderState::Created),
-                cancel: FetchCancelHandle::new(),
+                cancel,
             }),
         }
     }

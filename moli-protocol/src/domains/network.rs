@@ -62,7 +62,8 @@ pub use agent::IoStreamState;
 pub(crate) use agent::TargetIoStreamRead;
 pub(crate) use agent::{
     CapturedRequestBody, CapturedResponseBody, CollectedNetworkDataArtifact,
-    NetworkBacklogPreferredRequestId, TargetNetworkAgentState, TargetNetworkArtifacts,
+    NetworkBacklogPreferredRequestId, RetiringTargetNetworkAgentState, TargetNetworkAgentState,
+    TargetNetworkArtifacts,
 };
 pub(crate) use backlog::{
     NetworkBacklogProjectionContext, emit_pending_network_backlog_activity_background_events,

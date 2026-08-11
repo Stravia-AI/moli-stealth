@@ -1,17 +1,23 @@
 use crate::{
     DocumentOwnedBlockingStylesheetDiscoveryInput,
-    dom::native::NativeNodeId,
+    dom::native::{DomHost, NativeNodeId},
+    frame_owner_model::FrameDocumentTaskOwner,
     parser::{
         DocumentStream, HtmlParser, ParserBlockingStylesheetPause,
         ParserCustomElementConstructionHandoff, ParserDomMutationConsumer, ParserDomReadConsumer,
         ParserElementCreationConsumer, ParserMutationEffectConsumer, ParserPumpOutcome,
-        ParserPumpStep, ParserScriptHandoff, ParserYield, PreparedScript,
+        ParserPumpStep, ParserScriptHandoff, ParserYield, PreparedScript, XmlDocumentStream,
     },
 };
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 use url::Url;
 
 pub(crate) type DocumentParserStreamHandle = Rc<RefCell<DocumentStream>>;
+type XmlDocumentParserStreamHandle = Rc<RefCell<XmlDocumentStream>>;
 
 fn new_document_parser_stream_handle(stream: DocumentStream) -> DocumentParserStreamHandle {
     Rc::new(RefCell::new(stream))
@@ -25,12 +31,21 @@ pub(crate) trait LiveDocumentParserOwner:
 {
 }
 
+#[cfg(test)]
 fn pump_live_document_parser_step(
     stream: &mut DocumentStream,
     chunk: &str,
     owner: &mut impl LiveDocumentParserOwner,
 ) -> ParserPumpOutcome {
     stream.pump_parser_step_with_runtime_dom_consumer(chunk, owner)
+}
+
+fn pump_next_live_document_parser_step(
+    stream: &mut DocumentStream,
+    max_bytes: usize,
+    owner: &mut impl LiveDocumentParserOwner,
+) -> ParserPumpOutcome {
+    stream.pump_next_parser_step_with_runtime_dom_consumer(max_bytes, owner)
 }
 
 pub(crate) enum LiveDocumentParserStepOutcome {
@@ -80,6 +95,7 @@ impl LiveDocumentParserDiscoverySignals {
 }
 
 impl LiveDocumentParserStepAdvance {
+    #[cfg(test)]
     fn split(
         self,
     ) -> (
@@ -90,6 +106,7 @@ impl LiveDocumentParserStepAdvance {
     }
 }
 
+#[cfg(test)]
 fn advance_live_document_parser_step<Driver>(
     stream: &mut DocumentStream,
     parser_step: &str,
@@ -98,14 +115,34 @@ fn advance_live_document_parser_step<Driver>(
 where
     Driver: LiveDocumentParserOwner,
 {
+    let outcome = pump_live_document_parser_step(stream, parser_step, driver);
+    let parser_meta_csp_candidates = stream.drain_discovered_parser_meta_csp_candidates();
+    live_document_parser_advance_from_outcome(outcome, parser_meta_csp_candidates)
+}
+
+fn advance_next_live_document_parser_step<Driver>(
+    stream: &mut DocumentStream,
+    max_bytes: usize,
+    driver: &mut Driver,
+) -> LiveDocumentParserStepAdvance
+where
+    Driver: LiveDocumentParserOwner,
+{
+    let outcome = pump_next_live_document_parser_step(stream, max_bytes, driver);
+    let parser_meta_csp_candidates = stream.drain_discovered_parser_meta_csp_candidates();
+    live_document_parser_advance_from_outcome(outcome, parser_meta_csp_candidates)
+}
+
+fn live_document_parser_advance_from_outcome(
+    outcome: ParserPumpOutcome,
+    discovered_parser_meta_csp_candidates: Vec<NativeNodeId>,
+) -> LiveDocumentParserStepAdvance {
     let ParserPumpOutcome {
         result,
         discovered_async_prefetch_scripts,
         discovered_modulepreload_link_candidates,
         discovered_blocking_stylesheet_inputs,
-    } = pump_live_document_parser_step(stream, parser_step, driver);
-    let discovered_parser_meta_csp_candidates =
-        stream.drain_discovered_parser_meta_csp_candidates();
+    } = outcome;
     let discovery_signals = LiveDocumentParserDiscoverySignals {
         async_prefetch_scripts: discovered_async_prefetch_scripts,
         modulepreload_link_candidates: discovered_modulepreload_link_candidates,
@@ -140,132 +177,331 @@ pub(crate) enum DocumentParserLifetime {
     Closing,
 }
 
+static NEXT_DOCUMENT_PARSER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ParserSessionId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ParserSuspensionId(u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct DocumentParserOwnerIdentity {
+    document_owner: FrameDocumentTaskOwner,
+    runtime_generation: u64,
+}
+
+impl DocumentParserOwnerIdentity {
+    fn new(document_owner: FrameDocumentTaskOwner, runtime_generation: u64) -> Self {
+        Self {
+            document_owner,
+            runtime_generation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParserSuspensionCause {
+    ParserClassicSource { script: NativeNodeId },
+    ParserClassicStylesheets { script: NativeNodeId },
+    ParserCreatedStylesheet { owner: NativeNodeId },
+    DocumentWriteExternalScript { script: NativeNodeId },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ParserSuspension {
+    id: ParserSuspensionId,
+    cause: ParserSuspensionCause,
+    parser_commit_epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParserResumePermit {
+    owner_identity: Option<DocumentParserOwnerIdentity>,
+    session_id: ParserSessionId,
+    suspension_id: ParserSuspensionId,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParserStopReason {
+    DocumentReplacement,
+    MainResourceLoadFailure,
+    OwnerDropped,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentParserRunState {
+    Ready,
+    Pumping {
+        epoch: u64,
+    },
+    Suspended {
+        id: ParserSuspensionId,
+        cause: ParserSuspensionCause,
+        parser_commit_epoch: u64,
+    },
+    Finishing,
+    Finished,
+    Stopped(ParserStopReason),
+}
+
+impl From<ParserSuspension> for DocumentParserRunState {
+    fn from(suspension: ParserSuspension) -> Self {
+        Self::Suspended {
+            id: suspension.id,
+            cause: suspension.cause,
+            parser_commit_epoch: suspension.parser_commit_epoch,
+        }
+    }
+}
+
+impl DocumentParserRunState {
+    fn suspension(self) -> Option<ParserSuspension> {
+        match self {
+            Self::Suspended {
+                id,
+                cause,
+                parser_commit_epoch,
+            } => Some(ParserSuspension {
+                id,
+                cause,
+                parser_commit_epoch,
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ParserResumeApplication {
+    Resumed,
+    RejectedSession,
+    RejectedOwner,
+    RejectedSuspension,
+    ParserNotSuspended,
+}
+
+#[derive(Debug)]
+struct DocumentParserSessionControl {
+    session_id: ParserSessionId,
+    owner_identity: Option<DocumentParserOwnerIdentity>,
+    next_suspension_id: u64,
+    next_pump_epoch: u64,
+    parser_commit_epoch: u64,
+    run_state: DocumentParserRunState,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct DocumentParserSessionControlHandle(Rc<RefCell<DocumentParserSessionControl>>);
+
+impl DocumentParserSessionControlHandle {
+    pub(crate) fn new() -> Self {
+        let session_id =
+            ParserSessionId(NEXT_DOCUMENT_PARSER_SESSION_ID.fetch_add(1, Ordering::Relaxed));
+        Self(Rc::new(RefCell::new(DocumentParserSessionControl {
+            session_id,
+            owner_identity: None,
+            next_suspension_id: 1,
+            next_pump_epoch: 1,
+            parser_commit_epoch: 0,
+            run_state: DocumentParserRunState::Ready,
+        })))
+    }
+
+    pub(crate) fn session_id(&self) -> ParserSessionId {
+        self.0.borrow().session_id
+    }
+
+    pub(crate) fn run_state(&self) -> DocumentParserRunState {
+        self.0.borrow().run_state
+    }
+
+    fn bind_owner(&self, owner_identity: DocumentParserOwnerIdentity) {
+        let mut control = self.0.borrow_mut();
+        match control.owner_identity {
+            None => control.owner_identity = Some(owner_identity),
+            Some(current) => assert_eq!(
+                current, owner_identity,
+                "one live parser session cannot be rebound to a different Document owner"
+            ),
+        }
+    }
+
+    pub(crate) fn suspend(&self, cause: ParserSuspensionCause) -> ParserResumePermit {
+        let mut control = self.0.borrow_mut();
+        assert_eq!(
+            control.run_state,
+            DocumentParserRunState::Ready,
+            "only a ready live parser session can enter a persistent suspension"
+        );
+        let suspension_id = ParserSuspensionId(control.next_suspension_id);
+        control.next_suspension_id = control.next_suspension_id.wrapping_add(1).max(1);
+        let suspension = ParserSuspension {
+            id: suspension_id,
+            cause,
+            parser_commit_epoch: control.parser_commit_epoch,
+        };
+        control.run_state = suspension.into();
+        ParserResumePermit {
+            owner_identity: control.owner_identity,
+            session_id: control.session_id,
+            suspension_id,
+        }
+    }
+
+    pub(crate) fn current_resume_permit(&self) -> Option<ParserResumePermit> {
+        let control = self.0.borrow();
+        let suspension = control.run_state.suspension()?;
+        Some(ParserResumePermit {
+            owner_identity: control.owner_identity,
+            session_id: control.session_id,
+            suspension_id: suspension.id,
+        })
+    }
+
+    pub(crate) fn resume(&self, permit: ParserResumePermit) -> ParserResumeApplication {
+        let mut control = self.0.borrow_mut();
+        if permit.session_id != control.session_id {
+            return ParserResumeApplication::RejectedSession;
+        }
+        if permit.owner_identity != control.owner_identity {
+            return ParserResumeApplication::RejectedOwner;
+        }
+        let Some(suspension) = control.run_state.suspension() else {
+            return ParserResumeApplication::ParserNotSuspended;
+        };
+        if suspension.id != permit.suspension_id {
+            return ParserResumeApplication::RejectedSuspension;
+        }
+        control.run_state = DocumentParserRunState::Ready;
+        ParserResumeApplication::Resumed
+    }
+
+    pub(crate) fn begin_pump(&self) -> DocumentParserPumpGuard {
+        let mut control = self.0.borrow_mut();
+        assert_eq!(
+            control.run_state,
+            DocumentParserRunState::Ready,
+            "a live parser may only pump from the ready state"
+        );
+        let epoch = control.next_pump_epoch;
+        control.next_pump_epoch = control.next_pump_epoch.wrapping_add(1).max(1);
+        control.parser_commit_epoch = control.parser_commit_epoch.wrapping_add(1);
+        control.run_state = DocumentParserRunState::Pumping { epoch };
+        drop(control);
+        DocumentParserPumpGuard {
+            control: self.clone(),
+            epoch,
+        }
+    }
+
+    fn begin_finish(&self) {
+        let mut control = self.0.borrow_mut();
+        assert_eq!(
+            control.run_state,
+            DocumentParserRunState::Ready,
+            "a suspended or stopped live parser cannot finish"
+        );
+        control.run_state = DocumentParserRunState::Finishing;
+    }
+
+    fn finish(&self) {
+        let mut control = self.0.borrow_mut();
+        assert_eq!(
+            control.run_state,
+            DocumentParserRunState::Finishing,
+            "parser finish must complete the active finishing transition"
+        );
+        control.run_state = DocumentParserRunState::Finished;
+    }
+
+    pub(crate) fn stop(&self, reason: ParserStopReason) {
+        let mut control = self.0.borrow_mut();
+        if !matches!(
+            control.run_state,
+            DocumentParserRunState::Finished | DocumentParserRunState::Stopped(_)
+        ) {
+            control.run_state = DocumentParserRunState::Stopped(reason);
+        }
+    }
+}
+
+pub(crate) struct DocumentParserPumpGuard {
+    control: DocumentParserSessionControlHandle,
+    epoch: u64,
+}
+
+impl Drop for DocumentParserPumpGuard {
+    fn drop(&mut self) {
+        let mut control = self.control.0.borrow_mut();
+        if control.run_state == (DocumentParserRunState::Pumping { epoch: self.epoch }) {
+            control.run_state = DocumentParserRunState::Ready;
+        }
+    }
+}
+
 /// The canonical runtime owner of one live document parser.
 ///
 /// Root and child documents store this same type. A `ParserInsertionController`
 /// is only a temporary reentrant capability derived from its stream handle; it
 /// does not own parser lifetime or suspension state.
+enum ExecutableDocumentParserBackend {
+    Html(DocumentParserStreamHandle),
+    Xml(XmlDocumentParserStreamHandle),
+}
+
+impl ExecutableDocumentParserBackend {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Html(_) => "html",
+            Self::Xml(_) => "xml",
+        }
+    }
+}
+
 pub(crate) struct DocumentParserSession {
-    stream: DocumentParserStreamHandle,
-    input: ParserInputBuffer,
+    backend: Option<ExecutableDocumentParserBackend>,
     discovery_signals: LiveDocumentParserDiscoverySignals,
     lifetime: DocumentParserLifetime,
-    waiting_for_blocking_stylesheet: bool,
-    waiting_for_parser_script: bool,
+    control: DocumentParserSessionControlHandle,
 }
 
 impl std::fmt::Debug for DocumentParserSession {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("DocumentParserSession")
-            .field("lifetime", &self.lifetime)
             .field(
-                "waiting_for_blocking_stylesheet",
-                &self.waiting_for_blocking_stylesheet,
+                "backend",
+                &self
+                    .backend
+                    .as_ref()
+                    .map(ExecutableDocumentParserBackend::name),
             )
-            .field("waiting_for_parser_script", &self.waiting_for_parser_script)
+            .field("lifetime", &self.lifetime)
+            .field("session_id", &self.control.session_id())
+            .field("run_state", &self.control.run_state())
             .finish_non_exhaustive()
-    }
-}
-
-pub(crate) struct ParserInputBuffer {
-    queued_chunks: VecDeque<String>,
-    current_chunk: Option<String>,
-}
-
-impl ParserInputBuffer {
-    pub(crate) fn new() -> Self {
-        Self {
-            queued_chunks: VecDeque::new(),
-            current_chunk: None,
-        }
-    }
-
-    pub(crate) fn queue_arrived_chunk(&mut self, html: String) {
-        if !html.is_empty() {
-            self.queued_chunks.push_back(html);
-        }
-    }
-
-    pub(crate) fn ensure_current_chunk(&mut self, stream: &DocumentStream) {
-        if let Some(script_input_html) = DocumentParserDriver::take_next_script_input(stream) {
-            if let Some(network_chunk) = self.current_chunk.take()
-                && !network_chunk.is_empty()
-            {
-                self.queued_chunks.push_front(network_chunk);
-            }
-            self.current_chunk = Some(script_input_html);
-            return;
-        }
-
-        if self.current_chunk.is_none() {
-            self.current_chunk = self.queued_chunks.pop_front();
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.current_chunk.is_none() && self.queued_chunks.is_empty()
-    }
-
-    pub(crate) fn current_chunk_len(&self) -> usize {
-        self.current_chunk.as_ref().map_or(0, |chunk| chunk.len())
-    }
-
-    pub(crate) fn current_chunk_is_none(&self) -> bool {
-        self.current_chunk.is_none()
-    }
-
-    pub(crate) fn current_chunk_is_empty(&self) -> bool {
-        self.current_chunk
-            .as_ref()
-            .is_some_and(|chunk| chunk.is_empty())
-    }
-
-    pub(crate) fn take_current_chunk(&mut self) -> String {
-        self.current_chunk.take().unwrap_or_default()
-    }
-
-    pub(crate) fn set_current_chunk(&mut self, chunk: Option<String>) {
-        self.current_chunk = chunk;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_current_chunk_for_testing(&mut self, chunk: Option<String>) {
-        self.current_chunk = chunk;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_chunk_for_testing(&self) -> Option<&str> {
-        self.current_chunk.as_deref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn current_chunk_is_non_empty_for_testing(&self) -> bool {
-        self.current_chunk
-            .as_ref()
-            .is_some_and(|chunk| !chunk.is_empty())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn queued_chunk_count_for_testing(&self) -> usize {
-        self.queued_chunks.len()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn queued_front_for_testing(&self) -> Option<&str> {
-        self.queued_chunks.front().map(String::as_str)
     }
 }
 
 struct DocumentParserDriver;
 
 impl DocumentParserDriver {
+    #[cfg(test)]
     fn advance_step(
         stream: &mut DocumentStream,
         parser_step: &str,
         owner: &mut impl LiveDocumentParserOwner,
     ) -> LiveDocumentParserStepAdvance {
         advance_live_document_parser_step(stream, parser_step, owner)
+    }
+
+    fn advance_next_step(
+        stream: &mut DocumentStream,
+        max_bytes: usize,
+        owner: &mut impl LiveDocumentParserOwner,
+    ) -> LiveDocumentParserStepAdvance {
+        advance_next_live_document_parser_step(stream, max_bytes, owner)
     }
 
     fn note_defined_autonomous_custom_elements(
@@ -285,33 +521,11 @@ impl DocumentParserDriver {
         stream.take_processed_insertion_meta_csp_count()
     }
 
-    fn take_next_script_input(stream: &DocumentStream) -> Option<String> {
-        stream.take_next_script_input()
-    }
-
     fn has_script_input(stream: &DocumentStream) -> bool {
         stream.has_script_input()
     }
 
-    fn take_buffered_input(stream: &mut DocumentStream) -> String {
-        stream.take_buffered_input()
-    }
-
-    fn take_buffered_input_with_tail(
-        stream: &mut DocumentStream,
-        tail: Option<String>,
-    ) -> Option<String> {
-        let mut input = Self::take_buffered_input(stream);
-        if let Some(tail) = tail {
-            input.push_str(&tail);
-        }
-        (!input.is_empty()).then_some(input)
-    }
-
-    fn peek_buffered_input(stream: &mut DocumentStream) -> String {
-        stream.peek_buffered_input()
-    }
-
+    #[cfg(test)]
     fn take_null_custom_element_registry_elements(
         stream: &mut DocumentStream,
     ) -> Vec<NativeNodeId> {
@@ -328,8 +542,15 @@ impl DocumentParserDriver {
 
 impl DocumentParserSession {
     pub(crate) fn start_main_document(document_url: Url) -> Self {
-        Self::new(
+        Self::new_html(
             HtmlParser.start_document(document_url),
+            DocumentParserLifetime::Finite,
+        )
+    }
+
+    pub(crate) fn start_main_xml_document(document_url: Url) -> Self {
+        Self::new_xml(
+            XmlDocumentStream::new_top_level_document(document_url),
             DocumentParserLifetime::Finite,
         )
     }
@@ -338,8 +559,18 @@ impl DocumentParserSession {
         document_url: Url,
         document_handle: NativeNodeId,
     ) -> Self {
-        Self::new(
+        Self::new_html(
             HtmlParser.start_live_document_root(document_url, document_handle),
+            DocumentParserLifetime::Finite,
+        )
+    }
+
+    pub(crate) fn start_finite_live_xml_document(
+        document_url: Url,
+        document_handle: NativeNodeId,
+    ) -> Self {
+        Self::new_xml(
+            XmlDocumentStream::new_live_document_root(document_url, document_handle),
             DocumentParserLifetime::Finite,
         )
     }
@@ -348,25 +579,85 @@ impl DocumentParserSession {
         document_url: Url,
         document_handle: NativeNodeId,
     ) -> Self {
-        Self::new(
+        Self::new_html(
             HtmlParser.start_live_document_root(document_url, document_handle),
             DocumentParserLifetime::Open,
         )
     }
 
-    fn new(stream: DocumentStream, lifetime: DocumentParserLifetime) -> Self {
+    fn new_html(stream: DocumentStream, lifetime: DocumentParserLifetime) -> Self {
         Self {
-            stream: new_document_parser_stream_handle(stream),
-            input: ParserInputBuffer::new(),
+            backend: Some(ExecutableDocumentParserBackend::Html(
+                new_document_parser_stream_handle(stream),
+            )),
             discovery_signals: LiveDocumentParserDiscoverySignals::default(),
             lifetime,
-            waiting_for_blocking_stylesheet: false,
-            waiting_for_parser_script: false,
+            control: DocumentParserSessionControlHandle::new(),
         }
     }
 
+    fn new_xml(stream: XmlDocumentStream, lifetime: DocumentParserLifetime) -> Self {
+        Self {
+            backend: Some(ExecutableDocumentParserBackend::Xml(Rc::new(RefCell::new(
+                stream,
+            )))),
+            discovery_signals: LiveDocumentParserDiscoverySignals::default(),
+            lifetime,
+            control: DocumentParserSessionControlHandle::new(),
+        }
+    }
+
+    fn backend(&self) -> &ExecutableDocumentParserBackend {
+        self.backend
+            .as_ref()
+            .expect("a finished parser session no longer owns a backend")
+    }
+
+    pub(crate) fn bind_owner(
+        &mut self,
+        document_owner: FrameDocumentTaskOwner,
+        runtime_generation: u64,
+    ) {
+        self.control.bind_owner(DocumentParserOwnerIdentity::new(
+            document_owner,
+            runtime_generation,
+        ));
+    }
+
+    pub(crate) fn run_state(&self) -> DocumentParserRunState {
+        self.control.run_state()
+    }
+
+    pub(crate) fn control_handle(&self) -> DocumentParserSessionControlHandle {
+        self.control.clone()
+    }
+
+    pub(crate) fn suspend(&mut self, cause: ParserSuspensionCause) -> ParserResumePermit {
+        self.control.suspend(cause)
+    }
+
+    pub(crate) fn current_resume_permit(&self) -> Option<ParserResumePermit> {
+        self.control.current_resume_permit()
+    }
+
+    pub(crate) fn resume(&mut self, permit: ParserResumePermit) -> ParserResumeApplication {
+        self.control.resume(permit)
+    }
+
+    pub(crate) fn stop(&mut self, reason: ParserStopReason) {
+        self.control.stop(reason);
+    }
+
     pub(crate) fn stream_handle(&self) -> DocumentParserStreamHandle {
-        self.stream.clone()
+        self.html_stream_handle()
+            .expect("HTML parser stream requested from an XML document parser session")
+    }
+
+    pub(crate) fn html_stream_handle(&self) -> Option<DocumentParserStreamHandle> {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => Some(stream.clone()),
+            ExecutableDocumentParserBackend::Xml(_) => None,
+        }
     }
 
     pub(crate) fn lifetime(&self) -> DocumentParserLifetime {
@@ -388,58 +679,75 @@ impl DocumentParserSession {
         )
     }
 
-    pub(crate) fn wait_for_blocking_stylesheet(&mut self) {
-        self.waiting_for_blocking_stylesheet = true;
+    pub(crate) fn is_suspended(&self) -> bool {
+        matches!(self.run_state(), DocumentParserRunState::Suspended { .. })
     }
 
-    pub(crate) fn take_blocking_stylesheet_wait(&mut self) -> bool {
-        std::mem::take(&mut self.waiting_for_blocking_stylesheet)
-    }
-
-    pub(crate) fn is_waiting_for_blocking_stylesheet(&self) -> bool {
-        self.waiting_for_blocking_stylesheet
-    }
-
-    pub(crate) fn wait_for_parser_script(&mut self) {
-        self.waiting_for_parser_script = true;
-    }
-
-    pub(crate) fn take_parser_script_wait(&mut self) -> bool {
-        std::mem::take(&mut self.waiting_for_parser_script)
-    }
-
-    pub(crate) fn is_waiting_for_parser_script(&self) -> bool {
-        self.waiting_for_parser_script
+    pub(crate) fn suspension_cause(&self) -> Option<ParserSuspensionCause> {
+        self.run_state().suspension().map(|pause| pause.cause)
     }
 
     pub(crate) fn has_exclusive_stream_handle(&self) -> bool {
-        Rc::strong_count(&self.stream) == 1
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => Rc::strong_count(stream) == 1,
+            ExecutableDocumentParserBackend::Xml(stream) => Rc::strong_count(stream) == 1,
+        }
     }
 
     pub(crate) fn note_defined_autonomous_custom_elements(
         &mut self,
         names: impl IntoIterator<Item = String>,
     ) {
-        DocumentParserDriver::note_defined_autonomous_custom_elements(
-            &mut self.stream.borrow_mut(),
-            names,
-        );
+        if let ExecutableDocumentParserBackend::Html(stream) = self.backend() {
+            DocumentParserDriver::note_defined_autonomous_custom_elements(
+                &mut stream.borrow_mut(),
+                names,
+            );
+        }
     }
 
-    pub(crate) fn queue_arrived_chunk(&mut self, html: String) {
-        self.input.queue_arrived_chunk(html);
+    pub(crate) fn queue_arrived_chunk(&mut self, source: String) {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                stream.borrow_mut().append_to_end(source);
+            }
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                stream.borrow_mut().append_to_end(source);
+            }
+        }
     }
 
-    pub(crate) fn ensure_current_chunk(&mut self) {
-        self.input.ensure_current_chunk(&self.stream.borrow());
+    pub(crate) fn declare_eof(&mut self) {
+        if let ExecutableDocumentParserBackend::Xml(stream) = self.backend() {
+            stream.borrow_mut().declare_eof();
+        }
+    }
+
+    pub(crate) fn set_xml_document_content_type(&mut self, content_type: String) {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                stream.borrow_mut().set_document_content_type(content_type);
+            }
+            ExecutableDocumentParserBackend::Html(_) => {
+                panic!("XML content type applied to an HTML parser session")
+            }
+        }
     }
 
     pub(crate) fn has_script_input(&self) -> bool {
-        DocumentParserDriver::has_script_input(&self.stream.borrow())
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                DocumentParserDriver::has_script_input(&stream.borrow())
+            }
+            ExecutableDocumentParserBackend::Xml(_) => false,
+        }
     }
 
     pub(crate) fn input_is_empty(&self) -> bool {
-        self.input.is_empty()
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => !stream.borrow().has_pending_input(),
+            ExecutableDocumentParserBackend::Xml(stream) => !stream.borrow().has_pending_input(),
+        }
     }
 
     #[cfg(test)]
@@ -448,103 +756,173 @@ impl DocumentParserSession {
     }
 
     pub(crate) fn current_chunk_len(&self) -> usize {
-        self.input.current_chunk_len()
-    }
-
-    pub(crate) fn current_chunk_is_none(&self) -> bool {
-        self.input.current_chunk_is_none()
-    }
-
-    pub(crate) fn current_chunk_is_empty(&self) -> bool {
-        self.input.current_chunk_is_empty()
-    }
-
-    pub(crate) fn take_current_chunk(&mut self) -> String {
-        self.input.take_current_chunk()
-    }
-
-    pub(crate) fn set_current_chunk(&mut self, chunk: Option<String>) {
-        self.input.set_current_chunk(chunk);
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => stream.borrow().next_input_len(),
+            ExecutableDocumentParserBackend::Xml(stream) => stream.borrow().next_input_len(),
+        }
     }
 
     pub(crate) fn take_next_insertion_preload_input(&self) -> Option<String> {
-        DocumentParserDriver::take_next_insertion_preload_input(&self.stream.borrow())
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                DocumentParserDriver::take_next_insertion_preload_input(&stream.borrow())
+            }
+            ExecutableDocumentParserBackend::Xml(_) => None,
+        }
     }
 
     pub(crate) fn take_processed_insertion_meta_csp_count(&self) -> usize {
-        DocumentParserDriver::take_processed_insertion_meta_csp_count(&self.stream.borrow())
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                DocumentParserDriver::take_processed_insertion_meta_csp_count(&stream.borrow())
+            }
+            ExecutableDocumentParserBackend::Xml(_) => 0,
+        }
     }
 
-    pub(crate) fn take_buffered_input_with_tail(&mut self, tail: Option<String>) -> Option<String> {
-        DocumentParserDriver::take_buffered_input_with_tail(&mut self.stream.borrow_mut(), tail)
-    }
-
-    pub(crate) fn peek_buffered_input(&mut self) -> String {
-        DocumentParserDriver::peek_buffered_input(&mut self.stream.borrow_mut())
+    pub(crate) fn snapshot_pending_input(&self) -> String {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                stream.borrow().snapshot_pending_input()
+            }
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                stream.borrow().snapshot_pending_input()
+            }
+        }
     }
 
     pub(crate) fn advance_queued_or_resume_step(
         &mut self,
         owner: &mut impl LiveDocumentParserOwner,
     ) -> LiveDocumentParserStepOutcome {
-        self.ensure_current_chunk();
-        let parser_step = self.input.take_current_chunk();
-        self.advance_step(&parser_step, owner)
+        self.advance_next_step(0, owner)
     }
 
+    pub(crate) fn advance_next_step(
+        &mut self,
+        max_bytes: usize,
+        owner: &mut impl LiveDocumentParserOwner,
+    ) -> LiveDocumentParserStepOutcome {
+        let _pump_guard = self.control.begin_pump();
+        let advance = match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                DocumentParserDriver::advance_next_step(&mut stream.borrow_mut(), max_bytes, owner)
+            }
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                let mut stream = stream.borrow_mut();
+                let outcome =
+                    stream.pump_next_parser_step_with_runtime_dom_consumer(max_bytes, owner);
+                let parser_meta_csp_candidates =
+                    stream.drain_discovered_parser_meta_csp_candidates();
+                live_document_parser_advance_from_outcome(outcome, parser_meta_csp_candidates)
+            }
+        };
+        self.discovery_signals.extend(advance.discovery_signals);
+        advance.outcome
+    }
+
+    #[cfg(test)]
     pub(crate) fn advance_step_and_take_null_custom_element_registry_elements(
         &mut self,
         parser_step: &str,
         owner: &mut impl LiveDocumentParserOwner,
     ) -> (LiveDocumentParserStepOutcome, Vec<NativeNodeId>) {
-        let (advance, null_custom_element_registry_elements) =
-            self.with_reentrant_stream_step(|stream| {
+        let _pump_guard = self.control.begin_pump();
+        let (advance, null_custom_element_registry_elements) = match self.backend() {
+            ExecutableDocumentParserBackend::Html(_) => self.with_reentrant_stream_step(|stream| {
                 let advance = DocumentParserDriver::advance_step(stream, parser_step, owner);
                 let null_custom_element_registry_elements =
                     DocumentParserDriver::take_null_custom_element_registry_elements(stream);
                 (advance, null_custom_element_registry_elements)
-            });
+            }),
+            ExecutableDocumentParserBackend::Xml(_) => {
+                panic!("XML document parsers do not support HTML insertion input")
+            }
+        };
         let (outcome, discovery_signals) = advance.split();
         self.discovery_signals.extend(discovery_signals);
         (outcome, null_custom_element_registry_elements)
-    }
-
-    fn advance_step(
-        &mut self,
-        parser_step: &str,
-        owner: &mut impl LiveDocumentParserOwner,
-    ) -> LiveDocumentParserStepOutcome {
-        let advance =
-            DocumentParserDriver::advance_step(&mut self.stream.borrow_mut(), parser_step, owner);
-        self.discovery_signals.extend(advance.discovery_signals);
-        advance.outcome
     }
 
     pub(crate) fn take_discovery_signals(&mut self) -> LiveDocumentParserDiscoverySignals {
         std::mem::take(&mut self.discovery_signals)
     }
 
+    pub(crate) fn with_parser_stream_dom_host_for_bootstrap<R>(
+        &mut self,
+        f: impl FnOnce(DomHost) -> std::result::Result<R, Box<(anyhow::Error, DomHost)>>,
+    ) -> anyhow::Result<R> {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => stream
+                .borrow_mut()
+                .with_parser_stream_dom_host_for_bootstrap(f),
+            ExecutableDocumentParserBackend::Xml(stream) => stream
+                .borrow_mut()
+                .with_parser_stream_dom_host_for_bootstrap(f),
+        }
+    }
+
+    pub(crate) fn take_parser_stream_null_custom_element_registry_elements(
+        &mut self,
+    ) -> Vec<NativeNodeId> {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => stream
+                .borrow_mut()
+                .take_parser_stream_null_custom_element_registry_elements(),
+            ExecutableDocumentParserBackend::Xml(stream) => stream
+                .borrow_mut()
+                .take_parser_stream_null_custom_element_registry_elements(),
+        }
+    }
+
+    pub(crate) fn with_stylesheet_blocking_read_view<R>(
+        &self,
+        f: impl FnOnce(&dyn crate::StylesheetBlockingReadView) -> R,
+    ) -> R {
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                stream.borrow().with_stylesheet_blocking_read_view(f)
+            }
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                stream.borrow().with_stylesheet_blocking_read_view(f)
+            }
+        }
+    }
+
     pub(crate) fn finish(
-        mut self,
+        &mut self,
         owner: &mut impl LiveDocumentParserOwner,
     ) -> DocumentParserFinishSignals {
+        assert!(
+            self.input_is_empty(),
+            "a live document parser may only finish after all parser-owned input is drained"
+        );
+        self.control.begin_finish();
         let mut discovery_signals = std::mem::take(&mut self.discovery_signals);
-        let stream = match Rc::try_unwrap(self.stream) {
-            Ok(stream) => stream.into_inner(),
-            Err(_) => {
-                panic!(
-                    "live document parser session must not retain cloned stream handles at finish"
-                )
+        let backend = self
+            .backend
+            .take()
+            .expect("one parser session can only finish once");
+        let mut finish_signals = match backend {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                DocumentParserDriver::finish(unwrap_exclusive_parser_stream(stream), owner)
+            }
+            ExecutableDocumentParserBackend::Xml(stream) => {
+                finish_live_xml_document_parser(unwrap_exclusive_xml_parser_stream(stream), owner)
             }
         };
-        let mut finish_signals = DocumentParserDriver::finish(stream, owner);
         discovery_signals.extend(finish_signals.discovery_signals);
         finish_signals.discovery_signals = discovery_signals;
+        self.control.finish();
         finish_signals
     }
 
+    #[cfg(test)]
     fn with_reentrant_stream_step<R>(&self, op: impl FnOnce(&mut DocumentStream) -> R) -> R {
-        let stream_ptr = self.stream.as_ref().as_ptr();
+        let stream = self
+            .html_stream_handle()
+            .expect("reentrant insertion step requires an HTML parser stream");
+        let stream_ptr = stream.as_ref().as_ptr();
         // SAFETY: The Rc keeps the DocumentStream allocation alive for this
         // synchronous parser step, and phase-one parser turns run on the
         // renderer owner thread. We intentionally avoid a RefCell guard here
@@ -564,12 +942,23 @@ impl DocumentParserSession {
 
     #[cfg(test)]
     pub(crate) fn queued_chunk_count_for_testing(&self) -> usize {
-        self.input.queued_chunk_count_for_testing()
+        match self.backend() {
+            ExecutableDocumentParserBackend::Html(stream) => {
+                stream.borrow().queued_end_segment_count_for_testing()
+            }
+            ExecutableDocumentParserBackend::Xml(_) => 0,
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn current_chunk_is_non_empty_for_testing(&self) -> bool {
-        self.input.current_chunk_is_non_empty_for_testing()
+        self.current_chunk_len() > 0
+    }
+}
+
+impl Drop for DocumentParserSession {
+    fn drop(&mut self) {
+        self.control.stop(ParserStopReason::OwnerDropped);
     }
 }
 
@@ -591,5 +980,141 @@ fn finish_live_document_parser(
             blocking_stylesheet_inputs: discovered_blocking_stylesheet_inputs,
             ..LiveDocumentParserDiscoverySignals::default()
         },
+    }
+}
+
+fn finish_live_xml_document_parser(
+    stream: XmlDocumentStream,
+    owner: &mut impl LiveDocumentParserOwner,
+) -> DocumentParserFinishSignals {
+    let crate::parser::ParserFinishDiscoverySignals {
+        parser_created_null_registry_elements,
+        discovered_modulepreload_link_candidates,
+        discovered_parser_meta_csp_candidates,
+        discovered_blocking_stylesheet_inputs,
+    } = stream.finish_with_runtime_dom_consumer(owner);
+    DocumentParserFinishSignals {
+        parser_created_null_registry_elements,
+        discovery_signals: LiveDocumentParserDiscoverySignals {
+            modulepreload_link_candidates: discovered_modulepreload_link_candidates,
+            parser_meta_csp_candidates: discovered_parser_meta_csp_candidates,
+            blocking_stylesheet_inputs: discovered_blocking_stylesheet_inputs,
+            ..LiveDocumentParserDiscoverySignals::default()
+        },
+    }
+}
+
+fn unwrap_exclusive_parser_stream(stream: DocumentParserStreamHandle) -> DocumentStream {
+    Rc::try_unwrap(stream)
+        .unwrap_or_else(|_| {
+            panic!("live document parser session must not retain cloned stream handles at finish")
+        })
+        .into_inner()
+}
+
+fn unwrap_exclusive_xml_parser_stream(stream: XmlDocumentParserStreamHandle) -> XmlDocumentStream {
+    Rc::try_unwrap(stream)
+        .unwrap_or_else(|_| {
+            panic!("live XML parser session must not retain cloned stream handles at finish")
+        })
+        .into_inner()
+}
+
+#[cfg(test)]
+mod session_state_tests {
+    use super::*;
+    use crate::frame_owner_model::{DocumentId, FrameSchedulerLaneId, LocalWindowId};
+
+    fn owner(lane: u64, window: u64, document: u64) -> FrameDocumentTaskOwner {
+        FrameDocumentTaskOwner::new(
+            FrameSchedulerLaneId(lane),
+            LocalWindowId(window),
+            DocumentId(document),
+        )
+    }
+
+    fn session() -> DocumentParserSession {
+        DocumentParserSession::start_finite_live_document(
+            Url::parse("https://parser-session.test/").expect("test URL"),
+            NativeNodeId::new(1),
+        )
+    }
+
+    #[test]
+    fn parser_resume_permit_is_exact_and_one_shot() {
+        let mut parser = session();
+        let owner = owner(1, 2, 3);
+        parser.bind_owner(owner, 7);
+        let permit = parser.suspend(ParserSuspensionCause::ParserClassicSource {
+            script: NativeNodeId::new(8),
+        });
+
+        assert_eq!(
+            permit.owner_identity,
+            Some(DocumentParserOwnerIdentity::new(owner, 7))
+        );
+        assert_eq!(permit.session_id, parser.control.session_id());
+        assert_eq!(parser.resume(permit), ParserResumeApplication::Resumed);
+        assert_eq!(
+            parser.resume(permit),
+            ParserResumeApplication::ParserNotSuspended,
+            "a copied permit cannot resume the same suspension twice"
+        );
+    }
+
+    #[test]
+    fn parser_resume_rejects_wrong_owner_session_and_suspension() {
+        let mut parser = session();
+        let parser_owner = owner(1, 2, 3);
+        parser.bind_owner(parser_owner, 11);
+        let first = parser.suspend(ParserSuspensionCause::ParserCreatedStylesheet {
+            owner: NativeNodeId::new(5),
+        });
+
+        let wrong_owner = ParserResumePermit {
+            owner_identity: Some(DocumentParserOwnerIdentity::new(owner(9, 9, 9), 11)),
+            ..first
+        };
+        assert_eq!(
+            parser.resume(wrong_owner),
+            ParserResumeApplication::RejectedOwner
+        );
+
+        let mut other = session();
+        other.bind_owner(parser_owner, 11);
+        assert_eq!(
+            other.resume(first),
+            ParserResumeApplication::RejectedSession
+        );
+
+        assert_eq!(parser.resume(first), ParserResumeApplication::Resumed);
+        let second = parser.suspend(ParserSuspensionCause::DocumentWriteExternalScript {
+            script: NativeNodeId::new(6),
+        });
+        assert_eq!(
+            parser.resume(first),
+            ParserResumeApplication::RejectedSuspension
+        );
+        assert_eq!(parser.resume(second), ParserResumeApplication::Resumed);
+    }
+
+    #[test]
+    fn parser_pump_and_drop_transitions_are_observable_by_derived_capabilities() {
+        let parser = session();
+        let control = parser.control_handle();
+        {
+            let _pump = control.begin_pump();
+            assert!(matches!(
+                control.run_state(),
+                DocumentParserRunState::Pumping { .. }
+            ));
+        }
+        assert_eq!(control.run_state(), DocumentParserRunState::Ready);
+
+        drop(parser);
+        assert_eq!(
+            control.run_state(),
+            DocumentParserRunState::Stopped(ParserStopReason::OwnerDropped)
+        );
     }
 }

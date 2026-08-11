@@ -1085,6 +1085,7 @@ pub struct SubresourceRequestStarted {
     request_headers: Vec<(String, String)>,
     request_body: Option<String>,
     request_body_bytes: Option<Vec<u8>>,
+    keepalive: bool,
     resource_type: SubresourceResourceType,
     request_initiator_type: SubresourceRequestInitiatorType,
     request_cookie_report: Option<StoredCookieQueryReport>,
@@ -1182,6 +1183,7 @@ impl SubresourceRequestStarted {
             request_headers,
             request_body,
             request_body_bytes,
+            keepalive: false,
             resource_type,
             request_initiator_type,
             request_cookie_report,
@@ -1195,6 +1197,11 @@ impl SubresourceRequestStarted {
     pub fn with_request_body_bytes(mut self, request_body_bytes: Option<Vec<u8>>) -> Self {
         self.request_body_bytes =
             request_body_bytes.or_else(|| request_body_text_bytes(&self.request_body));
+        self
+    }
+
+    pub fn with_keepalive(mut self, keepalive: bool) -> Self {
+        self.keepalive = keepalive;
         self
     }
 
@@ -1224,6 +1231,10 @@ impl SubresourceRequestStarted {
 
     pub fn request_body_bytes(&self) -> Option<&[u8]> {
         self.request_body_bytes.as_deref()
+    }
+
+    pub fn keepalive(&self) -> bool {
+        self.keepalive
     }
 
     pub fn resource_type(&self) -> SubresourceResourceType {

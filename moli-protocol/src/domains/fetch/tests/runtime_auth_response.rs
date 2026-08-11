@@ -1796,15 +1796,9 @@ async fn run_cdp_fetch_then_bidi_network_auth_required_terminal_credentials_comp
     .await;
     ctx.expect_result(35_980, json!({}), Some("SID-1"));
 
-    let (
-        result,
-        add_intercept_scheduler_events,
-        add_intercept_protocol_events,
-        add_intercept_renderer_output_predecessor,
-    ) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -1816,12 +1810,9 @@ async fn run_cdp_fetch_then_bidi_network_auth_required_terminal_credentials_comp
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: protected_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_complete_parts();
-    assert!(add_intercept_protocol_events.is_empty());
-    assert!(add_intercept_renderer_output_predecessor.is_none());
+            }),
+        )
+        .await;
     assert_eq!(
         result.expect("BiDi add auth intercept should succeed"),
         DevToolsCommandResult::AddNetworkIntercept(
@@ -1830,14 +1821,6 @@ async fn run_cdp_fetch_then_bidi_network_auth_required_terminal_credentials_comp
             }
         )
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
     let protected_parsed_url = Url::parse(&protected_url).unwrap();
     let auth_pause_sessions = ctx
         .conn

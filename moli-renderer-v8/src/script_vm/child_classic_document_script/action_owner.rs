@@ -24,19 +24,28 @@ impl<'vm> ChildClassicExecutionActionOwner<'vm> {
     > {
         let mut followup = FrameDocumentClassicExecutionFollowup::default();
         let (job, finish) = action.into_parts();
-        let _parser_script_nesting = matches!(
+        let parser_blocking = matches!(
             finish.scheduling,
             FrameDocumentClassicScriptScheduling::ParserBlocking
-        )
-        .then(|| {
-            ChildDocumentScriptOwnerHooks::new(self.vm)
-                .enter_parser_script_nesting(finish.child_handle, finish.task_owner)
-        })
-        .flatten();
+        );
+        let parser_ready = !parser_blocking
+            || ChildDocumentScriptOwnerHooks::new(self.vm).resume_parser_for_classic_execution(
+                finish.child_handle,
+                finish.task_owner,
+                finish.script_handle,
+            );
+        let _parser_script_nesting = (parser_blocking && parser_ready)
+            .then(|| {
+                ChildDocumentScriptOwnerHooks::new(self.vm)
+                    .enter_parser_script_nesting(finish.child_handle, finish.task_owner)
+            })
+            .flatten();
         followup.note_script_job_attempted();
-        if let Err(error) = ChildDocumentScriptOwnerHooks::new(self.vm)
-            .execute_frame_script_job_selected_task_body(job)
-        {
+        let execution = parser_ready.then(|| {
+            ChildDocumentScriptOwnerHooks::new(self.vm)
+                .execute_frame_script_job_selected_task_body(job)
+        });
+        if let Some(Err(error)) = execution {
             tracing::warn!(
                 error = %error,
                 child_handle = ?finish.child_handle,
@@ -44,6 +53,13 @@ impl<'vm> ChildClassicExecutionActionOwner<'vm> {
                 url = %finish.script_url,
                 base_url = %finish.script_base_url,
                 "child classic script execution failed"
+            );
+            followup.note_script_job_failed();
+        } else if !parser_ready {
+            tracing::debug!(
+                child_handle = ?finish.child_handle,
+                script_handle = ?finish.script_handle,
+                "dropping child parser-blocking classic execution with a stale parser resume permit"
             );
             followup.note_script_job_failed();
         }

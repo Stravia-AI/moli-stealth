@@ -37,6 +37,13 @@ fn image_is_small_for_priority_boost(element: &crate::dom::native::Element) -> b
 // the host document state accessors, current-script/parser visibility
 // bookkeeping, and pending resource-load delivery that feed DCL/load decisions.
 impl DocumentRuntime {
+    pub(crate) fn bind_main_document_script_preload_store(
+        &mut self,
+        store: crate::runtime::DocumentScriptPreloadStore,
+    ) {
+        self.main_document_script_preloads = store;
+    }
+
     pub(crate) fn bind_main_document_runtime_producer(
         &mut self,
         owner: crate::frame_owner_model::FrameDocumentTaskOwner,
@@ -225,6 +232,7 @@ impl DocumentRuntime {
         self.pending_inspector_issues.clear();
         self.quirks_mode_issue_reported = false;
         self.document_write_script_preload_scanner = None;
+        self.main_document_script_preloads = Default::default();
         self.document_write_script_preloads.clear();
         self.pending_document_write_external_script_load = None;
         self.pending_document_write_stylesheet_blocked_script = None;
@@ -412,8 +420,6 @@ impl DocumentRuntime {
         let parser_connected = parser_insertion_controller.map(|insertion_controller| {
             let input_context = insertion_controller.input_session().enter_pending_context();
             ParserConnectedScriptContext {
-                visibility_boundary: handle
-                    .map(|current_script| self.begin_parser_visibility_boundary(current_script)),
                 insertion_controller,
                 _input_context: input_context,
             }
@@ -429,17 +435,7 @@ impl DocumentRuntime {
     }
 
     pub(crate) fn clear_current_script_handle(&mut self) {
-        let Some(context) = self.script_context_stack.pop() else {
-            return;
-        };
-        if context
-            .parser_connected
-            .as_ref()
-            .is_some_and(|parser| parser.visibility_boundary.is_some())
-        {
-            self.dom_host.end_tree_insertion_tracking();
-        }
-        drop(context);
+        self.script_context_stack.pop();
     }
 
     pub(crate) fn has_active_parser_write_insertion_point(&self) -> bool {
@@ -461,13 +457,6 @@ impl DocumentRuntime {
 
     pub(crate) fn take_post_parse_schedule_rebuild(&mut self) -> bool {
         self.take_post_parse_schedule_invalidated()
-    }
-
-    pub(crate) fn filter_parser_visible_handles(&self, handles: Vec<DomHandle>) -> Vec<DomHandle> {
-        handles
-            .into_iter()
-            .filter(|handle| self.is_parser_visible_handle(*handle))
-            .collect()
     }
 
     pub(crate) fn queue_current_main_document_image_load_events(
@@ -531,73 +520,6 @@ impl DocumentRuntime {
                 native_bridge::element::queue_text_track_load_if_needed(scope, host_ptr, handle);
             }
         }
-    }
-
-    fn is_parser_visible_handle(&self, handle: DomHandle) -> bool {
-        self.current_script_context()
-            .and_then(|context| context.parser_connected.as_ref())
-            .is_none_or(|state| {
-                state.visibility_boundary.as_ref().is_none_or(|boundary| {
-                    self.is_handle_visible_at_parser_boundary(handle, boundary)
-                })
-            })
-    }
-
-    fn begin_parser_visibility_boundary(
-        &self,
-        current_script: DomHandle,
-    ) -> ParserVisibilityBoundary {
-        self.dom_host.begin_tree_insertion_tracking();
-        ParserVisibilityBoundary {
-            document: self.dom_host.document_handle(),
-            current_script,
-            current_script_ancestor_chain: self.ancestor_chain(current_script),
-            query_version: self.dom_host.query_version(),
-        }
-    }
-
-    fn is_handle_visible_at_parser_boundary(
-        &self,
-        handle: DomHandle,
-        boundary: &ParserVisibilityBoundary,
-    ) -> bool {
-        if self.handle_is_statically_visible_at_parser_boundary(handle, boundary) {
-            return true;
-        }
-
-        // The parser stream has already materialized nodes beyond the current
-        // blocking script. A script can also insert real DOM nodes after its
-        // own position, though, and those must be observable immediately. Find
-        // the outermost subtree inserted since this parser boundary and judge
-        // it by the visibility of its insertion parent. This preserves the
-        // parser frontier without snapshotting or rescanning the whole DOM.
-        let chain = self.ancestor_chain(handle);
-        let Some(inserted_root_index) = chain.iter().position(|candidate| {
-            self.dom_host
-                .tree_insertion_version(*candidate)
-                .is_some_and(|version| version > boundary.query_version)
-        }) else {
-            return false;
-        };
-        inserted_root_index
-            .checked_sub(1)
-            .and_then(|parent_index| chain.get(parent_index))
-            .is_some_and(|parent| {
-                self.handle_is_statically_visible_at_parser_boundary(*parent, boundary)
-            })
-    }
-
-    fn handle_is_statically_visible_at_parser_boundary(
-        &self,
-        handle: DomHandle,
-        boundary: &ParserVisibilityBoundary,
-    ) -> bool {
-        handle == boundary.current_script
-            || self.dom_host.root_node_handle(handle) != Some(boundary.document)
-            || self.precedes_in_document_order_against_ancestor_chain(
-                handle,
-                &boundary.current_script_ancestor_chain,
-            )
     }
 }
 
@@ -794,90 +716,6 @@ mod tests {
                     .as_script()
                     .is_some_and(|script| script.position == position)
         )
-    }
-
-    #[test]
-    fn parser_visibility_boundary_preserves_document_order_without_materializing_future_nodes() {
-        let document = HtmlParser.parse(
-            Url::parse("https://example.com/").unwrap(),
-            concat!(
-                "<!doctype html><html><head></head><body>",
-                "<section id='before'><span id='before-child'></span></section>",
-                "<script id='current'>window.ready = true;</script>",
-                "<article id='after'><span id='after-child'></span></article>",
-                "</body></html>"
-            )
-            .to_owned(),
-        );
-        let mut runtime = DocumentRuntime::new(&document);
-        let current = runtime
-            .dom_host()
-            .element_handle_by_id("current")
-            .expect("current script");
-        let before = runtime
-            .dom_host()
-            .element_handle_by_id("before")
-            .expect("preceding element");
-        let before_child = runtime
-            .dom_host()
-            .element_handle_by_id("before-child")
-            .expect("preceding descendant");
-        let after = runtime
-            .dom_host()
-            .element_handle_by_id("after")
-            .expect("following element");
-        let after_child = runtime
-            .dom_host()
-            .element_handle_by_id("after-child")
-            .expect("following descendant");
-        let script_text = runtime
-            .dom_host()
-            .first_child(current)
-            .expect("script text child");
-        let detached = runtime.dom_host_mut().create_element("aside");
-        let boundary = runtime.begin_parser_visibility_boundary(current);
-
-        assert_eq!(boundary.current_script, current);
-        assert_eq!(
-            boundary.current_script_ancestor_chain.last(),
-            Some(&current)
-        );
-        assert!(boundary.current_script_ancestor_chain.len() < 8);
-        for visible in [boundary.document, before, before_child, current, detached] {
-            assert!(
-                runtime.is_handle_visible_at_parser_boundary(visible, &boundary),
-                "expected {visible:?} to be parser-visible"
-            );
-        }
-        for hidden in [script_text, after, after_child] {
-            assert!(
-                !runtime.is_handle_visible_at_parser_boundary(hidden, &boundary),
-                "expected {hidden:?} to remain behind the parser boundary"
-            );
-        }
-
-        let body = runtime.dom_host().document_body_handle().expect("body");
-        assert!(runtime.dom_host_mut().append_child(body, detached));
-        let dynamic = runtime.dom_host_mut().create_element("strong");
-        assert!(runtime.dom_host_mut().append_child(body, dynamic));
-        let dynamic_under_hidden = runtime.dom_host_mut().create_element("em");
-        assert!(
-            runtime
-                .dom_host_mut()
-                .append_child(after, dynamic_under_hidden)
-        );
-
-        for visible in [detached, dynamic] {
-            assert!(
-                runtime.is_handle_visible_at_parser_boundary(visible, &boundary),
-                "expected dynamically inserted {visible:?} to be parser-visible"
-            );
-        }
-        assert!(
-            !runtime.is_handle_visible_at_parser_boundary(dynamic_under_hidden, &boundary),
-            "a dynamic child must not expose its parser-hidden insertion parent"
-        );
-        runtime.dom_host().end_tree_insertion_tracking();
     }
 
     #[test]

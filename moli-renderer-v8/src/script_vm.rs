@@ -6485,6 +6485,10 @@ impl ScriptVm {
         environment.output_journal().append_records(records);
     }
 
+    pub(super) fn has_renderer_output_journal(&self) -> bool {
+        self.renderer_page_script_environment.is_some()
+    }
+
     #[cfg(test)]
     pub(crate) fn bind_renderer_output_journal_for_test(
         &mut self,
@@ -7838,22 +7842,18 @@ impl ScriptVm {
             execution_context.parser_insertion_controller(),
         ) {
             (Some(_), true, Some(controller)) => Some(controller.clone()),
-            (Some(_), true, None) => {
-                return ParserOwnedClassicScriptExecutionReport::new(
-                    Err(ParserOwnedClassicScriptExecutionError::new(
-                        "parser-connected classic execution has no insertion controller",
-                    )),
-                    None,
-                    ParserOwnedClassicScriptEvaluationSettlement::NotSettled,
-                    PreparedScriptBodyActivity::NotEntered,
-                );
-            }
             _ => None,
         };
+        // XML parser-blocking scripts have a currentScript and use the same
+        // execution/lifecycle coordinator, but XML has no HTML insertion point.
+        // Absence of a controller therefore means document.write is inactive;
+        // it must not suppress otherwise valid XHTML/SVG script execution.
+        let parser_write_insertion_point_active =
+            run_input.parser_write_insertion_point_active && parser_insertion_controller.is_some();
         self.document_runtime
             .set_current_script_context(CurrentScriptContextSpec {
                 handle: run_input.current_script,
-                parser_write_insertion_point_active: run_input.parser_write_insertion_point_active,
+                parser_write_insertion_point_active,
                 parser_insertion_controller,
             });
         let runtime_reset_generation_before_run = self.document_runtime.runtime_reset_generation();

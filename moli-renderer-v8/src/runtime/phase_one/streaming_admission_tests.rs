@@ -104,6 +104,9 @@ async fn resume_open_stream(
         super::access::run_named_owner_local_task(executor, operation, residence.resume())
             .await
             .expect("open-stream continuation should resume");
+    let PendingPhaseOneResumeOutcome::Progress(outcome) = outcome else {
+        panic!("successful open-stream fixture must not fail its main resource");
+    };
     let ParseTimePageVmCreationOutcome::PendingPhaseOne(residence) = outcome else {
         panic!("open body and its ready Page task should keep phase one resident");
     };
@@ -203,9 +206,14 @@ async fn resume_phase_one_once(
     operation: &'static str,
 ) -> ParseTimePageVmCreationOutcome {
     let executor = residence.page_vm().local_executor.clone();
-    super::access::run_named_owner_local_task(executor, operation, residence.resume())
-        .await
-        .expect("phase-one continuation should resume")
+    let outcome =
+        super::access::run_named_owner_local_task(executor, operation, residence.resume())
+            .await
+            .expect("phase-one continuation should resume");
+    let PendingPhaseOneResumeOutcome::Progress(outcome) = outcome else {
+        panic!("successful phase-one fixture must not fail its main resource");
+    };
+    outcome
 }
 
 #[test]

@@ -14,6 +14,7 @@ pub(crate) struct RendererBackendNodeKey {
 #[derive(Clone, Copy, Debug)]
 struct RendererBackendNodeRecord {
     key: RendererBackendNodeKey,
+    resolves_while_detached: bool,
 }
 
 pub(crate) struct RendererBackendNodeRegistry {
@@ -72,13 +73,40 @@ impl RendererBackendNodeRegistry {
             .checked_add(1)
             .expect("renderer backend node id namespace exhausted");
         self.node_ids.insert(key, backend_node_id);
-        self.nodes
-            .insert(backend_node_id, RendererBackendNodeRecord { key });
+        self.nodes.insert(
+            backend_node_id,
+            RendererBackendNodeRecord {
+                key,
+                resolves_while_detached: false,
+            },
+        );
         backend_node_id
     }
 
     pub(crate) fn key_for_id(&self, backend_node_id: u32) -> Option<RendererBackendNodeKey> {
         Some(self.nodes.get(&backend_node_id)?.key)
+    }
+
+    /// Keeps an event-exposed node id resolvable after its Document detaches
+    /// the node without destroying the underlying DOM object.
+    ///
+    /// Blink freezes the input node's DOMNodeId synchronously when
+    /// `Page.fileChooserOpened` is emitted. If the same script then calls
+    /// `document.open()`, the event id still resolves to that detached input.
+    /// This bit is intentionally per-record: ordinary ids keep the stricter
+    /// Document-generation validation used elsewhere in Lightmount.
+    pub(crate) fn retain_detached_resolution(&mut self, backend_node_id: u32) -> bool {
+        let Some(record) = self.nodes.get_mut(&backend_node_id) else {
+            return false;
+        };
+        record.resolves_while_detached = true;
+        true
+    }
+
+    pub(crate) fn resolves_while_detached(&self, backend_node_id: u32) -> bool {
+        self.nodes
+            .get(&backend_node_id)
+            .is_some_and(|record| record.resolves_while_detached)
     }
 
     pub(crate) fn remove_stale_id(&mut self, backend_node_id: u32, key: RendererBackendNodeKey) {
@@ -204,5 +232,17 @@ mod tests {
         assert_eq!(registry.key_for_id(first), None);
         let second = registry.id_for_node(key.document_id, key.handle);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn detached_resolution_is_opt_in_per_backend_node_record() {
+        let mut registry = RendererBackendNodeRegistry::default();
+        let retained = registry.id_for_node(document_id(1), dom_handle(7));
+        let ordinary = registry.id_for_node(document_id(1), dom_handle(8));
+
+        assert!(registry.retain_detached_resolution(retained));
+        assert!(registry.resolves_while_detached(retained));
+        assert!(!registry.resolves_while_detached(ordinary));
+        assert!(!registry.retain_detached_resolution(u32::MAX));
     }
 }

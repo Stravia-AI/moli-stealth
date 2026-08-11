@@ -162,7 +162,7 @@ async fn flush_prepared_subresource_continue_action_background_events_async(
                     .target_fetch_subresource_interception_snapshot_for_session_owner(session_id)
                     .is_some_and(|snapshot| {
                         snapshot.matches_response_stage(
-                            response_info.resource_type.as_cdp_type(),
+                            response_info.resource_type.into(),
                             &response_info.final_url,
                         )
                     })
@@ -191,7 +191,7 @@ async fn flush_prepared_subresource_continue_action_background_events_async(
                     .map(|snapshot| {
                         snapshot.matching_network_intercepts(
                             FetchRequestStage::Response,
-                            response_info.resource_type.as_cdp_type(),
+                            response_info.resource_type.into(),
                             &response_info.final_url,
                         )
                     })
@@ -203,7 +203,7 @@ async fn flush_prepared_subresource_continue_action_background_events_async(
                 conn.target_fetch_matching_network_intercepts_for_target(
                     &in_flight.pending.frame_id,
                     FetchRequestStage::Response,
-                    response_info.resource_type.as_cdp_type(),
+                    response_info.resource_type.into(),
                     &response_info.final_url,
                 )
             } else {
@@ -224,7 +224,7 @@ async fn flush_prepared_subresource_continue_action_background_events_async(
                 .map(|snapshot| {
                     snapshot.matching_response_stage_pause_sessions(
                         session_id,
-                        response_info.resource_type.as_cdp_type(),
+                        response_info.resource_type.into(),
                         &response_info.final_url,
                     )
                 })

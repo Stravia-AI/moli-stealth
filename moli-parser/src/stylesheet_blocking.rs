@@ -62,7 +62,7 @@ mod tests {
         document_owned_blocking_stylesheet_candidate_for_node, preload_like_link_loads_stylesheet,
         stylesheet_link_disposition,
     };
-    use crate::HtmlParser;
+    use crate::{HtmlParser, ParserPumpStep};
     use moli_dom::native::Node;
 
     #[test]
@@ -95,12 +95,21 @@ mod tests {
     #[test]
     fn parser_created_link_blocker_is_captured_before_link_processing_state_is_consumed() {
         let parser = HtmlParser;
-        let (document, handoffs) = parser.parse_dom_host_with_document_handoffs(
-            url::Url::parse("https://example.com/").unwrap(),
+        let mut stream = parser.start_document(url::Url::parse("https://example.com/").unwrap());
+        stream.append_to_end(
             "<!doctype html><html><head><link rel=stylesheet href='/slow.css'><script>window.x = 1;</script></head></html>".to_owned(),
         );
+        let mut captured_blockers = Vec::new();
+        while stream.has_pending_input() {
+            let outcome = stream.pump_next_parser_step(0);
+            captured_blockers.extend(outcome.discovered_blocking_stylesheet_inputs);
+            if matches!(outcome.result, ParserPumpStep::InputDrained) && !stream.has_pending_input()
+            {
+                break;
+            }
+        }
+        let document = stream.finish();
         let script = document.script_handles()[0];
-        let (_, captured_blockers) = handoffs.into_parts();
 
         let blockers = collect_document_owned_blocking_stylesheet_nodes_before(
             &document,

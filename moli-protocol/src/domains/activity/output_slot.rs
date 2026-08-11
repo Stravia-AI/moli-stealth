@@ -51,6 +51,7 @@ pub(in crate::domains) enum ProtocolOutputSlot {
     RuntimeInspectorMessages,
     RuntimeInspectorPostResponseMessages,
     MainDocumentCommit,
+    DocumentTitleChanged,
     DocumentLifecycle,
     RuntimeObservable,
     DomStorage,
@@ -86,6 +87,7 @@ impl ProtocolOutputSlot {
             | Self::RuntimeBindingCalls
             | Self::DomMutations
             | Self::MainDocumentCommit
+            | Self::DocumentTitleChanged
             | Self::DocumentLifecycle
             | Self::DomStorage => ProtocolOutputDelivery::ProtocolObservation,
         }
@@ -97,7 +99,6 @@ impl ProtocolOutputSlot {
         match self {
             Self::TopLevelLocationNavigation
             | Self::TopLevelHistoryTraversal
-            | Self::FileChooser
             | Self::Download
             | Self::SharedWorkerTargetLifecycle
             | Self::ServiceWorkerTargetLifecycle
@@ -106,6 +107,11 @@ impl ProtocolOutputSlot {
                 ProtocolOutputResponseOrder::AfterResponse
             }
             Self::PendingSubresourceContinueEvents
+            // Blink's file-input activation probe queues
+            // Page.fileChooserOpened synchronously. A script may continue into
+            // document.open(), but Chromium still flushes the chooser event
+            // before the invoking Runtime.evaluate response.
+            | Self::FileChooser
             | Self::JavascriptDialog
             | Self::WindowOpen
             | Self::Popup
@@ -124,6 +130,7 @@ impl ProtocolOutputSlot {
             | Self::DomMutations
             | Self::RuntimeInspectorMessages
             | Self::MainDocumentCommit
+            | Self::DocumentTitleChanged
             | Self::DocumentLifecycle
             | Self::RuntimeObservable
             | Self::DomStorage
@@ -218,6 +225,7 @@ impl ProtocolOutputSlot {
                 | Self::JavascriptDialog
                 | Self::WindowOpen
                 | Self::Popup
+                | Self::DocumentTitleChanged
                 | Self::DocumentLifecycle
                 | Self::ChildFrameActivity
                 | Self::SameDocumentNavigation
@@ -265,7 +273,7 @@ mod tests {
             ),
             (TopLevelLocationNavigation, OwnerAction, AfterResponse),
             (TopLevelHistoryTraversal, OwnerAction, AfterResponse),
-            (FileChooser, OwnerAction, AfterResponse),
+            (FileChooser, OwnerAction, BeforeResponse),
             (Download, OwnerAction, AfterResponse),
             (JavascriptDialog, OwnerAction, BeforeResponse),
             (WindowOpen, ProtocolObservation, BeforeResponse),
@@ -291,6 +299,7 @@ mod tests {
                 AfterResponse,
             ),
             (MainDocumentCommit, ProtocolObservation, BeforeResponse),
+            (DocumentTitleChanged, ProtocolObservation, BeforeResponse),
             (DocumentLifecycle, ProtocolObservation, BeforeResponse),
             (RuntimeObservable, OwnerAction, BeforeResponse),
             (DomStorage, ProtocolObservation, BeforeResponse),

@@ -9,7 +9,6 @@ use crate::{
         RuntimeIsolatedWorldDefinition, SubresourceAuthCredentials, SubresourceResourceType,
         ViewportSurface,
     },
-    parser::{HtmlParser, XmlParser},
     renderer::ExternalRawDocumentBodyStream,
     renderer::JsRuntime,
     renderer::PageVmInitStage,
@@ -76,11 +75,6 @@ struct DocumentPageLoadOptions {
 pub enum CommittedDocumentResourceSource {
     Navigation(Box<DocumentFetchContextSeed>),
     Synthetic,
-}
-
-fn response_headers_indicate_xml_document(headers: &[(String, String)]) -> bool {
-    moli_web_mime::response_document_content_type(headers)
-        .is_some_and(|mime| moli_web_mime::is_dom_parser_xml_mime(&mime))
 }
 
 fn streaming_raw_response_from_navigation_response(
@@ -890,11 +884,13 @@ impl NavigationEngine {
         &mut self,
         cookie_store: SharedBrowserCookieStore,
         requested_url: Url,
+        cancel_handle: FetchCancelHandle,
     ) -> Result<NavigationResourceLoader> {
-        Ok(NavigationResourceLoader::new(
+        Ok(NavigationResourceLoader::new_with_cancel_handle(
             self.ensure_resource_request_client(cookie_store)?,
             requested_url,
             moli_renderer_v8::network::RendererResourceTaskRunner::from_current_tokio()?,
+            cancel_handle,
         ))
     }
 
@@ -932,8 +928,11 @@ impl NavigationEngine {
             })
             .context("failed to build request")?;
         request.set_auth(auth.map(Into::into));
-        let navigation_loader =
-            self.navigation_resource_loader(cookie_store, request.url.clone())?;
+        let navigation_loader = self.navigation_resource_loader(
+            cookie_store,
+            request.url.clone(),
+            FetchCancelHandle::new(),
+        )?;
         navigation_loader
             .fetch_with_network_metadata(request)
             .await
@@ -978,6 +977,7 @@ impl NavigationEngine {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        cancel_handle: FetchCancelHandle,
     ) -> Result<NavigationStreamingRawResponse> {
         let mut request = Request::new_bytes(method, raw_url, body, request_headers)
             .map(|request| {
@@ -995,7 +995,7 @@ impl NavigationEngine {
             .context("failed to build request")?;
         request.set_auth(auth.map(Into::into));
         let navigation_loader =
-            self.navigation_resource_loader(cookie_store, request.url.clone())?;
+            self.navigation_resource_loader(cookie_store, request.url.clone(), cancel_handle)?;
         let service_worker_fetch = self
             .browser_context_runtime()
             .fetch_service_worker_main_resource_for_navigation(&request, &navigation_loader)
@@ -1049,6 +1049,7 @@ impl NavigationEngine {
             body.map(String::into_bytes),
             request_headers,
             auth,
+            FetchCancelHandle::new(),
         )
         .await
     }
@@ -1065,6 +1066,7 @@ impl NavigationEngine {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        cancel_handle: FetchCancelHandle,
     ) -> Result<NavigationStreamingRawResponse> {
         let cookie_store = storage.into_cookie_store();
         self.fetch_navigation_streaming_raw_response_async(
@@ -1077,6 +1079,7 @@ impl NavigationEngine {
             body,
             request_headers,
             auth,
+            cancel_handle,
         )
         .await
     }
@@ -2121,74 +2124,45 @@ impl NavigationEngine {
         options: DocumentPageLoadOptions,
         stage: PageVmInitStage,
     ) -> Result<PreparedDocumentPage> {
-        let loader = self.resource_request_client_for_committed_document(
+        let raw_body =
+            ExternalRawDocumentBodyStream::from_bytes(options.response_body.into_bytes());
+        self.prepare_streaming_raw_page_from_external_body_async(
+            page_reservation,
             cookie_store,
-            &options.final_url,
-            options.resource_source.clone(),
-        )?;
-        loader.set_extra_http_headers(&options.extra_http_headers);
-        loader.set_network_offline(options.network_offline);
-        loader.set_blocked_url_patterns(&options.blocked_url_patterns);
-        let (mut document, parser_document_handoffs) =
-            if response_headers_indicate_xml_document(&options.response_headers) {
-                XmlParser.parse_top_level_document_with_handoffs(
-                    options.final_url.clone(),
-                    options.response_body,
-                )
-            } else {
-                let (dom_host, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
-                    options.final_url.clone(),
-                    options.response_body,
-                );
-                (dom_host.into_dom(), handoffs)
-            };
-        if let Some(content_type) =
-            moli_web_mime::response_document_content_type(&options.response_headers)
-        {
-            document.set_document_content_type(content_type);
-        }
-        let (parser_document_handoffs, parser_blocking_stylesheet_inputs) =
-            parser_document_handoffs.into_parts();
-        let prepared = self
-            .js_runtime
-            .prepare_document_page_with_inspector_session_restores(
-                page_reservation,
-                options.requested_url.clone(),
-                options.navigation_initiator_url,
-                options.redirected,
-                options.redirect_count,
-                options.response_status,
-                options.response_headers,
-                &loader,
-                web_storage,
-                document,
-                parser_document_handoffs,
-                parser_blocking_stylesheet_inputs,
-                indexed_db_manager,
-                storage_bucket_store,
-                options.document_start_scripts,
-                options.runtime_bindings,
-                options.runtime_inspector_session_restore_snapshots,
-                options.extra_http_headers,
-                options.locale_override,
-                options.timezone_override,
-                options.script_execution_disabled,
-                options.bypass_content_security_policy,
-                options.cpu_throttling_rate,
-                options.emulated_media,
-                options.viewport_surface,
-                options.network_offline,
-                options.blocked_url_patterns,
-                options.fetch_subresource_interception_enabled,
-                options.fetch_subresource_interception_resource_type,
-                false,
-                stage,
-                options.root_frame_id,
-                options.main_document_commit,
-            )
-            .await
-            .context("failed to prepare document page")?;
-        Ok(PreparedDocumentPage { prepared })
+            web_storage,
+            indexed_db_manager,
+            storage_bucket_store,
+            options.requested_url,
+            options.final_url,
+            options.navigation_initiator_url,
+            options.redirected,
+            options.redirect_count,
+            options.response_status,
+            options.response_headers,
+            raw_body,
+            options.document_start_scripts,
+            options.runtime_bindings,
+            options.runtime_inspector_session_restore_snapshots,
+            options.extra_http_headers,
+            options.locale_override,
+            options.timezone_override,
+            options.script_execution_disabled,
+            options.bypass_content_security_policy,
+            options.cpu_throttling_rate,
+            options.emulated_media,
+            options.viewport_surface,
+            options.network_offline,
+            options.blocked_url_patterns,
+            options.fetch_subresource_interception_enabled,
+            options.fetch_subresource_interception_resource_type,
+            stage,
+            moli_renderer_v8::RendererPageCreationReplyBoundary::LifecycleTarget,
+            options.root_frame_id,
+            options.resource_source,
+            None,
+            options.main_document_commit,
+        )
+        .await
     }
 
     async fn build_document_page_from_response_options_best_effort_async(

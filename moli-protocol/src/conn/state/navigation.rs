@@ -126,6 +126,20 @@ impl TargetNavigationHistoryState {
             .map(|entry| entry.url.clone())
     }
 
+    pub(crate) fn refresh_current_entry_title(&mut self, title: String) -> bool {
+        let Some(current_entry) = self
+            .current_index
+            .and_then(|current_index| self.entries.get_mut(current_index))
+        else {
+            return false;
+        };
+        if current_entry.title == title {
+            return false;
+        }
+        current_entry.title = title;
+        true
+    }
+
     pub(crate) fn snapshot(&self) -> (usize, Vec<PageNavigationHistoryEntry>) {
         (self.current_index.unwrap_or(0), self.entries.clone())
     }
@@ -315,5 +329,33 @@ mod tests {
             SameDocumentHistoryUpdate::Traverse { delta: -1 },
         ));
         assert_eq!(history.snapshot(), before);
+    }
+
+    #[test]
+    fn title_refresh_updates_only_current_entry_metadata() {
+        let mut history = TargetNavigationHistoryState::default();
+        let first_id = history.allocate_entry_id();
+        history.seed_entry(PageNavigationHistoryEntry {
+            id: first_id,
+            url: "https://example.test/a".to_owned(),
+            user_typed_url: "https://example.test/a".to_owned(),
+            title: String::new(),
+            transition_type: "typed".to_owned(),
+            document_sequence_number: None,
+        });
+        let before = history.snapshot().1[0].clone();
+
+        assert!(history.refresh_current_entry_title("A".to_owned()));
+        assert!(!history.refresh_current_entry_title("A".to_owned()));
+
+        let refreshed = &history.snapshot().1[0];
+        assert_eq!(refreshed.title, "A");
+        assert_eq!(refreshed.id, before.id);
+        assert_eq!(refreshed.url, before.url);
+        assert_eq!(refreshed.user_typed_url, before.user_typed_url);
+        assert_eq!(
+            refreshed.document_sequence_number,
+            before.document_sequence_number
+        );
     }
 }

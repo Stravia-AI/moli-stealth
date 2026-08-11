@@ -2149,6 +2149,34 @@ pub(super) async fn document_write_external_split_script_parser_session_page() -
     Html(DOCUMENT_WRITE_EXTERNAL_SPLIT_SCRIPT_PARSER_SESSION_HTML)
 }
 
+pub(super) async fn document_write_inserted_external_resumes_chunked_root_page() -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tokio::spawn(async move {
+        if tx
+            .send(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                DOCUMENT_WRITE_INSERTED_EXTERNAL_CHUNKED_HEAD.as_bytes(),
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        sleep(Duration::from_millis(5)).await;
+        let _ = tx
+            .send(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                DOCUMENT_WRITE_INSERTED_EXTERNAL_CHUNKED_TAIL.as_bytes(),
+            )))
+            .await;
+    });
+
+    Response::builder()
+        .header(CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .expect("chunked document.write external-script response should build")
+}
+
 pub(super) async fn document_write_parser_visible_dom_boundary_page() -> Html<&'static str> {
     Html(DOCUMENT_WRITE_PARSER_VISIBLE_DOM_BOUNDARY_HTML)
 }
@@ -4464,6 +4492,11 @@ pub(super) async fn asset_document_write_nested_external_outer_after_script() ->
 pub(super) async fn asset_document_write_external_split_session_parent_script() -> Response {
     sleep(Duration::from_millis(10)).await;
     javascript_response(DOCUMENT_WRITE_EXTERNAL_SPLIT_SESSION_PARENT_JS)
+}
+
+pub(super) async fn asset_document_write_inserted_chunked_external_script() -> Response {
+    sleep(Duration::from_millis(50)).await;
+    javascript_response(DOCUMENT_WRITE_INSERTED_CHUNKED_EXTERNAL_JS)
 }
 
 pub(super) async fn asset_dynamic_preparation_context_stale_script() -> Response {

@@ -18,7 +18,7 @@ pub(super) use super::super::fetch_support::{
 };
 use super::navigation_outcome::NavigationDispatchState;
 use super::runtime_slot::TargetRuntimeSlot;
-use crate::devtools_runtime::DevToolsNetworkInterceptId;
+use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use moli_fetch::url_pattern_matches;
 
 #[derive(Debug, Default)]
@@ -1112,7 +1112,7 @@ impl TargetFetchConfig {
     #[cfg(test)]
     pub(crate) fn matching_request_stage(
         &self,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Option<FetchRequestStage> {
         if !self.enabled {
@@ -1124,7 +1124,7 @@ impl TargetFetchConfig {
 
     #[cfg(test)]
     pub(crate) fn matching_document_request_stage(&self, url: &Url) -> Option<FetchRequestStage> {
-        self.matching_request_stage("Document", url)
+        self.matching_request_stage(DevToolsNetworkResourceType::Document, url)
     }
 
     pub(crate) fn matches_auth_required(&self, url: &Url) -> bool {
@@ -1141,7 +1141,7 @@ impl TargetFetchConfig {
     pub(crate) fn matching_network_intercepts(
         &self,
         request_stage: FetchRequestStage,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<DevToolsNetworkInterceptId> {
         if !self.enabled {
@@ -1154,9 +1154,9 @@ impl TargetFetchConfig {
         self.enabled
             && self.patterns.iter().any(|pattern| {
                 pattern.request_stage == FetchRequestStage::Response
-                    && pattern
-                        .resource_type_filter
-                        .is_none_or(|filter| filter.matches_cdp_type("Document"))
+                    && pattern.resource_type_filter.is_none_or(|filter| {
+                        filter.matches_resource_type(DevToolsNetworkResourceType::Document)
+                    })
             })
     }
 
@@ -1326,7 +1326,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
 
     pub(crate) fn matching_request_stage(
         &self,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Option<FetchRequestStage> {
         if !self.enabled {
@@ -1339,7 +1339,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     pub(crate) fn matching_fetch_request_stage_sessions(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<TargetFetchRequestStageSession> {
         if !self.enabled {
@@ -1374,7 +1374,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     pub(crate) fn matching_request_stage_pause_sessions(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<TargetFetchRequestStageSession> {
         let mut sessions = self
@@ -1393,7 +1393,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     fn matching_network_request_stage_session(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Option<TargetFetchRequestStageSession> {
         if !self.enabled {
@@ -1420,7 +1420,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     pub(crate) fn matching_fetch_response_stage_sessions(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<TargetFetchResponseStageSession> {
         if !self.enabled {
@@ -1446,7 +1446,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     pub(crate) fn matching_response_stage_pause_sessions(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<TargetFetchResponseStageSession> {
         let mut sessions =
@@ -1462,7 +1462,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     fn matching_network_response_stage_session(
         &self,
         default_session_id: Option<&str>,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Option<TargetFetchResponseStageSession> {
         if !self.enabled {
@@ -1552,7 +1552,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
 
     pub(crate) fn response_stage_owner_kind(
         &self,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Option<PendingSubresourceFetchOwnerKind> {
         if !self.enabled {
@@ -1576,7 +1576,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
 
     pub(crate) fn response_stage_candidate_owner_kind(
         &self,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
     ) -> Option<PendingSubresourceFetchOwnerKind> {
         if !self.enabled {
             return None;
@@ -1586,7 +1586,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
                 pattern.request_stage == FetchRequestStage::Response
                     && pattern
                         .resource_type_filter
-                        .is_none_or(|filter| filter.matches_cdp_type(resource_type))
+                        .is_none_or(|filter| filter.matches_resource_type(resource_type))
             })
         }) {
             return Some(PendingSubresourceFetchOwnerKind::Fetch);
@@ -1598,7 +1598,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
                     pattern.request_stage == FetchRequestStage::Response
                         && pattern
                             .resource_type_filter
-                            .is_none_or(|filter| filter.matches_cdp_type(resource_type))
+                            .is_none_or(|filter| filter.matches_resource_type(resource_type))
                 })
             })
             .then_some(PendingSubresourceFetchOwnerKind::NetworkOrBidi)
@@ -1622,7 +1622,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
     pub(crate) fn matching_network_intercepts(
         &self,
         request_stage: FetchRequestStage,
-        resource_type: &str,
+        resource_type: DevToolsNetworkResourceType,
         url: &Url,
     ) -> Vec<DevToolsNetworkInterceptId> {
         if !self.enabled {
@@ -1642,17 +1642,24 @@ impl TargetFetchSubresourceInterceptionSnapshot {
         matching_auth_required_network_intercepts(&self.network_intercepts, url)
     }
 
-    pub(crate) fn has_response_stage_candidate(&self, resource_type: &str) -> bool {
+    pub(crate) fn has_response_stage_candidate(
+        &self,
+        resource_type: DevToolsNetworkResourceType,
+    ) -> bool {
         self.enabled
             && self.patterns.iter().any(|pattern| {
                 pattern.request_stage == FetchRequestStage::Response
                     && pattern
                         .resource_type_filter
-                        .is_none_or(|filter| filter.matches_cdp_type(resource_type))
+                        .is_none_or(|filter| filter.matches_resource_type(resource_type))
             })
     }
 
-    pub(crate) fn matches_response_stage(&self, resource_type: &str, url: &Url) -> bool {
+    pub(crate) fn matches_response_stage(
+        &self,
+        resource_type: DevToolsNetworkResourceType,
+        url: &Url,
+    ) -> bool {
         self.enabled
             && self.patterns.iter().any(|pattern| {
                 pattern.request_stage == FetchRequestStage::Response
@@ -1664,7 +1671,7 @@ impl TargetFetchSubresourceInterceptionSnapshot {
 fn matching_network_intercepts(
     intercepts: &BTreeMap<String, TargetNetworkInterceptConfig>,
     request_stage: FetchRequestStage,
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
     url: &Url,
 ) -> Vec<DevToolsNetworkInterceptId> {
     intercepts

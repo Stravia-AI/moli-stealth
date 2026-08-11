@@ -59,6 +59,12 @@ struct ParserInputState {
 
 pub struct DocumentStream {
     inner: HtmlTreeSinkStream,
+    input: HtmlParserInputStream,
+}
+
+#[derive(Debug, Default)]
+struct HtmlParserInputStream {
+    end_segments: VecDeque<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -132,45 +138,6 @@ impl ParserScriptHandoff {
             | Self::NoExecution { node_id, .. }
             | Self::PreparationFailure { node_id, .. } => *node_id,
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ParserDocumentHandoffs {
-    ordered_handoffs: Vec<ParserDocumentHandoff>,
-    blocking_stylesheet_inputs: Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-}
-
-/// A parser-created DOM action whose runtime side effects must retain token order.
-///
-/// Script handoffs and `<link rel=modulepreload>` insertion are intentionally
-/// represented in one sequence. Both can close import-map acquisition or start
-/// module work, so transporting them in separate vectors would allow the
-/// renderer bootstrap to reorder observable module behavior.
-#[derive(Debug, Clone)]
-pub enum ParserDocumentHandoff {
-    Script(Box<ParserScriptHandoff>),
-    ModulepreloadLink(NativeNodeId),
-}
-
-impl ParserDocumentHandoffs {
-    pub(crate) fn new(
-        ordered_handoffs: Vec<ParserDocumentHandoff>,
-        blocking_stylesheet_inputs: Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-    ) -> Self {
-        Self {
-            ordered_handoffs,
-            blocking_stylesheet_inputs,
-        }
-    }
-
-    pub fn into_parts(
-        self,
-    ) -> (
-        Vec<ParserDocumentHandoff>,
-        Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-    ) {
-        (self.ordered_handoffs, self.blocking_stylesheet_inputs)
     }
 }
 
@@ -376,59 +343,6 @@ impl HtmlParser {
         stream.finish_dom_host()
     }
 
-    pub fn parse_dom_host_with_script_handoffs(
-        &self,
-        final_url: Url,
-        html: String,
-    ) -> (DomHost, Vec<ParserScriptHandoff>) {
-        let (dom_host, handoffs) = self.parse_dom_host_with_document_handoffs(final_url, html);
-        let (ordered_handoffs, _) = handoffs.into_parts();
-        let script_handoffs = ordered_handoffs
-            .into_iter()
-            .filter_map(|handoff| match handoff {
-                ParserDocumentHandoff::Script(script) => Some(*script),
-                ParserDocumentHandoff::ModulepreloadLink(_) => None,
-            })
-            .collect();
-        (dom_host, script_handoffs)
-    }
-
-    pub fn parse_dom_host_with_document_handoffs(
-        &self,
-        final_url: Url,
-        html: String,
-    ) -> (DomHost, ParserDocumentHandoffs) {
-        let mut stream = self.start_document(final_url);
-        let mut handoffs = Vec::new();
-        let mut blocking_stylesheet_inputs = Vec::new();
-        for chunk in html_chunks(&html) {
-            collect_parser_document_handoffs_for_chunk(
-                &mut stream,
-                chunk,
-                &mut handoffs,
-                &mut blocking_stylesheet_inputs,
-            );
-        }
-        collect_parser_document_handoffs_for_chunk(
-            &mut stream,
-            "",
-            &mut handoffs,
-            &mut blocking_stylesheet_inputs,
-        );
-        let (dom_host, finish_signals) = stream.finish_dom_host_with_discovery_signals();
-        handoffs.extend(
-            finish_signals
-                .discovered_modulepreload_link_candidates
-                .into_iter()
-                .map(ParserDocumentHandoff::ModulepreloadLink),
-        );
-        blocking_stylesheet_inputs.extend(finish_signals.discovered_blocking_stylesheet_inputs);
-        (
-            dom_host,
-            ParserDocumentHandoffs::new(handoffs, blocking_stylesheet_inputs),
-        )
-    }
-
     pub fn parse_without_declarative_shadow_roots(
         &self,
         final_url: Url,
@@ -574,12 +488,14 @@ impl DocumentStream {
     fn new_parser_stream(final_url: Url) -> Self {
         Self {
             inner: new_parser_stream_html_tree_sink_stream(final_url),
+            input: HtmlParserInputStream::default(),
         }
     }
 
     fn new_live_document_root(final_url: Url, document_handle: NativeNodeId) -> Self {
         Self {
             inner: new_live_document_root_html_tree_sink_stream(final_url, document_handle),
+            input: HtmlParserInputStream::default(),
         }
     }
 
@@ -602,6 +518,7 @@ impl DocumentStream {
                 runtime_dom_sinks,
                 allow_declarative_shadow_roots,
             ),
+            input: HtmlParserInputStream::default(),
         }
     }
 
@@ -683,6 +600,79 @@ impl DocumentStream {
         self.inner.feed(chunk)
     }
 
+    /// Append decoded document input to the parser-owned end segment chain.
+    ///
+    /// The tokenizer only receives a bounded prefix when the owner pumps the
+    /// parser.  Appending while a script or stylesheet blocks parsing therefore
+    /// cannot advance the DOM commit frontier.
+    pub fn append_to_end(&mut self, chunk: String) {
+        if !chunk.is_empty() {
+            self.input.end_segments.push_back(chunk);
+        }
+    }
+
+    pub fn has_pending_input(&self) -> bool {
+        self.inner.has_script_input()
+            || self.inner.has_buffered_input()
+            || !self.input.end_segments.is_empty()
+    }
+
+    pub fn next_input_len(&self) -> usize {
+        self.inner
+            .next_script_input_len()
+            .or_else(|| {
+                self.inner
+                    .has_buffered_input()
+                    .then(|| self.inner.buffered_input_len())
+            })
+            .or_else(|| self.input.end_segments.front().map(String::len))
+            .unwrap_or_default()
+    }
+
+    pub fn snapshot_pending_input(&self) -> String {
+        let mut pending = self.inner.snapshot_script_input();
+        pending.push_str(&self.inner.snapshot_buffered_input());
+        for segment in &self.input.end_segments {
+            pending.push_str(segment);
+        }
+        pending
+    }
+
+    pub fn queued_end_segment_count_for_testing(&self) -> usize {
+        self.input.end_segments.len()
+    }
+
+    fn take_next_owned_input(&mut self, max_bytes: usize) -> (String, bool) {
+        if let Some(input) = self.inner.take_next_script_input() {
+            // One parser insertion is an atomic source segment. Splitting it
+            // outside html5ever would let a remainder jump ahead of bytes the
+            // tokenizer retained when it yielded on a script boundary.
+            return (input, true);
+        }
+
+        if self.inner.has_buffered_input() {
+            return (String::new(), false);
+        }
+
+        let Some(input) = self.input.end_segments.pop_front() else {
+            return (String::new(), false);
+        };
+        let (prefix, remainder) = split_parser_input_prefix(input, max_bytes);
+        if let Some(remainder) = remainder {
+            self.input.end_segments.push_front(remainder);
+        }
+        (prefix, false)
+    }
+
+    pub fn pump_next_parser_step(&mut self, max_bytes: usize) -> ParserPumpOutcome {
+        let (chunk, inserted_source) = self.take_next_owned_input(max_bytes);
+        if inserted_source {
+            self.inner.pump_parser_inserted_step(&chunk)
+        } else {
+            self.inner.pump_parser_step(&chunk)
+        }
+    }
+
     /// Feed parser input until either the current buffer is exhausted or the parser yields a
     /// concrete embedder control-flow boundary.
     ///
@@ -729,6 +719,25 @@ impl DocumentStream {
         // parser-step Drop guard removes every erased callback before return.
         let sinks = unsafe { ParserRuntimeDomSinks::from_consumer(consumer) };
         self.pump_parser_step_with_runtime_dom_sinks(chunk, sinks)
+    }
+
+    pub fn pump_next_parser_step_with_runtime_dom_consumer<T>(
+        &mut self,
+        max_bytes: usize,
+        consumer: &mut T,
+    ) -> ParserPumpOutcome
+    where
+        T: ParserDomReadConsumer
+            + ParserDomMutationConsumer
+            + ParserMutationEffectConsumer
+            + ParserElementCreationConsumer,
+    {
+        // SAFETY: `consumer` stays exclusively borrowed for this call; the
+        // parser-step Drop guard removes every erased callback before return.
+        let sinks = unsafe { ParserRuntimeDomSinks::from_consumer(consumer) };
+        self.inner.enter_runtime_dom_sinks_parse_step(sinks);
+        let mut step = RuntimeDomSinksParserStep { stream: self };
+        step.pump_next_parser_step(max_bytes)
     }
 
     pub fn pump_parser_step_with_runtime_dom_consumer_without_element_creation<T>(
@@ -904,32 +913,12 @@ impl DocumentStream {
         self.inner.mark_script_already_started(node_id)
     }
 
-    pub fn take_buffered_input(&mut self) -> String {
-        // html5ever keeps any still-unconsumed bytes in `input_buffer` after yielding a concrete
-        // script hand-off. Returning them to runtime lets the embedder re-queue that buffered
-        // source behind a fresh scheduling decision instead of being forced to continue under the
-        // parser-step policy that was chosen *before* the hand-off changed script ownership.
-        self.inner.take_buffered_input()
-    }
-
-    pub fn prepend_buffered_input(&mut self, input: String) {
-        self.inner.prepend_buffered_input(input);
-    }
-
-    pub fn peek_buffered_input(&mut self) -> String {
-        self.inner.peek_buffered_input()
-    }
-
     pub fn finish(self) -> NativeDom {
         self.inner.finish()
     }
 
     pub fn finish_dom_host(self) -> DomHost {
         self.inner.finish_dom_host()
-    }
-
-    fn finish_dom_host_with_discovery_signals(self) -> (DomHost, ParserFinishDiscoverySignals) {
-        self.inner.finish_dom_host_with_discovery_signals()
     }
 }
 
@@ -945,6 +934,28 @@ impl RuntimeDomSinksParserStep<'_> {
     fn pump_parser_inserted_step(&mut self, chunk: &str) -> ParserPumpOutcome {
         self.stream.inner.pump_parser_inserted_step(chunk)
     }
+
+    fn pump_next_parser_step(&mut self, max_bytes: usize) -> ParserPumpOutcome {
+        self.stream.pump_next_parser_step(max_bytes)
+    }
+}
+
+fn split_parser_input_prefix(input: String, max_bytes: usize) -> (String, Option<String>) {
+    if max_bytes == 0 || input.len() <= max_bytes {
+        return (input, None);
+    }
+
+    let mut split = input.len();
+    for (index, character) in input.char_indices() {
+        let end = index + character.len_utf8();
+        if end > max_bytes {
+            split = if index == 0 { end } else { index };
+            break;
+        }
+    }
+    let remainder = input[split..].to_owned();
+    let prefix = input[..split].to_owned();
+    (prefix, (!remainder.is_empty()).then_some(remainder))
 }
 
 impl Drop for RuntimeDomSinksParserStep<'_> {
@@ -1091,6 +1102,21 @@ impl ParserInputQueue {
             .filter(|html| !html.is_empty())
     }
 
+    pub fn next_script_input_len(&self) -> Option<usize> {
+        self.0.borrow().script_input_queue.front().map(String::len)
+    }
+
+    pub fn snapshot_script_input(&self) -> String {
+        self.0
+            .borrow()
+            .script_input_queue
+            .iter()
+            .fold(String::new(), |mut input, segment| {
+                input.push_str(segment);
+                input
+            })
+    }
+
     pub fn has_script_input(&self) -> bool {
         !self.0.borrow().script_input_queue.is_empty()
     }
@@ -1105,39 +1131,6 @@ impl ParserInputQueue {
 
     pub fn take_processed_insertion_meta_csp_count(&self) -> usize {
         std::mem::take(&mut self.0.borrow_mut().processed_insertion_meta_csp_count)
-    }
-}
-
-fn collect_parser_document_handoffs_for_chunk(
-    stream: &mut DocumentStream,
-    chunk: &str,
-    handoffs: &mut Vec<ParserDocumentHandoff>,
-    blocking_stylesheet_inputs: &mut Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
-) {
-    let mut pending_chunk = chunk;
-    loop {
-        let ParserPumpOutcome {
-            result,
-            discovered_modulepreload_link_candidates,
-            discovered_blocking_stylesheet_inputs,
-            ..
-        } = stream.pump_parser_step(pending_chunk);
-        blocking_stylesheet_inputs.extend(discovered_blocking_stylesheet_inputs);
-        handoffs.extend(
-            discovered_modulepreload_link_candidates
-                .into_iter()
-                .map(ParserDocumentHandoff::ModulepreloadLink),
-        );
-        match result {
-            ParserPumpStep::Yield(ParserYield::Script(handoff)) => {
-                handoffs.push(ParserDocumentHandoff::Script(handoff))
-            }
-            ParserPumpStep::Yield(
-                ParserYield::CustomElementConstruction(_) | ParserYield::BlockingStylesheet(_),
-            ) => {}
-            ParserPumpStep::InputDrained => break,
-        }
-        pending_chunk = "";
     }
 }
 
@@ -1674,13 +1667,9 @@ impl TreeSink for DocumentSink {
 mod tests {
     use std::rc::Rc;
 
-    use super::{
-        HtmlParser, ParseHandle, ParserDocumentHandoff, ParserInputQueue, ParserScriptHandoff,
-    };
+    use super::{HtmlParser, ParseHandle, ParserInputQueue};
     use html5ever::{LocalName, Namespace, QualName};
     use moli_dom::native::{NativeDom, NativeNodeId};
-    use moli_page_types::{ScriptKind, ScriptMode, ScriptSourceKind};
-    use moli_stylesheet_blocking::DocumentBlockingStylesheetSignature;
     use url::Url;
 
     const HTML_NS: &str = "http://www.w3.org/1999/xhtml";
@@ -1733,8 +1722,8 @@ mod tests {
     }
 
     #[test]
-    fn template_contents_do_not_publish_document_stylesheet_handoffs() {
-        let (document, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
+    fn template_contents_do_not_publish_document_stylesheet_candidates() {
+        let document = HtmlParser.parse_dom_host(
             Url::parse("https://template-styles.test/page.html").expect("test URL"),
             concat!(
                 "<!doctype html>",
@@ -1744,12 +1733,6 @@ mod tests {
                 "</template>",
             )
             .to_owned(),
-        );
-        let (_, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-        assert!(
-            blocking_stylesheet_inputs.is_empty(),
-            "inert template contents must not publish main Document stylesheet blockers"
         );
         assert!(
             document
@@ -1820,156 +1803,6 @@ mod tests {
             queue.take_next_script_input().as_deref(),
             Some("<script>outer</script>")
         );
-    }
-
-    #[test]
-    fn parse_dom_host_with_script_handoffs_reports_parser_blocking_classic_scripts() {
-        let parser = HtmlParser;
-        let (host, handoffs) = parser.parse_dom_host_with_script_handoffs(
-            Url::parse("https://parser-handoff.test/page.html").expect("test url"),
-            "<!doctype html><html><head><script>window.ran = true;</script></head><body><p>after</p></body></html>"
-                .to_owned(),
-        );
-        let script_handles = host.dom().document_order_script_handles();
-        assert_eq!(script_handles.len(), 1);
-        assert_eq!(handoffs.len(), 1);
-        let ParserScriptHandoff::BlockingClassic {
-            node_id,
-            start_line,
-            script,
-            ..
-        } = &handoffs[0]
-        else {
-            panic!("inline parser classic script should produce a blocking classic handoff");
-        };
-        assert_eq!(*node_id, script_handles[0]);
-        assert_eq!(*start_line, 1);
-        assert_eq!(script.kind, ScriptKind::Classic);
-        assert_eq!(script.mode, ScriptMode::Normal);
-        assert_eq!(script.source_kind, ScriptSourceKind::Inline);
-        assert!(
-            host.dom().serialize_document().contains("<p>after</p>"),
-            "parser should continue past the collected script handoff"
-        );
-    }
-
-    #[test]
-    fn parse_dom_host_with_document_handoffs_captures_stylesheet_inputs() {
-        let (mut host, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
-            Url::parse("https://parser-handoff.test/page.html").expect("test URL"),
-            concat!(
-                "<!doctype html><html><head>",
-                "<link rel='stylesheet' href='/before.css'>",
-                "<script defer src='/defer.js'></script>",
-                "</head><body></body></html>",
-            )
-            .to_owned(),
-        );
-        let (script_handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-        assert_eq!(script_handoffs.len(), 1);
-        assert_eq!(blocking_stylesheet_inputs.len(), 1);
-        assert!(matches!(
-            blocking_stylesheet_inputs[0].signature(),
-            DocumentBlockingStylesheetSignature::Link { url, .. }
-                if url.as_str() == "https://parser-handoff.test/before.css"
-        ));
-        assert!(
-            host.dom().serialize_document().contains("/before.css"),
-            "document handoff collection must not consume the stylesheet node"
-        );
-        let link = host
-            .elements_by_tag_name(host.document_handle(), "link", false)
-            .into_iter()
-            .next()
-            .expect("parsed stylesheet link");
-        let node = host.node(link).expect("parsed stylesheet link node");
-        assert!(
-            node.flags().parser_created(),
-            "generic parser provenance remains available after tree construction"
-        );
-        assert!(
-            !node
-                .as_element()
-                .is_some_and(moli_dom::native::Element::link_created_by_parser),
-            "link-specific parser processing state must be consumed at FinishParsingChildren"
-        );
-        assert!(host.set_attribute(link, "href", "/dynamic.css"));
-        assert!(
-            moli_stylesheet_blocking::document_owned_blocking_stylesheet_candidate_for_node(
-                &host,
-                moli_dom::NodeId::new(link.index()),
-            )
-            .is_none(),
-            "a dynamically reprocessed parser-created link must not become a new parser blocker"
-        );
-    }
-
-    #[test]
-    fn parse_dom_host_with_document_handoffs_captures_stylesheet_closed_by_eof() {
-        let (_, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
-            Url::parse("https://parser-handoff.test/page.html").expect("test URL"),
-            "<!doctype html><body><style>@import url('/eof.css')".to_owned(),
-        );
-        let (_, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-        assert_eq!(
-            blocking_stylesheet_inputs
-                .iter()
-                .map(|input| input.signature())
-                .collect::<Vec<_>>(),
-            vec![
-                &DocumentBlockingStylesheetSignature::ParserCreatedStyleImport {
-                    urls: vec![
-                        Url::parse("https://parser-handoff.test/eof.css").expect("stylesheet URL"),
-                    ],
-                }
-            ],
-            "EOF tree-builder completion must publish its final captured parser blocker",
-        );
-    }
-
-    #[test]
-    fn parser_document_handoffs_preserve_script_and_modulepreload_token_order() {
-        let (host, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
-            Url::parse("https://parser-handoff.test/page.html").expect("test URL"),
-            concat!(
-                "<!doctype html><html><head>",
-                "<script type='importmap'>{\"imports\": {}}</script>",
-                "<link id='preload' rel='modulepreload' href='/dependency.mjs'>",
-                "<script type='module' src='/entry.mjs'></script>",
-                "</head><body></body></html>",
-            )
-            .to_owned(),
-        );
-        let preload = host
-            .element_handle_by_id("preload")
-            .expect("modulepreload link");
-        let (ordered_handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-        assert!(blocking_stylesheet_inputs.is_empty());
-        assert_eq!(ordered_handoffs.len(), 3);
-        let ParserDocumentHandoff::Script(import_map) = &ordered_handoffs[0] else {
-            panic!("first handoff should be the import map");
-        };
-        assert!(matches!(
-            import_map.as_ref(),
-            ParserScriptHandoff::ImportMap { .. }
-        ));
-        assert!(matches!(
-            ordered_handoffs[1],
-            ParserDocumentHandoff::ModulepreloadLink(handle) if handle == preload
-        ));
-        let ParserDocumentHandoff::Script(module) = &ordered_handoffs[2] else {
-            panic!("third handoff should be the module script");
-        };
-        assert!(matches!(
-            module.as_ref(),
-            ParserScriptHandoff::NonAsyncPostParse {
-                script,
-                ..
-            } if script.kind == ScriptKind::Module
-        ));
     }
 
     #[test]

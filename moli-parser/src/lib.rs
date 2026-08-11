@@ -10,6 +10,7 @@ mod session;
 mod stream;
 mod stylesheet_blocking;
 mod xml;
+mod xml_stream;
 mod xml_tree_viewer;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -22,11 +23,10 @@ use moli_stylesheet_blocking::{
 
 pub use html::{
     DocumentStream, HtmlParser, ParserBlockingStylesheetPause,
-    ParserCustomElementConstructionHandoff, ParserDocumentHandoff, ParserDocumentHandoffs,
-    ParserFinishDiscoverySignals, ParserInputContext, ParserInputQueue, ParserInputSession,
-    ParserPumpOutcome, ParserPumpStep, ParserScriptElementStateTransition, ParserScriptHandoff,
-    ParserScriptNoExecutionOutcome, ParserScriptPreparationFailure, ParserStreamDocumentSnapshot,
-    ParserYield,
+    ParserCustomElementConstructionHandoff, ParserFinishDiscoverySignals, ParserInputContext,
+    ParserInputQueue, ParserInputSession, ParserPumpOutcome, ParserPumpStep,
+    ParserScriptElementStateTransition, ParserScriptHandoff, ParserScriptNoExecutionOutcome,
+    ParserScriptPreparationFailure, ParserStreamDocumentSnapshot, ParserYield,
 };
 pub use live_target::{
     ParserDomMutation, ParserDomMutationConsumer, ParserDomReadConsumer,
@@ -39,6 +39,7 @@ pub use script_planning::{
     classify_parser_script,
 };
 pub use xml::XmlParser;
+pub use xml_stream::XmlDocumentStream;
 
 const STREAM_CHUNK_BYTES: usize = 8 * 1024;
 

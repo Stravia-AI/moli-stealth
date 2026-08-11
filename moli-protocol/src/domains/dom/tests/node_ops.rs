@@ -2250,7 +2250,7 @@ async fn set_file_input_files_validates_node_before_reading_files() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement() {
+async fn file_chooser_backend_node_id_resolves_detached_source_after_document_open() {
     let mut ctx = TestContext::new();
     load_bc(&mut ctx, "BID-A");
     navigate_to_data_html_async(
@@ -2288,6 +2288,21 @@ async fn file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_repl
         }
     }))
     .await;
+    let chooser_position = ctx
+        .sent
+        .iter()
+        .position(|message| message["method"] == json!("Page.fileChooserOpened"))
+        .unwrap_or_else(|| panic!("Page.fileChooserOpened should be emitted: {:?}", ctx.sent));
+    let response_position = ctx
+        .sent
+        .iter()
+        .position(|message| message["id"] == json!(3))
+        .expect("Runtime.evaluate response");
+    assert!(
+        chooser_position < response_position,
+        "Chromium emits fileChooserOpened synchronously before the invoking script response: {:?}",
+        ctx.sent
+    );
     let evaluated = take_response_by_id(&mut ctx, 3);
     assert_eq!(evaluated["result"]["result"]["value"], json!("fresh"));
 
@@ -2310,6 +2325,7 @@ async fn file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_repl
         moli_core::page::is_renderer_backend_node_id(backend_node_id),
         "file chooser event should use renderer backend id namespace: {file_chooser:?}"
     );
+
     ctx.process_async(json!({
         "id": 4,
         "method": "DOM.resolveNode",
@@ -2321,9 +2337,13 @@ async fn file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_repl
     .await;
     let resolved = take_response_by_id(&mut ctx, 4);
     assert_eq!(
-        resolved["error"]["message"],
-        json!("Could not find node with given id"),
-        "old file chooser backend id must not resolve against the replacement document: {resolved:?}"
+        resolved["result"]["object"]["subtype"],
+        json!("node"),
+        "Chromium keeps the event-exposed detached input resolvable after document.open: {resolved:?}"
+    );
+    assert!(
+        resolved["result"]["object"]["objectId"].as_str().is_some(),
+        "detached file input should resolve to a runtime object: {resolved:?}"
     );
 }
 

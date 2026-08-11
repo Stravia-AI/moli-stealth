@@ -1264,12 +1264,13 @@ async fn rust_cdp_chromium_dom_get_node_for_location_contract() {
     .await;
     let loader_id = navigation["result"]["loaderId"]
         .as_str()
-        .expect("navigation loader id");
+        .expect("hit-test navigation loader id")
+        .to_owned();
     crate::testing::wait_until_renderer_document_load(
         &mut ctx,
-        Some(&attached.session_id),
+        Some(attached.session_id.as_str()),
         &attached.target_id,
-        loader_id,
+        &loader_id,
     )
     .await;
 

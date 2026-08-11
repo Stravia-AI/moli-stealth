@@ -512,7 +512,10 @@ pub(crate) use runtime_load::{
 };
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
-pub use scheduler_state::{BackgroundNavigationGateKey, CdpSchedulerEvent, CdpTurnOutcome};
+pub use scheduler_state::{
+    BackgroundNavigationCancellation, BackgroundNavigationGateKey, CdpSchedulerEvent,
+    CdpTurnOutcome,
+};
 #[cfg(test)]
 pub(crate) use site_data_manager_surface::{
     BrowserContextReservedSiteDataOwnerState, BrowserContextSiteDataManagerOwnerState,
@@ -1422,10 +1425,14 @@ impl CdpConnection {
         &mut self,
         token: &DocumentNavigationToken,
         state: &NavigationDispatchState,
+        cancellation: BackgroundNavigationCancellation,
     ) {
         let key = BackgroundNavigationGateKey::for_navigation(token, state);
         self.scheduler_state
-            .push_scheduler_event(CdpSchedulerEvent::BackgroundNavigationStarted { key });
+            .push_scheduler_event(CdpSchedulerEvent::BackgroundNavigationStarted {
+                key,
+                cancellation,
+            });
     }
 
     pub fn has_pending_document_navigation_for_session_owner(
@@ -1537,9 +1544,25 @@ impl CdpConnection {
             .and_then(|slot| slot.current_document_loader_id().map(str::to_owned))
     }
 
+    #[cfg(test)]
     pub(crate) fn ingest_renderer_network_output_item_and_prepare_live_delivery_for_session_owner(
         &mut self,
         session_id: Option<&str>,
+        source_document: moli_core::RendererDocumentLifecycleIdentity,
+        item: &moli_core::page::ScriptNetworkOutputItem,
+    ) -> Option<crate::domains::network::TargetNetworkBacklogPreparedDelivery> {
+        self.ingest_renderer_page_network_output_item_and_prepare_live_delivery_for_session_owner(
+            session_id,
+            None,
+            source_document,
+            item,
+        )
+    }
+
+    pub(crate) fn ingest_renderer_page_network_output_item_and_prepare_live_delivery_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        source_renderer_page: Option<RendererPageResidenceIdentity>,
         source_document: moli_core::RendererDocumentLifecycleIdentity,
         item: &moli_core::page::ScriptNetworkOutputItem,
     ) -> Option<crate::domains::network::TargetNetworkBacklogPreparedDelivery> {
@@ -1550,6 +1573,7 @@ impl CdpConnection {
             .ok()
             .and_then(|slot| {
                 slot.ingest_renderer_network_output_item_and_prepare_live_delivery(
+                    source_renderer_page,
                     source_document,
                     item,
                     session_id,

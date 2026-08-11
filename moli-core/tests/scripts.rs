@@ -2398,6 +2398,34 @@ async fn document_write_external_split_script_continues_parser_session() -> Resu
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn document_write_inserted_external_script_resumes_chunked_root_input() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+
+    let page = tokio::time::timeout(
+        Duration::from_secs(5),
+        browser.fetch(&server.url("/compat/document-write-inserted-external-resumes-chunked-root")),
+    )
+    .await
+    .expect("document.write parser continuation must not spin on queued root input")?;
+
+    assert_eq!(
+        diagnostic_global(&page, "documentWriteInsertedChunkedResult"),
+        Some(&JsValueSnapshot::String(
+            "before-write,after-write,inserted-external,tail-script".to_owned()
+        ))
+    );
+    assert!(
+        page.serialize_html_async()
+            .await?
+            .contains("id=\"document-write-inserted-chunked-tail\"")
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn imported_started_child_script_stays_inert_when_appended() -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;

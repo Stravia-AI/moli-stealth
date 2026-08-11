@@ -31,8 +31,23 @@ pub(crate) enum RendererPublicationOwner {
 /// no output payload and grants no renderer execution authority.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RendererPublicationRoute {
-    AttachedSession { session_id: String },
-    UnattachedOwner { owner_route: CdpSessionRoute },
+    AttachedSession {
+        session_id: String,
+        projection: RendererPublicationProjection,
+    },
+    UnattachedOwner {
+        owner_route: CdpSessionRoute,
+        projection: RendererPublicationProjection,
+    },
+}
+
+/// A current Page can project its complete renderer stream. A replaced Page
+/// remains routable only for final Network facts whose request correlations
+/// are retained by the target; every other historical record is stale.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererPublicationProjection {
+    CurrentPage,
+    RetiringNetworkOnly,
 }
 
 impl RendererPublicationRoute {
@@ -40,9 +55,13 @@ impl RendererPublicationRoute {
         browser_context_id: String,
         target_id: Option<String>,
         session_id: Option<String>,
+        projection: RendererPublicationProjection,
     ) -> Self {
         if let Some(session_id) = session_id {
-            return Self::AttachedSession { session_id };
+            return Self::AttachedSession {
+                session_id,
+                projection,
+            };
         }
         let owner_route = match target_id {
             Some(target_id) => CdpSessionRoute::BackgroundTarget {
@@ -54,7 +73,10 @@ impl RendererPublicationRoute {
                 target_id: None,
             },
         };
-        Self::UnattachedOwner { owner_route }
+        Self::UnattachedOwner {
+            owner_route,
+            projection,
+        }
     }
 }
 
@@ -111,6 +133,7 @@ impl RendererPublicationOwner {
                         browser_context_id: browser_context.id.clone(),
                         target_id: None,
                     },
+                    projection: RendererPublicationProjection::CurrentPage,
                 })
             }
             Self::PageTarget {
@@ -142,16 +165,25 @@ impl RendererPublicationOwner {
                             target.session_id().map(str::to_owned),
                         )
                     };
-                    (runtime_slot.routes_renderer_page(*renderer_page)
-                        && runtime_slot.loaded_page_generation()
-                            == page_owner.loaded_page_generation())
-                    .then(|| {
-                        RendererPublicationRoute::for_target(
-                            browser_context.id.clone(),
-                            route_target_id,
-                            session_id,
-                        )
-                    })
+                    let projection = if runtime_slot.routes_current_renderer_page_owner(
+                        *renderer_page,
+                        page_owner.loaded_page_generation(),
+                    ) {
+                        RendererPublicationProjection::CurrentPage
+                    } else if runtime_slot.routes_retiring_renderer_page_owner(
+                        *renderer_page,
+                        page_owner.loaded_page_generation(),
+                    ) {
+                        RendererPublicationProjection::RetiringNetworkOnly
+                    } else {
+                        return None;
+                    };
+                    Some(RendererPublicationRoute::for_target(
+                        browser_context.id.clone(),
+                        route_target_id,
+                        session_id,
+                        projection,
+                    ))
                 }),
         }
     }

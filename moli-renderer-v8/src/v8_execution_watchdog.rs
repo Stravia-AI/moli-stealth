@@ -17,6 +17,14 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex};
 
+#[cfg(not(test))]
+pub(crate) const SCRIPT_TURN_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+// Keep runaway-script tests substantially faster than production without
+// terminating finite debug-build checkpoints merely because workspace
+// nextest is concurrently running other V8-heavy processes.
+pub(crate) const SCRIPT_TURN_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum V8ExecutionWatchdogKind {
     ScriptTurn,

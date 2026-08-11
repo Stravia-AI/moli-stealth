@@ -2574,6 +2574,44 @@ fn window_fetch_retirement_covers_every_host_stage() {
 }
 
 #[test]
+fn window_fetch_request_start_records_keepalive_disposition() {
+    let mut vm = new_storage_test_vm("https://fetch-keepalive-output.test/");
+    vm.with_default_context_scope_and_checkpoint_for_test(|scope, host_ptr| {
+        let host = unsafe { &mut *host_ptr };
+        let _ordinary = register_pending_window_fetch_for_test(
+            scope,
+            host,
+            false,
+            PendingWindowFetchTestStage::Pending,
+        );
+        let _keepalive = register_pending_window_fetch_for_test(
+            scope,
+            host,
+            true,
+            PendingWindowFetchTestStage::Pending,
+        );
+        Ok(())
+    })
+    .expect("ordinary and keepalive Fetches should register");
+
+    let starts = vm
+        .take_network_output()
+        .into_items()
+        .filter_map(|item| match item {
+            crate::types::ScriptNetworkOutputItem::SubresourceRequestStarted(request) => {
+                Some(request.keepalive())
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        starts,
+        vec![false, true],
+        "renderer network start facts must preserve the resource teardown disposition"
+    );
+}
+
+#[test]
 fn cancel_pending_window_fetch_auth_preserves_401_for_response_stage() {
     let mut vm = new_storage_test_vm("https://fetch-auth-cancel.test/");
     let internal_id = vm
@@ -6835,7 +6873,7 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
     assert_eq!(
         vm.eval("__childExternalClassicJobEvents.join('|')")
             .expect("child external classic events before HostLoad should evaluate"),
-        "external:true|external-current:external-classic|script-load",
+        "external:true|external-current:external-classic|external-write:true|script-load",
         "the parser-blocking load event must ignore document.open() and finish without firing iframe load"
     );
     run_page_realm_prerequisite_then_expected_child_frame_semantic_turn(
@@ -6848,7 +6886,7 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
     assert_eq!(
         vm.eval("__childExternalClassicJobEvents.join('|')")
             .expect("child external classic parser-continuation events should evaluate"),
-        "external:true|external-current:external-classic|script-load|inline-current:after-external-classic|inline:73",
+        "external:true|external-current:external-classic|external-write:true|script-load|inline-current:after-external-classic|inline:73",
         "ignored document.open() must leave the parser owner alive for the following inline script"
     );
     for transition in ["interactive", "DOMContentLoaded", "complete"] {
@@ -6881,7 +6919,7 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
     assert_eq!(
         vm.eval("__childExternalClassicJobEvents.join('|')")
             .expect("child external classic events should evaluate"),
-        "external:true|external-current:external-classic|script-load|inline-current:after-external-classic|inline:73|load"
+        "external:true|external-current:external-classic|external-write:true|script-load|inline-current:after-external-classic|inline:73|load"
     );
     assert_eq!(
         vm.eval("String(__childExternalClassicJobFrame.contentDocument.currentScript)")
@@ -6964,7 +7002,7 @@ async fn child_external_classic_script_load_executes_as_frame_script_job() {
     assert_eq!(
         vm.eval("__childExternalClassicJobEvents.join('|')")
             .expect("child external classic events should still evaluate"),
-        "external:true|external-current:external-classic|script-load|inline-current:after-external-classic|inline:73|load",
+        "external:true|external-current:external-classic|external-write:true|script-load|inline-current:after-external-classic|inline:73|load",
         "stale owner-token event must not fire the script load listener again"
     );
     assert_eq!(
@@ -8920,6 +8958,10 @@ async fn spawn_child_external_classic_frame_script_job_server() -> (
         let _ = path_tx.send(request_path);
         let body = r#"parent.__childExternalClassicJobEvents.push("external:" + (globalThis === self));
 parent.__childExternalClassicJobEvents.push("external-current:" + document.currentScript.id);
+document.write("<span id='external-write'>written</span>");
+parent.__childExternalClassicJobEvents.push(
+  "external-write:" + (document.getElementById("external-write") !== null)
+);
 document.currentScript.addEventListener("load", () => {
   parent.__childExternalClassicJobEvents.push("script-load");
   document.open();

@@ -1,5 +1,6 @@
 use super::parser_blocking_owner::MainParserBlockingSourceLoadWaitOwner;
 use super::*;
+use crate::document_script_scheduler::ParseTimeDocumentScriptEvent;
 
 pub(super) struct ParseTimeDriverState {
     pub(super) final_url: Url,
@@ -16,6 +17,19 @@ impl ParseTimeDriverState {
     pub(super) fn new(final_url: Url) -> Self {
         Self {
             parser_session: DocumentParserSession::start_main_document(final_url.clone()),
+            final_url,
+            document_character_set: "UTF-8".to_owned(),
+            scheduler: DocumentScriptScheduler::new(),
+            pending_parsing_blocking_script: PendingParsingBlockingClassicScriptRunner::empty(),
+            buffered_document_preloads: Box::default(),
+            service_worker_preload_context: None,
+            input_closed: false,
+        }
+    }
+
+    pub(super) fn new_xml(final_url: Url) -> Self {
+        Self {
+            parser_session: DocumentParserSession::start_main_xml_document(final_url.clone()),
             final_url,
             document_character_set: "UTF-8".to_owned(),
             scheduler: DocumentScriptScheduler::new(),
@@ -78,17 +92,69 @@ impl ConcurrentParseTimeRuntime {
         &mut self.page_vm
     }
 
+    pub(super) fn retire_main_parser_continuation(
+        &mut self,
+    ) -> (
+        Vec<ParseTimeDocumentScriptEvent>,
+        Vec<PostParsePageOwnedWork>,
+    ) {
+        self.page_vm
+            .vm_mut()
+            .document_runtime
+            .deactivate_main_parser_continuation();
+        (
+            self.page_vm
+                .page_task_queue
+                .take_parse_time_document_script_events(),
+            self.page_vm
+                .page_task_queue
+                .take_parse_time_lifecycle_work(),
+        )
+    }
+
+    /// Stop a committed parser after its main-resource body reaches a failed
+    /// terminal while retaining the partial Document as the active Page.
+    ///
+    /// Blink's `DocumentLoader::LoadFailed` stops parsing and reports a failed
+    /// navigation; it does not destroy the committed LocalFrame. Mirror that
+    /// ownership transition here: parser-only state is discarded, while the
+    /// PageVm and its observable DOM remain resident for automation and a
+    /// subsequent navigation.
+    pub(super) fn into_main_resource_load_failed_page_vm(mut self) -> PageVm {
+        self.state
+            .parser_session
+            .stop(ParserStopReason::MainResourceLoadFailure);
+        drop(self.retire_main_parser_continuation());
+        let _ = self.page_vm.document_lifecycle.request_termination(
+            self.page_vm.document_lifecycle.identity(),
+            RendererDocumentTerminationReason::MainResourceLoadFailed,
+        );
+        self.page_vm
+    }
+
     pub(super) fn new_parser_owner(
         loader: ResourceRequestClient,
         stage: PageVmInitStage,
-        state: ParseTimeDriverState,
+        mut state: ParseTimeDriverState,
         mut page_vm: PageVm,
     ) -> Self {
         page_vm.set_target_stage(stage);
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .bind_main_document_script_preload_store(
+                state
+                    .buffered_document_preloads
+                    .document_script_preload_store(),
+            );
         let parser_document_owner = page_vm
             .vm()
             .current_main_document_task_owner()
             .expect("phase-one parser runtime requires an installed main document owner");
+        state.parser_session.bind_owner(
+            parser_document_owner,
+            page_vm.vm().document_runtime.runtime_reset_generation(),
+        );
         page_vm
             .vm_mut()
             .document_runtime
@@ -149,7 +215,7 @@ impl ConcurrentParseTimeRuntime {
         let ConcurrentParseTimeRuntime { state, page_vm, .. } = self;
         let mut context = DocumentTurnContext {
             scheduler: &mut state.scheduler,
-            stream: state.parser_session.stream_handle(),
+            parser_session: &state.parser_session,
         };
         context.run_parse_time_turn(page_vm).await
     }

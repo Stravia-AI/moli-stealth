@@ -7,6 +7,30 @@ use super::{
     PendingStreamingPhaseOneContinuation, PhaseOneRestoreRequirement,
 };
 
+pub(in crate::runtime) enum PendingPhaseOneResumeOutcome {
+    Progress(ParseTimePageVmCreationOutcome),
+    MainResourceLoadFailed {
+        page_vm: PageVm,
+        error: anyhow::Error,
+    },
+}
+
+impl PendingPhaseOneResumeOutcome {
+    pub(super) fn progress(outcome: ParseTimePageVmCreationOutcome) -> Self {
+        Self::Progress(outcome)
+    }
+
+    pub(super) fn main_resource_load_failed(
+        runtime: ConcurrentParseTimeRuntime,
+        error: anyhow::Error,
+    ) -> Self {
+        Self::MainResourceLoadFailed {
+            page_vm: runtime.into_main_resource_load_failed_page_vm(),
+            error,
+        }
+    }
+}
+
 /// Stable Page-slot residence for a parser that has yielded phase one.
 ///
 /// Closed-input runtimes and open streaming responses have different state
@@ -106,13 +130,14 @@ impl PendingPhaseOneResidence {
         }
     }
 
-    pub(in crate::runtime) async fn resume(self) -> Result<ParseTimePageVmCreationOutcome> {
+    pub(in crate::runtime) async fn resume(self) -> Result<PendingPhaseOneResumeOutcome> {
         match self {
             Self::ParserBlockingSourceLoad { runtime, started }
             | Self::ClosedInputPageWork { runtime, started } => {
-                (*runtime)
+                let outcome = (*runtime)
                     .continue_creation_from_phase_one_runtime(started)
-                    .await
+                    .await?;
+                Ok(PendingPhaseOneResumeOutcome::progress(outcome))
             }
             Self::OpenStreaming(continuation) => continuation.resume().await,
         }

@@ -488,6 +488,11 @@ async fn restore_and_commit_loaded_navigation_page_async(
             .await;
         out.extend_background_events_after_messages(worker_retirement_events);
     }
+    if let Some(continuation) = page_commit.committed_document_post_response_continuation {
+        command_context
+            .response_flush()
+            .defer_until_response_flush(move || continuation.release());
+    }
     let _ = conn.commit_loaded_navigation_target_identity_for_session_owner(
         state.navigate_session_id.as_deref(),
         main_document_commit,

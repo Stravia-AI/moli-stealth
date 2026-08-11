@@ -317,7 +317,6 @@ impl DomHost {
                 ),
             );
             self.record_mutation(MutationScope::QueryState);
-            self.record_tree_insertion_roots(&inserted_roots);
             if let Some(document) = old_owner_document {
                 self.update_document_target_from_url(document);
             }

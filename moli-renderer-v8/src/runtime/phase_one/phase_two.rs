@@ -17,18 +17,8 @@ impl ConcurrentParseTimeRuntime {
             &self.page_vm.local_executor,
             "parse-time phase transition handoff",
         );
-        self.page_vm
-            .vm_mut()
-            .document_runtime
-            .deactivate_main_parser_continuation();
-        let stranded_parse_time_document_script_events = self
-            .page_vm
-            .page_task_queue
-            .take_parse_time_document_script_events();
-        let stranded_parse_time_lifecycle_work = self
-            .page_vm
-            .page_task_queue
-            .take_parse_time_lifecycle_work();
+        let (stranded_parse_time_document_script_events, stranded_parse_time_lifecycle_work) =
+            self.retire_main_parser_continuation();
         self.page_vm
             .vm_mut()
             .document_runtime
@@ -41,6 +31,16 @@ impl ConcurrentParseTimeRuntime {
                 scheduler.absorb_stranded_parse_time_document_script_events(
                     stranded_parse_time_document_script_events,
                 );
+                // A parser-inserted external script can suspend the main
+                // parser and let the document.write continuation consume its
+                // remaining input. Defer-like handoffs discovered by that
+                // continuation are accepted synchronously but leave their
+                // source/graph starts queued. Ordinary ParserDriver handoffs
+                // start immediately, so this EOF boundary must normalize both
+                // paths before sealing the one parser-deferred queue.
+                self.page_vm
+                    .vm_mut()
+                    .start_pending_main_parser_deferred_scripts()?;
                 let parser_deferred_marker = self
                     .page_vm
                     .seal_main_parser_deferred_scripts(self.parser_document_owner);

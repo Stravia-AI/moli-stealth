@@ -264,6 +264,7 @@ pub(in crate::native_bridge) fn form_elements_getter_function<'s>(
         query: None,
         include_root: false,
         tag_name_html_document: None,
+        resolution_cache: Default::default(),
     };
     let collection = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
     rv.set(collection.into());
@@ -448,6 +449,7 @@ pub(in crate::native_bridge) fn fieldset_elements_getter_function<'s>(
         query: None,
         include_root: false,
         tag_name_html_document: None,
+        resolution_cache: Default::default(),
     };
     let collection = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
     rv.set(collection.into());
@@ -573,6 +575,7 @@ pub(in crate::native_bridge) fn form_named_getter(
             query: Some(key),
             include_root: false,
             tag_name_html_document: None,
+            resolution_cache: Default::default(),
         };
         let list = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
         rv.set(list.into());
@@ -632,6 +635,7 @@ pub(in crate::native_bridge) fn form_named_descriptor(
             query: Some(key),
             include_root: false,
             tag_name_html_document: None,
+            resolution_cache: Default::default(),
         };
         let list = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
         list.into()

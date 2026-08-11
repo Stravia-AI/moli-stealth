@@ -1,6 +1,7 @@
 use crate::conn::{
-    BackgroundNavigationBodyCompletionSink, CapturedBody, CdpConnection, Cmd, DEFAULT_LOADER_ID,
-    PendingStreamingDocumentResponseNavigation, monotonic_timestamp_seconds,
+    BackgroundNavigationBodyCompletionSink, BackgroundNavigationCancellation, CapturedBody,
+    CdpConnection, Cmd, DEFAULT_LOADER_ID, PendingStreamingDocumentResponseNavigation,
+    monotonic_timestamp_seconds,
 };
 use crate::devtools_runtime::{
     DevToolsAuthChallengeAction, DevToolsCommand, DevToolsContinueInterceptedRequestCommand,
@@ -274,7 +275,7 @@ fn start_devtools_continue_intercepted_request_command(
         let configured_response_stage = conn
             .target_fetch_subresource_interception_snapshot_for_session_owner(command_session_id)
             .is_some_and(|snapshot| {
-                snapshot.has_response_stage_candidate(pending.resource_type.as_cdp_type())
+                snapshot.has_response_stage_candidate(pending.resource_type.into())
             });
         let intercept_response = command.intercept_response || configured_response_stage;
         if let Some(continuation) = pending.detached_parser_script_fetch_continuation() {
@@ -559,7 +560,7 @@ fn start_devtools_fail_intercepted_request_command(
                 &loader_id,
                 monotonic_timestamp_seconds(),
                 &error_text,
-                pending.resource_type.as_cdp_type(),
+                pending.resource_type.into(),
             );
             plan.extend_background_events(events);
             return FetchCommandTaskStep::Complete(plan);
@@ -1895,6 +1896,8 @@ fn continue_streaming_document_response_in_background(
         .is_none()
         .then(|| conn.none_session_owner_route_override())
         .flatten();
+    let cancellation =
+        BackgroundNavigationCancellation::from_fetch_cancel_handle(response.cancellation_handle());
     if response_code.is_none()
         && response_headers.is_empty()
         && let Some(prepared_document) = prepared_document
@@ -1902,6 +1905,7 @@ fn continue_streaming_document_response_in_background(
         conn.record_background_navigation_started_scheduler_event(
             &document_navigation_token,
             &navigation,
+            cancellation,
         );
         tokio::task::spawn_local(async move {
             let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(
@@ -1933,6 +1937,7 @@ fn continue_streaming_document_response_in_background(
     conn.record_background_navigation_started_scheduler_event(
         &document_navigation_token,
         &navigation,
+        cancellation,
     );
     tokio::task::spawn_local(async move {
         let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(

@@ -1897,23 +1897,11 @@ async fn dom_get_document_rejects_while_main_document_navigation_is_pending() {
 #[tokio::test]
 async fn document_navigation_gate_is_scoped_to_background_target_owner() {
     let mut ctx = TestContext::new();
-    let active_page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<html><title>active</title></html>")
-        .await
-        .expect("active page should load");
-    let background_page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<html><title>background</title></html>")
-        .await
-        .expect("background page should load");
-    let background_url = background_page.final_url().as_str().to_owned();
-    let mut background_target = crate::conn::BackgroundTarget::with_url(
+    let background_target = crate::conn::BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        background_url,
+        "about:blank".to_owned(),
     );
-    background_target.replace_loaded_page(Some(background_page));
 
     let mut browser_context = BrowserContext::new("BID-1".to_owned());
     browser_context.set_active_target_id("TID-active");
@@ -1922,11 +1910,19 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
         .devtools_session_state
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    browser_context
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(active_page));
     browser_context.background_targets.push(background_target);
+    ctx.conn.browser_context = Some(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<html><title>active</title></html>",
+        Some("SID-active"),
+    )
+    .await;
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<html><title>background</title></html>",
+        Some("SID-background"),
+    )
+    .await;
+    let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
     browser_context.mutate_parked_page_session_state("TID-background", |state| {
         state
             .devtools_session_state
@@ -1940,7 +1936,6 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
             "PENDING-BACKGROUND-LOADER".to_owned(),
         )
         .expect("background document navigation should start");
-    ctx.conn.browser_context = Some(browser_context);
     assert!(
         ctx.conn
             .has_pending_document_navigation_for_session_owner(Some("SID-background")),
@@ -3342,7 +3337,8 @@ async fn runtime_evaluate_document_replacement_clears_timer_mutated_inline_style
     resolve("mutated");
   }, 0));
 })()"#,
-            "awaitPromise": true
+            "awaitPromise": true,
+            "returnByValue": true
         }
     }))
     .await;
@@ -3421,7 +3417,8 @@ async fn isolated_call_function_document_replacement_clears_default_world_style_
     resolve("mutated");
   }, 0));
 })()"#,
-            "awaitPromise": true
+            "awaitPromise": true,
+            "returnByValue": true
         }
     }))
     .await;
@@ -3526,7 +3523,7 @@ async fn playwright_utility_document_replacement_clears_default_world_style_stat
                 { "objectId": isolated_utility },
                 { "value": r#"(() => {
   document.open();
-  document.write("<!doctype html><html><body><div id='before' style='display:none'>before</div><script>setTimeout(() => { document.getElementById('before').style.display = 'block'; }, 0);</script></body></html>");
+  document.write("<!doctype html><html><body><div id='before' style='display:none'>before</div><script>globalThis.__lm_timer_style_mutation = new Promise(resolve => { setTimeout(() => { document.getElementById('before').style.display = 'block'; resolve('mutated'); }, 0); });</script></body></html>");
   document.close();
 })()"# }
             ],
@@ -3537,34 +3534,26 @@ async fn playwright_utility_document_replacement_clears_default_world_style_stat
     .await;
     let _ = take_response_by_id(&mut ctx, 3_144);
 
-    for attempt in 0..16 {
-        ctx.process_async(json!({
-            "id": 3_145,
-            "method": "Runtime.callFunctionOn",
-            "params": {
-                "objectId": default_utility,
-                "functionDeclaration": "(utility, expression) => utility.evaluate(expression)",
-                "arguments": [
-                    { "objectId": default_utility },
-                    { "value": r#"(() => {
+    ctx.process_async(json!({
+        "id": 3_145,
+        "method": "Runtime.callFunctionOn",
+        "params": {
+            "objectId": default_utility,
+            "functionDeclaration": "(utility, expression) => utility.evaluate(expression)",
+            "arguments": [
+                { "objectId": default_utility },
+                { "value": r#"globalThis.__lm_timer_style_mutation.then(() => {
   const before = document.getElementById('before');
   return `${before.style.display}:${getComputedStyle(before).display}:${before.getClientRects().length}`;
-})()"# }
-                ],
-                "returnByValue": true,
-                "awaitPromise": true
-            }
-        }))
-        .await;
-        let warmed = take_response_by_id(&mut ctx, 3_145);
-        if warmed["result"]["result"]["value"] == json!("block:block:1") {
-            break;
+})"# }
+            ],
+            "returnByValue": true,
+            "awaitPromise": true
         }
-        if attempt + 1 == 16 {
-            panic!("timer style mutation did not become visible: {warmed:?}");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
+    }))
+    .await;
+    let warmed = take_response_by_id(&mut ctx, 3_145);
+    assert_eq!(warmed["result"]["result"]["value"], json!("block:block:1"));
 
     ctx.process_async(json!({
         "id": 3_146,

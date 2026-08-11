@@ -57,6 +57,12 @@ async fn dom_resolve_geometry_and_mutation_target_loaded_background_owner_withou
         Some("SID-background"),
     )
     .await;
+    ctx.wait_for_scheduler_message("background fixture load", |message| {
+        message["sessionId"] == json!("SID-background")
+            && message["method"] == json!("Page.loadEventFired")
+    })
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 340,
@@ -282,14 +288,6 @@ async fn dom_resolve_geometry_and_mutation_target_loaded_background_owner_withou
 #[tokio::test(flavor = "multi_thread")]
 async fn dom_resolve_geometry_targets_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><html><body><article id='owned' style='position:absolute;left:7px;top:9px;width:13px;height:15px'>inactive</article></body></html>",
-        )
-        .await
-        .expect("inactive page should load");
-
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active".to_owned());
@@ -297,10 +295,22 @@ async fn dom_resolve_geometry_targets_inactive_loaded_owner_without_activation()
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
+    inactive.set_target_url("about:blank".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.replace_loaded_page(Some(page));
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><html><body><article id='owned' style='position:absolute;left:7px;top:9px;width:13px;height:15px'>inactive</article></body></html>",
+        Some("SID-inactive"),
+    )
+    .await;
+    crate::testing::wait_until_renderer_document_load(
+        &mut ctx,
+        Some("SID-inactive"),
+        "TID-inactive",
+        crate::domains::page::LOADER_ID,
+    )
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 361,
@@ -312,6 +322,7 @@ async fn dom_resolve_geometry_targets_inactive_loaded_owner_without_activation()
     let root_id = take_response_by_id(&mut ctx, 361)["result"]["root"]["nodeId"]
         .as_u64()
         .expect("document root node id");
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 362,

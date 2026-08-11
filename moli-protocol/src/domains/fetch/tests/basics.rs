@@ -3,7 +3,9 @@ use crate::conn::{
     CdpCommandTaskStep, FetchInterceptionPattern, PendingSubresourceFetchAuthRequest,
     PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
 };
-use crate::devtools_runtime::{AutomationEvent, DevToolsNetworkInterceptId};
+use crate::devtools_runtime::{
+    AutomationEvent, DevToolsNetworkInterceptId, DevToolsNetworkResourceType,
+};
 use crate::domains::fetch::pending_subresource_auth_required_event;
 use moli_core::page::SubresourceResourceType;
 
@@ -106,7 +108,10 @@ fn pending_subresource_auth_required_event_carries_typed_sidecar() {
         sidecar.network_id.as_ref().map(|id| id.as_str()),
         Some("NETWORK-7")
     );
-    assert_eq!(sidecar.resource_type.as_deref(), Some("XHR"));
+    assert_eq!(
+        sidecar.resource_type,
+        Some(DevToolsNetworkResourceType::Xhr)
+    );
     assert_eq!(
         sidecar.blocked_intercepts,
         vec![DevToolsNetworkInterceptId::from("intercept-auth")]
@@ -393,24 +398,23 @@ async fn disable_drains_fetch_owned_pending_when_same_session_network_intercept_
 #[tokio::test(flavor = "multi_thread")]
 async fn enable_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<title>fetch background</title>")
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-fetch-bg".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<title>fetch background</title>",
+        Some("SID-background"),
+    )
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1201,
@@ -443,37 +447,38 @@ async fn enable_targets_loaded_background_owner_without_promotion() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pending_fetch_enable_keeps_background_owner_route_across_completion() {
     let mut ctx = TestContext::new();
-    let active_page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<title>active fetch</title>")
-        .await
-        .expect("active page should load");
-    let background_page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<title>background fetch</title>")
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-fetch-background".to_owned(),
         None,
-        background_page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(background_page));
 
     let mut bc = BrowserContext::new("BID-fetch-owner-route".to_owned());
     bc.set_active_target_id("TID-fetch-active".to_owned());
-    bc.set_target_url(active_page.final_url().as_str().to_owned());
-    bc.active_target
-        .runtime_slot
-        .set_loaded_page_for_test(active_page);
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<title>active fetch</title>",
+        None,
+    )
+    .await;
 
     let background_route = ctx
         .conn
         .target_session_route_for_target_id("TID-fetch-background")
         .expect("background target route");
+    let previous_route = ctx
+        .conn
+        .replace_none_session_owner_route_override(Some(background_route.clone()));
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<title>background fetch</title>",
+        None,
+    )
+    .await;
+    ctx.conn
+        .replace_none_session_owner_route_override(previous_route);
+    ctx.sent.clear();
     let raw = serde_json::to_string(&json!({
         "id": 1204,
         "method": "Fetch.enable",
@@ -593,18 +598,11 @@ async fn enable_targets_inactive_owner_without_activation() {
 #[tokio::test(flavor = "multi_thread")]
 async fn disable_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<title>fetch disable background</title>")
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-fetch-disable-bg".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -622,6 +620,12 @@ async fn disable_targets_loaded_background_owner_without_promotion() {
         );
     });
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<title>fetch disable background</title>",
+        Some("SID-background"),
+    )
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1203,

@@ -553,6 +553,17 @@ async fn playwright_over_cdp_child_frame_playwright_style_utility_script_uses_ch
     let navigation = take_response_by_id(&mut ctx, 5205);
     assert_eq!(navigation["sessionId"], json!(session_id));
 
+    crate::testing::wait_until_message(
+        &mut ctx,
+        Some(session_id.as_str()),
+        "Playwright child frame attachment after Page.navigate response",
+        |message| {
+            message["sessionId"] == json!(session_id)
+                && message["method"] == json!("Page.frameAttached")
+                && message["params"]["parentFrameId"] == json!(attached.target_id)
+        },
+    )
+    .await;
     let child_frame_id = ctx
         .sent
         .iter()
@@ -1254,8 +1265,7 @@ async fn playwright_connect_over_cdp_second_page_window_query_keeps_background_t
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn playwright_over_cdp_child_frame_is_visible_in_frame_tree_immediately_after_navigation_response()
- {
+async fn playwright_over_cdp_child_frame_is_visible_in_frame_tree_after_frame_attachment() {
     async fn parent() -> impl IntoResponse {
         (
             [(CONTENT_TYPE.as_str(), "text/html")],
@@ -1300,6 +1310,17 @@ async fn playwright_over_cdp_child_frame_is_visible_in_frame_tree_immediately_af
     let navigation = take_response_by_id(&mut ctx, 5323);
     assert_eq!(navigation["sessionId"], json!(attached.session_id));
 
+    crate::testing::wait_until_message(
+        &mut ctx,
+        Some(session_id.as_str()),
+        "Playwright child frame attachment after Page.navigate response",
+        |message| {
+            message["sessionId"] == json!(session_id)
+                && message["method"] == json!("Page.frameAttached")
+                && message["params"]["parentFrameId"] == json!(target_id)
+        },
+    )
+    .await;
     let child_frame_id = ctx
         .sent
         .iter()
@@ -6088,6 +6109,10 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
     .await;
     let response = take_response_by_id(&mut ctx, 246);
     assert_eq!(response["sessionId"], json!(session_id));
+    let loader_id = response["result"]["loaderId"]
+        .as_str()
+        .expect("script-disabled navigation loader id")
+        .to_owned();
     assert!(
         ctx.sent
             .iter()
@@ -6096,6 +6121,21 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
         ctx.sent
     );
     ctx.take_all();
+    crate::testing::wait_until_renderer_document_load(
+        &mut ctx,
+        Some(session_id.as_str()),
+        &attached.target_id,
+        &loader_id,
+    )
+    .await;
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .and_then(|browser_context| browser_context.active_target.runtime_slot.loaded_page_mut())
+        .expect("script-disabled loaded page")
+        .refresh_script_execution_report_async()
+        .await
+        .expect("script-disabled report refresh");
 
     let active = ctx
         .conn

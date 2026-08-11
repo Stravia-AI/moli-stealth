@@ -18,7 +18,10 @@ use super::parser_blocking_task::{
 use super::*;
 use crate::document_runtime::parser_script_preparation_failure_page_owned_work;
 use crate::dom::native::{Attribute, DomMutationEffects, NativeNodeId};
-use crate::live_document_parser::{LiveDocumentParserOwner, LiveDocumentParserStepOutcome};
+use crate::live_document_parser::{
+    LiveDocumentParserOwner, LiveDocumentParserStepOutcome, ParserResumeApplication,
+    ParserSuspensionCause,
+};
 use crate::parser::{
     ParserDomMutation, ParserDomMutationConsumer, ParserDomReadConsumer,
     ParserElementCreationConsumer, ParserElementCreationRequest, ParserMutationEffectConsumer,
@@ -43,6 +46,10 @@ impl ParserMutationEffectConsumer for PhaseOneParserOwner<'_> {
 }
 
 impl ParserDomReadConsumer for PhaseOneParserOwner<'_> {
+    fn snapshot_parser_document(&mut self) -> Option<crate::dom::native::NativeDom> {
+        Some(self.vm.document_runtime.snapshot_document())
+    }
+
     fn node_exists(&mut self, node_id: NativeNodeId) -> bool {
         self.vm
             .document_runtime
@@ -233,6 +240,12 @@ impl ParserDomMutationConsumer for PhaseOneParserOwner<'_> {
         self.vm
             .document_runtime
             .create_processing_instruction_in_live_dom_host(target, data)
+    }
+
+    fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+        self.vm
+            .document_runtime
+            .create_cdata_section_in_live_dom_host(data)
     }
 
     fn create_document_type(
@@ -450,10 +463,6 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         );
     }
 
-    fn stream_handle(&self) -> ParserStreamHandle {
-        self.parser_session.stream_handle()
-    }
-
     fn sync_parser_defined_custom_elements(&mut self, page_vm: &mut PageVm) {
         let names = page_vm
             .vm_mut()
@@ -499,6 +508,55 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
             );
             return Ok(owner_step_progress_after_current_document_stop(page_vm));
         }
+        match self.parser_session.suspension_cause() {
+            Some(ParserSuspensionCause::ParserCreatedStylesheet { .. }) => {
+                if !page_vm
+                    .vm()
+                    .document_runtime
+                    .has_all_blocking_stylesheets_resolved()
+                {
+                    return Ok(suspend_parser_for_stylesheet_page_task(
+                        owner,
+                        pending_parsing_blocking_wait,
+                    ));
+                }
+                let permit = self
+                    .parser_session
+                    .current_resume_permit()
+                    .expect("a stylesheet-suspended parser must retain its resume permit");
+                assert_eq!(
+                    self.parser_session.resume(permit),
+                    ParserResumeApplication::Resumed,
+                    "the admitted stylesheet continuation must resume its exact parser suspension"
+                );
+            }
+            Some(ParserSuspensionCause::DocumentWriteExternalScript { .. }) => {
+                if page_vm
+                    .vm()
+                    .document_runtime
+                    .has_pending_document_write_external_script_load()
+                {
+                    *owner = ParseTimeOwner::Document;
+                    *pending_parsing_blocking_wait =
+                        PendingParsingBlockingWait::PageNetworkingDocumentWriteExternalScript;
+                    return Ok(OwnerStepProgress::BlockedOnPageTask);
+                }
+                let permit = self
+                    .parser_session
+                    .current_resume_permit()
+                    .expect("a document.write-suspended parser must retain its resume permit");
+                assert_eq!(
+                    self.parser_session.resume(permit),
+                    ParserResumeApplication::Resumed,
+                    "the admitted document.write continuation must resume its exact parser suspension"
+                );
+            }
+            Some(
+                ParserSuspensionCause::ParserClassicSource { .. }
+                | ParserSuspensionCause::ParserClassicStylesheets { .. },
+            )
+            | None => {}
+        }
         debug_assert!(
             !pending_parsing_blocking_wait.is_pending(),
             "parser owner should not enqueue a new parsing turn while a blocking-wait document turn is still pending"
@@ -507,15 +565,12 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
             .pending_parsing_blocking_script
             .has_parser_blocking_script()
         {
-            self.parser_session.ensure_current_chunk();
-            if self.parser_session.current_chunk_is_none()
-                && !self.parser_session.has_script_input()
-            {
-                return Ok(if *self.input_closed {
-                    OwnerStepProgress::AdvancePhase
-                } else {
-                    OwnerStepProgress::NeedMoreInput
-                });
+            if self.parser_session.input_is_empty() {
+                if *self.input_closed {
+                    self.finish_main_parser(page_vm, parser_document_owner);
+                    return Ok(OwnerStepProgress::AdvancePhase);
+                }
+                return Ok(OwnerStepProgress::NeedMoreInput);
             }
             if !*parser_step_ready {
                 *owner = ParseTimeOwner::Document;
@@ -574,7 +629,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 return Ok(OwnerStepProgress::BlockedOnParserScriptSourceLoad);
             }
             let progress = match resolve_main_parser_blocking_classic_after_runtime_gate(
-                self.stream_handle(),
+                self.parser_session,
                 page_vm,
                 self.pending_parsing_blocking_script,
                 "executing stylesheet-unblocked parser-blocking classic script",
@@ -635,122 +690,94 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 default_chunk_bytes,
             });
         *parser_step_ready = false;
-        self.parser_session.ensure_current_chunk();
-        let progress = if self.parser_session.current_chunk_is_empty() {
-            OwnerStepProgress::AdvancePhase
-        } else {
-            let remaining_chunk = self.parser_session.take_current_chunk();
-            if remaining_chunk.is_empty() {
+        let progress = if self.parser_session.input_is_empty() {
+            if *self.input_closed {
+                self.finish_main_parser(page_vm, parser_document_owner);
                 OwnerStepProgress::AdvancePhase
             } else {
-                let parser_step_bytes =
-                    parser_step_bytes.expect("BeforeParserStep turn must retain parser step size");
-                page_vm
-                    .page_task_queue
-                    .enqueue_parse_time_document_script_task(ready_task);
-                let (parser_step, rest) =
-                    split_first_by_char_boundary(&remaining_chunk, parser_step_bytes);
-                let remaining_chunk = (!rest.is_empty()).then(|| rest.to_owned());
+                OwnerStepProgress::NeedMoreInput
+            }
+        } else {
+            let parser_step_bytes =
+                parser_step_bytes.expect("BeforeParserStep turn must retain parser step size");
+            let parser_budget_exhausted =
+                parser_step_bytes > 0 && default_chunk_bytes > parser_step_bytes;
+            page_vm
+                .page_task_queue
+                .enqueue_parse_time_document_script_task(ready_task);
 
-                match self
-                    .advance_parser_step_for_owner(
-                        page_vm,
-                        parser_document_owner,
-                        parser_step,
-                        remaining_chunk.as_deref(),
-                    )
-                    .await?
-                {
-                    ParserStepAdvanceOutcome::Continue => {
-                        let parser_budget_exhausted = remaining_chunk.is_some();
-                        self.parser_session.set_current_chunk(remaining_chunk);
-                        if !parser_budget_exhausted {
-                            // This bounded step consumed the complete current
-                            // chunk. The owner loop can immediately observe
-                            // EOF, another already-buffered chunk, or the next
-                            // real wait without manufacturing a continuation.
-                            OwnerStepProgress::Continue
-                        } else if page_vm
-                            .vm()
-                            .document_runtime
-                            .request_main_parser_continuation_if_active()
+            match self
+                .advance_next_parser_step_for_owner(
+                    page_vm,
+                    parser_document_owner,
+                    parser_step_bytes,
+                )
+                .await?
+            {
+                ParserStepAdvanceOutcome::Continue => {
+                    if !parser_budget_exhausted {
+                        // This bounded step consumed the complete current
+                        // chunk. The owner loop can immediately observe
+                        // EOF, another already-buffered chunk, or the next
+                        // real wait without manufacturing a continuation.
+                        OwnerStepProgress::Continue
+                    } else if page_vm
+                        .vm()
+                        .document_runtime
+                        .request_main_parser_continuation_if_active()
+                    {
+                        // One bounded tokenizer turn has spent its parser
+                        // budget. The exact parser state remains in this
+                        // runtime; the Networking task only grants the next
+                        // opportunity through the common Page scheduler.
+                        OwnerStepProgress::BlockedOnPageTask
+                    } else {
+                        #[cfg(test)]
                         {
-                            // One bounded tokenizer turn has spent its parser
-                            // budget. The exact parser state remains in this
-                            // runtime; the Networking task only grants the next
-                            // opportunity through the common Page scheduler.
-                            OwnerStepProgress::BlockedOnPageTask
-                        } else {
-                            #[cfg(test)]
-                            {
-                                assert!(
-                                    page_vm.permits_direct_parser_budget_continuation_for_test(),
-                                    "only an explicit standalone parser fixture may bypass the Networking continuation"
-                                );
-                                OwnerStepProgress::Continue
-                            }
-                            #[cfg(not(test))]
-                            {
-                                panic!(
-                                    "an active production parser spent its budget without a bound Networking continuation"
-                                );
-                            }
-                        }
-                    }
-                    ParserStepAdvanceOutcome::StoppedCurrentDocument => {
-                        owner_step_progress_after_current_document_stop(page_vm)
-                    }
-                    ParserStepAdvanceOutcome::BlockedOnStylesheet(script) => {
-                        let current_chunk = self
-                            .parser_session
-                            .take_buffered_input_with_tail(remaining_chunk);
-                        self.parser_session.set_current_chunk(current_chunk);
-                        self.pending_parsing_blocking_script
-                            .install_parser_blocking_script_blocked_on_execution(*script);
-                        suspend_parser_for_stylesheet_page_task(
-                            owner,
-                            pending_parsing_blocking_wait,
-                        )
-                    }
-                    ParserStepAdvanceOutcome::BlockedOnStylesheetParserPause => {
-                        let current_chunk = self
-                            .parser_session
-                            .take_buffered_input_with_tail(remaining_chunk);
-                        self.parser_session.set_current_chunk(current_chunk);
-                        suspend_parser_for_stylesheet_page_task(
-                            owner,
-                            pending_parsing_blocking_wait,
-                        )
-                    }
-                    ParserStepAdvanceOutcome::BlockedOnExternalSource(script) => {
-                        let current_chunk = self
-                            .parser_session
-                            .take_buffered_input_with_tail(remaining_chunk);
-                        self.parser_session.set_current_chunk(current_chunk);
-                        self.pending_parsing_blocking_script
-                            .install_parser_blocking_script_blocked_on_source_load(*script);
-                        *pending_parsing_blocking_wait = PendingParsingBlockingWait::None;
-                        *owner = ParseTimeOwner::Parser;
-                        OwnerStepProgress::NeedMoreInput
-                    }
-                    ParserStepAdvanceOutcome::BlockedOnDocumentWriteExternalLoad => {
-                        let current_chunk = self
-                            .parser_session
-                            .take_buffered_input_with_tail(remaining_chunk);
-                        self.parser_session.set_current_chunk(current_chunk);
-                        *pending_parsing_blocking_wait = if page_vm
-                            .has_page_resource_completion_route()
-                        {
-                            PendingParsingBlockingWait::PageNetworkingDocumentWriteExternalScript
-                        } else {
-                            PendingParsingBlockingWait::LegacyDocumentProcessing
-                        };
-                        *owner = ParseTimeOwner::Document;
-                        if pending_parsing_blocking_wait.waits_for_page_task() {
-                            OwnerStepProgress::BlockedOnPageTask
-                        } else {
+                            assert!(
+                                page_vm.permits_direct_parser_budget_continuation_for_test(),
+                                "only an explicit standalone parser fixture may bypass the Networking continuation"
+                            );
                             OwnerStepProgress::Continue
                         }
+                        #[cfg(not(test))]
+                        {
+                            panic!(
+                                "an active production parser spent its budget without a bound Networking continuation"
+                            );
+                        }
+                    }
+                }
+                ParserStepAdvanceOutcome::StoppedCurrentDocument => {
+                    owner_step_progress_after_current_document_stop(page_vm)
+                }
+                ParserStepAdvanceOutcome::BlockedOnStylesheet(script) => {
+                    self.pending_parsing_blocking_script
+                        .install_parser_blocking_script_blocked_on_execution(*script);
+                    suspend_parser_for_stylesheet_page_task(owner, pending_parsing_blocking_wait)
+                }
+                ParserStepAdvanceOutcome::BlockedOnStylesheetParserPause => {
+                    suspend_parser_for_stylesheet_page_task(owner, pending_parsing_blocking_wait)
+                }
+                ParserStepAdvanceOutcome::BlockedOnExternalSource(script) => {
+                    self.pending_parsing_blocking_script
+                        .install_parser_blocking_script_blocked_on_source_load(*script);
+                    *pending_parsing_blocking_wait = PendingParsingBlockingWait::None;
+                    *owner = ParseTimeOwner::Parser;
+                    OwnerStepProgress::NeedMoreInput
+                }
+                ParserStepAdvanceOutcome::BlockedOnDocumentWriteExternalLoad => {
+                    *pending_parsing_blocking_wait = if page_vm.has_page_resource_completion_route()
+                    {
+                        PendingParsingBlockingWait::PageNetworkingDocumentWriteExternalScript
+                    } else {
+                        PendingParsingBlockingWait::LegacyDocumentProcessing
+                    };
+                    *owner = ParseTimeOwner::Document;
+                    if pending_parsing_blocking_wait.waits_for_page_task() {
+                        OwnerStepProgress::BlockedOnPageTask
+                    } else {
+                        OwnerStepProgress::Continue
                     }
                 }
             }
@@ -764,7 +791,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         final_url: &Url,
         parser_tail_after_step: Option<&str>,
     ) {
-        let mut upcoming_html = self.parser_session.peek_buffered_input();
+        let mut upcoming_html = self.parser_session.snapshot_pending_input();
         if let Some(tail) = parser_tail_after_step {
             upcoming_html.push_str(tail);
         }
@@ -874,33 +901,39 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     still_blocked
                 };
                 if still_blocked_on_stylesheet {
-                    return Ok(ScriptHandoffOutcome::BlockedOnStylesheet(Box::new(
-                        stylesheet_blocked_main_parser_blocking_classic_script(
-                            main_parser_blocking_classic_script_item(
-                                parser_document_owner,
-                                ParserPreparedClassicScript::new(
-                                    ParserClassicScriptMetadata::new(handle, start_line),
-                                    script,
-                                ),
-                                blocking_signatures_before,
-                                source_load,
-                            ),
+                    let resume_permit = self.parser_session.suspend(
+                        ParserSuspensionCause::ParserClassicStylesheets { script: handle },
+                    );
+                    let mut pending = main_parser_blocking_classic_script_item(
+                        parser_document_owner,
+                        ParserPreparedClassicScript::new(
+                            ParserClassicScriptMetadata::new(handle, start_line),
+                            script,
                         ),
+                        blocking_signatures_before,
+                        source_load,
+                    );
+                    pending.context_mut().install_resume_permit(resume_permit);
+                    return Ok(ScriptHandoffOutcome::BlockedOnStylesheet(Box::new(
+                        stylesheet_blocked_main_parser_blocking_classic_script(pending),
                     )));
                 }
                 if let Some(source_load) = source_load {
-                    return Ok(ScriptHandoffOutcome::BlockedOnExternalSource(Box::new(
-                        source_load_blocked_main_parser_blocking_classic_script(
-                            main_parser_blocking_classic_script_item(
-                                parser_document_owner,
-                                ParserPreparedClassicScript::new(
-                                    ParserClassicScriptMetadata::new(handle, start_line),
-                                    script,
-                                ),
-                                blocking_signatures_before,
-                                Some(source_load),
-                            ),
+                    let resume_permit = self
+                        .parser_session
+                        .suspend(ParserSuspensionCause::ParserClassicSource { script: handle });
+                    let mut pending = main_parser_blocking_classic_script_item(
+                        parser_document_owner,
+                        ParserPreparedClassicScript::new(
+                            ParserClassicScriptMetadata::new(handle, start_line),
+                            script,
                         ),
+                        blocking_signatures_before,
+                        Some(source_load),
+                    );
+                    pending.context_mut().install_resume_permit(resume_permit);
+                    return Ok(ScriptHandoffOutcome::BlockedOnExternalSource(Box::new(
+                        source_load_blocked_main_parser_blocking_classic_script(pending),
                     )));
                 }
                 let mut pending_runner =
@@ -917,7 +950,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     );
                 let outcome = script_handoff_from_main_parser_blocking_execution(
                     resolve_main_parser_blocking_classic_after_runtime_gate(
-                        self.stream_handle(),
+                        self.parser_session,
                         page_vm,
                         &mut pending_runner,
                         "executing parser-inserted classic script during parse",
@@ -1192,6 +1225,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
     ///
     /// Returns only the flow-control signal (ScriptHandoff or InputDrained).
     /// Parser-discovery signals are processed internally before returning.
+    #[cfg(test)]
     pub(super) fn pump_parse_step_with_signals(
         &mut self,
         page_vm: &mut PageVm,
@@ -1208,6 +1242,107 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                         &mut parser_owner,
                     )
             });
+        self.finish_parser_pump_step(
+            page_vm,
+            parser_document_owner,
+            outcome,
+            null_custom_element_registry_elements,
+        )
+    }
+
+    fn pump_next_parse_step_with_signals(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+        max_bytes: usize,
+    ) -> LiveDocumentParserStepOutcome {
+        self.sync_parser_defined_custom_elements(page_vm);
+        let (outcome, null_custom_element_registry_elements) =
+            page_vm.vm_mut().with_dom_host_parse_step(|vm| {
+                let mut parser_owner = PhaseOneParserOwner { vm };
+                let outcome = self
+                    .parser_session
+                    .advance_next_step(max_bytes, &mut parser_owner);
+                let null_custom_element_registry_elements = self
+                    .parser_session
+                    .take_parser_stream_null_custom_element_registry_elements();
+                (outcome, null_custom_element_registry_elements)
+            });
+        self.finish_parser_pump_step(
+            page_vm,
+            parser_document_owner,
+            outcome,
+            null_custom_element_registry_elements,
+        )
+    }
+
+    fn pump_queued_or_resume_parse_step_with_signals(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) -> LiveDocumentParserStepOutcome {
+        self.sync_parser_defined_custom_elements(page_vm);
+        let (outcome, null_custom_element_registry_elements) =
+            page_vm.vm_mut().with_dom_host_parse_step(|vm| {
+                let mut parser_owner = PhaseOneParserOwner { vm };
+                let outcome = self
+                    .parser_session
+                    .advance_queued_or_resume_step(&mut parser_owner);
+                let null_custom_element_registry_elements = self
+                    .parser_session
+                    .take_parser_stream_null_custom_element_registry_elements();
+                (outcome, null_custom_element_registry_elements)
+            });
+        self.finish_parser_pump_step(
+            page_vm,
+            parser_document_owner,
+            outcome,
+            null_custom_element_registry_elements,
+        )
+    }
+
+    fn finish_parser_pump_step(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+        outcome: LiveDocumentParserStepOutcome,
+        null_custom_element_registry_elements: Vec<NativeNodeId>,
+    ) -> LiveDocumentParserStepOutcome {
+        let discovery_signals = self.parser_session.take_discovery_signals();
+        self.apply_parser_step_outputs(
+            page_vm,
+            parser_document_owner,
+            null_custom_element_registry_elements,
+            discovery_signals,
+        );
+        outcome
+    }
+
+    fn finish_main_parser(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) {
+        self.sync_parser_defined_custom_elements(page_vm);
+        let finish_signals = page_vm.vm_mut().with_dom_host_parse_step(|vm| {
+            let mut parser_owner = PhaseOneParserOwner { vm };
+            self.parser_session.finish(&mut parser_owner)
+        });
+        self.apply_parser_step_outputs(
+            page_vm,
+            parser_document_owner,
+            finish_signals.parser_created_null_registry_elements,
+            finish_signals.discovery_signals,
+        );
+    }
+
+    fn apply_parser_step_outputs(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+        null_custom_element_registry_elements: Vec<NativeNodeId>,
+        discovery_signals: crate::live_document_parser::LiveDocumentParserDiscoverySignals,
+    ) {
         let _ = page_vm
             .vm_mut()
             .apply_parser_created_null_registry_associations_in_default_context(
@@ -1224,7 +1359,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
             modulepreload_link_candidates,
             parser_meta_csp_candidates,
             blocking_stylesheet_inputs,
-        } = self.parser_session.take_discovery_signals();
+        } = discovery_signals;
         self.buffered_document_preloads
             .claim_pending_stylesheet_preloads_for_parser(&blocking_stylesheet_inputs);
         for handle in &parser_meta_csp_candidates {
@@ -1288,8 +1423,100 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 parser_document_owner,
                 &blocking_stylesheet_inputs,
             );
+    }
 
-        outcome
+    async fn advance_next_parser_step_for_owner(
+        &mut self,
+        page_vm: &mut PageVm,
+        parser_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+        max_bytes: usize,
+    ) -> Result<ParserStepAdvanceOutcome> {
+        self.bind_page_resource_runtime(page_vm);
+        let mut first_step = true;
+        let outcome = loop {
+            if page_vm.vm().current_main_document_task_owner() != Some(parser_document_owner) {
+                tracing::debug!(
+                    ?parser_document_owner,
+                    current_owner = ?page_vm.vm().current_main_document_task_owner(),
+                    "stopping stale main parser owner before advancing parser-owned input"
+                );
+                break ParserStepAdvanceOutcome::StoppedCurrentDocument;
+            }
+            let outcome = if first_step {
+                first_step = false;
+                self.pump_next_parse_step_with_signals(page_vm, parser_document_owner, max_bytes)
+            } else {
+                // Continue only bytes already admitted to the active backend for
+                // this bounded parser turn. The next end segment remains owned by
+                // the parser session until the scheduler grants another turn.
+                self.pump_queued_or_resume_parse_step_with_signals(page_vm, parser_document_owner)
+            };
+            if page_vm
+                .run_pending_parser_post_step_runtime_work_on_named_owner_local_task()
+                .await?
+            {
+                break ParserStepAdvanceOutcome::StoppedCurrentDocument;
+            }
+
+            match outcome {
+                LiveDocumentParserStepOutcome::Continue => {
+                    break ParserStepAdvanceOutcome::Continue;
+                }
+                LiveDocumentParserStepOutcome::CustomElementConstructionHandoff(handoff) => {
+                    page_vm
+                        .construct_parser_custom_element_handoff_on_named_owner_local_task(*handoff)
+                        .await?;
+                }
+                LiveDocumentParserStepOutcome::BlockingStylesheetPause(pause) => {
+                    tracing::debug!(
+                        stylesheet_node_id = pause.node_id.index(),
+                        "main document parser paused on a body blocking stylesheet"
+                    );
+                    let final_url = self.final_url.clone();
+                    self.catch_up_main_document_preload_scan(page_vm, &final_url, None);
+                    let _ = self.parser_session.suspend(
+                        ParserSuspensionCause::ParserCreatedStylesheet {
+                            owner: pause.node_id,
+                        },
+                    );
+                    break ParserStepAdvanceOutcome::BlockedOnStylesheetParserPause;
+                }
+                LiveDocumentParserStepOutcome::ScriptHandoff(handoff) => {
+                    match self
+                        .handle_parse_time_script_handoff_for_owner(
+                            page_vm,
+                            parser_document_owner,
+                            *handoff,
+                            None,
+                        )
+                        .await?
+                    {
+                        ScriptHandoffOutcome::StoppedCurrentDocument => {
+                            break ParserStepAdvanceOutcome::StoppedCurrentDocument;
+                        }
+                        ScriptHandoffOutcome::NoNavigation => {
+                            if let Some(outcome) = self.document_write_suspension_step_outcome() {
+                                break outcome;
+                            }
+                        }
+                        ScriptHandoffOutcome::BlockedOnDocumentWriteExternalLoad => {
+                            break ParserStepAdvanceOutcome::BlockedOnDocumentWriteExternalLoad;
+                        }
+                        ScriptHandoffOutcome::BlockedOnStylesheet(script) => {
+                            break ParserStepAdvanceOutcome::BlockedOnStylesheet(script);
+                        }
+                        ScriptHandoffOutcome::BlockedOnExternalSource(script) => {
+                            break ParserStepAdvanceOutcome::BlockedOnExternalSource(script);
+                        }
+                    }
+                }
+            }
+        };
+
+        page_vm
+            .drain_deferred_page_tasks_on_named_owner_local_task()
+            .await?;
+        Ok(outcome)
     }
 
     #[cfg(test)]
@@ -1312,6 +1539,7 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         .await
     }
 
+    #[cfg(test)]
     async fn advance_parser_step_for_owner(
         &mut self,
         page_vm: &mut PageVm,
@@ -1365,6 +1593,11 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                         &final_url,
                         handoff_tail.take(),
                     );
+                    let _ = self.parser_session.suspend(
+                        ParserSuspensionCause::ParserCreatedStylesheet {
+                            owner: pause.node_id,
+                        },
+                    );
                     break ParserStepAdvanceOutcome::BlockedOnStylesheetParserPause;
                 }
                 LiveDocumentParserStepOutcome::ScriptHandoff(handoff) => {
@@ -1381,7 +1614,11 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                         ScriptHandoffOutcome::StoppedCurrentDocument => {
                             break ParserStepAdvanceOutcome::StoppedCurrentDocument;
                         }
-                        ScriptHandoffOutcome::NoNavigation => {}
+                        ScriptHandoffOutcome::NoNavigation => {
+                            if let Some(outcome) = self.document_write_suspension_step_outcome() {
+                                break outcome;
+                            }
+                        }
                         ScriptHandoffOutcome::BlockedOnDocumentWriteExternalLoad => {
                             break ParserStepAdvanceOutcome::BlockedOnDocumentWriteExternalLoad;
                         }
@@ -1401,54 +1638,20 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
             .await?;
         Ok(outcome)
     }
-}
 
-fn split_first_by_char_boundary(input: &str, max_bytes: usize) -> (&str, &str) {
-    if max_bytes == 0 || input.len() <= max_bytes {
-        return (input, "");
-    }
-
-    let mut current_len = 0;
-    for (index, ch) in input.char_indices() {
-        let ch_len = ch.len_utf8();
-        if current_len > 0 && current_len + ch_len > max_bytes {
-            return (&input[..index], &input[index..]);
+    fn document_write_suspension_step_outcome(&self) -> Option<ParserStepAdvanceOutcome> {
+        match self.parser_session.suspension_cause() {
+            Some(ParserSuspensionCause::ParserCreatedStylesheet { .. }) => {
+                Some(ParserStepAdvanceOutcome::BlockedOnStylesheetParserPause)
+            }
+            Some(ParserSuspensionCause::DocumentWriteExternalScript { .. }) => {
+                Some(ParserStepAdvanceOutcome::BlockedOnDocumentWriteExternalLoad)
+            }
+            Some(
+                ParserSuspensionCause::ParserClassicSource { .. }
+                | ParserSuspensionCause::ParserClassicStylesheets { .. },
+            )
+            | None => None,
         }
-        current_len += ch_len;
-    }
-
-    (input, "")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parser_input_buffer_prioritizes_script_input_before_current_network_chunk() {
-        let final_url = Url::parse("https://example.test/").expect("test url");
-        let stream = std::rc::Rc::new(std::cell::RefCell::new(
-            HtmlParser.start_document(final_url),
-        ));
-        let mut input = ParserInputBuffer::new();
-
-        input.set_current_chunk_for_testing(Some("<main>network</main>".to_owned()));
-        stream
-            .borrow()
-            .script_input_session()
-            .enqueue_script_input_html("<span>script</span>".to_owned());
-
-        input.ensure_current_chunk(&stream.borrow());
-
-        assert_eq!(
-            input.current_chunk_for_testing(),
-            Some("<span>script</span>"),
-            "document.write/script input must be consumed at the parser insertion point first"
-        );
-        assert_eq!(
-            input.queued_front_for_testing(),
-            Some("<main>network</main>"),
-            "unconsumed network input must remain after script input"
-        );
     }
 }

@@ -6,7 +6,8 @@ use crate::conn::{
 };
 use crate::devtools_runtime::{
     AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsNetworkInterceptId,
-    DevToolsRequestId, DevToolsTargetId, NetworkAuthChallengeEvent, NetworkRequestEvent,
+    DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId, NetworkAuthChallengeEvent,
+    NetworkRequestEvent,
 };
 use crate::domains::network;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
@@ -212,7 +213,7 @@ fn navigation_auth_required_parts(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: request_cookie_report.cloned(),
-        resource_type: Some("Document".to_owned()),
+        resource_type: Some(DevToolsNetworkResourceType::Document),
         timestamp: Some(navigation.timestamp),
         wall_time: Some(navigation.timestamp),
         status: None,
@@ -276,12 +277,9 @@ fn pending_subresource_auth_required_parts(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: pending.request_cookie_report.clone(),
-        resource_type: Some(
-            pending
-                .resource_type
-                .as_cdp_fetch_interception_type()
-                .to_owned(),
-        ),
+        resource_type: Some(DevToolsNetworkResourceType::from_fetch_interception_type(
+            pending.resource_type,
+        )),
         timestamp: None,
         wall_time: None,
         status: None,
@@ -354,7 +352,7 @@ fn navigation_response_stage_request_paused_parts(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: request_cookie_report.cloned(),
-        resource_type: Some("Document".to_owned()),
+        resource_type: Some(DevToolsNetworkResourceType::Document),
         timestamp: None,
         wall_time: None,
         status: Some(response_status),
@@ -416,12 +414,9 @@ fn pending_subresource_response_stage_request_paused_parts(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: pending.request_cookie_report.clone(),
-        resource_type: Some(
-            pending
-                .resource_type
-                .as_cdp_fetch_interception_type()
-                .to_owned(),
-        ),
+        resource_type: Some(DevToolsNetworkResourceType::from_fetch_interception_type(
+            pending.resource_type,
+        )),
         timestamp: None,
         wall_time: None,
         status: Some(pending.response_status),
@@ -514,7 +509,7 @@ pub(crate) fn request_paused_background_event(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: pending.request_cookie_report.clone(),
-        resource_type: Some("Document".to_owned()),
+        resource_type: Some(DevToolsNetworkResourceType::Document),
         timestamp: Some(pending.navigation.timestamp),
         wall_time: Some(pending.navigation.timestamp),
         status: None,

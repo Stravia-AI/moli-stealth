@@ -5973,20 +5973,15 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn document_node_snapshot_for_backend_node_id_reads_live_renderer_snapshot() {
         let mut ctx = TestContext::new();
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><body><article id='target'>live</article></body></html>",
-            )
-            .await
-            .expect("test page should load");
         let mut browser_context = BrowserContext::new("BID-runtime-node-snapshot".to_owned());
         browser_context.set_active_target_id("TID-runtime-node-snapshot".to_owned());
-        let _ = browser_context
-            .active_target
-            .runtime_slot
-            .replace_loaded_page(Some(page));
         ctx.conn.browser_context = Some(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<html><body><article id='target'>live</article></body></html>",
+            None,
+        )
+        .await;
+        ctx.sent.clear();
 
         ctx.process_async(json!({
             "id": 1,

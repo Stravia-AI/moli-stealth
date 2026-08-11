@@ -364,6 +364,18 @@ mod tests {
             navigate["result"]["frameId"].as_str().is_some(),
             "{navigate:?}"
         );
+        let parsed = ctx
+            .wait_for_scheduler_message(
+                "instrumented replacement scriptParsed after Page.navigate response",
+                |message| {
+                    message["method"] == json!("Debugger.scriptParsed")
+                        && message["params"]["url"]
+                            == json!(
+                                "data:text/html,<script>globalThis.__instrumentedNavigation = true</script>"
+                            )
+                },
+            )
+            .await;
 
         let created = ctx
             .sent
@@ -371,14 +383,10 @@ mod tests {
             .find(|message| message["method"] == json!("Runtime.executionContextCreated"))
             .expect("replacement default context must precede its instrumentation pause");
         assert_eq!(created["params"]["context"]["origin"], json!("://"));
-        assert!(
-            ctx.sent.iter().any(|message| {
-                message["method"] == json!("Debugger.scriptParsed")
-                    && message["params"]["url"]
-                        == json!("data:text/html,<script>globalThis.__instrumentedNavigation = true</script>")
-            }),
-            "the instrumented replacement script must reach V8: {:?}",
-            ctx.sent
+        assert_eq!(
+            parsed["params"]["url"],
+            json!("data:text/html,<script>globalThis.__instrumentedNavigation = true</script>"),
+            "the instrumented replacement script must reach V8"
         );
     }
 

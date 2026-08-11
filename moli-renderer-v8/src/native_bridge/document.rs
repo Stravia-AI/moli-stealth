@@ -1260,6 +1260,7 @@ fn document_html_collection_getter<'s>(
         query,
         include_root: true,
         tag_name_html_document,
+        resolution_cache: Default::default(),
     };
     let collection = collections::build_live_collection_wrapper(scope, runtime_ptr, descriptor);
     rv.set(collection.into());

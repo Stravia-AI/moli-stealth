@@ -474,6 +474,14 @@ impl HtmlTreeSinkStream {
         self.script_input.take_next_script_input()
     }
 
+    pub fn next_script_input_len(&self) -> Option<usize> {
+        self.script_input.next_script_input_len()
+    }
+
+    pub fn snapshot_script_input(&self) -> String {
+        self.script_input.snapshot_script_input()
+    }
+
     pub fn has_script_input(&self) -> bool {
         self.script_input.has_script_input()
     }
@@ -499,6 +507,14 @@ impl HtmlTreeSinkStream {
     }
 
     pub fn pump_parser_inserted_step(&mut self, chunk: &str) -> ParserPumpOutcome {
+        if chunk.is_empty() {
+            return ParserPumpOutcome {
+                result: ParserPumpStep::InputDrained,
+                discovered_async_prefetch_scripts: Vec::new(),
+                discovered_modulepreload_link_candidates: Vec::new(),
+                discovered_blocking_stylesheet_inputs: Vec::new(),
+            };
+        }
         self.pump_parser_step_with_source(chunk, true)
     }
 
@@ -509,7 +525,7 @@ impl HtmlTreeSinkStream {
     ) -> ParserPumpOutcome {
         if !chunk.is_empty() {
             if inserted_source {
-                self.parser.push_inserted_back(StrTendril::from(chunk));
+                self.parser.begin_inserted_input(StrTendril::from(chunk));
             } else {
                 self.parser.push_back(StrTendril::from(chunk));
             }
@@ -799,32 +815,16 @@ impl HtmlTreeSinkStream {
         self.parser.sink().mark_script_already_started(node_id);
     }
 
-    pub fn take_buffered_input(&mut self) -> String {
-        let mut buffered = String::new();
-        while let Some(chunk) = self.parser.pop_front() {
-            buffered.push_str(&chunk);
-        }
-        buffered
+    pub fn has_buffered_input(&self) -> bool {
+        self.parser.has_buffered_input()
     }
 
-    pub fn prepend_buffered_input(&mut self, input: String) {
-        if input.is_empty() {
-            return;
-        }
-        self.parser.push_front(StrTendril::from(input));
+    pub fn buffered_input_len(&self) -> usize {
+        self.parser.buffered_input_len()
     }
 
-    pub fn peek_buffered_input(&mut self) -> String {
-        let mut buffered = String::new();
-        let mut drained = Vec::new();
-        while let Some(chunk) = self.parser.pop_front() {
-            buffered.push_str(&chunk);
-            drained.push(chunk);
-        }
-        for chunk in drained {
-            self.parser.push_back(chunk);
-        }
-        buffered
+    pub fn snapshot_buffered_input(&self) -> String {
+        self.parser.snapshot_buffered_input()
     }
 
     pub fn finish(self) -> NativeDom {
@@ -1049,6 +1049,11 @@ mod tests {
         fn create_processing_instruction(&mut self, target: String, data: String) -> NativeNodeId {
             // SAFETY: the test keeps the DomHost alive for this parser pump step.
             unsafe { &mut *self.host }.create_processing_instruction(&target, &data)
+        }
+
+        fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+            // SAFETY: the test keeps the DomHost alive for this parser pump step.
+            unsafe { &mut *self.host }.create_cdata_section(&data)
         }
 
         fn create_document_type(
@@ -1636,8 +1641,6 @@ mod tests {
             outer.result,
             ParserPumpStep::Yield(ParserYield::Script(_))
         ));
-        let original_tail = stream.take_buffered_input();
-
         let inserted = stream.pump_parser_inserted_step("\n    <script>inserted()</script>\n");
         let ParserPumpStep::Yield(ParserYield::Script(handoff)) = inserted.result else {
             panic!("expected inserted parser script handoff");
@@ -1653,10 +1656,9 @@ mod tests {
         assert_eq!((start_line, start_column), (0, 0));
 
         assert!(matches!(
-            stream.pump_parser_inserted_step("").result,
+            stream.pump_parser_step("").result,
             ParserPumpStep::InputDrained
         ));
-        stream.prepend_buffered_input(original_tail);
 
         let original = stream.pump_parser_step("");
         let ParserPumpStep::Yield(ParserYield::Script(handoff)) = original.result else {
@@ -1686,13 +1688,10 @@ mod tests {
             outer.result,
             ParserPumpStep::Yield(ParserYield::Script(_))
         ));
-        let original_tail = stream.take_buffered_input();
-
         assert!(matches!(
             stream.pump_parser_inserted_step("<scr").result,
             ParserPumpStep::InputDrained
         ));
-        stream.prepend_buffered_input(original_tail);
 
         let cross_source = stream.pump_parser_step("");
         let ParserPumpStep::Yield(ParserYield::Script(handoff)) = cross_source.result else {
@@ -1790,13 +1789,10 @@ mod tests {
             outer.result,
             ParserPumpStep::Yield(ParserYield::Script(_))
         ));
-        let original_tail = stream.take_buffered_input();
-
         assert!(matches!(
             stream.pump_parser_inserted_step("").result,
             ParserPumpStep::InputDrained
         ));
-        stream.prepend_buffered_input(original_tail);
 
         let original = stream.pump_parser_step("");
         let ParserPumpStep::Yield(ParserYield::Script(handoff)) = original.result else {

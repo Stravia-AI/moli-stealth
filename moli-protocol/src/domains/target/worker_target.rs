@@ -24,9 +24,11 @@ use moli_shared_worker::SharedWorkerInstanceId;
 use serde_json::json;
 use url::Url;
 
+use crate::devtools_runtime::{
+    DevToolsNetworkResourceType, DevToolsTargetKind, RuntimeExecutionContextsClearedEvent,
+};
 #[cfg(test)]
 use crate::devtools_runtime::{DevToolsTargetInfo, RuntimeExecutionContextEvent};
-use crate::devtools_runtime::{DevToolsTargetKind, RuntimeExecutionContextsClearedEvent};
 use crate::{
     conn::{
         BackgroundProtocolEvent, CdpConnection, PreparedTargetAttach, PreparedTargetHostDelta,
@@ -759,7 +761,7 @@ fn register_dedicated_worker_target(
             "GET",
             None,
             &[],
-            "Script",
+            DevToolsNetworkResourceType::Script,
             SubresourceRequestInitiatorType::Other,
             None,
             false,
@@ -1044,7 +1046,7 @@ fn dedicated_worker_main_script_worker_events(
             response.from_cache,
             response.negotiated_http_version,
             has_extra_info,
-            "Script",
+            DevToolsNetworkResourceType::Script,
         );
     }
     match &script.outcome {
@@ -1057,7 +1059,7 @@ fn dedicated_worker_main_script_worker_events(
                 target_id,
                 timestamp,
                 response.body_bytes().len(),
-                Some("Script"),
+                DevToolsNetworkResourceType::Script,
             );
         }
         crate::conn::DedicatedWorkerMainScriptOutcome::Failed { error_message, .. } => {
@@ -1069,7 +1071,7 @@ fn dedicated_worker_main_script_worker_events(
                 target_id,
                 timestamp,
                 dedicated_worker_loading_error_text(error_message),
-                "Script",
+                DevToolsNetworkResourceType::Script,
             );
         }
     }
@@ -3386,7 +3388,7 @@ fn emit_service_worker_fetch_diagnostic_events(
                     &loader_id,
                     timestamp + 0.000_001,
                     *body_len,
-                    None,
+                    resource_type,
                 );
                 for event in &mut out[body_finished_event_start..] {
                     tag_service_worker_fetch_diagnostic_event(Some(event), diagnostic);
@@ -3484,19 +3486,21 @@ fn service_worker_fetch_diagnostic_result_name(
     }
 }
 
-fn service_worker_fetch_diagnostic_resource_type(destination: &str) -> &'static str {
+fn service_worker_fetch_diagnostic_resource_type(destination: &str) -> DevToolsNetworkResourceType {
     match destination {
-        "document" | "iframe" | "frame" => "Document",
-        "style" => "Stylesheet",
-        "image" => "Image",
-        "font" => "Font",
-        "audio" | "video" => "Media",
-        "script" | "worker" | "sharedworker" | "serviceworker" => "Script",
-        "track" => "TextTrack",
-        "manifest" => "Manifest",
-        "report" => "CSPViolationReport",
-        "" => "Fetch",
-        _ => "Other",
+        "document" | "iframe" | "frame" => DevToolsNetworkResourceType::Document,
+        "style" => DevToolsNetworkResourceType::Stylesheet,
+        "image" => DevToolsNetworkResourceType::Image,
+        "font" => DevToolsNetworkResourceType::Font,
+        "audio" | "video" => DevToolsNetworkResourceType::Media,
+        "script" | "worker" | "sharedworker" | "serviceworker" => {
+            DevToolsNetworkResourceType::Script
+        }
+        "track" => DevToolsNetworkResourceType::TextTrack,
+        "manifest" => DevToolsNetworkResourceType::Manifest,
+        "report" => DevToolsNetworkResourceType::CspViolationReport,
+        "" => DevToolsNetworkResourceType::Fetch,
+        _ => DevToolsNetworkResourceType::Other,
     }
 }
 
@@ -6373,7 +6377,8 @@ mod tests {
             Some(crate::devtools_runtime::AutomationEvent::NetworkBeforeRequestSent(event))
                 if event.request_id.as_str() == "TID-service-worker.sw-fetch.101.4"
                     && event.method.as_deref() == Some("POST")
-                    && event.resource_type.as_deref() == Some("Fetch")
+                    && event.resource_type
+                        == Some(crate::devtools_runtime::DevToolsNetworkResourceType::Fetch)
         ));
         assert!(matches!(
             sidecars[1].as_ref(),
@@ -6385,18 +6390,22 @@ mod tests {
             sidecars[3].as_ref(),
             Some(crate::devtools_runtime::AutomationEvent::NetworkResponseCompleted(event))
                 if event.encoded_data_length == Some(2)
+                    && event.resource_type
+                        == Some(crate::devtools_runtime::DevToolsNetworkResourceType::Fetch)
         ));
         assert!(matches!(
             sidecars[5].as_ref(),
             Some(crate::devtools_runtime::AutomationEvent::NetworkFetchError(event))
                 if event.error_text.as_deref() == Some("ServiceWorkerFallback")
-                    && event.resource_type.as_deref() == Some("Script")
+                    && event.resource_type
+                        == Some(crate::devtools_runtime::DevToolsNetworkResourceType::Script)
         ));
         assert!(matches!(
             sidecars[7].as_ref(),
             Some(crate::devtools_runtime::AutomationEvent::NetworkFetchError(event))
                 if event.error_text.as_deref() == Some("network down")
-                    && event.resource_type.as_deref() == Some("Image")
+                    && event.resource_type
+                        == Some(crate::devtools_runtime::DevToolsNetworkResourceType::Image)
         ));
     }
 

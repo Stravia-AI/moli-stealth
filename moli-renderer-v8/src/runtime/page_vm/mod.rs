@@ -14,6 +14,7 @@ use crate::document_script_scheduler::{
 use crate::dom::native::DomHost;
 use crate::dynamic_script_owner::{DynamicScriptOwnerId, DynamicScriptPageTaskClaim};
 use crate::frame_owner_model::DocumentId;
+use crate::live_document_parser::DocumentParserSession;
 use crate::local_executor::is_on_named_owner_execution_lane_for;
 use crate::module_script_continuation::{
     ModuleScriptCompletionOwner, ModuleScriptContinuation, ModuleScriptContinuationGraphAdvance,
@@ -24,7 +25,6 @@ use crate::page_task_queue::{
     PostParseLifecycleWork, PostParsePageOwnedWork, RendererOwnerWakeSender,
     RendererResourceCompletionSender,
 };
-use crate::parser::DocumentStream;
 use crate::script_vm::{
     MainDocumentLifecycleBody, MainDocumentLifecycleCallbackEffect,
     MainDocumentLifecycleCompletion, MainDocumentLifecycleFollowup,
@@ -1534,6 +1534,7 @@ pub(crate) struct PageVm {
     )>,
     dom_agent_state: RendererDomAgentState,
     pending_dom_mutation_event_batches: Vec<RendererDomMutationEventBatch>,
+    last_published_document_title: String,
     css_agent_sessions: HashMap<Option<String>, RendererCssAgentSessionState>,
     // Page-owned task queue lives on the page VM itself so parse-time turns and later lifecycle
     // turns share one owner-lane carrier. The runtime still uses it in narrow slices today, but
@@ -1781,7 +1782,31 @@ impl PageVm {
         // call is therefore a no-op for that suffix and a safety boundary for
         // ordinary, lifecycle, error, and maintenance turns.
         self.absorb_pending_dom_mutations_into_output_journal();
+        self.record_document_title_change_if_needed();
         self.vm_mut().settle_renderer_output_publication()
+    }
+
+    fn record_document_title_change_if_needed(&mut self) {
+        // A PageVm can exist without a DevTools-facing Page residence in
+        // standalone embeddings and owner-boundary unit tests. Lifecycle
+        // progress must not depend on an observer being installed. Keep the
+        // last-published value untouched so a later binding still publishes
+        // the current title on its first owner settlement.
+        if !self.vm().has_renderer_output_journal() {
+            return;
+        }
+        let title = self.vm().document_runtime.dom_host().dom().document_title();
+        if title == self.last_published_document_title {
+            return;
+        }
+        self.last_published_document_title.clone_from(&title);
+        self.append_renderer_output_records(vec![PendingRendererOutputRecord::observation(
+            None,
+            RendererProtocolObservation::DocumentTitleChanged(RendererDocumentTitleChanged {
+                source_document: self.document_lifecycle.identity(),
+                title,
+            }),
+        )]);
     }
 
     pub(super) fn append_renderer_output_records(&self, records: Vec<PendingRendererOutputRecord>) {
@@ -4603,6 +4628,7 @@ impl PageVm {
             .refresh_top_level_document_url_from_world_locations();
     }
 
+    #[cfg(test)]
     pub(super) fn new(
         page_id: PageId,
         local_executor: JsLocalExecutor,
@@ -4762,6 +4788,7 @@ impl PageVm {
             report_snapshot_cache: None,
             dom_agent_state,
             pending_dom_mutation_event_batches: Vec::new(),
+            last_published_document_title: String::new(),
             css_agent_sessions: HashMap::new(),
             page_task_queue,
             next_module_script_evaluation_reaction_id: 0,
@@ -4904,7 +4931,7 @@ impl PageVm {
         loader: &ResourceRequestClient,
         env: &PageVmEnvConfig,
         runtime_hooks: PageVmRuntimeHooks,
-        stream: &mut DocumentStream,
+        parser_session: &mut DocumentParserSession,
         started: Instant,
         before_document_start: impl FnOnce(&mut Self) -> Result<()>,
     ) -> Result<(Self, bool)> {
@@ -4914,13 +4941,13 @@ impl PageVm {
             loader,
             env,
             runtime_hooks,
-            stream,
+            parser_session,
             started,
         )?;
         page_vm.install_stored_runtime_isolated_worlds_on_named_owner_lane()?;
         page_vm.install_stored_runtime_bindings_on_named_owner_lane()?;
         let null_custom_element_registry_elements =
-            stream.take_parser_stream_null_custom_element_registry_elements();
+            parser_session.take_parser_stream_null_custom_element_registry_elements();
         page_vm
             .vm_mut()
             .apply_parser_created_null_registry_associations_in_default_context(
@@ -5077,11 +5104,11 @@ impl PageVm {
         loader: &ResourceRequestClient,
         env: &PageVmEnvConfig,
         runtime_hooks: PageVmRuntimeHooks,
-        stream: &mut DocumentStream,
+        parser_session: &mut DocumentParserSession,
         started: Instant,
     ) -> Result<PageVm> {
         let mut page_vm =
-            stream.with_parser_stream_dom_host_for_bootstrap(|bootstrap_document| {
+            parser_session.with_parser_stream_dom_host_for_bootstrap(|bootstrap_document| {
                 PageVm::new_with_bootstrap_document_recovery(
                     page_id,
                     local_executor,
@@ -5165,9 +5192,13 @@ impl PageVm {
             .backend_node_key_for_id(backend_node_id)?;
         let handle = key.handle;
         let current_document_id = self.vm().document_id_for_live_node_handle(handle);
-        let still_current = current_document_id == Some(key.document_id)
-            && self.vm().document_runtime.dom_host().node(handle).is_some();
-        if still_current {
+        let node_exists = self.vm().document_runtime.dom_host().node(handle).is_some();
+        let still_current = current_document_id == Some(key.document_id) && node_exists;
+        let retained_detached = node_exists
+            && self
+                .dom_agent_state
+                .backend_node_resolves_while_detached(backend_node_id);
+        if still_current || retained_detached {
             return Some(key);
         }
 
@@ -5490,6 +5521,11 @@ impl PageVm {
         activation.node_id = Some(handle);
         activation.backend_node_id =
             self.renderer_backend_node_id_for_node_key(document_id, handle);
+        assert!(
+            self.dom_agent_state
+                .retain_detached_backend_node_resolution(activation.backend_node_id),
+            "file chooser backend node id must exist before it is exposed"
+        );
         true
     }
 

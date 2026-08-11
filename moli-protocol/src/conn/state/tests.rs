@@ -1,3 +1,4 @@
+use crate::devtools_runtime::DevToolsNetworkResourceType;
 use moli_cookie_jar::new_shared_browser_cookie_store;
 use moli_core::page::{SameDocumentHistoryUpdate, SubresourceResourceType};
 
@@ -163,11 +164,17 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
         "subresource snapshot preserves the event session id"
     );
     assert_eq!(
-        snapshot.matching_request_stage("Fetch", &Url::parse("https://example.test/api").unwrap()),
+        snapshot.matching_request_stage(
+            DevToolsNetworkResourceType::Fetch,
+            &Url::parse("https://example.test/api").unwrap(),
+        ),
         Some(FetchRequestStage::Response)
     );
     assert_eq!(
-        snapshot.matching_request_stage("WebSocket", &Url::parse("wss://example.test/ws").unwrap()),
+        snapshot.matching_request_stage(
+            DevToolsNetworkResourceType::WebSocket,
+            &Url::parse("wss://example.test/ws").unwrap(),
+        ),
         Some(FetchRequestStage::Request)
     );
     assert_eq!(
@@ -229,7 +236,10 @@ fn target_fetch_owner_projects_config_without_exposing_slots() {
     assert_eq!(
         owner
             .subresource_interception_snapshot()
-            .matching_request_stage("Document", &Url::parse("https://example.test/doc").unwrap()),
+            .matching_request_stage(
+                DevToolsNetworkResourceType::Document,
+                &Url::parse("https://example.test/doc").unwrap(),
+            ),
         None
     );
 }
@@ -402,7 +412,11 @@ fn target_fetch_owner_appends_network_intercept_after_fetch_request_stage_sessio
     let pause_sessions = owner
         .config_snapshot()
         .subresource_interception_snapshot()
-        .matching_request_stage_pause_sessions(Some("SID-z"), "Fetch", &api_url)
+        .matching_request_stage_pause_sessions(
+            Some("SID-z"),
+            DevToolsNetworkResourceType::Fetch,
+            &api_url,
+        )
         .into_iter()
         .map(|session| (session.session_id, session.owner_kind))
         .collect::<Vec<_>>();
@@ -463,7 +477,11 @@ fn target_fetch_owner_appends_network_intercept_after_fetch_response_stage_sessi
     let pause_sessions = owner
         .config_snapshot()
         .subresource_interception_snapshot()
-        .matching_response_stage_pause_sessions(Some("SID-z"), "Fetch", &api_url)
+        .matching_response_stage_pause_sessions(
+            Some("SID-z"),
+            DevToolsNetworkResourceType::Fetch,
+            &api_url,
+        )
         .into_iter()
         .map(|session| (session.session_id, session.owner_kind))
         .collect::<Vec<_>>();
@@ -572,7 +590,11 @@ fn target_fetch_owner_network_request_stage_survives_earlier_fetch_response_patt
     let pause_sessions = owner
         .config_snapshot()
         .subresource_interception_snapshot()
-        .matching_request_stage_pause_sessions(Some("SID-fetch"), "Fetch", &api_url);
+        .matching_request_stage_pause_sessions(
+            Some("SID-fetch"),
+            DevToolsNetworkResourceType::Fetch,
+            &api_url,
+        );
 
     assert_eq!(pause_sessions.len(), 1);
     assert_eq!(pause_sessions[0].session_id.as_deref(), Some("BIDI-SID"));
@@ -601,7 +623,7 @@ fn target_fetch_owner_keeps_dormant_network_intercept_removable() {
             .config_snapshot()
             .matching_network_intercepts(
                 FetchRequestStage::Request,
-                "Fetch",
+                DevToolsNetworkResourceType::Fetch,
                 &Url::parse("https://example.test/api").unwrap(),
             )
             .is_empty()
@@ -649,8 +671,11 @@ fn target_fetch_owner_reports_matching_network_intercept_ids_by_stage() {
 
     let api_url = Url::parse("https://example.test/api").unwrap();
     let config = owner.config_snapshot();
-    let request_intercepts =
-        config.matching_network_intercepts(FetchRequestStage::Request, "Fetch", &api_url);
+    let request_intercepts = config.matching_network_intercepts(
+        FetchRequestStage::Request,
+        DevToolsNetworkResourceType::Fetch,
+        &api_url,
+    );
     assert_eq!(
         request_intercepts
             .iter()
@@ -660,7 +685,11 @@ fn target_fetch_owner_reports_matching_network_intercept_ids_by_stage() {
     );
     assert_eq!(
         config
-            .matching_network_intercepts(FetchRequestStage::Response, "Fetch", &api_url)
+            .matching_network_intercepts(
+                FetchRequestStage::Response,
+                DevToolsNetworkResourceType::Fetch,
+                &api_url,
+            )
             .iter()
             .map(|intercept| intercept.as_str())
             .collect::<Vec<_>>(),
@@ -668,7 +697,11 @@ fn target_fetch_owner_reports_matching_network_intercept_ids_by_stage() {
     );
     assert_eq!(
         config
-            .matching_network_intercepts(FetchRequestStage::Response, "XHR", &api_url)
+            .matching_network_intercepts(
+                FetchRequestStage::Response,
+                DevToolsNetworkResourceType::Xhr,
+                &api_url,
+            )
             .iter()
             .map(|intercept| intercept.as_str())
             .collect::<Vec<_>>(),
@@ -676,7 +709,11 @@ fn target_fetch_owner_reports_matching_network_intercept_ids_by_stage() {
     );
     assert_eq!(
         config
-            .matching_network_intercepts(FetchRequestStage::Request, "XHR", &api_url)
+            .matching_network_intercepts(
+                FetchRequestStage::Request,
+                DevToolsNetworkResourceType::Xhr,
+                &api_url,
+            )
             .iter()
             .map(|intercept| intercept.as_str())
             .collect::<Vec<_>>(),
@@ -688,7 +725,11 @@ fn target_fetch_owner_reports_matching_network_intercept_ids_by_stage() {
         owner
             .config_snapshot()
             .subresource_interception_snapshot()
-            .matching_network_intercepts(FetchRequestStage::Request, "Fetch", &api_url)
+            .matching_network_intercepts(
+                FetchRequestStage::Request,
+                DevToolsNetworkResourceType::Fetch,
+                &api_url,
+            )
             .iter()
             .map(|intercept| intercept.as_str())
             .collect::<Vec<_>>(),
@@ -720,7 +761,10 @@ fn target_fetch_owner_reports_matching_auth_required_network_intercepts() {
     assert_eq!(owner.subresource_interception_config(), (true, None));
     assert!(config.matches_auth_required(&matching_url));
     assert!(config.matches_auth_required(&other_url));
-    assert_eq!(config.matching_request_stage("Fetch", &matching_url), None);
+    assert_eq!(
+        config.matching_request_stage(DevToolsNetworkResourceType::Fetch, &matching_url),
+        None
+    );
     assert_eq!(
         config
             .matching_auth_required_network_intercepts(&matching_url)

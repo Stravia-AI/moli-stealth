@@ -108,12 +108,11 @@ mod tests {
         NativeDom,
         Vec<crate::DocumentOwnedBlockingStylesheetDiscoveryInput>,
     ) {
-        let (document, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
+        let (document, _, inputs) = crate::parse_html_test_fixture_with_parser_outputs(
             Url::parse("https://example.com/").unwrap(),
             html.to_owned(),
         );
-        let (_, inputs) = handoffs.into_parts();
-        (document.into_dom(), inputs)
+        (document, inputs)
     }
 
     fn prepared_script(position: usize, node_index: usize, mode: ScriptMode) -> PreparedScript {

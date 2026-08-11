@@ -37,6 +37,32 @@ impl CdpConnection {
                 self.scheduler_state
                     .renderer_output_ingress
                     .close(stream, last_published_sequence);
+                if let Some(renderer_page) =
+                    super::RendererPageResidenceIdentity::from_residence(stream.residence())
+                {
+                    self.finish_renderer_page_output_retirement(renderer_page);
+                }
+            }
+        }
+    }
+
+    fn finish_renderer_page_output_retirement(
+        &mut self,
+        renderer_page: super::RendererPageResidenceIdentity,
+    ) {
+        for browser_context in self
+            .browser_context
+            .iter_mut()
+            .chain(self.inactive_browser_contexts.iter_mut())
+        {
+            browser_context
+                .active_target
+                .runtime_slot
+                .finish_renderer_page_output_retirement(renderer_page);
+            for target in &mut browser_context.background_targets {
+                target
+                    .runtime_slot
+                    .finish_renderer_page_output_retirement(renderer_page);
             }
         }
     }

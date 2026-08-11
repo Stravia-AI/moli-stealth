@@ -58,7 +58,11 @@ use crate::{
         },
     },
     frame_owner_model::FrameDocumentTaskOwner,
-    live_document_parser::{DocumentParserLifetime, DocumentParserSession},
+    live_document_parser::{
+        DocumentParserLifetime, DocumentParserRunState, DocumentParserSession,
+        DocumentParserSessionControlHandle, ParserResumeApplication, ParserResumePermit,
+        ParserSuspensionCause,
+    },
     module_runtime::ModuleMapKey,
     network::ResourceRequestClient,
     parser::{HtmlParser, ParserInputContext, ParserInputSession},
@@ -163,17 +167,8 @@ pub(crate) enum PostParseOwnerDriverStep {
 
 #[derive(Debug)]
 struct ParserConnectedScriptContext {
-    visibility_boundary: Option<ParserVisibilityBoundary>,
     insertion_controller: ParserInsertionController,
     _input_context: ParserInputContext,
-}
-
-#[derive(Debug)]
-struct ParserVisibilityBoundary {
-    document: DomHandle,
-    current_script: DomHandle,
-    current_script_ancestor_chain: Vec<DomHandle>,
-    query_version: u64,
 }
 
 #[derive(Debug)]
@@ -193,23 +188,38 @@ pub(crate) struct CurrentScriptContextSpec {
 pub(crate) struct ParserInsertionController {
     input_session: ParserInputSession,
     parser_stream: ParserStreamHandle,
+    parser_control: DocumentParserSessionControlHandle,
 }
 
 impl std::fmt::Debug for ParserInsertionController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ParserInsertionController")
             .field("input_session", &self.input_session)
+            .field("session_id", &self.parser_control.session_id())
+            .field("run_state", &self.parser_control.run_state())
             .finish()
     }
 }
 
 impl ParserInsertionController {
+    #[cfg(test)]
     pub(crate) fn for_stream(stream: ParserStreamHandle) -> Self {
         let input_session = stream.borrow().script_input_session();
         Self {
             input_session,
             parser_stream: stream,
+            parser_control: DocumentParserSessionControlHandle::new(),
         }
+    }
+
+    pub(crate) fn for_session(parser: &DocumentParserSession) -> Option<Self> {
+        let parser_stream = parser.html_stream_handle()?;
+        let input_session = parser_stream.borrow().script_input_session();
+        Some(Self {
+            input_session,
+            parser_stream,
+            parser_control: parser.control_handle(),
+        })
     }
 
     pub(crate) fn input_session(&self) -> ParserInputSession {
@@ -218,6 +228,22 @@ impl ParserInsertionController {
 
     pub(crate) fn parser_stream(&self) -> ParserStreamHandle {
         self.parser_stream.clone()
+    }
+
+    pub(crate) fn run_state(&self) -> DocumentParserRunState {
+        self.parser_control.run_state()
+    }
+
+    pub(crate) fn suspend(&self, cause: ParserSuspensionCause) -> ParserResumePermit {
+        self.parser_control.suspend(cause)
+    }
+
+    pub(crate) fn resume(&self, permit: ParserResumePermit) -> ParserResumeApplication {
+        self.parser_control.resume(permit)
+    }
+
+    pub(crate) fn begin_pump(&self) -> crate::live_document_parser::DocumentParserPumpGuard {
+        self.parser_control.begin_pump()
     }
 }
 
@@ -394,7 +420,8 @@ struct DocumentWriteExternalScriptStart {
 struct SuspendedDocumentWriteInsertion {
     document_handle: DomHandle,
     parser_insertion_controller: ParserInsertionController,
-    pending_html_tail: String,
+    resume_permit: ParserResumePermit,
+    resume_permit_consumed: bool,
 }
 
 #[derive(Debug)]
@@ -691,6 +718,10 @@ pub(super) struct DocumentRuntime {
     next_document_write_external_script_load_id: u64,
     document_write_script_preload_scanner:
         Option<Box<crate::runtime::IncrementalBufferedScriptPreloadScanner>>,
+    /// In-flight classic script loads started by the main-document scanner.
+    /// The Document shares this resource residence with parser re-entry while
+    /// scanner/tokenizer state remains owned by phase one.
+    main_document_script_preloads: crate::runtime::DocumentScriptPreloadStore,
     document_write_script_preloads:
         HashMap<crate::runtime::BufferedScriptPreloadKey, DocumentWriteScriptPreload>,
     pending_document_write_external_script_load: Option<PendingDocumentWriteExternalScriptLoad>,
@@ -1226,10 +1257,9 @@ mod tests {
         crate::dom::native::NativeDom,
         Vec<crate::DocumentOwnedBlockingStylesheetDiscoveryInput>,
     ) {
-        let (document, handoffs) =
-            HtmlParser.parse_dom_host_with_document_handoffs(final_url, html.into());
-        let (_, inputs) = handoffs.into_parts();
-        (document.into_dom(), inputs)
+        let (document, _, inputs) =
+            crate::parse_html_test_fixture_with_parser_outputs(final_url, html.into());
+        (document, inputs)
     }
 
     fn preload_load_parameters(url: Url) -> ConnectedLoadParameters {

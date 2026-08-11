@@ -58,6 +58,7 @@ async fn dom_agent_lifecycle_matches_chromium_errors_and_binding_reset() {
         "<!doctype html><html><body><main id='target'></main></body></html>",
     )
     .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({ "id": 11, "method": "DOM.disable" }))
         .await;
@@ -126,6 +127,7 @@ async fn dom_enable_include_whitespace_controls_inspector_tree_projection() {
         "<!doctype html><html><body>\n  <div id='first'></div>\n  <div id='second'></div>\n</body></html>",
     )
     .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 2,
@@ -211,26 +213,22 @@ async fn dom_enable_include_whitespace_controls_inspector_tree_projection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dom_document_reads_target_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><html><body><section id='owned'>background</section></body></html>",
-        )
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-A".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><html><body><section id='owned'>background</section></body></html>",
+        Some("SID-background"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 321,
@@ -294,14 +292,6 @@ async fn dom_document_reads_target_loaded_background_owner_without_promotion() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dom_document_reads_target_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><html><body><section id='owned'>inactive</section></body></html>",
-        )
-        .await
-        .expect("inactive page should load");
-
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active".to_owned());
@@ -309,10 +299,14 @@ async fn dom_document_reads_target_inactive_loaded_owner_without_activation() {
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
+    inactive.set_target_url("about:blank".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.replace_loaded_page(Some(page));
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><html><body><section id='owned'>inactive</section></body></html>",
+        Some("SID-inactive"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 331,

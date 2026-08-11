@@ -200,6 +200,7 @@ pub(in crate::native_bridge) fn build_live_collection_for_node<'s>(
             query,
             include_root,
             tag_name_html_document,
+            resolution_cache: Default::default(),
         },
     )
 }

@@ -59,6 +59,17 @@ impl ParserMutationEffectSink {
 }
 
 pub trait ParserDomReadConsumer {
+    /// Returns a read-only snapshot of the parser's current executable
+    /// Document when the embedding runtime can provide one.
+    ///
+    /// Most parser turns only need narrow node reads. The snapshot is reserved
+    /// for end-of-document algorithms, such as Chromium-compatible unstyled
+    /// XML presentation, which must inspect the complete tree before applying
+    /// mutations back through the live parser mutation sink.
+    fn snapshot_parser_document(&mut self) -> Option<NativeDom> {
+        None
+    }
+
     fn node_exists(&mut self, node_id: NativeNodeId) -> bool;
 
     fn is_connected(&mut self, node_id: NativeNodeId) -> bool;
@@ -140,6 +151,7 @@ pub trait ParserDomReadConsumer {
 #[derive(Clone, Copy)]
 struct ParserDomReadSink {
     data: NonNull<()>,
+    snapshot_parser_document: unsafe fn(NonNull<()>) -> Option<NativeDom>,
     node_exists: unsafe fn(NonNull<()>, NativeNodeId) -> bool,
     is_connected: unsafe fn(NonNull<()>, NativeNodeId) -> bool,
     is_text_node: unsafe fn(NonNull<()>, NativeNodeId) -> bool,
@@ -163,6 +175,14 @@ struct ParserDomReadSink {
 
 impl ParserDomReadSink {
     unsafe fn from_consumer_unchecked<T: ParserDomReadConsumer>(consumer: &mut T) -> Self {
+        unsafe fn snapshot_parser_document_impl<T: ParserDomReadConsumer>(
+            data: NonNull<()>,
+        ) -> Option<NativeDom> {
+            // SAFETY: ParserDomReadSink::from_consumer_unchecked requires the pointed-to
+            // consumer to remain live and exclusive for the pump step.
+            unsafe { data.cast::<T>().as_mut() }.snapshot_parser_document()
+        }
+
         unsafe fn node_exists_impl<T: ParserDomReadConsumer>(
             data: NonNull<()>,
             node_id: NativeNodeId,
@@ -315,6 +335,7 @@ impl ParserDomReadSink {
 
         Self {
             data: NonNull::from(consumer).cast(),
+            snapshot_parser_document: snapshot_parser_document_impl::<T>,
             node_exists: node_exists_impl::<T>,
             is_connected: is_connected_impl::<T>,
             is_text_node: is_text_node_impl::<T>,
@@ -335,6 +356,12 @@ impl ParserDomReadSink {
             stylesheet_element: stylesheet_element_impl::<T>,
             text_content: text_content_impl::<T>,
         }
+    }
+
+    fn snapshot_parser_document(self) -> Option<NativeDom> {
+        // SAFETY: construction ties the raw pointer and callback to the same
+        // consumer remains live for the current parser operation.
+        unsafe { (self.snapshot_parser_document)(self.data) }
     }
 
     fn node_exists(self, node_id: NativeNodeId) -> bool {
@@ -520,6 +547,8 @@ pub trait ParserDomMutationConsumer {
 
     fn create_processing_instruction(&mut self, target: String, data: String) -> NativeNodeId;
 
+    fn create_cdata_section(&mut self, data: String) -> NativeNodeId;
+
     fn create_document_type(
         &mut self,
         name: String,
@@ -555,12 +584,13 @@ pub trait ParserDomMutationConsumer {
 struct ParserDomMutationSink {
     data: NonNull<()>,
     apply: unsafe fn(NonNull<()>, ParserDomMutation),
-    create_parser_element_without_attributes:
-        unsafe fn(NonNull<()>, String, String, Option<String>) -> NativeNodeId,
+    create_parser_element_for_document_without_attributes:
+        unsafe fn(NonNull<()>, NativeNodeId, String, String, Option<String>) -> NativeNodeId,
     add_attrs_if_missing_for_parser: unsafe fn(NonNull<()>, NativeNodeId, Vec<NativeAttribute>),
     create_text_node: unsafe fn(NonNull<()>, String) -> NativeNodeId,
     create_comment: unsafe fn(NonNull<()>, String) -> NativeNodeId,
     create_processing_instruction: unsafe fn(NonNull<()>, String, String) -> NativeNodeId,
+    create_cdata_section: unsafe fn(NonNull<()>, String) -> NativeNodeId,
     create_document_type: unsafe fn(NonNull<()>, String, String, String) -> NativeNodeId,
     prepend_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String),
     append_text_to_text_node: unsafe fn(NonNull<()>, NativeNodeId, String),
@@ -584,8 +614,11 @@ impl ParserDomMutationSink {
             // pointed-to consumer to remain live and exclusive for the pump step.
             unsafe { data.cast::<T>().as_mut() }.apply_parser_dom_mutation(mutation);
         }
-        unsafe fn create_parser_element_without_attributes_impl<T: ParserDomMutationConsumer>(
+        unsafe fn create_parser_element_for_document_without_attributes_impl<
+            T: ParserDomMutationConsumer,
+        >(
             data: NonNull<()>,
+            document_handle: NativeNodeId,
             local_name: String,
             namespace: String,
             prefix: Option<String>,
@@ -593,7 +626,12 @@ impl ParserDomMutationSink {
             // SAFETY: ParserDomMutationSink::from_consumer_unchecked requires the
             // pointed-to consumer to remain live and exclusive for the pump step.
             unsafe { data.cast::<T>().as_mut() }
-                .create_parser_element_without_attributes(local_name, namespace, prefix)
+                .create_parser_element_for_document_without_attributes(
+                    document_handle,
+                    local_name,
+                    namespace,
+                    prefix,
+                )
         }
         unsafe fn add_attrs_if_missing_for_parser_impl<T: ParserDomMutationConsumer>(
             data: NonNull<()>,
@@ -628,6 +666,14 @@ impl ParserDomMutationSink {
             // SAFETY: ParserDomMutationSink::from_consumer_unchecked requires the
             // pointed-to consumer to remain live and exclusive for the pump step.
             unsafe { data.cast::<T>().as_mut() }.create_processing_instruction(target, data_text)
+        }
+        unsafe fn create_cdata_section_impl<T: ParserDomMutationConsumer>(
+            data: NonNull<()>,
+            cdata: String,
+        ) -> NativeNodeId {
+            // SAFETY: ParserDomMutationSink::from_consumer_unchecked requires the
+            // pointed-to consumer to remain live and exclusive for the pump step.
+            unsafe { data.cast::<T>().as_mut() }.create_cdata_section(cdata)
         }
         unsafe fn create_document_type_impl<T: ParserDomMutationConsumer>(
             data: NonNull<()>,
@@ -724,13 +770,13 @@ impl ParserDomMutationSink {
         Self {
             data: NonNull::from(consumer).cast(),
             apply: apply_impl::<T>,
-            create_parser_element_without_attributes: create_parser_element_without_attributes_impl::<
-                T,
-            >,
+            create_parser_element_for_document_without_attributes:
+                create_parser_element_for_document_without_attributes_impl::<T>,
             add_attrs_if_missing_for_parser: add_attrs_if_missing_for_parser_impl::<T>,
             create_text_node: create_text_node_impl::<T>,
             create_comment: create_comment_impl::<T>,
             create_processing_instruction: create_processing_instruction_impl::<T>,
+            create_cdata_section: create_cdata_section_impl::<T>,
             create_document_type: create_document_type_impl::<T>,
             prepend_text_to_text_node: prepend_text_to_text_node_impl::<T>,
             append_text_to_text_node: append_text_to_text_node_impl::<T>,
@@ -750,8 +796,9 @@ impl ParserDomMutationSink {
         unsafe { (self.apply)(self.data, mutation) };
     }
 
-    fn create_parser_element_without_attributes(
+    fn create_parser_element_for_document_without_attributes(
         self,
+        document_handle: NativeNodeId,
         local_name: String,
         namespace: String,
         prefix: Option<String>,
@@ -759,8 +806,12 @@ impl ParserDomMutationSink {
         // SAFETY: construction ties the raw pointer and callback to the same
         // consumer remains live for the current runtime-DOM sink step.
         unsafe {
-            (self.create_parser_element_without_attributes)(
-                self.data, local_name, namespace, prefix,
+            (self.create_parser_element_for_document_without_attributes)(
+                self.data,
+                document_handle,
+                local_name,
+                namespace,
+                prefix,
             )
         }
     }
@@ -787,6 +838,12 @@ impl ParserDomMutationSink {
         // SAFETY: construction ties the raw pointer and callback to the same
         // consumer remains live for the current runtime-DOM sink step.
         unsafe { (self.create_processing_instruction)(self.data, target, data) }
+    }
+
+    fn create_cdata_section(self, data: String) -> NativeNodeId {
+        // SAFETY: construction ties the raw pointer and callback to the same
+        // consumer remains live for the current runtime-DOM sink step.
+        unsafe { (self.create_cdata_section)(self.data, data) }
     }
 
     fn create_document_type(
@@ -1322,6 +1379,12 @@ impl ParserDomMutationConsumer for TestMutationEffectCollector<'_> {
         unsafe { &mut *self.host }.create_processing_instruction(&target, &data)
     }
 
+    fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+        // SAFETY: tests keep the borrowed DomHost pointer alive and route the
+        // parser pump through this collector for the duration of the step.
+        unsafe { &mut *self.host }.create_cdata_section(&data)
+    }
+
     fn create_document_type(
         &mut self,
         name: String,
@@ -1656,6 +1719,12 @@ impl ParserDomMutationConsumer for TestReadTrackingCollector<'_> {
         unsafe { &mut *self.host }.create_processing_instruction(&target, &data)
     }
 
+    fn create_cdata_section(&mut self, data: String) -> NativeNodeId {
+        // SAFETY: tests keep the borrowed DomHost pointer alive and route the
+        // parser pump through this collector for the duration of the step.
+        unsafe { &mut *self.host }.create_cdata_section(&data)
+    }
+
     fn create_document_type(
         &mut self,
         name: String,
@@ -1847,7 +1916,44 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
+    pub(super) fn new_xml(final_url: Url) -> Self {
+        let dom_host = DomHost::from_dom(NativeDom::new_xml(final_url.clone()));
+        let document_handle = dom_host.document_handle();
+        Self {
+            owned_dom_host: Some(dom_host),
+            parser_document_handle: Some(document_handle),
+            parser_document_url: Some(final_url),
+            runtime_dom_sinks: None,
+            next_insertion_is_template_contents: false,
+            open_template_element_depth: 0,
+            pending_open_parser_element: None,
+            open_parser_elements: Vec::new(),
+            allow_declarative_shadow_roots: false,
+            pending_null_custom_element_registry_elements: Vec::new(),
+            state: HtmlTreeSinkState::default(),
+        }
+    }
+
     pub(super) fn new_live_document_root(final_url: Url, document_handle: NativeNodeId) -> Self {
+        Self::new_live_document_root_with_declarative_shadow_roots(final_url, document_handle, true)
+    }
+
+    pub(super) fn new_live_xml_document_root(
+        final_url: Url,
+        document_handle: NativeNodeId,
+    ) -> Self {
+        Self::new_live_document_root_with_declarative_shadow_roots(
+            final_url,
+            document_handle,
+            false,
+        )
+    }
+
+    fn new_live_document_root_with_declarative_shadow_roots(
+        final_url: Url,
+        document_handle: NativeNodeId,
+        allow_declarative_shadow_roots: bool,
+    ) -> Self {
         Self {
             owned_dom_host: None,
             parser_document_handle: Some(document_handle),
@@ -1857,7 +1963,7 @@ impl ParserStreamHtmlTreeSinkTarget {
             open_template_element_depth: 0,
             pending_open_parser_element: None,
             open_parser_elements: Vec::new(),
-            allow_declarative_shadow_roots: true,
+            allow_declarative_shadow_roots,
             pending_null_custom_element_registry_elements: Vec::new(),
             state: HtmlTreeSinkState::default(),
         }
@@ -1909,6 +2015,14 @@ impl ParserStreamHtmlTreeSinkTarget {
             owner.dom_read_sink().node_exists(node_id)
         } else {
             self.dom_host().node(node_id).is_some()
+        }
+    }
+
+    pub(super) fn snapshot_current_parser_document(&self) -> Option<NativeDom> {
+        if let Some(owner) = &self.runtime_dom_sinks {
+            owner.dom_read_sink().snapshot_parser_document()
+        } else {
+            Some(self.dom_host().snapshot_document())
         }
     }
 
@@ -2045,7 +2159,7 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn parser_document_node_id(&self) -> NativeNodeId {
+    pub(super) fn parser_document_node_id(&self) -> NativeNodeId {
         self.parser_document_handle
             .expect("parser stream should record its parser document/root handle")
     }
@@ -2168,6 +2282,16 @@ impl ParserStreamHtmlTreeSinkTarget {
     ) -> ParserMutationEffectDelivery {
         let effects = self.apply_parser_dom_mutation(mutation);
         self.mutation_effect_delivery(effects)
+    }
+
+    pub(super) fn append_existing_node(&mut self, parent: NativeNodeId, child: NativeNodeId) {
+        self.record_parser_dom_mutation(ParserDomMutation::AppendChild { parent, child })
+            .consume();
+    }
+
+    pub(super) fn remove_existing_node(&mut self, parent: NativeNodeId, child: NativeNodeId) {
+        self.record_parser_dom_mutation(ParserDomMutation::RemoveChild { parent, child })
+            .consume();
     }
 
     fn note_parser_element_appended(&mut self, handle: &ParseHandle) {
@@ -2344,23 +2468,34 @@ impl ParserStreamHtmlTreeSinkTarget {
         svg_script.then_some(node_id)
     }
 
-    fn create_parser_element_without_attributes(
+    pub(super) fn create_parser_element_without_attributes(
         &mut self,
         local_name: String,
         namespace: String,
         prefix: Option<String>,
     ) -> NativeNodeId {
+        let document_handle = self.parser_document_node_id();
         if let Some(owner) = &self.runtime_dom_sinks {
             owner
                 .dom_mutation_sink()
-                .create_parser_element_without_attributes(local_name, namespace, prefix)
+                .create_parser_element_for_document_without_attributes(
+                    document_handle,
+                    local_name,
+                    namespace,
+                    prefix,
+                )
         } else {
             self.dom_host_mut()
-                .create_parser_element_without_attributes(local_name, namespace, prefix)
+                .create_parser_element_without_attributes_for_document(
+                    document_handle,
+                    local_name,
+                    namespace,
+                    prefix,
+                )
         }
     }
 
-    fn add_attrs_if_missing_for_parser(
+    pub(super) fn add_attrs_if_missing_for_parser(
         &mut self,
         node_id: NativeNodeId,
         attrs: Vec<NativeAttribute>,
@@ -2375,7 +2510,7 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn create_text_node(&mut self, text: String) -> NativeNodeId {
+    pub(super) fn create_text_node(&mut self, text: String) -> NativeNodeId {
         if let Some(owner) = &self.runtime_dom_sinks {
             owner.dom_mutation_sink().create_text_node(text)
         } else {
@@ -2383,7 +2518,7 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn create_comment_node(&mut self, text: String) -> NativeNodeId {
+    pub(super) fn create_comment_node(&mut self, text: String) -> NativeNodeId {
         if let Some(owner) = &self.runtime_dom_sinks {
             owner.dom_mutation_sink().create_comment(text)
         } else {
@@ -2391,7 +2526,11 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn create_processing_instruction_node(&mut self, target: String, data: String) -> NativeNodeId {
+    pub(super) fn create_processing_instruction_node(
+        &mut self,
+        target: String,
+        data: String,
+    ) -> NativeNodeId {
         if let Some(owner) = &self.runtime_dom_sinks {
             owner
                 .dom_mutation_sink()
@@ -2402,7 +2541,17 @@ impl ParserStreamHtmlTreeSinkTarget {
         }
     }
 
-    fn create_document_type_node(
+    pub(super) fn create_cdata_section_node(&mut self, data: String) -> NativeNodeId {
+        let document_handle = self.parser_document_node_id();
+        if let Some(owner) = &self.runtime_dom_sinks {
+            owner.dom_mutation_sink().create_cdata_section(data)
+        } else {
+            self.dom_host_mut()
+                .create_cdata_section_for_document(document_handle, &data)
+        }
+    }
+
+    pub(super) fn create_document_type_node(
         &mut self,
         name: String,
         public_id: String,
@@ -2890,6 +3039,10 @@ impl ParserStreamHtmlTreeSinkTarget {
         data: String,
     ) -> ParseHandle {
         ParseHandle::new(self.create_processing_instruction_node(target, data), None)
+    }
+
+    pub(super) fn create_cdata_section(&mut self, data: String) -> ParseHandle {
+        ParseHandle::new(self.create_cdata_section_node(data), None)
     }
 
     pub(super) fn append(

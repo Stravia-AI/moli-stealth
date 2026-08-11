@@ -8,7 +8,7 @@ use super::{
     CapturedBody, CapturedBodyWriter, CdpConnection, DocumentNavigationToken,
     NavigationDispatchState, NavigationLoadOutcome, PausedResponsePreparedDocument,
 };
-use crate::devtools_runtime::DevToolsNetworkInterceptId;
+use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use crate::domains::network::MainDocumentBodyProgressSource;
 use moli_cookie_jar::StoredCookieQueryReport;
 use moli_core::page::{
@@ -45,16 +45,16 @@ pub struct FetchInterceptionPattern {
 }
 
 impl FetchInterceptionPattern {
-    pub fn matches_request(&self, resource_type: &str, url: &Url) -> bool {
+    pub fn matches_request(&self, resource_type: DevToolsNetworkResourceType, url: &Url) -> bool {
         self.resource_type_filter
-            .is_none_or(|filter| filter.matches_cdp_type(resource_type))
+            .is_none_or(|filter| filter.matches_resource_type(resource_type))
             && url_pattern_matches(&self.url_pattern, url.as_str())
     }
 }
 
 pub fn matching_fetch_pattern<'a>(
     patterns: &'a [FetchInterceptionPattern],
-    resource_type: &str,
+    resource_type: DevToolsNetworkResourceType,
     url: &Url,
 ) -> Option<&'a FetchInterceptionPattern> {
     patterns
@@ -90,12 +90,28 @@ impl FetchResourceTypeFilter {
         self.into()
     }
 
-    pub fn matches_cdp_type(self, resource_type: &str) -> bool {
+    pub fn matches_resource_type(self, resource_type: DevToolsNetworkResourceType) -> bool {
         match self {
             Self::Fetch | Self::EventSource | Self::Xhr => {
-                matches!(resource_type, "Fetch" | "EventSource" | "XHR")
+                matches!(
+                    resource_type,
+                    DevToolsNetworkResourceType::Fetch
+                        | DevToolsNetworkResourceType::EventSource
+                        | DevToolsNetworkResourceType::Xhr
+                )
             }
-            _ => self.label() == resource_type,
+            Self::Document => resource_type == DevToolsNetworkResourceType::Document,
+            Self::Script => resource_type == DevToolsNetworkResourceType::Script,
+            Self::Stylesheet => resource_type == DevToolsNetworkResourceType::Stylesheet,
+            Self::Image => resource_type == DevToolsNetworkResourceType::Image,
+            Self::Media => resource_type == DevToolsNetworkResourceType::Media,
+            Self::TextTrack => resource_type == DevToolsNetworkResourceType::TextTrack,
+            Self::Ping => resource_type == DevToolsNetworkResourceType::Ping,
+            Self::CspViolationReport => {
+                resource_type == DevToolsNetworkResourceType::CspViolationReport
+            }
+            Self::WebSocket => resource_type == DevToolsNetworkResourceType::WebSocket,
+            Self::Other => resource_type == DevToolsNetworkResourceType::Other,
         }
     }
 
@@ -144,6 +160,7 @@ mod tests {
         FetchInterceptionPattern, FetchRequestStage, FetchResourceTypeFilter,
         fetch_subresource_interception_config_for_patterns, matching_fetch_pattern,
     };
+    use crate::devtools_runtime::DevToolsNetworkResourceType;
     use moli_core::page::SubresourceResourceType;
     use url::Url;
 
@@ -186,7 +203,12 @@ mod tests {
                 .expect("CDP Fetch resourceType token should parse");
             assert_eq!(parsed, expected);
             assert_eq!(parsed.label(), raw);
-            assert!(parsed.matches_cdp_type(raw));
+            assert!(
+                parsed.matches_resource_type(
+                    DevToolsNetworkResourceType::from_cdp_type(raw)
+                        .expect("supported Fetch filter should be a CDP network resource type"),
+                )
+            );
         }
         assert!(FetchResourceTypeFilter::parse("xhr").is_none());
     }
@@ -207,11 +229,17 @@ mod tests {
         ];
         let url = Url::parse("https://example.test/api").unwrap();
 
-        let matched = matching_fetch_pattern(&patterns, "Fetch", &url).unwrap();
+        let matched =
+            matching_fetch_pattern(&patterns, DevToolsNetworkResourceType::Fetch, &url).unwrap();
         assert_eq!(matched.request_stage, FetchRequestStage::Response);
-        assert!(matching_fetch_pattern(&patterns, "Image", &url).is_none());
+        assert!(
+            matching_fetch_pattern(&patterns, DevToolsNetworkResourceType::Image, &url).is_none()
+        );
         let script_url = Url::parse("https://example.test/script.js").unwrap();
-        assert!(matching_fetch_pattern(&patterns, "Script", &script_url).is_some());
+        assert!(
+            matching_fetch_pattern(&patterns, DevToolsNetworkResourceType::Script, &script_url,)
+                .is_some()
+        );
     }
 
     #[test]
@@ -221,10 +249,17 @@ mod tests {
             FetchResourceTypeFilter::EventSource,
             FetchResourceTypeFilter::Xhr,
         ] {
-            for resource_type in ["Fetch", "EventSource", "XHR"] {
-                assert!(filter.matches_cdp_type(resource_type), "{filter:?}");
+            for resource_type in [
+                DevToolsNetworkResourceType::Fetch,
+                DevToolsNetworkResourceType::EventSource,
+                DevToolsNetworkResourceType::Xhr,
+            ] {
+                assert!(filter.matches_resource_type(resource_type), "{filter:?}");
             }
-            assert!(!filter.matches_cdp_type("Script"), "{filter:?}");
+            assert!(
+                !filter.matches_resource_type(DevToolsNetworkResourceType::Script),
+                "{filter:?}"
+            );
         }
     }
 
@@ -237,7 +272,10 @@ mod tests {
         }];
         let url = Url::parse("https://example.test/style.css").unwrap();
 
-        assert!(matching_fetch_pattern(&patterns, "Stylesheet", &url).is_some());
+        assert!(
+            matching_fetch_pattern(&patterns, DevToolsNetworkResourceType::Stylesheet, &url)
+                .is_some()
+        );
     }
 
     #[test]

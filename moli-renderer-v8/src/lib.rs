@@ -130,6 +130,33 @@ pub(crate) const fn real_layout_test_policy() -> moli_page_types::LayoutPolicy {
     moli_page_types::LayoutPolicy::OnDemand
 }
 
+/// Builds an owned HTML fixture through the same incremental parser frontier
+/// used by executable Documents while retaining parser-time discovery output
+/// needed by unit tests. This is deliberately test-only: production code must
+/// keep the live parser session and deliver each handoff at its source boundary.
+#[cfg(test)]
+pub(crate) fn parse_html_test_fixture_with_parser_outputs(
+    final_url: url::Url,
+    html: String,
+) -> (
+    dom::native::NativeDom,
+    Vec<parser::ParserScriptHandoff>,
+    Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
+) {
+    let mut stream = parser::HtmlParser.start_document(final_url);
+    stream.append_to_end(html);
+    let mut scripts = Vec::new();
+    let mut blocking_stylesheets = Vec::new();
+    while stream.has_pending_input() {
+        let outcome = stream.pump_next_parser_step(0);
+        blocking_stylesheets.extend(outcome.discovered_blocking_stylesheet_inputs);
+        if let parser::ParserPumpStep::Yield(parser::ParserYield::Script(script)) = outcome.result {
+            scripts.push(*script);
+        }
+    }
+    (stream.finish(), scripts, blocking_stylesheets)
+}
+
 #[allow(unused_imports)]
 pub(crate) use crate::script_planning::{
     ParserPlanningReadView, ParserScriptRead, PrepareScriptOutcome, PreparedScript,
@@ -209,13 +236,13 @@ pub use runtime::{
     RendererDocumentQuerySelectorWithChildNodeSnapshotEvents,
     RendererDocumentSourcedSameDocumentNavigation,
     RendererDocumentSourcedTopLevelLocationNavigation, RendererDocumentTerminationReason,
-    RendererDocumentToken, RendererDomAttributeMutation, RendererDomAttributeMutationOutcome,
-    RendererDomBidiNodeBindingResolution, RendererDomBidiNodeSharedIdResolution,
-    RendererDomDebuggerDomBreakpointResolution, RendererDomDebuggerEventListener,
-    RendererDomDebuggerEventListenerBreakpoint, RendererDomDebuggerEventListenersResolution,
-    RendererDomDebuggerXhrBreakpoint, RendererDomEdit, RendererDomEditOutcome,
-    RendererDomFocusOutcome, RendererDomFrontendNodeBindingResolution, RendererDomMutationEvent,
-    RendererDomMutationEventBatch, RendererDomNodeCreationStackFrame,
+    RendererDocumentTitleChanged, RendererDocumentToken, RendererDomAttributeMutation,
+    RendererDomAttributeMutationOutcome, RendererDomBidiNodeBindingResolution,
+    RendererDomBidiNodeSharedIdResolution, RendererDomDebuggerDomBreakpointResolution,
+    RendererDomDebuggerEventListener, RendererDomDebuggerEventListenerBreakpoint,
+    RendererDomDebuggerEventListenersResolution, RendererDomDebuggerXhrBreakpoint, RendererDomEdit,
+    RendererDomEditOutcome, RendererDomFocusOutcome, RendererDomFrontendNodeBindingResolution,
+    RendererDomMutationEvent, RendererDomMutationEventBatch, RendererDomNodeCreationStackFrame,
     RendererDomNodeCreationStackTrace, RendererDomNodeStackTraceResolution,
     RendererDomSearchRegistration, RendererDomSearchResultNode, RendererDomSearchResultsResolution,
     RendererDomSnapshotCaptureOptions, RendererDomSnapshotCapturePayload, RendererDragData,

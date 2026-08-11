@@ -2504,10 +2504,9 @@ mod tests {
         crate::dom::native::NativeDom,
         Vec<crate::DocumentOwnedBlockingStylesheetDiscoveryInput>,
     ) {
-        let (document, handoffs) =
-            HtmlParser.parse_dom_host_with_document_handoffs(final_url, html.into());
-        let (_, inputs) = handoffs.into_parts();
-        (document.into_dom(), inputs)
+        let (document, _, inputs) =
+            crate::parse_html_test_fixture_with_parser_outputs(final_url, html.into());
+        (document, inputs)
     }
 
     #[test]

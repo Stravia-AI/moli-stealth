@@ -1213,6 +1213,10 @@ pub(super) fn build_router() -> Router {
             get(document_write_external_split_script_parser_session_page),
         )
         .route(
+            "/compat/document-write-inserted-external-resumes-chunked-root",
+            get(document_write_inserted_external_resumes_chunked_root_page),
+        )
+        .route(
             "/compat/document-write-parser-visible-dom-boundary",
             get(document_write_parser_visible_dom_boundary_page),
         )
@@ -2264,6 +2268,10 @@ pub(super) fn build_router() -> Router {
         .route(
             "/assets/document_write_external_split_session_parent.js",
             get(asset_document_write_external_split_session_parent_script),
+        )
+        .route(
+            "/assets/document_write_inserted_chunked_external.js",
+            get(asset_document_write_inserted_chunked_external_script),
         )
         .route(
             "/assets/dynamic_preparation_context_stale.js",

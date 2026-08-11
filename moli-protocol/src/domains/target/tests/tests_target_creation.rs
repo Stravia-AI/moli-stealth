@@ -703,12 +703,18 @@ async fn browser_target_session_discovery_receives_target_info_changed_after_nav
     }))
     .await;
 
-    let changed =
-        ctx.take_first_matching("session targetInfoChanged after navigation", |message| {
-            message["sessionId"] == json!(browser_session_id)
-                && message["method"] == json!("Target.targetInfoChanged")
-                && message["params"]["targetInfo"]["targetId"] == json!(target_id)
-        });
+    let changed = ctx
+        .wait_for_scheduler_message(
+            "title-aware targetInfoChanged after navigation",
+            |message| {
+                message["sessionId"] == json!(browser_session_id)
+                    && message["method"] == json!("Target.targetInfoChanged")
+                    && message["params"]["targetInfo"]["targetId"] == json!(target_id)
+                    && message["params"]["targetInfo"]["title"]
+                        == json!("Session Discovery Navigation")
+            },
+        )
+        .await;
     assert_eq!(changed["params"]["targetInfo"]["url"], json!(url));
     assert_eq!(
         changed["params"]["targetInfo"]["title"],
@@ -2100,10 +2106,23 @@ async fn auto_attach_only_owner_receives_target_info_changed_without_target_crea
     }))
     .await;
 
+    crate::testing::wait_until_message(
+        &mut ctx,
+        None,
+        "auto-attach-only parsed title targetInfoChanged",
+        |message| {
+            message.get("sessionId").is_none()
+                && message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"] == json!(target_id)
+                && message["params"]["targetInfo"]["title"] == json!("Auto Attach InfoChanged")
+        },
+    )
+    .await;
     let changed = ctx.take_first_matching("auto-attach-only targetInfoChanged", |message| {
         message.get("sessionId").is_none()
             && message["method"] == json!("Target.targetInfoChanged")
             && message["params"]["targetInfo"]["targetId"] == json!(target_id)
+            && message["params"]["targetInfo"]["title"] == json!("Auto Attach InfoChanged")
     });
     assert_eq!(changed["params"]["targetInfo"]["url"], json!(url));
     assert_eq!(
@@ -2981,6 +3000,13 @@ async fn create_target_without_debugger_wait_starts_requested_url_navigation() {
             "{\"url\":\"data:text/html,<title>created-target-ready</title>\",\"title\":\"created-target-ready\"}"
         )
     );
+
+    ctx.wait_for_scheduler_message("created target title metadata", |message| {
+        message["method"] == json!("Target.targetInfoChanged")
+            && message["params"]["targetInfo"]["targetId"] == json!(target_id)
+            && message["params"]["targetInfo"]["title"] == json!("created-target-ready")
+    })
+    .await;
 
     ctx.process_async(json!({
         "id": 9011,

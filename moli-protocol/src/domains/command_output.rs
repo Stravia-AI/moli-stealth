@@ -5,9 +5,9 @@ use crate::devtools_runtime::{
     AutomationEvent, BrowserDownloadProgressEvent, BrowserDownloadWillBeginEvent,
     DevToolsCommandResult, DevToolsError, DevToolsErrorKind, DevToolsFetchRequestId,
     DevToolsFrameId, DevToolsLoaderId, DevToolsNetworkDataBytesType, DevToolsNetworkInterceptId,
-    DevToolsRealmId, DevToolsRemoteValue, DevToolsRequestId, DevToolsScriptException,
-    DevToolsScriptResult, DevToolsStackTrace, DevToolsTargetId, DevToolsTargetInfo,
-    NavigationFrameEvent, NavigationFrameEventKind, NetworkAuthChallengeEvent,
+    DevToolsNetworkResourceType, DevToolsRealmId, DevToolsRemoteValue, DevToolsRequestId,
+    DevToolsScriptException, DevToolsScriptResult, DevToolsStackTrace, DevToolsTargetId,
+    DevToolsTargetInfo, NavigationFrameEvent, NavigationFrameEventKind, NetworkAuthChallengeEvent,
     NetworkRedirectResponseEvent, NetworkRequestEvent, PageFileChooserOpenedEvent,
     PageJavaScriptDialogOpeningEvent, PageLifecycleEvent, RuntimeConsoleEvent,
     RuntimeExecutionContextEvent, SameDocumentNavigationEvent, ScriptExceptionEvent,
@@ -1078,7 +1078,7 @@ fn network_request_event_from_cdp_params(params: &Value, request_id: &str) -> Ne
             .get("type")
             .or_else(|| params.get("resourceType"))
             .and_then(Value::as_str)
-            .map(str::to_owned),
+            .and_then(DevToolsNetworkResourceType::from_cdp_type),
         timestamp: params.get("timestamp").and_then(Value::as_f64),
         wall_time: params.get("wallTime").and_then(Value::as_f64),
         status: params

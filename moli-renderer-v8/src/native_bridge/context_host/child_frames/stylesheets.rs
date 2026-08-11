@@ -338,12 +338,12 @@ impl JsContextHost {
         let document_owner = completion.owner.document_owner();
         if self
             .child_document_parsers
-            .is_waiting_for_blocking_stylesheet(document_owner)
+            .is_suspended_on_parser_created_stylesheet(document_owner)
             && !self
                 .frame_document_blocking_stylesheets
                 .has_pending(document_owner)
         {
-            let resume = self.resume_live_child_html_document_parser_after_blocker(
+            let resume = self.resume_live_child_document_parser_after_blocker(
                 scope,
                 completion.child_handle,
                 document_owner,

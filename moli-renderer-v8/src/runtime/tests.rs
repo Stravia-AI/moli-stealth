@@ -12,7 +12,6 @@ use super::{
 };
 use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_js_local_executor};
 use crate::network::ResourceRequestClient;
-use crate::parser::XmlParser;
 use crate::{
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleMilestone,
     RendererPageCreationNavigationReplyPolicy, RendererPageCreationReplyBoundary,
@@ -35,6 +34,42 @@ async fn prepare_test_external_raw_document(
     url: url::Url,
     raw_body: ExternalRawDocumentBodyStream,
 ) -> PreparedRendererDocument {
+    prepare_test_external_raw_document_with_content_type(
+        runtime,
+        loader,
+        url,
+        "text/html",
+        raw_body,
+    )
+    .await
+}
+
+async fn prepare_test_external_raw_document_with_content_type(
+    runtime: &JsRuntime,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    content_type: &str,
+    raw_body: ExternalRawDocumentBodyStream,
+) -> PreparedRendererDocument {
+    prepare_test_external_raw_document_with_content_type_and_reply_boundary(
+        runtime,
+        loader,
+        url,
+        content_type,
+        raw_body,
+        RendererPageCreationReplyBoundary::LifecycleTarget,
+    )
+    .await
+}
+
+async fn prepare_test_external_raw_document_with_content_type_and_reply_boundary(
+    runtime: &JsRuntime,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    content_type: &str,
+    raw_body: ExternalRawDocumentBodyStream,
+    reply_boundary: RendererPageCreationReplyBoundary,
+) -> PreparedRendererDocument {
     runtime
         .prepare_streaming_raw_document_from_external_body_with_inspector_session_restores(
             runtime.reserve_page_for_creation(),
@@ -44,7 +79,7 @@ async fn prepare_test_external_raw_document(
             false,
             0,
             200,
-            vec![("content-type".to_owned(), "text/html".to_owned())],
+            vec![("content-type".to_owned(), content_type.to_owned())],
             loader,
             crate::RendererWebStorageHandles::ephemeral(),
             raw_body,
@@ -67,7 +102,7 @@ async fn prepare_test_external_raw_document(
             Vec::new(),
             false,
             PageVmInitStage::Load,
-            RendererPageCreationReplyBoundary::LifecycleTarget,
+            reply_boundary,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
             None,
@@ -1227,75 +1262,147 @@ navigator.webkitTemporaryStorage.queryUsageAndQuota((usage, quota) => {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn create_document_page_executes_initial_xhtml_parser_handoff() {
+async fn streaming_xml_document_executes_parser_blocking_xhtml_script() {
     let runtime = JsRuntime::initialize();
     let loader =
         ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let url = url::Url::parse("https://example.test/initial.xhtml").unwrap();
-    let (document, handoffs) = XmlParser.parse_with_document_handoffs(
-        url.clone(),
-        concat!(
-            "<html xmlns='http://www.w3.org/1999/xhtml'><head>",
-            "<script>globalThis.__initialXhtmlHandoff = 'executed';</script>",
-            "</head><body /></html>",
-        )
-        .to_owned(),
+    let source = concat!(
+        "<html xmlns='http://www.w3.org/1999/xhtml'><head>",
+        "<script>try { document.write('&lt;future/&gt;'); } ",
+        "catch (error) { globalThis.__xmlWriteError = error.name; } ",
+        "globalThis.__initialXhtmlHandoff = 'executed';</script>",
+        "</head><body /></html>",
     );
-    let (document_handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-    let (mut page, _, _, _, pending_download) = runtime
-        .create_document_page_best_effort(
-            url.clone(),
-            None,
-            false,
-            0,
-            200,
-            vec![(
-                "content-type".to_owned(),
-                "application/xhtml+xml".to_owned(),
-            )],
-            &loader,
-            crate::RendererWebStorageHandles::ephemeral(),
-            document,
-            document_handoffs,
-            blocking_stylesheet_inputs,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            1.0,
-            Default::default(),
-            None,
-            false,
-            Vec::new(),
-            false,
-            None,
-        )
+    let prepared = prepare_test_external_raw_document_with_content_type(
+        &runtime,
+        &loader,
+        url,
+        "application/xhtml+xml",
+        ExternalRawDocumentBodyStream::from_bytes(source.as_bytes().to_vec()),
+    )
+    .await;
+    let permit = prepared.issue_commit_permit();
+    let (mut page, page_state, _, _, pending_download) = prepared
+        .commit(permit)
         .await
-        .expect("XHTML document page should load from prepared parser handoffs");
+        .expect("incremental XHTML document should commit");
     assert!(pending_download.is_none());
 
     let (reply, _) = page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: "String(globalThis.__initialXhtmlHandoff)".to_owned(),
+            expression: concat!(
+                "JSON.stringify([document.contentType, ",
+                "document.getElementsByTagName('script').length, ",
+                "String(globalThis.__initialXhtmlHandoff), ",
+                "String(globalThis.__xmlWriteError), ",
+                "document.getElementsByTagName('future').length])",
+            )
+            .to_owned(),
             await_promise: false,
         })
         .await
         .expect("initial XHTML script side effect should be observable");
     assert_eq!(
         renderer_json_value(reply),
-        Some(serde_json::json!("executed"))
+        Some(serde_json::json!(
+            r#"["application/xhtml+xml",1,"executed","InvalidStateError",0]"#
+        )),
+        "XML script report: {:#?}",
+        page_state.script_execution.runs,
     );
     page.close_async().await.expect("XHTML page should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configuration() {
+async fn streaming_unstyled_xml_converts_live_document_before_domcontentloaded() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let url = url::Url::parse("https://example.test/document.xml").unwrap();
+    let source = "<semantic-root id='source'><child>xml-ready</child></semantic-root>";
+    let prepared = prepare_test_external_raw_document_with_content_type(
+        &runtime,
+        &loader,
+        url,
+        "application/xml",
+        ExternalRawDocumentBodyStream::from_bytes(source.as_bytes().to_vec()),
+    )
+    .await;
+    prepared
+        .update_commit_configuration(RendererPreparedDocumentCommitConfiguration {
+            document_start_scripts: vec![crate::DocumentStartScript {
+                registry_key: None,
+                source: concat!(
+                    "globalThis.__xmlViewerDcl = null;",
+                    "document.addEventListener('DOMContentLoaded', () => {",
+                    "  const source = document.getElementById('source');",
+                    "  globalThis.__xmlViewerDcl = [",
+                    "    document.documentElement.localName,",
+                    "    source && source.parentNode && source.parentNode.id,",
+                    "    source && source.textContent",
+                    "  ];",
+                    "});",
+                )
+                .to_owned(),
+                world_name: None,
+                has_bidi_channel_argument: false,
+                bidi_channel_handoffs: Vec::new(),
+            }],
+            runtime_bindings: Vec::new(),
+            runtime_inspector_session_restore_snapshots: Vec::new(),
+            runtime_isolated_worlds: Vec::new(),
+            permission_overrides: Vec::new(),
+            extra_http_headers: Vec::new(),
+            locale_override: None,
+            timezone_override: None,
+            script_execution_disabled: false,
+            bypass_content_security_policy: false,
+            cpu_throttling_rate: 1.0,
+            emulated_media: Default::default(),
+            idle_override: None,
+            viewport_surface: None,
+            network_offline: false,
+            blocked_url_patterns: Vec::new(),
+            fetch_subresource_interception_enabled: false,
+            fetch_subresource_interception_resource_type: None,
+        })
+        .await
+        .expect("prepared XML should accept the lifecycle probe");
+
+    let permit = prepared.issue_commit_permit();
+    let (mut page, _, _, _, pending_download) = prepared
+        .commit(permit)
+        .await
+        .expect("unstyled XML document should commit");
+    assert!(pending_download.is_none());
+    let (reply, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: concat!(
+                "JSON.stringify([",
+                "document.documentElement.localName,",
+                "document.documentElement.namespaceURI,",
+                "globalThis.__xmlViewerDcl",
+                "])",
+            )
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("live XML viewer state should evaluate");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!(
+            r#"["html","http://www.w3.org/1999/xhtml",["html","webkit-xml-viewer-source-xml","xml-ready"]]"#
+        ))
+    );
+    page.close_async()
+        .await
+        .expect("unstyled XML page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_streaming_xml_document_waits_for_permit_and_uses_latest_configuration() {
     let runtime = JsRuntime::initialize();
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
     let loader =
@@ -1308,60 +1415,21 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
         )
         .await;
     let url = url::Url::parse(&format!("{base_url}/prepared.xhtml")).expect("prepared XHTML url");
-    let (document, handoffs) = XmlParser.parse_with_document_handoffs(
-        url.clone(),
-        concat!(
-            "<html xmlns='http://www.w3.org/1999/xhtml'><head><script>",
-            "globalThis.__nativeCommitObserved = JSON.stringify([",
-            "globalThis.__nativePreload, typeof nativeBinding]);",
-            "fetch('/native-author-side-effect');",
-            "</script></head><body /></html>",
-        )
-        .to_owned(),
+    let source = concat!(
+        "<html xmlns='http://www.w3.org/1999/xhtml'><head><script>",
+        "globalThis.__nativeCommitObserved = JSON.stringify([",
+        "globalThis.__nativePreload, typeof nativeBinding]);",
+        "fetch('/native-author-side-effect');",
+        "</script></head><body /></html>",
     );
-    let (document_handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-
-    let prepared = runtime
-        .prepare_document_page_with_inspector_session_restores(
-            runtime.reserve_page_for_creation(),
-            url.clone(),
-            None,
-            false,
-            0,
-            200,
-            vec![(
-                "content-type".to_owned(),
-                "application/xhtml+xml".to_owned(),
-            )],
-            &loader,
-            crate::RendererWebStorageHandles::ephemeral(),
-            document,
-            document_handoffs,
-            blocking_stylesheet_inputs,
-            None,
-            None,
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
-            false,
-            false,
-            1.0,
-            Default::default(),
-            None,
-            false,
-            Vec::new(),
-            false,
-            None,
-            false,
-            PageVmInitStage::Load,
-            None,
-            None,
-        )
-        .await
-        .expect("NativeDom document should prepare");
+    let prepared = prepare_test_external_raw_document_with_content_type(
+        &runtime,
+        &loader,
+        url.clone(),
+        "application/xhtml+xml",
+        ExternalRawDocumentBodyStream::from_bytes(source.as_bytes().to_vec()),
+    )
+    .await;
     let prepared_agent = prepared.renderer_devtools_agent_token();
     let prepared_isolates = runtime.document_isolate_accounting_for_diagnostics();
     assert_eq!(prepared_isolates.created, baseline_isolates.created + 1);
@@ -1370,7 +1438,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
     assert_eq!(
         runtime.renderer_owner_handle().len(),
         0,
-        "preparing a NativeDom must not install a Page"
+        "preparing a streaming XML document must not install a Page"
     );
     assert!(
         tokio::time::timeout(Duration::from_millis(100), &mut side_effect_request_seen)
@@ -1430,7 +1498,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
             fetch_subresource_interception_resource_type: None,
         })
         .await
-        .expect("prepared NativeDom should accept live commit configuration");
+        .expect("prepared streaming XML should accept live commit configuration");
 
     let permit = prepared.issue_commit_permit();
     let (mut page, _, diagnostics, _, pending_download) =
@@ -1439,7 +1507,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
     assert_eq!(
         page.devtools_agent_token(),
         prepared_agent,
-        "NativeDom commit must attach the agent reserved during prepare"
+        "streaming XML commit must attach the agent reserved during prepare"
     );
     tokio::time::timeout(Duration::from_secs(2), &mut side_effect_request_seen)
         .await
@@ -1465,7 +1533,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
         .iter()
         .find(|realm| realm.name == "native-world")
         .map(|realm| realm.context_id)
-        .expect("the NativeDom named world should exist at initial commit");
+        .expect("the streaming XML named world should exist at initial commit");
     let (world_marker, _) = page
         .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
             execution_context_id: world_context_id,
@@ -1473,7 +1541,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
             await_promise: false,
         })
         .await
-        .expect("NativeDom named-world preload marker should evaluate");
+        .expect("streaming XML named-world preload marker should evaluate");
     assert_eq!(
         renderer_json_value(world_marker),
         Some(serde_json::json!("ready"))
@@ -1481,7 +1549,7 @@ async fn prepared_native_dom_document_waits_for_permit_and_uses_latest_configura
 
     page.close_async()
         .await
-        .expect("committed NativeDom page should close");
+        .expect("committed streaming XML page should close");
     server
         .await
         .expect("NativeDom author side-effect server should finish");
@@ -1986,6 +2054,159 @@ async fn external_raw_streaming_page_command_builds_phase_one_page() {
     assert!(html.contains("id=\"external-raw\""));
     assert!(html.contains("外部 raw stream"));
     assert!(html.contains("data-streamed=\"yes\""));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn external_raw_streaming_body_failure_preserves_committed_document_and_owner() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let url = url::Url::parse("https://example.test/failed-main-document")
+        .expect("failed main document url");
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
+    body_tx
+        .send(
+            b"<!doctype html><main id='partial'>partial body before transport failure</main>"
+                .to_vec(),
+        )
+        .await
+        .expect("partial main document body should send");
+    let prepared = prepare_test_external_raw_document_with_content_type_and_reply_boundary(
+        &runtime,
+        &loader,
+        url,
+        "text/html",
+        raw_body,
+        RendererPageCreationReplyBoundary::DocumentCommit,
+    )
+    .await;
+    drop(body_tx);
+    completion_tx
+        .send(Err(anyhow::anyhow!(
+            "synthetic partial main document body failure"
+        )))
+        .expect("main document body failure should send");
+    let permit = prepared.issue_commit_permit();
+    let (mut page, _, _, creation_artifacts, pending_download) =
+        tokio::time::timeout(Duration::from_secs(5), prepared.commit(permit))
+            .await
+            .expect("partial main document should reach its response commit boundary")
+            .expect("partial main document should attach before its body terminal");
+    assert!(pending_download.is_none());
+    assert!(
+        creation_artifacts.lifecycle_snapshot.load.is_none(),
+        "open main document must attach before load"
+    );
+    page.take_committed_document_post_response_continuation()
+        .expect("DocumentCommit should retain parser work until its response boundary")
+        .release();
+
+    let failure_events = tokio::time::timeout(Duration::from_secs(5), async {
+        let mut events = Vec::new();
+        loop {
+            let publication = output_rx
+                .recv()
+                .await
+                .expect("renderer output transport should stay open");
+            if !publication_is_for_page(&publication, &page) {
+                continue;
+            }
+            let publication_events = publication_document_lifecycle_events(&publication)
+                .copied()
+                .collect::<Vec<_>>();
+            let main_resource_failed = publication_events.iter().any(|event| {
+                event.kind
+                    == RendererDocumentLifecycleEventKind::Terminated {
+                        last_reached: None,
+                        reason: super::RendererDocumentTerminationReason::MainResourceLoadFailed,
+                    }
+            });
+            events.extend(publication_events);
+            if main_resource_failed {
+                return events;
+            }
+        }
+    })
+    .await
+    .expect("main-resource failure should terminate the parser lifecycle");
+    assert!(failure_events.iter().all(|event| {
+        event.kind
+            != RendererDocumentLifecycleEventKind::Milestone(
+                RendererDocumentLifecycleMilestone::DomContentLoaded,
+            )
+            && event.kind
+                != RendererDocumentLifecycleEventKind::Milestone(
+                    RendererDocumentLifecycleMilestone::Load,
+                )
+    }));
+    assert_eq!(
+        runtime.renderer_owner_handle().len(),
+        1,
+        "a committed partial Document should remain resident like Blink's failed DocumentLoader"
+    );
+
+    let (reply, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.querySelector('#partial').textContent".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("committed partial Document should remain script-observable");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!("partial body before transport failure"))
+    );
+    let (reply, _) = tokio::time::timeout(
+        Duration::from_secs(2),
+        page.run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "new Promise(resolve => setTimeout(() => resolve(document.readyState), 0))"
+                .to_owned(),
+            await_promise: true,
+        }),
+    )
+    .await
+    .expect("a failed committed Document should keep running ordinary Page tasks")
+    .expect("a failed committed Document should resolve a newly scheduled timer");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!("loading")),
+        "stopping a failed parser must not synthesize DCL or a successful EOF"
+    );
+    page.close_async()
+        .await
+        .expect("failed committed page should close normally");
+
+    let recovery_url =
+        url::Url::parse("https://example.test/recovery-after-body-failure").expect("recovery url");
+    let mut recovery_page = tokio::time::timeout(
+        Duration::from_secs(5),
+        create_test_html_page(
+            &runtime,
+            &loader,
+            recovery_url,
+            "<!doctype html><main id='recovered'>recovered</main>",
+        ),
+    )
+    .await
+    .expect("renderer owner should accept a page after the failed candidate");
+    let (reply, _) = recovery_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.querySelector('#recovered').textContent".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("recovery page should remain usable");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!("recovered"))
+    );
+    recovery_page
+        .close_async()
+        .await
+        .expect("recovery page should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3055,6 +3276,9 @@ async fn renderer_owned_navigation_survives_page_creation_observer_detach() {
     producer.await.expect("producer should finish");
     assert!(pending_download.is_none());
     assert!(creation_artifacts.lifecycle_snapshot.load.is_none());
+    page.take_committed_document_post_response_continuation()
+        .expect("DocumentCommit should defer parser continuation")
+        .release();
 
     let initial_document = creation_artifacts.active_document;
     let replacement_document = tokio::time::timeout(Duration::from_secs(2), async {
@@ -15512,6 +15736,9 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
         .close_async()
         .await
         .expect("predecessor page should close after replacement attach");
+    page.take_committed_document_post_response_continuation()
+        .expect("DocumentCommit should defer parser continuation")
+        .release();
 
     let observed = tokio::time::timeout(
         Duration::from_millis(500),
@@ -15543,6 +15770,81 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
         .expect("document-commit DCL-tail page should close");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn document_title_observation_precedes_dcl_for_exact_document() {
+    let runtime = JsRuntime::initialize();
+    let (activity_wake_tx, mut activity_wake_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(activity_wake_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let page_url = url::Url::parse("https://example.test/title-before-dcl").expect("page url");
+    let mut page = create_test_html_page_at_document_commit(
+        &runtime,
+        &loader,
+        page_url,
+        "<!doctype html><title>committed title</title><main>ready</main>",
+    )
+    .await;
+
+    let (observed, title_identity, dcl_identity) =
+        tokio::time::timeout(Duration::from_secs(2), async {
+            let mut observed = Vec::new();
+            let mut title_identity = None;
+            loop {
+                let publication = activity_wake_rx
+                    .recv()
+                    .await
+                    .expect("renderer output channel should stay open");
+                if !publication_is_for_page(&publication, &page) {
+                    continue;
+                }
+                for record in publication.records() {
+                    match record.item() {
+                        RendererOutputItem::Observation(
+                            RendererProtocolObservation::DocumentTitleChanged(change),
+                        ) => {
+                            assert_eq!(change.title, "committed title");
+                            assert!(
+                                title_identity.replace(change.source_document).is_none(),
+                                "an unchanged title must not be published twice"
+                            );
+                            observed.push("title");
+                        }
+                        RendererOutputItem::Observation(
+                            RendererProtocolObservation::DocumentLifecycle(event),
+                        ) if event.kind
+                            == RendererDocumentLifecycleEventKind::Milestone(
+                                RendererDocumentLifecycleMilestone::DomContentLoaded,
+                            ) =>
+                        {
+                            observed.push("dcl");
+                            let identity = super::RendererDocumentLifecycleIdentity {
+                                frame: event.frame,
+                                document: event.document,
+                                epoch: event.epoch,
+                            };
+                            return (observed, title_identity, identity);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        })
+        .await
+        .expect("title and DCL observations should be published");
+
+    assert_eq!(observed, vec!["title", "dcl"]);
+    assert_eq!(
+        title_identity,
+        Some(dcl_identity),
+        "the title observation must be sourced from the exact DCL document"
+    );
+
+    page.close_async()
+        .await
+        .expect("title observation page should close");
+}
+
 // This witness needs one renderer-owner worker and one observer worker.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn lifecycle_record_precedes_handler_navigation_action_record() {
@@ -15566,6 +15868,7 @@ document.addEventListener("DOMContentLoaded", () => {
         page_url,
         html,
         RendererTopLevelNavigationDispatch::DelegateToBrowser,
+        RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
     )
     .await;
 
@@ -15616,6 +15919,51 @@ document.addEventListener("DOMContentLoaded", () => {
     page.close_async()
         .await
         .expect("DCL handler navigation page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn document_commit_release_runs_parser_script_location_handoff_in_background() {
+    let runtime = JsRuntime::initialize();
+    let (activity_wake_tx, mut activity_wake_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(activity_wake_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let page_url =
+        url::Url::parse("https://example.test/parser-location-source").expect("page url");
+    let mut page = create_test_html_page_at_document_commit_with_navigation_dispatch(
+        &runtime,
+        &loader,
+        page_url,
+        r#"<!doctype html><script>location.href = "/final"</script>"#,
+        RendererTopLevelNavigationDispatch::DelegateToBrowser,
+        RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+    )
+    .await;
+
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(publication) = activity_wake_rx.recv().await {
+            if !publication_is_for_page(&publication, &page) {
+                continue;
+            }
+            if publication.records().iter().any(|record| {
+                matches!(
+                    record.item(),
+                    super::RendererOutputItem::OwnerAction(
+                        super::RendererOwnerAction::TopLevelLocationNavigation(_)
+                    )
+                )
+            }) {
+                return;
+            }
+        }
+        panic!("renderer output channel closed before parser location handoff");
+    })
+    .await
+    .expect("released parser continuation should publish its location handoff");
+
+    page.close_async()
+        .await
+        .expect("parser location handoff page should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -16651,6 +16999,7 @@ async fn create_test_html_page_at_document_commit(
         url,
         html,
         RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+        RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
     )
     .await
 }
@@ -16661,6 +17010,7 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
     url: url::Url,
     html: &str,
     top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
+    navigation_reply_policy: RendererPageCreationNavigationReplyPolicy,
 ) -> RendererPageHandle {
     let (completion_tx, completion_rx) = oneshot::channel();
     let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
@@ -16675,7 +17025,7 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
             .send(Ok(()))
             .expect("document-commit HTML body should complete");
     });
-    let (page, _, _, creation_artifacts, pending_download) = runtime
+    let (mut page, _, _, creation_artifacts, pending_download) = runtime
         .create_streaming_raw_page_from_external_body_with_inspector_session_restores(
             url.clone(),
             url,
@@ -16708,7 +17058,7 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
             PageVmInitStage::Load,
             RendererPageCreationReplyBoundary::DocumentCommit,
             top_level_navigation_dispatch,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            navigation_reply_policy,
             None,
             None,
             None,
@@ -16723,6 +17073,9 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
         creation_artifacts.lifecycle_snapshot.load.is_none(),
         "document-commit fixture must return before load"
     );
+    page.take_committed_document_post_response_continuation()
+        .expect("DocumentCommit should defer parser continuation")
+        .release();
     page
 }
 

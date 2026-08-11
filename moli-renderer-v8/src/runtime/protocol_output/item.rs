@@ -18,6 +18,12 @@ use moli_page_types::{
     ScriptNetworkOutputItem,
 };
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RendererDocumentTitleChanged {
+    pub source_document: RendererDocumentLifecycleIdentity,
+    pub title: String,
+}
+
 /// A renderer-neutral browser-owner action.
 ///
 /// Variants move here as their old pending queue is removed. Keeping actions
@@ -74,6 +80,7 @@ pub enum RendererOwnerAction {
 #[derive(Clone, Debug, PartialEq)]
 pub enum RendererProtocolObservation {
     MainDocumentCommit(RendererMainDocumentCommit),
+    DocumentTitleChanged(RendererDocumentTitleChanged),
     DocumentLifecycle(RendererDocumentLifecycleEvent),
     Network {
         source_document: RendererDocumentLifecycleIdentity,

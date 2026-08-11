@@ -1,6 +1,12 @@
 #[cfg(test)]
 use crate::live_document_parser::DocumentParserLifetime;
-use crate::{frame_owner_model::FrameDocumentOwner, live_document_parser::DocumentParserSession};
+use crate::{
+    frame_owner_model::FrameDocumentOwner,
+    live_document_parser::{
+        DocumentParserSession, ParserResumeApplication, ParserResumePermit, ParserStopReason,
+        ParserSuspensionCause,
+    },
+};
 use std::collections::HashMap;
 
 #[derive(Default)]
@@ -10,7 +16,9 @@ pub(in crate::native_bridge::context_host) struct ChildDocumentParserStore {
 
 impl ChildDocumentParserStore {
     pub(in crate::native_bridge::context_host) fn clear(&mut self, owner: FrameDocumentOwner) {
-        self.sessions.remove(&owner);
+        if let Some(mut parser) = self.sessions.remove(&owner) {
+            parser.stop(ParserStopReason::DocumentReplacement);
+        }
     }
 
     pub(in crate::native_bridge::context_host) fn replace(
@@ -18,7 +26,9 @@ impl ChildDocumentParserStore {
         owner: FrameDocumentOwner,
         parser: DocumentParserSession,
     ) {
-        self.sessions.insert(owner, parser);
+        if let Some(mut replaced) = self.sessions.insert(owner, parser) {
+            replaced.stop(ParserStopReason::DocumentReplacement);
+        }
     }
 
     pub(in crate::native_bridge::context_host) fn take(
@@ -48,13 +58,47 @@ impl ChildDocumentParserStore {
         self.sessions.contains_key(&owner)
     }
 
-    pub(in crate::native_bridge::context_host) fn is_waiting_for_blocking_stylesheet(
+    pub(in crate::native_bridge::context_host) fn parser_script_resume_permit(
+        &self,
+        owner: FrameDocumentOwner,
+        script: crate::document_runtime::DomHandle,
+    ) -> Option<ParserResumePermit> {
+        let parser = self.sessions.get(&owner)?;
+        if !matches!(
+            parser.suspension_cause(),
+            Some(
+                ParserSuspensionCause::ParserClassicSource {
+                    script: suspended_script,
+                } | ParserSuspensionCause::ParserClassicStylesheets {
+                    script: suspended_script,
+                }
+            ) if suspended_script == script
+        ) {
+            return None;
+        }
+        parser.current_resume_permit()
+    }
+
+    pub(in crate::native_bridge::context_host) fn resume_parser_script_for_execution(
+        &mut self,
+        owner: FrameDocumentOwner,
+        permit: ParserResumePermit,
+    ) -> Option<ParserResumeApplication> {
+        self.sessions
+            .get_mut(&owner)
+            .map(|parser| parser.resume(permit))
+    }
+
+    pub(in crate::native_bridge::context_host) fn is_suspended_on_parser_created_stylesheet(
         &self,
         owner: FrameDocumentOwner,
     ) -> bool {
         self.sessions
             .get(&owner)
-            .is_some_and(DocumentParserSession::is_waiting_for_blocking_stylesheet)
+            .and_then(DocumentParserSession::suspension_cause)
+            .is_some_and(|cause| {
+                matches!(cause, ParserSuspensionCause::ParserCreatedStylesheet { .. })
+            })
     }
 
     #[cfg(test)]

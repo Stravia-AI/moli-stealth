@@ -175,7 +175,7 @@ impl OpenStreamingPage {
             .await
             .expect("first open-stream body chunk should send");
 
-        let (page, _, _, creation_artifacts, pending_download) = tokio::time::timeout(
+        let (mut page, _, _, creation_artifacts, pending_download) = tokio::time::timeout(
             Duration::from_secs(2),
             runtime.create_streaming_raw_page_from_external_body_with_inspector_session_restores(
                 page_url.clone(),
@@ -220,6 +220,9 @@ impl OpenStreamingPage {
         .expect("open main-Document stream should create a Page");
         assert!(pending_download.is_none());
         assert!(creation_artifacts.lifecycle_snapshot.load.is_none());
+        page.take_committed_document_post_response_continuation()
+            .expect("DocumentCommit should defer parser continuation")
+            .release();
 
         Self {
             page,

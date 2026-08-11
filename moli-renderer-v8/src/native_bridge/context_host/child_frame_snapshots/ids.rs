@@ -3,11 +3,10 @@ use crate::{document_runtime::DomHandle, dom::NodeId};
 
 impl JsContextHost {
     pub(in crate::native_bridge::context_host) fn allocate_child_document_loader_id(
-        &mut self,
+        &self,
     ) -> String {
-        let next_id = self.next_child_document_loader_id;
-        self.next_child_document_loader_id = self.next_child_document_loader_id.wrapping_add(1);
-        format!("LID-CHILD-{next_id:010}")
+        self.browser_context_runtime
+            .allocate_child_document_loader_id()
     }
 
     pub(crate) fn child_browsing_context_owner_node_id_by_frame_id(

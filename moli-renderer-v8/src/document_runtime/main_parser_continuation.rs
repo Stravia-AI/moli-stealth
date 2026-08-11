@@ -126,6 +126,10 @@ impl DocumentRuntime {
         std::mem::take(&mut self.main_parser_continuation.admitted)
     }
 
+    pub(crate) fn has_main_parser_continuation_admission(&self) -> bool {
+        self.main_parser_continuation.admitted
+    }
+
     pub(super) fn reset_main_parser_continuation_for_document_replacement(&mut self) {
         self.main_parser_continuation
             .reset_for_document_replacement();

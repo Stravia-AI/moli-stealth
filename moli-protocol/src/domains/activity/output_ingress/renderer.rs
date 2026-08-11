@@ -3,6 +3,7 @@ use serde_json::json;
 use std::collections::VecDeque;
 
 use super::super::publication_route::RendererPublicationOwner;
+use super::super::publication_route::RendererPublicationProjection;
 use super::super::publication_route::RendererPublicationRoute;
 use super::super::runtime_command_barrier::RuntimeCommandOutputBarriers;
 use super::prepared_outputs::PreparedProtocolOutputs;
@@ -92,24 +93,32 @@ async fn ingest_renderer_output_publication(
     };
     let records = publication.into_records();
     match route {
-        RendererPublicationRoute::AttachedSession { session_id } => {
+        RendererPublicationRoute::AttachedSession {
+            session_id,
+            projection,
+        } => {
             project_renderer_output_records_for_route(
                 conn,
                 Some(&session_id),
                 records,
                 cursor,
+                projection,
                 barriers,
                 command_context,
             )
             .await;
         }
-        RendererPublicationRoute::UnattachedOwner { owner_route } => {
+        RendererPublicationRoute::UnattachedOwner {
+            owner_route,
+            projection,
+        } => {
             let mut route_scope = conn.scoped_none_session_owner_route_override(owner_route);
             project_renderer_output_records_for_route(
                 route_scope.conn_mut(),
                 None,
                 records,
                 cursor,
+                projection,
                 barriers,
                 command_context,
             )
@@ -123,11 +132,22 @@ async fn project_renderer_output_records_for_route(
     session_id: Option<&str>,
     records: Vec<moli_core::RendererOutputRecord>,
     cursor: moli_core::RendererOutputCursor,
+    projection: RendererPublicationProjection,
     barriers: &mut RuntimeCommandOutputBarriers,
     command_context: &mut CommandDispatchContext,
 ) {
     for record in records {
         let (renderer_cause, item) = record.into_parts();
+        if projection == RendererPublicationProjection::RetiringNetworkOnly
+            && !matches!(
+                &item,
+                RendererOutputItem::Observation(
+                    moli_core::RendererProtocolObservation::Network { .. }
+                )
+            )
+        {
+            continue;
+        }
         match item {
             RendererOutputItem::OwnerAction(action) => {
                 let outputs =
@@ -153,6 +173,9 @@ async fn project_renderer_output_records_for_route(
                     let Some(outputs) = PreparedProtocolOutputs::from_renderer_network_observation(
                         conn,
                         session_id,
+                        crate::conn::RendererPageResidenceIdentity::from_residence(
+                            cursor.stream().residence(),
+                        ),
                         *source_document,
                         item,
                     ) else {

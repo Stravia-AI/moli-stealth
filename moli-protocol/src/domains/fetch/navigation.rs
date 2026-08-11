@@ -4,7 +4,7 @@ use crate::conn::{
     PendingSubresourceFetchAuthStage, PendingSubresourceFetchAuthStageChain,
     PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest, decode_data_url_response,
 };
-use crate::devtools_runtime::DevToolsNetworkInterceptId;
+use crate::devtools_runtime::{DevToolsNetworkInterceptId, DevToolsNetworkResourceType};
 use crate::domains::{command_output::CommandOutputBuffer, network, page};
 use moli_cookie_jar::StoredCookieQueryReport;
 use moli_core::page::{SubresourceAuthCredentials, SubresourceAuthScheme, SubresourceResourceType};
@@ -44,7 +44,7 @@ fn prepare_navigation_response_stage(
             snapshot
                 .matching_response_stage_pause_sessions(
                     pending.navigation.navigate_session_id.as_deref(),
-                    "Document",
+                    DevToolsNetworkResourceType::Document,
                     final_url,
                 )
                 .into_iter()

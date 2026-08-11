@@ -261,6 +261,13 @@ impl StreamingRawResponse {
         self.network_request_extra_info.as_ref()
     }
 
+    /// Returns cancellation authority for this exact streaming transfer.
+    /// Owners that move the response into another lifecycle boundary can use
+    /// the clone to retire the transport without retaining the response body.
+    pub fn cancellation_handle(&self) -> FetchCancelHandle {
+        self.cancel_handle.clone()
+    }
+
     pub fn try_next_chunk(&mut self) -> Option<Vec<u8>> {
         // See StreamingHtmlResponse::try_next_chunk.
         self.body_chunks.try_recv().ok()

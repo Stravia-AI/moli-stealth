@@ -43,6 +43,7 @@ pub enum RendererDocumentTerminationReason {
     SupersededByCrossDocumentNavigation,
     RestartedByDocumentOpen,
     ReplacedByJavascriptResult,
+    MainResourceLoadFailed,
     Stopped,
     Detached,
 }

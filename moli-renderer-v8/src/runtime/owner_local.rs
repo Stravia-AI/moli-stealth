@@ -5,6 +5,7 @@ use super::owner_local_store::{
     remove_page_on_bound_owner_local_store,
 };
 use super::*;
+use crate::page_task_queue::RendererOwnerWake;
 use crate::render_runtime::RenderRuntimeHandle;
 use anyhow::anyhow;
 use tokio::sync::oneshot;
@@ -25,9 +26,29 @@ pub struct RendererAttachedPage {
     pub(super) creation_diagnostics: RendererPageCreationDiagnostics,
     pub(super) creation_artifacts: RendererPageCreationArtifacts,
     pub(super) pending_download: Option<RendererPendingDownloadActivation>,
+    pub(super) committed_document_post_response_continuation:
+        Option<RendererPageCommandPostResponseContinuation>,
 }
 
 impl RendererAttachedPage {
+    pub(super) fn defer_committed_document_parser_until_response(
+        &mut self,
+        page_wake_tx: tokio::sync::mpsc::UnboundedSender<RendererOwnerWake>,
+    ) {
+        debug_assert!(
+            self.committed_document_post_response_continuation.is_none(),
+            "committed-Document parser continuation can only be armed once"
+        );
+        let token = self.token;
+        self.committed_document_post_response_continuation = Some(
+            RendererPageCommandPostResponseContinuation::new(move || {
+                let _ = page_wake_tx.send(RendererOwnerWake::committed_document_parser_unblocked(
+                    token,
+                ));
+            }),
+        );
+    }
+
     pub(super) fn into_parts(
         self,
         local_executor: JsLocalExecutor,
@@ -48,6 +69,8 @@ impl RendererAttachedPage {
                 page_context_cancel_tx: self.page_context_cancel_tx,
                 javascript_dialog_broker: self.javascript_dialog_broker,
                 inspector_pause_bridge: self.inspector_pause_bridge,
+                committed_document_post_response_continuation: self
+                    .committed_document_post_response_continuation,
                 _not_send: PhantomData,
             },
             self.page_state,
@@ -66,6 +89,8 @@ pub struct RendererPageHandle {
     page_context_cancel_tx: RendererPageContextCancelSender,
     javascript_dialog_broker: RendererJavaScriptDialogBroker,
     inspector_pause_bridge: crate::script_vm::inspector_pause::RendererInspectorPauseBridge,
+    committed_document_post_response_continuation:
+        Option<RendererPageCommandPostResponseContinuation>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -125,6 +150,13 @@ impl RendererPageHandle {
 
     pub fn devtools_agent_token(&self) -> RendererDevToolsAgentToken {
         self.devtools_agent_token
+    }
+
+    #[doc(hidden)]
+    pub fn take_committed_document_post_response_continuation(
+        &mut self,
+    ) -> Option<RendererPageCommandPostResponseContinuation> {
+        self.committed_document_post_response_continuation.take()
     }
 
     pub fn take_pending_modal_javascript_dialogs(&self) -> Vec<RendererPendingJavaScriptDialog> {

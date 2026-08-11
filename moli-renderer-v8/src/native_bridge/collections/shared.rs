@@ -112,7 +112,8 @@ pub(in crate::native_bridge::collections) fn named_item_matches(
 
     descriptor
         .resolve(host)
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|handle| {
             host.dom_host()
                 .node(*handle)
@@ -136,7 +137,7 @@ pub(in crate::native_bridge::collections) fn named_item_property_names(
     }
 
     let mut names = IndexSet::new();
-    for handle in descriptor.resolve(host) {
+    for handle in descriptor.resolve(host).iter().copied() {
         let Some(element) = host.dom_host().node(handle).and_then(Node::as_element) else {
             continue;
         };

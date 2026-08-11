@@ -5090,10 +5090,13 @@ async fn same_context_named_popup_reuse_navigates_loaded_background_owner_withou
         |conn| {
             conn.browser_context_by_id("BID-9-NAMED-POPUP")
                 .and_then(|browser_context| browser_context.background_target(&owner.target_id))
-                .and_then(|target| target.loaded_page())
-                .is_some_and(|page| {
-                    page.final_url().as_str()
+                .is_some_and(|target| {
+                    target.target_url()
                         == "data:text/html,<title>named</title><main>named target</main>"
+                        && target.loaded_page().is_some_and(|page| {
+                            page.final_url().as_str()
+                                == "data:text/html,<title>named</title><main>named target</main>"
+                        })
                 })
         },
     )
@@ -5107,7 +5110,12 @@ async fn same_context_named_popup_reuse_navigates_loaded_background_owner_withou
     );
     let changed = emitted
         .iter()
-        .find(|message| message["method"] == json!("Target.targetInfoChanged"))
+        .find(|message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"] == json!(owner.target_id)
+                && message["params"]["targetInfo"]["url"]
+                    == json!("data:text/html,<title>named</title><main>named target</main>")
+        })
         .unwrap_or_else(|| {
             panic!("loaded named target reuse should report targetInfoChanged: {emitted:?}")
         });

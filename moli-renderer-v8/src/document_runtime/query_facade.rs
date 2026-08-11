@@ -10,7 +10,6 @@ static HOT_SELECTOR_API_TRACE_COUNT: AtomicU32 = AtomicU32::new(0);
 //
 // It is intentionally separate from the low-level DOM facade and the mutation commands because it
 // is the one place where `DocumentRuntime` combines:
-// - parser-visibility filtering
 // - selector-engine entrypoints
 // - selector-specific debug counters / hot-call tracing
 //
@@ -32,10 +31,7 @@ impl DocumentRuntime {
                         root,
                         selector,
                     )?;
-                    Ok(self
-                        .filter_parser_visible_handles(handles)
-                        .into_iter()
-                        .next())
+                    Ok(handles.into_iter().next())
                 } else {
                     self.selector_engine
                         .query_selector_in_host(&self.dom_host, root, selector)
@@ -61,11 +57,7 @@ impl DocumentRuntime {
                     root,
                     selector,
                 )?;
-                if self.dom_host.node(root).is_some_and(Node::is_document) {
-                    Ok(self.filter_parser_visible_handles(handles))
-                } else {
-                    Ok(handles)
-                }
+                Ok(handles)
             }
             None => self
                 .selector_engine

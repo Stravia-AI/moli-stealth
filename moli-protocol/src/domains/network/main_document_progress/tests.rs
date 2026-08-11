@@ -1,4 +1,4 @@
-use crate::devtools_runtime::AutomationEvent;
+use crate::devtools_runtime::{AutomationEvent, DevToolsNetworkResourceType};
 use moli_cookie_jar::{
     StoredCookieQueryReport, StoredCookieSetRejectionReason, StoredCookieSetStatus,
 };
@@ -1398,7 +1398,7 @@ fn failed_navigation_progress_drain_prequeues_loading_failed() {
         failed_sidecar,
         Some(AutomationEvent::NetworkFetchError(event))
             if event.request_id.as_str() == "REQ-1"
-                && event.resource_type.as_deref() == Some("Document")
+                && event.resource_type == Some(DevToolsNetworkResourceType::Document)
                 && event.error_text.as_deref() == Some("net::ERR_FAILED")
     ));
     assert_eq!(failed["method"], json!("Network.loadingFailed"));

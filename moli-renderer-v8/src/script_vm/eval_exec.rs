@@ -1,5 +1,4 @@
 use std::pin::pin;
-use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use tracing::debug;
@@ -22,16 +21,9 @@ use crate::util::{
     script_base_url_continuation_data, v8_string,
 };
 use crate::v8_execution_watchdog::{
-    V8ExecutionWatchdog, V8ExecutionWatchdogKind, V8ExecutionWatchdogOutcome,
+    SCRIPT_TURN_WATCHDOG_TIMEOUT, V8ExecutionWatchdog, V8ExecutionWatchdogKind,
+    V8ExecutionWatchdogOutcome,
 };
-
-#[cfg(not(test))]
-const SCRIPT_TURN_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(8);
-#[cfg(test)]
-// Keep runaway-script tests substantially faster than production without
-// terminating finite debug-build checkpoints merely because workspace
-// nextest is concurrently running other V8-heavy processes.
-const SCRIPT_TURN_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Source-neutral result of one bounded runtime-script owner flush.
 ///

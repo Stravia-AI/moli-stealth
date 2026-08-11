@@ -49,6 +49,10 @@ pub(crate) enum RendererOwnerWake {
         token: RendererPageToken,
         document: RendererDocumentLifecycleIdentity,
     },
+    /// The browser-side commit response has crossed its release boundary.
+    /// Parser work parked at DocumentCommit may now resume without racing
+    /// ahead of target installation, old-Page retirement, or the response.
+    CommittedDocumentParserUnblocked { token: RendererPageToken },
     /// A concrete late Inspector response that became ready inside a Page
     /// owner turn. It is committed only after that turn has published all
     /// protocol-visible output, and never schedules or executes Page work.
@@ -84,6 +88,10 @@ impl RendererOwnerWake {
         Self::PostResponseDocumentLifecycle { token, document }
     }
 
+    pub(crate) fn committed_document_parser_unblocked(token: RendererPageToken) -> Self {
+        Self::CommittedDocumentParserUnblocked { token }
+    }
+
     pub(crate) fn runtime_inspector_response_publication(
         token: RendererPageToken,
         publication: RendererRuntimeInspectorResponsePublication,
@@ -113,6 +121,7 @@ impl RendererOwnerWake {
         match self {
             Self::Page { token, .. }
             | Self::PostResponseDocumentLifecycle { token, .. }
+            | Self::CommittedDocumentParserUnblocked { token }
             | Self::RuntimeInspectorResponsePublication { token, .. }
             | Self::TopLevelNavigationHandoff { token, .. }
             | Self::ReplacementDocumentViewSettled { token, .. } => token.page_id(),
@@ -125,6 +134,9 @@ impl RendererOwnerWake {
             Self::Page { source, .. } => *source,
             Self::PostResponseDocumentLifecycle { .. } => RendererOwnerWakeSource::Runtime(
                 RendererOwnerRuntimeActivitySource::DocumentLifecycleTurn,
+            ),
+            Self::CommittedDocumentParserUnblocked { .. } => panic!(
+                "a committed-Document parser release is an owner continuation gate, not a Page source wake"
             ),
             Self::RuntimeInspectorResponsePublication { .. } => {
                 panic!("a concrete Runtime response publication is not a Page scheduling wake")

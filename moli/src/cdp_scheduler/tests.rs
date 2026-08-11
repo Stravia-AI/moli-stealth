@@ -11,15 +11,15 @@ use moli_core::{
     },
 };
 use moli_protocol::{
-    BackgroundNavigationGateKey, BackgroundProtocolEvent, CdpConnection, CdpSchedulerEvent,
-    DeferredMainDocumentLoadCompletionOutputAction,
+    BackgroundNavigationCancellation, BackgroundNavigationGateKey, BackgroundProtocolEvent,
+    CdpConnection, CdpSchedulerEvent, DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadPredecessorCandidate,
     ProtocolSchedulerWork,
     conn::RuntimeInspectorResponseReady,
     devtools_runtime::{
         AutomationEvent, BrowserDownloadWillBeginEvent, DevToolsFrameId, DevToolsLoaderId,
-        DevToolsNavigationWait, DevToolsRequestId, DevToolsTargetId, NavigationFrameEvent,
-        NavigationFrameEventKind, NetworkRequestEvent,
+        DevToolsNavigationWait, DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId,
+        NavigationFrameEvent, NavigationFrameEventKind, NetworkRequestEvent,
     },
     test_support::{
         background_navigation_gate_key as make_background_navigation_gate_key,
@@ -30,8 +30,8 @@ use moli_protocol::{
 use serde_json::json;
 
 use super::{
-    CdpScheduler, ForegroundNavigationNetworkBarrier, ProtocolOutputSequence,
-    ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
+    BackgroundNavigationGate, CdpScheduler, ForegroundNavigationNetworkBarrier,
+    ProtocolOutputSequence, ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
     devtools_navigation_lifecycle_milestone, drain_pending_background_events,
     next_page_screencast_deadline, page_screencast_interval,
 };
@@ -120,7 +120,7 @@ fn protocol_output_sequence_preserves_background_event_sidecar() {
 
 #[test]
 fn load_ordering_splits_network_observations_from_page_side_effects() {
-    let network = network_response_event("EventSource", "REQ-sse");
+    let network = network_response_event(DevToolsNetworkResourceType::EventSource, "REQ-sse");
     let page_effect = download_will_begin_event("FRAME-nav", "download-after-load");
     let output =
         ProtocolOutputSequence::from_background_events(vec![network.clone(), page_effect.clone()]);
@@ -262,12 +262,15 @@ fn protocol_output_loose_response_split_ignores_typed_runtime_response() {
     assert_eq!(response.command_id(), 42);
 }
 
-fn network_response_event(resource_type: &str, request_id: &str) -> BackgroundProtocolEvent {
+fn network_response_event(
+    resource_type: DevToolsNetworkResourceType,
+    request_id: &str,
+) -> BackgroundProtocolEvent {
     let message = json!({
         "method": "Network.responseReceived",
         "params": {
             "requestId": request_id,
-            "type": resource_type,
+            "type": resource_type.as_cdp_type(),
             "response": {
                 "url": "https://example.test/resource",
                 "status": 200,
@@ -290,7 +293,7 @@ fn network_response_event(resource_type: &str, request_id: &str) -> BackgroundPr
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
-        resource_type: Some(resource_type.to_owned()),
+        resource_type: Some(resource_type),
         timestamp: Some(1.0),
         wall_time: None,
         status: Some(200),
@@ -310,6 +313,56 @@ fn network_response_event(resource_type: &str, request_id: &str) -> BackgroundPr
         auth_challenge: None,
     });
     BackgroundProtocolEvent::immediate_automation_event(message, automation_event)
+}
+
+fn network_request_event(
+    resource_type: DevToolsNetworkResourceType,
+    request_id: &str,
+) -> BackgroundProtocolEvent {
+    let (_, Some(AutomationEvent::NetworkResponseStarted(mut network_event))) =
+        network_response_event(resource_type, request_id).into_parts()
+    else {
+        unreachable!("network response fixture should retain its typed sidecar")
+    };
+    network_event.status = None;
+    network_event.encoded_data_length = None;
+    BackgroundProtocolEvent::immediate_automation_event(
+        json!({
+            "method": "Network.requestWillBeSent",
+            "params": {
+                "requestId": request_id,
+                "loaderId": "LOADER-nav",
+                "type": resource_type.as_cdp_type(),
+                "request": {
+                    "url": "https://example.test/resource",
+                    "method": "GET"
+                }
+            }
+        }),
+        AutomationEvent::NetworkBeforeRequestSent(network_event),
+    )
+}
+
+fn network_finished_event(
+    resource_type: DevToolsNetworkResourceType,
+    request_id: &str,
+) -> BackgroundProtocolEvent {
+    let (_, Some(AutomationEvent::NetworkResponseStarted(network_event))) =
+        network_response_event(resource_type, request_id).into_parts()
+    else {
+        unreachable!("network response fixture should retain its typed sidecar")
+    };
+    BackgroundProtocolEvent::immediate_automation_event(
+        json!({
+            "method": "Network.loadingFinished",
+            "params": {
+                "requestId": request_id,
+                "timestamp": 2.0,
+                "encodedDataLength": 0
+            }
+        }),
+        AutomationEvent::NetworkResponseCompleted(network_event),
+    )
 }
 
 fn output_request_ids(output: ProtocolOutputSequence) -> Vec<String> {
@@ -400,12 +453,22 @@ fn root_document_lifecycle_identity(
 }
 
 fn background_navigation_gate_key() -> BackgroundNavigationGateKey {
+    background_navigation_gate_key_for("TID-nav", "SID-nav", "FRAME-nav", "LOADER-nav", 1)
+}
+
+fn background_navigation_gate_key_for(
+    target_id: &str,
+    session_id: &str,
+    frame_id: &str,
+    loader_id: &str,
+    navigation_request_id: u64,
+) -> BackgroundNavigationGateKey {
     make_background_navigation_gate_key(
-        Some("TID-nav".to_owned()),
-        Some("SID-nav".to_owned()),
-        "FRAME-nav".to_owned(),
-        "LOADER-nav".to_owned(),
-        Some(1),
+        Some(target_id.to_owned()),
+        Some(session_id.to_owned()),
+        frame_id.to_owned(),
+        loader_id.to_owned(),
+        Some(navigation_request_id),
     )
 }
 
@@ -1030,7 +1093,10 @@ fn background_navigation_blocks_concrete_protocol_residence_not_renderer_ingress
     let mut scheduler = CdpScheduler::new(CdpConnection::new());
     scheduler
         .background_navigation_gate
-        .note_navigation_started(background_navigation_gate_key());
+        .note_navigation_started(
+            background_navigation_gate_key(),
+            BackgroundNavigationCancellation::new(),
+        );
     scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
         work: root_frame_stopped_loading_work(1, "FRAME-1"),
     }]);
@@ -1042,29 +1108,151 @@ fn background_navigation_blocks_concrete_protocol_residence_not_renderer_ingress
 }
 
 #[test]
+fn replacement_navigation_retires_only_the_superseded_frame_gate() {
+    let mut gate = BackgroundNavigationGate::default();
+    let source = background_navigation_gate_key_for(
+        "TID-nav",
+        "SID-source",
+        "FRAME-nav",
+        "LOADER-source",
+        1,
+    );
+    let replacement = background_navigation_gate_key_for(
+        "TID-nav",
+        "SID-replacement",
+        "FRAME-nav",
+        "LOADER-replacement",
+        2,
+    );
+    let unrelated = background_navigation_gate_key_for(
+        "TID-other",
+        "SID-other",
+        "FRAME-other",
+        "LOADER-other",
+        3,
+    );
+    let source_cancellation = BackgroundNavigationCancellation::new();
+    let replacement_cancellation = BackgroundNavigationCancellation::new();
+    let unrelated_cancellation = BackgroundNavigationCancellation::new();
+
+    gate.note_navigation_started(source.clone(), source_cancellation.clone());
+    gate.note_navigation_started(unrelated.clone(), unrelated_cancellation.clone());
+    gate.note_navigation_started(replacement.clone(), replacement_cancellation.clone());
+    assert!(source_cancellation.is_cancelled());
+    assert!(!replacement_cancellation.is_cancelled());
+    assert!(!unrelated_cancellation.is_cancelled());
+
+    gate.note_navigation_completion_drained(&source);
+    assert!(
+        gate.has_inflight_navigation(),
+        "a stale completion must not clear either live navigation gate"
+    );
+    gate.note_navigation_completion_drained(&replacement);
+    assert!(
+        gate.has_inflight_navigation(),
+        "replacing one frame must not clear an unrelated target's gate"
+    );
+    gate.note_navigation_completion_drained(&unrelated);
+    assert!(!gate.has_inflight_navigation());
+}
+
+#[test]
 fn scheduler_defers_subresource_network_events_until_background_navigation_gate_clears() {
     let mut scheduler = CdpScheduler::new(CdpConnection::new());
     let key = background_navigation_gate_key();
     scheduler
         .background_navigation_gate
-        .note_navigation_started(key.clone());
+        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
 
     let document_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event("Document", "REQ-document"),
+        network_response_event(DevToolsNetworkResourceType::Document, "REQ-document"),
     );
     assert_eq!(output_request_ids(document_output), ["REQ-document"]);
 
     let script_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event("Script", "REQ-script"),
+        network_response_event(DevToolsNetworkResourceType::Script, "REQ-script"),
     );
     assert!(script_output.is_empty());
-    assert_eq!(scheduler.pending_navigation_background_events.len(), 1);
+    let script_terminal = scheduler.route_background_event_around_inflight_navigation(
+        network_finished_event(DevToolsNetworkResourceType::Script, "REQ-script"),
+    );
+    assert!(script_terminal.is_empty());
+    assert_eq!(scheduler.pending_navigation_background_events.len(), 2);
 
     scheduler
         .background_navigation_gate
         .note_navigation_completion_drained(&key);
     let released = scheduler.drain_pending_navigation_background_events();
-    assert_eq!(output_request_ids(released), ["REQ-script"]);
+    let released = released
+        .into_background_events()
+        .into_iter()
+        .map(BackgroundProtocolEvent::into_protocol_message)
+        .map(|message| {
+            (
+                message["method"].as_str().unwrap().to_owned(),
+                message["params"]["requestId"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        released,
+        [
+            (
+                "Network.responseReceived".to_owned(),
+                "REQ-script".to_owned()
+            ),
+            (
+                "Network.loadingFinished".to_owned(),
+                "REQ-script".to_owned()
+            ),
+        ]
+    );
+}
+
+#[test]
+fn navigation_gate_release_precedes_later_renderer_boundary_network_output() {
+    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let key = background_navigation_gate_key();
+    scheduler
+        .background_navigation_gate
+        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
+
+    let request_id = "REQ-boundary-race";
+    assert!(
+        scheduler
+            .route_background_event_around_inflight_navigation(network_request_event(
+                DevToolsNetworkResourceType::Xhr,
+                request_id,
+            ))
+            .is_empty()
+    );
+
+    scheduler
+        .background_navigation_gate
+        .note_navigation_completion_drained(&key);
+    let mut output = ProtocolOutputSequence::empty();
+    scheduler.append_navigation_gate_release_before_renderer_boundary(&mut output);
+    output.append(ProtocolOutputSequence::from_background_event(
+        network_response_event(DevToolsNetworkResourceType::Xhr, request_id),
+    ));
+    output.append(ProtocolOutputSequence::from_background_event(
+        network_finished_event(DevToolsNetworkResourceType::Xhr, request_id),
+    ));
+
+    let methods = output
+        .into_background_events()
+        .into_iter()
+        .map(BackgroundProtocolEvent::into_protocol_message)
+        .map(|message| message["method"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        methods,
+        [
+            "Network.requestWillBeSent",
+            "Network.responseReceived",
+            "Network.loadingFinished",
+        ]
+    );
 }
 
 #[test]
@@ -1072,16 +1260,25 @@ fn foreground_load_wait_network_barrier_releases_document_response_before_subres
     let mut barrier =
         ForegroundNavigationNetworkBarrier::for_navigation_wait(Some(DevToolsNavigationWait::Load));
 
-    let script_output = barrier.route_event(network_response_event("Script", "REQ-script"));
+    let script_output = barrier.route_event(network_response_event(
+        DevToolsNetworkResourceType::Script,
+        "REQ-script",
+    ));
     assert!(script_output.is_empty());
 
-    let document_output = barrier.route_event(network_response_event("Document", "REQ-document"));
+    let document_output = barrier.route_event(network_response_event(
+        DevToolsNetworkResourceType::Document,
+        "REQ-document",
+    ));
     assert_eq!(
         output_request_ids(document_output),
         ["REQ-document", "REQ-script"]
     );
 
-    let image_output = barrier.route_event(network_response_event("Image", "REQ-image"));
+    let image_output = barrier.route_event(network_response_event(
+        DevToolsNetworkResourceType::Image,
+        "REQ-image",
+    ));
     assert_eq!(output_request_ids(image_output), ["REQ-image"]);
     assert!(barrier.finish().is_empty());
 }
@@ -1091,7 +1288,10 @@ fn foreground_load_wait_network_barrier_drains_subresources_if_document_response
     let mut barrier =
         ForegroundNavigationNetworkBarrier::for_navigation_wait(Some(DevToolsNavigationWait::Load));
 
-    let script_output = barrier.route_event(network_response_event("Script", "REQ-script"));
+    let script_output = barrier.route_event(network_response_event(
+        DevToolsNetworkResourceType::Script,
+        "REQ-script",
+    ));
     assert!(script_output.is_empty());
 
     assert_eq!(output_request_ids(barrier.finish()), ["REQ-script"]);

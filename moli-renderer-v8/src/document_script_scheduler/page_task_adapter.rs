@@ -271,7 +271,7 @@ mod tests {
     async fn parser_defer_finalization_preserves_handoff_stylesheet_snapshot() {
         let document_url =
             Url::parse("https://post-parse.test/page.html").expect("test document URL");
-        let (mut document, handoffs) = HtmlParser.parse_dom_host_with_script_handoffs(
+        let (mut document, handoffs, _) = crate::parse_html_test_fixture_with_parser_outputs(
             document_url,
             concat!(
                 "<!doctype html><link rel='stylesheet' href='/before.css'>",
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(blocking_signatures_before.len(), 1);
 
         let link = document
-            .elements_by_tag_name(document.document_handle(), "link", false)
+            .elements_by_tag_name(document.document_node_id(), "link", false)
             .into_iter()
             .next()
             .expect("stylesheet link");

@@ -14,7 +14,7 @@ use super::parser_blocking_task::{
     MainParserBlockingNextAction,
 };
 use super::*;
-use crate::document_runtime::{ParserInsertionController, ParserStreamHandle};
+use crate::document_runtime::ParserInsertionController;
 use crate::document_script_scheduler::{
     DocumentScriptExecutionOutcome, ParserClassicDocumentScriptCompletionPlan,
     ParserClassicDocumentScriptContinuation, ParserClassicDocumentScriptExecutionHooks,
@@ -33,7 +33,7 @@ use crate::script_vm::{
 pub(super) struct MainParserBlockingDocumentScriptOwner<'page, 'runner> {
     page_vm: &'page mut PageVm,
     pending_runner: &'runner mut PendingParsingBlockingClassicScriptRunner,
-    stream: ParserStreamHandle,
+    parser_insertion_controller: Option<ParserInsertionController>,
     log_message: &'static str,
 }
 
@@ -59,13 +59,13 @@ impl<'page, 'runner> MainParserBlockingDocumentScriptOwner<'page, 'runner> {
     pub(super) fn new(
         page_vm: &'page mut PageVm,
         pending_runner: &'runner mut PendingParsingBlockingClassicScriptRunner,
-        stream: ParserStreamHandle,
+        parser_insertion_controller: Option<ParserInsertionController>,
         log_message: &'static str,
     ) -> Self {
         Self {
             page_vm,
             pending_runner,
-            stream,
+            parser_insertion_controller,
             log_message,
         }
     }
@@ -149,8 +149,7 @@ impl ParserClassicDocumentScriptExecutionHooks
         let owner = &mut **self;
         let script_handle = ready_script.script_handle();
         let completion_target = *ready_script.target();
-        let parser_insertion_controller =
-            ParserInsertionController::for_stream(owner.stream.clone());
+        let parser_insertion_controller = owner.parser_insertion_controller.clone();
         let mut begin_owner = MainParserBlockingBeginExecutionOwner {
             parser_insertion_controller,
             completion_target,
@@ -273,7 +272,7 @@ impl ParserClassicDocumentScriptExecutionHooks
         let completion = MainParserBlockingClassicScriptCompletionAction::new(
             target,
             ParserOwnedClassicScriptCompletion::parser_blocking_source_failure(
-                ParserInsertionController::for_stream(owner.stream.clone()),
+                owner.parser_insertion_controller.clone(),
                 event,
             ),
         );

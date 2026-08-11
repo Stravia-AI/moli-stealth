@@ -36,14 +36,14 @@ use crate::page_task_queue::{
     RendererPageNetworkingSource,
 };
 use crate::page_task_queue::{PostParseLifecycleWork, PostParsePageOwnedWork};
-use crate::parser::{HtmlParser, XmlParser};
+use crate::parser::HtmlParser;
 use crate::planning::{
     PreparedScript, PreparedScriptRuntimeGeneration, PreparedScriptSourceLoadOutcome,
     ScriptFetchMetadata, ScriptSource, SharedScriptSourceLoad,
 };
 use crate::runtime::{
     RendererOwnerResourceActivitySource, RendererPageCommand, RendererRuntimeObservableSourceItem,
-    RendererSharedWorkerTargetEvent, post_parse_runtime_inputs::InitialDocumentScriptOwnerInput,
+    RendererSharedWorkerTargetEvent,
 };
 use crate::script_vm::{PostParseLifecycleAdvance, PostParseLifecycleCompletionAction};
 use crate::types::{
@@ -1827,167 +1827,6 @@ fn test_page_vm_with_loader_dom_host_hooks_and_response_referrer_policy(
         Instant::now(),
     )
     .expect("page vm")
-}
-
-#[tokio::test]
-async fn initial_xml_scripts_use_prepared_handoffs_after_dom_mutation() {
-    let loader =
-        crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
-    let (document, handoffs) = XmlParser.parse_with_document_handoffs(
-        Url::parse("https://static-owner.test/page.xhtml").expect("document URL"),
-        concat!(
-            "<html xmlns='http://www.w3.org/1999/xhtml'><head>",
-            "<link id='blocking' rel='stylesheet' href='/before.css' />",
-            "<script type='importmap'>{\"imports\":{\"dep\":\"/dep.js\"}}</script>",
-            "<script id='normal'>globalThis.initialNormal = 'prepared';</script>",
-            "<script defer='defer' src='data:text/javascript,globalThis.initialDefer=1'></script>",
-            "<script type='module'>export const value = 1;</script>",
-            "<script async='async' src='data:text/javascript,globalThis.initialAsync=1'></script>",
-            "<script id='invalid' src='http://[::1'></script>",
-            "</head><body /></html>",
-        )
-        .to_owned(),
-    );
-    let (handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-    let expected_blocking_stylesheet_inputs = blocking_stylesheet_inputs.clone();
-    assert_eq!(expected_blocking_stylesheet_inputs.len(), 1);
-    let mut page_vm = test_page_vm_with_loader_and_dom_host(&loader, DomHost::from_dom(document));
-    let input = InitialDocumentScriptOwnerInput::accept(
-        &mut page_vm,
-        &loader,
-        handoffs,
-        blocking_stylesheet_inputs,
-    )
-    .expect("initial document handoffs should bind to the bootstrap owner");
-
-    let blocking = page_vm
-        .vm()
-        .document_runtime
-        .get_element_by_id("blocking")
-        .expect("blocking stylesheet link");
-    assert!(
-        page_vm
-            .vm_mut()
-            .document_runtime
-            .dom_host_mut()
-            .set_attribute(blocking, "href", "/after.css")
-    );
-
-    let normal = page_vm
-        .vm()
-        .document_runtime
-        .get_element_by_id("normal")
-        .expect("normal script");
-    assert!(
-        page_vm
-            .vm_mut()
-            .document_runtime
-            .dom_host_mut()
-            .set_text_content(normal, "globalThis.initialNormal = 'mutated';")
-    );
-    let invalid = page_vm
-        .vm()
-        .document_runtime
-        .get_element_by_id("invalid")
-        .expect("invalid script");
-    assert!(
-        page_vm
-            .vm_mut()
-            .document_runtime
-            .dom_host_mut()
-            .set_attribute(invalid, "src", "/fixed-after-acceptance.js")
-    );
-
-    let work = input.finalize(&mut page_vm).await;
-    assert!(work.iter().any(|work| {
-        matches!(
-            work,
-            PostParsePageOwnedWork::Lifecycle(lifecycle)
-                if matches!(
-                    lifecycle.as_ref(),
-                    PostParseLifecycleWork::SeedDocumentOwnedBlockingStylesheets(inputs)
-                        if inputs == &expected_blocking_stylesheet_inputs
-                )
-        )
-    }));
-    assert!(work.iter().any(|work| matches!(
-        work.as_lifecycle_work(),
-        Some(PostParseLifecycleWork::AdvanceMainParserDeferredScripts {
-            initial_count: 2,
-            ..
-        })
-    )));
-    assert!(work.iter().any(|work| {
-        work.as_script()
-            .is_some_and(|script| script.position == 4 && script.mode == ScriptMode::Async)
-    }));
-    assert_eq!(
-        page_vm
-            .vm_mut()
-            .document_runtime
-            .resolve_module_specifier(
-                "dep",
-                &Url::parse("https://static-owner.test/module.js").expect("module base URL"),
-            )
-            .expect("prepared import map should be registered before module acceptance"),
-        Url::parse("https://static-owner.test/dep.js").expect("mapped URL")
-    );
-
-    assert!(work.iter().any(|work| {
-        work.as_script().is_some_and(|script| {
-            script.position == 1
-                && matches!(
-                    &script.source,
-                    ScriptSource::Inline(source)
-                        if source == "globalThis.initialNormal = 'prepared';"
-                )
-        })
-    }));
-    assert!(work.iter().any(|work| {
-        matches!(
-            work.as_lifecycle_work(),
-            Some(PostParseLifecycleWork::ReportWindowScriptFailure(task))
-                if task.message.contains("failed to resolve script src")
-        )
-    }));
-}
-
-#[tokio::test]
-async fn initial_static_script_input_drops_after_document_owner_replacement() {
-    let loader =
-        crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
-    let (dom_host, handoffs) = HtmlParser.parse_dom_host_with_document_handoffs(
-        Url::parse("https://static-owner.test/page.html").expect("document URL"),
-        concat!(
-            "<!doctype html><link rel='stylesheet' href='/stale.css'>",
-            "<script defer src='data:text/javascript,globalThis.staleDefer=1'></script>",
-        )
-        .to_owned(),
-    );
-    let (handoffs, blocking_stylesheet_inputs) = handoffs.into_parts();
-    assert_eq!(blocking_stylesheet_inputs.len(), 1);
-    let mut page_vm = test_page_vm_with_loader_and_dom_host(&loader, dom_host);
-    let owner_before = page_vm
-        .vm()
-        .current_main_document_task_owner()
-        .expect("initial owner");
-    let input = InitialDocumentScriptOwnerInput::accept(
-        &mut page_vm,
-        &loader,
-        handoffs,
-        blocking_stylesheet_inputs,
-    )
-    .expect("initial document handoffs should bind to the bootstrap owner");
-
-    page_vm
-        .vm_mut()
-        .eval("document.open(); 'replaced'")
-        .expect("document.open should replace the main document owner");
-    assert_ne!(
-        page_vm.vm().current_main_document_task_owner(),
-        Some(owner_before)
-    );
-    assert!(input.finalize(&mut page_vm).await.is_empty());
 }
 
 fn prepared_external_module_for_page_vm_test(page_vm: &PageVm, url: Url) -> PreparedScript {

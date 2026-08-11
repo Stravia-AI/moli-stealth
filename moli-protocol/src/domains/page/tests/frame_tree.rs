@@ -553,17 +553,11 @@ async fn pending_get_frame_tree_after_page_unload_returns_empty_target_tree() {
 async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
     let page_url = "data:text/html,<iframe name='background-child'></iframe>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(page_url)
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -571,6 +565,9 @@ async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
     bc.set_target_url("data:text/html,<body>active</body>".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-background"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1202,
@@ -604,20 +601,14 @@ async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
 async fn get_frame_tree_targets_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
     let page_url = "data:text/html,<iframe name='inactive-child'></iframe>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(page_url)
-        .await
-        .expect("inactive page should load");
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
-    inactive
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
+    inactive.set_target_url("about:blank".to_owned());
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1203,

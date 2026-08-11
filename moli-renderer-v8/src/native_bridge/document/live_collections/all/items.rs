@@ -11,11 +11,10 @@ pub(super) fn document_all_items_array<'s>(
     document_handle: DomHandle,
 ) -> Option<v8::Local<'s, v8::Array>> {
     let runtime = unsafe { &mut *runtime_ptr };
-    let handles = runtime.filter_parser_visible_handles(
+    let handles =
         runtime
             .dom_host()
-            .resolve_live_collection(document_handle, "tagName", Some("*"), true)?,
-    );
+            .resolve_live_collection(document_handle, "tagName", Some("*"), true)?;
     let array = v8::Array::new(scope, handles.len() as i32);
     let mut visible_index = 0u32;
     for handle in handles {

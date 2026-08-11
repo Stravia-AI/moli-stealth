@@ -76,6 +76,22 @@ impl<'vm> ChildDocumentScriptOwnerHooks<'vm> {
         })
     }
 
+    pub(in crate::script_vm) fn resume_parser_for_classic_execution(
+        &mut self,
+        child_handle: DomHandle,
+        owner: FrameDocumentTaskOwner,
+        script_handle: DomHandle,
+    ) -> bool {
+        self.vm
+            ._context_host
+            .borrow_mut()
+            .resume_live_child_document_parser_for_classic_execution(
+                child_handle,
+                owner,
+                script_handle,
+            )
+    }
+
     pub(in crate::script_vm) fn select_current_realm(
         &mut self,
         child_handle: DomHandle,

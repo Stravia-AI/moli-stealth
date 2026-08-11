@@ -1,5 +1,9 @@
-use moli_dom::native::{DomHost, NativeDom, NativeNodeId, NodeData, NodeType};
+use std::collections::{HashMap, HashSet};
+
+use moli_dom::native::{DomHost, NativeDom, NativeNodeId, Node, NodeData, NodeType};
 use xmlparser::{ElementEnd, Token, Tokenizer};
+
+use crate::live_target::ParserStreamHtmlTreeSinkTarget;
 
 const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
@@ -76,6 +80,116 @@ pub(super) fn transform_document_to_xml_tree_view(document: NativeDom) -> Native
     }
     append(&mut host, document, html);
     host.into_dom()
+}
+
+/// Applies the XML viewer conversion to the parser's current DOM owner.
+///
+/// The snapshot is used only to decide and plan the Chromium-compatible tree
+/// shape. Every structural change is replayed through the parser target, so a
+/// bootstrapped renderer keeps one live `Document`, stable node identities for
+/// the source XML subtree, and the normal mutation/runtime bookkeeping.
+pub(super) fn transform_parser_target_to_xml_tree_view(
+    target: &mut ParserStreamHtmlTreeSinkTarget,
+) {
+    let Some(source_document) = target.snapshot_current_parser_document() else {
+        return;
+    };
+    if !should_transform(&source_document) {
+        return;
+    }
+
+    let parser_document = target.parser_document_node_id();
+    if source_document.document_node_id() != parser_document {
+        return;
+    }
+    let original_handles = source_document
+        .nodes()
+        .map(Node::id)
+        .collect::<HashSet<_>>();
+    let original_document_children = source_document
+        .child_ids(parser_document)
+        .collect::<Vec<_>>();
+    let transformed_document = transform_document_to_xml_tree_view(source_document);
+    let desired_document_children = transformed_document
+        .child_ids(transformed_document.document_node_id())
+        .collect::<Vec<_>>();
+
+    for child in original_document_children {
+        target.remove_existing_node(parser_document, child);
+    }
+
+    let mut materialized_handles = HashMap::new();
+    for desired_child in desired_document_children {
+        let child = materialize_transformed_viewer_node(
+            target,
+            &transformed_document,
+            &original_handles,
+            &mut materialized_handles,
+            desired_child,
+        );
+        target.append_existing_node(parser_document, child);
+    }
+}
+
+fn materialize_transformed_viewer_node(
+    target: &mut ParserStreamHtmlTreeSinkTarget,
+    transformed: &NativeDom,
+    original_handles: &HashSet<NativeNodeId>,
+    materialized_handles: &mut HashMap<NativeNodeId, NativeNodeId>,
+    source_handle: NativeNodeId,
+) -> NativeNodeId {
+    if original_handles.contains(&source_handle) {
+        return source_handle;
+    }
+    if let Some(handle) = materialized_handles.get(&source_handle) {
+        return *handle;
+    }
+
+    let data = transformed
+        .node(source_handle)
+        .unwrap_or_else(|| panic!("XML viewer plan references missing node {source_handle:?}"))
+        .data()
+        .clone();
+    let materialized = match data {
+        NodeData::Element(element) => {
+            let handle = target.create_parser_element_without_attributes(
+                element.local_name().to_owned(),
+                element.namespace().to_owned(),
+                element.prefix().map(str::to_owned),
+            );
+            target.add_attrs_if_missing_for_parser(handle, element.attributes().to_vec());
+            handle
+        }
+        NodeData::Text(text) => target.create_text_node(text.data().to_owned()),
+        NodeData::CDataSection(cdata) => target.create_cdata_section_node(cdata.data().to_owned()),
+        NodeData::Comment(comment) => target.create_comment_node(comment.data().to_owned()),
+        NodeData::ProcessingInstruction(instruction) => target.create_processing_instruction_node(
+            instruction.target().to_owned(),
+            instruction.data().to_owned(),
+        ),
+        NodeData::DocumentType(document_type) => target.create_document_type_node(
+            document_type.name().to_owned(),
+            document_type.public_id().to_owned(),
+            document_type.system_id().to_owned(),
+        ),
+        NodeData::Document(_) | NodeData::DocumentFragment(_) => {
+            panic!("XML viewer plan cannot materialize a document container node")
+        }
+    };
+    materialized_handles.insert(source_handle, materialized);
+
+    let children = transformed.child_ids(source_handle).collect::<Vec<_>>();
+    for child in children {
+        let child = materialize_transformed_viewer_node(
+            target,
+            transformed,
+            original_handles,
+            materialized_handles,
+            child,
+        );
+        target.append_existing_node(materialized, child);
+    }
+    materialized
 }
 
 fn should_transform(document: &NativeDom) -> bool {
@@ -359,12 +473,10 @@ mod tests {
     use url::Url;
 
     fn parse_top_level(source: &str) -> NativeDom {
-        XmlParser
-            .parse_top_level_document_with_handoffs(
-                Url::parse("https://example.test/document.xml").unwrap(),
-                source.to_owned(),
-            )
-            .0
+        XmlParser.parse_top_level_document(
+            Url::parse("https://example.test/document.xml").unwrap(),
+            source.to_owned(),
+        )
     }
 
     fn document_element(document: &NativeDom) -> NativeNodeId {

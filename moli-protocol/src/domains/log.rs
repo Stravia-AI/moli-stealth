@@ -360,7 +360,12 @@ mod tests {
             "unexpected Log.entryAdded sidecar text: {log_event:?}"
         );
         assert_eq!(log_event.level, "error");
-        assert_eq!(log_event.url.as_deref(), Some("data:text/html,log-test"));
+        assert_eq!(
+            log_event.url.as_deref(),
+            Some(
+                "data:text/html,<!doctype html><script>setTimeout(function(){ throw new Error('boot failure') }, 0)</script>"
+            )
+        );
 
         let (response, response_sidecar) = events[1].clone().into_parts();
         assert_eq!(response["id"], json!(1));

@@ -69,6 +69,7 @@ fn observation_transport_charge_bytes(observation: &RendererProtocolObservation)
         .into_iter()
         .map(string_charge)
         .sum(),
+        RendererProtocolObservation::DocumentTitleChanged(change) => string_charge(&change.title),
         RendererProtocolObservation::DocumentLifecycle(_) => 0,
         RendererProtocolObservation::Network { item, .. } => item.renderer_transport_charge_bytes(),
         RendererProtocolObservation::RuntimeBinding(call) => {

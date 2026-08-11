@@ -271,9 +271,21 @@ async fn puppeteer_target_events_create_navigate_close_page_sequence() {
         "params": { "url": navigated_url }
     }))
     .await;
+    crate::testing::wait_until_message(
+        &mut ctx,
+        None,
+        "Puppeteer parsed title targetInfoChanged",
+        |message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
+                && message["params"]["targetInfo"]["title"] == json!("Puppeteer Target Events")
+        },
+    )
+    .await;
     let changed = ctx.take_first_matching("Puppeteer page targetInfoChanged", |message| {
         message["method"] == json!("Target.targetInfoChanged")
             && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
+            && message["params"]["targetInfo"]["title"] == json!("Puppeteer Target Events")
     });
     assert_eq!(changed["params"]["targetInfo"]["type"], json!("page"));
     assert_eq!(

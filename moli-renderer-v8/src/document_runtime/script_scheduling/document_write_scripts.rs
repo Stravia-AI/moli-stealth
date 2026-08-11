@@ -7,6 +7,10 @@ use crate::planning::{PreparedScriptRuntimeGeneration, ScriptSource};
 use crate::script_vm::perform_microtask_checkpoint_and_report_pending_promise_rejections;
 use crate::types::ScriptKind;
 use crate::util::create_script_origin;
+use crate::v8_execution_watchdog::{
+    SCRIPT_TURN_WATCHDOG_TIMEOUT, V8ExecutionWatchdog, V8ExecutionWatchdogKind,
+    V8ExecutionWatchdogOutcome,
+};
 use crate::{context_bootstrap, native_bridge};
 use tracing::debug;
 
@@ -147,6 +151,11 @@ impl DocumentRuntime {
             "parser-created top-level script execution requires the page main-world context",
         );
         let scope = &mut v8::ContextScope::new(scope, default_context);
+        let watchdog = V8ExecutionWatchdog::arm(
+            V8ExecutionWatchdogKind::ScriptTurn,
+            scope.thread_safe_handle(),
+            SCRIPT_TURN_WATCHDOG_TIMEOUT,
+        );
         let run_result = {
             let _parser_script_nesting = self.enter_parser_script_nesting();
             (|| {
@@ -156,8 +165,16 @@ impl DocumentRuntime {
                 script.run(scope)
             })()
         };
+        let script_timed_out = watchdog.disarm() == V8ExecutionWatchdogOutcome::TimedOut;
         self.clear_current_script_handle();
         if run_result.is_none() {
+            if script_timed_out {
+                tracing::warn!(
+                    host_script_handle,
+                    timeout = ?SCRIPT_TURN_WATCHDOG_TIMEOUT,
+                    "document.write script execution exceeded its deadline and was terminated"
+                );
+            }
             return;
         }
         match current_script_event_behavior {
@@ -174,7 +191,19 @@ impl DocumentRuntime {
                 }
             }
         }
+        let watchdog = V8ExecutionWatchdog::arm(
+            V8ExecutionWatchdogKind::ScriptTurn,
+            scope.thread_safe_handle(),
+            SCRIPT_TURN_WATCHDOG_TIMEOUT,
+        );
         perform_document_write_microtask_checkpoints(scope);
+        if watchdog.disarm() == V8ExecutionWatchdogOutcome::TimedOut {
+            tracing::warn!(
+                host_script_handle,
+                timeout = ?SCRIPT_TURN_WATCHDOG_TIMEOUT,
+                "document.write script microtask checkpoint exceeded its deadline and was terminated"
+            );
+        }
     }
 
     fn execute_document_write_prepared_script(

@@ -61,13 +61,13 @@ impl MainParserBlockingClassicScriptCompletionAction {
 
 #[derive(Clone)]
 pub(super) struct MainParserBlockingClassicScriptExecutionTarget {
-    parser_insertion_controller: ParserInsertionController,
+    parser_insertion_controller: Option<ParserInsertionController>,
     completion_target: MainDocumentClassicScriptTarget,
 }
 
 impl MainParserBlockingClassicScriptExecutionTarget {
     pub(super) fn new(
-        parser_insertion_controller: ParserInsertionController,
+        parser_insertion_controller: Option<ParserInsertionController>,
         completion_target: MainDocumentClassicScriptTarget,
     ) -> Self {
         Self {
@@ -76,7 +76,7 @@ impl MainParserBlockingClassicScriptExecutionTarget {
         }
     }
 
-    pub(super) fn parser_insertion_controller(&self) -> ParserInsertionController {
+    pub(super) fn parser_insertion_controller(&self) -> Option<ParserInsertionController> {
         self.parser_insertion_controller.clone()
     }
 
@@ -94,7 +94,7 @@ pub(super) fn main_parser_blocking_ready_action(
 }
 
 pub(super) fn main_parser_blocking_begin_execution_action(
-    parser_insertion_controller: ParserInsertionController,
+    parser_insertion_controller: Option<ParserInsertionController>,
     completion_target: MainDocumentClassicScriptTarget,
     action: ParserPendingClassicScriptBeginExecutionAction,
 ) -> MainParserBlockingClassicScriptExecutionEntry {

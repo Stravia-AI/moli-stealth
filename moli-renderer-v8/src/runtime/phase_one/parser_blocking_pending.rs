@@ -1,6 +1,7 @@
 use super::parser_blocking_owner::MainParserBlockingExternalLoadOwner;
 use crate::DocumentBlockingStylesheetSignature;
 use crate::frame_owner_model::FrameDocumentTaskOwner;
+use crate::live_document_parser::ParserResumePermit;
 use crate::parser_script::context::{
     ParserClassicScriptDocumentOwnerState, ParserClassicScriptExecutionGateState,
     ParserClassicScriptSourceLoadOutcomeState, ParserClassicScriptSourceLoadStartState,
@@ -27,6 +28,7 @@ pub(super) struct PendingParsingBlockingClassicScriptContext {
     owner: FrameDocumentTaskOwner,
     pub(super) blocking_signatures_before: HashSet<DocumentBlockingStylesheetSignature>,
     pub(super) source_load: Option<PendingParserBlockingSourceLoad>,
+    resume_permit: Option<ParserResumePermit>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,7 +55,19 @@ impl PendingParsingBlockingClassicScriptContext {
             owner,
             blocking_signatures_before,
             source_load,
+            resume_permit: None,
         }
+    }
+
+    pub(super) fn install_resume_permit(&mut self, permit: ParserResumePermit) {
+        assert!(
+            self.resume_permit.replace(permit).is_none(),
+            "one parser-blocking script context can own only one parser resume permit"
+        );
+    }
+
+    pub(super) fn resume_permit(&self) -> Option<ParserResumePermit> {
+        self.resume_permit
     }
 }
 

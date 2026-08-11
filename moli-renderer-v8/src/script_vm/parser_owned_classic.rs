@@ -79,7 +79,7 @@ impl ParserOwnedClassicScriptExecutionReport {
 #[derive(Clone, Debug)]
 pub(crate) enum ParserOwnedClassicScriptExecutionContext {
     ParserBlocking {
-        insertion_controller: ParserInsertionController,
+        insertion_controller: Option<ParserInsertionController>,
     },
     Deferred,
 }
@@ -93,7 +93,7 @@ impl ParserOwnedClassicScriptExecutionContext {
         match self {
             Self::ParserBlocking {
                 insertion_controller,
-            } => Some(insertion_controller),
+            } => insertion_controller.as_ref(),
             Self::Deferred => None,
         }
     }
@@ -119,7 +119,7 @@ impl ParserOwnedClassicScriptCompletion {
     }
 
     pub(crate) fn parser_blocking_source_failure(
-        parser_insertion_controller: ParserInsertionController,
+        parser_insertion_controller: Option<ParserInsertionController>,
         script_element_event: Option<ScriptEventTask>,
     ) -> Self {
         Self {

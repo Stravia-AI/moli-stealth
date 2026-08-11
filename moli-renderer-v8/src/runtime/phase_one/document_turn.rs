@@ -8,7 +8,7 @@ use crate::document_script_scheduler::{
 
 pub(super) struct DocumentTurnContext<'driver> {
     pub(super) scheduler: &'driver mut DocumentScriptScheduler,
-    pub(super) stream: ParserStreamHandle,
+    pub(super) parser_session: &'driver DocumentParserSession,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,8 +73,7 @@ impl<'driver> DocumentTurnContext<'driver> {
             vm.as_mut()
                 .expect("PageVm must retain a live ScriptVm until drop")
                 .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
-            self.stream
-                .borrow()
+            self.parser_session
                 .with_stylesheet_blocking_read_view(|document| {
                     vm.as_mut()
                         .expect("PageVm must retain a live ScriptVm until drop")

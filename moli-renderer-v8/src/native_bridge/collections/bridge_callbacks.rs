@@ -230,6 +230,7 @@ fn bridge_create_live_collection_callback(
         query,
         include_root,
         tag_name_html_document,
+        resolution_cache: Default::default(),
     };
 
     let collection = build_live_collection_wrapper(scope, runtime_ptr, descriptor);

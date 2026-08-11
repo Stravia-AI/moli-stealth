@@ -52,6 +52,7 @@ async fn search_flow_with_real_dom() {
         "<!doctype html><html><body><p>one</p><p>two</p></body></html>",
     )
     .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 2,
@@ -198,6 +199,7 @@ async fn perform_search_unions_plain_text_tag_attribute_and_xpath_matches() {
         "<!doctype html><html><body><p id='first' data-label='Needle Value'>first paragraph</p><p id='second'>second paragraph</p></body></html>",
     )
     .await;
+    ctx.sent.clear();
     publish_document_for_search(&mut ctx, 21, None).await;
 
     let text_nodes = perform_search_and_get_all_results(&mut ctx, 30, "paragraph", 2).await;
@@ -471,26 +473,22 @@ async fn perform_search_selectors_cover_all_frame_documents_and_author_shadow_ro
 #[tokio::test(flavor = "multi_thread")]
 async fn dom_search_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><html><body><span>one</span><span>two</span></body></html>",
-        )
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-A".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><html><body><span>one</span><span>two</span></body></html>",
+        Some("SID-background"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 301,
@@ -558,14 +556,6 @@ async fn dom_search_targets_loaded_background_owner_without_promotion() {
 #[tokio::test(flavor = "multi_thread")]
 async fn dom_search_targets_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><html><body><article>one</article><article>two</article></body></html>",
-        )
-        .await
-        .expect("inactive page should load");
-
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active".to_owned());
@@ -573,10 +563,14 @@ async fn dom_search_targets_inactive_loaded_owner_without_activation() {
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
+    inactive.set_target_url("about:blank".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.replace_loaded_page(Some(page));
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><html><body><article>one</article><article>two</article></body></html>",
+        Some("SID-inactive"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 311,

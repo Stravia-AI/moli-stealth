@@ -21,7 +21,7 @@ pub(in crate::native_bridge::collections) fn radio_node_list_value_getter<'s>(
         return;
     }
     let runtime = unsafe { &*runtime_ptr };
-    for handle in descriptor.resolve(runtime) {
+    for handle in descriptor.resolve(runtime).iter().copied() {
         let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
             continue;
         };
@@ -62,7 +62,7 @@ pub(in crate::native_bridge::collections) fn radio_node_list_value_setter<'s>(
     }
     let matching_handle = {
         let runtime = unsafe { &*runtime_ptr };
-        descriptor.resolve(runtime).into_iter().find(|handle| {
+        descriptor.resolve(runtime).iter().copied().find(|handle| {
             runtime
                 .dom_host()
                 .node(*handle)

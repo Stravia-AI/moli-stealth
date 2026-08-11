@@ -972,26 +972,23 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn css_loaded_page_methods_target_background_owner_without_promotion() {
         let mut ctx = TestContext::new();
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><style title='owner'>body { color: red; }</style></head><body><div id='target' style='display:flex;width:123px;color:blue'></div></body></html>",
-            )
-            .await
-            .expect("background page should load");
-
-        let mut background = BackgroundTarget::with_url(
+        let background = BackgroundTarget::with_url(
             "TID-background".to_owned(),
             Some("SID-background".to_owned()),
-            page.final_url().as_str().to_owned(),
+            "about:blank".to_owned(),
         );
-        background.replace_loaded_page(Some(page));
 
         let mut bc = BrowserContext::new("BID-A".to_owned());
         bc.set_active_target_id("TID-active".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         bc.background_targets.push(background);
         ctx.conn.browser_context = Some(bc);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<html><head><style title='owner'>body { color: red; }</style></head><body><div id='target' style='display:flex;width:123px;color:blue'></div></body></html>",
+            Some("SID-background"),
+        )
+        .await;
+        ctx.sent.clear();
 
         let style_sheet_id =
             inline_style_sheet_id_for_session_async(&mut ctx, Some("SID-background")).await;
@@ -1106,14 +1103,6 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn css_loaded_page_methods_target_inactive_owner_without_activation() {
         let mut ctx = TestContext::new();
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><style title='inactive'>main { color: red; }</style></head><body><main id='target' style='display:block;height:77px'></main></body></html>",
-            )
-            .await
-            .expect("inactive page should load");
-
         let mut active = BrowserContext::new("BID-active".to_owned());
         active.set_active_target_id("TID-active".to_owned());
         active.attach_active_session("SID-active".to_owned());
@@ -1121,10 +1110,15 @@ mod tests {
 
         let mut inactive = BrowserContext::new("BID-inactive".to_owned());
         inactive.set_active_target_id("TID-inactive".to_owned());
-        inactive.set_target_url(page.final_url().as_str().to_owned());
+        inactive.set_target_url("about:blank".to_owned());
         inactive.attach_active_session("SID-inactive".to_owned());
-        inactive.replace_loaded_page(Some(page));
         ctx.conn.inactive_browser_contexts.push(inactive);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<html><head><style title='inactive'>main { color: red; }</style></head><body><main id='target' style='display:block;height:77px'></main></body></html>",
+            Some("SID-inactive"),
+        )
+        .await;
+        ctx.sent.clear();
 
         let style_sheet_id =
             inline_style_sheet_id_for_session_async(&mut ctx, Some("SID-inactive")).await;

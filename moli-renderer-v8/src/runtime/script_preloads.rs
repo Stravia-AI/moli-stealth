@@ -1,5 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use html5ever::{
     Attribute,
@@ -10,6 +11,8 @@ use html5ever::{
     },
 };
 use url::Url;
+
+use parking_lot::Mutex;
 
 use crate::network::ResourceRequestClient;
 use crate::page_task_queue::RendererOwnerWakeSender;
@@ -41,7 +44,7 @@ pub(super) enum ParserBlockingPreloadDisposition {
 }
 
 pub(super) struct BufferedDocumentPreloadState {
-    pub(super) entries: HashMap<BufferedScriptPreloadKey, BufferedScriptPreloadEntry>,
+    pub(super) entries: DocumentScriptPreloadStore,
     document_character_set: String,
     script_fetch_interception_enabled: bool,
     response_csp_requires_parser_admission: bool,
@@ -89,6 +92,80 @@ pub(super) struct BufferedScriptPreloadEntry {
     pub(super) load: SharedScriptSourceLoad,
 }
 
+/// Document-scoped residence for classic script loads started by the HTML
+/// preload scanner.
+///
+/// The scanner itself remains phase-one state, while its in-flight loads must
+/// also be visible to nested parser re-entry in `DocumentRuntime`. Sharing only
+/// this resource map keeps one physical fetch owner without moving tokenizer
+/// or scanner state into the live Document.
+#[derive(Clone, Default)]
+pub(crate) struct DocumentScriptPreloadStore {
+    entries: Arc<Mutex<HashMap<BufferedScriptPreloadKey, BufferedScriptPreloadEntry>>>,
+}
+
+impl std::fmt::Debug for DocumentScriptPreloadStore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("DocumentScriptPreloadStore")
+            .field("entry_count", &self.len())
+            .finish()
+    }
+}
+
+impl DocumentScriptPreloadStore {
+    pub(super) fn contains_key(&self, key: &BufferedScriptPreloadKey) -> bool {
+        self.entries.lock().contains_key(key)
+    }
+
+    pub(super) fn insert(
+        &mut self,
+        key: BufferedScriptPreloadKey,
+        entry: BufferedScriptPreloadEntry,
+    ) {
+        self.entries.lock().insert(key, entry);
+    }
+
+    pub(super) fn len(&self) -> usize {
+        self.entries.lock().len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn is_empty(&self) -> bool {
+        self.entries.lock().is_empty()
+    }
+
+    #[cfg(test)]
+    pub(super) fn load_for_key(
+        &self,
+        key: &BufferedScriptPreloadKey,
+    ) -> Option<SharedScriptSourceLoad> {
+        self.entries.lock().get(key).map(|entry| entry.load.clone())
+    }
+
+    fn preload_for_script(
+        &self,
+        script: &PreparedScript,
+    ) -> Option<(SharedScriptSourceLoad, moli_fetch::RequestResourceType)> {
+        if !matches!(script.source, ScriptSource::External) {
+            return None;
+        }
+        let key = BufferedScriptPreloadKey::from_script(script)?;
+        let entries = self.entries.lock();
+        let entry = entries
+            .get(&key)
+            .filter(|entry| entry.request.matches_script(script))?;
+        Some((entry.load.clone(), entry.request.resource_type_hint))
+    }
+
+    pub(crate) fn shared_preload_for_script(
+        &self,
+        script: &PreparedScript,
+    ) -> Option<SharedScriptSourceLoad> {
+        self.preload_for_script(script).map(|(load, _)| load)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ServiceWorkerScriptPreloadContext {
     browser_context_runtime: RendererBrowserContextRuntime,
@@ -116,7 +193,7 @@ impl ServiceWorkerScriptPreloadContext {
 impl Default for BufferedDocumentPreloadState {
     fn default() -> Self {
         Self {
-            entries: HashMap::new(),
+            entries: DocumentScriptPreloadStore::default(),
             document_character_set: "UTF-8".to_owned(),
             script_fetch_interception_enabled: false,
             response_csp_requires_parser_admission: false,
@@ -133,6 +210,10 @@ impl Default for BufferedDocumentPreloadState {
 }
 
 impl BufferedDocumentPreloadState {
+    pub(super) fn document_script_preload_store(&self) -> DocumentScriptPreloadStore {
+        self.entries.clone()
+    }
+
     pub(super) fn bind_resource_runtime(
         &mut self,
         owner_wake: Option<RendererOwnerWakeSender>,
@@ -235,14 +316,20 @@ impl BufferedDocumentPreloadState {
         loader: &ResourceRequestClient,
         service_worker_context: Option<&ServiceWorkerScriptPreloadContext>,
     ) {
-        if self.script_fetch_interception_enabled
+        let requires_owner_admission = self.script_fetch_interception_enabled
             || self.response_csp_requires_parser_admission
-            || self.meta_csp_preload_gate.has_seen_meta_csp()
-        {
-            self.queue_script_preloads_for_owner_admission(requests);
-            return;
-        }
-        self.start_preloads_for_requests(requests, loader, service_worker_context);
+            || self.meta_csp_preload_gate.has_seen_meta_csp();
+        let (owner_admitted, legacy_preloads): (Vec<_>, Vec<_>) =
+            requests.into_iter().partition(|request| {
+                requires_owner_admission || request.kind_hint == crate::types::ScriptKind::Module
+            });
+        // Native module graphs share fetches through the Document's module
+        // map. They cannot enter the legacy SharedScriptSourceLoad cache: a
+        // parser module would have no way to join that in-flight request and
+        // would issue a second fetch. PageVm bootstrap drains these descriptors
+        // into the native module map as soon as the Document owner exists.
+        self.queue_script_preloads_for_owner_admission(owner_admitted);
+        self.start_preloads_for_requests(legacy_preloads, loader, service_worker_context);
     }
 
     pub(super) fn set_document_character_set(&mut self, document_character_set: &str) {
@@ -453,21 +540,7 @@ impl BufferedDocumentPreloadState {
         &self,
         script: &PreparedScript,
     ) -> Option<SharedScriptSourceLoad> {
-        self.preload_entry_for_script(script)
-            .map(|entry| entry.load.clone())
-    }
-
-    fn preload_entry_for_script(
-        &self,
-        script: &PreparedScript,
-    ) -> Option<&BufferedScriptPreloadEntry> {
-        if !matches!(script.source, ScriptSource::External) {
-            return None;
-        }
-        let key = BufferedScriptPreloadKey::from_script(script)?;
-        self.entries
-            .get(&key)
-            .filter(|entry| entry.request.matches_script(script))
+        self.entries.shared_preload_for_script(script)
     }
 
     pub(super) fn parser_blocking_preload_disposition_for_script(
@@ -478,11 +551,9 @@ impl BufferedDocumentPreloadState {
             return ParserBlockingPreloadDisposition::Missing;
         }
 
-        let Some(entry) = self.preload_entry_for_script(script) else {
+        let Some((load, resource_type_hint)) = self.entries.preload_for_script(script) else {
             return ParserBlockingPreloadDisposition::Missing;
         };
-        let load = entry.load.clone();
-        let resource_type_hint = entry.request.resource_type_hint;
         if parser_blocking_consumer_should_refetch_pending_late_preload(
             script,
             resource_type_hint,
@@ -523,9 +594,7 @@ impl BufferedDocumentPreloadState {
             return None;
         }
 
-        let entry = self.preload_entry_for_script(script)?;
-        let load = entry.load.clone();
-        let resource_type_hint = entry.request.resource_type_hint;
+        let (load, resource_type_hint) = self.entries.preload_for_script(script)?;
         let probe_started = (wait_for_pending && moli_trace::defer_wait_probe_enabled())
             .then(std::time::Instant::now);
         if probe_started.is_some() {
@@ -877,7 +946,7 @@ fn admit_image_preloads(page_vm: &mut PageVm, requests: Vec<BufferedImagePreload
 }
 
 fn admit_script_preloads(
-    page_vm: &PageVm,
+    page_vm: &mut PageVm,
     state: &mut BufferedDocumentPreloadState,
     requests: Vec<BufferedScriptPreloadRequest>,
     loader: &ResourceRequestClient,
@@ -904,7 +973,21 @@ fn admit_script_preloads(
         }
     }
     let admitted_count = admitted.len();
-    state.start_preloads_for_requests(admitted, loader, service_worker_context);
+    let (native_modules, legacy_preloads): (Vec<_>, Vec<_>) = admitted
+        .into_iter()
+        .partition(|request| request.kind_hint == crate::types::ScriptKind::Module);
+    state.start_preloads_for_requests(legacy_preloads, loader, service_worker_context);
+    for request in native_modules {
+        let request_url = request.url.clone();
+        if let Err(error) = page_vm
+            .vm_mut()
+            .register_native_modulepreload_for_owner(request.into_native_module_preload())
+        {
+            page_vm.vm_mut().record_runtime_warning(format_args!(
+                "preload-scanned module script `{request_url}` failed before fetch scheduling: {error}"
+            ));
+        }
+    }
     if let Some(started) = timing_started
         && discovered_count > 0
     {
@@ -962,6 +1045,22 @@ impl BufferedScriptPreloadRequest {
             host_script_handle: None,
             runtime_generation: crate::planning::PreparedScriptRuntimeGeneration::PendingBinding,
         }
+    }
+
+    fn into_native_module_preload(self) -> crate::module_runtime::NativeModuleSingleFetchRequest {
+        debug_assert_eq!(self.kind_hint, crate::types::ScriptKind::Module);
+        let module_key = crate::module_runtime::ModuleMapKey::java_script(self.url.clone());
+        let fetch_metadata =
+            crate::module_runtime::ModuleFetchMetadata::from_top_level_script_fetch_metadata(
+                &self.fetch_metadata,
+            );
+        crate::module_runtime::NativeModuleSingleFetchRequest::new(
+            self.url.clone(),
+            self.url,
+            self.initiator_url,
+            module_key,
+            fetch_metadata,
+        )
     }
 
     pub(crate) fn matches_script(&self, script: &PreparedScript) -> bool {

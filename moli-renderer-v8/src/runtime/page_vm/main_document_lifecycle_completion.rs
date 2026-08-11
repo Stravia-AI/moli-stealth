@@ -189,6 +189,7 @@ async fn execute_main_document_lifecycle_body_on_owner_local_task(
                     page_vm.prepare_dom_agent_for_main_document_dom_content_loaded(
                         document_lifecycle_identity,
                     );
+                    page_vm.record_document_title_change_if_needed();
                 }
                 let waits_for_descendants = milestone == RendererDocumentLifecycleMilestone::Load
                     && page_vm

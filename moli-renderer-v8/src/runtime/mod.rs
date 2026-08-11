@@ -11,8 +11,10 @@ use std::{
 
 use super::native_bridge::element::ClientRect;
 use crate::DocumentStartScript;
+#[cfg(test)]
+use crate::dom::native::NativeDom;
 use crate::{
-    dom::{NodeId, native::NativeDom},
+    dom::NodeId,
     network::{ResourceRequestClient, context::DocumentResourceLoader},
 };
 use anyhow::{Result, anyhow, ensure};
@@ -68,13 +70,13 @@ mod page_turn_scheduler;
 mod page_vm;
 pub(crate) use page_vm::dom_agent_state::RendererDomAgentState;
 mod phase_one;
-mod post_parse_runtime_inputs;
 mod protocol_output;
 mod script_preloads;
 mod service_worker_run;
 
 pub(crate) use self::script_preloads::{
-    BufferedScriptPreloadKey, BufferedScriptPreloadRequest, IncrementalBufferedScriptPreloadScanner,
+    BufferedScriptPreloadKey, BufferedScriptPreloadRequest, DocumentScriptPreloadStore,
+    IncrementalBufferedScriptPreloadScanner,
 };
 
 pub(crate) use self::browser_context_runtime::RendererOutputTransportSenderSlot;
@@ -384,10 +386,11 @@ pub(in crate::runtime) use self::phase_one::{
 };
 pub(crate) use self::protocol_output::{PendingRendererOutputRecord, RendererTurnOutputJournal};
 pub use self::protocol_output::{
-    RendererOutputCursor, RendererOutputFence, RendererOutputFenceLeaseId, RendererOutputItem,
-    RendererOutputPublication, RendererOutputPublicationOrdering, RendererOutputRecord,
-    RendererOutputResidenceIdentity, RendererOutputStreamCloseReason, RendererOutputStreamControl,
-    RendererOutputStreamEpoch, RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
+    RendererDocumentTitleChanged, RendererOutputCursor, RendererOutputFence,
+    RendererOutputFenceLeaseId, RendererOutputItem, RendererOutputPublication,
+    RendererOutputPublicationOrdering, RendererOutputRecord, RendererOutputResidenceIdentity,
+    RendererOutputStreamCloseReason, RendererOutputStreamControl, RendererOutputStreamEpoch,
+    RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
     RendererOutputTransportMessage, RendererOutputTransportReceiver,
     RendererOutputTransportSendError, RendererOutputTransportSender, RendererOwnerAction,
     RendererProtocolObservation, renderer_output_transport_channel,

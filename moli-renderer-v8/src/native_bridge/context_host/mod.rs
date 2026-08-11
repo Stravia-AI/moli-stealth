@@ -868,7 +868,6 @@ pub(crate) struct JsContextHost {
     child_browsing_context_document_handles: HashMap<DomHandle, DomHandle>,
     document_domain_override: Option<String>,
     next_child_browsing_context_id: u64,
-    next_child_document_loader_id: u64,
     next_child_document_load_id: u64,
     next_child_classic_script_load_id: u64,
     pending_child_document_navigations: HashMap<u64, PendingChildDocumentNavigation>,

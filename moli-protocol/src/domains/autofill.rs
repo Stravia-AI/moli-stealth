@@ -171,16 +171,13 @@ mod tests {
         browser_context.set_target_url("data:text/html,autofill-test".to_owned());
         browser_context.set_active_target_id("TID-1".to_owned());
         browser_context.attach_active_session("SID-1".to_owned());
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(&format!("data:text/html,{html}"))
-            .await
-            .expect("Autofill test page should load");
-        let _ = browser_context
-            .active_target
-            .runtime_slot
-            .replace_loaded_page(Some(page));
         ctx.conn.browser_context = Some(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            &format!("data:text/html,{html}"),
+            Some("SID-1"),
+        )
+        .await;
+        ctx.sent.clear();
     }
 
     async fn backend_node_id_for_expression(

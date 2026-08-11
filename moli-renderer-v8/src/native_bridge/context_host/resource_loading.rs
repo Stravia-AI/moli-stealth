@@ -494,10 +494,15 @@ impl JsContextHost {
         })
     }
 
-    fn record_pending_subresource_request_started(&mut self, info: &PendingSubresourceFetchInfo) {
+    fn record_pending_subresource_request_started(
+        &mut self,
+        info: &PendingSubresourceFetchInfo,
+        disposition: ResourceLoadDisposition,
+    ) {
         self.record_pending_subresource_request_started_with_initiator(
             info,
             SubresourceRequestInitiatorType::Script,
+            disposition,
         );
     }
 
@@ -505,6 +510,7 @@ impl JsContextHost {
         &mut self,
         info: &PendingSubresourceFetchInfo,
         initiator_type: SubresourceRequestInitiatorType,
+        disposition: ResourceLoadDisposition,
     ) {
         let Some(handle) = info.network_request_handle else {
             return;
@@ -522,7 +528,8 @@ impl JsContextHost {
                 initiator_type,
                 info.request_cookie_report.clone(),
             )
-            .with_request_body_bytes(info.request_body_bytes.clone()),
+            .with_request_body_bytes(info.request_body_bytes.clone())
+            .with_keepalive(disposition == ResourceLoadDisposition::Keepalive),
         );
     }
 
@@ -533,7 +540,7 @@ impl JsContextHost {
         if !pending.deferred_request_started {
             return;
         }
-        self.record_pending_subresource_request_started(&pending.info);
+        self.record_pending_subresource_request_started(&pending.info, pending.load.disposition());
         pending.deferred_request_started = false;
     }
 
@@ -827,7 +834,7 @@ impl JsContextHost {
             cancel_handle.clone(),
         );
         if !defer_request_started {
-            self.record_pending_subresource_request_started(&info);
+            self.record_pending_subresource_request_started(&info, load.disposition());
         }
         self.pending_subresource_fetches.insert(
             internal_id,
@@ -877,7 +884,7 @@ impl JsContextHost {
             )
             .expect("active Document authority required for EventSource load");
         if request_started {
-            self.record_pending_subresource_request_started(&info);
+            self.record_pending_subresource_request_started(&info, load.disposition());
         } else {
             self.push_pending_subresource_fetch_info(info.clone());
         }
@@ -931,6 +938,7 @@ impl JsContextHost {
         self.record_pending_subresource_request_started_with_initiator(
             &info,
             SubresourceRequestInitiatorType::Other,
+            load.disposition(),
         );
         self.pending_subresource_fetches.insert(
             internal_id,
@@ -997,6 +1005,7 @@ impl JsContextHost {
                 self.record_pending_subresource_request_started_with_initiator(
                     &info,
                     request_initiator_type,
+                    load.disposition(),
                 );
             }
         }
@@ -1113,6 +1122,7 @@ impl JsContextHost {
         self.record_pending_subresource_request_started_with_initiator(
             &info,
             SubresourceRequestInitiatorType::Other,
+            load.disposition(),
         );
         self.pending_subresource_fetches.insert(
             internal_id,
@@ -1166,6 +1176,7 @@ impl JsContextHost {
         self.record_pending_subresource_request_started_with_initiator(
             &info,
             SubresourceRequestInitiatorType::Css,
+            load.disposition(),
         );
         self.pending_subresource_fetches.insert(
             internal_id,
@@ -1204,7 +1215,7 @@ impl JsContextHost {
             ResourceLoadDisposition::Keepalive,
             cancel_handle.clone(),
         );
-        self.record_pending_subresource_request_started(&info);
+        self.record_pending_subresource_request_started(&info, load.disposition());
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1241,7 +1252,7 @@ impl JsContextHost {
             crate::network::loads::ResourceLoadKind::CspReport
         );
         debug_assert_eq!(load.disposition(), ResourceLoadDisposition::Keepalive);
-        self.record_pending_subresource_request_started(&info);
+        self.record_pending_subresource_request_started(&info, load.disposition());
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {
@@ -1422,7 +1433,7 @@ impl JsContextHost {
             ResourceLoadDisposition::Ordinary,
             cancel_handle.clone(),
         );
-        self.record_pending_subresource_request_started(&info);
+        self.record_pending_subresource_request_started(&info, load.disposition());
         self.pending_subresource_fetches.insert(
             internal_id,
             PendingSubresourceFetchState {

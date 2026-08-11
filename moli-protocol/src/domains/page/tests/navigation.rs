@@ -372,6 +372,13 @@ async fn navigation_history_supports_playwright_back_forward_commands() {
     }))
     .await;
     take_response_by_id(&mut ctx, 1);
+    wait_until_message(
+        &mut ctx,
+        Some("SID-1"),
+        "first history document DOMContentLoaded",
+        |message| message["method"] == json!("Page.domContentEventFired"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -382,6 +389,13 @@ async fn navigation_history_supports_playwright_back_forward_commands() {
     }))
     .await;
     take_response_by_id(&mut ctx, 2);
+    wait_until_message(
+        &mut ctx,
+        Some("SID-1"),
+        "second history document DOMContentLoaded",
+        |message| message["method"] == json!("Page.domContentEventFired"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -1278,17 +1292,11 @@ async fn navigation_history_is_preserved_per_parked_target() {
 async fn get_navigation_history_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
     let background_url = "data:text/html,<title>Background History</title><main>background</main>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(background_url)
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
@@ -1296,6 +1304,9 @@ async fn get_navigation_history_targets_loaded_background_owner_without_promotio
     bc.set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(background_url, Some("SID-background"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 15,
@@ -1326,17 +1337,11 @@ async fn reset_navigation_history_targets_loaded_background_owner_without_promot
     let mut ctx = TestContext::new();
     let background_url =
         "data:text/html,<title>Background Reset History</title><main>background</main>";
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(background_url)
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background-reset".to_owned(),
         Some("SID-background-reset".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut browser_context = BrowserContext::new("BID-reset-background".to_owned());
     browser_context.set_active_target_id("TID-active".to_owned());
@@ -1345,6 +1350,9 @@ async fn reset_navigation_history_targets_loaded_background_owner_without_promot
         .set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     browser_context.background_targets.push(background);
     ctx.conn.browser_context = Some(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(background_url, Some("SID-background-reset"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 1215,
@@ -2752,8 +2760,22 @@ async fn navigate_after_target_discovery_emits_target_info_changed() {
     }))
     .await;
 
+    wait_until_message(
+        &mut ctx,
+        None,
+        "parsed document title targetInfoChanged",
+        |message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["targetId"]
+                    == json!("TID-target-info-navigation")
+                && message["params"]["targetInfo"]["title"] == json!("Target Info Title")
+        },
+    )
+    .await;
     let changed = ctx.take_first_matching("Target.targetInfoChanged", |message| {
         message["method"] == json!("Target.targetInfoChanged")
+            && message["params"]["targetInfo"]["targetId"] == json!("TID-target-info-navigation")
+            && message["params"]["targetInfo"]["title"] == json!("Target Info Title")
     });
     assert_eq!(
         changed["params"]["targetInfo"]["targetId"],
@@ -2838,6 +2860,16 @@ async fn runtime_removing_child_iframe_emits_frame_detached_and_forgets_owner_st
     }))
     .await;
     let _ = take_response_by_id(&mut ctx, 5242);
+    wait_until_message(
+        &mut ctx,
+        "SID-1",
+        "removable child frame attachment after Page.navigate response",
+        |message| {
+            message["method"] == json!("Page.frameAttached")
+                && message["params"]["parentFrameId"] == json!("TID-1")
+        },
+    )
+    .await;
     let child_frame_id = ctx
         .sent
         .iter()
@@ -6577,7 +6609,7 @@ async fn parser_script_location_navigation_suppresses_aborted_document_dcl() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn parser_script_location_navigation_suppression_is_independent_of_target_response() {
+async fn parser_script_location_navigation_continues_after_target_response() {
     async fn challenge() -> impl axum::response::IntoResponse {
         (
             [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
@@ -6617,13 +6649,19 @@ async fn parser_script_location_navigation_suppression_is_independent_of_target_
 
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    let navigation = ctx.process_async(json!({
+    ctx.process_async(json!({
         "id": 252,
         "method": "Page.navigate",
         "sessionId": "SID-1",
         "params": { "url": format!("http://{addr}/challenge") }
-    }));
-    let release_response = async {
+    }))
+    .await;
+    let _ = take_response_by_id(&mut ctx, 252);
+
+    // Chromium returns Page.navigate once the new document commits. Parser
+    // continuation (and therefore this script navigation) is admitted only
+    // after that response boundary has been flushed.
+    let release_response = tokio::spawn(async move {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             final_requested.notified(),
@@ -6631,9 +6669,7 @@ async fn parser_script_location_navigation_suppression_is_independent_of_target_
         .await
         .expect("successor navigation should request the gated final response");
         final_release.notify_one();
-    };
-    let ((), ()) = tokio::join!(navigation, release_response);
-    let _ = take_response_by_id(&mut ctx, 252);
+    });
     wait_until_messages(
         &mut ctx,
         Some("SID-1"),
@@ -6650,6 +6686,9 @@ async fn parser_script_location_navigation_suppression_is_independent_of_target_
         },
     )
     .await;
+    release_response
+        .await
+        .expect("gated final-response release task");
 
     let events = ctx.take_all();
     assert_eq!(

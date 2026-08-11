@@ -53,8 +53,6 @@ impl DomHost {
             dom,
             dom_version: Cell::new(0),
             query_version: Cell::new(0),
-            tree_insertion_tracking_depth: Cell::new(0),
-            tree_insertion_versions: RefCell::new(HashMap::new()),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
             id_index: RefCell::new(None),
@@ -193,31 +191,6 @@ impl DomHost {
         self.query_version.get()
     }
 
-    pub fn tree_insertion_version(&self, handle: DomHandle) -> Option<u64> {
-        self.tree_insertion_versions.borrow().get(&handle).copied()
-    }
-
-    pub fn begin_tree_insertion_tracking(&self) {
-        let depth = self.tree_insertion_tracking_depth.get();
-        if depth == 0 {
-            self.tree_insertion_versions.borrow_mut().clear();
-        }
-        self.tree_insertion_tracking_depth
-            .set(depth.saturating_add(1));
-    }
-
-    pub fn end_tree_insertion_tracking(&self) {
-        let depth = self.tree_insertion_tracking_depth.get();
-        if depth == 0 {
-            return;
-        }
-        let depth = depth - 1;
-        self.tree_insertion_tracking_depth.set(depth);
-        if depth == 0 {
-            self.tree_insertion_versions.borrow_mut().clear();
-        }
-    }
-
     pub fn dom_version(&self) -> u64 {
         self.dom_version.get()
     }
@@ -233,17 +206,6 @@ impl DomHost {
             self.query_version
                 .set(self.query_version.get().saturating_add(1));
             self.live_collection_cache.borrow_mut().clear();
-        }
-    }
-
-    pub(super) fn record_tree_insertion_roots(&self, roots: &[DomHandle]) {
-        if self.tree_insertion_tracking_depth.get() == 0 {
-            return;
-        }
-        let version = self.query_version.get();
-        let mut insertion_versions = self.tree_insertion_versions.borrow_mut();
-        for root in roots {
-            insertion_versions.insert(*root, version);
         }
     }
 
@@ -378,7 +340,6 @@ impl DomHost {
             self.record_connected_shadow_roots_mutation();
         }
         self.record_mutation(MutationScope::QueryState);
-        self.record_tree_insertion_roots(std::slice::from_ref(&root));
     }
 
     pub fn mark_subtree_disconnected_preserving_owner_document(&mut self, root: DomHandle) {
@@ -1761,12 +1722,24 @@ impl DomHost {
         let Some(host) = self.shadow_hosts_by_root.borrow().get(&root).copied() else {
             return false;
         };
-        let mut roots = self.shadow_roots_by_host.borrow_mut();
-        let Some(state) = roots.get_mut(&host) else {
-            return false;
+        let changed = {
+            let mut roots = self.shadow_roots_by_host.borrow_mut();
+            let Some(state) = roots.get_mut(&host) else {
+                return false;
+            };
+            if state.init.reference_target() == reference_target.as_deref() {
+                return false;
+            }
+            state.init.set_reference_target(reference_target);
+            true
         };
-        state.init.set_reference_target(reference_target);
-        true
+        if changed {
+            // Reference-target forwarding changes live `labels` and form-control
+            // resolution even though it is neither a tree nor an attribute
+            // mutation. Keep it in the same query-version invalidation domain.
+            self.record_mutation(MutationScope::QueryState);
+        }
+        changed
     }
 
     pub fn shadow_root_host(&self, root: DomHandle) -> Option<DomHandle> {

@@ -260,6 +260,16 @@ async fn rust_cdp_p0_page_get_frame_tree_includes_child_iframe() {
     page.navigate(&mut ctx, 140_006, fixture.url("/iframe"))
         .await;
 
+    crate::testing::wait_until_message(
+        &mut ctx,
+        Some(page.session_id.as_str()),
+        "child frame attachment after Page.navigate response",
+        |message| {
+            message["method"] == json!("Page.frameAttached")
+                && message["params"]["parentFrameId"] == json!(page.target_id)
+        },
+    )
+    .await;
     let child_frame_id = ctx
         .sent
         .iter()

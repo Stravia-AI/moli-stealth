@@ -2534,6 +2534,10 @@ async fn direct_console_routes_to_inactive_active_owner_without_promoting_slot()
     ctx.conn.inactive_browser_contexts.push(inactive);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-B"))
         .await;
+    ctx.wait_for_scheduler_message("inactive console fixture load", |message| {
+        message["method"] == json!("Page.loadEventFired") && message["sessionId"] == json!("SID-B")
+    })
+    .await;
     ctx.sent.clear();
 
     ctx.process_and_wait_for_response_async(json!({

@@ -9,8 +9,8 @@ use crate::conn::{
     PendingSubresourceFetchResponseRequest, build_event, monotonic_timestamp_seconds,
 };
 use crate::devtools_runtime::{
-    AutomationEvent, DevToolsFrameId, DevToolsNetworkInterceptId, DevToolsRequestId,
-    DevToolsTargetId, NetworkRequestEvent,
+    AutomationEvent, DevToolsFrameId, DevToolsNetworkInterceptId, DevToolsNetworkResourceType,
+    DevToolsRequestId, DevToolsTargetId, NetworkRequestEvent,
 };
 use crate::domains::network;
 use moli_core::runtime::DetachedParserScriptFetchContinuation;
@@ -144,7 +144,7 @@ async fn prepare_subresource_fetch_pause_sources_async(
             .cloned()
             .unwrap_or_else(|| info.document_url.clone());
         let frame_id = info.frame_id.as_deref().unwrap_or(&frame_id).to_owned();
-        let resource_type = info.resource_type.as_cdp_type();
+        let resource_type = info.resource_type.into();
         let request_stage_pause_sessions = fetch_snapshot.matching_request_stage_pause_sessions(
             session_id,
             resource_type,
@@ -435,10 +435,9 @@ fn subresource_request_paused_event(
         redirect_response: None,
         redirect_has_extra_info: false,
         request_cookie_report: None,
-        resource_type: event_payload
-            .get("resourceType")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        resource_type: Some(DevToolsNetworkResourceType::from_fetch_interception_type(
+            pending.resource_type,
+        )),
         timestamp: None,
         wall_time: None,
         status: None,
@@ -591,7 +590,7 @@ mod tests {
         BackgroundProtocolEvent, BackgroundTarget, BrowserContext, CdpConnection,
         PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest,
     };
-    use crate::devtools_runtime::AutomationEvent;
+    use crate::devtools_runtime::{AutomationEvent, DevToolsNetworkResourceType};
     use crate::domains::network::{
         TargetSubresourceFetchPauseNetworkOutput, TargetSubresourceFetchPauseOutput,
     };
@@ -739,13 +738,13 @@ mod tests {
             sidecars[0].as_ref(),
             Some(AutomationEvent::NetworkBeforeRequestSent(event))
                 if event.request_id.as_str() == "REQ-1"
-                && event.resource_type.as_deref() == Some("Fetch")
+                && event.resource_type == Some(DevToolsNetworkResourceType::Fetch)
         ));
         assert!(matches!(
             sidecars[1].as_ref(),
             Some(AutomationEvent::RequestPaused(event))
                 if event.request_id.as_str() == "FETCH-1"
-                    && event.resource_type.as_deref() == Some("XHR")
+                    && event.resource_type == Some(DevToolsNetworkResourceType::Xhr)
                     && event.url == "https://example.test/one"
         ));
 

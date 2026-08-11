@@ -15,7 +15,6 @@ use chromiumoxide_cdp::cdp::browser_protocol::page::{
     PrintToPdfTransferMode, SetBypassCspParams, SetDocumentContentParams,
     SetInterceptFileChooserDialogParams, SetLifecycleEventsEnabledParams as LifecycleParams,
 };
-use moli_core::RendererRuntimeCommandCausalIdentity;
 use moli_core::page::{
     ChildFrameDocumentNetworkActivitySnapshot, ChildFrameDocumentOpenedSnapshot,
     ChildFrameNavigationSnapshot, ChildFrameTreeEventSnapshot, ChildFrameTreeSnapshot,
@@ -29,6 +28,7 @@ use moli_core::page::{
     RendererScreenshotClip, RendererScreenshotFormat, RendererScreenshotPurpose,
     RendererScreenshotRegion, RendererSetDocumentContentResult,
 };
+use moli_core::{RendererDocumentTitleChanged, RendererRuntimeCommandCausalIdentity};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -454,6 +454,7 @@ enum PageOutputProjectionStep {
     JavascriptDialog,
     WindowOpen,
     Popup,
+    DocumentTitleChanged,
     DocumentLifecycle,
     ChildFrameActivity,
     SameDocumentNavigation,
@@ -466,6 +467,7 @@ pub(crate) struct PagePreparedOutputs {
     javascript_dialogs: Vec<javascript_dialog::PreparedJavaScriptDialog>,
     window_open_events: Vec<popup::PagePreparedWindowOpenEvent>,
     popup_activations: Vec<popup::PagePreparedPopupActivation>,
+    document_title_changes: Vec<RendererDocumentTitleChanged>,
     document_lifecycle_events: Vec<RendererDocumentLifecycleEvent>,
     child_frame_activities: Vec<PagePreparedChildFrameActivity>,
     same_document_navigations: Vec<PagePreparedSameDocumentNavigation>,
@@ -754,10 +756,21 @@ impl PagePreparedOutputs {
         }
     }
 
+    pub(crate) fn from_renderer_document_title_change(
+        change: RendererDocumentTitleChanged,
+    ) -> Self {
+        Self {
+            document_title_changes: vec![change],
+            ..Default::default()
+        }
+    }
+
     pub(crate) fn extend(&mut self, other: Self) {
         self.javascript_dialogs.extend(other.javascript_dialogs);
         self.window_open_events.extend(other.window_open_events);
         self.popup_activations.extend(other.popup_activations);
+        self.document_title_changes
+            .extend(other.document_title_changes);
         self.document_lifecycle_events
             .extend(other.document_lifecycle_events);
         for activity in other.child_frame_activities {
@@ -809,6 +822,16 @@ impl PagePreparedOutputs {
     ) {
         if !self.document_lifecycle_events.is_empty() {
             sink.push_produced_slot(SLOT_DOCUMENT_LIFECYCLE);
+            sink.push_prepared_payload(PagePreparedOutputSlot::from_outputs(self).into());
+        }
+    }
+
+    pub(in crate::domains) fn append_to_document_title_output_sink(
+        self,
+        sink: &mut (impl ProtocolOutputSink + ?Sized),
+    ) {
+        if !self.document_title_changes.is_empty() {
+            sink.push_produced_slot(SLOT_DOCUMENT_TITLE_CHANGED);
             sink.push_prepared_payload(PagePreparedOutputSlot::from_outputs(self).into());
         }
     }
@@ -876,6 +899,7 @@ impl PagePreparedOutputs {
                 .collect(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: Vec::new(),
             same_document_navigations: Vec::new(),
@@ -901,6 +925,7 @@ impl PagePreparedOutputs {
                     )
                 })
                 .collect(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: Vec::new(),
             same_document_navigations: Vec::new(),
@@ -947,6 +972,7 @@ impl PagePreparedOutputs {
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: vec![activity],
             same_document_navigations: Vec::new(),
@@ -964,6 +990,7 @@ impl PagePreparedOutputs {
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: Vec::new(),
             same_document_navigations: navigations
@@ -986,6 +1013,7 @@ impl PagePreparedOutputs {
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: Vec::new(),
             same_document_navigations: Vec::new(),
@@ -1031,6 +1059,11 @@ impl PagePreparedOutputSlot {
     ) -> Option<Vec<RendererDocumentLifecycleEvent>> {
         (!self.outputs.document_lifecycle_events.is_empty())
             .then(|| std::mem::take(&mut self.outputs.document_lifecycle_events))
+    }
+
+    fn take_document_title_changes(&mut self) -> Option<Vec<RendererDocumentTitleChanged>> {
+        (!self.outputs.document_title_changes.is_empty())
+            .then(|| std::mem::take(&mut self.outputs.document_title_changes))
     }
 
     pub(crate) fn take_child_frame_activity(
@@ -1101,6 +1134,8 @@ pub(in crate::domains) const SLOT_WINDOW_OPEN: ProtocolOutputSlot = ProtocolOutp
 pub(in crate::domains) const SLOT_POPUP: ProtocolOutputSlot = ProtocolOutputSlot::Popup;
 pub(in crate::domains) const SLOT_DOCUMENT_LIFECYCLE: ProtocolOutputSlot =
     ProtocolOutputSlot::DocumentLifecycle;
+pub(in crate::domains) const SLOT_DOCUMENT_TITLE_CHANGED: ProtocolOutputSlot =
+    ProtocolOutputSlot::DocumentTitleChanged;
 pub(in crate::domains) const SLOT_CHILD_FRAME_ACTIVITY: ProtocolOutputSlot =
     ProtocolOutputSlot::ChildFrameActivity;
 
@@ -1156,6 +1191,30 @@ impl PageOutputProjectionStep {
                         );
                         context.command.protocol_events_mut().extend(events);
                     }
+                }
+            }
+            PageOutputProjectionStep::DocumentTitleChanged => {
+                if let Some(changes) = prepared_outputs
+                    .and_then(ProtocolOutputPayloads::page_mut)
+                    .and_then(PagePreparedOutputSlot::take_document_title_changes)
+                {
+                    let mut events = Vec::new();
+                    for change in changes {
+                        if conn
+                            .apply_renderer_document_title_for_session_owner(
+                                context.session_id,
+                                &change,
+                            )
+                            .unwrap_or(false)
+                        {
+                            crate::domains::target::emit_target_info_changed_for_session_owner_background_event(
+                                conn,
+                                &mut events,
+                                context.session_id,
+                            );
+                        }
+                    }
+                    context.command.protocol_events_mut().extend(events);
                 }
             }
             PageOutputProjectionStep::FileChooser => {
@@ -1261,6 +1320,7 @@ pub(in crate::domains) async fn project_page_output_async(
         ProtocolOutputSlot::JavascriptDialog => PageOutputProjectionStep::JavascriptDialog,
         ProtocolOutputSlot::WindowOpen => PageOutputProjectionStep::WindowOpen,
         ProtocolOutputSlot::Popup => PageOutputProjectionStep::Popup,
+        ProtocolOutputSlot::DocumentTitleChanged => PageOutputProjectionStep::DocumentTitleChanged,
         ProtocolOutputSlot::DocumentLifecycle => PageOutputProjectionStep::DocumentLifecycle,
         ProtocolOutputSlot::ChildFrameActivity => PageOutputProjectionStep::ChildFrameActivity,
         ProtocolOutputSlot::SameDocumentNavigation => {
@@ -2355,6 +2415,7 @@ pub(in crate::domains) async fn emit_same_document_navigation_activity_backgroun
 
 #[cfg(test)]
 mod producer_tests {
+    use moli_core::RendererDocumentTitleChanged;
     use moli_core::page::{
         ChildFrameDocumentNetworkActivitySnapshot, ChildFrameDocumentNetworkSnapshot,
         ChildFrameNavigationSnapshot, RENDERER_BACKEND_NODE_ID_START,
@@ -2564,6 +2625,70 @@ mod producer_tests {
             .into_iter()
             .map(BackgroundProtocolEvent::into_protocol_message)
             .collect()
+    }
+
+    #[test]
+    fn stale_document_title_cannot_overwrite_replacement_target_metadata() {
+        let mut conn = CdpConnection::default();
+        let mut bc = BrowserContext::new("BID-title-source".into());
+        bc.set_active_target_id("TID-title-source");
+        bc.attach_active_session("SID-title-source");
+        conn.browser_context = Some(bc);
+
+        let predecessor = renderer_document_identity_for_test(1, 1);
+        bind_renderer_document_for_test(
+            &mut conn,
+            "SID-title-source",
+            "TID-title-source",
+            predecessor,
+        );
+        assert_eq!(
+            conn.apply_renderer_document_title_for_session_owner(
+                Some("SID-title-source"),
+                &RendererDocumentTitleChanged {
+                    source_document: predecessor,
+                    title: "predecessor".to_owned(),
+                },
+            ),
+            Some(true)
+        );
+
+        let replacement = renderer_document_identity_for_test(2, 2);
+        bind_renderer_document_for_test(
+            &mut conn,
+            "SID-title-source",
+            "TID-title-source",
+            replacement,
+        );
+        assert_eq!(
+            conn.apply_renderer_document_title_for_session_owner(
+                Some("SID-title-source"),
+                &RendererDocumentTitleChanged {
+                    source_document: replacement,
+                    title: "replacement".to_owned(),
+                },
+            ),
+            Some(true)
+        );
+
+        assert_eq!(
+            conn.apply_renderer_document_title_for_session_owner(
+                Some("SID-title-source"),
+                &RendererDocumentTitleChanged {
+                    source_document: predecessor,
+                    title: "late predecessor".to_owned(),
+                },
+            ),
+            None,
+            "an old renderer Document must lose authority at replacement commit"
+        );
+        assert_eq!(
+            conn.browser_context
+                .as_ref()
+                .and_then(|context| context.target_info("TID-title-source"))
+                .and_then(|target| target["title"].as_str().map(str::to_owned)),
+            Some("replacement".to_owned())
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -4227,6 +4352,7 @@ mod producer_tests {
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
+            document_title_changes: Vec::new(),
             document_lifecycle_events: Vec::new(),
             child_frame_activities: vec![super::PagePreparedChildFrameActivity::from_document(
                 root_document_attachment_for_test(&conn, "SID-1", source_document),

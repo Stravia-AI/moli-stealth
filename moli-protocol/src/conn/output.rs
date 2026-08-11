@@ -1,11 +1,11 @@
 use crate::devtools_runtime::{
     AutomationEvent, BrowserDownloadProgressEvent, BrowserDownloadWillBeginEvent, DevToolsFrameId,
-    DevToolsRealmId, DevToolsRemoteHandleId, DevToolsTargetInfo, DomSetChildNodesEvent,
-    LogEntryEvent, NavigationFrameEvent, NavigationFrameEventKind, NavigationLifecycleEvent,
-    PageFileChooserOpenedEvent, PageJavaScriptDialogOpeningEvent, PageLifecycleEvent,
-    RuntimeConsoleEvent, RuntimeExecutionContextEvent, RuntimeExecutionContextsClearedEvent,
-    SameDocumentNavigationEvent, ScriptExceptionEvent, TargetAttachmentEvent,
-    TargetDetachmentEvent, TargetLifecycleEvent, UserPromptClosedEvent,
+    DevToolsNetworkResourceType, DevToolsRealmId, DevToolsRemoteHandleId, DevToolsTargetInfo,
+    DomSetChildNodesEvent, LogEntryEvent, NavigationFrameEvent, NavigationFrameEventKind,
+    NavigationLifecycleEvent, PageFileChooserOpenedEvent, PageJavaScriptDialogOpeningEvent,
+    PageLifecycleEvent, RuntimeConsoleEvent, RuntimeExecutionContextEvent,
+    RuntimeExecutionContextsClearedEvent, SameDocumentNavigationEvent, ScriptExceptionEvent,
+    TargetAttachmentEvent, TargetDetachmentEvent, TargetLifecycleEvent, UserPromptClosedEvent,
 };
 use moli_core::{
     RendererRuntimeInspectorAsyncCompletion,
@@ -2049,7 +2049,7 @@ impl ProtocolDeliveryEnvelope {
         let Some(resource_type) = self.network_resource_type() else {
             return false;
         };
-        resource_type != "Document"
+        resource_type != DevToolsNetworkResourceType::Document
     }
 
     /// Returns whether this event is an already-produced CDP Network-domain
@@ -2070,7 +2070,7 @@ impl ProtocolDeliveryEnvelope {
             return false;
         };
         message.get("method").and_then(Value::as_str) == Some("Network.responseReceived")
-            && self.network_resource_type() == Some("Document")
+            && self.network_resource_type() == Some(DevToolsNetworkResourceType::Document)
     }
 
     pub fn trace_network_summary(
@@ -2142,7 +2142,13 @@ impl ProtocolDeliveryEnvelope {
             .or_else(|| params.pointer("/response/url"))
             .or_else(|| params.get("documentURL"))
             .and_then(Value::as_str);
-        Some((method, self.network_resource_type(), request_id, url))
+        Some((
+            method,
+            self.network_resource_type()
+                .map(DevToolsNetworkResourceType::as_cdp_type),
+            request_id,
+            url,
+        ))
     }
 
     fn is_fetch_interception_control_path_event(&self) -> bool {
@@ -2183,14 +2189,14 @@ impl ProtocolDeliveryEnvelope {
             .is_some_and(|blocked_intercepts| !blocked_intercepts.is_empty())
     }
 
-    fn network_resource_type(&self) -> Option<&str> {
+    fn network_resource_type(&self) -> Option<DevToolsNetworkResourceType> {
         if let Some(resource_type) = self.automation_event_network_resource_type() {
             return Some(resource_type);
         }
         self.protocol_message_network_resource_type()
     }
 
-    fn automation_event_network_resource_type(&self) -> Option<&str> {
+    fn automation_event_network_resource_type(&self) -> Option<DevToolsNetworkResourceType> {
         let BackgroundProtocolEventPayload::Protocol(event) = &self.payload else {
             return None;
         };
@@ -2200,21 +2206,29 @@ impl ProtocolDeliveryEnvelope {
             | AutomationEvent::NetworkResponseCompleted(event)
             | AutomationEvent::NetworkFetchError(event)
             | AutomationEvent::NetworkAuthRequired(event)
-            | AutomationEvent::RequestPaused(event) => event.resource_type.as_deref(),
+            | AutomationEvent::RequestPaused(event) => event.resource_type,
             _ => None,
         }
     }
 
-    fn protocol_message_network_resource_type(&self) -> Option<&str> {
+    fn protocol_message_network_resource_type(&self) -> Option<DevToolsNetworkResourceType> {
         let message = self.protocol_message()?;
         let method = message.get("method")?.as_str()?;
         let params = message.get("params")?;
         match method {
             "Network.requestWillBeSent" | "Network.responseReceived" | "Network.loadingFailed" => {
-                params.get("type")?.as_str()
+                params
+                    .get("type")?
+                    .as_str()
+                    .and_then(DevToolsNetworkResourceType::from_cdp_type)
             }
-            "Network.webSocketFrameError" | "Network.webSocketClosed" => Some("WebSocket"),
-            "Fetch.requestPaused" | "Fetch.authRequired" => params.get("resourceType")?.as_str(),
+            "Network.webSocketFrameError" | "Network.webSocketClosed" => {
+                Some(DevToolsNetworkResourceType::WebSocket)
+            }
+            "Fetch.requestPaused" | "Fetch.authRequired" => params
+                .get("resourceType")?
+                .as_str()
+                .and_then(DevToolsNetworkResourceType::from_cdp_type),
             _ => None,
         }
     }
@@ -4265,10 +4279,11 @@ pub fn build_event(method: &str, params: Value, session_id: Option<&str>) -> Val
 mod tests {
     use crate::devtools_runtime::{
         AutomationEvent, DevToolsBrowserContextId, DevToolsFrameId, DevToolsLoaderId,
-        DevToolsSessionId, DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind,
-        NavigationFrameEvent, NavigationFrameEventKind, NavigationLifecycleEvent,
-        RuntimeExecutionContextEvent, RuntimeExecutionContextsClearedEvent, TargetAttachmentEvent,
-        TargetDetachmentEvent, TargetLifecycleEvent, UserPromptClosedEvent,
+        DevToolsNetworkResourceType, DevToolsSessionId, DevToolsTargetId, DevToolsTargetInfo,
+        DevToolsTargetKind, NavigationFrameEvent, NavigationFrameEventKind,
+        NavigationLifecycleEvent, RuntimeExecutionContextEvent,
+        RuntimeExecutionContextsClearedEvent, TargetAttachmentEvent, TargetDetachmentEvent,
+        TargetLifecycleEvent, UserPromptClosedEvent,
     };
     use serde_json::{Value, json};
 
@@ -5441,7 +5456,7 @@ mod tests {
     fn background_event_waits_for_navigation_completion_only_for_non_document_network() {
         use crate::devtools_runtime::{DevToolsRequestId, NetworkRequestEvent};
 
-        let network_event = |resource_type: Option<&str>| {
+        let network_event = |resource_type: Option<DevToolsNetworkResourceType>| {
             AutomationEvent::NetworkResponseStarted(NetworkRequestEvent {
                 target_id: DevToolsTargetId::from("TID-nav"),
                 frame_id: Some(DevToolsFrameId::from("TID-nav")),
@@ -5457,7 +5472,7 @@ mod tests {
                 redirect_response: None,
                 redirect_has_extra_info: false,
                 request_cookie_report: None,
-                resource_type: resource_type.map(str::to_owned),
+                resource_type,
                 timestamp: Some(1.0),
                 wall_time: None,
                 status: Some(200),
@@ -5479,11 +5494,11 @@ mod tests {
 
         let document = BackgroundProtocolEvent::immediate_automation_event(
             json!({"method": "Network.responseReceived"}),
-            network_event(Some("Document")),
+            network_event(Some(DevToolsNetworkResourceType::Document)),
         );
         let script = BackgroundProtocolEvent::immediate_automation_event(
             json!({"method": "Network.responseReceived"}),
-            network_event(Some("Script")),
+            network_event(Some(DevToolsNetworkResourceType::Script)),
         );
         let lifecycle = BackgroundProtocolEvent::immediate_automation_event(
             json!({"method": "Page.frameStartedLoading"}),

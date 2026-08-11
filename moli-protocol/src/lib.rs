@@ -18,13 +18,14 @@ pub mod version;
 pub use devtools_runtime::*;
 
 pub use conn::{
-    BackgroundCommandResponsePayload, BackgroundNavigationGateKey, BackgroundProtocolEvent,
-    CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition, CdpRendererCommandAccess,
-    CdpRendererCommandReplacement, CdpRendererCommandReplayDispatch, CdpSchedulerEvent,
-    CdpTargetHostLifecycleDelta, CdpTargetHostLifecycleObserver, CdpTurnOutcome,
-    CommandDispatchContext, CommandResponseFlushContext, CommandResponseFlushPermit,
-    CompletedCdpCommandDispatch, CompletedDeferredMainDocumentLoadCompletion,
-    CompletedRuntimeProtocolMessageDispatch, DeferredMainDocumentLoadCompletionOutputAction,
+    BackgroundCommandResponsePayload, BackgroundNavigationCancellation,
+    BackgroundNavigationGateKey, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
+    CdpInitialStoragePartition, CdpRendererCommandAccess, CdpRendererCommandReplacement,
+    CdpRendererCommandReplayDispatch, CdpSchedulerEvent, CdpTargetHostLifecycleDelta,
+    CdpTargetHostLifecycleObserver, CdpTurnOutcome, CommandDispatchContext,
+    CommandResponseFlushContext, CommandResponseFlushPermit, CompletedCdpCommandDispatch,
+    CompletedDeferredMainDocumentLoadCompletion, CompletedRuntimeProtocolMessageDispatch,
+    DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadObservationId,
     DeferredMainDocumentLoadPredecessorCandidate, DevToolsCommandDispatchOutcome,
     DevToolsDocumentLifecycleWaitKey, DevToolsDocumentLifecycleWaitState,

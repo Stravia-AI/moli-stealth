@@ -96,6 +96,25 @@ impl RendererMainDocumentCommitSeed {
         }
     }
 
+    /// Freezes the same renderer commit identity for a test navigation that
+    /// starts from an already-installed target without creating a synthetic
+    /// `NavigationDispatchState` or mutating the target's request counters.
+    #[cfg(test)]
+    pub(crate) fn from_navigation_fixture(
+        frame_id: String,
+        loader_id: String,
+        timestamp: f64,
+    ) -> Self {
+        let source_document_security = NavigationSourceDocumentSecurityContext::default();
+        Self {
+            frame_id,
+            loader_id,
+            timestamp,
+            inherited_security_origin: source_document_security.security_origin,
+            inherited_secure_context_type: source_document_security.secure_context_type,
+        }
+    }
+
     pub(crate) fn resolve(
         &self,
         final_url: &Url,
@@ -359,9 +378,15 @@ impl<'a> TargetInfo<'a> {
             kind: "page",
             title: bc
                 .active_target
-                .runtime_slot
-                .loaded_page()
-                .map(|page| page.document_title())
+                .owner_state
+                .committed_document_title()
+                .map(str::to_owned)
+                .or_else(|| {
+                    bc.active_target
+                        .runtime_slot
+                        .loaded_page()
+                        .map(|page| page.document_title())
+                })
                 .unwrap_or_default(),
             url: bc.target_url(),
             attached,

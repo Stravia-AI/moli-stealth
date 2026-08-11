@@ -427,7 +427,10 @@ fn network_request_event_cdp_params(event: &NetworkRequestEvent, method: &str) -
                     "type": event.request_initiator_type.as_deref().unwrap_or("other")
                 },
                 "redirectHasExtraInfo": event.redirect_has_extra_info,
-                "type": event.resource_type.as_deref().unwrap_or_default(),
+                "type": event
+                    .resource_type
+                    .map(|resource_type| resource_type.as_cdp_type())
+                    .unwrap_or_default(),
                 "frameId": event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or_default(),
                 "hasUserGesture": false,
             });
@@ -462,7 +465,10 @@ fn network_request_event_cdp_params(event: &NetworkRequestEvent, method: &str) -
                 "requestId": event.request_id.as_str(),
                 "loaderId": event.loader_id.as_ref().map(|id| id.as_str()).unwrap_or_default(),
                 "timestamp": event.timestamp.unwrap_or_default(),
-                "type": event.resource_type.as_deref().unwrap_or_default(),
+                "type": event
+                    .resource_type
+                    .map(|resource_type| resource_type.as_cdp_type())
+                    .unwrap_or_default(),
                 "frameId": event.frame_id.as_ref().map(|id| id.as_str()).unwrap_or_default(),
                 "response": {
                     "url": event.url,
@@ -488,7 +494,10 @@ fn network_request_event_cdp_params(event: &NetworkRequestEvent, method: &str) -
         "Network.loadingFailed" => json!({
             "requestId": event.request_id.as_str(),
             "timestamp": event.timestamp.unwrap_or_default(),
-            "type": event.resource_type.as_deref().unwrap_or_default(),
+            "type": event
+                .resource_type
+                .map(|resource_type| resource_type.as_cdp_type())
+                .unwrap_or_default(),
             "errorText": event.error_text.as_deref().unwrap_or_default(),
             "canceled": event.loading_failed_canceled,
         }),
@@ -1171,7 +1180,7 @@ fn json_number_as_u64(value: &Value) -> Option<u64> {
 mod tests {
     use moli_protocol::devtools_runtime::{
         AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsNetworkInterceptId,
-        DevToolsRequestId, DevToolsTargetId, NetworkRequestEvent,
+        DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId, NetworkRequestEvent,
     };
     use serde_json::json;
 
@@ -1307,7 +1316,7 @@ mod tests {
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some("Fetch".to_owned()),
+            resource_type: Some(DevToolsNetworkResourceType::Fetch),
             timestamp: Some(1.25),
             wall_time: None,
             status: Some(200),
@@ -1355,7 +1364,7 @@ mod tests {
             redirect_response: None,
             redirect_has_extra_info: false,
             request_cookie_report: None,
-            resource_type: Some("Fetch".to_owned()),
+            resource_type: Some(DevToolsNetworkResourceType::Fetch),
             timestamp: Some(1.25),
             wall_time: None,
             status: Some(200),

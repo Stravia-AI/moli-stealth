@@ -14,7 +14,7 @@ use super::navigation::{
     PageCreationNavigationFailurePublisher, PageCreationResolution, PageCreationRetirement,
     PageNavigationOwnerFailure, page_creation_navigation_failure_scope,
 };
-use super::owner::{RendererCreateDocumentPageRequest, RendererCreateStreamingRawPageRequest};
+use super::owner::RendererCreateStreamingRawPageRequest;
 use super::owner_deadline_index::OwnerDeadlineIndex;
 use super::owner_local::RendererAttachedPage;
 use super::owner_maintenance::{
@@ -30,7 +30,7 @@ use super::page_vm::{
     PageVmRuntimeCommandLifecycleAdvance, PageVmRuntimeCommandOutputScopeId,
     renderer_document_lifecycle_milestone_for_stage,
 };
-use super::phase_one::ParseTimePageVmCreationOutcome;
+use super::phase_one::{ParseTimePageVmCreationOutcome, PendingPhaseOneResumeOutcome};
 use super::*;
 use crate::page_task_queue::{
     PostParsePageOwnedWork, RendererPageOwnedTaskSources, RendererPageSchedulerTask,
@@ -412,6 +412,10 @@ pub(super) enum LivePageNavigationFailureRecipient {
 }
 
 impl LivePagePendingNavigationCompletion {
+    pub(super) fn continues_committed_document_parser_prefix(&self) -> bool {
+        matches!(self, Self::PublishedPageCreation { .. })
+    }
+
     pub(super) fn chain_limit_error_context(&self) -> &'static str {
         match self {
             Self::Background | Self::PublishedPageCreation { .. } => {
@@ -540,15 +544,10 @@ pub(super) struct RendererOwnerLocalStore {
 }
 
 pub(super) struct RendererPreparedDocumentResidence {
-    pub(super) request: RendererPreparedDocumentRequest,
+    pub(super) request: RendererCreateStreamingRawPageRequest,
     pub(super) isolate_allocator: RendererDocumentIsolateAllocator,
     pub(super) isolate_bootstrap: RendererDocumentIsolateBootstrap,
     pub(super) isolate_reservation: RendererDocumentIsolateReservation,
-}
-
-pub(super) enum RendererPreparedDocumentRequest {
-    StreamingRaw(RendererCreateStreamingRawPageRequest),
-    NativeDom(RendererCreateDocumentPageRequest),
 }
 
 pub(super) struct RendererOwnerLocalStoreSession<'a> {
@@ -889,9 +888,6 @@ impl RendererPageLocalEntry {
     }
 
     pub(super) fn settle_standalone_navigation_follow(&mut self, succeeded: bool) {
-        // A failed phase-one resume consumes its pending residence before
-        // returning the entry, so the failure boundary can legitimately own
-        // an empty shell with neither an installed nor a pending PageVm.
         let current = self
             .active_page_vm()
             .and_then(|page_vm| page_vm.vm().pending_location_navigation_handoff());
@@ -1199,6 +1195,15 @@ impl RendererPageLocalEntry {
         let wake_token = self.prepare_pending_phase_one_navigation_install(&mut pending)?;
         self.pending_phase_one_navigation = Some(pending);
         Ok(wake_token)
+    }
+
+    fn install_resumed_phase_one_page_vm(&mut self, page_vm: PageVm) {
+        debug_assert!(
+            self.pending_phase_one_navigation.is_none(),
+            "a resumed phase-one PageVm cannot coexist with its consumed residence"
+        );
+        self.retire_document_lifecycle_turn();
+        self.vm = Some(page_vm);
     }
 
     fn reject_pending_phase_one_navigation_state(
@@ -1946,6 +1951,18 @@ pub(super) async fn advance_pending_phase_one_navigation_on_entry_via_local_task
                     return Err(error);
                 }
             };
+            let phase_one_outcome = match phase_one_outcome {
+                PendingPhaseOneResumeOutcome::Progress(outcome) => outcome,
+                PendingPhaseOneResumeOutcome::MainResourceLoadFailed { page_vm, error } => {
+                    metadata.reject(
+                        None,
+                        &browser_context_runtime,
+                        format!("Cannot navigate to URL: {error}"),
+                    );
+                    entry.install_resumed_phase_one_page_vm(page_vm);
+                    return Err(error);
+                }
+            };
             match phase_one_outcome {
                 ParseTimePageVmCreationOutcome::PendingPhaseOne(residence) => {
                     let pending = PageVmPendingPhaseOneNavigation::new(residence, metadata);
@@ -1954,8 +1971,7 @@ pub(super) async fn advance_pending_phase_one_navigation_on_entry_via_local_task
                 }
                 ParseTimePageVmCreationOutcome::TriggeredNavigation { mut page_vm, stage } => {
                     metadata.complete_service_worker_follow(&mut page_vm);
-                    entry.retire_document_lifecycle_turn();
-                    entry.vm = Some(page_vm);
+                    entry.install_resumed_phase_one_page_vm(page_vm);
                     Ok(LivePagePendingNavigationPhaseOneAdvance::TriggeredNavigation { stage })
                 }
                 ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
@@ -1965,8 +1981,7 @@ pub(super) async fn advance_pending_phase_one_navigation_on_entry_via_local_task
                     started,
                 } => {
                     metadata.complete_service_worker_follow(&mut page_vm);
-                    entry.retire_document_lifecycle_turn();
-                    entry.vm = Some(page_vm);
+                    entry.install_resumed_phase_one_page_vm(page_vm);
                     let (page_vm, pending_document_lifecycle_turn) =
                         entry.page_vm_and_document_lifecycle_turn_mut();
                     let outcome = page_vm
@@ -2486,14 +2501,7 @@ impl RendererOwnerLocalStore {
                     configuration.fetch_subresource_interception_resource_type;
             }};
         }
-        match &mut residence.request {
-            RendererPreparedDocumentRequest::StreamingRaw(request) => {
-                apply_configuration!(request);
-            }
-            RendererPreparedDocumentRequest::NativeDom(request) => {
-                apply_configuration!(request);
-            }
-        }
+        apply_configuration!(&mut residence.request);
         Ok(())
     }
 
@@ -3392,6 +3400,7 @@ impl RendererOwnerLocalStore {
                         creation_diagnostics,
                         creation_artifacts,
                         pending_download,
+                        committed_document_post_response_continuation: None,
                     },
                     resume_parked_page_turn,
                 }

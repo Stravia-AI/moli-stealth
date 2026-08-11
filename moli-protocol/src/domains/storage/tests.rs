@@ -774,24 +774,20 @@ async fn storage_key_targets_loaded_background_owner_without_promotion() {
         .expect("page url should parse")
         .origin()
         .ascii_serialization();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(&page_url)
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-SK-BG".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-background"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 101,

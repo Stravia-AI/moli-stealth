@@ -524,6 +524,101 @@ globalThis.__documentWriteEvents.push('inline-after');
 }
 
 #[test]
+fn document_write_external_script_live_collection_walk_uses_incremental_parser_frontier() {
+    super::tests::run_phase_one_large_stack_test("document-write-live-collection", || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let _js_runtime = crate::JsRuntime::initialize();
+            let (script_url, server) = spawn_document_write_script_server(
+                r#"
+const nodes = document.getElementsByTagName("*");
+const ids = [];
+for (let index = 0; index < nodes.length; index++) {
+  if (nodes[index].id) ids.push(nodes[index].id);
+}
+globalThis.__documentWriteVisibleIds = ids.join("|");
+"#,
+            )
+            .await;
+            let document_url = script_url.join("page.html").expect("document URL");
+            let before = (0..256)
+                .map(|index| format!(r#"<div id="before-{index}"><span></span></div>"#))
+                .collect::<String>();
+            let future = (0..256)
+                .map(|index| format!(r#"<article id="future-{index}"><i></i></article>"#))
+                .collect::<String>();
+            let html = format!(
+                r#"<!doctype html><html><body>{before}<script>document.write(`<script src="{script_url}"><\/script>`);</script>{future}</body></html>"#,
+            );
+
+            let page_vm = finish_standalone_document_write_page(html, document_url).await;
+            let result = evaluate_on_owner_local_task(
+                page_vm,
+                r#"JSON.stringify({
+  sawFirst: __documentWriteVisibleIds.includes("before-0"),
+  sawLast: __documentWriteVisibleIds.includes("before-255"),
+  hidFuture: !__documentWriteVisibleIds.includes("future-0"),
+  parserResumed: !!document.getElementById("future-255")
+})"#,
+            )
+            .await;
+            assert_eq!(
+                result.get("value").and_then(serde_json::Value::as_str),
+                Some(
+                    r#"{"sawFirst":true,"sawLast":true,"hidFuture":true,"parserResumed":true}"#
+                ),
+                "a repeated live-collection indexed walk must observe only parser-committed DOM and let parsing resume"
+            );
+            server
+                .await
+                .expect("document.write script server should finish");
+        }));
+    });
+}
+
+#[test]
+fn document_write_external_runaway_script_is_terminated_and_parser_recovers() {
+    super::tests::run_phase_one_large_stack_test("document-write-script-watchdog", || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+            let _js_runtime = crate::JsRuntime::initialize();
+            let (script_url, server) =
+                spawn_document_write_script_server("for (;;) {}").await;
+            let document_url = script_url.join("page.html").expect("document URL");
+            let html = format!(
+                r#"<!doctype html><script>document.write(`<script src="{script_url}"><\/script>`);</script><main id="parser-recovered">ready</main>"#,
+            );
+
+            let started = Instant::now();
+            let page_vm = finish_standalone_document_write_page(html, document_url).await;
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(4),
+                "the document.write script watchdog should interrupt the runaway turn promptly"
+            );
+            let result = evaluate_on_owner_local_task(
+                page_vm,
+                "String(!!document.getElementById('parser-recovered'))",
+            )
+            .await;
+            assert_eq!(
+                result.get("value").and_then(serde_json::Value::as_str),
+                Some("true"),
+                "the parser and isolate must remain usable after terminating the written script"
+            );
+            server
+                .await
+                .expect("document.write script server should finish");
+        }));
+    });
+}
+
+#[test]
 fn resident_queue_phase_one_continuation_uses_the_exact_owner_arbiter() {
     super::tests::run_phase_one_large_stack_test("document-write-resident-queue", || {
         let runtime = tokio::runtime::Builder::new_current_thread()

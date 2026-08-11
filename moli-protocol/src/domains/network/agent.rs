@@ -16,12 +16,19 @@ use super::{
 const RESPONSE_BODY_BUFFER_MAX_TOTAL_BYTES: usize = 20_000_000;
 const RESPONSE_BODY_BUFFER_MAX_ENTRY_BYTES: usize = 2_000_000;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RendererSubresourceTeardownDisposition {
+    RequiresDocumentTerminal,
+    DetachedKeepalive,
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct TargetNetworkAgentState {
     primary_enabled: bool,
     auxiliary_event_session_ids: Vec<String>,
     output_queue: TargetNetworkOutputQueue,
-    active_renderer_subresource_requests: HashSet<SubresourceNetworkRequestHandle>,
+    active_renderer_subresource_requests:
+        HashMap<SubresourceNetworkRequestHandle, RendererSubresourceTeardownDisposition>,
     artifacts: TargetNetworkArtifacts,
 }
 
@@ -35,23 +42,26 @@ pub(crate) struct CollectedNetworkDataArtifact {
 }
 
 struct NetworkBacklogRequestIdPlan<'a> {
-    artifacts: &'a mut TargetNetworkArtifacts,
+    subresource_artifacts: &'a mut SubresourceNetworkArtifacts,
+    websocket_artifacts: &'a mut WebSocketNetworkArtifacts,
     preferred_request_id: NetworkBacklogPreferredRequestIdBudget,
     request_id_allocator: &'a mut ConnectionNetworkRequestIdAllocator,
 }
 
 impl<'a> NetworkBacklogRequestIdPlan<'a> {
     fn new(
-        artifacts: &'a mut TargetNetworkArtifacts,
+        subresource_artifacts: &'a mut SubresourceNetworkArtifacts,
+        websocket_artifacts: &'a mut WebSocketNetworkArtifacts,
         preferred_request_id: Option<NetworkBacklogPreferredRequestId<'_>>,
         request_id_allocator: &'a mut ConnectionNetworkRequestIdAllocator,
     ) -> Self {
         let preferred_request_id = NetworkBacklogPreferredRequestIdBudget::new(
             preferred_request_id,
-            &artifacts.subresource_network_artifacts,
+            subresource_artifacts,
         );
         Self {
-            artifacts,
+            subresource_artifacts,
+            websocket_artifacts,
             preferred_request_id,
             request_id_allocator,
         }
@@ -61,16 +71,39 @@ impl<'a> NetworkBacklogRequestIdPlan<'a> {
         &mut self,
         output: &TargetSubresourcePlanOutput,
     ) -> String {
-        self.artifacts.request_id_for_subresource_output(
-            output,
-            &mut self.preferred_request_id,
-            self.request_id_allocator,
-        )
+        if let Some(socket_id) = output.websocket_socket_id()
+            && let Some(request_id) = self.websocket_artifacts.request_id_for_socket(socket_id)
+        {
+            return request_id.to_owned();
+        }
+        if let Some(handle) = output.request_handle()
+            && let Some(request_id) = self.subresource_artifacts.request_id_for_handle(handle)
+        {
+            return request_id.to_owned();
+        }
+        let request_id = self
+            .preferred_request_id
+            .take_for_new_subresource(output.request_handle())
+            .unwrap_or_else(|| self.request_id_allocator.allocate_request_id());
+        if let Some(handle) = output.request_handle() {
+            self.subresource_artifacts
+                .set_request_id_for_handle_if_absent(handle, request_id.clone());
+        }
+        if let Some(socket_id) = output.websocket_socket_id() {
+            self.websocket_artifacts
+                .set_request_id_for_socket_if_absent(socket_id, request_id.clone());
+        }
+        request_id
     }
 
     fn request_id_for_websocket_socket(&mut self, socket_id: u64) -> String {
-        self.artifacts
-            .request_id_for_websocket_socket(socket_id, self.request_id_allocator)
+        if let Some(request_id) = self.websocket_artifacts.request_id_for_socket(socket_id) {
+            return request_id.to_owned();
+        }
+        let request_id = self.request_id_allocator.allocate_request_id();
+        self.websocket_artifacts
+            .set_request_id_for_socket_if_absent(socket_id, request_id.clone());
+        request_id
     }
 }
 
@@ -144,6 +177,29 @@ impl NetworkBacklogPreferredRequestIdBudget {
 }
 
 impl TargetNetworkAgentState {
+    /// Moves the Document-owned live queue and request correlations into a
+    /// short-lived predecessor state while retaining target/session policy and
+    /// target-scoped body/stream artifacts for the replacement Document.
+    ///
+    /// A renderer Page can publish its final cancellation batch after protocol
+    /// has installed its successor Page. Keeping the predecessor queue intact
+    /// lets those terminal facts reuse the request ids announced before the
+    /// commit without making the successor replay historical requests.
+    pub(crate) fn rotate_document_for_replacement(&mut self) -> RetiringTargetNetworkAgentState {
+        RetiringTargetNetworkAgentState {
+            output_queue: std::mem::take(&mut self.output_queue),
+            active_renderer_subresource_requests: std::mem::take(
+                &mut self.active_renderer_subresource_requests,
+            ),
+            subresource_network_artifacts: std::mem::take(
+                &mut self.artifacts.subresource_network_artifacts,
+            ),
+            websocket_network_artifacts: std::mem::take(
+                &mut self.artifacts.websocket_network_artifacts,
+            ),
+        }
+    }
+
     pub(crate) fn primary_events_enabled(&self) -> bool {
         self.primary_enabled
     }
@@ -181,22 +237,10 @@ impl TargetNetworkAgentState {
         item: &ScriptNetworkOutputItem,
         document_loader_id: &str,
     ) {
-        match item {
-            ScriptNetworkOutputItem::SubresourceRequestStarted(request) => {
-                self.active_renderer_subresource_requests
-                    .insert(request.handle());
-            }
-            ScriptNetworkOutputItem::SubresourceBodyFinished(body) => {
-                self.active_renderer_subresource_requests
-                    .remove(&body.handle());
-            }
-            ScriptNetworkOutputItem::SubresourceNetworkRecord(_)
-            | ScriptNetworkOutputItem::SubresourceResponseStarted(_)
-            | ScriptNetworkOutputItem::SubresourceDataReceived(_)
-            | ScriptNetworkOutputItem::SubresourceEventSourceMessageReceived(_)
-            | ScriptNetworkOutputItem::WebSocketNetworkEvent(_)
-            | ScriptNetworkOutputItem::WebSocketLifecycleEvent(_) => {}
-        }
+        update_active_renderer_subresource_requests(
+            &mut self.active_renderer_subresource_requests,
+            item,
+        );
         self.output_queue
             .append_renderer_output_item_for_loader(item, document_loader_id);
     }
@@ -246,7 +290,8 @@ impl TargetNetworkAgentState {
                 .collect(),
         );
         let mut request_ids = NetworkBacklogRequestIdPlan::new(
-            &mut self.artifacts,
+            &mut self.artifacts.subresource_network_artifacts,
+            &mut self.artifacts.websocket_network_artifacts,
             preferred_request_id,
             request_id_allocator,
         );
@@ -401,7 +446,8 @@ impl TargetNetworkAgentState {
         let websocket_activity =
             self.pending_websocket_activity(trigger_session_id, primary_session_id);
         let mut request_ids = NetworkBacklogRequestIdPlan::new(
-            &mut self.artifacts,
+            &mut self.artifacts.subresource_network_artifacts,
+            &mut self.artifacts.websocket_network_artifacts,
             preferred_request_id,
             request_id_allocator,
         );
@@ -850,6 +896,126 @@ impl TargetNetworkAgentState {
         self.artifacts
             .subresource_network_artifacts
             .emitted_record_count()
+    }
+}
+
+/// Network lifecycle state retained only until a replaced renderer Page has
+/// published and closed its final output stream.
+#[derive(Debug)]
+pub(crate) struct RetiringTargetNetworkAgentState {
+    output_queue: TargetNetworkOutputQueue,
+    active_renderer_subresource_requests:
+        HashMap<SubresourceNetworkRequestHandle, RendererSubresourceTeardownDisposition>,
+    subresource_network_artifacts: SubresourceNetworkArtifacts,
+    websocket_network_artifacts: WebSocketNetworkArtifacts,
+}
+
+impl RetiringTargetNetworkAgentState {
+    pub(crate) fn ingest_renderer_output_item_and_prepare_live_delivery(
+        &mut self,
+        item: &ScriptNetworkOutputItem,
+        document_loader_id: &str,
+        event_session_ids: Vec<Option<String>>,
+        preferred_request_id: Option<NetworkBacklogPreferredRequestId<'_>>,
+        request_id_allocator: &mut ConnectionNetworkRequestIdAllocator,
+    ) -> TargetNetworkBacklogPreparedDelivery {
+        update_active_renderer_subresource_requests(
+            &mut self.active_renderer_subresource_requests,
+            item,
+        );
+
+        let subresource_start = self.output_queue.subresource_record_count();
+        let websocket_event_start = self.output_queue.websocket_event_count();
+        self.output_queue
+            .append_renderer_output_item_for_loader(item, document_loader_id);
+        let subresource_activity = PendingSubresourceNetworkActivity::from_sessions(
+            event_session_ids
+                .iter()
+                .cloned()
+                .map(|session_id| {
+                    PendingSubresourceNetworkActivitySession::new(session_id, subresource_start)
+                })
+                .collect(),
+        );
+        let websocket_activity = PendingWebSocketNetworkActivity::from_sessions(
+            event_session_ids
+                .into_iter()
+                .map(|session_id| {
+                    PendingWebSocketNetworkActivitySession::new(
+                        session_id,
+                        subresource_start,
+                        websocket_event_start,
+                    )
+                })
+                .collect(),
+        );
+        let mut request_ids = NetworkBacklogRequestIdPlan::new(
+            &mut self.subresource_network_artifacts,
+            &mut self.websocket_network_artifacts,
+            preferred_request_id,
+            request_id_allocator,
+        );
+        self.output_queue.backlog_prepared_delivery_for_activity(
+            subresource_activity,
+            websocket_activity,
+            &mut request_ids,
+        )
+    }
+
+    pub(crate) fn unterminated_document_bound_request_diagnostics(
+        &self,
+    ) -> Vec<(u64, Option<&str>)> {
+        let mut handles = self
+            .active_renderer_subresource_requests
+            .iter()
+            .filter_map(|(&handle, &disposition)| {
+                (disposition == RendererSubresourceTeardownDisposition::RequiresDocumentTerminal)
+                    .then_some(handle)
+            })
+            .collect::<Vec<_>>();
+        handles.sort_unstable_by_key(|handle| handle.get());
+        handles
+            .into_iter()
+            .map(|handle| {
+                (
+                    handle.get(),
+                    self.subresource_network_artifacts
+                        .request_id_for_handle(handle),
+                )
+            })
+            .collect()
+    }
+}
+
+fn update_active_renderer_subresource_requests(
+    active_requests: &mut HashMap<
+        SubresourceNetworkRequestHandle,
+        RendererSubresourceTeardownDisposition,
+    >,
+    item: &ScriptNetworkOutputItem,
+) {
+    match item {
+        ScriptNetworkOutputItem::SubresourceRequestStarted(request) => {
+            let disposition = if request.keepalive() {
+                RendererSubresourceTeardownDisposition::DetachedKeepalive
+            } else {
+                RendererSubresourceTeardownDisposition::RequiresDocumentTerminal
+            };
+            active_requests.insert(request.handle(), disposition);
+        }
+        ScriptNetworkOutputItem::SubresourceBodyFinished(body) => {
+            active_requests.remove(&body.handle());
+        }
+        ScriptNetworkOutputItem::SubresourceNetworkRecord(record) => {
+            if let Some(handle) = record.request_handle() {
+                active_requests.remove(&handle);
+            }
+        }
+        ScriptNetworkOutputItem::SubresourceResponseStarted(_)
+        | ScriptNetworkOutputItem::SubresourceDataReceived(_)
+        | ScriptNetworkOutputItem::SubresourceEventSourceMessageReceived(_)
+        | ScriptNetworkOutputItem::WebSocketNetworkEvent(_)
+        | ScriptNetworkOutputItem::WebSocketLifecycleEvent(_) => {}
     }
 }
 
@@ -1344,35 +1510,7 @@ impl TargetNetworkArtifacts {
             .emitted_event_count_for_session(session_id)
     }
 
-    fn request_id_for_subresource_output(
-        &mut self,
-        output: &TargetSubresourcePlanOutput,
-        preferred_request_id: &mut NetworkBacklogPreferredRequestIdBudget,
-        request_id_allocator: &mut ConnectionNetworkRequestIdAllocator,
-    ) -> String {
-        if let Some(socket_id) = output.websocket_socket_id()
-            && let Some(request_id) = self.websocket_request_id_for_socket(socket_id)
-        {
-            return request_id.to_owned();
-        }
-        if let Some(handle) = output.request_handle()
-            && let Some(request_id) = self
-                .subresource_network_artifacts
-                .request_id_for_handle(handle)
-        {
-            return request_id.to_owned();
-        }
-        let request_id = preferred_request_id
-            .take_for_new_subresource(output.request_handle())
-            .unwrap_or_else(|| request_id_allocator.allocate_request_id());
-        if let Some(handle) = output.request_handle() {
-            self.subresource_network_artifacts
-                .set_request_id_for_handle_if_absent(handle, request_id.clone());
-        }
-        self.record_websocket_request_id_for_subresource_output_if_absent(output, &request_id);
-        request_id
-    }
-
+    #[cfg(test)]
     fn request_id_for_websocket_socket(
         &mut self,
         socket_id: u64,
@@ -1386,11 +1524,13 @@ impl TargetNetworkArtifacts {
         request_id
     }
 
+    #[cfg(test)]
     fn websocket_request_id_for_socket(&self, socket_id: u64) -> Option<&str> {
         self.websocket_network_artifacts
             .request_id_for_socket(socket_id)
     }
 
+    #[cfg(test)]
     fn record_websocket_request_id_for_socket_if_absent(
         &mut self,
         socket_id: u64,
@@ -1398,17 +1538,6 @@ impl TargetNetworkArtifacts {
     ) {
         self.websocket_network_artifacts
             .set_request_id_for_socket_if_absent(socket_id, request_id);
-    }
-
-    fn record_websocket_request_id_for_subresource_output_if_absent(
-        &mut self,
-        output: &TargetSubresourcePlanOutput,
-        request_id: &str,
-    ) {
-        let Some(socket_id) = output.websocket_socket_id() else {
-            return;
-        };
-        self.record_websocket_request_id_for_socket_if_absent(socket_id, request_id.to_owned());
     }
 
     pub(crate) fn clear_session_scoped_observation_artifacts(&mut self) {
@@ -1761,8 +1890,8 @@ impl SubresourceNetworkArtifacts {
 mod tests {
     use moli_core::page::{
         ScriptNetworkOutputItem, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
-        SubresourceResourceType, WebSocketFrameDirection, WebSocketFrameOpcode,
-        WebSocketNetworkEvent,
+        SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
+        WebSocketFrameDirection, WebSocketFrameOpcode, WebSocketNetworkEvent,
     };
     use url::Url;
 
@@ -1951,6 +2080,94 @@ mod tests {
         for item in network_output_items(records, events) {
             agent.ingest_renderer_output_item(&item, "LOADER-1");
         }
+    }
+
+    #[test]
+    fn handled_terminal_network_record_retires_staged_request_from_idle_accounting() {
+        let mut agent = TargetNetworkAgentState::default();
+        let handle = SubresourceNetworkRequestHandle::new(17);
+        let document_url = Url::parse("https://example.com/").expect("document URL should parse");
+        let request_url =
+            Url::parse("https://example.com/late-xhr").expect("request URL should parse");
+        let started = ScriptNetworkOutputItem::SubresourceRequestStarted(Box::new(
+            SubresourceRequestStarted::new(
+                handle,
+                None,
+                document_url,
+                request_url,
+                "GET".to_owned(),
+                Vec::new(),
+                None,
+                SubresourceResourceType::Xhr,
+                SubresourceRequestInitiatorType::Script,
+                None,
+            ),
+        ));
+        agent.ingest_renderer_output_item(&started, "LOADER-1");
+        assert!(!agent.renderer_subresources_are_idle());
+
+        let terminal = ScriptNetworkOutputItem::SubresourceNetworkRecord(Box::new(
+            subresource_record("https://example.com/late-xhr").with_request_handle(handle),
+        ));
+        agent.ingest_renderer_output_item(&terminal, "LOADER-1");
+
+        assert!(
+            agent.renderer_subresources_are_idle(),
+            "a handled all-in-one record is terminal for the staged request with the same handle"
+        );
+    }
+
+    #[test]
+    fn retiring_keepalive_does_not_require_a_document_bound_terminal() {
+        fn started(
+            handle: SubresourceNetworkRequestHandle,
+            keepalive: bool,
+        ) -> ScriptNetworkOutputItem {
+            ScriptNetworkOutputItem::SubresourceRequestStarted(Box::new(
+                SubresourceRequestStarted::new(
+                    handle,
+                    None,
+                    Url::parse("https://example.com/").expect("document URL should parse"),
+                    Url::parse("https://example.com/collect").expect("request URL should parse"),
+                    "POST".to_owned(),
+                    Vec::new(),
+                    None,
+                    SubresourceResourceType::Fetch,
+                    SubresourceRequestInitiatorType::Script,
+                    None,
+                )
+                .with_keepalive(keepalive),
+            ))
+        }
+
+        let mut keepalive_agent = TargetNetworkAgentState::default();
+        keepalive_agent.ingest_renderer_output_item(
+            &started(SubresourceNetworkRequestHandle::new(18), true),
+            "LOADER-1",
+        );
+        assert!(
+            !keepalive_agent.renderer_subresources_are_idle(),
+            "a keepalive remains current-document activity until replacement"
+        );
+        let retiring_keepalive = keepalive_agent.rotate_document_for_replacement();
+        assert!(
+            retiring_keepalive
+                .unterminated_document_bound_request_diagnostics()
+                .is_empty(),
+            "a detached keepalive may outlive its Document without a CDP terminal"
+        );
+
+        let mut ordinary_agent = TargetNetworkAgentState::default();
+        ordinary_agent.ingest_renderer_output_item(
+            &started(SubresourceNetworkRequestHandle::new(19), false),
+            "LOADER-2",
+        );
+        let retiring_ordinary = ordinary_agent.rotate_document_for_replacement();
+        assert_eq!(
+            retiring_ordinary.unterminated_document_bound_request_diagnostics(),
+            vec![(19, None)],
+            "an ordinary request still requires a terminal before its renderer stream closes"
+        );
     }
 
     fn pending_combined_snapshot(
@@ -2638,7 +2855,8 @@ mod tests {
         .expect("test websocket activity should be visible");
         let mut request_id_allocator = ConnectionNetworkRequestIdAllocator::default();
         let mut request_ids = NetworkBacklogRequestIdPlan::new(
-            &mut agent.artifacts,
+            &mut agent.artifacts.subresource_network_artifacts,
+            &mut agent.artifacts.websocket_network_artifacts,
             Some(contextual_preferred_request_id("REQ-main")),
             &mut request_id_allocator,
         );

@@ -178,6 +178,7 @@ struct RendererBrowserContextRuntimeInner {
     service_worker_runtime: crate::service_worker_runtime::ServiceWorkerRuntimeService,
     storage_partition_identity: RendererStoragePartitionIdentity,
     next_web_storage_opaque_context_nonce: AtomicU64,
+    next_child_document_loader_id: AtomicU64,
     next_detached_parser_script_fetch_id: AtomicU64,
     next_dedicated_worker_instance_id: AtomicU64,
     dedicated_worker_devtools_senders:
@@ -517,6 +518,7 @@ impl RendererBrowserContextRuntime {
                 service_worker_runtime,
                 storage_partition_identity,
                 next_web_storage_opaque_context_nonce: AtomicU64::default(),
+                next_child_document_loader_id: AtomicU64::default(),
                 next_detached_parser_script_fetch_id: AtomicU64::default(),
                 next_dedicated_worker_instance_id: AtomicU64::default(),
                 dedicated_worker_devtools_senders: Mutex::new(HashMap::new()),
@@ -645,6 +647,16 @@ impl RendererBrowserContextRuntime {
                 .fetch_add(1, Ordering::Relaxed)
                 .saturating_add(1),
         )
+    }
+
+    pub(crate) fn allocate_child_document_loader_id(&self) -> String {
+        let next_id = self
+            .inner
+            .next_child_document_loader_id
+            .fetch_add(1, Ordering::Relaxed)
+            .checked_add(1)
+            .expect("browser-context child Document loader id space exhausted");
+        format!("LID-CHILD-{next_id:010}")
     }
 
     pub(crate) fn prepare_detached_parser_script_fetch(
@@ -915,6 +927,21 @@ mod tests {
         let clone = runtime.clone();
 
         assert!(runtime.shares_state_with(&clone));
+    }
+
+    #[test]
+    fn cloned_runtime_shares_child_document_loader_id_sequence() {
+        let runtime = RendererBrowserContextRuntime::new();
+        let clone = runtime.clone();
+
+        assert_eq!(
+            runtime.allocate_child_document_loader_id(),
+            "LID-CHILD-0000000001"
+        );
+        assert_eq!(
+            clone.allocate_child_document_loader_id(),
+            "LID-CHILD-0000000002"
+        );
     }
 
     #[test]

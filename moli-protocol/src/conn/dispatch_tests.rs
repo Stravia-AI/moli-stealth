@@ -71,18 +71,8 @@ async fn execute_direct_devtools_command_through_renderer_fence_for_test(
     ctx: &mut crate::testing::TestContext,
     command: DevToolsCommand,
 ) -> Result<DevToolsCommandResult, crate::devtools_runtime::DevToolsError> {
-    let (result, scheduler_events, protocol_events, renderer_output_predecessor) = ctx
-        .conn
-        .execute_devtools_command(command)
+    ctx.execute_devtools_command_through_renderer_fence_for_test(command)
         .await
-        .into_complete_parts();
-    if let Some(predecessor) = renderer_output_predecessor {
-        ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
-            .await;
-    }
-    ctx.route_direct_command_output_for_test(protocol_events, scheduler_events)
-        .await;
-    result
 }
 
 async fn evaluate_string_through_renderer_fence_for_test(
@@ -144,7 +134,7 @@ async fn create_target_in_browser_context_through_renderer_fence_for_test(
 }
 
 async fn materialize_bidi_target_node_for_test(
-    conn: &mut CdpConnection,
+    ctx: &mut crate::testing::TestContext,
     html: &str,
     selector: &str,
 ) -> (DevToolsCommandContext, DevToolsRemoteHandleId, u32) {
@@ -154,15 +144,16 @@ async fn materialize_bidi_target_node_for_test(
         target_id: None,
         browser_context_id: None,
     };
-    let (create_result, _, _, _) = conn
-        .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
-            context: context.clone(),
-            url: "about:blank".to_owned(),
-            browser_context_id: None,
-            activate: false,
-        }))
-        .await
-        .into_complete_parts();
+    let create_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CreateTarget(
+            DevToolsCreateTargetCommand {
+                context: context.clone(),
+                url: "about:blank".to_owned(),
+                browser_context_id: None,
+                activate: false,
+            },
+        ))
+        .await;
     let DevToolsCommandResult::CreateTarget(create_result) =
         create_result.expect("create target should succeed")
     else {
@@ -173,19 +164,20 @@ async fn materialize_bidi_target_node_for_test(
         ..context
     };
 
-    let (navigate_result, _, _, _) = conn
-        .execute_devtools_command(DevToolsCommand::Navigate(DevToolsNavigateCommand {
-            context: target_context.clone(),
-            url: format!("data:text/html,{html}"),
-            referrer: None,
-            wait: DevToolsNavigationWait::Load,
-        }))
-        .await
-        .into_complete_parts();
+    let navigate_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::Navigate(
+            DevToolsNavigateCommand {
+                context: target_context.clone(),
+                url: format!("data:text/html,{html}"),
+                referrer: None,
+                wait: DevToolsNavigationWait::Load,
+            },
+        ))
+        .await;
     navigate_result.expect("navigate should succeed");
 
-    let (evaluate_result, _, _, _) = conn
-        .execute_devtools_command(DevToolsCommand::EvaluateScript(
+    let evaluate_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::EvaluateScript(
             DevToolsEvaluateScriptCommand {
                 context: target_context.clone(),
                 realm_id: None,
@@ -200,8 +192,7 @@ async fn materialize_bidi_target_node_for_test(
                 serialization_options: None,
             },
         ))
-        .await
-        .into_complete_parts();
+        .await;
     let DevToolsCommandResult::Script(evaluate_result) =
         evaluate_result.expect("node evaluate should succeed")
     else {
@@ -220,10 +211,10 @@ async fn materialize_bidi_target_node_for_test(
 }
 
 async fn materialize_bidi_target_input_node_for_test(
-    conn: &mut CdpConnection,
+    ctx: &mut crate::testing::TestContext,
     html: &str,
 ) -> (DevToolsCommandContext, DevToolsRemoteHandleId, u32) {
-    materialize_bidi_target_node_for_test(conn, html, "#target").await
+    materialize_bidi_target_node_for_test(ctx, html, "#target").await
 }
 
 async fn ensure_initial_document_for_target_id_for_test(
@@ -3889,10 +3880,10 @@ async fn devtools_call_function_node_shared_id_failure_precedes_handle() {
 
 #[tokio::test]
 async fn bidi_node_remote_value_registers_renderer_shared_node_binding() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let (_target_context, shared_id, backend_node_id) =
         materialize_bidi_target_input_node_for_test(
-            &mut conn,
+            &mut ctx,
             "<input id='target' data-state='ready'>",
         )
         .await;
@@ -3901,9 +3892,11 @@ async fn bidi_node_remote_value_registers_renderer_shared_node_binding() {
         "BiDi node remote value should carry renderer-owned backend id"
     );
 
-    conn.clear_runtime_remote_object_tracking_for_session_owner(None);
+    ctx.conn
+        .clear_runtime_remote_object_tracking_for_session_owner(None);
 
-    let renderer_binding = conn
+    let renderer_binding = ctx
+        .conn
         .document_bidi_node_binding_for_session_owner_async(None, shared_id.as_str())
         .await
         .expect("renderer BiDi shared-node binding lookup should run");
@@ -4019,16 +4012,16 @@ async fn bidi_node_remote_value_reuses_renderer_frontend_node_id() {
 
 #[tokio::test]
 async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let (target_context, _shared_id, _backend_node_id) = materialize_bidi_target_node_for_test(
-        &mut conn,
+        &mut ctx,
         "<section id='target'><a id='inside'>Inside</a></section>",
         "#target",
     )
     .await;
 
-    let (evaluate_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::EvaluateScript(
+    let evaluate_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::EvaluateScript(
             DevToolsEvaluateScriptCommand {
                 context: target_context.clone(),
                 realm_id: None,
@@ -4047,8 +4040,7 @@ async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
                 }),
             },
         ))
-        .await
-        .into_parts();
+        .await;
     let remote_value = expect_script_value_result(
         evaluate_result.expect("node evaluate should succeed"),
         "expected node script result",
@@ -4061,9 +4053,11 @@ async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
         .unwrap_or_else(|| panic!("serialized child should expose sharedId: {node_value}"))
         .to_owned();
 
-    conn.clear_runtime_remote_object_tracking_for_session_owner(None);
+    ctx.conn
+        .clear_runtime_remote_object_tracking_for_session_owner(None);
 
-    let renderer_binding = conn
+    let renderer_binding = ctx
+        .conn
         .document_bidi_node_binding_for_session_owner_async(None, &child_shared_id)
         .await
         .expect("child shared-node binding lookup should run");
@@ -4075,29 +4069,30 @@ async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
         "renderer DOM agent should register child sharedId bindings: {renderer_binding:?}"
     );
 
-    let (call_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::CallFunction(DevToolsCallFunctionCommand {
-            context: target_context,
-            realm_id: None,
-            world_name: None,
-            object_id: None,
-            this_parameter: None,
-            function_declaration: "(node) => `${node.localName}:${node.id}`".to_owned(),
-            arguments: vec![json!({
-                "type": "node",
-                "sharedId": child_shared_id
-            })],
-            await_promise: false,
-            user_gesture: false,
-            webdriver_bidi_file_prompt_handler: None,
-            result_ownership: DevToolsResultOwnership::None,
-            object_group: None,
-            preserve_remote_metadata: false,
-            materialize_bidi_script_result: false,
-            serialization_options: None,
-        }))
-        .await
-        .into_parts();
+    let call_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CallFunction(
+            DevToolsCallFunctionCommand {
+                context: target_context,
+                realm_id: None,
+                world_name: None,
+                object_id: None,
+                this_parameter: None,
+                function_declaration: "(node) => `${node.localName}:${node.id}`".to_owned(),
+                arguments: vec![json!({
+                    "type": "node",
+                    "sharedId": child_shared_id
+                })],
+                await_promise: false,
+                user_gesture: false,
+                webdriver_bidi_file_prompt_handler: None,
+                result_ownership: DevToolsResultOwnership::None,
+                object_group: None,
+                preserve_remote_metadata: false,
+                materialize_bidi_script_result: false,
+                serialization_options: None,
+            },
+        ))
+        .await;
     let remote_value = expect_script_value_result(
         call_result.expect("callFunction should resolve child sharedId via renderer binding"),
         "expected callFunction value result",
@@ -4107,24 +4102,25 @@ async fn bidi_node_remote_value_registers_child_shared_node_bindings() {
 
 #[tokio::test]
 async fn set_file_input_files_shared_id_uses_renderer_binding_without_protocol_registry() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let (target_context, _shared_id, backend_node_id) =
-        materialize_bidi_target_input_node_for_test(&mut conn, "<input id='target' type='file'>")
+        materialize_bidi_target_input_node_for_test(&mut ctx, "<input id='target' type='file'>")
             .await;
     let fake_shared_id =
         crate::devtools_runtime::webdriver_bidi_node_shared_id_for_backend_node_id(backend_node_id);
-    conn.register_document_bidi_node_binding_for_session_owner_async(
-        None,
-        fake_shared_id.as_str(),
-        backend_node_id,
-    )
-    .await
-    .expect("renderer fake shared-node binding registration should run");
+    ctx.conn
+        .register_document_bidi_node_binding_for_session_owner_async(
+            None,
+            fake_shared_id.as_str(),
+            backend_node_id,
+        )
+        .await
+        .expect("renderer fake shared-node binding registration should run");
 
     let upload_bytes = b"from renderer registry";
-    let (set_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::SetFileInputFiles(
-            DevToolsSetFileInputFilesCommand {
+    let set_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::SetFileInputFiles(DevToolsSetFileInputFilesCommand {
                 context: target_context.clone(),
                 object_id: fake_shared_id,
                 files: vec![moli_core::page::SelectedFile {
@@ -4134,14 +4130,13 @@ async fn set_file_input_files_shared_id_uses_renderer_binding_without_protocol_r
                     last_modified: 0.0,
                 }],
                 append: false,
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     set_result.expect("setFileInputFiles should use renderer shared-node binding");
 
-    let (evaluate_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::EvaluateScript(
+    let evaluate_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::EvaluateScript(
             DevToolsEvaluateScriptCommand {
                 context: target_context,
                 realm_id: None,
@@ -4156,8 +4151,7 @@ async fn set_file_input_files_shared_id_uses_renderer_binding_without_protocol_r
                 serialization_options: None,
             },
         ))
-        .await
-        .into_parts();
+        .await;
     let remote_value = expect_script_value_result(
         evaluate_result.expect("file input state evaluate should succeed"),
         "expected file input state script result",
@@ -4170,37 +4164,39 @@ async fn set_file_input_files_shared_id_uses_renderer_binding_without_protocol_r
 
 #[tokio::test]
 async fn locate_nodes_start_node_shared_id_uses_renderer_binding_without_protocol_registry() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let (target_context, _shared_id, backend_node_id) = materialize_bidi_target_node_for_test(
-        &mut conn,
+        &mut ctx,
         "<section id='target'><a id='inside'>Inside</a></section><a id='outside'>Outside</a>",
         "#target",
     )
     .await;
     let fake_shared_id =
         crate::devtools_runtime::webdriver_bidi_node_shared_id_for_backend_node_id(backend_node_id);
-    conn.register_document_bidi_node_binding_for_session_owner_async(
-        None,
-        fake_shared_id.as_str(),
-        backend_node_id,
-    )
-    .await
-    .expect("renderer fake shared-node binding registration should run");
-
-    let (locate_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::LocateNodes(DevToolsLocateNodesCommand {
-            context: target_context,
-            locator: DevToolsLocateNodesLocator::Css("a".to_owned()),
-            max_node_count: None,
-            start_nodes: vec![json!({
-                "type": "node",
-                "sharedId": fake_shared_id.as_str()
-            })],
-            start_node_references: Vec::new(),
-            serialization_options: None,
-        }))
+    ctx.conn
+        .register_document_bidi_node_binding_for_session_owner_async(
+            None,
+            fake_shared_id.as_str(),
+            backend_node_id,
+        )
         .await
-        .into_parts();
+        .expect("renderer fake shared-node binding registration should run");
+
+    let locate_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::LocateNodes(
+            DevToolsLocateNodesCommand {
+                context: target_context,
+                locator: DevToolsLocateNodesLocator::Css("a".to_owned()),
+                max_node_count: None,
+                start_nodes: vec![json!({
+                    "type": "node",
+                    "sharedId": fake_shared_id.as_str()
+                })],
+                start_node_references: Vec::new(),
+                serialization_options: None,
+            },
+        ))
+        .await;
     let DevToolsCommandResult::LocateNodes(locate_result) =
         locate_result.expect("locateNodes should use renderer shared-node binding")
     else {
@@ -4216,46 +4212,49 @@ async fn locate_nodes_start_node_shared_id_uses_renderer_binding_without_protoco
 
 #[tokio::test]
 async fn call_function_shared_id_uses_renderer_binding_without_protocol_registry() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let (target_context, _shared_id, backend_node_id) = materialize_bidi_target_node_for_test(
-        &mut conn,
+        &mut ctx,
         "<section id='target'><a id='inside'>Inside</a></section>",
         "#target",
     )
     .await;
     let fake_shared_id =
         crate::devtools_runtime::webdriver_bidi_node_shared_id_for_backend_node_id(backend_node_id);
-    conn.register_document_bidi_node_binding_for_session_owner_async(
-        None,
-        fake_shared_id.as_str(),
-        backend_node_id,
-    )
-    .await
-    .expect("renderer fake shared-node binding registration should run");
-
-    let (call_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::CallFunction(DevToolsCallFunctionCommand {
-            context: target_context,
-            realm_id: None,
-            world_name: None,
-            object_id: None,
-            this_parameter: None,
-            function_declaration: "(node) => `${node.id}:${node.querySelector('a').id}`".to_owned(),
-            arguments: vec![json!({
-                "type": "node",
-                "sharedId": fake_shared_id.as_str()
-            })],
-            await_promise: false,
-            user_gesture: false,
-            webdriver_bidi_file_prompt_handler: None,
-            result_ownership: DevToolsResultOwnership::None,
-            object_group: None,
-            preserve_remote_metadata: false,
-            materialize_bidi_script_result: false,
-            serialization_options: None,
-        }))
+    ctx.conn
+        .register_document_bidi_node_binding_for_session_owner_async(
+            None,
+            fake_shared_id.as_str(),
+            backend_node_id,
+        )
         .await
-        .into_parts();
+        .expect("renderer fake shared-node binding registration should run");
+
+    let call_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CallFunction(
+            DevToolsCallFunctionCommand {
+                context: target_context,
+                realm_id: None,
+                world_name: None,
+                object_id: None,
+                this_parameter: None,
+                function_declaration: "(node) => `${node.id}:${node.querySelector('a').id}`"
+                    .to_owned(),
+                arguments: vec![json!({
+                    "type": "node",
+                    "sharedId": fake_shared_id.as_str()
+                })],
+                await_promise: false,
+                user_gesture: false,
+                webdriver_bidi_file_prompt_handler: None,
+                result_ownership: DevToolsResultOwnership::None,
+                object_group: None,
+                preserve_remote_metadata: false,
+                materialize_bidi_script_result: false,
+                serialization_options: None,
+            },
+        ))
+        .await;
     let remote_value = expect_script_value_result(
         call_result.expect("callFunction should use renderer shared-node binding"),
         "expected callFunction value result",
@@ -4790,7 +4789,7 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
         loader_id.as_str(),
     )
     .await;
-    let mut conn = ctx.conn;
+    let conn = &mut ctx.conn;
 
     let (single_result, _) = conn
         .execute_devtools_command(DevToolsCommand::QuerySelector(
@@ -5005,35 +5004,38 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     );
     assert!(object_geometry_result.quads.is_empty());
 
-    let (resolved_property_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::CallFunction(DevToolsCallFunctionCommand {
-            context: DevToolsCommandContext {
-                target_id: Some(target_id.clone()),
-                ..context.clone()
+    let _ = conn;
+    let resolved_property_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::CallFunction(
+            DevToolsCallFunctionCommand {
+                context: DevToolsCommandContext {
+                    target_id: Some(target_id.clone()),
+                    ..context.clone()
+                },
+                realm_id: None,
+                world_name: None,
+                object_id: Some(DevToolsRemoteHandleId::from(resolved_object_id)),
+                this_parameter: None,
+                function_declaration: "function() { return this.id; }".to_owned(),
+                arguments: Vec::new(),
+                await_promise: false,
+                user_gesture: false,
+                webdriver_bidi_file_prompt_handler: None,
+                result_ownership: DevToolsResultOwnership::ByValue,
+                object_group: None,
+                preserve_remote_metadata: false,
+                materialize_bidi_script_result: false,
+                serialization_options: None,
             },
-            realm_id: None,
-            world_name: None,
-            object_id: Some(DevToolsRemoteHandleId::from(resolved_object_id)),
-            this_parameter: None,
-            function_declaration: "function() { return this.id; }".to_owned(),
-            arguments: Vec::new(),
-            await_promise: false,
-            user_gesture: false,
-            webdriver_bidi_file_prompt_handler: None,
-            result_ownership: DevToolsResultOwnership::ByValue,
-            object_group: None,
-            preserve_remote_metadata: false,
-            materialize_bidi_script_result: false,
-            serialization_options: None,
-        }))
-        .await
-        .into_parts();
+        ))
+        .await;
     let resolved_property = expect_script_value_result(
         resolved_property_result.expect("resolved call function should succeed"),
         "expected resolved call function value",
     );
     assert_eq!(resolved_property.value, json!("target"));
 
+    let conn = &mut ctx.conn;
     let (scroll_result, _) = conn
         .execute_devtools_command(DevToolsCommand::ScrollIntoViewIfNeeded(
             DevToolsScrollIntoViewIfNeededCommand {
@@ -5099,20 +5101,22 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     assert_eq!(multiple_result.node_ids.len(), 2);
     assert!(multiple_result.multiple);
 
-    let (xpath_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::LocateNodes(DevToolsLocateNodesCommand {
-            context: DevToolsCommandContext {
-                target_id: Some(target_id.clone()),
-                ..context.clone()
+    let _ = conn;
+    let xpath_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::LocateNodes(
+            DevToolsLocateNodesCommand {
+                context: DevToolsCommandContext {
+                    target_id: Some(target_id.clone()),
+                    ..context.clone()
+                },
+                locator: DevToolsLocateNodesLocator::XPath("//main[@id='target']".to_owned()),
+                max_node_count: Some(1),
+                start_nodes: Vec::new(),
+                start_node_references: Vec::new(),
+                serialization_options: None,
             },
-            locator: DevToolsLocateNodesLocator::XPath("//main[@id='target']".to_owned()),
-            max_node_count: Some(1),
-            start_nodes: Vec::new(),
-            start_node_references: Vec::new(),
-            serialization_options: None,
-        }))
-        .await
-        .into_parts();
+        ))
+        .await;
     let DevToolsCommandResult::LocateNodes(xpath_result) =
         xpath_result.expect("xpath locate nodes should succeed")
     else {
@@ -5128,23 +5132,24 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     );
     assert_eq!(xpath_result.node_ids, vec![target_node_id]);
 
-    let (link_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::LocateNodes(DevToolsLocateNodesCommand {
-            context: DevToolsCommandContext {
-                target_id: Some(target_id.clone()),
-                ..context.clone()
+    let link_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::LocateNodes(
+            DevToolsLocateNodesCommand {
+                context: DevToolsCommandContext {
+                    target_id: Some(target_id.clone()),
+                    ..context.clone()
+                },
+                locator: DevToolsLocateNodesLocator::LinkText {
+                    value: "Top Link".to_owned(),
+                    match_type: DevToolsLocateNodesTextMatch::Full,
+                },
+                max_node_count: Some(1),
+                start_nodes: Vec::new(),
+                start_node_references: Vec::new(),
+                serialization_options: None,
             },
-            locator: DevToolsLocateNodesLocator::LinkText {
-                value: "Top Link".to_owned(),
-                match_type: DevToolsLocateNodesTextMatch::Full,
-            },
-            max_node_count: Some(1),
-            start_nodes: Vec::new(),
-            start_node_references: Vec::new(),
-            serialization_options: None,
-        }))
-        .await
-        .into_parts();
+        ))
+        .await;
     let DevToolsCommandResult::LocateNodes(link_result) =
         link_result.expect("link text locate nodes should succeed")
     else {
@@ -5152,8 +5157,8 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     };
     assert_eq!(link_result.node_ids.len(), 1);
 
-    let (root_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::QuerySelector(
+    let root_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::QuerySelector(
             DevToolsQuerySelectorCommand {
                 context: DevToolsCommandContext {
                     target_id: Some(target_id.clone()),
@@ -5164,8 +5169,7 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
                 multiple: false,
             },
         ))
-        .await
-        .into_parts();
+        .await;
     let DevToolsCommandResult::QuerySelector(root_result) =
         root_result.expect("root query selector should succeed")
     else {
@@ -5173,8 +5177,9 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     };
     let root_node_id = root_result.node_ids[0];
 
-    let (rooted_query_result, _, rooted_query_events) = conn
-        .execute_devtools_command_with_protocol_events(DevToolsCommand::QuerySelector(
+    let sent_before_rooted_query = ctx.sent.len();
+    let rooted_query_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::QuerySelector(
             DevToolsQuerySelectorCommand {
                 context: DevToolsCommandContext {
                     target_id: Some(target_id.clone()),
@@ -5185,12 +5190,11 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
                 multiple: false,
             },
         ))
-        .await
-        .into_parts_with_protocol_events();
+        .await;
     assert!(
-        rooted_query_events
+        ctx.sent[sent_before_rooted_query..]
             .iter()
-            .all(|event| event.protocol_message().is_none()),
+            .all(|message| message.get("id").is_none()),
         "direct rooted DOM.querySelector must not route child-node sidecars as protocol events"
     );
     let DevToolsCommandResult::QuerySelector(rooted_query_result) =
@@ -5201,23 +5205,24 @@ async fn devtools_command_executes_dom_query_selector_for_document_root() {
     assert_eq!(rooted_query_result.node_ids.len(), 1);
     assert_ne!(rooted_query_result.node_ids[0], link_result.node_ids[0]);
 
-    let (root_link_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::LocateNodes(DevToolsLocateNodesCommand {
-            context: DevToolsCommandContext {
-                target_id: Some(target_id),
-                ..context
+    let root_link_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::LocateNodes(
+            DevToolsLocateNodesCommand {
+                context: DevToolsCommandContext {
+                    target_id: Some(target_id),
+                    ..context
+                },
+                locator: DevToolsLocateNodesLocator::LinkText {
+                    value: "Link".to_owned(),
+                    match_type: DevToolsLocateNodesTextMatch::Partial,
+                },
+                max_node_count: None,
+                start_nodes: Vec::new(),
+                start_node_references: vec![DevToolsDomNodeReference::FrontendNodeId(root_node_id)],
+                serialization_options: None,
             },
-            locator: DevToolsLocateNodesLocator::LinkText {
-                value: "Link".to_owned(),
-                match_type: DevToolsLocateNodesTextMatch::Partial,
-            },
-            max_node_count: None,
-            start_nodes: Vec::new(),
-            start_node_references: vec![DevToolsDomNodeReference::FrontendNodeId(root_node_id)],
-            serialization_options: None,
-        }))
-        .await
-        .into_parts();
+        ))
+        .await;
     let DevToolsCommandResult::LocateNodes(root_link_result) =
         root_link_result.expect("rooted link text locate nodes should succeed")
     else {
@@ -5565,9 +5570,8 @@ async fn devtools_command_executes_input_key_command_without_cdp_sidecar() {
         "direct input key dispatch must not emit CDP-shaped sidecar messages: {protocol_events:?}"
     );
 
-    let (value_result, _) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::EvaluateScript(
+    let value_result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(DevToolsCommand::EvaluateScript(
             DevToolsEvaluateScriptCommand {
                 context: target_context,
                 realm_id: None,
@@ -5582,8 +5586,7 @@ async fn devtools_command_executes_input_key_command_without_cdp_sidecar() {
                 serialization_options: None,
             },
         ))
-        .await
-        .into_parts();
+        .await;
     let value_result = expect_script_value_result(
         value_result.expect("value evaluation should succeed"),
         "expected script value",

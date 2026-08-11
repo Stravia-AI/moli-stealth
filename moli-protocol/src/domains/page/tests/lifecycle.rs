@@ -2097,17 +2097,12 @@ async fn add_script_run_immediately_creates_top_level_world_even_when_child_worl
 async fn add_script_run_immediately_installs_matching_bindings_into_new_top_level_world() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<body>parent-frame<iframe srcdoc=\"<body>child-frame</body>\"></iframe></body>",
-        ).await
-        .expect("page should load");
-    let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-    let _ = bc
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body>parent-frame<iframe srcdoc=\"<body>child-frame</body>\"></iframe></body>",
+        Some("SID-1"),
+    )
+    .await;
+    ctx.sent.clear();
     ctx.process_async(json!({
         "id": 4160,
         "method": "Runtime.enable",
@@ -2207,29 +2202,32 @@ async fn add_script_run_immediately_installs_matching_bindings_into_new_top_leve
 #[tokio::test(flavor = "multi_thread")]
 async fn document_start_script_run_immediately_targets_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body>background</body>")
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
-    bc.mutate_parked_page_session_state("TID-background", |state| {
-        state
-            .devtools_session_state
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-    });
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body>background</body>",
+        Some("SID-background"),
+    )
+    .await;
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .expect("browser context")
+        .mutate_parked_page_session_state("TID-background", |state| {
+            state
+                .devtools_session_state
+                .runtime_session_state
+                .runtime_frontend_enabled = true;
+        });
     ctx.sent.clear();
 
     ctx.process_async(json!({

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{HashMap, VecDeque},
     sync::{Arc, atomic::AtomicU64},
     time::{Duration, Instant},
 };
@@ -10,11 +10,11 @@ use moli_core::{
     runtime::NavigationRuntimeConfig,
 };
 use moli_protocol::{
-    BackgroundNavigationCompletion, BackgroundNavigationGateKey, BackgroundProtocolEvent,
-    CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition, CdpRendererCommandAccess,
-    CdpSchedulerEvent, CdpTargetHostLifecycleObserver, CommandDispatchContext,
-    CompletedCdpCommandDispatch, CompletedDeferredMainDocumentLoadCompletion,
-    DeferredMainDocumentLoadCompletionOutputAction,
+    BackgroundNavigationCancellation, BackgroundNavigationCompletion, BackgroundNavigationGateKey,
+    BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition,
+    CdpRendererCommandAccess, CdpSchedulerEvent, CdpTargetHostLifecycleObserver,
+    CommandDispatchContext, CompletedCdpCommandDispatch,
+    CompletedDeferredMainDocumentLoadCompletion, DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadObservationId,
     DeferredMainDocumentLoadPredecessorCandidate, PageScreencastCaptureCompletion,
     PageScreencastCaptureStart, PageScreencastRegistration, PageScreencastSubscriptionStatus,
@@ -137,7 +137,7 @@ struct BackgroundNavigationGate {
     /// `BackgroundNavigationCompletion` has not yet been drained. The command
     /// response may be produced independently; this gate does not claim where
     /// that response falls relative to response-head or body EOF.
-    pending: HashSet<BackgroundNavigationGateKey>,
+    pending: HashMap<BackgroundNavigationGateKey, BackgroundNavigationCancellation>,
 }
 
 impl BackgroundNavigationGate {
@@ -145,12 +145,35 @@ impl BackgroundNavigationGate {
         !self.pending.is_empty()
     }
 
-    fn note_navigation_started(&mut self, key: BackgroundNavigationGateKey) {
-        self.pending.insert(key);
+    fn note_navigation_started(
+        &mut self,
+        key: BackgroundNavigationGateKey,
+        cancellation: BackgroundNavigationCancellation,
+    ) {
+        if self.pending.contains_key(&key) {
+            return;
+        }
+        let pending_before = self.pending.len();
+        self.pending.retain(|pending, pending_cancellation| {
+            if !key.supersedes(pending) {
+                return true;
+            }
+            pending_cancellation.cancel();
+            false
+        });
+        let superseded = pending_before - self.pending.len();
+        if superseded > 0 {
+            tracing::debug!(
+                superseded,
+                ?key,
+                "retired superseded background navigation gate"
+            );
+        }
+        self.pending.insert(key, cancellation);
     }
 
     fn note_navigation_completion_drained(&mut self, key: &BackgroundNavigationGateKey) {
-        if !self.pending.remove(key) {
+        if self.pending.remove(key).is_none() {
             tracing::debug!(
                 ?key,
                 "background navigation completion did not match any pending gate"
@@ -1862,6 +1885,16 @@ impl CdpScheduler {
         ProtocolOutputSequence::from_background_events(events)
     }
 
+    fn append_navigation_gate_release_before_renderer_boundary(
+        &mut self,
+        prefix: &mut ProtocolOutputSequence,
+    ) {
+        if self.has_inflight_background_navigation() {
+            return;
+        }
+        prefix.append(self.drain_pending_navigation_background_events());
+    }
+
     fn apply_scheduler_events(&mut self, events: Vec<CdpSchedulerEvent>) {
         self.apply_scheduler_events_with_load_predecessors(events, &[], None);
     }
@@ -1882,8 +1915,9 @@ impl CdpScheduler {
                 );
             }
             match event {
-                CdpSchedulerEvent::BackgroundNavigationStarted { key } => {
-                    self.background_navigation_gate.note_navigation_started(key);
+                CdpSchedulerEvent::BackgroundNavigationStarted { key, cancellation } => {
+                    self.background_navigation_gate
+                        .note_navigation_started(key, cancellation);
                 }
                 CdpSchedulerEvent::ProtocolWorkPublished { work } => {
                     if moli_trace::cdp_nav_timing_enabled() {
@@ -2449,9 +2483,12 @@ impl CdpScheduler {
             "navigation completion must use its exact insertion boundary, not a command predecessor"
         );
         prefix.append(completion_prefix);
-        if !self.has_inflight_background_navigation() {
-            suffix.append(self.drain_pending_navigation_background_events());
-        }
+        // The completion can still carry a renderer insertion boundary. While
+        // that boundary is projected, later publications may contain the
+        // response or terminal for a request whose start is parked behind the
+        // navigation gate. Release the parked FIFO into the pre-boundary
+        // prefix so those later publications cannot overtake it.
+        self.append_navigation_gate_release_before_renderer_boundary(&mut prefix);
         suffix.append(self.drain_background_events_around_inflight_navigation(background_event_rx));
         (prefix, suffix, renderer_output_boundary)
     }

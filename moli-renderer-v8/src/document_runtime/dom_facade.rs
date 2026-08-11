@@ -381,6 +381,11 @@ impl DocumentRuntime {
             .create_processing_instruction(&target, &data)
     }
 
+    pub(crate) fn create_cdata_section_in_live_dom_host(&mut self, data: String) -> DomHandle {
+        self.dom_host_mut_for_active_parser_step()
+            .create_cdata_section(&data)
+    }
+
     pub(crate) fn create_document_type_in_live_dom_host(
         &mut self,
         name: String,

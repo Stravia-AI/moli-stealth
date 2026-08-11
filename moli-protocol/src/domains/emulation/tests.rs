@@ -1016,7 +1016,7 @@ async fn set_user_agent_override_applies_to_current_page_xhr_requests() {
         "params": { "expression": "navigator.userAgent" }
     }))
     .await;
-    let response = ctx.take_one();
+    let response = ctx.take_response_by_id(15);
     assert_eq!(
         response["result"]["result"]["value"],
         json!("moli-emulation-live-ua")
@@ -1920,7 +1920,7 @@ async fn live_locale_override_updates_navigator_without_page_define_property() {
         }
     }))
     .await;
-    let response = ctx.take_one();
+    let response = ctx.take_response_by_id(152);
     assert_eq!(response["result"]["result"]["value"], json!("tampered"));
 
     ctx.process_async(json!({
@@ -1941,7 +1941,7 @@ async fn live_locale_override_updates_navigator_without_page_define_property() {
         }
     }))
     .await;
-    let response = ctx.take_one();
+    let response = ctx.take_response_by_id(154);
     let payload = response["result"]["result"]["value"]
         .as_str()
         .expect("runtime evaluate should return a JSON string");
@@ -2034,26 +2034,23 @@ async fn locale_and_timezone_overrides_apply_to_locale_date_formatting() {
 #[tokio::test(flavor = "multi_thread")]
 async fn context_emulated_media_applies_to_loaded_background_page_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body>background</body>")
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::new(
+    let background = BackgroundTarget::new(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
         TargetIdentityState::about_blank(),
         TargetPageSlot::empty_for_test_fixture(),
     );
-    background.set_target_url(page.final_url().as_str().to_owned());
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active");
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body>background</body>",
+        Some("SID-background"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -2113,26 +2110,23 @@ async fn context_emulated_media_applies_to_loaded_background_page_without_promot
 #[tokio::test(flavor = "multi_thread")]
 async fn context_locale_override_applies_to_loaded_background_page_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body>background</body>")
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::new(
+    let background = BackgroundTarget::new(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
         TargetIdentityState::about_blank(),
         TargetPageSlot::empty_for_test_fixture(),
     );
-    background.set_target_url(page.final_url().as_str().to_owned());
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active");
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body>background</body>",
+        Some("SID-background"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -2193,25 +2187,23 @@ async fn context_locale_override_applies_to_loaded_background_page_without_promo
 #[tokio::test(flavor = "multi_thread")]
 async fn session_emulation_routes_to_loaded_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body>background</body>")
-        .await
-        .expect("background page should load");
-    let mut background = BackgroundTarget::new(
+    let background = BackgroundTarget::new(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        TargetIdentityState::with_url(page.final_url().as_str().to_owned()),
+        TargetIdentityState::about_blank(),
         TargetPageSlot::empty_for_test_fixture(),
     );
-    background.set_target_url(page.final_url().as_str().to_owned());
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active");
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body>background</body>",
+        Some("SID-background"),
+    )
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -2324,18 +2316,13 @@ async fn emulated_media_updates_existing_media_query_list_matches() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<body><script>globalThis.events = []; globalThis.darkMql = matchMedia('(prefers-color-scheme: dark)'); globalThis.lightMql = matchMedia('(prefers-color-scheme: light)'); darkMql.addEventListener('change', event => events.push(['dark', event.matches, event.media, event.target === darkMql])); lightMql.onchange = event => events.push(['light', event.matches, event.media, event.target === lightMql]);</script></body>",
-        )
-        .await
-        .expect("page should load");
-    let _ = bc
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<body><script>globalThis.events = []; globalThis.darkMql = matchMedia('(prefers-color-scheme: dark)'); globalThis.lightMql = matchMedia('(prefers-color-scheme: light)'); darkMql.addEventListener('change', event => events.push(['dark', event.matches, event.media, event.target === darkMql])); lightMql.onchange = event => events.push(['light', event.matches, event.media, event.target === lightMql]);</script></body>",
+        Some("SID-1"),
+    )
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 184,
@@ -2402,16 +2389,10 @@ async fn generated_surface_refresh_does_not_freeze_match_media_override() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body></body>")
-        .await
-        .expect("page should load");
-    let _ = bc
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<body></body>", Some("SID-1"))
+        .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 187,
@@ -2465,16 +2446,10 @@ async fn target_session_detach_clears_emulated_media_before_reattach() {
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<body></body>")
-        .await
-        .expect("page should load");
-    let _ = bc
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<body></body>", None)
+        .await;
+    ctx.sent.clear();
     ctx.conn.register_top_level_page_target("TID-1");
 
     ctx.process_async(json!({

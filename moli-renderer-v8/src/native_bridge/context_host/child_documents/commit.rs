@@ -132,80 +132,19 @@ impl JsContextHost {
         if !self.child_browsing_contexts.contains_key(&handle) {
             return None;
         }
-        if !snapshot
+        let is_xml_document = snapshot
             .content_type
             .as_deref()
-            .is_some_and(is_dom_parser_xml_mime)
-        {
-            return self.install_live_child_html_document_from_snapshot(
-                scope,
-                handle,
-                snapshot,
-                window_commit,
-                preserve_window_event_state,
-                navigation_loader,
-            );
-        }
-        let document_handle = self.create_empty_child_xml_document_from_snapshot(snapshot);
-        let document_url = self.document_url_for_handle(document_handle);
-        let document_base_url = self.document_base_url_for_handle(document_handle);
-        let referrer_policy = self
-            .child_browsing_context_referrer_policy_for_document_handle(document_handle)
-            .map(str::to_owned);
-        // Chromium's XML parser builds into the Document selected for this
-        // navigation. Keep that same identity here instead of parsing a
-        // detached snapshot and transplanting its children. Parse before
-        // publishing the owner transition so a rejected target cannot leave a
-        // partially initialized current Document behind.
-        //
-        // Script handles discovered by this full-tree parse are deliberately
-        // not scheduled: doing so after parsing would not provide
-        // parser-blocking ordering.
-        if moli_parser::XmlParser
-            .parse_tree_into_document(self.dom_host_mut(), document_handle, &snapshot.markup)
-            .is_none()
-        {
-            tracing::error!(
-                ?handle,
-                ?document_handle,
-                url = %snapshot.url,
-                "aborting child XML document commit because its parser target is not an empty XML Document"
-            );
-            return None;
-        }
-        let owner_transition = self.commit_child_document_owner(
+            .is_some_and(is_dom_parser_xml_mime);
+        self.install_live_child_document_from_snapshot(
             scope,
             handle,
-            document_handle,
-            document_url,
-            document_base_url,
-            referrer_policy,
-            snapshot.policy_container.clone(),
+            snapshot,
             window_commit,
             preserve_window_event_state,
             navigation_loader,
-        )?;
-        let current_owner = owner_transition
-            .current_owner()
-            .expect("child document commit must install a current owner");
-        let owner_local_window_id = current_owner.local_window_id;
-        let owner_document_id = current_owner.document_id;
-        self.dom_host_mut()
-            .mark_subtree_connected_preserving_owner_document(document_handle);
-        self.sync_owner_style_sheet_texts_for_document_tree_scopes(document_handle);
-        self.install_empty_child_classic_script_runner_for_current_document(
-            handle,
-            owner_local_window_id,
-            owner_document_id,
-        );
-        let parser_stop_action = self
-            .frame_owner_store
-            .finish_current_child_document_parsing(handle, current_owner.document_owner());
-        Some(ChildDocumentInstallResult {
-            initial_classic_ready_work: None,
-            parser_stop_action,
-            owner_transition,
-        })
+            is_xml_document,
+        )
     }
 
     pub(in crate::native_bridge) fn replace_child_custom_elements_registry_for_document_commit(
@@ -221,7 +160,7 @@ impl JsContextHost {
         }
     }
 
-    fn install_live_child_html_document_from_snapshot(
+    fn install_live_child_document_from_snapshot(
         &mut self,
         scope: &mut v8::PinScope<'_, '_>,
         handle: DomHandle,
@@ -229,20 +168,30 @@ impl JsContextHost {
         window_commit: ChildDocumentWindowCommit,
         preserve_window_event_state: bool,
         navigation_loader: Option<crate::network::navigation::NavigationResourceLoader>,
+        is_xml_document: bool,
     ) -> Option<ChildDocumentInstallResult> {
-        let source = crate::dom_parser::preserve_decoded_bom_only_child_body(
-            &snapshot.markup,
-            snapshot.content_type.as_deref(),
-        );
-        let document_handle = self.create_empty_live_child_html_document(
-            snapshot.url.clone(),
-            snapshot.content_type.as_deref(),
-        );
-        self.dom_host_mut()
-            .set_document_fallback_base_url_for_handle(
-                document_handle,
-                snapshot.fallback_base_url.clone(),
+        let source = if is_xml_document {
+            std::borrow::Cow::Borrowed(snapshot.markup.as_str())
+        } else {
+            crate::dom_parser::preserve_decoded_bom_only_child_body(
+                &snapshot.markup,
+                snapshot.content_type.as_deref(),
+            )
+        };
+        let document_handle = if is_xml_document {
+            self.create_empty_child_xml_document_from_snapshot(snapshot)
+        } else {
+            let document_handle = self.create_empty_live_child_html_document(
+                snapshot.url.clone(),
+                snapshot.content_type.as_deref(),
             );
+            self.dom_host_mut()
+                .set_document_fallback_base_url_for_handle(
+                    document_handle,
+                    snapshot.fallback_base_url.clone(),
+                );
+            document_handle
+        };
         let document_url = self.document_url_for_handle(document_handle);
         let document_base_url = self.document_base_url_for_handle(document_handle);
         let parser_base_url = document_base_url.clone();
@@ -273,7 +222,7 @@ impl JsContextHost {
             owner_local_window_id,
             owner_document_id,
         );
-        let parser_start = self.start_live_child_html_document_parser(
+        let parser_start = self.start_live_child_document_parser(
             scope,
             handle,
             document_handle,
@@ -281,6 +230,7 @@ impl JsContextHost {
             owner_document_id,
             parser_base_url,
             source.as_ref(),
+            is_xml_document,
         );
         Some(ChildDocumentInstallResult {
             initial_classic_ready_work: parser_start.initial_classic_ready_work,

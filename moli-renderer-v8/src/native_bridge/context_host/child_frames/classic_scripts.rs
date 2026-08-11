@@ -27,6 +27,7 @@ use crate::{
         FrameRequestKind, FrameScriptJob, LocalWindowId, PendingChildExternalClassicDocumentScript,
         frame_script_job_kind_from_parser_classic_ready_kind,
     },
+    live_document_parser::ParserResumeApplication,
     page_task_queue::RendererPageChildClassicScriptSourceLoadTarget,
     parser_script::action::{
         ParserPendingClassicScriptExecution, ParserPendingClassicScriptNotification,
@@ -1690,6 +1691,20 @@ impl JsContextHost {
                 FrameDocumentClassicPrepareDropReason::StaleDocumentOwner,
             );
         }
+        let parser_resume_permit = (target.scheduling()
+            == FrameDocumentClassicScriptScheduling::ParserBlocking)
+            .then(|| {
+                self.child_document_parsers
+                    .parser_script_resume_permit(owner, script_handle)
+            })
+            .flatten();
+        if target.scheduling() == FrameDocumentClassicScriptScheduling::ParserBlocking
+            && parser_resume_permit.is_none()
+        {
+            return FrameDocumentClassicPrepareApplication::dropped(
+                FrameDocumentClassicPrepareDropReason::StaleParserSuspension,
+            );
+        }
         let Some(execution_entry) = self.frame_parser_classic_scripts.begin_ready_execution(
             owner,
             child_handle,
@@ -1710,6 +1725,24 @@ impl JsContextHost {
                 FrameDocumentClassicPrepareDropReason::BeginExecutionUnavailable,
             );
         };
+        if let Some(permit) = parser_resume_permit
+            && self
+                .child_document_parsers
+                .resume_parser_script_for_execution(owner, permit)
+                != Some(ParserResumeApplication::Resumed)
+        {
+            tracing::debug!(
+                child_handle = ?child_handle,
+                owner = ?owner,
+                script_handle = ?script_handle,
+                ?permit,
+                "dropping child parser script with a stale parser suspension permit"
+            );
+            self.child_document_parsers.clear(owner);
+            return FrameDocumentClassicPrepareApplication::dropped(
+                FrameDocumentClassicPrepareDropReason::StaleParserSuspension,
+            );
+        }
         let (target, execution, executable) = execution_entry.into_parts();
         let Some(action) = self.child_classic_script_execution_action(
             target,
@@ -1942,7 +1975,7 @@ impl JsContextHost {
                 FrameDocumentClassicParserResumeSkipReason::StaleRealm,
             );
         }
-        self.resume_live_child_html_document_parser_after_blocker(scope, child_handle, owner)
+        self.resume_live_child_document_parser_after_blocker(scope, child_handle, owner)
     }
 }
 

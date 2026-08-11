@@ -73,6 +73,7 @@ async fn accessibility_top_frame_snapshot_commands_use_explicit_dispatch() {
         "<!doctype html><html><body><button id='go'>Go</button></body></html>",
     )
     .await;
+    ctx.sent.clear();
 
     let full_tree_raw = json!({
         "id": 1,
@@ -148,6 +149,7 @@ async fn accessibility_get_full_tree_rejects_while_main_document_navigation_is_p
         "<!doctype html><html><body><button>previous</button></body></html>",
     )
     .await;
+    ctx.sent.clear();
     let browser_context = ctx
         .conn
         .browser_context
@@ -409,26 +411,22 @@ fn renderer_backed_ax_node_id(node: &Value) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn accessibility_loaded_page_methods_target_background_owner_without_promotion() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<html><body><p>Intro</p><button>Owner</button></body></html>",
-        )
-        .await
-        .expect("background page should load");
-
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        "about:blank".to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut bc = BrowserContext::new("BID-A".to_owned());
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
     ctx.conn.browser_context = Some(bc);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<html><body><p>Intro</p><button>Owner</button></body></html>",
+        Some("SID-background"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 201,
@@ -452,7 +450,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         "method": "Accessibility.getRootAXNode"
     }))
     .await;
-    let root = ctx.take_one();
+    let root = ctx.take_response_by_id(202);
     assert_eq!(root["sessionId"], "SID-background");
     assert_eq!(root["result"]["node"]["role"]["value"], "RootWebArea");
 
@@ -463,7 +461,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         "params": { "id": button_ax_id }
     }))
     .await;
-    let children = ctx.take_one();
+    let children = ctx.take_response_by_id(203);
     assert_eq!(children["sessionId"], "SID-background");
     assert!(
         children["result"]["nodes"]
@@ -480,7 +478,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         "params": { "backendNodeId": button_backend_id }
     }))
     .await;
-    let chain = ctx.take_one();
+    let chain = ctx.take_response_by_id(204);
     assert_eq!(chain["sessionId"], "SID-background");
     assert_eq!(
         chain["result"]["nodes"]
@@ -502,7 +500,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         }
     }))
     .await;
-    let query = ctx.take_one();
+    let query = ctx.take_response_by_id(205);
     assert_eq!(query["sessionId"], "SID-background");
     assert_eq!(query["result"]["nodes"][0]["nodeId"], button_ax_id);
 
@@ -516,7 +514,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         }
     }))
     .await;
-    let partial = ctx.take_one();
+    let partial = ctx.take_response_by_id(206);
     assert_eq!(partial["sessionId"], "SID-background");
     assert_eq!(partial["result"]["nodes"][0]["nodeId"], button_ax_id);
 
@@ -532,14 +530,6 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
 #[tokio::test(flavor = "multi_thread")]
 async fn accessibility_loaded_page_methods_target_inactive_owner_without_activation() {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(
-            "data:text/html,<html><body><button>Inactive</button></body></html>",
-        )
-        .await
-        .expect("inactive page should load");
-
     let mut active = BrowserContext::new("BID-active".to_owned());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active".to_owned());
@@ -547,10 +537,14 @@ async fn accessibility_loaded_page_methods_target_inactive_owner_without_activat
 
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
-    inactive.set_target_url(page.final_url().as_str().to_owned());
+    inactive.set_target_url("about:blank".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
-    inactive.replace_loaded_page(Some(page));
     ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<html><body><button>Inactive</button></body></html>",
+        Some("SID-inactive"),
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 211,

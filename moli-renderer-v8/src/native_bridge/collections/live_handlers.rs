@@ -373,6 +373,7 @@ fn live_collection_named_value<'s>(
             query: Some(key),
             include_root: false,
             tag_name_html_document: None,
+            resolution_cache: Default::default(),
         };
         return Some(build_live_collection_wrapper(scope, runtime_ptr, live_descriptor).into());
     }

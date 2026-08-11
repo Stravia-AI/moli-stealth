@@ -4,8 +4,8 @@ use crate::devtools_runtime::{
     DevToolsCommandResult, DevToolsContinueInterceptedRequestCommand,
     DevToolsContinueInterceptedResponseCommand, DevToolsEvaluateScriptCommand,
     DevToolsNetworkInterceptId, DevToolsNetworkInterceptPattern, DevToolsNetworkInterceptPhase,
-    DevToolsProtocol, DevToolsRequestId, DevToolsResultOwnership, DevToolsSessionId,
-    DevToolsTargetId,
+    DevToolsNetworkResourceType, DevToolsProtocol, DevToolsRequestId, DevToolsResultOwnership,
+    DevToolsSessionId, DevToolsTargetId,
 };
 use crate::testing::{
     drain_scheduler_events_like_scheduler,
@@ -1115,10 +1115,9 @@ async fn response_body_stream_taken_blocks_chained_bidi_response_stage_pause() {
     .await;
     ctx.expect_result(35_958, json!({}), Some("SID-1"));
 
-    let (result, add_intercept_scheduler_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -1130,29 +1129,23 @@ async fn response_body_stream_taken_blocks_chained_bidi_response_stage_pause() {
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: hit_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     assert!(
         result.is_ok(),
         "BiDi response-stage add intercept should succeed: {result:?}"
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
-
     let api_url = Url::parse(&hit_url).unwrap();
     let response_pause_sessions = ctx
         .conn
         .target_fetch_subresource_interception_snapshot_for_session_owner(Some("SID-1"))
         .expect("active target fetch snapshot")
-        .matching_response_stage_pause_sessions(Some("SID-1"), "Fetch", &api_url);
+        .matching_response_stage_pause_sessions(
+            Some("SID-1"),
+            DevToolsNetworkResourceType::Fetch,
+            &api_url,
+        );
     assert_eq!(
         response_pause_sessions
             .iter()
@@ -6629,10 +6622,9 @@ async fn bidi_add_network_intercept_pauses_matching_fetch_subresources() {
     with_loaded_http_document(&mut ctx, &page_url, "SID-1", "TID-1").await;
     ctx.sent.clear();
 
-    let (result, add_intercept_scheduler_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -6644,10 +6636,9 @@ async fn bidi_add_network_intercept_pauses_matching_fetch_subresources() {
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: hit_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     assert_eq!(
         result.expect("BiDi add intercept should succeed"),
         DevToolsCommandResult::AddNetworkIntercept(
@@ -6656,14 +6647,6 @@ async fn bidi_add_network_intercept_pauses_matching_fetch_subresources() {
             }
         )
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
     ctx.sent.clear();
 
     let (evaluate_result, scheduler_events, protocol_events, renderer_output_predecessor) = ctx
@@ -6787,10 +6770,9 @@ async fn cdp_fetch_then_bidi_network_intercept_request_stage_chain_completes() {
     .await;
     ctx.expect_result(41_010, json!({}), Some("SID-1"));
 
-    let (result, add_intercept_scheduler_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -6802,22 +6784,13 @@ async fn cdp_fetch_then_bidi_network_intercept_request_stage_chain_completes() {
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: hit_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     assert!(
         result.is_ok(),
         "BiDi add intercept should succeed: {result:?}"
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
     enable_runtime_async(&mut ctx, "SID-1", 41_011).await;
     ctx.sent.clear();
 
@@ -6990,10 +6963,9 @@ async fn cdp_fetch_then_bidi_network_intercept_response_stage_chain_completes() 
     .await;
     ctx.expect_result(41_110, json!({}), Some("SID-1"));
 
-    let (result, add_intercept_scheduler_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -7005,28 +6977,23 @@ async fn cdp_fetch_then_bidi_network_intercept_response_stage_chain_completes() 
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: hit_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     assert!(
         result.is_ok(),
         "BiDi response-stage add intercept should succeed: {result:?}"
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
     let api_url = Url::parse(&hit_url).unwrap();
     let response_pause_sessions = ctx
         .conn
         .target_fetch_subresource_interception_snapshot_for_session_owner(Some("SID-1"))
         .expect("active target fetch snapshot")
-        .matching_response_stage_pause_sessions(Some("SID-1"), "Fetch", &api_url);
+        .matching_response_stage_pause_sessions(
+            Some("SID-1"),
+            DevToolsNetworkResourceType::Fetch,
+            &api_url,
+        );
     assert_eq!(
         response_pause_sessions
             .iter()
@@ -7253,10 +7220,9 @@ async fn bidi_response_stage_network_intercept_marks_fetch_continuation_request_
     ctx.expect_result(41_200, json!({}), Some("SID-1"));
     ctx.sent.clear();
 
-    let (result, add_intercept_scheduler_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::AddNetworkIntercept(
-            DevToolsAddNetworkInterceptCommand {
+    let result = ctx
+        .execute_devtools_command_through_renderer_fence_for_test(
+            DevToolsCommand::AddNetworkIntercept(DevToolsAddNetworkInterceptCommand {
                 context: DevToolsCommandContext {
                     protocol: DevToolsProtocol::WebDriverBidi,
                     session_id: Some(DevToolsSessionId::from("BIDI-SID")),
@@ -7268,10 +7234,9 @@ async fn bidi_response_stage_network_intercept_marks_fetch_continuation_request_
                 url_patterns: vec![DevToolsNetworkInterceptPattern {
                     url_pattern: hit_url.clone(),
                 }],
-            },
-        ))
-        .await
-        .into_parts();
+            }),
+        )
+        .await;
     assert_eq!(
         result.expect("BiDi add response-stage intercept should succeed"),
         DevToolsCommandResult::AddNetworkIntercept(
@@ -7280,14 +7245,6 @@ async fn bidi_response_stage_network_intercept_marks_fetch_continuation_request_
             }
         )
     );
-    let mut add_intercept_output = Vec::new();
-    drain_scheduler_events_like_scheduler(
-        &mut ctx.conn,
-        &mut add_intercept_output,
-        add_intercept_scheduler_events,
-    )
-    .await;
-    ctx.sent.extend(add_intercept_output);
     ctx.sent.clear();
 
     let (evaluate_result, scheduler_events, protocol_events, renderer_output_predecessor) = ctx
