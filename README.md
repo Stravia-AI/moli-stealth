@@ -1,3 +1,11 @@
+<p align="center">
+  <img
+    src="assets/moli-browser-banner.png"
+    alt="Moli Browser — Fast, Lightweight, Headless"
+    width="1086"
+  />
+</p>
+
 <h1 align="center">Moli</h1>
 
 <p align="center">
