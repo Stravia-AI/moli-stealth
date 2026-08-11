@@ -10,8 +10,8 @@ The release workflow builds and publishes four native archives:
 | Windows x86_64 | `x86_64-pc-windows-msvc` | `.zip` |
 
 Every archive contains the `moli` executable, project licenses, README,
-version marker, and third-party license notices. A SHA-256 checksum is
-published beside each archive.
+version marker, and third-party license notices. GitHub displays the SHA-256
+digest for each uploaded release asset.
 
 Each artifact is built on its native GitHub-hosted runner. The packager strips
 only a staging copy, leaving the binary under `target/release` unchanged for
@@ -52,7 +52,7 @@ untested.
 4. Choose whether the release should be a prerelease or a draft, then run it.
 
 The workflow validates the selected commit, builds all four native artifacts
-in parallel, verifies every checksum, creates the corresponding `vX.Y.Z` tag,
-generates release notes, and uploads all archives and checksums. It stops
-without creating a release if any platform fails, if the requested version
-does not match the manifest, or if the tag already exists.
+in parallel, verifies the expected archives, creates the corresponding
+`vX.Y.Z` tag, generates release notes, and uploads all four archives. It stops
+without creating a release if any platform fails, if the requested version does
+not match the manifest, or if the tag already exists.

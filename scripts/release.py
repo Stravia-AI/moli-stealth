@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import os
 import re
 import shlex
@@ -229,26 +228,16 @@ def verify_archive(archive_path: Path, expected_binary: str, target: str) -> Non
         )
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as input_file:
-        for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
 def package_release(
     *, version: str, target: str, binary: Path, output_dir: Path
-) -> tuple[Path, Path, int, int]:
+) -> tuple[Path, int, int]:
     package_name = f"moli-v{version}-{target}"
     extension = ".zip" if "-windows-" in target else ".tar.gz"
     archive_path = output_dir / f"{package_name}{extension}"
-    checksum_path = output_dir / f"{archive_path.name}.sha256"
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for output in (archive_path, checksum_path):
-        if output.exists():
-            raise ReleaseError(f"release output already exists: {output}")
+    if archive_path.exists():
+        raise ReleaseError(f"release output already exists: {archive_path}")
 
     with tempfile.TemporaryDirectory(prefix=".moli-release-", dir=output_dir) as raw:
         staging_dir = Path(raw)
@@ -280,18 +269,9 @@ def package_release(
             target,
         )
 
-        digest = sha256(staged_archive)
-        staged_checksum = staging_dir / checksum_path.name
-        staged_checksum.write_text(
-            f"{digest}  {archive_path.name}\n", encoding="ascii"
-        )
-        if sha256(staged_archive) != digest:
-            raise ReleaseError("archive checksum changed during packaging")
-
         staged_archive.rename(archive_path)
-        staged_checksum.rename(checksum_path)
 
-    return archive_path, checksum_path, original_size, stripped_size
+    return archive_path, original_size, stripped_size
 
 
 def parse_args() -> argparse.Namespace:
@@ -352,7 +332,7 @@ def main() -> int:
             raise ReleaseError(f"release binary not found: {binary}")
 
         output_dir = resolve_repo_path(args.output_dir)
-        archive, checksum, before, after = package_release(
+        archive, before, after = package_release(
             version=version,
             target=target,
             binary=binary,
@@ -362,7 +342,6 @@ def main() -> int:
         print(f"Packaged target: {target}")
         print(f"Staged binary: {before:,} -> {after:,} bytes after strip")
         print(f"Created: {archive}")
-        print(f"Created: {checksum}")
         return 0
     except ReleaseError as error:
         print(f"release error: {error}", file=sys.stderr)

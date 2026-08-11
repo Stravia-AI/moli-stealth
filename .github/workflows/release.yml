@@ -231,22 +231,14 @@ jobs:
           )
           for archive in "${expected_archives[@]}"; do
             test -f "dist/$archive"
-            test -f "dist/$archive.sha256"
           done
 
           artifact_count=$(find dist -maxdepth 1 -type f | wc -l)
-          if [[ "$artifact_count" -ne 8 ]]; then
-            echo "Expected 8 release assets, found $artifact_count." >&2
+          if [[ "$artifact_count" -ne 4 ]]; then
+            echo "Expected 4 release assets, found $artifact_count." >&2
             find dist -maxdepth 1 -type f -print >&2
             exit 1
           fi
-
-          (
-            cd dist
-            for checksum in *.sha256; do
-              sha256sum --check "$checksum"
-            done
-          )
 
       - name: Create GitHub Release
         shell: bash
@@ -261,13 +253,9 @@ jobs:
 
           assets=(
             "dist/moli-v${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-            "dist/moli-v${RELEASE_VERSION}-x86_64-unknown-linux-gnu.tar.gz.sha256"
             "dist/moli-v${RELEASE_VERSION}-x86_64-apple-darwin.tar.gz"
-            "dist/moli-v${RELEASE_VERSION}-x86_64-apple-darwin.tar.gz.sha256"
             "dist/moli-v${RELEASE_VERSION}-aarch64-apple-darwin.tar.gz"
-            "dist/moli-v${RELEASE_VERSION}-aarch64-apple-darwin.tar.gz.sha256"
             "dist/moli-v${RELEASE_VERSION}-x86_64-pc-windows-msvc.zip"
-            "dist/moli-v${RELEASE_VERSION}-x86_64-pc-windows-msvc.zip.sha256"
           )
           args=(
             release create "$RELEASE_TAG"
