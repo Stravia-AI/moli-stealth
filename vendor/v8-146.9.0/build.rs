@@ -508,6 +508,10 @@ fn build_moli_v8_ext(sources: &[PathBuf]) {
     .include("v8/include")
     .std("c++20")
     .flag_if_supported("-w");
+  let compiler = build.get_compiler();
+  if compiler.is_like_msvc() && !compiler.is_like_clang_cl() {
+    build.flag("/Zc:__cplusplus");
+  }
   for source in sources {
     build.file(source);
   }
