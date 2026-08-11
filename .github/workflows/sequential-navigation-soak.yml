@@ -1,0 +1,211 @@
+name: Sequential Navigation Soak
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Base commit or ref
+        required: false
+        default: main
+      head_ref:
+        description: Head commit or ref (defaults to the dispatched commit)
+        required: false
+        default: ""
+
+concurrency:
+  group: sequential-navigation-soak-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+# Candidate code builds and runs without a token capable of writing to GitHub.
+# A separate workflow_run workflow renders the artifact from the default branch.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  compare:
+    name: 200 navigations · Base vs HEAD
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]')
+    runs-on: [self-hosted, moli-ci]
+    timeout-minutes: 90
+    container: rust:1.96.1-bookworm
+    env:
+      BENCHMARK_OUTPUT: sequential-navigation-soak-results
+      BINARY_DIR: /tmp/moli-sequential-navigation-binaries
+      TARGET_BASE_REF: ${{ github.event.pull_request.base.sha || inputs.base_ref || github.event.repository.default_branch }}
+      HEAD_REF: ${{ github.event.pull_request.head.sha || inputs.head_ref || github.sha }}
+    steps:
+      # The exact HEAD harness drives both binaries, so an A/B run uses one
+      # report schema and one URL order. This job has read-only permissions.
+      - name: Checkout exact HEAD harness
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || inputs.head_ref || github.sha }}
+
+      - name: Resolve commits and initialize evidence
+        id: refs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global --add safe.directory "$(pwd -P)"
+
+          mkdir -p "$BENCHMARK_OUTPUT"
+          printf '%s\n' '{"schema":"moli.sequential-navigation.run-metadata.v1","status":"initializing"}' \
+            > "$BENCHMARK_OUTPUT/run-metadata.json"
+
+          target_base_sha=$(git rev-parse "${TARGET_BASE_REF}^{commit}")
+          head_sha=$(git rev-parse "${HEAD_REF}^{commit}")
+          base_sha=$(git merge-base "$target_base_sha" "$head_sha")
+          git merge-base --is-ancestor "$base_sha" "$target_base_sha"
+          git merge-base --is-ancestor "$base_sha" "$head_sha"
+          echo "target_base_sha=$target_base_sha" >> "$GITHUB_OUTPUT"
+          echo "base_sha=$base_sha" >> "$GITHUB_OUTPUT"
+          echo "head_sha=$head_sha" >> "$GITHUB_OUTPUT"
+
+          if (( GITHUB_RUN_NUMBER % 2 == 0 )); then
+            execution_order=head-first
+          else
+            execution_order=base-first
+          fi
+          echo "execution_order=$execution_order" >> "$GITHUB_OUTPUT"
+
+          printf '{\n  "schema": "moli.sequential-navigation.run-metadata.v1",\n  "status": "resolved",\n  "target_base": { "sha": "%s" },\n  "base": { "sha": "%s", "role": "common-ancestor" },\n  "head": { "sha": "%s" },\n  "harness": { "sha": "%s", "role": "exact-head" },\n  "execution_order": "%s",\n  "navigation_count": 200\n}\n' \
+            "$target_base_sha" "$base_sha" "$head_sha" "$head_sha" \
+            "$execution_order" > "$BENCHMARK_OUTPUT/run-metadata.json"
+
+      - name: Build common-ancestor base and exact HEAD release binaries
+        shell: bash
+        env:
+          BASE_SHA: ${{ steps.refs.outputs.base_sha }}
+          HEAD_SHA: ${{ steps.refs.outputs.head_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$BINARY_DIR"
+
+          restore_harness() {
+            git checkout --detach "$HEAD_SHA"
+          }
+          trap restore_harness EXIT
+
+          git checkout --detach "$BASE_SHA"
+          cargo build --release --locked -p moli
+          install -m 755 target/release/moli "$BINARY_DIR/moli-base"
+
+          git checkout --detach "$HEAD_SHA"
+          cargo build --release --locked -p moli
+          install -m 755 target/release/moli "$BINARY_DIR/moli-head"
+
+          restore_harness
+          trap - EXIT
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: 0.11.14
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: moli-benchmark/uv.lock
+
+      - name: Install benchmark dependencies
+        run: uv sync --project moli-benchmark --locked
+
+      - name: Run one-session public-web A/B
+        id: soak
+        shell: bash
+        env:
+          EXECUTION_ORDER: ${{ steps.refs.outputs.execution_order }}
+        run: |
+          set -euo pipefail
+
+          run_side() {
+            local side=$1
+            local binary=$2
+            local report="$BENCHMARK_OUTPUT/$side.json"
+            set +e
+            uv run --project moli-benchmark --no-sync python \
+              moli-benchmark/scripts/fuzz-cdp-sequential-navigate.py \
+              --engine moli \
+              --moli-bin "$binary" \
+              --url https://www.csdn.net/ \
+              --url https://segmentfault.com/ \
+              --url https://huaban.com/ \
+              --url https://example.com/ \
+              --rounds 50 \
+              --network-diagnostics \
+              --navigation-resource-samples \
+              --response-timeout 15 \
+              --dcl-timeout 14 \
+              --load-timeout 20 \
+              --postcheck-timeout 5 \
+              --recovery-timeout 8 \
+              --output "$report"
+            local status=$?
+            set -e
+            echo "${side}_exit_code=$status" >> "$GITHUB_OUTPUT"
+          }
+
+          if [[ "$EXECUTION_ORDER" == head-first ]]; then
+            run_side head "$BINARY_DIR/moli-head"
+            run_side base "$BINARY_DIR/moli-base"
+          else
+            run_side base "$BINARY_DIR/moli-base"
+            run_side head "$BINARY_DIR/moli-head"
+          fi
+
+      - name: Compare resilience and memory evidence
+        id: comparison
+        if: ${{ always() && !cancelled() && steps.soak.outcome == 'success' }}
+        env:
+          PYTHONPATH: moli-benchmark
+        run: >-
+          uv run --project moli-benchmark --no-sync python
+          -m moli_benchmark.sequential_navigate_ci compare
+          --base-report "$BENCHMARK_OUTPUT/base.json"
+          --head-report "$BENCHMARK_OUTPUT/head.json"
+          --base-exit-code "${{ steps.soak.outputs.base_exit_code }}"
+          --head-exit-code "${{ steps.soak.outputs.head_exit_code }}"
+          --base-sha "${{ steps.refs.outputs.base_sha }}"
+          --head-sha "${{ steps.refs.outputs.head_sha }}"
+          --execution-order "${{ steps.refs.outputs.execution_order }}"
+          --expected-navigations 200
+          --output "$BENCHMARK_OUTPUT/comparison.json"
+          --comment-output "$BENCHMARK_OUTPUT/comment.md"
+          --run-url "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          --conclusion local
+
+      - name: Render Actions job summary
+        if: ${{ always() && !cancelled() }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [[ -f "$BENCHMARK_OUTPUT/comment.md" ]]; then
+            cat "$BENCHMARK_OUTPUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload full soak evidence
+        if: ${{ always() && !cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: sequential-navigation-soak-results
+          path: ${{ env.BENCHMARK_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Require complete HEAD resilience evidence
+        if: ${{ always() && !cancelled() && steps.comparison.outcome == 'success' }}
+        env:
+          PYTHONPATH: moli-benchmark
+        run: >-
+          uv run --project moli-benchmark --no-sync python
+          -m moli_benchmark.sequential_navigate_ci check
+          --input "$BENCHMARK_OUTPUT/comparison.json"

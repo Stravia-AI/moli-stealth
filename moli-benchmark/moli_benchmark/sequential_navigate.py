@@ -23,6 +23,7 @@ from .raw_cdp import (
     RoutedRawCdpClient,
     connect_routed_raw_cdp,
 )
+from .sampling import snapshot_resources
 from .target_serve import start_target_serve, stop_target_serve
 
 
@@ -45,6 +46,15 @@ NETWORK_EVENT_METHODS = {
     "Network.loadingFinished",
     "Network.loadingFailed",
 }
+NAVIGATION_RESOURCE_FIELDS = (
+    "process_count",
+    "pss_bytes",
+    "pss_process_count",
+    "rss_bytes",
+    "rss_process_count",
+    "thread_count",
+    "fd_count",
+)
 
 
 @dataclass(frozen=True)
@@ -910,6 +920,157 @@ def repository_state() -> dict[str, Any]:
     }
 
 
+def capture_navigation_resource_sample(
+    root_pid: int,
+    *,
+    index: int,
+    url: str | None,
+) -> dict[str, Any]:
+    sample: dict[str, Any] = {
+        "index": index,
+        "url": url,
+        "captured_at": datetime.now(UTC).isoformat(),
+        "error": None,
+    }
+    try:
+        observed = snapshot_resources(root_pid, include_lifetime_cpu=False)
+    except Exception as error:
+        sample["error"] = f"{type(error).__name__}: {error}"
+        return sample
+    sample.update({field: observed.get(field) for field in NAVIGATION_RESOURCE_FIELDS})
+    return sample
+
+
+def _average(values: Iterable[float | int]) -> float | None:
+    values = list(values)
+    return sum(values) / len(values) if values else None
+
+
+def _linear_slope(points: list[tuple[int, float]]) -> float | None:
+    if len(points) < 2:
+        return None
+    mean_x = sum(point[0] for point in points) / len(points)
+    mean_y = sum(point[1] for point in points) / len(points)
+    denominator = sum((point[0] - mean_x) ** 2 for point in points)
+    if denominator == 0:
+        return None
+    return sum(
+        (point[0] - mean_x) * (point[1] - mean_y) for point in points
+    ) / denominator
+
+
+def _resource_metric_summary(
+    samples: list[dict[str, Any]],
+    metric: str,
+) -> dict[str, Any]:
+    initial = next(
+        (
+            sample.get(metric)
+            for sample in samples
+            if sample.get("index") == 0
+            and isinstance(sample.get(metric), (int, float))
+        ),
+        None,
+    )
+    points = [
+        (int(sample["index"]), float(sample[metric]))
+        for sample in samples
+        if isinstance(sample.get("index"), int)
+        and sample["index"] > 0
+        and isinstance(sample.get(metric), (int, float))
+    ]
+    values = [value for _, value in points]
+    window_size = min(10, len(values))
+    first_window = values[:window_size]
+    last_window = values[-window_size:] if window_size else []
+    first_window_average = _average(first_window)
+    last_window_average = _average(last_window)
+    warm_start = min(len(points), max(1, len(points) // 10))
+    warm_slope = _linear_slope(points[warm_start:])
+    return {
+        "observed_samples": len(points),
+        "initial": initial,
+        "first": values[0] if values else None,
+        "final": values[-1] if values else None,
+        "minimum": min(values) if values else None,
+        "peak": max(values) if values else None,
+        "window_size": window_size,
+        "first_window_average": first_window_average,
+        "last_window_average": last_window_average,
+        "first_to_last_window_delta": (
+            last_window_average - first_window_average
+            if first_window_average is not None and last_window_average is not None
+            else None
+        ),
+        "warm_slope_per_navigation": warm_slope,
+        "warm_slope_per_100_navigations": (
+            warm_slope * 100.0 if warm_slope is not None else None
+        ),
+    }
+
+
+def summarize_navigation_resource_samples(
+    samples: list[dict[str, Any]],
+    periodic_resources: dict[str, Any],
+) -> dict[str, Any]:
+    navigation_samples = [
+        sample
+        for sample in samples
+        if isinstance(sample.get("index"), int) and sample["index"] > 0
+    ]
+    quarters = []
+    for offset in range(4):
+        start = len(navigation_samples) * offset // 4
+        end = len(navigation_samples) * (offset + 1) // 4
+        quarter_samples = navigation_samples[start:end]
+
+        def quarter_metric(metric: str) -> dict[str, Any]:
+            values = [
+                float(sample[metric])
+                for sample in quarter_samples
+                if isinstance(sample.get(metric), (int, float))
+            ]
+            return {
+                "observed_samples": len(values),
+                "average": _average(values),
+                "final": values[-1] if values else None,
+                "peak": max(values) if values else None,
+            }
+
+        quarters.append(
+            {
+                "quarter": offset + 1,
+                "start_index": quarter_samples[0]["index"] if quarter_samples else None,
+                "end_index": quarter_samples[-1]["index"] if quarter_samples else None,
+                "sample_count": len(quarter_samples),
+                "rss_bytes": quarter_metric("rss_bytes"),
+                "pss_bytes": quarter_metric("pss_bytes"),
+                "fd_count": quarter_metric("fd_count"),
+            }
+        )
+
+    return {
+        "sample_count": len(navigation_samples),
+        "initial_sample_present": any(sample.get("index") == 0 for sample in samples),
+        "sample_errors": sum(bool(sample.get("error")) for sample in samples),
+        "rss_bytes": _resource_metric_summary(samples, "rss_bytes"),
+        "pss_bytes": _resource_metric_summary(samples, "pss_bytes"),
+        "fd_count": _resource_metric_summary(samples, "fd_count"),
+        "thread_count": _resource_metric_summary(samples, "thread_count"),
+        "process_count": _resource_metric_summary(samples, "process_count"),
+        "periodic": {
+            "sample_count": periodic_resources.get("sample_count"),
+            "peak_rss_bytes": periodic_resources.get("peak_rss_bytes"),
+            "peak_pss_bytes": periodic_resources.get("peak_pss_bytes"),
+            "peak_fd_count": periodic_resources.get("peak_fd_count"),
+            "peak_thread_count": periodic_resources.get("peak_thread_count"),
+            "observer_error": periodic_resources.get("observer_error"),
+            "late_sample_count": periodic_resources.get("late_sample_count"),
+        },
+        "quarters": quarters,
+    }
+
+
 def selected_engines(engine: str) -> tuple[str, ...]:
     if engine == "both":
         return ("moli", "chromium")
@@ -927,6 +1088,7 @@ async def run_engine(
     startup_timeout: float,
     recovery_timeout: float,
     network_diagnostics: bool,
+    navigation_resource_samples: bool,
 ) -> dict[str, Any]:
     started_at = datetime.now(UTC).isoformat()
     serve = start_target_serve(target, binary, startup_timeout)
@@ -934,6 +1096,7 @@ async def run_engine(
     session_id: str | None = None
     rows: list[dict[str, Any]] = []
     network_order_violations: list[dict[str, Any]] = []
+    resource_samples: list[dict[str, Any]] = []
     aborted_after_index: int | None = None
     try:
         client = await connect_routed_raw_cdp(serve.endpoint)
@@ -942,6 +1105,14 @@ async def run_engine(
             startup_timeout,
             network_diagnostics=network_diagnostics,
         )
+        if navigation_resource_samples:
+            resource_samples.append(
+                capture_navigation_resource_sample(
+                    serve.process.pid,
+                    index=0,
+                    url=None,
+                )
+            )
         for index, url in enumerate(urls, 1):
             row = await navigate_once(
                 client,
@@ -975,6 +1146,14 @@ async def run_engine(
                 if not recovery["ok"]:
                     aborted_after_index = index
             rows.append(row)
+            if navigation_resource_samples:
+                resource_samples.append(
+                    capture_navigation_resource_sample(
+                        serve.process.pid,
+                        index=index,
+                        url=url,
+                    )
+                )
             print(
                 json.dumps(
                     {
@@ -1036,6 +1215,17 @@ async def run_engine(
         "ready_ms": serve.ready_ms,
         "summary": summary,
         "network_order_violations": network_order_violations,
+        "navigation_resources": (
+            {
+                "samples": resource_samples,
+                "summary": summarize_navigation_resource_samples(
+                    resource_samples,
+                    serve_result.get("resources", {}),
+                ),
+            }
+            if navigation_resource_samples
+            else None
+        ),
         "rows": rows,
         "process": serve_result,
     }
@@ -1067,6 +1257,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "Enable Network events, record compact request terminal-state summaries, "
             "and audit exact request event order; off by default to keep benchmark "
             "overhead comparable."
+        ),
+    )
+    parser.add_argument(
+        "--navigation-resource-samples",
+        action="store_true",
+        help=(
+            "Capture a process-tree RSS/PSS/FD checkpoint before the first "
+            "navigation and after every navigation, then report windows, "
+            "quarters, and a warm memory slope."
         ),
     )
     parser.add_argument("--startup-timeout", type=float, default=20.0)
@@ -1142,10 +1341,11 @@ async def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 startup_timeout=args.startup_timeout,
                 recovery_timeout=args.recovery_timeout,
                 network_diagnostics=args.network_diagnostics,
+                navigation_resource_samples=args.navigation_resource_samples,
             )
         )
     payload = {
-        "schema_version": 4,
+        "schema_version": 5,
         "repository": repository_state(),
         "engine_selection": args.engine,
         "seed": args.seed,
@@ -1153,6 +1353,7 @@ async def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "urls": urls,
         "timeouts": asdict(timeouts),
         "network_diagnostics": args.network_diagnostics,
+        "navigation_resource_samples": args.navigation_resource_samples,
         "results": results,
     }
     failed = any(

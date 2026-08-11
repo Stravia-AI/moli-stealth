@@ -14,6 +14,7 @@ from moli_benchmark.sequential_navigate import (
     parse_top_100_domains,
     select_seed_urls,
     selected_engines,
+    summarize_navigation_resource_samples,
     summarize_network_activity,
 )
 
@@ -99,6 +100,67 @@ def network_event(
 
 
 class SequentialNavigateTests(unittest.TestCase):
+    def test_navigation_resource_summary_reports_windows_slope_and_quarters(self) -> None:
+        mib = 1024 * 1024
+        samples = [
+            {
+                "index": 0,
+                "rss_bytes": 100 * mib,
+                "pss_bytes": 90 * mib,
+                "fd_count": 20,
+                "thread_count": 8,
+                "process_count": 1,
+                "error": None,
+            }
+        ]
+        samples.extend(
+            {
+                "index": index,
+                "rss_bytes": (100 + index) * mib,
+                "pss_bytes": (90 + index / 2) * mib,
+                "fd_count": 20 + index // 50,
+                "thread_count": 8,
+                "process_count": 1,
+                "error": None,
+            }
+            for index in range(1, 201)
+        )
+
+        summary = summarize_navigation_resource_samples(
+            samples,
+            {
+                "sample_count": 500,
+                "peak_rss_bytes": 305 * mib,
+                "peak_pss_bytes": 195 * mib,
+                "peak_fd_count": 24,
+                "peak_thread_count": 8,
+                "observer_error": None,
+                "late_sample_count": 0,
+            },
+        )
+
+        self.assertEqual(summary["sample_count"], 200)
+        self.assertTrue(summary["initial_sample_present"])
+        self.assertEqual(summary["sample_errors"], 0)
+        self.assertEqual(summary["rss_bytes"]["first_window_average"], 105.5 * mib)
+        self.assertEqual(summary["rss_bytes"]["last_window_average"], 295.5 * mib)
+        self.assertEqual(
+            summary["rss_bytes"]["first_to_last_window_delta"],
+            190 * mib,
+        )
+        self.assertAlmostEqual(
+            summary["rss_bytes"]["warm_slope_per_100_navigations"],
+            100 * mib,
+        )
+        self.assertEqual(
+            [
+                (quarter["start_index"], quarter["end_index"], quarter["sample_count"])
+                for quarter in summary["quarters"]
+            ],
+            [(1, 50, 50), (51, 100, 50), (101, 150, 50), (151, 200, 50)],
+        )
+        self.assertEqual(summary["periodic"]["peak_rss_bytes"], 305 * mib)
+
     def test_url_normalization_preserves_explicit_data_url(self) -> None:
         url = "data:text/html,<title>fixture</title>"
 
