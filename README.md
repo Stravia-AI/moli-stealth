@@ -65,9 +65,9 @@ evaluation environments, and reinforcement-learning workloads.
   overrides, structured logging, and network diagnostics.
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.png">
+  <a href="assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.png"
+      src="assets/moli-devtools-rust-lang.jpg"
       alt="Chrome DevTools connected to Moli while inspecting and rendering rust-lang.org"
       width="1200"
     />
