@@ -13,7 +13,7 @@ Moli is a production-ready, structured-first browser engine for AI agents.
 It runs real JavaScript, DOM, and browser APIs by default, and computes layout
 or pixels only when requested.
 
-Use it through CLI, MCP, CDP, WebDriver Classic, or WebDriver BiDi.
+Use it through CLI, CDP, WebDriver Classic, or WebDriver BiDi.
 
 ## Why Moli
 
@@ -51,9 +51,6 @@ evaluation environments, and reinforcement-learning workloads.
 - **Extraction-first outputs** — HTML, Markdown, JSON, semantic text trees,
   frame-aware serialization, selector/script/response waits, and network
   tracing, all from the CLI.
-- **Agent-native MCP server** — navigation, Markdown, links, JS evaluation,
-  semantic trees, interactive-element discovery, node inspection, form
-  actions, keyboard input, hover, and scrolling.
 - **One automation binary** — CDP, WebDriver Classic, and WebDriver BiDi share
   the same kernel and scheduler. No separate ChromeDriver, geckodriver, or
   browser install required.
