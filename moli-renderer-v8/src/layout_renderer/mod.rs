@@ -148,6 +148,7 @@ fn build_native_layout_pass_output_recursive(
         let mut frames = NativeEmbeddedFrameRenderer {
             runtime,
             reason: request.reason,
+            include_backgrounds: request.includes_backgrounds(),
             document_stack,
             embedded_document_services,
         };
@@ -166,6 +167,7 @@ fn build_native_layout_pass_output_recursive(
 struct NativeEmbeddedFrameRenderer<'a> {
     runtime: &'a JsContextHost,
     reason: moli_layout::LayoutFlushReason,
+    include_backgrounds: bool,
     document_stack: &'a mut Vec<DomHandle>,
     embedded_document_services: &'a mut HashMap<DomHandle, DocumentLayoutServices>,
 }
@@ -198,12 +200,14 @@ impl EmbeddedFrameRenderer<DomHandle> for NativeEmbeddedFrameRenderer<'_> {
             .embedded_document_services
             .remove(&document)
             .unwrap_or_default();
+        let mut capture = moli_layout::PaintCaptureRequest::viewport();
+        capture.include_backgrounds = self.include_backgrounds;
         let result = build_native_layout_pass_output_recursive(
             self.runtime,
             root,
             &mut services,
             self.embedded_document_services,
-            LayoutPassRequest::with_paint(viewport, self.reason),
+            LayoutPassRequest::with_capture(viewport, self.reason, capture),
             self.document_stack,
         );
         self.embedded_document_services.insert(document, services);

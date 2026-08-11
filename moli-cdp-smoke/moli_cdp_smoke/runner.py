@@ -42,6 +42,7 @@ from .groups.network import (
     run_page_network_group,
     run_websocket_group,
 )
+from .groups.pdf import run_pdf_group
 from .groups.playwright_compat import run_playwright_compat_group
 from .groups.protocol import run_raw_protocol_group
 from .groups.proxy_auth import run_proxy_auth_group
@@ -110,6 +111,12 @@ RAW_GROUPS: tuple[SmokeGroup, ...] = (
         "Raw viewport PNG plus uncached 1 FPS JPEG screencast, ACK, mutation, and default-Mock boundaries.",
         "raw",
         run_layout_screenshot_group,
+    ),
+    SmokeGroup(
+        "pdf",
+        "Raw Page.printToPDF base64, IO stream, pagination, orientation, and validation contracts.",
+        "raw",
+        run_pdf_group,
     ),
     SmokeGroup(
         "target-semantics",

@@ -675,6 +675,95 @@ async fn capture_screenshot_encodes_jpeg_and_limits_device_dimensions() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn print_capture_uses_print_media_controls_backgrounds_and_restores_screen_media() {
+    let runtime = initialize_layout_test_runtime();
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+        .expect("default resource request client");
+    let url = url::Url::parse("https://example.test/print-capture").unwrap();
+    let page = create_test_html_page(
+        &runtime,
+        &loader,
+        url,
+        concat!(
+            "<!doctype html><style>",
+            "html,body{margin:0;background:white}",
+            "#probe{width:10px;height:10px;background:red}",
+            "iframe{position:absolute;left:10px;top:0;width:10px;height:10px;border:0}",
+            "@media print{#probe{background:rgb(0,255,0)}}",
+            "</style><div id='probe'></div>",
+            "<iframe srcdoc='<style>html,body{margin:0;background:blue}</style>'></iframe>",
+        ),
+    )
+    .await;
+    let viewport = crate::protocol_types::ViewportSurface {
+        inner_width: 20,
+        inner_height: 20,
+        outer_width: 20,
+        outer_height: 20,
+        device_pixel_ratio: 1.0,
+        screen_width: 20,
+        screen_height: 20,
+        screen_avail_width: 20,
+        screen_avail_height: 20,
+    };
+    page.run_async_command(RendererPageCommand::SetViewportSurface(Some(viewport)))
+        .await
+        .expect("viewport should update");
+
+    let screen = capture_screenshot_for_renderer_page(&page).await;
+    assert_eq!(decoded_png_pixel(&screen.bytes, 5, 5), [255, 0, 0, 255]);
+    assert_eq!(decoded_png_pixel(&screen.bytes, 15, 5), [0, 0, 255, 255]);
+
+    let print = capture_screenshot_with_request(
+        &page,
+        super::RendererCaptureScreenshotRequest {
+            purpose: super::RendererScreenshotPurpose::Print {
+                print_background: true,
+            },
+            format: super::RendererScreenshotFormat::Png,
+            quality: 100,
+            region: super::RendererScreenshotRegion::Viewport,
+            optimize_for_speed: false,
+            max_width: None,
+            max_height: None,
+        },
+    )
+    .await;
+    assert_eq!(decoded_png_pixel(&print.bytes, 5, 5), [0, 255, 0, 255]);
+    assert_eq!(decoded_png_pixel(&print.bytes, 15, 5), [0, 0, 255, 255]);
+
+    let no_background = capture_screenshot_with_request(
+        &page,
+        super::RendererCaptureScreenshotRequest {
+            purpose: super::RendererScreenshotPurpose::Print {
+                print_background: false,
+            },
+            format: super::RendererScreenshotFormat::Png,
+            quality: 100,
+            region: super::RendererScreenshotRegion::Viewport,
+            optimize_for_speed: false,
+            max_width: None,
+            max_height: None,
+        },
+    )
+    .await;
+    assert_eq!(
+        decoded_png_pixel(&no_background.bytes, 5, 5),
+        [255, 255, 255, 255]
+    );
+    assert_eq!(
+        decoded_png_pixel(&no_background.bytes, 15, 5),
+        [255, 255, 255, 255]
+    );
+
+    let restored_screen = capture_screenshot_for_renderer_page(&page).await;
+    assert_eq!(
+        decoded_png_pixel(&restored_screen.bytes, 5, 5),
+        [255, 0, 0, 255]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn capture_screenshot_clip_and_full_document_keep_the_live_layout_viewport() {
     let runtime = initialize_layout_test_runtime();
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())

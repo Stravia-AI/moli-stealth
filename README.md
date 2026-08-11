@@ -252,8 +252,8 @@ Current intentional boundaries:
   playback.
 - Selected CDP, WebDriver Classic, and WebDriver BiDi coverage, not full
   protocol parity.
-- Current-viewport software screenshots under `--layout` — no PDF generation
-  and not every Chrome screenshot mode.
+- Software screenshots and raster-backed CDP PDF generation under `--layout`;
+  not every Chrome screenshot or print mode is implemented.
 - Resource loading, geometry freshness, and visual cost stay explicit policy
   choices rather than always-on behavior.
 

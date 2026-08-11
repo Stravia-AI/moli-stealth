@@ -7191,7 +7191,7 @@ fn command_dispatch_completes_additional_page_sync_commands_without_legacy_fallb
             "id": 413,
             "error": {
                 "code": -32000,
-                "message": "Page.printToPDF is not supported: PDF generation is not implemented."
+                "message": "Page.printToPDF is not supported: renderer layout is disabled."
             }
         })]
     );

@@ -14,6 +14,7 @@ pub enum RendererScreenshotFormat {
 pub enum RendererScreenshotPurpose {
     Screenshot,
     Screencast,
+    Print { print_background: bool },
 }
 
 /// A CDP page-coordinate clip. Validation remains at the renderer boundary so
@@ -68,6 +69,28 @@ impl PageVm {
         &mut self,
         request: RendererCaptureScreenshotRequest,
     ) -> anyhow::Result<RendererCaptureScreenshotReply> {
+        let restore_media = if matches!(request.purpose, RendererScreenshotPurpose::Print { .. })
+            && self.emulated_media.media.is_none()
+        {
+            let previous = self.emulated_media.clone();
+            let mut print = previous.clone();
+            print.media = Some("print".to_owned());
+            self.set_emulated_media(&print);
+            Some(previous)
+        } else {
+            None
+        };
+        let result = self.capture_screenshot_inner(request);
+        if let Some(previous) = restore_media {
+            self.set_emulated_media(&previous);
+        }
+        result
+    }
+
+    fn capture_screenshot_inner(
+        &mut self,
+        request: RendererCaptureScreenshotRequest,
+    ) -> anyhow::Result<RendererCaptureScreenshotReply> {
         if self.layout_policy == LayoutPolicy::Mock {
             return Ok(RendererCaptureScreenshotReply::LayoutDisabled);
         }
@@ -82,7 +105,9 @@ impl PageVm {
         );
         let paint_capture = request.paint_capture_request()?;
         let layout_reason = match request.purpose {
-            RendererScreenshotPurpose::Screenshot => moli_layout::LayoutFlushReason::Screenshot,
+            RendererScreenshotPurpose::Screenshot | RendererScreenshotPurpose::Print { .. } => {
+                moli_layout::LayoutFlushReason::Screenshot
+            }
             RendererScreenshotPurpose::Screencast => moli_layout::LayoutFlushReason::Screencast,
         };
         let Some(snapshot) = self.vm_mut().paint_layout_snapshot_with_capture(
@@ -138,6 +163,12 @@ impl RendererCaptureScreenshotRequest {
         };
         Ok(PaintCaptureRequest {
             region,
+            include_backgrounds: match self.purpose {
+                RendererScreenshotPurpose::Print { print_background } => print_background,
+                RendererScreenshotPurpose::Screenshot | RendererScreenshotPurpose::Screencast => {
+                    true
+                }
+            },
             max_width: self.max_width,
             max_height: self.max_height,
         })

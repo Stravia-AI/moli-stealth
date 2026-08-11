@@ -75,6 +75,16 @@ impl LayoutPassRequest {
     pub const fn requests_paint(self) -> bool {
         self.paint_capture.is_some()
     }
+
+    /// Whether paint snapshots for this demand should include CSS backgrounds.
+    /// Layout-only demands return `true` so recursive renderers retain their
+    /// normal paint defaults when no capture policy exists.
+    pub const fn includes_backgrounds(self) -> bool {
+        match self.paint_capture {
+            Some(capture) => capture.include_backgrounds,
+            None => true,
+        }
+    }
 }
 
 /// Inputs for one on-demand screenshot layout pass.

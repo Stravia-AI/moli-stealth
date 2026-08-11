@@ -18,6 +18,8 @@ pub enum PaintCaptureRegion {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PaintCaptureRequest {
     pub region: PaintCaptureRegion,
+    /// Whether CSS background colors and images are included in paint.
+    pub include_backgrounds: bool,
     /// Maximum encoded image width in device pixels.
     pub max_width: Option<u32>,
     /// Maximum encoded image height in device pixels.
@@ -29,6 +31,7 @@ impl PaintCaptureRequest {
     pub const fn viewport() -> Self {
         Self {
             region: PaintCaptureRegion::Viewport,
+            include_backgrounds: true,
             max_width: None,
             max_height: None,
         }
@@ -38,6 +41,7 @@ impl PaintCaptureRequest {
     pub const fn viewport_with_limits(max_width: Option<u32>, max_height: Option<u32>) -> Self {
         Self {
             region: PaintCaptureRegion::Viewport,
+            include_backgrounds: true,
             max_width,
             max_height,
         }
@@ -47,6 +51,7 @@ impl PaintCaptureRequest {
     pub const fn full_document() -> Self {
         Self {
             region: PaintCaptureRegion::FullDocument,
+            include_backgrounds: true,
             max_width: None,
             max_height: None,
         }
@@ -56,6 +61,7 @@ impl PaintCaptureRequest {
     pub const fn page_clip(rect: LayoutRect, scale: f32) -> Self {
         Self {
             region: PaintCaptureRegion::PageClip { rect, scale },
+            include_backgrounds: true,
             max_width: None,
             max_height: None,
         }
@@ -99,6 +105,7 @@ pub(crate) struct ResolvedPaintCapture {
     /// Translation applied after local-to-viewport transforms.
     pub(crate) viewport_to_surface: LayoutTransform2D,
     pub(crate) surface: PaintCaptureSurface,
+    pub(crate) include_backgrounds: bool,
 }
 
 impl PaintCaptureRequest {
@@ -172,6 +179,7 @@ impl PaintCaptureRequest {
                 viewport_rect.height,
                 device_scale,
             ),
+            include_backgrounds: self.include_backgrounds,
         })
     }
 }
@@ -255,6 +263,7 @@ mod tests {
                 rect: LayoutRect::new(120.0, 250.0, 200.0, 100.0),
                 scale: 1.5,
             },
+            include_backgrounds: true,
             max_width: Some(500),
             max_height: Some(200),
         }

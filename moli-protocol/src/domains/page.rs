@@ -36,9 +36,9 @@ use url::Url;
 
 use super::input;
 use crate::conn::{
-    BackgroundProtocolEvent, CdpSessionRoute, CommandDispatchContext, CommandOwnerScope,
-    NETWORK_ERROR_PAGE_URL, PageLifecycleEventsEnableResult, PageScreencastConfig,
-    PageScreencastFormat,
+    BackgroundProtocolEvent, CapturedBody, CdpSessionRoute, CommandDispatchContext,
+    CommandOwnerScope, NETWORK_ERROR_PAGE_URL, PageLifecycleEventsEnableResult,
+    PageScreencastConfig, PageScreencastFormat,
 };
 use crate::conn::{CdpConnection, Cmd, EmulatedViewportSurface};
 pub(crate) use crate::conn::{DEFAULT_LOADER_ID as LOADER_ID, monotonic_timestamp_seconds};
@@ -55,6 +55,7 @@ mod lifecycle;
 mod main_document_commit;
 mod navigation;
 mod navigation_commit;
+mod pdf;
 mod popup;
 mod preload;
 mod prepared_navigation;
@@ -104,6 +105,8 @@ const CAPTURE_SCREENSHOT_UNSUPPORTED_MESSAGE: &str =
     "Page.captureScreenshot is not supported: renderer screenshots are not implemented.";
 const START_SCREENCAST_LAYOUT_DISABLED_MESSAGE: &str =
     "Page.startScreencast is not supported: renderer layout is disabled.";
+const PRINT_TO_PDF_LAYOUT_DISABLED_MESSAGE: &str =
+    "Page.printToPDF is not supported: renderer layout is disabled.";
 const PRINT_TO_PDF_UNSUPPORTED_MESSAGE: &str =
     "Page.printToPDF is not supported: PDF generation is not implemented.";
 
@@ -163,6 +166,11 @@ enum PendingPageCommandKind {
     },
     CaptureScreenshot {
         pending: PendingPageCommand,
+    },
+    PrintToPdf {
+        pending: PendingPageCommand,
+        options: pdf::RasterPdfOptions,
+        transfer_mode: DevToolsPrintToPdfTransferMode,
     },
     Navigate(Box<navigation::PendingNavigateLoadCommand>),
     TraverseSameDocumentHistory(Box<navigation::PendingSameDocumentHistoryTraversalCommand>),
@@ -227,6 +235,11 @@ enum CompletedPageCommandKind {
     CaptureScreenshot {
         completed: Box<Result<CompletedPageCommand, String>>,
     },
+    PrintToPdf {
+        completed: Box<Result<CompletedPageCommand, String>>,
+        options: pdf::RasterPdfOptions,
+        transfer_mode: DevToolsPrintToPdfTransferMode,
+    },
     Navigate(Box<navigation::CompletedNavigateLoadCommand>),
     TraverseSameDocumentHistory(Box<navigation::CompletedSameDocumentHistoryTraversalCommand>),
     ChildFrameNavigate(Box<navigation::CompletedChildFrameNavigateCommand>),
@@ -259,7 +272,8 @@ impl CompletedPageCommandKind {
             | Self::SetBypassContentSecurityPolicy { completed }
             | Self::CaptureSnapshot { completed }
             | Self::GetLayoutMetrics { completed }
-            | Self::CaptureScreenshot { completed } => direct(completed),
+            | Self::CaptureScreenshot { completed }
+            | Self::PrintToPdf { completed, .. } => direct(completed),
             Self::SearchInResource(completed) => completed.renderer_output_predecessor(),
             Self::GetAppManifest(completed) => completed.renderer_output_predecessor(),
             Self::SameDocumentNavigate(completed) => completed.renderer_output_predecessor(),
@@ -367,6 +381,15 @@ impl PendingPageCommandDispatch {
                     completed: Box::new(pending.wait().await.map_err(|error| error.to_string())),
                 }
             }
+            PendingPageCommandKind::PrintToPdf {
+                pending,
+                options,
+                transfer_mode,
+            } => CompletedPageCommandKind::PrintToPdf {
+                completed: Box::new(pending.wait().await.map_err(|error| error.to_string())),
+                options,
+                transfer_mode,
+            },
             PendingPageCommandKind::Navigate(pending) => {
                 CompletedPageCommandKind::Navigate(Box::new(pending.wait().await))
             }
@@ -5469,6 +5492,20 @@ fn build_cdp_print_to_pdf_command(
         Ok(None) => default_print_to_pdf_params(),
         Err(error) => return Err(CommandOutputPlan::error(-32602, error)),
     };
+    if params.display_header_footer.unwrap_or(false) {
+        return Err(unsupported_cdp_print_to_pdf_option("displayHeaderFooter"));
+    }
+    if params.prefer_css_page_size.unwrap_or(false) {
+        return Err(unsupported_cdp_print_to_pdf_option("preferCSSPageSize"));
+    }
+    if params.generate_tagged_pdf.unwrap_or(false) {
+        return Err(unsupported_cdp_print_to_pdf_option("generateTaggedPDF"));
+    }
+    if params.generate_document_outline.unwrap_or(false) {
+        return Err(unsupported_cdp_print_to_pdf_option(
+            "generateDocumentOutline",
+        ));
+    }
     let transfer_mode = match params.transfer_mode {
         Some(PrintToPdfTransferMode::ReturnAsBase64) => {
             Some(DevToolsPrintToPdfTransferMode::ReturnAsBase64)
@@ -5497,6 +5534,13 @@ fn build_cdp_print_to_pdf_command(
         shrink_to_fit: None,
         transfer_mode,
     })
+}
+
+fn unsupported_cdp_print_to_pdf_option(option: &str) -> CommandOutputPlan {
+    CommandOutputPlan::error(
+        -32000,
+        format!("Page.printToPDF option '{option}' is not supported."),
+    )
 }
 
 fn devtools_print_to_pdf_error(command: &DevToolsPrintToPdfCommand) -> DevToolsError {
@@ -5695,9 +5739,7 @@ pub(crate) fn try_start_page_command_dispatch(
         Some(PageAction::CaptureSnapshot) => {
             Some(try_start_page_capture_snapshot_command(conn, cmd))
         }
-        Some(PageAction::PrintToPdf) => Some(PageCommandTaskStep::Complete(
-            print_to_pdf_command_output_plan(conn, cmd),
-        )),
+        Some(PageAction::PrintToPdf) => Some(try_start_page_print_to_pdf_command(conn, cmd)),
         Some(PageAction::SetDocumentContent) => {
             Some(try_start_page_set_document_content_command(conn, cmd))
         }
@@ -6439,7 +6481,7 @@ fn start_devtools_page_command(
             start_devtools_capture_screenshot_command(conn, command_id, command)
         }
         DevToolsCommand::PrintToPdf(command) => {
-            PageCommandTaskStep::Complete(complete_devtools_print_to_pdf_command(conn, command))
+            start_devtools_print_to_pdf_command(conn, command_id, command)
         }
         _ => PageCommandTaskStep::Complete(CommandOutputPlan::error(
             -32000,
@@ -6522,6 +6564,73 @@ fn start_devtools_capture_screenshot_command(
         Err(error) => PageCommandTaskStep::Complete(CommandOutputPlan::error(
             -32000,
             format!("Failed to start page screenshot: {error}"),
+        )),
+    }
+}
+
+fn start_devtools_print_to_pdf_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    command: DevToolsPrintToPdfCommand,
+) -> PageCommandTaskStep {
+    if let Err(error) = validate_page_capture_target_context(conn, &command.context) {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(error));
+    }
+    if command.context.protocol != DevToolsProtocol::Cdp {
+        return PageCommandTaskStep::Complete(complete_devtools_print_to_pdf_command(
+            conn, command,
+        ));
+    }
+    if conn.layout_policy() == moli_core::LayoutPolicy::Mock {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+            -32000,
+            PRINT_TO_PDF_LAYOUT_DISABLED_MESSAGE,
+        ));
+    }
+    let options = match pdf::RasterPdfOptions::from_command(&command) {
+        Ok(options) => options,
+        Err(error) => {
+            return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                error.code(),
+                error.message(),
+            ));
+        }
+    };
+    let transfer_mode = command
+        .transfer_mode
+        .unwrap_or(DevToolsPrintToPdfTransferMode::ReturnAsBase64);
+    let session_id = command.context.session_id.as_ref().map(|id| id.as_str());
+    let owner_scope = CommandOwnerScope::capture(conn, session_id);
+    let page = match conn.loaded_page_mut_for_protocol_access(session_id) {
+        Ok(page) => page,
+        Err(message) => {
+            return PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, message));
+        }
+    };
+    let request = RendererCaptureScreenshotRequest {
+        purpose: RendererScreenshotPurpose::Print {
+            print_background: command.print_background.unwrap_or(false),
+        },
+        format: RendererScreenshotFormat::Jpeg,
+        quality: 90,
+        region: RendererScreenshotRegion::FullDocument,
+        optimize_for_speed: false,
+        max_width: None,
+        max_height: None,
+    };
+    match page.start_capture_screenshot_with_request(request) {
+        Ok(pending) => PageCommandTaskStep::Pending(PendingPageCommandDispatch {
+            command_id,
+            owner_scope,
+            kind: Box::new(PendingPageCommandKind::PrintToPdf {
+                pending,
+                options,
+                transfer_mode,
+            }),
+        }),
+        Err(error) => PageCommandTaskStep::Complete(CommandOutputPlan::error(
+            -32000,
+            format!("Failed to start PDF capture: {error}"),
         )),
     }
 }
@@ -7027,7 +7136,7 @@ mod protocol_neutral_tests {
     }
 
     #[test]
-    fn devtools_page_entry_rejects_print_to_pdf_without_placeholder_payload() {
+    fn devtools_page_entry_reports_layout_disabled_without_placeholder_payload() {
         let mut conn = CdpConnection::new();
         let params = Value::Null;
         let cmd = Cmd::for_test(
@@ -7054,7 +7163,7 @@ mod protocol_neutral_tests {
         assert_eq!(out[0]["error"]["code"], json!(-32000));
         assert_eq!(
             out[0]["error"]["message"],
-            json!("Page.printToPDF is not supported: PDF generation is not implemented.")
+            json!("Page.printToPDF is not supported: renderer layout is disabled.")
         );
     }
 
@@ -7135,17 +7244,15 @@ fn start_devtools_get_layout_metrics_command(
     }
 }
 
-fn print_to_pdf_command_output_plan(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> CommandOutputPlan {
+fn try_start_page_print_to_pdf_command(
+    conn: &mut CdpConnection,
+    cmd: &Cmd<'_>,
+) -> PageCommandTaskStep {
     let command = match build_cdp_print_to_pdf_command(conn, cmd) {
         Ok(command) => command,
-        Err(plan) => return plan,
+        Err(plan) => return PageCommandTaskStep::Complete(plan),
     };
-    match start_devtools_page_command(conn, cmd.id, DevToolsCommand::PrintToPdf(command)) {
-        PageCommandTaskStep::Complete(plan) => plan,
-        PageCommandTaskStep::Pending(_) => {
-            CommandOutputPlan::error(-32000, "Unexpected pending printToPDF command")
-        }
-    }
+    start_devtools_page_command(conn, cmd.id, DevToolsCommand::PrintToPdf(command))
 }
 
 pub(crate) async fn complete_pending_page_command(
@@ -7537,6 +7644,94 @@ async fn complete_pending_page_command_inner(
                     -32000,
                     format!("Failed to capture page screenshot: {error}"),
                 ),
+            }
+        }
+        CompletedPageCommandKind::PrintToPdf {
+            completed,
+            options,
+            transfer_mode,
+        } => {
+            let completion = match *completed {
+                Ok(completion) => completion,
+                Err(message) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        format!("Failed to capture PDF content: {message}"),
+                    ));
+                }
+            };
+            let page = match conn.loaded_page_mut_for_protocol_access(session_id.as_deref()) {
+                Ok(page) => page,
+                Err(message) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000, message,
+                    ));
+                }
+            };
+            let image = match page.finish_capture_screenshot(completion) {
+                Ok(RendererCaptureScreenshotReply::Captured(image)) => image,
+                Ok(RendererCaptureScreenshotReply::LayoutDisabled) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        PRINT_TO_PDF_LAYOUT_DISABLED_MESSAGE,
+                    ));
+                }
+                Ok(RendererCaptureScreenshotReply::NoDocument) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        "NoDocumentLoaded",
+                    ));
+                }
+                Err(error) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        format!("Failed to capture PDF content: {error}"),
+                    ));
+                }
+            };
+            if image.mime_type != "image/jpeg" {
+                return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    "Printing failed: renderer returned a non-JPEG raster",
+                ));
+            }
+            let pdf = match pdf::build_raster_pdf(
+                image.bytes.as_ref(),
+                image.width,
+                image.height,
+                &options,
+            ) {
+                Ok(pdf) => pdf,
+                Err(error) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        error.code(),
+                        error.message(),
+                    ));
+                }
+            };
+            match transfer_mode {
+                DevToolsPrintToPdfTransferMode::ReturnAsBase64 => {
+                    CommandOutputPlan::result(json!({
+                        "data": BASE64_STANDARD.encode(pdf),
+                    }))
+                }
+                DevToolsPrintToPdfTransferMode::ReturnAsStream => {
+                    let stream = match conn.open_io_stream_body_source_for_session_owner(
+                        session_id.as_deref(),
+                        CapturedBody::from_bytes_spooled(pdf),
+                    ) {
+                        Ok(stream) => stream,
+                        Err(message) => {
+                            return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                                -32000, message,
+                            ));
+                        }
+                    };
+                    CommandOutputPlan::result(json!({
+                        "data": "",
+                        "stream": stream,
+                    }))
+                }
             }
         }
         CompletedPageCommandKind::CreateIsolatedWorld(completed) => {

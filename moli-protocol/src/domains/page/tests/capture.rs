@@ -375,33 +375,75 @@ fn mhtml_snapshot_base64_encodes_html_and_sanitizes_header_url() {
     assert!(!mhtml.contains(html));
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn print_to_pdf_reports_unsupported_for_default_base64() {
+async fn print_to_pdf_returns_base64_pdf() {
     let mut ctx = TestContext::new();
+    install_active_screenshot_page(
+        &mut ctx,
+        "BID-PDF-BASE64",
+        "TID-PDF-BASE64",
+        "SID-PDF-BASE64",
+        "data:text/html,<style>html,body%7Bmargin%3A0%7D</style><main>pdf</main>",
+    )
+    .await;
     ctx.process_async(json!({
         "id": 1112,
-        "method": "Page.printToPDF"
+        "method": "Page.printToPDF",
+        "sessionId": "SID-PDF-BASE64"
     }))
     .await;
-    ctx.expect_error(
-        1112,
-        -32000,
-        "Page.printToPDF is not supported: PDF generation is not implemented.",
-    );
+    let pdf = screenshot_bytes(&take_response_by_id(&mut ctx, 1112));
+    assert!(pdf.starts_with(b"%PDF-1.7"));
+    assert!(pdf.ends_with(b"%%EOF\n"));
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn print_to_pdf_return_as_stream_reports_unsupported_without_io_stream() {
+async fn print_to_pdf_return_as_stream_reads_through_io_domain() {
     let mut ctx = TestContext::new();
+    install_active_screenshot_page(
+        &mut ctx,
+        "BID-PDF-STREAM",
+        "TID-PDF-STREAM",
+        "SID-PDF-STREAM",
+        "data:text/html,<style>html,body%7Bmargin%3A0%7D</style><main>stream</main>",
+    )
+    .await;
     ctx.process_async(json!({
         "id": 1113,
         "method": "Page.printToPDF",
+        "sessionId": "SID-PDF-STREAM",
         "params": { "transferMode": "ReturnAsStream" }
     }))
     .await;
-    ctx.expect_error(
-        1113,
-        -32000,
-        "Page.printToPDF is not supported: PDF generation is not implemented.",
-    );
+    let response = take_response_by_id(&mut ctx, 1113);
+    assert_eq!(response["result"]["data"], json!(""));
+    let handle = response["result"]["stream"]
+        .as_str()
+        .expect("printToPDF stream handle")
+        .to_owned();
+
+    ctx.process_async(json!({
+        "id": 1114,
+        "method": "IO.read",
+        "sessionId": "SID-PDF-STREAM",
+        "params": { "handle": handle.clone() }
+    }))
+    .await;
+    let read = take_response_by_id(&mut ctx, 1114);
+    assert_eq!(read["result"]["base64Encoded"], json!(true));
+    assert_eq!(read["result"]["eof"], json!(true));
+    let pdf = BASE64_STANDARD
+        .decode(read["result"]["data"].as_str().expect("IO.read data"))
+        .expect("IO.read PDF should be base64");
+    assert!(pdf.starts_with(b"%PDF-1.7"));
+    assert!(pdf.ends_with(b"%%EOF\n"));
+
+    ctx.process_async(json!({
+        "id": 1116,
+        "method": "IO.close",
+        "sessionId": "SID-PDF-STREAM",
+        "params": { "handle": handle }
+    }))
+    .await;
+    assert_eq!(take_response_by_id(&mut ctx, 1116)["result"], json!({}));
 }
 #[tokio::test(flavor = "multi_thread")]
 async fn print_to_pdf_rejects_tiny_page_with_default_margins() {
@@ -416,8 +458,8 @@ async fn print_to_pdf_rejects_tiny_page_with_default_margins() {
     .await;
     ctx.expect_error(
         1115,
-        -32000,
-        "printToPDF paper size is too small for margins",
+        -32602,
+        "invalid print parameters: printable area is empty",
     );
 }
 #[tokio::test(flavor = "multi_thread")]

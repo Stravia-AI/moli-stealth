@@ -24,6 +24,7 @@ pub(super) fn project_inline_box_fragments<N>(
     world: &LayoutWorld<N>,
     owner: &LayoutBox<N>,
     transform: LayoutTransform2D,
+    include_backgrounds: bool,
     snapshot: &mut PaintSnapshot,
     text_clip_mask: &impl Fn(TextClipMaskScope, &mut PaintSnapshot),
 ) where
@@ -136,21 +137,23 @@ pub(super) fn project_inline_box_fragments<N>(
         let project_text_clip_mask = |snapshot: &mut PaintSnapshot| {
             text_clip_mask(TextClipMaskScope::InlineBox(fragment.box_id), snapshot);
         };
-        project_background_color(
-            inline_box,
-            areas,
-            transform,
-            color,
-            snapshot,
-            &project_text_clip_mask,
-        );
-        project_background_layers(
-            inline_box,
-            areas,
-            transform,
-            snapshot,
-            &project_text_clip_mask,
-        );
+        if include_backgrounds {
+            project_background_color(
+                inline_box,
+                areas,
+                transform,
+                color,
+                snapshot,
+                &project_text_clip_mask,
+            );
+            project_background_layers(
+                inline_box,
+                areas,
+                transform,
+                snapshot,
+                &project_text_clip_mask,
+            );
+        }
 
         let colors = style.border_colors();
         if widths.has_positive_edge() && colors.has_visible_edge() {

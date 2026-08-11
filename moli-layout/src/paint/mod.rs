@@ -55,7 +55,11 @@ where
     N: Copy + Debug + Eq + Hash,
 {
     let root = projection.world.root;
-    let (canvas_color, propagated_background) = canvas_background(projection.world, root);
+    let (canvas_color, propagated_background) = if capture.include_backgrounds {
+        canvas_background(projection.world, root)
+    } else {
+        (PaintColor::WHITE, None)
+    };
     let mut snapshot = PaintSnapshot::new(projection.viewport, canvas_color);
     snapshot.surface = capture.surface;
     snapshot.viewport_to_surface = capture.viewport_to_surface;
@@ -242,6 +246,7 @@ where
                     id,
                     propagated_background,
                     embedded_frames.contains_key(&id),
+                    capture.include_backgrounds,
                     &mut snapshot,
                 );
                 pop_clips(clip_count, &mut snapshot);
@@ -252,7 +257,13 @@ where
                     projection.content_clips[id.index()],
                     &mut snapshot,
                 );
-                project_box_contents(projection, id, embedded_frames, &mut snapshot);
+                project_box_contents(
+                    projection,
+                    id,
+                    embedded_frames,
+                    capture.include_backgrounds,
+                    &mut snapshot,
+                );
                 pop_clips(clip_count, &mut snapshot);
             }
             PaintOrderEvent::TableCollapsedBorders(id) => {
@@ -427,6 +438,7 @@ fn project_box_background<N>(
     id: LayoutBoxId,
     propagated_background: Option<LayoutBoxId>,
     has_embedded_frame: bool,
+    include_backgrounds: bool,
     snapshot: &mut PaintSnapshot,
 ) where
     N: Copy + Debug + Eq + Hash,
@@ -445,7 +457,7 @@ fn project_box_background<N>(
 
     let shadows = layout_box.style.box_shadows(rect, radii, transform);
 
-    if propagated_background != Some(id) {
+    if include_backgrounds && propagated_background != Some(id) {
         let mut color = layout_box.style.background_color();
         match unavailable_replaced_content_paint(layout_box, has_embedded_frame) {
             Some(UnavailableReplacedContentPaint::OpaquePlaceholder) => {
@@ -646,6 +658,7 @@ fn project_box_contents<N>(
     projection: &OutputProjection<'_, N>,
     id: LayoutBoxId,
     embedded_frames: &mut HashMap<LayoutBoxId, PaintSnapshot>,
+    include_backgrounds: bool,
     snapshot: &mut PaintSnapshot,
 ) where
     N: Copy + Debug + Eq + Hash,
@@ -677,6 +690,7 @@ fn project_box_contents<N>(
         projection.world,
         layout_box,
         transform,
+        include_backgrounds,
         snapshot,
         &text_clip_mask,
     );

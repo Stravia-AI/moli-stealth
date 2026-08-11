@@ -5,6 +5,7 @@ from typing import Any, Callable, Awaitable
 
 from . import SmokeState
 from ..assertions import SmokeError, assert_equal, wait_until
+from ..pdf_document import assert_pdf_envelope
 
 
 async def run_playwright_compat_group(state: SmokeState) -> None:
@@ -17,7 +18,7 @@ async def run_playwright_compat_group(state: SmokeState) -> None:
     await _verify_playwright_page_context_fallback_chain_sample(state)
     await _verify_playwright_route_fulfill_set_cookie_sample(state)
     await _verify_playwright_route_fulfill_headers_sample(state)
-    await _verify_playwright_pdf_unsupported_sample(state)
+    await _verify_playwright_pdf_sample(state)
     await _verify_playwright_cdp_session_sample(state)
     await _verify_playwright_cdp_session_network_event_sample(state)
     await _verify_playwright_cdp_session_error_sample(state)
@@ -280,26 +281,24 @@ async def _verify_playwright_route_fulfill_headers_sample(state: SmokeState) -> 
     state.record("playwright_route_fulfill_headers_sample")
 
 
-async def _verify_playwright_pdf_unsupported_sample(state: SmokeState) -> None:
+async def _verify_playwright_pdf_sample(state: SmokeState) -> None:
     async def body(_context: Any, page: Any) -> None:
         await page.goto(f"{state.fixture}/plain", wait_until="load", timeout=10_000)
-        default_error = await _expect_async_error(page.pdf())
-        if "Page.printToPDF is not supported" not in default_error:
-            raise SmokeError(f"Playwright page.pdf default should fail explicitly as unsupported: {default_error}")
+        default_pdf = await page.pdf()
+        assert_pdf_envelope(default_pdf, "Playwright default page.pdf")
 
-        option_error = await _expect_async_error(
-            page.pdf(
-                format="A4",
-                landscape=True,
-                print_background=True,
-                page_ranges="1",
-            )
+        option_pdf = await page.pdf(
+            format="A4",
+            landscape=True,
+            print_background=True,
+            page_ranges="1",
         )
-        if "Page.printToPDF is not supported" not in option_error:
-            raise SmokeError(f"Playwright page.pdf options should fail explicitly as unsupported: {option_error}")
+        assert_pdf_envelope(option_pdf, "Playwright option page.pdf")
+        if default_pdf == option_pdf:
+            raise SmokeError("Playwright page.pdf options should change the encoded PDF")
 
     await _with_fresh_page(state, body)
-    state.record("playwright_pdf_unsupported_sample")
+    state.record("playwright_pdf_sample")
 
 
 async def _verify_playwright_cdp_session_sample(state: SmokeState) -> None:
