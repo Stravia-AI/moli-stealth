@@ -1,5 +1,5 @@
 use clap::Parser;
-use std::num::NonZeroU32;
+use std::{num::NonZeroU32, process::Command};
 
 use moli::cli::{
     Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogFormat, LogLevel, McpArgs,
@@ -983,6 +983,51 @@ fn layout_selects_on_demand_policy_for_fetch_and_serve() {
             moli_core::LayoutPolicy::OnDemand
         );
     }
+}
+
+#[test]
+fn env_flags_are_fallbacks_and_cli_flags_take_priority() {
+    for (case, layout, resource) in [
+        ("env-enables", "true", "true"),
+        ("env-disables", "false", "false"),
+        ("cli-overrides-env", "false", "false"),
+    ] {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "parse_env_flags_in_child_process", "--nocapture"])
+            .env("MOLI_TEST_ENV_FLAG_CASE", case)
+            .env("MOLI_LAYOUT", layout)
+            .env("MOLI_RESOURCE", resource)
+            .output()
+            .unwrap();
+
+        assert!(
+            output.status.success(),
+            "environment flag case {case:?} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+}
+
+#[test]
+fn parse_env_flags_in_child_process() {
+    let Ok(case) = std::env::var("MOLI_TEST_ENV_FLAG_CASE") else {
+        return;
+    };
+
+    let args = if case == "cli-overrides-env" {
+        vec!["moli", "serve", "--layout", "--resource"]
+    } else {
+        vec!["moli", "serve"]
+    };
+    let cli = Cli::try_parse_from(normalize_args_for_compat(args)).unwrap();
+    let Commands::Serve(args) = cli.command else {
+        panic!("expected serve command");
+    };
+    let expected = case != "env-disables";
+
+    assert_eq!(args.common.layout, expected);
+    assert_eq!(args.common.resource, expected);
 }
 
 #[test]

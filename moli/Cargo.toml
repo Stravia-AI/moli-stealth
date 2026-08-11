@@ -17,7 +17,7 @@ anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["ws"] }
 base64 = "0.22"
 cidr = "0.3.2"
-clap = { version = "4.5.39", features = ["derive"] }
+clap = { version = "4.5.39", features = ["derive", "env"] }
 flate2 = "1.1.9"
 futures-util = "0.3.31"
 moli-browser-profile = { path = "../moli-browser-profile" }

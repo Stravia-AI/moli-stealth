@@ -200,6 +200,11 @@ Moli keeps expensive browser work explicit rather than silently enabling it:
 | `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Enable one specific optional resource family |
 | `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Opt into whatever persistence the workload needs |
 
+`MOLI_LAYOUT=true` and `MOLI_RESOURCE=true` provide environment-variable
+fallbacks for `--layout` and `--resource`. Explicit command-line flags take
+priority over their environment-variable values. The environment values must
+be `true` or `false`.
+
 Layout is sampled, not continuously retained: a cold geometry request builds
 one full pass from the current DOM/style and keeps only the latest
 `LayoutPassOutput`. Ordinary geometry reads may reuse that snapshot after

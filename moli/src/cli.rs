@@ -315,7 +315,7 @@ pub struct CommonArgs {
 
     /// Fetch every optional image, font, audio, video, media, and text-track
     /// resource family.
-    #[arg(long)]
+    #[arg(long, env = "MOLI_RESOURCE")]
     pub resource: bool,
 
     #[arg(long)]
@@ -325,7 +325,7 @@ pub struct CommonArgs {
     ///
     /// Without this flag Moli keeps deterministic compatibility
     /// geometry and does not construct layout or paint output.
-    #[arg(long)]
+    #[arg(long, env = "MOLI_LAYOUT")]
     pub layout: bool,
 
     #[arg(long = "cookie-file")]
