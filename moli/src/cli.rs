@@ -315,7 +315,11 @@ pub struct CommonArgs {
 
     /// Fetch every optional image, font, audio, video, media, and text-track
     /// resource family.
-    #[arg(long, env = "MOLI_RESOURCE")]
+    #[arg(
+        long,
+        env = "MOLI_RESOURCE",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub resource: bool,
 
     #[arg(long)]
@@ -325,7 +329,11 @@ pub struct CommonArgs {
     ///
     /// Without this flag Moli keeps deterministic compatibility
     /// geometry and does not construct layout or paint output.
-    #[arg(long, env = "MOLI_LAYOUT")]
+    #[arg(
+        long,
+        env = "MOLI_LAYOUT",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub layout: bool,
 
     #[arg(long = "cookie-file")]
@@ -337,7 +345,11 @@ pub struct CommonArgs {
     #[arg(long)]
     pub document_start_script_file: Vec<String>,
 
-    #[arg(long, env = "MOLI_BLOCK_PRIVATE_NETWORKS")]
+    #[arg(
+        long,
+        env = "MOLI_BLOCK_PRIVATE_NETWORKS",
+        value_parser = clap::builder::BoolishValueParser::new()
+    )]
     pub block_private_networks: bool,
 
     #[arg(long)]

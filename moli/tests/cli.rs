@@ -987,17 +987,20 @@ fn layout_selects_on_demand_policy_for_fetch_and_serve() {
 
 #[test]
 fn env_flags_are_fallbacks_and_cli_flags_take_priority() {
-    for (case, layout, resource) in [
-        ("env-enables", "true", "true"),
-        ("env-disables", "false", "false"),
-        ("cli-overrides-env", "false", "false"),
+    for (case, env_value, expected) in [
+        ("env-enables", "true", true),
+        ("env-disables", "false", false),
+        ("env-one-enables", "1", true),
+        ("env-zero-disables", "0", false),
+        ("cli-overrides-env", "0", true),
     ] {
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "parse_env_flags_in_child_process", "--nocapture"])
             .env("MOLI_TEST_ENV_FLAG_CASE", case)
-            .env("MOLI_LAYOUT", layout)
-            .env("MOLI_RESOURCE", resource)
-            .env("MOLI_BLOCK_PRIVATE_NETWORKS", resource)
+            .env("MOLI_TEST_ENV_FLAG_EXPECTED", expected.to_string())
+            .env("MOLI_LAYOUT", env_value)
+            .env("MOLI_RESOURCE", env_value)
+            .env("MOLI_BLOCK_PRIVATE_NETWORKS", env_value)
             .output()
             .unwrap();
 
@@ -1015,6 +1018,10 @@ fn parse_env_flags_in_child_process() {
     let Ok(case) = std::env::var("MOLI_TEST_ENV_FLAG_CASE") else {
         return;
     };
+    let expected = std::env::var("MOLI_TEST_ENV_FLAG_EXPECTED")
+        .unwrap()
+        .parse::<bool>()
+        .unwrap();
 
     let args = if case == "cli-overrides-env" {
         vec![
@@ -1031,8 +1038,6 @@ fn parse_env_flags_in_child_process() {
     let Commands::Serve(args) = cli.command else {
         panic!("expected serve command");
     };
-    let expected = case != "env-disables";
-
     assert_eq!(args.common.layout, expected);
     assert_eq!(args.common.resource, expected);
     assert_eq!(args.common.block_private_networks, expected);
