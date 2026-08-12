@@ -52,6 +52,7 @@ use crate::cdp_scheduler::{
     CdpScheduler, CdpSchedulerEventReceivers, DevToolsRuntimeCommandProgress,
     PendingDevToolsRuntimeDeferredReplyExecution, ProtocolAdapterScheduler,
     ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput, ProtocolOutputSequence,
+    RendererOutputTransportFailure,
 };
 
 use super::webdriver_files::selected_files_from_paths;
@@ -251,7 +252,9 @@ async fn handle_bidi_session_socket_local(
             }
         }
     }
-    actor.release_event_sources(&mut scheduler).await;
+    actor
+        .release_event_sources(&mut scheduler, &mut receivers)
+        .await;
     actor.release_session(&mut session_registry.lock());
     CookieProfileCommit::from_optional_profile_backed_snapshot(
         initial_cookie_snapshot,
@@ -323,10 +326,19 @@ impl BidiSocketActor {
     pub(in crate::protocol_server) async fn release_event_sources(
         &mut self,
         scheduler: &mut CdpScheduler,
+        receivers: &mut CdpSchedulerEventReceivers,
     ) {
         self.release_pending_runtime_command_state(scheduler);
         let plan = self.bidi.release_event_source_hook_plan();
-        let _ = execute_bidi_event_source_hook_plan(scheduler, &mut self.bidi, &plan).await;
+        let mut events = Vec::new();
+        let _ = append_bidi_event_source_hook_plan_events(
+            scheduler,
+            receivers,
+            &mut self.bidi,
+            &plan,
+            &mut events,
+        )
+        .await;
     }
 
     fn release_pending_runtime_command_state(&mut self, scheduler: &mut CdpScheduler) {
@@ -485,7 +497,8 @@ impl BidiSocketActor {
         if self.pending_runtime_command.is_none() {
             return send_bidi_protocol_output(
                 &mut self.socket,
-                Some(scheduler),
+                scheduler,
+                receivers,
                 &mut self.bidi,
                 output,
                 owner_context,
@@ -506,7 +519,8 @@ impl BidiSocketActor {
         let Some(mut pending_command) = self.pending_runtime_command.take() else {
             return send_bidi_protocol_output(
                 &mut self.socket,
-                Some(scheduler),
+                scheduler,
+                receivers,
                 &mut self.bidi,
                 output,
                 None,
@@ -535,7 +549,8 @@ impl BidiSocketActor {
             let output = scheduler.route_registered_runtime_inspector_response(response);
             return send_bidi_protocol_output(
                 &mut self.socket,
-                Some(scheduler),
+                scheduler,
+                receivers,
                 &mut self.bidi,
                 output,
                 None,
@@ -586,7 +601,8 @@ impl BidiSocketActor {
                 pending_command.pending = Some(pending);
                 let sent = send_bidi_protocol_output(
                     &mut self.socket,
-                    Some(scheduler),
+                    scheduler,
+                    receivers,
                     &mut self.bidi,
                     protocol_output,
                     None,
@@ -799,8 +815,17 @@ async fn handle_bidi_socket_message(
                 &initial_sources,
                 pending.completion.event_context.as_deref(),
             );
-            append_context_created_event_source_hook_events(scheduler, bidi, &mut bidi_events)
-                .await;
+            if !append_context_created_event_source_hook_events(
+                scheduler,
+                receivers,
+                bidi,
+                &mut bidi_events,
+            )
+            .await
+            {
+                let _ = send_bidi_json_events(socket, bidi_events).await;
+                return false;
+            }
             if !send_bidi_json_events(socket, bidi_events).await {
                 return false;
             }
@@ -845,15 +870,34 @@ async fn handle_bidi_socket_message(
         &command_output.event_sources,
         command_output.event_context.as_deref(),
     );
-    if !renderer_output_transport_terminal {
-        append_context_created_event_source_hook_events(scheduler, bidi, &mut bidi_events).await;
+    if !renderer_output_transport_terminal
+        && !append_context_created_event_source_hook_events(
+            scheduler,
+            receivers,
+            bidi,
+            &mut bidi_events,
+        )
+        .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        return false;
     }
     if command_method.as_deref() == Some("session.subscribe")
         && command_output.response["type"] == json!("success")
         && !renderer_output_transport_terminal
     {
-        if let Some(plan) = subscribe_hook_plan.as_ref() {
-            bidi_events.extend(execute_bidi_event_source_hook_plan(scheduler, bidi, plan).await);
+        if let Some(plan) = subscribe_hook_plan.as_ref()
+            && !append_bidi_event_source_hook_plan_events(
+                scheduler,
+                receivers,
+                bidi,
+                plan,
+                &mut bidi_events,
+            )
+            .await
+        {
+            let _ = send_bidi_json_events(socket, bidi_events).await;
+            return false;
         }
         bidi_events.extend(
             replay_existing_bidi_realm_created_events(
@@ -865,21 +909,36 @@ async fn handle_bidi_socket_message(
         );
         bidi_events.extend(bidi.replay_buffered_bidi_log_entry_events_for_subscriptions());
     }
-    bidi_events
-        .extend(execute_bidi_event_source_hook_plan(scheduler, bidi, &command_hook_plan).await);
+    if !append_bidi_event_source_hook_plan_events(
+        scheduler,
+        receivers,
+        bidi,
+        &command_hook_plan,
+        &mut bidi_events,
+    )
+    .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        return false;
+    }
     let mut post_response_bidi_events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
         &command_output.post_response_event_sources,
         command_output.event_context.as_deref(),
     );
-    if !renderer_output_transport_terminal {
-        append_context_created_event_source_hook_events(
+    if !renderer_output_transport_terminal
+        && !append_context_created_event_source_hook_events(
             scheduler,
+            receivers,
             bidi,
             &mut post_response_bidi_events,
         )
-        .await;
+        .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        let _ = send_bidi_json_events(socket, post_response_bidi_events).await;
+        return false;
     }
     if !send_bidi_json_events(socket, bidi_events).await {
         return false;
@@ -1002,24 +1061,48 @@ async fn complete_and_send_bidi_pending_runtime_command(
         &command_output.event_sources,
         command_output.event_context.as_deref(),
     );
-    if !renderer_output_transport_terminal {
-        append_context_created_event_source_hook_events(scheduler, bidi, &mut bidi_events).await;
+    if !renderer_output_transport_terminal
+        && !append_context_created_event_source_hook_events(
+            scheduler,
+            receivers,
+            bidi,
+            &mut bidi_events,
+        )
+        .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        return false;
     }
-    bidi_events
-        .extend(execute_bidi_event_source_hook_plan(scheduler, bidi, &command_hook_plan).await);
+    if !append_bidi_event_source_hook_plan_events(
+        scheduler,
+        receivers,
+        bidi,
+        &command_hook_plan,
+        &mut bidi_events,
+    )
+    .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        return false;
+    }
     let mut post_response_bidi_events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
         &command_output.post_response_event_sources,
         command_output.event_context.as_deref(),
     );
-    if !renderer_output_transport_terminal {
-        append_context_created_event_source_hook_events(
+    if !renderer_output_transport_terminal
+        && !append_context_created_event_source_hook_events(
             scheduler,
+            receivers,
             bidi,
             &mut post_response_bidi_events,
         )
-        .await;
+        .await
+    {
+        let _ = send_bidi_json_events(socket, bidi_events).await;
+        let _ = send_bidi_json_events(socket, post_response_bidi_events).await;
+        return false;
     }
     if !send_bidi_json_events(socket, bidi_events).await {
         return false;
@@ -1106,13 +1189,17 @@ async fn drain_and_send_bidi_navigation_after_response(
         &background_navigation_sources,
         event_context,
     );
-    if transport_is_live {
-        append_context_created_event_source_hook_events(
+    if transport_is_live
+        && !append_context_created_event_source_hook_events(
             scheduler,
+            receivers,
             bidi,
             &mut background_navigation_events,
         )
-        .await;
+        .await
+    {
+        let _ = send_bidi_json_events(socket, background_navigation_events).await;
+        return false;
     }
     if !send_bidi_json_events(socket, background_navigation_events).await {
         return false;
@@ -1149,36 +1236,74 @@ fn bidi_command_channel_from_message(message: &serde_json::Value) -> Result<Opti
     }
 }
 
-async fn execute_bidi_event_source_hook_plan(
+async fn append_bidi_event_source_hook_plan_events(
     scheduler: &mut CdpScheduler,
+    receivers: &mut CdpSchedulerEventReceivers,
     bidi: &mut BidiConnectionState,
     plan: &BidiEventSourceHookPlan,
-) -> Vec<Value> {
-    let mut events = Vec::new();
+    events: &mut Vec<Value>,
+) -> bool {
+    match try_append_bidi_event_source_hook_plan_events(scheduler, receivers, bidi, plan, events)
+        .await
+    {
+        Ok(()) => true,
+        Err(error) => {
+            warn!(
+                ?error,
+                "BiDi event-source owner turn lost its renderer transport"
+            );
+            false
+        }
+    }
+}
+
+async fn try_append_bidi_event_source_hook_plan_events(
+    scheduler: &mut CdpScheduler,
+    receivers: &mut CdpSchedulerEventReceivers,
+    bidi: &mut BidiConnectionState,
+    plan: &BidiEventSourceHookPlan,
+    events: &mut Vec<Value>,
+) -> Result<(), DevToolsError> {
     if let Some(contexts) = plan.runtime_contexts() {
         if contexts.is_empty() {
-            let runtime_enable_output = enable_bidi_runtime_protocol_sources(scheduler).await;
+            let runtime_enable_result =
+                enable_bidi_runtime_protocol_sources(scheduler, receivers).await;
+            let runtime_enable_output = materialize_bidi_event_source_hook_output(
+                scheduler,
+                bidi,
+                events,
+                runtime_enable_result,
+                None,
+            )?;
             if !runtime_enable_output.is_empty() && plan.runtime_events_enabled() {
                 bidi.record_bidi_runtime_events_opened();
             }
             extend_bidi_events_from_protocol_output(
                 Some(&*scheduler),
                 bidi,
-                &mut events,
+                events,
                 runtime_enable_output,
                 None,
             );
         } else {
             for context in contexts {
-                let runtime_enable_output =
-                    scheduler.enable_runtime_listener_for_target(context).await;
+                let runtime_enable_result = scheduler
+                    .enable_runtime_listener_for_target(receivers, context)
+                    .await;
+                let runtime_enable_output = materialize_bidi_event_source_hook_output(
+                    scheduler,
+                    bidi,
+                    events,
+                    runtime_enable_result,
+                    Some(context),
+                )?;
                 if !runtime_enable_output.is_empty() && plan.records_runtime_context_ownership() {
                     bidi.record_bidi_runtime_event_source_opened(context);
                 }
                 extend_bidi_events_from_protocol_output(
                     Some(&*scheduler),
                     bidi,
-                    &mut events,
+                    events,
                     runtime_enable_output,
                     Some(context),
                 );
@@ -1186,15 +1311,31 @@ async fn execute_bidi_event_source_hook_plan(
         }
     }
     if plan.runtime_events_disabled() {
-        let runtime_disable_output = disable_bidi_runtime_protocol_sources(scheduler).await;
+        let runtime_disable_result =
+            disable_bidi_runtime_protocol_sources(scheduler, receivers).await;
+        let runtime_disable_output = materialize_bidi_event_source_hook_output(
+            scheduler,
+            bidi,
+            events,
+            runtime_disable_result,
+            None,
+        )?;
         if !runtime_disable_output.is_empty() {
             bidi.record_bidi_runtime_events_closed();
         }
     }
     if let Some(contexts) = plan.runtime_disabled_contexts() {
         for context in contexts {
-            let runtime_disable_output =
-                scheduler.disable_runtime_listener_for_target(context).await;
+            let runtime_disable_result = scheduler
+                .disable_runtime_listener_for_target(receivers, context)
+                .await;
+            let runtime_disable_output = materialize_bidi_event_source_hook_output(
+                scheduler,
+                bidi,
+                events,
+                runtime_disable_result,
+                Some(context),
+            )?;
             if !runtime_disable_output.is_empty() {
                 bidi.record_bidi_runtime_event_source_closed(context);
             }
@@ -1202,11 +1343,19 @@ async fn execute_bidi_event_source_hook_plan(
     }
     if let Some(contexts) = plan.network_contexts() {
         if contexts.is_empty() {
-            let network_enable_output = enable_bidi_network_protocol_sources(scheduler).await;
+            let network_enable_result =
+                enable_bidi_network_protocol_sources(scheduler, receivers).await;
+            let network_enable_output = materialize_bidi_event_source_hook_output(
+                scheduler,
+                bidi,
+                events,
+                network_enable_result,
+                None,
+            )?;
             extend_bidi_events_from_protocol_output(
                 Some(&*scheduler),
                 bidi,
-                &mut events,
+                events,
                 network_enable_output,
                 None,
             );
@@ -1245,12 +1394,36 @@ async fn execute_bidi_event_source_hook_plan(
     if plan.download_events_disabled() && scheduler.disable_webdriver_bidi_download_events() {
         bidi.record_bidi_download_event_source_closed();
     }
-    events
+    Ok(())
+}
+
+fn materialize_bidi_event_source_hook_output(
+    scheduler: &CdpScheduler,
+    bidi: &mut BidiConnectionState,
+    events: &mut Vec<Value>,
+    result: Result<ProtocolOutputSequence, RendererOutputTransportFailure>,
+    owner_context: Option<&str>,
+) -> Result<ProtocolOutputSequence, DevToolsError> {
+    match result {
+        Ok(output) => Ok(output),
+        Err(failure) => {
+            let (output, error) = failure.into_parts();
+            extend_bidi_events_from_protocol_output(
+                Some(scheduler),
+                bidi,
+                events,
+                output,
+                owner_context,
+            );
+            Err(error)
+        }
+    }
 }
 
 async fn send_bidi_protocol_output(
     socket: &mut WebSocket,
-    scheduler: Option<&mut CdpScheduler>,
+    scheduler: &mut CdpScheduler,
+    receivers: &mut CdpSchedulerEventReceivers,
     bidi: &mut BidiConnectionState,
     output: ProtocolOutputSequence,
     owner_context: Option<&str>,
@@ -1263,13 +1436,16 @@ async fn send_bidi_protocol_output(
     let pending_response =
         take_pending_navigation_response_from_sources(pending_navigation_response, &sources);
     let mut events = subscribed_bidi_events_from_devtools_event_sources(
-        scheduler.as_deref(),
+        Some(&*scheduler),
         bidi,
         &sources,
         owner_context,
     );
-    if let Some(scheduler) = scheduler {
-        append_context_created_event_source_hook_events(scheduler, bidi, &mut events).await;
+    if !append_context_created_event_source_hook_events(scheduler, receivers, bidi, &mut events)
+        .await
+    {
+        let _ = send_bidi_json_events(socket, events).await;
+        return false;
     }
     if !send_bidi_json_events(socket, events).await {
         return false;
@@ -1287,11 +1463,12 @@ async fn send_bidi_protocol_output(
 
 async fn append_context_created_event_source_hook_events(
     scheduler: &mut CdpScheduler,
+    receivers: &mut CdpSchedulerEventReceivers,
     bidi: &mut BidiConnectionState,
     events: &mut Vec<serde_json::Value>,
-) {
+) -> bool {
     let plan = bidi.context_created_event_source_hook_plan(events);
-    events.extend(execute_bidi_event_source_hook_plan(scheduler, bidi, &plan).await);
+    append_bidi_event_source_hook_plan_events(scheduler, receivers, bidi, &plan, events).await
 }
 
 struct BidiDevToolsCommandOutput {
@@ -1758,37 +1935,49 @@ fn bidi_protocol_message_owner_context(
 
 async fn enable_bidi_runtime_protocol_sources(
     scheduler: &mut CdpScheduler,
-) -> ProtocolOutputSequence {
+    receivers: &mut CdpSchedulerEventReceivers,
+) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
     scheduler
-        .execute_internal_protocol_message(json!({
-            "id": 0_u64,
-            "method": "Runtime.enable",
-            "params": {}
-        }))
+        .execute_internal_protocol_message(
+            receivers,
+            json!({
+                "id": 0_u64,
+                "method": "Runtime.enable",
+                "params": {}
+            }),
+        )
         .await
 }
 
 async fn disable_bidi_runtime_protocol_sources(
     scheduler: &mut CdpScheduler,
-) -> ProtocolOutputSequence {
+    receivers: &mut CdpSchedulerEventReceivers,
+) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
     scheduler
-        .execute_internal_protocol_message(json!({
-            "id": 0_u64,
-            "method": "Runtime.disable",
-            "params": {}
-        }))
+        .execute_internal_protocol_message(
+            receivers,
+            json!({
+                "id": 0_u64,
+                "method": "Runtime.disable",
+                "params": {}
+            }),
+        )
         .await
 }
 
 async fn enable_bidi_network_protocol_sources(
     scheduler: &mut CdpScheduler,
-) -> ProtocolOutputSequence {
+    receivers: &mut CdpSchedulerEventReceivers,
+) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
     scheduler
-        .execute_internal_protocol_message(json!({
-            "id": 0_u64,
-            "method": "Network.enable",
-            "params": {}
-        }))
+        .execute_internal_protocol_message(
+            receivers,
+            json!({
+                "id": 0_u64,
+                "method": "Network.enable",
+                "params": {}
+            }),
+        )
         .await
 }
 

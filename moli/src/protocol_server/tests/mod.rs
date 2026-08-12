@@ -3,7 +3,7 @@ use axum::{
     Router,
     body::{Body, to_bytes},
     extract::{WebSocketUpgrade, ws::Message},
-    http::{Method, Request, StatusCode},
+    http::{Method, Request, StatusCode, header},
     response::IntoResponse,
     routing::{get, post},
 };
@@ -92,6 +92,65 @@ fn spawn_dedicated_fixture_server(
             thread: Some(thread),
         },
     )
+}
+
+fn spawn_shared_worker_fixture_server(
+    name: &'static str,
+) -> (std::net::SocketAddr, DedicatedFixtureServer) {
+    let app = Router::new()
+        .route(
+            "/",
+            get(|| async move {
+                (
+                    [(header::CONTENT_TYPE.as_str(), "text/html")],
+                    r#"<!doctype html><html><body>shared worker
+<script>
+globalThis.__sharedWorkerProbe = value => new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error('shared worker timeout')), 1000);
+  const worker = new SharedWorker('/shared-worker.js', 'webdriver-shared-worker-smoke');
+  globalThis.__sharedWorkerSmoke = worker;
+  worker.port.onmessage = event => {
+    if (event.data && event.data.kind === 'probe-result') {
+      clearTimeout(timer);
+      resolve(event.data);
+    }
+  };
+  worker.port.start();
+  worker.port.postMessage({ kind: 'probe', value });
+});
+</script></body></html>"#,
+                )
+            }),
+        )
+        .route(
+            "/shared-worker.js",
+            get(|| async move {
+                (
+                    [(header::CONTENT_TYPE.as_str(), "text/javascript")],
+                    "globalThis.__sharedWorkerConnectCount = 0;\
+                     self.onconnect = event => {\
+                     globalThis.__sharedWorkerConnectCount += 1;\
+                     const port = event.ports[0];\
+                     port.onmessage = message => {\
+                     const data = message.data;\
+                     if (data && data.kind === 'probe') {\
+                     port.postMessage({\
+                     kind: 'probe-result',\
+                     echoed: data.value,\
+                     name,\
+                     pathname: self.location.pathname,\
+                     isSharedWorker: typeof SharedWorkerGlobalScope !== 'undefined' && self instanceof SharedWorkerGlobalScope,\
+                     selfEqualsGlobal: self === globalThis,\
+                     connectCount: globalThis.__sharedWorkerConnectCount\
+                     });\
+                     }\
+                     };\
+                     port.start();\
+                     };",
+                )
+            }),
+        );
+    spawn_dedicated_fixture_server(app, name)
 }
 
 fn wait_for_dedicated_fixture_ready(addr: std::net::SocketAddr, name: &'static str) {

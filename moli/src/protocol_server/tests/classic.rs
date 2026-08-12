@@ -13823,7 +13823,8 @@ async fn webdriver_classic_service_worker_projection_does_not_pollute_window_han
 
 #[tokio::test]
 async fn webdriver_classic_shared_worker_reuses_instance_and_does_not_pollute_window_handles() {
-    let (fixture_addr, _fixture_server) = spawn_classic_shared_worker_fixture_server();
+    let (fixture_addr, _fixture_server) =
+        spawn_shared_worker_fixture_server("classic-shared-worker");
     let app = build_router(test_state());
 
     let session = classic_request_json(app.clone(), Method::POST, "/session").await;
@@ -16641,48 +16642,6 @@ fn spawn_classic_service_worker_fixture_server() -> (std::net::SocketAddr, Dedic
             }),
         );
     spawn_dedicated_fixture_server(app, "classic-service-worker")
-}
-
-fn spawn_classic_shared_worker_fixture_server() -> (std::net::SocketAddr, DedicatedFixtureServer) {
-    let app = Router::new()
-        .route(
-            "/",
-            get(|| async move {
-                (
-                    [(header::CONTENT_TYPE.as_str(), "text/html")],
-                    "<!doctype html><html><body>classic shared worker</body></html>",
-                )
-            }),
-        )
-        .route(
-            "/shared-worker.js",
-            get(|| async move {
-                (
-                    [(header::CONTENT_TYPE.as_str(), "text/javascript")],
-                    "globalThis.__classicSharedWorkerConnectCount = 0;\
-                     self.onconnect = event => {\
-                     globalThis.__classicSharedWorkerConnectCount += 1;\
-                     const port = event.ports[0];\
-                     port.onmessage = message => {\
-                     const data = message.data;\
-                     if (data && data.kind === 'probe') {\
-                     port.postMessage({\
-                     kind: 'probe-result',\
-                     echoed: data.value,\
-                     name,\
-                     pathname: self.location.pathname,\
-                     isSharedWorker: typeof SharedWorkerGlobalScope !== 'undefined' && self instanceof SharedWorkerGlobalScope,\
-                     selfEqualsGlobal: self === globalThis,\
-                     connectCount: globalThis.__classicSharedWorkerConnectCount\
-                     });\
-                     }\
-                     };\
-                     port.start();\
-                     };",
-                )
-            }),
-        );
-    spawn_dedicated_fixture_server(app, "classic-shared-worker")
 }
 
 async fn classic_switch_to_child_frame_and_remove_current_frame(

@@ -850,8 +850,12 @@ struct ClassicAttachedBidiSocket {
 }
 
 impl ClassicAttachedBidiSocket {
-    async fn release_session(&mut self, scheduler: &mut CdpScheduler) {
-        self.actor.release_event_sources(scheduler).await;
+    async fn release_session(
+        &mut self,
+        scheduler: &mut CdpScheduler,
+        receivers: &mut CdpSchedulerEventReceivers,
+    ) {
+        self.actor.release_event_sources(scheduler, receivers).await;
         self.actor
             .release_session(&mut self.session_registry.lock());
     }
@@ -1317,13 +1321,17 @@ async fn classic_session_runtime_loop(
                         {
                             ClassicSessionRuntimeRequestOutcome::Continue => {}
                             ClassicSessionRuntimeRequestOutcome::AttachedBidi(mut duplicate) => {
-                                duplicate.release_session(&mut scheduler).await;
+                                duplicate
+                                    .release_session(&mut scheduler, &mut receivers)
+                                    .await;
                             }
                             ClassicSessionRuntimeRequestOutcome::DetachBidi => {
                                 detach_bidi = true;
                             }
                             ClassicSessionRuntimeRequestOutcome::Shutdown(cookies) => {
-                                attached.release_session(&mut scheduler).await;
+                                attached
+                                    .release_session(&mut scheduler, &mut receivers)
+                                    .await;
                                 shutdown_cookies = Some(cookies);
                             }
                         }
@@ -1334,7 +1342,9 @@ async fn classic_session_runtime_loop(
                 return cookies;
             }
             if detach_bidi && let Some(mut attached) = attached_bidi.take() {
-                attached.release_session(&mut scheduler).await;
+                attached
+                    .release_session(&mut scheduler, &mut receivers)
+                    .await;
             }
         } else {
             let page_javascript_blocked = scheduler.has_pending_javascript_dialog();

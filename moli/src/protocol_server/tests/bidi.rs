@@ -798,6 +798,101 @@ async fn websocket_bidi_classic_session_omits_synthetic_service_worker_runtime()
 }
 
 #[tokio::test]
+async fn websocket_bidi_shared_worker_subscription_projects_runtime_listener_predecessor() {
+    let (fixture_addr, _fixture_server) = spawn_shared_worker_fixture_server("bidi-shared-worker");
+    let page_url = format!("http://{fixture_addr}/");
+    let worker_url = format!("http://{fixture_addr}/shared-worker.js");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, context_id) = bidi_session_with_context(cdp_addr).await;
+
+    let navigate = send_bidi_command_response(
+        &mut socket,
+        3,
+        "browsingContext.navigate",
+        json!({
+            "context": context_id.clone(),
+            "url": page_url,
+            "wait": "complete"
+        }),
+    )
+    .await;
+    assert_eq!(navigate["type"], json!("success"), "{navigate:?}");
+
+    let subscribe = send_bidi_command_response(
+        &mut socket,
+        4,
+        "session.subscribe",
+        json!({
+            "events": [
+                "browsingContext.contextCreated",
+                "script.realmCreated"
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(subscribe["type"], json!("success"), "{subscribe:?}");
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 5_u64,
+                "method": "script.evaluate",
+                "params": {
+                    "expression": "globalThis.__sharedWorkerProbe('bidi').then(value => JSON.stringify(value))",
+                    "target": { "context": context_id },
+                    "awaitPromise": true
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send shared worker script.evaluate");
+    let messages = recv_until_id(&mut socket, 5).await;
+    let messages = collect_bidi_messages_until(
+        &mut socket,
+        messages,
+        |messages| {
+            let saw_context = messages.iter().any(|message| {
+                message["method"] == json!("browsingContext.contextCreated")
+                    && message["params"]["url"] == json!(worker_url)
+            });
+            let saw_realm = messages.iter().any(|message| {
+                message["method"] == json!("script.realmCreated")
+                    && message["params"]["type"] == json!("shared-worker")
+            });
+            saw_context && saw_realm
+        },
+        "shared worker context and realm events",
+    )
+    .await;
+
+    let evaluate = bidi_message_by_id(&messages, 5);
+    assert_eq!(evaluate["type"], json!("success"), "{messages:#?}");
+    let probe: serde_json::Value = serde_json::from_str(
+        evaluate["result"]["result"]["value"]
+            .as_str()
+            .expect("shared worker probe JSON string"),
+    )
+    .expect("parse shared worker probe JSON");
+    assert_eq!(probe["echoed"], json!("bidi"));
+    assert_eq!(probe["isSharedWorker"], json!(true));
+
+    let end = send_bidi_command_response(&mut socket, 6, "session.end", json!({})).await;
+    assert_eq!(end["type"], json!("success"), "{end:?}");
+    let closed = timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("BiDi socket should close after releasing shared worker event sources");
+    assert!(matches!(
+        closed,
+        Some(Ok(WsMessage::Close(_))) | None | Some(Err(_))
+    ));
+
+    protocol_server.abort();
+}
+
+#[tokio::test]
 async fn websocket_bidi_session_registry_allocates_unique_ids_across_connections() {
     let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
     let (mut first_socket, _) = connect_async(format!("ws://{cdp_addr}/session"))

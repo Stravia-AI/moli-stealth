@@ -933,13 +933,15 @@ impl CdpScheduler {
 
     pub(crate) async fn execute_internal_protocol_message(
         &mut self,
+        receivers: &mut CdpSchedulerEventReceivers,
         message: Value,
-    ) -> ProtocolOutputSequence {
+    ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
         let outcome = self
             .conn
             .process_message_with_turn_outcome_async(&message.to_string())
             .await;
-        self.apply_turn_outcome(outcome)
+        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+            .await
     }
 
     pub(crate) fn enable_network_listener_for_target(&mut self, target_id: &str) -> bool {
@@ -980,30 +982,34 @@ impl CdpScheduler {
 
     pub(crate) async fn enable_runtime_listener_for_target(
         &mut self,
+        receivers: &mut CdpSchedulerEventReceivers,
         target_id: &str,
-    ) -> ProtocolOutputSequence {
+    ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
         let Some(outcome) = self
             .conn
             .enable_runtime_listener_for_target(target_id)
             .await
         else {
-            return ProtocolOutputSequence::empty();
+            return Ok(ProtocolOutputSequence::empty());
         };
-        self.apply_turn_outcome(outcome)
+        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+            .await
     }
 
     pub(crate) async fn disable_runtime_listener_for_target(
         &mut self,
+        receivers: &mut CdpSchedulerEventReceivers,
         target_id: &str,
-    ) -> ProtocolOutputSequence {
+    ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
         let Some(outcome) = self
             .conn
             .disable_runtime_listener_for_target(target_id)
             .await
         else {
-            return ProtocolOutputSequence::empty();
+            return Ok(ProtocolOutputSequence::empty());
         };
-        self.apply_turn_outcome(outcome)
+        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+            .await
     }
 
     pub(crate) fn replace_target_discovery_enabled(&mut self, enabled: bool) -> bool {
@@ -1968,6 +1974,33 @@ impl CdpScheduler {
         );
         output.append(post_renderer_output);
         output
+    }
+
+    async fn apply_turn_outcome_at_renderer_owner_boundary(
+        &mut self,
+        receivers: &mut CdpSchedulerEventReceivers,
+        outcome: moli_protocol::CdpTurnOutcome,
+    ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
+        let (output, post_renderer_output, renderer_output_boundary, renderer_output_predecessor) =
+            self.materialize_turn_outcome(outcome);
+        assert!(
+            renderer_output_boundary.is_none(),
+            "non-navigation owner turn must not carry a renderer insertion boundary"
+        );
+
+        let mut causal_output = ProtocolOutputSequence::empty();
+        if let Some(predecessor) = renderer_output_predecessor {
+            causal_output.append(
+                self.project_renderer_output_predecessor_before_devtools_result(
+                    receivers,
+                    &predecessor,
+                )
+                .await?,
+            );
+        }
+        causal_output.append(output);
+        causal_output.append(post_renderer_output);
+        Ok(causal_output)
     }
 
     fn materialize_turn_outcome(
