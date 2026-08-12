@@ -14,8 +14,7 @@ use html5ever::{
 use moli_dom::native::{DomHost, NativeDom, NativeNodeId};
 use url::Url;
 use xml5ever::{
-    Attribute as XmlAttribute, ExpandedName, LocalName as XmlLocalName, Namespace as XmlNamespace,
-    Prefix as XmlPrefix, QualName as XmlQualName, TokenizerResult,
+    Attribute as XmlAttribute, ExpandedName, QualName as XmlQualName, TokenizerResult,
     buffer_queue::BufferQueue,
     driver::XmlParseOpts,
     interface::{ElementFlags as XmlElementFlags, QuirksMode as XmlQuirksMode},
@@ -32,9 +31,6 @@ use crate::{
     html::ParseHandle,
     live_target::{ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget},
     stream::prepare_parser_script_handoff_for_static_document,
-    xml::{
-        XmlNamespaceDeclaration, xml_namespace_declarations, xml_source_has_unclosed_element_at_eof,
-    },
     xml_tree_viewer::transform_parser_target_to_xml_tree_view,
 };
 
@@ -47,8 +43,6 @@ use crate::{
 pub struct XmlDocumentStream {
     parser: XmlParserSession,
     input: XmlParserInputStream,
-    raw_source: String,
-    scanned_namespace_element_count: usize,
     eof_declared: bool,
 }
 
@@ -73,8 +67,6 @@ struct XmlStreamDocumentSink {
 
 struct XmlParserStreamTarget {
     common: ParserStreamHtmlTreeSinkTarget,
-    namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-    source_has_unclosed_element_at_eof: bool,
     present_unstyled_top_level_document: bool,
 }
 
@@ -117,15 +109,11 @@ impl XmlDocumentStream {
     ) -> Self {
         let target = XmlParserStreamTarget {
             common,
-            namespace_declarations: VecDeque::new(),
-            source_has_unclosed_element_at_eof: false,
             present_unstyled_top_level_document,
         };
         Self {
             parser: XmlParserSession::new(target, XmlParseOpts::default()),
             input: XmlParserInputStream::default(),
-            raw_source: String::new(),
-            scanned_namespace_element_count: 0,
             eof_declared: false,
         }
     }
@@ -137,8 +125,6 @@ impl XmlDocumentStream {
         if chunk.is_empty() {
             return;
         }
-        self.raw_source.push_str(&chunk);
-        self.refresh_namespace_declarations();
         self.input.end_segments.push_back(chunk);
     }
 
@@ -148,12 +134,6 @@ impl XmlDocumentStream {
             return;
         }
         self.eof_declared = true;
-        self.refresh_namespace_declarations();
-        self.parser
-            .sink()
-            .borrow_mut()
-            .source_has_unclosed_element_at_eof =
-            xml_source_has_unclosed_element_at_eof(&self.raw_source);
     }
 
     pub fn has_pending_input(&self) -> bool {
@@ -325,25 +305,6 @@ impl XmlDocumentStream {
         self.parser.finish_owned().finish_dom_host().into_dom()
     }
 
-    fn refresh_namespace_declarations(&mut self) {
-        let declarations = xml_namespace_declarations(&self.raw_source);
-        if declarations.len() <= self.scanned_namespace_element_count {
-            return;
-        }
-        let newly_complete = declarations
-            .into_iter()
-            .skip(self.scanned_namespace_element_count)
-            .collect::<VecDeque<_>>();
-        self.scanned_namespace_element_count = self
-            .scanned_namespace_element_count
-            .saturating_add(newly_complete.len());
-        self.parser
-            .sink()
-            .borrow_mut()
-            .namespace_declarations
-            .extend(newly_complete);
-    }
-
     fn take_next_owned_input(&mut self, max_bytes: usize) -> String {
         if self.parser.has_buffered_input() {
             return String::new();
@@ -502,7 +463,6 @@ impl XmlParserSession {
         debug_assert!(input_buffer.is_empty());
         tokenizer.end();
         let mut target = tokenizer.sink.inner.sink.finish();
-        target.record_unclosed_source_element_error();
         target.present_unstyled_top_level_document_if_needed();
         target.common
     }
@@ -515,7 +475,6 @@ impl XmlParserSession {
         debug_assert!(input_buffer.is_empty());
         tokenizer.end();
         let mut target = tokenizer.sink.inner.sink.target.borrow_mut();
-        target.record_unclosed_source_element_error();
         target.present_unstyled_top_level_document_if_needed();
         ParserFinishDiscoverySignals {
             parser_created_null_registry_elements: target
@@ -563,38 +522,6 @@ impl TokenSink for EmbedderPausingXmlTreeBuilder {
 }
 
 impl XmlParserStreamTarget {
-    fn merge_namespace_declarations(&mut self, attributes: &mut Vec<XmlAttribute>) {
-        for (declaration_index, declaration) in self
-            .namespace_declarations
-            .pop_front()
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-        {
-            let attribute = &declaration.attribute;
-            let xml_attribute = XmlAttribute {
-                name: XmlQualName::new(
-                    attribute.prefix().map(XmlPrefix::from),
-                    XmlNamespace::from(attribute.namespace()),
-                    XmlLocalName::from(attribute.local_name()),
-                ),
-                value: StrTendril::from(attribute.value()),
-            };
-            let insertion_index = declaration
-                .ordinary_attributes_before
-                .saturating_add(declaration_index)
-                .min(attributes.len());
-            attributes.insert(insertion_index, xml_attribute);
-        }
-    }
-
-    fn record_unclosed_source_element_error(&mut self) {
-        if self.source_has_unclosed_element_at_eof {
-            self.common
-                .push_parse_error("Unexpected EOF with an unclosed XML element".to_owned());
-        }
-    }
-
     fn present_unstyled_top_level_document_if_needed(&mut self) {
         if self.present_unstyled_top_level_document {
             transform_parser_target_to_xml_tree_view(&mut self.common);
@@ -670,11 +597,10 @@ impl TreeSink for XmlStreamDocumentSink {
     fn create_element(
         &self,
         name: XmlQualName,
-        mut attrs: Vec<XmlAttribute>,
+        attrs: Vec<XmlAttribute>,
         flags: XmlElementFlags,
     ) -> Self::Handle {
         let mut target = self.target.borrow_mut();
-        target.merge_namespace_declarations(&mut attrs);
         let element_name = Rc::new(name.clone());
         let html_name = xml_name_to_html(&name);
         let html_attrs = attrs.into_iter().map(xml_attribute_to_html).collect();
@@ -1039,6 +965,42 @@ mod tests {
                 .map(|section| section.data()),
             Some(" < > & ")
         );
+    }
+
+    #[test]
+    fn incremental_xml_preserves_namespaces_across_many_single_byte_chunks() {
+        let mut source = String::from("<root>");
+        for index in 0..512 {
+            source.push_str(&format!(
+                "<p:item xmlns:p='urn:item:{index}' data-index='{index}'/>"
+            ));
+        }
+        source.push_str("</root>");
+
+        let mut stream = XmlDocumentStream::new(test_url());
+        for byte in source.bytes() {
+            stream.append_to_end(char::from(byte).to_string());
+        }
+        let document = stream.finish();
+        let items = document
+            .nodes()
+            .filter_map(Node::as_element)
+            .filter(|element| element.local_name() == "item")
+            .collect::<Vec<_>>();
+        assert_eq!(items.len(), 512);
+        for (index, item) in items.into_iter().enumerate() {
+            assert_eq!(item.namespace(), format!("urn:item:{index}"));
+            let attributes = item.attributes();
+            assert_eq!(
+                attributes
+                    .iter()
+                    .map(|attribute| attribute.name())
+                    .collect::<Vec<_>>(),
+                ["xmlns:p", "data-index"]
+            );
+            assert_eq!(attributes[0].namespace(), "http://www.w3.org/2000/xmlns/");
+            assert_eq!(attributes[0].value(), format!("urn:item:{index}"));
+        }
     }
 
     #[test]

@@ -257,9 +257,10 @@ where
     fn declare_ns(&self, attr: &mut Attribute) {
         if let Err(msg) = self.current_namespace.borrow_mut().insert_ns(attr) {
             self.sink.parse_error(msg);
-        } else {
-            attr.name.ns = ns!(xmlns);
         }
+        // Namespace declarations are real DOM attributes. Keep their XMLNS
+        // namespace identity even when the declaration itself is invalid.
+        attr.name.ns = ns!(xmlns);
     }
 
     fn find_uri(&self, prefix: &Option<Prefix>) -> Result<Option<Namespace>, Cow<'static, str>> {
@@ -342,12 +343,17 @@ where
             self.declare_ns(attr);
         }
 
-        // Then we bind those namespace declarations to attributes
-        for attr in tag.attrs.iter_mut().filter(|attr| {
-            attr.name.prefix != Some(namespace_prefix!("xmlns"))
-                && attr.name.local != local_name!("xmlns")
-        }) {
-            if self.bind_attr_qname(&mut present_attrs, &mut attr.name) {
+        // Bind ordinary attributes and retain namespace declarations in their
+        // original order. Tree sinks need the declarations as Attr nodes even
+        // though the namespace resolver has already consumed their values.
+        for attr in tag.attrs.iter_mut() {
+            let is_namespace_declaration = attr.name.ns == ns!(xmlns);
+            let keep = if is_namespace_declaration {
+                Self::check_duplicate_attr(&mut present_attrs, &attr.name)
+            } else {
+                self.bind_attr_qname(&mut present_attrs, &mut attr.name)
+            };
+            if keep {
                 new_attr.push(attr.clone());
             }
         }
@@ -432,7 +438,12 @@ where
     }
 
     fn end(&self) {
-        for node in self.open_elems.borrow_mut().drain(..).rev() {
+        let mut open_elems = self.open_elems.borrow_mut();
+        if !open_elems.is_empty() {
+            self.sink
+                .parse_error(Borrowed("Unexpected EOF with an unclosed XML element"));
+        }
+        for node in open_elems.drain(..).rev() {
             self.sink.pop(&node);
         }
     }

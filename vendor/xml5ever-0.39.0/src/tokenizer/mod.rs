@@ -21,7 +21,7 @@ use crate::macros::time;
 use crate::tendril::StrTendril;
 use crate::{buffer_queue, Attribute, QualName, SmallCharSet};
 use log::debug;
-use markup5ever::{local_name, namespace_prefix, ns, small_char_set, TokenizerResult};
+use markup5ever::{ns, small_char_set, TokenizerResult};
 use std::borrow::Cow::{self, Borrowed};
 use std::cell::{Cell, RefCell, RefMut};
 use std::collections::BTreeMap;
@@ -1307,13 +1307,10 @@ impl<Sink: TokenSink> XmlTokenizer<Sink> {
                 value: replace(&mut self.current_attr_value.borrow_mut(), StrTendril::new()),
             };
 
-            if qname.local == local_name!("xmlns")
-                || qname.prefix == Some(namespace_prefix!("xmlns"))
-            {
-                self.current_tag_attrs.borrow_mut().insert(0, attr);
-            } else {
-                self.current_tag_attrs.borrow_mut().push(attr);
-            }
+            // Keep source order. The tree builder performs a declaration-only
+            // pass before binding any qualified names, so declarations do not
+            // need to be moved ahead of ordinary attributes here.
+            self.current_tag_attrs.borrow_mut().push(attr);
         }
     }
 

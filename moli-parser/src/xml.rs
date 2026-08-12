@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::VecDeque,
     ops::{Deref, DerefMut},
     rc::Rc,
 };
@@ -14,14 +13,9 @@ use xml5ever::{
     tendril::{StrTendril as XmlStrTendril, TendrilSink as XmlTendrilSink},
     tree_builder::{NodeOrText as XmlNodeOrText, TreeSink as XmlTreeSinkBase, XmlTreeSink},
 };
-use xmlparser::{
-    ElementEnd as XmlElementEnd, Token as XmlTokenizerToken, Tokenizer as XmlTokenizer,
-};
 
 use super::{html_chunks, xml_tree_viewer::transform_document_to_xml_tree_view};
 use moli_dom::native::{Attribute as NativeAttribute, DomHost, NativeDom, NativeNodeId, Node};
-
-pub(super) const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
 #[derive(Debug, Clone, Default)]
 pub struct XmlParser;
@@ -65,13 +59,6 @@ impl DerefMut for XmlDomHost<'_> {
 struct XmlLiveTreeSinkTarget<'a> {
     dom_host: XmlDomHost<'a>,
     document_handle: NativeNodeId,
-    namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-    source_has_unclosed_element_at_eof: bool,
-}
-
-pub(super) struct XmlNamespaceDeclaration {
-    pub(super) ordinary_attributes_before: usize,
-    pub(super) attribute: NativeAttribute,
 }
 
 impl XmlParser {
@@ -92,13 +79,7 @@ impl XmlParser {
         xml: String,
         present_unstyled_xml: bool,
     ) -> NativeDom {
-        let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(&xml);
-        let namespace_declarations = xml_namespace_declarations(&xml);
-        let sink = XmlDocumentSink::new(XmlLiveTreeSinkTarget::new_owned(
-            final_url,
-            namespace_declarations,
-            source_has_unclosed_element_at_eof,
-        ));
+        let sink = XmlDocumentSink::new(XmlLiveTreeSinkTarget::new_owned(final_url));
         let mut parser = parse_xml_document(sink, XmlParseOpts::default());
         for chunk in html_chunks(&xml) {
             parser.process(XmlStrTendril::from(chunk));
@@ -122,11 +103,7 @@ impl XmlParser {
         document_handle: NativeNodeId,
         xml: &str,
     ) -> Option<()> {
-        let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(xml);
-        let namespace_declarations = xml_namespace_declarations(xml);
-        let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?
-            .with_namespace_declarations(namespace_declarations)
-            .with_source_has_unclosed_element_at_eof(source_has_unclosed_element_at_eof);
+        let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?;
         let sink = XmlDocumentSink::new(target);
         let mut parser = parse_xml_document(sink, XmlParseOpts::default());
         for chunk in html_chunks(&xml) {
@@ -135,164 +112,6 @@ impl XmlParser {
         parser.finish().finish_live_tree();
         Some(())
     }
-}
-
-// xml5ever 0.39 transitions from its Main tree-building phase directly to End
-// on EOF and therefore does not report a still-open element. Keep this check
-// deliberately narrower than a second well-formedness parser: tokenizer errors
-// and mismatched tags defer to xml5ever's own parse-error reporting.
-pub(super) fn xml_source_has_unclosed_element_at_eof(source: &str) -> bool {
-    let mut open_elements = Vec::<(String, String)>::new();
-    let mut pending_element = None::<(String, String)>;
-
-    for token in XmlTokenizer::from(source) {
-        let Ok(token) = token else {
-            return false;
-        };
-        match token {
-            XmlTokenizerToken::ElementStart { prefix, local, .. } => {
-                if pending_element.is_some() {
-                    return false;
-                }
-                pending_element = Some((prefix.as_str().to_owned(), local.as_str().to_owned()));
-            }
-            XmlTokenizerToken::ElementEnd {
-                end: XmlElementEnd::Open,
-                ..
-            } => {
-                let Some(element) = pending_element.take() else {
-                    return false;
-                };
-                open_elements.push(element);
-            }
-            XmlTokenizerToken::ElementEnd {
-                end: XmlElementEnd::Empty,
-                ..
-            } => {
-                if pending_element.take().is_none() {
-                    return false;
-                }
-            }
-            XmlTokenizerToken::ElementEnd {
-                end: XmlElementEnd::Close(prefix, local),
-                ..
-            } => {
-                let closes_current =
-                    open_elements
-                        .pop()
-                        .is_some_and(|(open_prefix, open_local)| {
-                            open_prefix == prefix.as_str() && open_local == local.as_str()
-                        });
-                if pending_element.is_some() || !closes_current {
-                    return false;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    pending_element.is_some() || !open_elements.is_empty()
-}
-
-/// xml5ever consumes namespace declarations while resolving qualified names,
-/// so its tree sink never receives the declarations as attributes. The DOM,
-/// however, exposes `xmlns` declarations as Attr nodes in the XMLNS namespace.
-/// Capture them in element-creation order and merge them at the tree-sink
-/// boundary.
-pub(super) fn xml_namespace_declarations(xml: &str) -> VecDeque<Vec<XmlNamespaceDeclaration>> {
-    let mut declarations = VecDeque::new();
-    let mut current = None::<(usize, Vec<XmlNamespaceDeclaration>)>;
-
-    for token in XmlTokenizer::from(xml) {
-        let Ok(token) = token else {
-            break;
-        };
-        match token {
-            XmlTokenizerToken::ElementStart { .. } => current = Some((0, Vec::new())),
-            XmlTokenizerToken::Attribute {
-                prefix,
-                local,
-                value,
-                ..
-            } => {
-                let is_default_declaration =
-                    prefix.as_str().is_empty() && local.as_str() == "xmlns";
-                let is_prefixed_declaration = prefix.as_str() == "xmlns";
-                if !is_default_declaration && !is_prefixed_declaration {
-                    if let Some((ordinary_attributes, _)) = current.as_mut() {
-                        *ordinary_attributes += 1;
-                    }
-                    continue;
-                }
-                let Some((ordinary_attributes_before, declarations)) = current.as_mut() else {
-                    continue;
-                };
-                declarations.push(XmlNamespaceDeclaration {
-                    ordinary_attributes_before: *ordinary_attributes_before,
-                    attribute: NativeAttribute::new(
-                        local.as_str().to_owned(),
-                        XMLNS_NAMESPACE.to_owned(),
-                        is_prefixed_declaration.then(|| "xmlns".to_owned()),
-                        decode_xml_attribute_value(value.as_str()),
-                    ),
-                });
-            }
-            XmlTokenizerToken::ElementEnd {
-                end: XmlElementEnd::Open | XmlElementEnd::Empty,
-                ..
-            } => {
-                if let Some((_, current_declarations)) = current.take() {
-                    declarations.push_back(current_declarations);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    declarations
-}
-
-fn decode_xml_attribute_value(value: &str) -> String {
-    let mut decoded = String::with_capacity(value.len());
-    let mut remaining = value;
-
-    while let Some(entity_start) = remaining.find('&') {
-        decoded.push_str(&remaining[..entity_start]);
-        let entity = &remaining[(entity_start + 1)..];
-        let Some(entity_end) = entity.find(';') else {
-            decoded.push_str(&remaining[entity_start..]);
-            return decoded;
-        };
-        let name = &entity[..entity_end];
-        let replacement = match name {
-            "amp" => Some('&'),
-            "apos" => Some('\''),
-            "gt" => Some('>'),
-            "lt" => Some('<'),
-            "quot" => Some('"'),
-            _ => name
-                .strip_prefix("#x")
-                .or_else(|| name.strip_prefix("#X"))
-                .and_then(|digits| u32::from_str_radix(digits, 16).ok())
-                .and_then(char::from_u32)
-                .or_else(|| {
-                    name.strip_prefix('#')
-                        .and_then(|digits| digits.parse::<u32>().ok())
-                        .and_then(char::from_u32)
-                }),
-        };
-        if let Some(replacement) = replacement {
-            decoded.push(replacement);
-        } else {
-            decoded.push('&');
-            decoded.push_str(name);
-            decoded.push(';');
-        }
-        remaining = &entity[(entity_end + 1)..];
-    }
-
-    decoded.push_str(remaining);
-    decoded
 }
 
 impl XmlParseHandle {
@@ -322,23 +141,16 @@ impl<'a> XmlDocumentSink<'a> {
 }
 
 impl XmlLiveTreeSinkTarget<'static> {
-    fn new_owned(
-        final_url: Url,
-        namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-        source_has_unclosed_element_at_eof: bool,
-    ) -> Self {
+    fn new_owned(final_url: Url) -> Self {
         let dom_host = DomHost::from_dom(NativeDom::new_xml(final_url));
         let document_handle = dom_host.document_handle();
         Self {
             dom_host: XmlDomHost::Owned(Box::new(dom_host)),
             document_handle,
-            namespace_declarations,
-            source_has_unclosed_element_at_eof,
         }
     }
 
-    fn finish_document(mut self) -> NativeDom {
-        self.record_unclosed_source_element_error();
+    fn finish_document(self) -> NativeDom {
         let XmlDomHost::Owned(dom_host) = self.dom_host else {
             unreachable!("owned XML parsing must finish with an owned DOM host")
         };
@@ -359,38 +171,10 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
         Some(Self {
             dom_host: XmlDomHost::Borrowed(dom_host),
             document_handle,
-            namespace_declarations: VecDeque::new(),
-            source_has_unclosed_element_at_eof: false,
         })
     }
 
-    fn with_namespace_declarations(
-        mut self,
-        namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-    ) -> Self {
-        self.namespace_declarations = namespace_declarations;
-        self
-    }
-
-    fn with_source_has_unclosed_element_at_eof(
-        mut self,
-        source_has_unclosed_element_at_eof: bool,
-    ) -> Self {
-        self.source_has_unclosed_element_at_eof = source_has_unclosed_element_at_eof;
-        self
-    }
-
-    fn finish_live_tree(mut self) {
-        self.record_unclosed_source_element_error();
-    }
-
-    fn record_unclosed_source_element_error(&mut self) {
-        if self.source_has_unclosed_element_at_eof && self.dom_host.dom().parse_errors().is_empty()
-        {
-            self.dom_host
-                .push_parse_error("Unexpected EOF with an unclosed XML element".to_owned());
-        }
-    }
+    fn finish_live_tree(self) {}
 
     fn document_handle(&self) -> XmlParseHandle {
         XmlParseHandle::new(self.document_handle, None)
@@ -398,7 +182,7 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
 
     fn create_element(&mut self, name: XmlQualName, attrs: Vec<XmlAttribute>) -> XmlParseHandle {
         let element_name = Rc::new(name.clone());
-        let mut attributes = attrs
+        let attributes = attrs
             .into_iter()
             .map(|attribute| {
                 NativeAttribute::new(
@@ -413,19 +197,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
                 )
             })
             .collect::<Vec<_>>();
-        for (declaration_index, declaration) in self
-            .namespace_declarations
-            .pop_front()
-            .unwrap_or_default()
-            .into_iter()
-            .enumerate()
-        {
-            let insertion_index = declaration
-                .ordinary_attributes_before
-                .saturating_add(declaration_index)
-                .min(attributes.len());
-            attributes.insert(insertion_index, declaration.attribute);
-        }
         let node_id = self
             .dom_host
             .create_parser_element_without_attributes_for_document(
@@ -813,22 +584,9 @@ impl XmlTreeSink for XmlDocumentSink<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{XmlParser, xml_source_has_unclosed_element_at_eof};
+    use super::XmlParser;
     use moli_dom::native::{DomHost, NativeDom, NativeNodeId, Node, NodeType};
     use url::Url;
-
-    #[test]
-    fn xml_eof_guard_only_reports_proven_unclosed_elements() {
-        assert!(xml_source_has_unclosed_element_at_eof("<root>"));
-        assert!(xml_source_has_unclosed_element_at_eof("<root><child/>"));
-        assert!(!xml_source_has_unclosed_element_at_eof("<root/>"));
-        assert!(!xml_source_has_unclosed_element_at_eof(
-            "<root></mismatched>"
-        ));
-        assert!(!xml_source_has_unclosed_element_at_eof(
-            "<root attr='unterminated></root>"
-        ));
-    }
 
     #[test]
     fn xml_parser_preserves_namespace_declarations_as_dom_attributes() {
@@ -862,11 +620,17 @@ mod tests {
                 "data-after"
             ]
         );
-        assert_eq!(root_attributes[1].namespace(), super::XMLNS_NAMESPACE);
+        assert_eq!(
+            root_attributes[1].namespace(),
+            "http://www.w3.org/2000/xmlns/"
+        );
         assert_eq!(root_attributes[1].prefix(), None);
         assert_eq!(root_attributes[1].local_name(), "xmlns");
         assert_eq!(root_attributes[1].value(), "urn:catalog&items");
-        assert_eq!(root_attributes[3].namespace(), super::XMLNS_NAMESPACE);
+        assert_eq!(
+            root_attributes[3].namespace(),
+            "http://www.w3.org/2000/xmlns/"
+        );
         assert_eq!(root_attributes[3].prefix(), Some("xmlns"));
         assert_eq!(root_attributes[3].local_name(), "m");
         assert_eq!(root_attributes[3].value(), "urn:meta");
