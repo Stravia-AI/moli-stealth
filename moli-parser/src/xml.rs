@@ -12,7 +12,7 @@ use xml5ever::{
     driver::{XmlParseOpts, parse_document as parse_xml_document},
     interface::{ElementFlags as XmlElementFlags, QuirksMode as XmlQuirksMode},
     tendril::{StrTendril as XmlStrTendril, TendrilSink as XmlTendrilSink},
-    tree_builder::{NodeOrText as XmlNodeOrText, TreeSink as XmlTreeSink},
+    tree_builder::{NodeOrText as XmlNodeOrText, TreeSink as XmlTreeSinkBase, XmlTreeSink},
 };
 use xmlparser::{
     ElementEnd as XmlElementEnd, Token as XmlTokenizerToken, Tokenizer as XmlTokenizer,
@@ -21,7 +21,6 @@ use xmlparser::{
 use super::{html_chunks, xml_tree_viewer::transform_document_to_xml_tree_view};
 use moli_dom::native::{Attribute as NativeAttribute, DomHost, NativeDom, NativeNodeId, Node};
 
-pub(super) const CDATA_MARKER_PI_TARGET: &str = "moli-cdata";
 pub(super) const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 
 #[derive(Debug, Clone, Default)]
@@ -66,7 +65,6 @@ impl DerefMut for XmlDomHost<'_> {
 struct XmlLiveTreeSinkTarget<'a> {
     dom_host: XmlDomHost<'a>,
     document_handle: NativeNodeId,
-    cdata_sections: Vec<String>,
     namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
     source_has_unclosed_element_at_eof: bool,
 }
@@ -96,10 +94,8 @@ impl XmlParser {
     ) -> NativeDom {
         let source_has_unclosed_element_at_eof = xml_source_has_unclosed_element_at_eof(&xml);
         let namespace_declarations = xml_namespace_declarations(&xml);
-        let (xml, cdata_sections) = xml_with_cdata_markers(&xml);
         let sink = XmlDocumentSink::new(XmlLiveTreeSinkTarget::new_owned(
             final_url,
-            cdata_sections,
             namespace_declarations,
             source_has_unclosed_element_at_eof,
         ));
@@ -131,8 +127,7 @@ impl XmlParser {
         let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?
             .with_namespace_declarations(namespace_declarations)
             .with_source_has_unclosed_element_at_eof(source_has_unclosed_element_at_eof);
-        let (xml, cdata_sections) = xml_with_cdata_markers(xml);
-        let sink = XmlDocumentSink::new(target.with_cdata_sections(cdata_sections));
+        let sink = XmlDocumentSink::new(target);
         let mut parser = parse_xml_document(sink, XmlParseOpts::default());
         for chunk in html_chunks(&xml) {
             parser.process(XmlStrTendril::from(chunk));
@@ -197,38 +192,6 @@ pub(super) fn xml_source_has_unclosed_element_at_eof(source: &str) -> bool {
     }
 
     pending_element.is_some() || !open_elements.is_empty()
-}
-
-fn xml_with_cdata_markers(xml: &str) -> (String, Vec<String>) {
-    let mut output = String::with_capacity(xml.len());
-    let mut cdata_sections = Vec::new();
-    let mut copied_until = 0;
-
-    for token in XmlTokenizer::from(xml) {
-        let Ok(XmlTokenizerToken::Cdata { text, span }) = token else {
-            continue;
-        };
-        let range = span.range();
-        if range.start < copied_until {
-            continue;
-        }
-        output.push_str(&xml[copied_until..range.start]);
-        let index = cdata_sections.len();
-        cdata_sections.push(text.as_str().to_owned());
-        output.push_str("<?");
-        output.push_str(CDATA_MARKER_PI_TARGET);
-        output.push(' ');
-        output.push_str(&index.to_string());
-        output.push_str("?>");
-        copied_until = range.end;
-    }
-
-    if cdata_sections.is_empty() {
-        return (xml.to_owned(), cdata_sections);
-    }
-
-    output.push_str(&xml[copied_until..]);
-    (output, cdata_sections)
 }
 
 /// xml5ever consumes namespace declarations while resolving qualified names,
@@ -361,7 +324,6 @@ impl<'a> XmlDocumentSink<'a> {
 impl XmlLiveTreeSinkTarget<'static> {
     fn new_owned(
         final_url: Url,
-        cdata_sections: Vec<String>,
         namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
         source_has_unclosed_element_at_eof: bool,
     ) -> Self {
@@ -370,7 +332,6 @@ impl XmlLiveTreeSinkTarget<'static> {
         Self {
             dom_host: XmlDomHost::Owned(Box::new(dom_host)),
             document_handle,
-            cdata_sections,
             namespace_declarations,
             source_has_unclosed_element_at_eof,
         }
@@ -378,7 +339,6 @@ impl XmlLiveTreeSinkTarget<'static> {
 
     fn finish_document(mut self) -> NativeDom {
         self.record_unclosed_source_element_error();
-        self.restore_cdata_marker_processing_instructions();
         let XmlDomHost::Owned(dom_host) = self.dom_host else {
             unreachable!("owned XML parsing must finish with an owned DOM host")
         };
@@ -399,7 +359,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
         Some(Self {
             dom_host: XmlDomHost::Borrowed(dom_host),
             document_handle,
-            cdata_sections: Vec::new(),
             namespace_declarations: VecDeque::new(),
             source_has_unclosed_element_at_eof: false,
         })
@@ -413,11 +372,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
         self
     }
 
-    fn with_cdata_sections(mut self, cdata_sections: Vec<String>) -> Self {
-        self.cdata_sections = cdata_sections;
-        self
-    }
-
     fn with_source_has_unclosed_element_at_eof(
         mut self,
         source_has_unclosed_element_at_eof: bool,
@@ -428,7 +382,6 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
 
     fn finish_live_tree(mut self) {
         self.record_unclosed_source_element_error();
-        self.restore_cdata_marker_processing_instructions();
     }
 
     fn record_unclosed_source_element_error(&mut self) {
@@ -490,6 +443,14 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
         XmlParseHandle::new(
             self.dom_host
                 .create_comment_for_document(self.document_handle, &text),
+            None,
+        )
+    }
+
+    fn create_cdata(&mut self, text: String) -> XmlParseHandle {
+        XmlParseHandle::new(
+            self.dom_host
+                .create_cdata_section_for_document(self.document_handle, &text),
             None,
         )
     }
@@ -680,6 +641,10 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
             .map(|handle| XmlParseHandle::new(handle, None))
     }
 
+    fn template_contents_id(&self, node_id: NativeNodeId) -> Option<NativeNodeId> {
+        self.dom_host.parser_template_contents_handle(node_id)
+    }
+
     fn add_attrs_if_missing(&mut self, node_id: NativeNodeId, attrs: Vec<XmlAttribute>) {
         let Some(node) = self.dom_host.node_mut(node_id) else {
             return;
@@ -720,50 +685,9 @@ impl<'a> XmlLiveTreeSinkTarget<'a> {
             let _ = self.dom_host.append_child(new_parent_id, child_id);
         }
     }
-
-    fn restore_cdata_marker_processing_instructions(&mut self) {
-        self.restore_cdata_marker_processing_instructions_under(self.document_handle);
-    }
-
-    fn restore_cdata_marker_processing_instructions_under(&mut self, parent_id: NativeNodeId) {
-        let child_ids = self.dom_host.child_handles(parent_id).collect::<Vec<_>>();
-        for child_id in child_ids {
-            if let Some(data) = self.cdata_marker_data(child_id) {
-                let cdata = self
-                    .dom_host
-                    .create_cdata_section_for_document(self.document_handle, &data);
-                let _ = self
-                    .dom_host
-                    .insert_before(parent_id, cdata, Some(child_id));
-                let _ = self.dom_host.remove_child(parent_id, child_id);
-            } else {
-                self.restore_cdata_marker_processing_instructions_under(child_id);
-            }
-        }
-        if let Some(template_contents) = self.template_contents_id(parent_id) {
-            self.restore_cdata_marker_processing_instructions_under(template_contents);
-        }
-    }
-
-    fn template_contents_id(&self, node_id: NativeNodeId) -> Option<NativeNodeId> {
-        self.dom_host.parser_template_contents_handle(node_id)
-    }
-
-    fn cdata_marker_data(&self, node_id: NativeNodeId) -> Option<String> {
-        let processing_instruction = self
-            .dom_host
-            .node(node_id)?
-            .data()
-            .as_processing_instruction()?;
-        if processing_instruction.target() != CDATA_MARKER_PI_TARGET {
-            return None;
-        }
-        let index = processing_instruction.data().trim().parse::<usize>().ok()?;
-        self.cdata_sections.get(index).cloned()
-    }
 }
 
-impl<'host> XmlTreeSink for XmlDocumentSink<'host> {
+impl<'host> XmlTreeSinkBase for XmlDocumentSink<'host> {
     type Handle = XmlParseHandle;
     type Output = XmlLiveTreeSinkTarget<'host>;
     type ElemName<'a>
@@ -878,6 +802,12 @@ impl<'host> XmlTreeSink for XmlDocumentSink<'host> {
         self.target
             .borrow_mut()
             .reparent_children(node.node_id, new_parent.node_id);
+    }
+}
+
+impl XmlTreeSink for XmlDocumentSink<'_> {
+    fn create_cdata(&self, text: XmlStrTendril) -> Self::Handle {
+        self.target.borrow_mut().create_cdata(text.to_string())
     }
 }
 
@@ -1209,7 +1139,7 @@ mod tests {
     }
 
     #[test]
-    fn xml_parser_restores_cdata_inside_html_template_contents() {
+    fn xml_parser_preserves_cdata_inside_html_template_contents() {
         let parser = XmlParser;
         let dom = parser.parse(
             Url::parse("https://example.test/html-template-cdata.xml").unwrap(),

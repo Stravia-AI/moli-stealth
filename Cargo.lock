@@ -5707,8 +5707,6 @@ dependencies = [
 [[package]]
 name = "xml5ever"
 version = "0.39.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5ab627f34ff61b80d756180d556f9c68801d836d271b3b8c094504ceca69d221"
 dependencies = [
  "log",
  "markup5ever 0.39.0",

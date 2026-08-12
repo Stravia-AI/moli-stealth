@@ -33,8 +33,7 @@ use crate::{
     live_target::{ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget},
     stream::prepare_parser_script_handoff_for_static_document,
     xml::{
-        CDATA_MARKER_PI_TARGET, XmlNamespaceDeclaration, xml_namespace_declarations,
-        xml_source_has_unclosed_element_at_eof,
+        XmlNamespaceDeclaration, xml_namespace_declarations, xml_source_has_unclosed_element_at_eof,
     },
     xml_tree_viewer::transform_parser_target_to_xml_tree_view,
 };
@@ -48,7 +47,6 @@ use crate::{
 pub struct XmlDocumentStream {
     parser: XmlParserSession,
     input: XmlParserInputStream,
-    preprocessor: XmlInputPreprocessor,
     raw_source: String,
     scanned_namespace_element_count: usize,
     eof_declared: bool,
@@ -76,7 +74,6 @@ struct XmlStreamDocumentSink {
 struct XmlParserStreamTarget {
     common: ParserStreamHtmlTreeSinkTarget,
     namespace_declarations: VecDeque<Vec<XmlNamespaceDeclaration>>,
-    cdata_sections: Vec<String>,
     source_has_unclosed_element_at_eof: bool,
     present_unstyled_top_level_document: bool,
 }
@@ -86,13 +83,6 @@ struct XmlStreamParseHandle {
     inner: ParseHandle,
     element_name: Option<Rc<XmlQualName>>,
     suppress_append: bool,
-}
-
-#[derive(Default)]
-struct XmlInputPreprocessor {
-    pending: String,
-    next_cdata_index: usize,
-    completed_cdata_sections: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,14 +118,12 @@ impl XmlDocumentStream {
         let target = XmlParserStreamTarget {
             common,
             namespace_declarations: VecDeque::new(),
-            cdata_sections: Vec::new(),
             source_has_unclosed_element_at_eof: false,
             present_unstyled_top_level_document,
         };
         Self {
             parser: XmlParserSession::new(target, XmlParseOpts::default()),
             input: XmlParserInputStream::default(),
-            preprocessor: XmlInputPreprocessor::default(),
             raw_source: String::new(),
             scanned_namespace_element_count: 0,
             eof_declared: false,
@@ -151,26 +139,16 @@ impl XmlDocumentStream {
         }
         self.raw_source.push_str(&chunk);
         self.refresh_namespace_declarations();
-        let transformed = self.preprocessor.push(&chunk, false);
-        self.transfer_completed_cdata_sections();
-        if !transformed.is_empty() {
-            self.input.end_segments.push_back(transformed);
-        }
+        self.input.end_segments.push_back(chunk);
     }
 
-    /// Declares source EOF and flushes any prefix retained by the CDATA
-    /// boundary preprocessor. Calling this more than once is a no-op.
+    /// Declares source EOF. Calling this more than once is a no-op.
     pub fn declare_eof(&mut self) {
         if self.eof_declared {
             return;
         }
         self.eof_declared = true;
         self.refresh_namespace_declarations();
-        let trailing = self.preprocessor.push("", true);
-        self.transfer_completed_cdata_sections();
-        if !trailing.is_empty() {
-            self.input.end_segments.push_back(trailing);
-        }
         self.parser
             .sink()
             .borrow_mut()
@@ -199,7 +177,6 @@ impl XmlDocumentStream {
         for segment in &self.input.end_segments {
             pending.push_str(segment);
         }
-        pending.push_str(&self.preprocessor.pending);
         pending
     }
 
@@ -365,17 +342,6 @@ impl XmlDocumentStream {
             .borrow_mut()
             .namespace_declarations
             .extend(newly_complete);
-    }
-
-    fn transfer_completed_cdata_sections(&mut self) {
-        let sections = std::mem::take(&mut self.preprocessor.completed_cdata_sections);
-        if !sections.is_empty() {
-            self.parser
-                .sink()
-                .borrow_mut()
-                .cdata_sections
-                .extend(sections);
-        }
     }
 
     fn take_next_owned_input(&mut self, max_bytes: usize) -> String {
@@ -737,12 +703,6 @@ impl TreeSink for XmlStreamDocumentSink {
         let target_text = target.to_string();
         let data_text = data.to_string();
         let mut parser_target = self.target.borrow_mut();
-        if target_text == CDATA_MARKER_PI_TARGET
-            && let Ok(index) = data_text.trim().parse::<usize>()
-            && let Some(cdata) = parser_target.cdata_sections.get(index).cloned()
-        {
-            return XmlStreamParseHandle::new(parser_target.common.create_cdata_section(cdata));
-        }
         let handle = parser_target
             .common
             .create_processing_instruction(target_text.clone(), data_text);
@@ -886,6 +846,17 @@ impl TreeSink for XmlStreamDocumentSink {
     }
 }
 
+impl xml5ever::tree_builder::XmlTreeSink for XmlStreamDocumentSink {
+    fn create_cdata(&self, text: StrTendril) -> Self::Handle {
+        XmlStreamParseHandle::new(
+            self.target
+                .borrow_mut()
+                .common
+                .create_cdata_section(text.to_string()),
+        )
+    }
+}
+
 fn xml_name_to_html(name: &XmlQualName) -> HtmlQualName {
     HtmlQualName::new(
         name.prefix
@@ -901,59 +872,6 @@ fn xml_attribute_to_html(attribute: XmlAttribute) -> HtmlAttribute {
         name: xml_name_to_html(&attribute.name),
         value: HtmlStrTendril::from(attribute.value.as_ref()),
     }
-}
-
-impl XmlInputPreprocessor {
-    fn push(&mut self, input: &str, eof: bool) -> String {
-        const CDATA_OPEN: &str = "<![CDATA[";
-        const CDATA_CLOSE: &str = "]]>";
-
-        self.pending.push_str(input);
-        let mut output = String::new();
-        loop {
-            let Some(start) = self.pending.find(CDATA_OPEN) else {
-                if eof {
-                    output.push_str(&self.pending);
-                    self.pending.clear();
-                } else {
-                    let keep = longest_suffix_prefix_len(&self.pending, CDATA_OPEN);
-                    let emit_len = self.pending.len().saturating_sub(keep);
-                    output.push_str(&self.pending[..emit_len]);
-                    self.pending.drain(..emit_len);
-                }
-                break;
-            };
-            output.push_str(&self.pending[..start]);
-            self.pending.drain(..start);
-            let content_start = CDATA_OPEN.len();
-            let Some(relative_end) = self.pending[content_start..].find(CDATA_CLOSE) else {
-                if eof {
-                    output.push_str(&self.pending);
-                    self.pending.clear();
-                }
-                break;
-            };
-            let content_end = content_start + relative_end;
-            let cdata = self.pending[content_start..content_end].to_owned();
-            output.push_str("<?");
-            output.push_str(CDATA_MARKER_PI_TARGET);
-            output.push(' ');
-            output.push_str(&self.next_cdata_index.to_string());
-            output.push_str("?>");
-            self.completed_cdata_sections.push(cdata);
-            self.next_cdata_index = self.next_cdata_index.saturating_add(1);
-            self.pending.drain(..(content_end + CDATA_CLOSE.len()));
-        }
-        output
-    }
-}
-
-fn longest_suffix_prefix_len(value: &str, prefix: &str) -> usize {
-    let max = value.len().min(prefix.len().saturating_sub(1));
-    (1..=max)
-        .rev()
-        .find(|length| value.ends_with(&prefix[..*length]))
-        .unwrap_or_default()
 }
 
 fn split_xml_parser_input_prefix(input: String, max_bytes: usize) -> (String, Option<String>) {
@@ -1120,6 +1038,53 @@ mod tests {
                 .and_then(Node::as_cdata_section)
                 .map(|section| section.data()),
             Some(" < > & ")
+        );
+    }
+
+    #[test]
+    fn incremental_xml_keeps_cdata_syntax_in_comment_and_pi() {
+        let mut stream = XmlDocumentStream::new(test_url());
+        for chunk in ["<root><!-- <![CDA", "TA[not closed -->"] {
+            stream.append_to_end(chunk.to_owned());
+            while stream.has_pending_input() {
+                let outcome = stream.pump_next_parser_step(2);
+                assert!(matches!(outcome.result, ParserPumpStep::InputDrained));
+            }
+        }
+
+        let snapshot = stream.snapshot_parser_stream_document();
+        assert_eq!(
+            snapshot
+                .nodes()
+                .find_map(Node::as_comment)
+                .map(|comment| comment.data()),
+            Some(" <![CDATA[not closed "),
+            "a fake CDATA opener inside a closed comment must not retain later input"
+        );
+
+        for chunk in [
+            "<?moli-cdata 0?><?probe <![CDATA[pi]]>?>",
+            "<child><![CDA",
+            "TA[real]]></child></root>",
+        ] {
+            stream.append_to_end(chunk.to_owned());
+        }
+        let document = stream.finish();
+        let instructions = document
+            .nodes()
+            .filter_map(Node::as_processing_instruction)
+            .map(|instruction| (instruction.target(), instruction.data()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            instructions,
+            [("moli-cdata", "0"), ("probe", "<![CDATA[pi]]>")]
+        );
+        assert_eq!(
+            document
+                .nodes()
+                .find_map(Node::as_cdata_section)
+                .map(|section| section.data()),
+            Some("real")
         );
     }
 
