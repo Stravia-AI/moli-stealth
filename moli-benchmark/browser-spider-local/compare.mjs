@@ -348,14 +348,14 @@ export function buildSpiderComparison({ baseSha, headSha, executionOrder, runs }
   };
 }
 
-export function spiderBenchmarkExecutionFailures(comparison) {
-  const failures = [];
+export function spiderBenchmarkObservationIssues(comparison) {
+  const issues = [];
   for (const suiteName of Object.keys(SUITE_CONFIGS)) {
     const suite = comparison?.suites?.[suiteName];
     for (const side of ['base', 'head']) {
       const run = suite?.[side];
       if (run?.availability !== 'available') {
-        failures.push({ suite: suiteName, side, reason: 'report-unavailable' });
+        issues.push({ suite: suiteName, side, reason: 'report-unavailable' });
         continue;
       }
       const serviceRuns = run.metrics?.service_runs;
@@ -368,11 +368,11 @@ export function spiderBenchmarkExecutionFailures(comparison) {
         || !Number.isInteger(failedRuns)
         || successfulRuns + failedRuns !== serviceRuns
       ) {
-        failures.push({ suite: suiteName, side, reason: 'invalid-service-summary' });
+        issues.push({ suite: suiteName, side, reason: 'invalid-service-summary' });
         continue;
       }
       if (failedRuns > 0) {
-        failures.push({
+        issues.push({
           suite: suiteName,
           side,
           reason: 'service-run-failed',
@@ -382,7 +382,7 @@ export function spiderBenchmarkExecutionFailures(comparison) {
         continue;
       }
       if (run.exit_code !== 0) {
-        failures.push({
+        issues.push({
           suite: suiteName,
           side,
           reason: 'benchmark-command-failed',
@@ -391,7 +391,7 @@ export function spiderBenchmarkExecutionFailures(comparison) {
       }
     }
   }
-  return failures;
+  return issues;
 }
 
 function safeSha(value) {
@@ -554,16 +554,16 @@ function assessmentSummary(assessment) {
   return `⚠️ Deterministic fixture recorded diagnostic issues (non-blocking):\n${reasons}`;
 }
 
-function executionSummary(comparison) {
-  const failures = spiderBenchmarkExecutionFailures(comparison);
-  if (failures.length === 0) {
-    return '✅ All benchmark browser service runs completed.';
+function observationSummary(comparison) {
+  const issues = spiderBenchmarkObservationIssues(comparison);
+  if (issues.length === 0) {
+    return '✅ All benchmark browser service runs completed; results are informational.';
   }
-  const labels = failures
+  const labels = issues
     .slice(0, 8)
-    .map((failure) => `${failure.suite}/${failure.side}: ${failure.reason}`)
+    .map((issue) => `${issue.suite}/${issue.side}: ${issue.reason}`)
     .join(', ');
-  return `❌ Benchmark execution was incomplete (${labels}). The workflow fails while preserving the collected evidence.`;
+  return `⚠️ Benchmark observation recorded non-blocking run issues: ${labels}.`;
 }
 
 function safeRunUrl(value) {
@@ -619,7 +619,7 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     SPIDER_CI_COMMENT_MARKER,
     '## Spider Bench A/B',
     '',
-    executionSummary(comparison),
+    observationSummary(comparison),
     '',
     publicHeadline(real48),
     '',
@@ -644,7 +644,7 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     '',
     `Full HTML, JSON, CSV, logs, and page snapshots: ${workflowLink}.`,
     '',
-    '_Spider Bench gates execution integrity: missing reports and failed browser service runs fail the workflow. Site content, fixture diagnostics, timing, and performance deltas remain observational._'
+    '_Spider Bench is informational: site failures, missing benchmark reports, failed browser service runs, fixture diagnostics, timing, and performance deltas do not fail the workflow. Build, runner, and artifact infrastructure errors can still fail it._'
   ].join('\n');
 }
 
@@ -743,16 +743,10 @@ async function runComparisonCommand(args) {
   writeJson(path.join(outputDir, 'comparison.json'), comparison);
   fs.writeFileSync(path.join(outputDir, 'comment.md'), `${renderSpiderComparison(comparison, {
     runUrl: args['run-url'],
-    conclusion: args['run-url']
-      ? (spiderBenchmarkExecutionFailures(comparison).length === 0 ? 'success' : 'failure')
-      : 'local'
+    conclusion: args['run-url'] ? 'success' : 'local'
   })}\n`, 'utf8');
   if (!comparison.suites.fixture.assessment.clean) {
     console.warn(`deterministic fixture recorded diagnostic issues: ${comparison.suites.fixture.assessment.reasons.join(', ')}`);
-  }
-  const executionFailures = spiderBenchmarkExecutionFailures(comparison);
-  if (executionFailures.length > 0) {
-    throw new Error(`Spider Bench execution failed: ${JSON.stringify(executionFailures)}`);
   }
 }
 

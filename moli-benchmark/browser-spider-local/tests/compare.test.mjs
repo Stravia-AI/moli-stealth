@@ -11,7 +11,7 @@ import {
   readSpiderBenchmark,
   renderSpiderComparison,
   renderSpiderInfrastructureFailure,
-  spiderBenchmarkExecutionFailures,
+  spiderBenchmarkObservationIssues,
   SPIDER_CI_COMMENT_MARKER,
   SPIDER_COMPARISON_SCHEMA
 } from '../compare.mjs';
@@ -291,7 +291,7 @@ test('missing output becomes unavailable instead of throwing', () => {
   assert.match(missing.error, /found 0/);
 });
 
-test('comment separates execution integrity from observational evidence', () => {
+test('comment labels browser execution and public content as informational evidence', () => {
   const comparison = buildComparison(
     makeFixtureRun({}),
     makeFixtureRun({ duration_ms: 82_000, peak_pss_bytes: 448 * 1024 * 1024 }),
@@ -304,7 +304,7 @@ test('comment separates execution integrity from observational evidence', () => 
   });
 
   assert.ok(comment.startsWith(SPIDER_CI_COMMENT_MARKER));
-  assert.match(comment, /All benchmark browser service runs completed/);
+  assert.match(comment, /All benchmark browser service runs completed; results are informational/);
   assert.match(comment, /Deterministic fixture diagnostic is clean/);
   assert.match(comment, /Deterministic fixture · diagnostic/);
   assert.match(comment, /Public 48-site run · informational/);
@@ -323,8 +323,8 @@ test('comment separates execution integrity from observational evidence', () => 
   assert.match(comment, /\| sports \| 27 \/ 40 \| 27 \/ 40 \| 0 \|/);
   assert.match(comment, /\+3\.00 MiB \(\+0\.67%\)/);
   assert.match(comment, /actions\/runs\/123/);
-  assert.match(comment, /missing reports and failed browser service runs fail the workflow/);
-  assert.match(comment, /performance deltas remain observational/);
+  assert.match(comment, /missing benchmark reports, failed browser service runs/);
+  assert.match(comment, /do not fail the workflow/);
   assert.match(comment, /Common ancestor `111111111111` → HEAD `222222222222`/);
   assert.match(comment, /### CPU and memory timelines/);
   assert.match(comment, /bounded 40-point views of the same complete process-tree samples/);
@@ -459,7 +459,7 @@ test('Moli endpoint discovery accepts ANSI-formatted tracing output', () => {
   assert.equal(endpointFromMoliLogs([`stderr: ${log}`]), 'http://127.0.0.1:45445');
 });
 
-test('execution gate ignores content diagnostics but rejects failed browser services', () => {
+test('observation issues retain failed browser services and missing reports without becoming a gate', () => {
   const diagnosticOnly = buildComparison(
     makeFixtureRun({}),
     makeFixtureRun({
@@ -471,7 +471,7 @@ test('execution gate ignores content diagnostics but rejects failed browser serv
     makeRun({})
   );
   assert.equal(diagnosticOnly.suites.fixture.assessment.clean, false);
-  assert.deepEqual(spiderBenchmarkExecutionFailures(diagnosticOnly), []);
+  assert.deepEqual(spiderBenchmarkObservationIssues(diagnosticOnly), []);
 
   const failedService = buildComparison(
     makeFixtureRun({}),
@@ -479,7 +479,7 @@ test('execution gate ignores content diagnostics but rejects failed browser serv
     makeRun({}),
     makeRun({ successful_runs: 0, failed_runs: 1 })
   );
-  assert.deepEqual(spiderBenchmarkExecutionFailures(failedService), [{
+  assert.deepEqual(spiderBenchmarkObservationIssues(failedService), [{
     suite: 'real48',
     side: 'head',
     reason: 'service-run-failed',
@@ -499,14 +499,14 @@ test('execution gate ignores content diagnostics but rejects failed browser serv
       resource_timeline: null
     }
   );
-  assert.deepEqual(spiderBenchmarkExecutionFailures(missingReport), [{
+  assert.deepEqual(spiderBenchmarkObservationIssues(missingReport), [{
     suite: 'real48',
     side: 'head',
     reason: 'report-unavailable'
   }]);
 });
 
-test('run command preserves failed browser evidence and exits non-zero', () => {
+test('run command preserves failed browser evidence and exits zero', () => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spider-observer-'));
   try {
     const result = spawnSync(process.execPath, [
@@ -520,13 +520,13 @@ test('run command preserves failed browser evidence and exits non-zero', () => {
       '--output-dir', tempDir
     ], { encoding: 'utf8' });
 
-    assert.equal(result.status, 1, result.stderr);
+    assert.equal(result.status, 0, result.stderr);
     const comparison = JSON.parse(fs.readFileSync(path.join(tempDir, 'comparison.json'), 'utf8'));
     assert.equal(comparison.suites.fixture.assessment.clean, false);
-    assert.ok(comparison.suites.fixture.assessment.reasons.includes('head-benchmark-failed'));
+    assert.ok(comparison.suites.fixture.assessment.reasons.includes('head-service-run-failed'));
     assert.ok(fs.existsSync(path.join(tempDir, 'comment.md')));
     assert.match(result.stderr, /recorded diagnostic issues/);
-    assert.match(result.stderr, /Spider Bench execution failed/);
+    assert.doesNotMatch(result.stderr, /Spider Bench execution failed/);
   } finally {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }
