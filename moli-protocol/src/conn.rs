@@ -2816,9 +2816,7 @@ impl CdpConnection {
         let is_current = completion.is_current_for_connection(self);
         let (token, state, navigation, engine) = completion.into_parts();
         if !is_current {
-            if state.navigate_id.is_some() {
-                out.push_error_after_messages(-32000, "Navigation aborted");
-            }
+            crate::domains::page::push_superseded_navigation_result(out, &state);
             return;
         }
         let navigation_session_id = state.navigate_session_id.clone();

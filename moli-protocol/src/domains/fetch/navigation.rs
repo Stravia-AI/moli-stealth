@@ -403,7 +403,7 @@ pub(super) async fn complete_tokened_materialized_navigation_into_buffer_async(
 ) {
     let Some(token) = token else {
         if navigation_state.navigate_id.is_some() {
-            out.push_error_after_messages(-32000, "Navigation aborted");
+            page::push_superseded_navigation_result(out, &navigation_state);
         } else {
             tracing::warn!(
                 session_id = navigation_state.navigate_session_id.as_deref(),

@@ -1419,6 +1419,8 @@ pub struct DevToolsNavigateResult {
     pub frame_id: Option<DevToolsFrameId>,
     pub loader_id: Option<DevToolsLoaderId>,
     pub url: String,
+    pub error_text: Option<String>,
+    pub is_download: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

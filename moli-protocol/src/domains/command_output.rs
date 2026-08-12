@@ -1610,6 +1610,12 @@ fn cdp_result_payload_from_devtools_result(result: DevToolsCommandResult) -> Val
             if let Some(loader_id) = result.loader_id {
                 payload["loaderId"] = json!(loader_id.into_string());
             }
+            if let Some(error_text) = result.error_text {
+                payload["errorText"] = json!(error_text);
+            }
+            if let Some(is_download) = result.is_download {
+                payload["isDownload"] = json!(is_download);
+            }
             payload
         }
         DevToolsCommandResult::GetNavigationHistory(result) => json!({
@@ -2269,6 +2275,8 @@ mod tests {
                     frame_id: Some(crate::devtools_runtime::DevToolsFrameId::from("FRAME-1")),
                     loader_id: Some(crate::devtools_runtime::DevToolsLoaderId::from("LOADER-1")),
                     url: "https://example.test/".to_owned(),
+                    error_text: None,
+                    is_download: None,
                 },
             ),
         )
@@ -2281,6 +2289,37 @@ mod tests {
                 "result": {
                     "frameId": "FRAME-1",
                     "loaderId": "LOADER-1"
+                },
+                "sessionId": "SID-1"
+            })]
+        );
+    }
+
+    #[test]
+    fn command_output_plan_serializes_aborted_cdp_navigate_as_result() {
+        let mut out = Vec::new();
+        CommandOutputPlan::from_devtools_result(
+            crate::devtools_runtime::DevToolsCommandResult::Navigate(
+                crate::devtools_runtime::DevToolsNavigateResult {
+                    navigation_id: None,
+                    frame_id: Some(crate::devtools_runtime::DevToolsFrameId::from("FRAME-1")),
+                    loader_id: None,
+                    url: "https://superseded.example.test/".to_owned(),
+                    error_text: Some("net::ERR_ABORTED".to_owned()),
+                    is_download: Some(false),
+                },
+            ),
+        )
+        .emit_into(&mut out, Some(13), Some("SID-1"));
+
+        assert_eq!(
+            out,
+            vec![json!({
+                "id": 13,
+                "result": {
+                    "frameId": "FRAME-1",
+                    "errorText": "net::ERR_ABORTED",
+                    "isDownload": false
                 },
                 "sessionId": "SID-1"
             })]

@@ -15,6 +15,7 @@ use moli_core::page::{
     SameDocumentHistoryUpdate,
 };
 use moli_core::runtime::NavigationEngine;
+use moli_fetch::NET_ERR_ABORTED_ERROR_TEXT;
 use moli_url_policy::{LocalFileNavigationAccess, route_navigation_url};
 use serde_json::{Value, json};
 use url::Url;
@@ -220,6 +221,8 @@ struct DirectNavigationResult {
     frame_id: Option<DevToolsFrameId>,
     loader_id: Option<DevToolsLoaderId>,
     navigation_id: Option<DevToolsNavigationId>,
+    error_text: Option<String>,
+    is_download: Option<bool>,
 }
 
 impl DirectNavigationResult {
@@ -249,6 +252,8 @@ impl DirectNavigationResult {
                 loader_id.map(DevToolsLoaderId::from)
             },
             navigation_id,
+            error_text: None,
+            is_download: None,
         }
     }
 
@@ -260,6 +265,8 @@ impl DirectNavigationResult {
             frame_id: None,
             loader_id: None,
             navigation_id: None,
+            error_text: None,
+            is_download: None,
         }
     }
 
@@ -271,6 +278,8 @@ impl DirectNavigationResult {
             frame_id: None,
             loader_id: None,
             navigation_id: None,
+            error_text: None,
+            is_download: None,
         }
     }
 
@@ -297,6 +306,13 @@ impl DirectNavigationResult {
         self.url = url;
     }
 
+    fn set_cdp_navigation_aborted(&mut self, frame_id: &str) {
+        self.frame_id = Some(DevToolsFrameId::from(frame_id));
+        self.loader_id = None;
+        self.error_text = Some(NET_ERR_ABORTED_ERROR_TEXT.to_owned());
+        self.is_download = Some(false);
+    }
+
     fn ensure_navigation_id_from_loader(&mut self, loader_id: Option<String>) {
         if self.navigation_id.is_none() {
             self.navigation_id = loader_id
@@ -319,6 +335,8 @@ impl DirectNavigationResult {
                     frame_id: self.frame_id,
                     loader_id: self.loader_id,
                     url: self.url,
+                    error_text: self.error_text,
+                    is_download: self.is_download,
                 })
             }
         }
@@ -791,6 +809,8 @@ fn cdp_navigate_result_payload(
             frame_id: frame_id.map(DevToolsFrameId::from),
             loader_id: loader_id.map(DevToolsLoaderId::from),
             url: url.to_owned(),
+            error_text: None,
+            is_download: None,
         },
     ))
 }
@@ -1095,6 +1115,8 @@ fn start_protocol_neutral_navigation_command(
             frame_id: None,
             loader_id: None,
             navigation_id: None,
+            error_text: None,
+            is_download: None,
         },
     };
     let reloaded_after_crash_session_ids =
@@ -1299,6 +1321,10 @@ fn direct_navigation_result_from_completed_load(
         completed.state.navigate_session_id.as_deref(),
         &completed.token,
     ) {
+        if superseded_cdp_page_navigate_payload(&completed.state).is_some() {
+            result.set_cdp_navigation_aborted(&completed.state.frame_id);
+            return Ok(());
+        }
         return Err(DevToolsError::new(
             DevToolsErrorKind::Internal,
             "Navigation aborted",
@@ -1340,6 +1366,10 @@ fn direct_navigation_result_from_fetch_continuation(
     result: &mut DirectNavigationResult,
 ) -> Result<(), DevToolsError> {
     if completed.pending.document_navigation_token.is_none() {
+        if superseded_cdp_page_navigate_payload(&completed.pending.navigation).is_some() {
+            result.set_cdp_navigation_aborted(&completed.pending.navigation.frame_id);
+            return Ok(());
+        }
         return Err(DevToolsError::new(
             DevToolsErrorKind::Internal,
             "Navigation aborted",
@@ -1350,6 +1380,36 @@ fn direct_navigation_result_from_fetch_continuation(
         result.set_navigation_identity(&state.frame_id, &state.loader_id);
     }
     Ok(())
+}
+
+fn superseded_cdp_page_navigate_payload(state: &NavigationDispatchState) -> Option<Value> {
+    if state.result_projection.protocol() != DevToolsProtocol::Cdp {
+        return None;
+    }
+    let mut result = state.result_projection.payload().clone();
+    let payload = result.as_object_mut()?;
+    if !payload.contains_key("frameId") {
+        return None;
+    }
+    payload.insert("frameId".to_owned(), json!(state.frame_id));
+    payload.remove("loaderId");
+    payload.insert("errorText".to_owned(), json!(NET_ERR_ABORTED_ERROR_TEXT));
+    payload.insert("isDownload".to_owned(), json!(false));
+    Some(result)
+}
+
+pub(crate) fn push_superseded_navigation_result(
+    out: &mut CommandOutputBuffer,
+    state: &NavigationDispatchState,
+) {
+    if state.navigate_id.is_none() {
+        return;
+    }
+    if let Some(result) = superseded_cdp_page_navigate_payload(state) {
+        out.push_result_after_messages(result);
+    } else {
+        out.push_error_after_messages(-32000, "Navigation aborted");
+    }
 }
 
 fn fill_navigation_id_from_current_loader_for_route(

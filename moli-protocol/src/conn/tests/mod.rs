@@ -1189,10 +1189,17 @@ async fn materialized_navigation_completion_drops_stale_token() {
     assert_eq!(out.len(), 1, "stale completion must emit terminal reply");
     let reply = &out[0];
     assert_eq!(reply["id"], serde_json::json!(7));
-    assert_eq!(reply["error"]["code"], serde_json::json!(-32000));
+    assert!(
+        reply.get("error").is_none(),
+        "CDP reports a superseded Page.navigate as a successful command: {reply:#?}"
+    );
     assert_eq!(
-        reply["error"]["message"],
-        serde_json::json!("Navigation aborted")
+        reply["result"],
+        serde_json::json!({
+            "frameId": "TID-nav",
+            "errorText": "net::ERR_ABORTED",
+            "isDownload": false
+        })
     );
     assert!(
         reply.get("method").is_none(),

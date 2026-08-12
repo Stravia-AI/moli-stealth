@@ -2086,11 +2086,20 @@ async fn websocket_cdp_replacement_retires_hanging_precommit_navigation() {
         .iter()
         .find(|message| message["id"] == json!(6_u64))
         .expect("superseded Page.navigate response");
-    assert_eq!(superseded_response["error"]["code"], json!(-32000));
-    assert_eq!(
-        superseded_response["error"]["message"],
-        json!("Navigation aborted")
+    assert!(
+        superseded_response.get("error").is_none(),
+        "Chromium reports a superseded Page.navigate as a successful command: {superseded_response:#?}"
     );
+    assert_eq!(
+        superseded_response["result"]["frameId"],
+        json!(session.target_id)
+    );
+    assert_eq!(
+        superseded_response["result"]["errorText"],
+        json!("net::ERR_ABORTED")
+    );
+    assert_eq!(superseded_response["result"]["isDownload"], json!(false));
+    assert!(superseded_response["result"].get("loaderId").is_none());
     let replacement_document = cdp_runtime_evaluate_string(
         &mut socket,
         &session.session_id,
