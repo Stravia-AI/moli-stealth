@@ -1,7 +1,7 @@
 /*
  * Moli HTML user-agent stylesheet.
  *
- * Form-control rules are a semantic port of Chromium
+ * Core flow/typography and form-control rules are a semantic port of Chromium
  * third_party/blink/renderer/core/html/resources/html.css at
  * a03603fe9af6230a12f1b2fb2c18a7d003a0d937. The cascade shape, standard
  * properties, system colors, light-dark() values and observable control
@@ -9,7 +9,8 @@
  *
  * Blink-only values have explicit Moli owners:
  *
- * - 0__qem maps to CSS zero.
+ * - Blink's __qem lengths map to equivalent em lengths; 0__qem maps to CSS
+ *   zero.
  * - -webkit-small-control maps to the deterministic Linux headless control
  *   font used by the Chromium build against which this port is tested.
  * - -internal-align-content-block is implemented by the HTML-to-layout form
@@ -45,8 +46,32 @@ input, textarea, select, button {
   display: inline-block;
 }
 
-pre {
+pre, xmp, plaintext, listing {
+  font-family: monospace;
   white-space: pre;
+  margin-block: 1em;
+  margin-inline: 0;
+}
+
+p {
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+}
+
+blockquote {
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  margin-inline-start: 40px;
+  margin-inline-end: 40px;
+}
+
+figure {
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  margin-inline-start: 40px;
+  margin-inline-end: 40px;
 }
 
 table {
@@ -88,6 +113,97 @@ caption {
 li,
 details > summary:first-of-type {
   display: list-item;
+}
+
+ul, menu, dir {
+  list-style-type: disc;
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  padding-inline-start: 40px;
+}
+
+ol {
+  list-style-type: decimal;
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  padding-inline-start: 40px;
+}
+
+:is(dir, dl, menu, ol, ul) :is(dir, dl, menu, ol, ul) {
+  margin-block-start: 0;
+  margin-block-end: 0;
+}
+
+:is(dir, menu, ol, ul) :is(dir, menu, ul) {
+  list-style-type: circle;
+}
+
+:is(dir, menu, ol, ul) :is(dir, menu, ol, ul) :is(dir, menu, ul) {
+  list-style-type: square;
+}
+
+dd {
+  margin-inline-start: 40px;
+}
+
+dl {
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+}
+
+/* Core heading defaults from Chromium's HTML user-agent stylesheet. */
+
+h1 {
+  font-size: 2em;
+  margin-block-start: 0.67em;
+  margin-block-end: 0.67em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
+}
+
+h2 {
+  font-size: 1.5em;
+  margin-block-start: 0.83em;
+  margin-block-end: 0.83em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
+}
+
+h3 {
+  font-size: 1.17em;
+  margin-block-start: 1em;
+  margin-block-end: 1em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
+}
+
+h4 {
+  margin-block-start: 1.33em;
+  margin-block-end: 1.33em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
+}
+
+h5 {
+  font-size: 0.83em;
+  margin-block-start: 1.67em;
+  margin-block-end: 1.67em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
+}
+
+h6 {
+  font-size: 0.67em;
+  margin-block-start: 2.33em;
+  margin-block-end: 2.33em;
+  margin-inline-start: 0;
+  margin-inline-end: 0;
+  font-weight: bold;
 }
 
 base, basefont, datalist, head, link, meta, noembed, noframes, param, rp,
@@ -380,8 +496,56 @@ u, ins {
   text-decoration: underline;
 }
 
+abbr[title], acronym[title] {
+  text-decoration: dotted underline;
+}
+
+strong, b {
+  font-weight: bolder;
+}
+
+i, cite, em, var, address, dfn {
+  font-style: italic;
+}
+
+tt, code, kbd, samp {
+  font-family: monospace;
+}
+
+mark {
+  background-color: Mark;
+  color: MarkText;
+}
+
+big {
+  font-size: larger;
+}
+
+small {
+  font-size: smaller;
+}
+
 s, strike, del {
   text-decoration: line-through;
+}
+
+sub {
+  vertical-align: sub;
+  font-size: smaller;
+}
+
+sup {
+  vertical-align: super;
+  font-size: smaller;
+}
+
+nobr {
+  white-space: nowrap;
+}
+
+a:any-link {
+  text-decoration: underline;
+  cursor: pointer;
 }
 
 body {

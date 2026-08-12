@@ -55,6 +55,56 @@ fn rendered_text_elements_use_chromium_user_agent_defaults() {
 }
 
 #[test]
+fn flow_content_uses_chromium_user_agent_typography_defaults() {
+    let mut vm = new_parsed_test_vm(
+        "https://flow-content-user-agent-defaults.test/",
+        r#"<!doctype html>
+<html><head><style>
+body { font: 16px/1.5 sans-serif; }
+.title h1 { font-size: 24px; margin: 19.92px 0; }
+</style></head><body>
+  <header><a class="title" href="/"><h1 id="title">Title</h1></a></header>
+  <main>
+    <h1 id="h1">Heading 1</h1>
+    <h2 id="h2">Heading 2</h2>
+    <p id="paragraph"><strong id="strong">Strong</strong> <a id="link" href="/next">link</a><sup id="sup">1</sup></p>
+  </main>
+</body></html>"#,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const style = id => getComputedStyle(document.getElementById(id));
+  const title = style('title');
+  const h1 = style('h1');
+  const h2 = style('h2');
+  const paragraph = style('paragraph');
+  const strong = style('strong');
+  const link = style('link');
+  const sup = style('sup');
+  return [
+    title.fontSize, title.fontWeight, title.marginBlockStart, title.marginBlockEnd,
+    h1.fontSize, h1.fontWeight, h1.marginBlockStart, h1.marginBlockEnd,
+    h2.fontSize, h2.fontWeight, h2.marginBlockStart, h2.marginBlockEnd,
+    paragraph.marginBlockStart, paragraph.marginBlockEnd,
+    strong.fontWeight,
+    link.textDecorationLine, link.cursor,
+    sup.fontSize
+  ].join('|');
+})()
+"#,
+        )
+        .expect("flow-content user-agent typography should evaluate");
+
+    assert_eq!(
+        result,
+        "24px|700|19.92px|19.92px|32px|700|21.44px|21.44px|24px|700|19.92px|19.92px|16px|16px|700|underline|pointer|13.3281px"
+    );
+}
+
+#[test]
 fn center_uses_legacy_centering_user_agent_default() {
     let mut vm = new_parsed_test_vm(
         "https://center-user-agent-default.test/",
