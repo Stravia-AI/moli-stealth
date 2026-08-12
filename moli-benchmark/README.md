@@ -130,6 +130,40 @@ uv run moli-benchmark --help
 uv run moli-benchmark top-sites --help
 ```
 
+## Long-running navigation stress reports
+
+`moli-stress` repeatedly navigates one long-lived CDP target, retains the
+100 ms process-tree RSS/PSS/CPU samples, and produces a self-contained D3.js
+report. Its default workload matches the sequential-navigation soak shape:
+600 navigations across CSDN, SegmentFault, Huaban, and example.com.
+
+From the repository root:
+
+```bash
+cargo build --release --locked -p moli
+uv sync --project moli-benchmark --locked
+uv run --project moli-benchmark --no-sync moli-stress run
+```
+
+Results are written under `moli-benchmark/results/stress-TIMESTAMP/` as:
+
+- `result.json`: full navigation and 100 ms resource samples;
+- `summary.json`: compact machine-readable metrics;
+- `report.html`: offline interactive RSS/PSS/CPU and latency charts.
+
+Choose another exact navigation count or URL sequence with `--navigations`
+and repeated `--url`. The navigation count must be divisible by the selected
+URL count. An existing retained result can be rendered again without rerunning
+the workload:
+
+```bash
+uv run --project moli-benchmark --no-sync moli-stress report \
+  moli-benchmark/results/stress-TIMESTAMP/result.json
+```
+
+The HTML embeds the vendored D3.js runtime, so opening it does not require a
+network connection or a local web server.
+
 ## Choosing a suite
 
 | Suite | What it measures |

@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 moli-benchmark = "moli_benchmark.cli:main"
+moli-stress = "moli_benchmark.stress:main"
 
 [build-system]
 requires = ["hatchling"]

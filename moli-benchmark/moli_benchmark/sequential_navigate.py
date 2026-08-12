@@ -1089,6 +1089,7 @@ async def run_engine(
     recovery_timeout: float,
     network_diagnostics: bool,
     navigation_resource_samples: bool,
+    periodic_resource_samples: bool = False,
 ) -> dict[str, Any]:
     started_at = datetime.now(UTC).isoformat()
     serve = start_target_serve(target, binary, startup_timeout)
@@ -1186,7 +1187,10 @@ async def run_engine(
                     session_id=session_id,
                 )
             await client.close()
-        serve_result = stop_target_serve(serve)
+        serve_result = stop_target_serve(
+            serve,
+            include_resource_samples=periodic_resource_samples,
+        )
 
     summary = {
         "planned": len(urls),
@@ -1268,6 +1272,15 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
             "quarters, and a warm memory slope."
         ),
     )
+    parser.add_argument(
+        "--periodic-resource-samples",
+        action="store_true",
+        help=(
+            "Retain the process-tree RSS/PSS/CPU time series in the output. "
+            "The sampler always runs, but raw points are omitted by default "
+            "because they can make long-run JSON files large."
+        ),
+    )
     parser.add_argument("--startup-timeout", type=float, default=20.0)
     parser.add_argument("--response-timeout", type=float, default=15.0)
     parser.add_argument("--dcl-timeout", type=float, default=15.0)
@@ -1342,6 +1355,7 @@ async def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
                 recovery_timeout=args.recovery_timeout,
                 network_diagnostics=args.network_diagnostics,
                 navigation_resource_samples=args.navigation_resource_samples,
+                periodic_resource_samples=args.periodic_resource_samples,
             )
         )
     payload = {
@@ -1354,6 +1368,7 @@ async def _run(args: argparse.Namespace) -> tuple[dict[str, Any], int]:
         "timeouts": asdict(timeouts),
         "network_diagnostics": args.network_diagnostics,
         "navigation_resource_samples": args.navigation_resource_samples,
+        "periodic_resource_samples": args.periodic_resource_samples,
         "results": results,
     }
     failed = any(

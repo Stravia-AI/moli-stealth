@@ -201,7 +201,11 @@ def start_target_serve(
     )
 
 
-def stop_target_serve(handle: TargetServeHandle | None) -> dict[str, Any]:
+def stop_target_serve(
+    handle: TargetServeHandle | None,
+    *,
+    include_resource_samples: bool = False,
+) -> dict[str, Any]:
     if handle is None:
         return {}
     process_exited = False
@@ -214,6 +218,8 @@ def stop_target_serve(handle: TargetServeHandle | None) -> dict[str, Any]:
         else:
             _append_log(handle.logs, "process did not exit after SIGKILL; skipped pipe drain")
         resources = handle.sampler.stop()
+        if include_resource_samples:
+            resources["samples"] = list(handle.sampler.samples)
     finally:
         handle.port_lease.close()
         if handle.temp_dir is not None:

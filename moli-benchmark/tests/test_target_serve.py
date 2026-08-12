@@ -32,6 +32,7 @@ class _FakeProcess:
 class _FakeSampler:
     def __init__(self, pid: int) -> None:
         self.pid = pid
+        self.samples = [{"elapsed_ms": 1.0, "rss_bytes": 42}]
 
     def start(self) -> None:
         return None
@@ -110,6 +111,22 @@ class TargetServeTests(unittest.TestCase):
             )
 
             stop_target_serve(handle)
+
+    def test_stop_target_serve_can_retain_periodic_resource_samples(self) -> None:
+        process = _FakeProcess()
+
+        with (
+            patch("moli_benchmark.target_serve.subprocess.Popen", return_value=process),
+            patch("moli_benchmark.target_serve.ResourceSampler", _FakeSampler),
+            patch("moli_benchmark.target_serve.probe_url", return_value=True),
+        ):
+            handle = start_target_serve("moli-cdp", Path("/bin/moli"), 1.0)
+            stopped = stop_target_serve(handle, include_resource_samples=True)
+
+        self.assertEqual(
+            stopped["resources"]["samples"],
+            [{"elapsed_ms": 1.0, "rss_bytes": 42}],
+        )
 
 
 if __name__ == "__main__":
