@@ -320,19 +320,15 @@ impl ParserElementCreationConsumer for DocumentWriteParserMutationOwner<'_, '_, 
 // "HTML string -> parser output -> document.write/fragment effects" rather than mixing two different
 // mutation models in one refactor slice.
 impl DocumentRuntime {
-    pub(crate) fn start_root_document_parser_stream(
-        &mut self,
-        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-    ) {
+    pub(crate) fn start_root_document_parser_stream(&mut self) {
         debug_assert!(
             self.root_document_parser.is_none(),
             "opening a root document must discard the previous parser stream first"
         );
-        let mut parser = DocumentParserSession::start_open_live_document(
+        let parser = DocumentParserSession::start_open_live_document(
             self.document_url().clone(),
             self.document_handle(),
         );
-        parser.bind_owner(owner, self.runtime_reset_generation());
         self.root_document_parser = Some(parser);
     }
 
@@ -1614,12 +1610,9 @@ impl DocumentRuntime {
         }
         let resumed = match insertion.parser_insertion_controller.run_state() {
             DocumentParserRunState::Ready => false,
-            DocumentParserRunState::Suspended { .. } => {
-                insertion
-                    .parser_insertion_controller
-                    .resume(insertion.resume_permit)
-                    == ParserResumeApplication::Resumed
-            }
+            DocumentParserRunState::Suspended { .. } => insertion
+                .parser_insertion_controller
+                .resume(insertion.resume_permit),
             DocumentParserRunState::Pumping { .. }
             | DocumentParserRunState::Finishing
             | DocumentParserRunState::Finished
@@ -2761,13 +2754,7 @@ mod tests {
         let document = HtmlParser.parse(document_url, "<!doctype html>".to_owned());
         let mut runtime = DocumentRuntime::new(&document);
 
-        runtime.start_root_document_parser_stream(
-            crate::frame_owner_model::FrameDocumentTaskOwner::new(
-                crate::frame_owner_model::FrameSchedulerLaneId(1),
-                crate::frame_owner_model::LocalWindowId(1),
-                crate::frame_owner_model::DocumentId(1),
-            ),
-        );
+        runtime.start_root_document_parser_stream();
 
         let parser = runtime
             .root_document_parser

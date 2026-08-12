@@ -60,8 +60,7 @@ use crate::{
     frame_owner_model::FrameDocumentTaskOwner,
     live_document_parser::{
         DocumentParserLifetime, DocumentParserRunState, DocumentParserSession,
-        DocumentParserSessionControlHandle, ParserResumeApplication, ParserResumePermit,
-        ParserSuspensionCause,
+        DocumentParserSessionControlHandle, ParserResumePermit, ParserSuspensionCause,
     },
     module_runtime::ModuleMapKey,
     network::ResourceRequestClient,
@@ -238,7 +237,7 @@ impl ParserInsertionController {
         self.parser_control.suspend(cause)
     }
 
-    pub(crate) fn resume(&self, permit: ParserResumePermit) -> ParserResumeApplication {
+    pub(crate) fn resume(&self, permit: ParserResumePermit) -> bool {
         self.parser_control.resume(permit)
     }
 

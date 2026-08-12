@@ -135,7 +135,7 @@ impl ConcurrentParseTimeRuntime {
     pub(super) fn new_parser_owner(
         loader: ResourceRequestClient,
         stage: PageVmInitStage,
-        mut state: ParseTimeDriverState,
+        state: ParseTimeDriverState,
         mut page_vm: PageVm,
     ) -> Self {
         page_vm.set_target_stage(stage);
@@ -151,10 +151,6 @@ impl ConcurrentParseTimeRuntime {
             .vm()
             .current_main_document_task_owner()
             .expect("phase-one parser runtime requires an installed main document owner");
-        state.parser_session.bind_owner(
-            parser_document_owner,
-            page_vm.vm().document_runtime.runtime_reset_generation(),
-        );
         page_vm
             .vm_mut()
             .document_runtime

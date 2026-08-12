@@ -5,9 +5,7 @@ use super::parser_blocking_task::PendingParsingBlockingClassicScriptBlockedOnExe
 use super::*;
 use crate::document_runtime::ParserInsertionController;
 use crate::document_script_scheduler::DocumentScriptExecutionOutcome;
-use crate::live_document_parser::{
-    DocumentParserSession, ParserResumeApplication, ParserStopReason,
-};
+use crate::live_document_parser::{DocumentParserSession, ParserStopReason};
 use crate::parser_script::owner::ParserScriptExecutionBlocker;
 use crate::parser_script::projection::{
     ParserClassicScriptExecutionGateProjection, ParserClassicScriptNextActionWithBlockedScript,
@@ -52,7 +50,7 @@ pub(super) async fn resolve_main_parser_blocking_classic_after_runtime_gate(
     if let Some(permit) = pending_runner
         .current_parser_blocking_context()
         .and_then(|context| context.resume_permit())
-        && parser_session.resume(permit) != ParserResumeApplication::Resumed
+        && !parser_session.resume(permit)
     {
         tracing::debug!(
             ?permit,

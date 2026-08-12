@@ -1,7 +1,6 @@
 use crate::{
     DocumentOwnedBlockingStylesheetDiscoveryInput,
     dom::native::{DomHost, NativeNodeId},
-    frame_owner_model::FrameDocumentTaskOwner,
     parser::{
         DocumentStream, HtmlParser, ParserBlockingStylesheetPause,
         ParserCustomElementConstructionHandoff, ParserDomMutationConsumer, ParserDomReadConsumer,
@@ -195,21 +194,6 @@ pub(crate) struct ParserSessionId(u64);
 pub(crate) struct ParserSuspensionId(u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct DocumentParserOwnerIdentity {
-    document_owner: FrameDocumentTaskOwner,
-    runtime_generation: u64,
-}
-
-impl DocumentParserOwnerIdentity {
-    fn new(document_owner: FrameDocumentTaskOwner, runtime_generation: u64) -> Self {
-        Self {
-            document_owner,
-            runtime_generation,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ParserSuspensionCause {
     ParserClassicSource { script: NativeNodeId },
     ParserClassicStylesheets { script: NativeNodeId },
@@ -221,12 +205,10 @@ pub(crate) enum ParserSuspensionCause {
 struct ParserSuspension {
     id: ParserSuspensionId,
     cause: ParserSuspensionCause,
-    parser_commit_epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ParserResumePermit {
-    owner_identity: Option<DocumentParserOwnerIdentity>,
     session_id: ParserSessionId,
     suspension_id: ParserSuspensionId,
 }
@@ -247,7 +229,6 @@ pub(crate) enum DocumentParserRunState {
     Suspended {
         id: ParserSuspensionId,
         cause: ParserSuspensionCause,
-        parser_commit_epoch: u64,
     },
     Finishing,
     Finished,
@@ -259,7 +240,6 @@ impl From<ParserSuspension> for DocumentParserRunState {
         Self::Suspended {
             id: suspension.id,
             cause: suspension.cause,
-            parser_commit_epoch: suspension.parser_commit_epoch,
         }
     }
 }
@@ -267,36 +247,17 @@ impl From<ParserSuspension> for DocumentParserRunState {
 impl DocumentParserRunState {
     fn suspension(self) -> Option<ParserSuspension> {
         match self {
-            Self::Suspended {
-                id,
-                cause,
-                parser_commit_epoch,
-            } => Some(ParserSuspension {
-                id,
-                cause,
-                parser_commit_epoch,
-            }),
+            Self::Suspended { id, cause } => Some(ParserSuspension { id, cause }),
             _ => None,
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ParserResumeApplication {
-    Resumed,
-    RejectedSession,
-    RejectedOwner,
-    RejectedSuspension,
-    ParserNotSuspended,
-}
-
 #[derive(Debug)]
 struct DocumentParserSessionControl {
     session_id: ParserSessionId,
-    owner_identity: Option<DocumentParserOwnerIdentity>,
     next_suspension_id: u64,
     next_pump_epoch: u64,
-    parser_commit_epoch: u64,
     run_state: DocumentParserRunState,
 }
 
@@ -309,10 +270,8 @@ impl DocumentParserSessionControlHandle {
             ParserSessionId(NEXT_DOCUMENT_PARSER_SESSION_ID.fetch_add(1, Ordering::Relaxed));
         Self(Rc::new(RefCell::new(DocumentParserSessionControl {
             session_id,
-            owner_identity: None,
             next_suspension_id: 1,
             next_pump_epoch: 1,
-            parser_commit_epoch: 0,
             run_state: DocumentParserRunState::Ready,
         })))
     }
@@ -323,17 +282,6 @@ impl DocumentParserSessionControlHandle {
 
     pub(crate) fn run_state(&self) -> DocumentParserRunState {
         self.0.borrow().run_state
-    }
-
-    fn bind_owner(&self, owner_identity: DocumentParserOwnerIdentity) {
-        let mut control = self.0.borrow_mut();
-        match control.owner_identity {
-            None => control.owner_identity = Some(owner_identity),
-            Some(current) => assert_eq!(
-                current, owner_identity,
-                "one live parser session cannot be rebound to a different Document owner"
-            ),
-        }
     }
 
     pub(crate) fn suspend(&self, cause: ParserSuspensionCause) -> ParserResumePermit {
@@ -348,11 +296,9 @@ impl DocumentParserSessionControlHandle {
         let suspension = ParserSuspension {
             id: suspension_id,
             cause,
-            parser_commit_epoch: control.parser_commit_epoch,
         };
         control.run_state = suspension.into();
         ParserResumePermit {
-            owner_identity: control.owner_identity,
             session_id: control.session_id,
             suspension_id,
         }
@@ -362,28 +308,24 @@ impl DocumentParserSessionControlHandle {
         let control = self.0.borrow();
         let suspension = control.run_state.suspension()?;
         Some(ParserResumePermit {
-            owner_identity: control.owner_identity,
             session_id: control.session_id,
             suspension_id: suspension.id,
         })
     }
 
-    pub(crate) fn resume(&self, permit: ParserResumePermit) -> ParserResumeApplication {
+    pub(crate) fn resume(&self, permit: ParserResumePermit) -> bool {
         let mut control = self.0.borrow_mut();
         if permit.session_id != control.session_id {
-            return ParserResumeApplication::RejectedSession;
-        }
-        if permit.owner_identity != control.owner_identity {
-            return ParserResumeApplication::RejectedOwner;
+            return false;
         }
         let Some(suspension) = control.run_state.suspension() else {
-            return ParserResumeApplication::ParserNotSuspended;
+            return false;
         };
         if suspension.id != permit.suspension_id {
-            return ParserResumeApplication::RejectedSuspension;
+            return false;
         }
         control.run_state = DocumentParserRunState::Ready;
-        ParserResumeApplication::Resumed
+        true
     }
 
     pub(crate) fn begin_pump(&self) -> DocumentParserPumpGuard {
@@ -395,7 +337,6 @@ impl DocumentParserSessionControlHandle {
         );
         let epoch = control.next_pump_epoch;
         control.next_pump_epoch = control.next_pump_epoch.wrapping_add(1).max(1);
-        control.parser_commit_epoch = control.parser_commit_epoch.wrapping_add(1);
         control.run_state = DocumentParserRunState::Pumping { epoch };
         drop(control);
         DocumentParserPumpGuard {
@@ -622,17 +563,6 @@ impl DocumentParserSession {
             .expect("a finished parser session no longer owns a backend")
     }
 
-    pub(crate) fn bind_owner(
-        &mut self,
-        document_owner: FrameDocumentTaskOwner,
-        runtime_generation: u64,
-    ) {
-        self.control.bind_owner(DocumentParserOwnerIdentity::new(
-            document_owner,
-            runtime_generation,
-        ));
-    }
-
     pub(crate) fn run_state(&self) -> DocumentParserRunState {
         self.control.run_state()
     }
@@ -649,7 +579,7 @@ impl DocumentParserSession {
         self.control.current_resume_permit()
     }
 
-    pub(crate) fn resume(&mut self, permit: ParserResumePermit) -> ParserResumeApplication {
+    pub(crate) fn resume(&mut self, permit: ParserResumePermit) -> bool {
         self.control.resume(permit)
     }
 
@@ -1033,15 +963,6 @@ fn unwrap_exclusive_xml_parser_stream(stream: XmlDocumentParserStreamHandle) -> 
 #[cfg(test)]
 mod session_state_tests {
     use super::*;
-    use crate::frame_owner_model::{DocumentId, FrameSchedulerLaneId, LocalWindowId};
-
-    fn owner(lane: u64, window: u64, document: u64) -> FrameDocumentTaskOwner {
-        FrameDocumentTaskOwner::new(
-            FrameSchedulerLaneId(lane),
-            LocalWindowId(window),
-            DocumentId(document),
-        )
-    }
 
     fn session() -> DocumentParserSession {
         DocumentParserSession::start_finite_live_document(
@@ -1053,59 +974,34 @@ mod session_state_tests {
     #[test]
     fn parser_resume_permit_is_exact_and_one_shot() {
         let mut parser = session();
-        let owner = owner(1, 2, 3);
-        parser.bind_owner(owner, 7);
         let permit = parser.suspend(ParserSuspensionCause::ParserClassicSource {
             script: NativeNodeId::new(8),
         });
 
-        assert_eq!(
-            permit.owner_identity,
-            Some(DocumentParserOwnerIdentity::new(owner, 7))
-        );
         assert_eq!(permit.session_id, parser.control.session_id());
-        assert_eq!(parser.resume(permit), ParserResumeApplication::Resumed);
-        assert_eq!(
-            parser.resume(permit),
-            ParserResumeApplication::ParserNotSuspended,
+        assert!(parser.resume(permit));
+        assert!(
+            !parser.resume(permit),
             "a copied permit cannot resume the same suspension twice"
         );
     }
 
     #[test]
-    fn parser_resume_rejects_wrong_owner_session_and_suspension() {
+    fn parser_resume_rejects_wrong_session_and_suspension() {
         let mut parser = session();
-        let parser_owner = owner(1, 2, 3);
-        parser.bind_owner(parser_owner, 11);
         let first = parser.suspend(ParserSuspensionCause::ParserCreatedStylesheet {
             owner: NativeNodeId::new(5),
         });
 
-        let wrong_owner = ParserResumePermit {
-            owner_identity: Some(DocumentParserOwnerIdentity::new(owner(9, 9, 9), 11)),
-            ..first
-        };
-        assert_eq!(
-            parser.resume(wrong_owner),
-            ParserResumeApplication::RejectedOwner
-        );
-
         let mut other = session();
-        other.bind_owner(parser_owner, 11);
-        assert_eq!(
-            other.resume(first),
-            ParserResumeApplication::RejectedSession
-        );
+        assert!(!other.resume(first));
 
-        assert_eq!(parser.resume(first), ParserResumeApplication::Resumed);
+        assert!(parser.resume(first));
         let second = parser.suspend(ParserSuspensionCause::DocumentWriteExternalScript {
             script: NativeNodeId::new(6),
         });
-        assert_eq!(
-            parser.resume(first),
-            ParserResumeApplication::RejectedSuspension
-        );
-        assert_eq!(parser.resume(second), ParserResumeApplication::Resumed);
+        assert!(!parser.resume(first));
+        assert!(parser.resume(second));
     }
 
     #[test]
@@ -1114,8 +1010,6 @@ mod session_state_tests {
             Url::parse("https://parser-session.test/").expect("test URL"),
             NativeNodeId::new(1),
         );
-        let parser_owner = owner(1, 2, 3);
-        parser.bind_owner(parser_owner, 11);
         let permit = parser.suspend(ParserSuspensionCause::ParserClassicSource {
             script: NativeNodeId::new(8),
         });
@@ -1133,7 +1027,7 @@ mod session_state_tests {
         );
         assert_eq!(parser.current_resume_permit(), Some(permit));
 
-        assert_eq!(parser.resume(permit), ParserResumeApplication::Resumed);
+        assert!(parser.resume(permit));
         assert_eq!(
             parser.request_close(),
             DocumentParserCloseDisposition::DrainNow,

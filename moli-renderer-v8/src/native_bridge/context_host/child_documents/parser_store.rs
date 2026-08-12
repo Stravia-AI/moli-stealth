@@ -3,8 +3,7 @@ use crate::live_document_parser::DocumentParserLifetime;
 use crate::{
     frame_owner_model::FrameDocumentOwner,
     live_document_parser::{
-        DocumentParserSession, ParserResumeApplication, ParserResumePermit, ParserStopReason,
-        ParserSuspensionCause,
+        DocumentParserSession, ParserResumePermit, ParserStopReason, ParserSuspensionCause,
     },
 };
 use std::collections::HashMap;
@@ -83,7 +82,7 @@ impl ChildDocumentParserStore {
         &mut self,
         owner: FrameDocumentOwner,
         permit: ParserResumePermit,
-    ) -> Option<ParserResumeApplication> {
+    ) -> Option<bool> {
         self.sessions
             .get_mut(&owner)
             .map(|parser| parser.resume(permit))

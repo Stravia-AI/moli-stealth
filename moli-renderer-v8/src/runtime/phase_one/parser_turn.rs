@@ -19,8 +19,7 @@ use super::*;
 use crate::document_runtime::parser_script_preparation_failure_page_owned_work;
 use crate::dom::native::{Attribute, DomMutationEffects, NativeNodeId};
 use crate::live_document_parser::{
-    LiveDocumentParserOwner, LiveDocumentParserStepOutcome, ParserResumeApplication,
-    ParserSuspensionCause,
+    LiveDocumentParserOwner, LiveDocumentParserStepOutcome, ParserSuspensionCause,
 };
 use crate::parser::{
     ParserDomMutation, ParserDomMutationConsumer, ParserDomReadConsumer,
@@ -524,9 +523,8 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .parser_session
                     .current_resume_permit()
                     .expect("a stylesheet-suspended parser must retain its resume permit");
-                assert_eq!(
+                assert!(
                     self.parser_session.resume(permit),
-                    ParserResumeApplication::Resumed,
                     "the admitted stylesheet continuation must resume its exact parser suspension"
                 );
             }
@@ -545,9 +543,8 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                     .parser_session
                     .current_resume_permit()
                     .expect("a document.write-suspended parser must retain its resume permit");
-                assert_eq!(
+                assert!(
                     self.parser_session.resume(permit),
-                    ParserResumeApplication::Resumed,
                     "the admitted document.write continuation must resume its exact parser suspension"
                 );
             }

@@ -530,7 +530,7 @@ impl JsContextHost {
             .expect("main document owner must exist before document.open() replacement");
         {
             let runtime: &mut DocumentRuntime = self;
-            runtime.start_root_document_parser_stream(transition.current_owner());
+            runtime.start_root_document_parser_stream();
         }
         self.dom_agent_state
             .reset_for_document_replacement(transition.current_owner().document_id);

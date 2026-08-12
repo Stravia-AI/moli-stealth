@@ -27,7 +27,6 @@ use crate::{
         FrameRequestKind, FrameScriptJob, LocalWindowId, PendingChildExternalClassicDocumentScript,
         frame_script_job_kind_from_parser_classic_ready_kind,
     },
-    live_document_parser::ParserResumeApplication,
     page_task_queue::RendererPageChildClassicScriptSourceLoadTarget,
     parser_script::action::{
         ParserPendingClassicScriptExecution, ParserPendingClassicScriptNotification,
@@ -1729,7 +1728,7 @@ impl JsContextHost {
             && self
                 .child_document_parsers
                 .resume_parser_script_for_execution(owner, permit)
-                != Some(ParserResumeApplication::Resumed)
+                != Some(true)
         {
             tracing::debug!(
                 child_handle = ?child_handle,

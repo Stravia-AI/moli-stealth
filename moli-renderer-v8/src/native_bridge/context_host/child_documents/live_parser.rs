@@ -15,7 +15,7 @@ use crate::{
     live_document_parser::{
         DocumentParserCloseDisposition, DocumentParserLifetime, DocumentParserRunState,
         DocumentParserSession, LiveDocumentParserOwner, LiveDocumentParserStepOutcome,
-        ParserResumeApplication, ParserSuspensionCause,
+        ParserSuspensionCause,
     },
     modulepreload::{
         invalid_modulepreload_as_value, invalid_modulepreload_as_warning,
@@ -999,10 +999,7 @@ impl JsContextHost {
             .current_child_document_task_owner(child_handle)
             .expect("committed child document-open parser must have a task owner");
         assert_eq!(task_owner.document_owner(), owner);
-        let runtime_generation = self.runtime_reset_generation();
-        let mut parser =
-            DocumentParserSession::start_open_live_document(document_url, document_handle);
-        parser.bind_owner(task_owner, runtime_generation);
+        let parser = DocumentParserSession::start_open_live_document(document_url, document_handle);
         self.child_document_parsers.replace(owner, parser);
     }
 
@@ -1515,7 +1512,6 @@ impl JsContextHost {
             .current_child_document_task_owner(child_handle)
             .expect("committed child parser must have a current task owner");
         assert_eq!(task_owner.document_owner(), owner);
-        parser.bind_owner(task_owner, self.runtime_reset_generation());
         parser.queue_arrived_chunk(markup.to_owned());
         parser.declare_eof();
         let outcome = self.drive_live_child_document_parser(
@@ -1614,7 +1610,7 @@ impl JsContextHost {
                         FrameDocumentClassicParserResumeSkipReason::StaleParserSuspension,
                     );
                 };
-                if entry.resume(permit) != ParserResumeApplication::Resumed {
+                if !entry.resume(permit) {
                     self.child_document_parsers.replace(owner, entry);
                     return FrameDocumentClassicParserResumeApplication::skipped(
                         FrameDocumentClassicParserResumeSkipReason::StaleParserSuspension,
@@ -1703,7 +1699,7 @@ impl JsContextHost {
             {
                 entry
                     .current_resume_permit()
-                    .is_some_and(|permit| entry.resume(permit) == ParserResumeApplication::Resumed)
+                    .is_some_and(|permit| entry.resume(permit))
             }
             DocumentParserRunState::Pumping { .. }
             | DocumentParserRunState::Suspended { .. }
