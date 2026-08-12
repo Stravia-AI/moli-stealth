@@ -282,13 +282,16 @@ async def run_locator_input_workflows(state: SmokeState) -> None:
             <style>
               #drag { position: absolute; left: 20px; top: 220px; width: 80px; height: 40px; background: #ddd; }
               #drop { position: absolute; left: 160px; top: 220px; width: 120px; height: 60px; background: #eee; }
-              #hover { position: absolute; left: 20px; top: 160px; width: 90px; height: 36px; }
+              #hover-menu { position: absolute; left: 20px; top: 160px; width: 90px; }
+              #hover { width: 90px; height: 36px; }
+              #hover-child { display: none; width: 90px; height: 24px; }
+              #hover-menu:hover #hover-child { display: block; }
               #editable { min-width: 120px; min-height: 24px; }
             </style>
             <input id="text" value="">
             <textarea id="area"></textarea>
             <div id="editable" contenteditable="true"></div>
-            <button id="hover">hover</button>
+            <div id="hover-menu"><button id="hover">hover</button><button id="hover-child">child</button></div>
             <input id="check" type="checkbox">
             <input id="radio-a" name="choice" type="radio" value="a">
             <input id="radio-b" name="choice" type="radio" value="b">
@@ -299,10 +302,12 @@ async def run_locator_input_workflows(state: SmokeState) -> None:
           window.__keys = [];
           const textInput = document.getElementById('text');
           const hoverTarget = document.getElementById('hover');
+          const hoverChild = document.getElementById('hover-child');
           const dragSource = document.getElementById('drag');
           const dropTarget = document.getElementById('drop');
           textInput.addEventListener('keydown', event => window.__keys.push(`${event.key}:${event.shiftKey}:${event.ctrlKey || event.metaKey}`));
           hoverTarget.addEventListener('mouseenter', () => window.__hovered = true);
+          hoverChild.addEventListener('click', () => window.__hoverChildClicked = true);
           dragSource.addEventListener('dragstart', event => event.dataTransfer.setData('text/plain', 'dragged-value'));
           dropTarget.addEventListener('dragover', event => event.preventDefault());
           dropTarget.addEventListener('drop', event => {
@@ -340,6 +345,23 @@ async def run_locator_input_workflows(state: SmokeState) -> None:
         await page.evaluate("() => window.__hovered === true"),
         True,
         "locator hover is dispatched",
+    )
+    assert_equal(
+        await page.evaluate(
+            """() => ({
+              target: document.querySelector('#hover').matches(':hover'),
+              ancestor: document.querySelector('#hover-menu').matches(':hover'),
+              childDisplay: getComputedStyle(document.querySelector('#hover-child')).display,
+            })"""
+        ),
+        {"target": True, "ancestor": True, "childDisplay": "block"},
+        "locator hover persists in Stylo and exposes the dropdown",
+    )
+    await page.locator("#hover-child").click(timeout=1_000)
+    assert_equal(
+        await page.evaluate("() => window.__hoverChildClicked === true"),
+        True,
+        "hover dropdown child is clickable without waiting for a screencast frame",
     )
 
     await page.locator("#check").evaluate("input => input.checked = true")

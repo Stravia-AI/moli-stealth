@@ -50,6 +50,10 @@ pub(super) fn clear_input_dispatch_state(vm: &mut ScriptVm) {
     vm.pressed_mouse_buttons = 0;
     vm.pending_mouse_press = None;
     vm.hovered_mouse_handle = None;
+    vm._context_host
+        .borrow()
+        .dom_host()
+        .clear_hovered_element_handles();
     vm.active_touch_pointer_handle = None;
     vm.active_touch_pointer_handles.clear();
     vm.active_touch_event_handle = None;

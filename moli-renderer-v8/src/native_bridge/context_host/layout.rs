@@ -284,6 +284,13 @@ impl JsContextHost {
         *self.document_layout_state.borrow_mut() = Default::default();
     }
 
+    pub(crate) fn invalidate_layout_after_interaction_state_change(&self) {
+        self.clear_layout_rect_cache();
+        self.document_layout_state
+            .borrow_mut()
+            .clear_latest_layout();
+    }
+
     pub(crate) fn mark_document_web_font_sources_dirty(&self) {
         self.document_layout_state
             .borrow_mut()

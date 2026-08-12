@@ -69,6 +69,7 @@ impl DomHost {
             child_browsing_context_host_candidates: RefCell::new(Vec::new()),
             shadow_disabled_custom_element_definitions: RefCell::new(HashSet::new()),
             active_element: Cell::new(None),
+            hovered_elements: RefCell::new(IndexSet::new()),
             mutation_observer_records_enabled: Cell::new(false),
             devtools_mutation_records_enabled: Cell::new(false),
         };
@@ -515,6 +516,54 @@ impl DomHost {
             };
         }
         false
+    }
+
+    pub fn hovered_element_handles(&self) -> Vec<DomHandle> {
+        self.hovered_elements
+            .borrow()
+            .iter()
+            .copied()
+            .filter(|handle| {
+                self.node(*handle)
+                    .is_some_and(|node| node.is_element() && node.is_connected())
+            })
+            .collect()
+    }
+
+    pub fn set_hovered_element_handles(&self, handles: Vec<DomHandle>) -> bool {
+        let next = handles
+            .into_iter()
+            .filter(|handle| {
+                self.node(*handle)
+                    .is_some_and(|node| node.is_element() && node.is_connected())
+            })
+            .collect::<IndexSet<_>>();
+        let mut hovered = self.hovered_elements.borrow_mut();
+        if *hovered == next {
+            return false;
+        }
+        *hovered = next;
+        drop(hovered);
+        self.record_mutation(MutationScope::QueryState);
+        true
+    }
+
+    pub fn clear_hovered_element_handles(&self) {
+        if self.hovered_elements.borrow().is_empty() {
+            return;
+        }
+        self.hovered_elements.borrow_mut().clear();
+        self.record_mutation(MutationScope::QueryState);
+    }
+
+    pub(super) fn prune_disconnected_hovered_elements(&self) {
+        self.hovered_elements
+            .borrow_mut()
+            .retain(|handle| self.is_connected(*handle));
+    }
+
+    pub fn element_matches_hover(&self, handle: DomHandle) -> bool {
+        self.is_connected(handle) && self.hovered_elements.borrow().contains(&handle)
     }
 
     pub fn resolve_node(&self, node_id: NodeId) -> Option<DomHandle> {

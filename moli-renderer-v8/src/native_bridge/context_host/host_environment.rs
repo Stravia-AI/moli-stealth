@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc};
 
 use super::{
     JsContextHost,
@@ -9,6 +9,7 @@ use crate::{
     dom::native::{
         DocumentReadyState, DomStylesheetOwnerChange, DomStylesheetOwnerChangeKind, Node,
     },
+    native_bridge::element::label_control_handle,
     network::context::DocumentResourceLoader,
     style_engine::{
         AdoptedStyleSheetInstallation, CssCustomPropertyRegistration,
@@ -32,6 +33,43 @@ fn push_unique_handle(handles: &mut Vec<DomHandle>, handle: DomHandle) {
     if !handles.contains(&handle) {
         handles.push(handle);
     }
+}
+
+fn hover_chain_for_input_hit(runtime: &JsContextHost, hit: Option<DomHandle>) -> Vec<DomHandle> {
+    let mut hovered = Vec::new();
+    let mut visited = HashSet::new();
+    let mut current = hit;
+    while let Some(handle) = current {
+        if !visited.insert(handle) {
+            break;
+        }
+        let Some(node) = runtime.dom_host().node(handle) else {
+            break;
+        };
+        if node.is_element() {
+            push_unique_handle(&mut hovered, handle);
+            if let Some(control) = label_control_handle(runtime, handle) {
+                push_unique_handle(&mut hovered, control);
+            }
+        }
+        if let Some(slot) = runtime.dom_host().assigned_slot_for_node(handle) {
+            current = Some(slot);
+            continue;
+        }
+        if let Some(parent) = runtime.dom_host().parent_node(handle) {
+            current = if runtime.dom_host().is_shadow_root(parent) {
+                runtime.dom_host().shadow_root_host(parent)
+            } else {
+                Some(parent)
+            };
+            continue;
+        }
+        current = node
+            .is_document()
+            .then(|| runtime.child_browsing_context_host_for_document_handle(handle))
+            .flatten();
+    }
+    hovered
 }
 
 impl JsContextHost {
@@ -1683,6 +1721,39 @@ impl JsContextHost {
                 &emulated_media,
                 viewport,
             );
+    }
+
+    pub(crate) fn set_hovered_element_for_input(&mut self, hit: Option<DomHandle>) -> bool {
+        let next = hover_chain_for_input_hit(self, hit);
+        let previous = self.dom_host().hovered_element_handles();
+        if previous == next {
+            return false;
+        }
+        let changed = previous
+            .iter()
+            .chain(&next)
+            .copied()
+            .filter(|handle| previous.contains(handle) != next.contains(handle))
+            .collect::<Vec<_>>();
+        let old_states = changed
+            .iter()
+            .map(|handle| (*handle, self.retained_current_element_state(*handle)))
+            .collect::<Vec<_>>();
+        if !self.dom_host().set_hovered_element_handles(next) {
+            return false;
+        }
+        for (handle, old_state) in old_states {
+            self.note_element_state_style_activity_with_old_state(
+                handle,
+                StyloElementState::HOVER,
+                old_state,
+            );
+        }
+        // Hover selectors may change box generation or geometry. The next hit
+        // test must observe that new tree instead of waiting for a paint pass
+        // to replace the latest owned layout snapshot.
+        self.invalidate_layout_after_interaction_state_change();
+        true
     }
 
     pub(crate) fn note_custom_state_style_activity(

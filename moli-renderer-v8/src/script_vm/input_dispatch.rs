@@ -454,6 +454,10 @@ impl ScriptVm {
                     .active_pointer_capture_target(MOUSE_POINTER_ID)
             })
             .flatten();
+        if tracks_mouse_hover_for_event(event_name) {
+            let mut context_host = self._context_host.borrow_mut();
+            context_host.set_hovered_element_for_input(hit_handle);
+        }
         let Some(handle) = capture_handle.or(hit_handle) else {
             return Ok(input_dispatch_outcome(false));
         };
