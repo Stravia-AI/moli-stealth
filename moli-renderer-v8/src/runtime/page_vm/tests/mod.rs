@@ -11068,6 +11068,137 @@ async fn child_document_write_nested_external_classic_blocks_domcontentloaded() 
 }
 
 #[tokio::test]
+async fn child_document_close_defers_while_written_external_classic_blocks_parser() {
+    run_page_vm_async_test(async move {
+        let (base_url, server) = spawn_path_response_http_server(vec![(
+            "/child-close-blocker.js",
+            "HTTP/1.1 200 OK",
+            "parent.__childCloseEvents.push('external:' + Boolean(document.getElementById('after-blocker')));"
+                .to_owned(),
+            Duration::ZERO,
+        )])
+        .await;
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let document_url = Url::parse(&format!("{base_url}/page")).expect("page url");
+        let page_vm = test_page_vm_with_loader_and_document_url(&loader, Vec::new(), document_url);
+        let local_executor = page_vm.local_executor.clone();
+
+        let (
+            events_after_close,
+            source_load_source,
+            events_after_external,
+            final_events,
+            tail_exists,
+        ) = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().eval(
+                    r#"
+(() => {
+  globalThis.__childCloseEvents = [];
+  const frame = document.createElement("iframe");
+  frame.id = "child-close-frame";
+  document.body.appendChild(frame);
+})()
+"#,
+                )?;
+                materialize_child_realm_through_page_turn_for_test(
+                    &mut page_vm,
+                    "child-close-frame",
+                )?;
+
+                let script_url = format!("{base_url}/child-close-blocker.js");
+                page_vm.vm_mut().eval(&format!(
+                    r#"
+(() => {{
+  const frame = document.getElementById("child-close-frame");
+  frame.onload = () => __childCloseEvents.push("load");
+  const childDocument = frame.contentDocument;
+  childDocument.open();
+  childDocument.addEventListener("DOMContentLoaded", () => __childCloseEvents.push("dcl"));
+  childDocument.write(`<script src="{script_url}"><\/script><main id="after-blocker">tail</main>`);
+  childDocument.close();
+  __childCloseEvents.push("after-close");
+}})()
+"#,
+                ))?;
+                let events_after_close = page_vm.vm_mut().eval("__childCloseEvents.join('|')")?;
+                let source_load_source =
+                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                        &mut page_vm,
+                        ChildFrameSemanticTurnKind::ClassicScriptSourceLoad,
+                        "document.close delayed external classic source load",
+                    )
+                    .await;
+                if !page_vm
+                    .page_resource_completion_queue()
+                    .has_ready_completion()
+                {
+                    let arrived = tokio::time::timeout(
+                        Duration::from_secs(2),
+                        wait_for_typed_page_resource_completion(&mut page_vm),
+                    )
+                    .await
+                    .expect("child close blocker completion should arrive before timeout");
+                    assert!(
+                        arrived,
+                        "child close blocker completion sender should remain open"
+                    );
+                }
+                let _ = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::DocumentScriptReady,
+                    "document.close delayed external classic execution",
+                )
+                .await;
+                let events_after_external =
+                    page_vm.vm_mut().eval("__childCloseEvents.join('|')")?;
+                run_child_interactive_domcontentloaded_then_host_load_for_wait(
+                    &mut page_vm,
+                    "document.close delayed child load",
+                )
+                .await;
+                let final_events = page_vm.vm_mut().eval("__childCloseEvents.join('|')")?;
+                let tail_exists = page_vm.vm_mut().eval(
+                    "String(Boolean(document.getElementById('child-close-frame').contentDocument.getElementById('after-blocker')))",
+                )?;
+
+                Ok::<_, anyhow::Error>((
+                    events_after_close,
+                    source_load_source,
+                    events_after_external,
+                    final_events,
+                    tail_exists,
+                ))
+            })
+            .await
+            .expect("child document.close delayed EOF test should run");
+
+        assert_eq!(
+            events_after_close, "after-close",
+            "document.close() should return without executing or bypassing the blocker"
+        );
+        assert_eq!(
+            source_load_source,
+            ChildFrameSemanticTurnKind::ClassicScriptSourceLoad
+        );
+        assert_eq!(
+            events_after_external, "after-close|external:false",
+            "the external parser-blocking script must run before future markup is parsed"
+        );
+        assert_eq!(final_events, "after-close|external:false|dcl|load");
+        assert_eq!(tail_exists, "true");
+
+        server
+            .await
+            .expect("child close blocker server should finish");
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn page_vm_nested_frame_finish_releases_parent_document_lifecycle() {
     run_page_vm_async_test(async move {
         let mut page_vm = test_page_vm();

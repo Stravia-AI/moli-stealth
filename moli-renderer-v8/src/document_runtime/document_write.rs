@@ -354,15 +354,10 @@ impl DocumentRuntime {
                 closed,
                 "a live root parser must own an open document stream"
             );
-            let close_transitioned = self
-                .root_document_parser
+            self.root_document_parser
                 .as_mut()
                 .expect("root document parser existence was checked")
                 .request_close();
-            debug_assert!(
-                close_transitioned,
-                "an open root document parser must accept its first close request"
-            );
         }
         let _ = self.finish_root_document_parser_stream_if_ready(scope, host_ptr);
         true

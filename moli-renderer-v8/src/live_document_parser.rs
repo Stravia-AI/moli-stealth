@@ -177,6 +177,15 @@ pub(crate) enum DocumentParserLifetime {
     Closing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentParserCloseDisposition {
+    /// The parser is ready to consume any queued input and reach EOF now.
+    DrainNow,
+    /// An active parser operation or blocker owns progress; closing resumes
+    /// through that operation's existing completion path.
+    DeferredUntilReady,
+}
+
 static NEXT_DOCUMENT_PARSER_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -664,12 +673,13 @@ impl DocumentParserSession {
         self.lifetime
     }
 
-    pub(crate) fn request_close(&mut self) -> bool {
-        if self.lifetime == DocumentParserLifetime::Closing {
-            return false;
-        }
+    pub(crate) fn request_close(&mut self) -> DocumentParserCloseDisposition {
         self.lifetime = DocumentParserLifetime::Closing;
-        true
+        if self.run_state() == DocumentParserRunState::Ready {
+            DocumentParserCloseDisposition::DrainNow
+        } else {
+            DocumentParserCloseDisposition::DeferredUntilReady
+        }
     }
 
     pub(crate) fn finishes_when_drained(&self) -> bool {
@@ -1096,6 +1106,39 @@ mod session_state_tests {
             ParserResumeApplication::RejectedSuspension
         );
         assert_eq!(parser.resume(second), ParserResumeApplication::Resumed);
+    }
+
+    #[test]
+    fn close_defers_without_consuming_the_active_parser_suspension() {
+        let mut parser = DocumentParserSession::start_open_live_document(
+            Url::parse("https://parser-session.test/").expect("test URL"),
+            NativeNodeId::new(1),
+        );
+        let parser_owner = owner(1, 2, 3);
+        parser.bind_owner(parser_owner, 11);
+        let permit = parser.suspend(ParserSuspensionCause::ParserClassicSource {
+            script: NativeNodeId::new(8),
+        });
+        let suspended_state = parser.run_state();
+
+        assert_eq!(
+            parser.request_close(),
+            DocumentParserCloseDisposition::DeferredUntilReady
+        );
+        assert_eq!(parser.lifetime(), DocumentParserLifetime::Closing);
+        assert_eq!(
+            parser.run_state(),
+            suspended_state,
+            "document.close() must not bypass the active parser blocker"
+        );
+        assert_eq!(parser.current_resume_permit(), Some(permit));
+
+        assert_eq!(parser.resume(permit), ParserResumeApplication::Resumed);
+        assert_eq!(
+            parser.request_close(),
+            DocumentParserCloseDisposition::DrainNow,
+            "the delayed close can drain after the exact blocker releases"
+        );
     }
 
     #[test]

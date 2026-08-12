@@ -13,9 +13,9 @@ use crate::{
         LocalWindowId,
     },
     live_document_parser::{
-        DocumentParserLifetime, DocumentParserRunState, DocumentParserSession,
-        LiveDocumentParserOwner, LiveDocumentParserStepOutcome, ParserResumeApplication,
-        ParserSuspensionCause,
+        DocumentParserCloseDisposition, DocumentParserLifetime, DocumentParserRunState,
+        DocumentParserSession, LiveDocumentParserOwner, LiveDocumentParserStepOutcome,
+        ParserResumeApplication, ParserSuspensionCause,
     },
     modulepreload::{
         invalid_modulepreload_as_value, invalid_modulepreload_as_warning,
@@ -1044,8 +1044,14 @@ impl JsContextHost {
                 .script_input_session()
                 .enqueue_script_input_html(chunk);
         }
-        if close_requested {
-            entry.request_close();
+        let parser_ready_to_advance = if close_requested {
+            entry.request_close() == DocumentParserCloseDisposition::DrainNow
+        } else {
+            entry.run_state() == DocumentParserRunState::Ready
+        };
+        if !parser_ready_to_advance {
+            self.child_document_parsers.replace(owner, entry);
+            return true;
         }
 
         loop {
