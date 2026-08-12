@@ -175,6 +175,27 @@ fn parses_json_dump_mode() {
 }
 
 #[test]
+fn parses_binary_dump_modes_with_inferred_fetch_command() {
+    for (value, expected) in [
+        ("screenshot", DumpFormat::Screenshot),
+        ("pdf", DumpFormat::Pdf),
+    ] {
+        let cli = Cli::try_parse_from(normalize_args_for_compat([
+            "moli",
+            "--dump",
+            value,
+            "https://example.com",
+        ]))
+        .unwrap();
+
+        let Commands::Fetch(args) = cli.command else {
+            panic!("expected fetch command for --dump {value}");
+        };
+        assert_eq!(args.dump, Some(expected));
+    }
+}
+
+#[test]
 fn app_config_rejects_unimplemented_web_bot_auth_flags() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",

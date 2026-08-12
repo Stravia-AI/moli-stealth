@@ -181,11 +181,11 @@ pub async fn run_cli_with_config<W: Write>(
                     .context("failed while waiting for page delay")?;
             }
 
-            let rendered = fetch_dump::render_page_dump_async(&mut page, &config.fetch)
+            let rendered = fetch_dump::render_page_output_async(&mut page, &config.fetch)
                 .await
                 .context("failed to render fetch output")?;
             stdout
-                .write_all(rendered.as_bytes())
+                .write_all(&rendered)
                 .context("failed to write fetch output")?;
             let _ = stdout.flush();
             if let Err(error) = page.close_async().await {

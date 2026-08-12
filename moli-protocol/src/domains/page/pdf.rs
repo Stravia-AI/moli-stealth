@@ -21,6 +21,21 @@ pub(super) struct RasterPdfOptions {
     page_ranges: Vec<PageRange>,
 }
 
+impl Default for RasterPdfOptions {
+    fn default() -> Self {
+        Self {
+            page_width_points: DEFAULT_PAGE_WIDTH_INCHES * POINTS_PER_INCH,
+            page_height_points: DEFAULT_PAGE_HEIGHT_INCHES * POINTS_PER_INCH,
+            margin_top_points: DEFAULT_MARGIN_INCHES * POINTS_PER_INCH,
+            margin_bottom_points: DEFAULT_MARGIN_INCHES * POINTS_PER_INCH,
+            margin_left_points: DEFAULT_MARGIN_INCHES * POINTS_PER_INCH,
+            margin_right_points: DEFAULT_MARGIN_INCHES * POINTS_PER_INCH,
+            scale: 1.0,
+            page_ranges: Vec::new(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PageRange {
     first: usize,

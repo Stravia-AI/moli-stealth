@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use moli_core::page::{
-    DocumentNodeSnapshot, Page, RendererPageDumpFormat, RendererPageDumpOptions,
-    RendererPageDumpStripOptions, SubresourceResponseWaitCriteria, is_renderer_backend_node_id,
+    DocumentNodeSnapshot, Page, RendererCaptureScreenshotReply, RendererCaptureScreenshotRequest,
+    RendererPageDumpFormat, RendererPageDumpOptions, RendererPageDumpStripOptions,
+    RendererScreenshotFormat, RendererScreenshotPurpose, RendererScreenshotRegion,
+    SubresourceResponseWaitCriteria, is_renderer_backend_node_id,
 };
 use moli_core::runtime::RawDocument;
 #[cfg(test)]
@@ -95,6 +97,26 @@ const WPT_DUMP_SCRIPT: &str = r#"
 })()
 "#;
 
+struct CapturedRaster {
+    mime_type: String,
+    width: u32,
+    height: u32,
+    bytes: Vec<u8>,
+}
+
+pub async fn render_page_output_async(
+    page: &mut Page,
+    command: &FetchCommandConfig,
+) -> Result<Vec<u8>> {
+    match command.dump_mode.unwrap_or(DumpFormat::Html) {
+        DumpFormat::Screenshot => render_screenshot_dump_async(page).await,
+        DumpFormat::Pdf => render_pdf_dump_async(page).await,
+        _ => render_page_dump_async(page, command)
+            .await
+            .map(String::into_bytes),
+    }
+}
+
 pub async fn render_page_dump_async(
     page: &mut Page,
     command: &FetchCommandConfig,
@@ -128,6 +150,8 @@ pub fn render_raw_document_dump(
             Ok(payload.into_bytes())
         }
         DumpFormat::Markdown
+        | DumpFormat::Screenshot
+        | DumpFormat::Pdf
         | DumpFormat::Wpt
         | DumpFormat::SemanticTree
         | DumpFormat::SemanticTreeText => {
@@ -186,9 +210,83 @@ async fn render_page_dump_with_trace_config_async(
         }
         DumpFormat::Html => render_html_dump_async(page, strip, with_base, with_frames).await,
         DumpFormat::Markdown => render_markdown_dump_async(page, strip, with_frames).await,
+        DumpFormat::Screenshot | DumpFormat::Pdf => {
+            bail!("binary dump formats are only supported by the fetch CLI output path")
+        }
         DumpFormat::SemanticTree => render_semantic_tree_dump_async(page).await,
         DumpFormat::SemanticTreeText => render_semantic_tree_text_dump_async(page).await,
         DumpFormat::Wpt => render_wpt_dump_async(page).await,
+    }
+}
+
+async fn render_screenshot_dump_async(page: &mut Page) -> Result<Vec<u8>> {
+    let image = capture_page_raster(
+        page,
+        RendererCaptureScreenshotRequest::viewport_png(),
+        "screenshot",
+    )
+    .await?;
+    if image.mime_type != "image/png" {
+        bail!(
+            "screenshot renderer returned `{}` instead of PNG",
+            image.mime_type
+        );
+    }
+    Ok(image.bytes)
+}
+
+async fn render_pdf_dump_async(page: &mut Page) -> Result<Vec<u8>> {
+    let image = capture_page_raster(
+        page,
+        RendererCaptureScreenshotRequest {
+            purpose: RendererScreenshotPurpose::Print {
+                print_background: false,
+            },
+            format: RendererScreenshotFormat::Jpeg,
+            quality: 90,
+            region: RendererScreenshotRegion::FullDocument,
+            optimize_for_speed: false,
+            max_width: None,
+            max_height: None,
+        },
+        "pdf",
+    )
+    .await?;
+    if image.mime_type != "image/jpeg" {
+        bail!(
+            "PDF renderer returned `{}` instead of JPEG",
+            image.mime_type
+        );
+    }
+    moli_protocol::build_default_raster_pdf(&image.bytes, image.width, image.height)
+        .context("failed to encode PDF output")
+}
+
+async fn capture_page_raster(
+    page: &mut Page,
+    request: RendererCaptureScreenshotRequest,
+    dump_mode: &str,
+) -> Result<CapturedRaster> {
+    let pending = page
+        .start_capture_screenshot_with_request(request)
+        .with_context(|| format!("failed to start --dump {dump_mode} capture"))?;
+    let completion = pending
+        .wait()
+        .await
+        .with_context(|| format!("failed to complete --dump {dump_mode} capture"))?;
+    match page.finish_capture_screenshot(completion)? {
+        RendererCaptureScreenshotReply::Captured(image) => Ok(CapturedRaster {
+            mime_type: image.mime_type,
+            width: image.width,
+            height: image.height,
+            bytes: image.bytes.to_vec(),
+        }),
+        RendererCaptureScreenshotReply::LayoutDisabled => {
+            bail!("--dump {dump_mode} requires --layout or MOLI_LAYOUT=true")
+        }
+        RendererCaptureScreenshotReply::NoDocument => {
+            bail!("--dump {dump_mode} requires a loaded HTML document")
+        }
     }
 }
 

@@ -65,6 +65,22 @@ mod termination;
 #[cfg(test)]
 mod tests;
 
+/// Builds a letter-sized raster PDF using the same defaults as
+/// `Page.printToPDF`.
+pub fn build_default_raster_pdf(
+    jpeg: &[u8],
+    image_width: u32,
+    image_height: u32,
+) -> anyhow::Result<Vec<u8>> {
+    pdf::build_raster_pdf(
+        jpeg,
+        image_width,
+        image_height,
+        &pdf::RasterPdfOptions::default(),
+    )
+    .map_err(|error| anyhow::anyhow!(error.message().to_owned()))
+}
+
 use child_frame_activity::PagePreparedChildFrameDocumentActivity;
 pub(crate) use child_frame_activity::{
     PagePreparedChildFrameActivity, PagePreparedChildFrameTreeEvent,

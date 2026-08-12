@@ -39,7 +39,7 @@ pub use domains::activity::{
 pub use domains::page::{
     BackgroundNavigationCompletion, CompletedPageScreencastCapture,
     PageScreencastCaptureCompletion, PageScreencastCaptureStart, PageScreencastRegistration,
-    PageScreencastSubscriptionStatus, PendingPageScreencastCapture,
+    PageScreencastSubscriptionStatus, PendingPageScreencastCapture, build_default_raster_pdf,
 };
 pub use domains::runtime::{
     CompletedDevToolsRuntimeCommandDispatch, DevToolsRuntimeCommandTaskStep,

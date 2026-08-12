@@ -775,6 +775,61 @@ fn cli_fetch_about_blank_materializes_empty_document() -> Result<()> {
 }
 
 #[test]
+fn cli_dump_screenshot_writes_png_bytes() -> Result<()> {
+    let output = run_fetch_cli_with_dump_and_args("about:blank", "screenshot", &["--layout"])?;
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout_bytes={}\nstderr={}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(output.stdout.ends_with(b"IEND\xaeB`\x82"));
+    Ok(())
+}
+
+#[test]
+fn cli_dump_pdf_writes_pdf_bytes() -> Result<()> {
+    let output = run_fetch_cli_with_dump_and_args("about:blank", "pdf", &["--layout"])?;
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout_bytes={}\nstderr={}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"%PDF-1.7\n"));
+    assert!(
+        output
+            .stdout
+            .windows(b"/Type /Pages".len())
+            .any(|window| window == b"/Type /Pages")
+    );
+    assert!(output.stdout.ends_with(b"%%EOF\n"));
+    Ok(())
+}
+
+#[test]
+fn binary_dump_modes_require_layout() -> Result<()> {
+    for dump in ["screenshot", "pdf"] {
+        let output = run_fetch_cli_with_dump_and_args("about:blank", dump, &[])?;
+        assert!(
+            !output.status.success(),
+            "--dump {dump} unexpectedly worked"
+        );
+        assert!(
+            output.stdout.is_empty(),
+            "--dump {dump} wrote partial output"
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains(&format!("--dump {dump} requires --layout")),
+            "stderr={stderr}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn cli_fetch_inline_pdf_dump_html_bypasses_dcl_page_lifecycle() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(BinaryDocumentFixtureServer::spawn())?;
