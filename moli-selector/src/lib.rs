@@ -1047,6 +1047,44 @@ mod tests {
     }
 
     #[test]
+    fn dom_api_selectors_match_persistent_hover_state() {
+        let url = url::Url::parse("https://example.test/").unwrap();
+        let mut host = DomHost::from_dom(NativeDom::new_html(url));
+        host.reset_html_document_shell();
+        let body = host.document_body_handle().unwrap();
+        let menu = host.create_element("nav");
+        let item = host.create_element("button");
+        let sibling = host.create_element("button");
+        assert!(host.append_child(menu, item));
+        assert!(host.append_child(body, menu));
+        assert!(host.append_child(body, sibling));
+
+        let engine = QueryEngine;
+        assert!(!engine.matches_host(&host, item, ":hover").unwrap());
+        assert!(!engine.matches_host(&host, menu, ":hover").unwrap());
+
+        assert!(host.set_hovered_element_handles(vec![item, menu, body]));
+        assert!(engine.matches_host(&host, item, ":hover").unwrap());
+        assert!(engine.matches_host(&host, menu, ":hover").unwrap());
+        assert!(
+            engine
+                .matches_host(&host, menu, ":hover:has(> button:hover)")
+                .unwrap()
+        );
+        assert!(!engine.matches_host(&host, sibling, ":hover").unwrap());
+
+        assert!(host.set_hovered_element_handles(vec![sibling, body]));
+        assert!(!engine.matches_host(&host, item, ":hover").unwrap());
+        assert!(!engine.matches_host(&host, menu, ":hover").unwrap());
+        assert!(engine.matches_host(&host, sibling, ":hover").unwrap());
+
+        assert!(host.remove_child(body, sibling));
+        assert!(!engine.matches_host(&host, sibling, ":hover").unwrap());
+        assert!(host.append_child(body, sibling));
+        assert!(!engine.matches_host(&host, sibling, ":hover").unwrap());
+    }
+
+    #[test]
     fn dom_api_selectors_clear_target_state_for_empty_fragment_and_top() {
         let url = url::Url::parse("https://example.test/page.html#target").unwrap();
         let mut host = DomHost::from_dom(NativeDom::new_html(url));

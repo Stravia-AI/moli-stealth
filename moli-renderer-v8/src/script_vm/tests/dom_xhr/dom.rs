@@ -5396,6 +5396,95 @@ fn mouse_hover_dispatches_pointer_boundary_before_mouse_boundary() {
 }
 
 #[test]
+fn mouse_hover_persists_stylo_state_and_reflows_dropdown_before_next_hit_test() {
+    let mut vm = new_parsed_test_vm(
+        "https://hover-dropdown.test/",
+        r#"
+<!doctype html>
+<style>
+  html, body { margin: 0; padding: 0; }
+  #menu, #trigger, #submenu, #outside { width: 120px; }
+  #trigger, #submenu, #outside { display: block; box-sizing: border-box; height: 24px; }
+  #submenu { display: none; }
+  #menu:hover #submenu { display: block; }
+</style>
+<nav id="menu">
+  <button id="trigger">menu</button>
+  <button id="submenu">child</button>
+</nav>
+<button id="outside">outside</button>
+"#,
+    );
+    vm.eval(
+        r#"
+(() => {
+  const menu = document.getElementById('menu');
+  const trigger = document.getElementById('trigger');
+  const submenu = document.getElementById('submenu');
+  const outside = document.getElementById('outside');
+  window.__submenuClicks = 0;
+  window.__duringHover = '';
+  window.__afterLeave = '';
+  trigger.addEventListener('mousemove', () => {
+    window.__duringHover = [
+      trigger.matches(':hover'),
+      menu.matches(':hover'),
+      document.body.matches(':hover'),
+      document.documentElement.matches(':hover'),
+      getComputedStyle(submenu).display
+    ].join('|');
+  });
+  submenu.addEventListener('click', () => window.__submenuClicks++);
+  outside.addEventListener('mousemove', () => {
+    window.__afterLeave = [
+      trigger.matches(':hover'),
+      menu.matches(':hover'),
+      submenu.matches(':hover'),
+      outside.matches(':hover'),
+      getComputedStyle(submenu).display
+    ].join('|');
+  });
+})()
+"#,
+    )
+    .expect("hover dropdown listeners should install");
+
+    assert_eq!(
+        vm.eval(
+            "[document.getElementById('menu').matches(':hover'), getComputedStyle(document.getElementById('submenu')).display].join('|')"
+        )
+        .expect("initial hover state should evaluate"),
+        "false|none"
+    );
+
+    vm.dispatch_mouse_event_at_point(10.0, 10.0, "mousemove", -1, Some(0), 0.0, 0.0)
+        .expect("mousemove should establish hover state");
+    assert_eq!(
+        vm.eval("window.__duringHover")
+            .expect("in-event hover state should evaluate"),
+        "true|true|true|true|block"
+    );
+
+    vm.dispatch_mouse_event_at_point(10.0, 35.0, "mousedown", 0, Some(1), 0.0, 0.0)
+        .expect("mousedown should hit the newly displayed submenu");
+    vm.dispatch_mouse_event_at_point(10.0, 35.0, "mouseup", 0, Some(0), 0.0, 0.0)
+        .expect("mouseup should activate the newly displayed submenu");
+    assert_eq!(
+        vm.eval("String(window.__submenuClicks)")
+            .expect("submenu click count should evaluate"),
+        "1"
+    );
+
+    vm.dispatch_mouse_event_at_point(10.0, 60.0, "mousemove", -1, Some(0), 0.0, 0.0)
+        .expect("mousemove outside the menu should clear its hover chain");
+    assert_eq!(
+        vm.eval("window.__afterLeave")
+            .expect("post-hover state should evaluate"),
+        "false|false|false|true|none"
+    );
+}
+
+#[test]
 fn detached_document_tag_collection_exposes_named_item() {
     let mut vm = new_storage_test_vm("https://detached-document-named-item.test/");
 

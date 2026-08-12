@@ -588,8 +588,8 @@ impl SelectorsElement for QueryElement<'_> {
         match pc {
             NonTSPseudoClass::Link | NonTSPseudoClass::AnyLink => self.is_link(),
             NonTSPseudoClass::Visited => false,
+            NonTSPseudoClass::Hover => self.host.element_matches_hover(self.handle),
             NonTSPseudoClass::Active
-            | NonTSPseudoClass::Hover
             | NonTSPseudoClass::Fullscreen
             | NonTSPseudoClass::Open
             | NonTSPseudoClass::ServoNonZeroBorder

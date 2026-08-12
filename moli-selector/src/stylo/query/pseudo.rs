@@ -73,6 +73,9 @@ impl<'a> QueryElement<'a> {
         if self.host.element_matches_focus_within(self.handle) {
             state |= ElementState::FOCUS_WITHIN;
         }
+        if self.host.element_matches_hover(self.handle) {
+            state |= ElementState::HOVER;
+        }
         if self.matches_target_pseudo() {
             state |= ElementState::URLTARGET;
         }

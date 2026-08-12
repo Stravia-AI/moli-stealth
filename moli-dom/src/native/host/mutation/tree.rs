@@ -72,6 +72,7 @@ impl DomHost {
             .remove_child_with_stylesheet_candidate_changes(parent, child);
         if let Some(candidate_changes) = candidate_changes {
             self.invalidate_shadow_slot_name_index_for_tree_parent(parent);
+            self.prune_disconnected_hovered_elements();
             let mut effects = DomMutationEffects::changed();
             effects.extend_stylesheet_candidate_changes(candidate_changes);
             self.clear_popover_open_states(&removal_context.open_popovers, &mut effects);
