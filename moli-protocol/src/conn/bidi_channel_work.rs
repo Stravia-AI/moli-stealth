@@ -35,6 +35,10 @@ impl BidiChannelPageOwner {
         self.attachment.session_id()
     }
 
+    pub(crate) fn target_id(&self) -> Option<&str> {
+        self.attachment.page_owner().target_id()
+    }
+
     pub(crate) fn enter<'a>(
         &self,
         conn: &'a mut CdpConnection,

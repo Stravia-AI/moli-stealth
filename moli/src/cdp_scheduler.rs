@@ -101,10 +101,16 @@ pub(crate) enum CommandStartAction {
 
 pub(crate) struct CdpScheduler {
     conn: CdpConnection,
-    pending_navigation_background_events: VecDeque<BackgroundProtocolEvent>,
+    pending_navigation_background_events: VecDeque<PendingNavigationBackgroundEvent>,
     runtime_command_output_barriers: RuntimeCommandOutputBarriers,
     queues: SchedulerQueues,
     page_screencasts: HashMap<Option<String>, PageScreencastSchedule>,
+}
+
+#[derive(Debug)]
+struct PendingNavigationBackgroundEvent {
+    target_id: Option<String>,
+    event: BackgroundProtocolEvent,
 }
 
 #[derive(Debug)]
@@ -127,6 +133,14 @@ fn page_screencast_interval(every_nth_frame: u32) -> Duration {
 
 fn next_page_screencast_deadline(now: TokioInstant, interval: Duration) -> TokioInstant {
     now + interval
+}
+
+fn append_unique_target_ids(target_ids: &mut Vec<String>, additional: Vec<String>) {
+    for target_id in additional {
+        if !target_ids.contains(&target_id) {
+            target_ids.push(target_id);
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -308,6 +322,23 @@ impl ProtocolOutputSequence {
 
     pub(crate) fn append(&mut self, mut other: Self) {
         self.events.append(&mut other.events);
+    }
+
+    fn navigation_gate_target_ids(&self, conn: &CdpConnection) -> Vec<String> {
+        let mut target_ids = Vec::new();
+        for event in &self.events {
+            let Some(target_id) = conn.background_navigation_target_id_for_event(event) else {
+                // A publication is released atomically. If even one event has
+                // no exact owner, keep the whole batch behind the conservative
+                // connection-wide gate rather than attributing it to a known
+                // sibling event's target.
+                return Vec::new();
+            };
+            if !target_ids.contains(&target_id) {
+                target_ids.push(target_id);
+            }
+        }
+        target_ids
     }
 
     fn split_network_observations(self) -> (Self, Self) {
@@ -818,6 +849,7 @@ impl CdpScheduler {
         background_command_id: Option<u64>,
     ) -> DevToolsCommandExecution {
         let navigation_wait = devtools_navigation_wait(&command);
+        let navigation_context = command.context().clone();
         let outcome = self
             .conn
             .execute_devtools_command_with_protocol_events_with_background_command_id(
@@ -867,7 +899,7 @@ impl CdpScheduler {
             && matches!(navigation_wait, Some(DevToolsNavigationWait::Load))
         {
             protocol_output.append(
-                self.drain_deferred_main_document_load_completion_for_wait()
+                self.drain_deferred_main_document_load_completion_for_wait(&navigation_context)
                     .await,
             );
         }
@@ -1033,7 +1065,10 @@ impl CdpScheduler {
         let mut foreground_navigation_network_barrier =
             ForegroundNavigationNetworkBarrier::for_navigation_wait(navigation_wait);
         let mut protocol_output = match self
-            .drain_inflight_background_navigation_before_internal_command(receivers)
+            .drain_inflight_background_navigation_before_internal_command(
+                receivers,
+                &navigation_context,
+            )
             .await
         {
             Ok(output) => output,
@@ -1249,9 +1284,13 @@ impl CdpScheduler {
     async fn drain_inflight_background_navigation_before_internal_command(
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
+        context: &moli_protocol::devtools_runtime::DevToolsCommandContext,
     ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
         let mut out = ProtocolOutputSequence::empty();
-        while self.has_inflight_background_navigation() {
+        while self
+            .conn
+            .has_inflight_background_navigation_for_devtools_context(context)
+        {
             let Some(input) = receivers.recv_interleaved_input().await else {
                 return Err(RendererOutputTransportFailure::new(
                     out,
@@ -1519,11 +1558,14 @@ impl CdpScheduler {
 
     async fn drain_deferred_main_document_load_completion_for_wait(
         &mut self,
+        context: &moli_protocol::devtools_runtime::DevToolsCommandContext,
     ) -> ProtocolOutputSequence {
         let mut out = ProtocolOutputSequence::empty();
         loop {
-            if self.has_inflight_background_navigation()
-                || !self.front_protocol_residence_is_main_document_load_action()
+            if self
+                .conn
+                .has_inflight_background_navigation_for_devtools_context(context)
+                || !self.front_protocol_residence_is_main_document_load_action_for_context(context)
             {
                 return out;
             }
@@ -1566,7 +1608,7 @@ impl CdpScheduler {
                 &mut receivers.background_event_rx,
             ));
             out.append(
-                self.drain_deferred_main_document_load_completion_for_wait()
+                self.drain_deferred_main_document_load_completion_for_wait(context)
                     .await,
             );
             out.append(self.drain_background_events_around_inflight_navigation(
@@ -1629,7 +1671,7 @@ impl CdpScheduler {
     pub(crate) async fn complete_ready_protocol_residences_after_command(
         &mut self,
     ) -> ProtocolOutputSequence {
-        if self.has_inflight_background_navigation() || self.has_pending_javascript_dialog() {
+        if self.has_pending_javascript_dialog() {
             return ProtocolOutputSequence::empty();
         }
         let snapshot = self.queues.take_command_followup_snapshot();
@@ -1642,9 +1684,6 @@ impl CdpScheduler {
         &mut self,
         predecessor: &moli_core::RendererOutputFence,
     ) -> ProtocolOutputSequence {
-        if self.has_inflight_background_navigation() {
-            return ProtocolOutputSequence::empty();
-        }
         let cursor = predecessor.cursor();
         let snapshot = self
             .queues
@@ -1694,22 +1733,110 @@ impl CdpScheduler {
         mut snapshot: VecDeque<ProtocolSchedulerResidence>,
     ) -> ProtocolOutputSequence {
         let mut out = ProtocolOutputSequence::empty();
+        let mut retained = VecDeque::new();
+        let mut blocked_target_ids = Vec::new();
         while let Some(mut residence) = snapshot.pop_front() {
-            if self.has_inflight_background_navigation() || self.has_pending_javascript_dialog() {
-                snapshot.push_front(residence);
-                self.queues.restore_snapshot_to_front(snapshot);
+            if self.has_pending_javascript_dialog() {
+                retained.push_back(residence);
+                retained.append(&mut snapshot);
+                self.queues.restore_snapshot_to_front(retained);
                 return out;
+            }
+            let target_ids = self.protocol_residence_navigation_gate_target_ids(&residence);
+            let blocked_by_prior_residence = target_ids
+                .iter()
+                .any(|target_id| blocked_target_ids.contains(target_id));
+            let blocked_by_navigation =
+                self.protocol_targets_have_inflight_background_navigation(&target_ids);
+            if blocked_by_prior_residence || blocked_by_navigation {
+                if target_ids.is_empty() {
+                    retained.push_back(residence);
+                    retained.append(&mut snapshot);
+                    self.queues.restore_snapshot_to_front(retained);
+                    return out;
+                }
+                append_unique_target_ids(&mut blocked_target_ids, target_ids);
+                retained.push_back(residence);
+                continue;
             }
             self.queues
                 .satisfy_checked_out_client_turn_predecessor(&mut residence);
             if !residence.is_ready_to_complete() {
-                snapshot.push_front(residence);
-                self.queues.restore_snapshot_to_front(snapshot);
-                return out;
+                if target_ids.is_empty() {
+                    retained.push_back(residence);
+                    retained.append(&mut snapshot);
+                    self.queues.restore_snapshot_to_front(retained);
+                    return out;
+                }
+                append_unique_target_ids(&mut blocked_target_ids, target_ids);
+                retained.push_back(residence);
+                continue;
             }
             out.append(self.complete_protocol_residence(residence).await);
         }
+        if !retained.is_empty() {
+            self.queues.restore_snapshot_to_front(retained);
+        }
         out
+    }
+
+    fn protocol_residence_navigation_gate_target_ids(
+        &self,
+        residence: &ProtocolSchedulerResidence,
+    ) -> Vec<String> {
+        match residence {
+            ProtocolSchedulerResidence::RendererOutputPublication(work) => {
+                work.output.navigation_gate_target_ids(&self.conn)
+            }
+            ProtocolSchedulerResidence::ProtocolWork { work, .. } => work
+                .navigation_gate_target_id()
+                .map(str::to_owned)
+                .into_iter()
+                .collect(),
+        }
+    }
+
+    fn protocol_targets_have_inflight_background_navigation(&self, target_ids: &[String]) -> bool {
+        if target_ids.is_empty() {
+            return self.has_inflight_background_navigation();
+        }
+        target_ids.iter().any(|target_id| {
+            self.conn
+                .has_inflight_background_navigation_for_target(target_id)
+        })
+    }
+
+    fn next_ungated_protocol_residence_index(&self) -> Option<usize> {
+        // A target-local navigation is an ordering barrier only for later
+        // work from the same target. Keep those lanes ordered while allowing
+        // an independent target to advance, matching Chromium's per-frame
+        // NavigationRequest ownership.
+        let mut blocked_target_ids = Vec::new();
+        for (index, residence) in self.queues.protocol_residences.iter().enumerate() {
+            let target_ids = self.protocol_residence_navigation_gate_target_ids(residence);
+            if target_ids
+                .iter()
+                .any(|target_id| blocked_target_ids.contains(target_id))
+            {
+                continue;
+            }
+            if self.protocol_targets_have_inflight_background_navigation(&target_ids) {
+                if target_ids.is_empty() {
+                    return None;
+                }
+                append_unique_target_ids(&mut blocked_target_ids, target_ids);
+                continue;
+            }
+            if !residence.should_yield_to_client_turn() && !residence.is_ready_to_complete() {
+                if target_ids.is_empty() {
+                    return None;
+                }
+                append_unique_target_ids(&mut blocked_target_ids, target_ids);
+                continue;
+            }
+            return Some(index);
+        }
+        None
     }
 
     pub(crate) async fn complete_interleaved_scheduler_input(
@@ -1733,11 +1860,15 @@ impl CdpScheduler {
         }
     }
 
-    fn front_protocol_residence_is_main_document_load_action(&self) -> bool {
+    fn front_protocol_residence_is_main_document_load_action_for_context(
+        &self,
+        context: &moli_protocol::devtools_runtime::DevToolsCommandContext,
+    ) -> bool {
         matches!(
             self.queues.protocol_residences.front(),
             Some(ProtocolSchedulerResidence::ProtocolWork { work, .. })
                 if work.kind() == ProtocolSchedulerWorkKind::MainDocumentLoadOwnerAction
+                    && work.observes_main_document_load_for_devtools_context(&self.conn, context)
         )
     }
 
@@ -1772,8 +1903,18 @@ impl CdpScheduler {
         if !event.route_is_current(&self.conn) {
             return ProtocolOutputSequence::empty();
         }
-        let has_inflight_navigation = self.has_inflight_background_navigation();
         let should_wait = event.should_wait_for_background_navigation_completion();
+        let navigation_target_id = should_wait
+            .then(|| self.conn.background_navigation_target_id_for_event(&event))
+            .flatten();
+        let has_inflight_navigation = should_wait
+            && navigation_target_id.as_deref().map_or_else(
+                || self.has_inflight_background_navigation(),
+                |target_id| {
+                    self.conn
+                        .has_inflight_background_navigation_for_target(target_id)
+                },
+            );
         if moli_trace::cdp_runtime_trace_enabled()
             && let Some((method, resource_type, request_id, url)) = event.trace_network_summary()
         {
@@ -1788,7 +1929,7 @@ impl CdpScheduler {
                 should_wait,
             );
         }
-        if has_inflight_navigation && should_wait {
+        if has_inflight_navigation {
             if moli_trace::cdp_runtime_trace_enabled() {
                 tracing::info!(
                     target: "moli_cdp_runtime",
@@ -1796,7 +1937,11 @@ impl CdpScheduler {
                     pending_background_events = self.pending_navigation_background_events.len() + 1,
                 );
             }
-            self.pending_navigation_background_events.push_back(event);
+            self.pending_navigation_background_events
+                .push_back(PendingNavigationBackgroundEvent {
+                    target_id: navigation_target_id,
+                    event,
+                });
             return ProtocolOutputSequence::empty();
         }
         ProtocolOutputSequence::from_background_event(event)
@@ -1825,15 +1970,30 @@ impl CdpScheduler {
     }
 
     fn drain_pending_navigation_background_events(&mut self) -> ProtocolOutputSequence {
-        let events = self
-            .pending_navigation_background_events
-            .drain(..)
+        let mut events = Vec::new();
+        let mut retained = VecDeque::new();
+        while let Some(pending) = self.pending_navigation_background_events.pop_front() {
             // The navigation gate deliberately extends an event's residence
             // beyond its projection turn. Reauthorize its frozen route at
             // the actual release boundary: the in-flight navigation may have
             // replaced the root Document or detached its session meanwhile.
-            .filter(|event| event.route_is_current(&self.conn))
-            .collect::<Vec<_>>();
+            if !pending.event.route_is_current(&self.conn) {
+                continue;
+            }
+            let remains_gated = pending.target_id.as_deref().map_or_else(
+                || self.has_inflight_background_navigation(),
+                |target_id| {
+                    self.conn
+                        .has_inflight_background_navigation_for_target(target_id)
+                },
+            );
+            if remains_gated {
+                retained.push_back(pending);
+            } else {
+                events.push(pending.event);
+            }
+        }
+        self.pending_navigation_background_events = retained;
         ProtocolOutputSequence::from_background_events(events)
     }
 
@@ -1841,9 +2001,6 @@ impl CdpScheduler {
         &mut self,
         prefix: &mut ProtocolOutputSequence,
     ) {
-        if self.has_inflight_background_navigation() {
-            return;
-        }
         prefix.append(self.drain_pending_navigation_background_events());
     }
 
@@ -2185,13 +2342,18 @@ impl CdpScheduler {
     }
 
     fn next_protocol_scheduler_step(&self) -> ProtocolSchedulerStep {
-        if self.has_inflight_background_navigation() {
+        let Some(index) = self.next_ungated_protocol_residence_index() else {
             return ProtocolSchedulerStep::Wait;
-        }
-        if self.queues.front_needs_client_turn_predecessor() {
+        };
+        let residence = self
+            .queues
+            .protocol_residences
+            .get(index)
+            .expect("selected protocol residence must exist");
+        if residence.should_yield_to_client_turn() {
             return ProtocolSchedulerStep::SatisfyClientTurnPredecessor;
         }
-        if self.queues.should_complete_next_residence() {
+        if residence.is_ready_to_complete() {
             return ProtocolSchedulerStep::CompleteReadyResidence;
         }
         ProtocolSchedulerStep::Wait
@@ -2205,12 +2367,18 @@ impl CdpScheduler {
                 protocol_residence_len = self.queues.protocol_residence_len(),
             );
         }
-        self.queues.satisfy_front_client_turn_predecessor();
+        let Some(index) = self.next_ungated_protocol_residence_index() else {
+            return;
+        };
+        self.queues.satisfy_client_turn_predecessor_at(index);
     }
 
     fn next_ready_protocol_residence_is_main_document_load_action(&self) -> bool {
+        let Some(index) = self.next_ungated_protocol_residence_index() else {
+            return false;
+        };
         matches!(
-            self.queues.protocol_residences.front(),
+            self.queues.protocol_residences.get(index),
             Some(ProtocolSchedulerResidence::ProtocolWork {
                 work,
                 client_turn_predecessor: ClientTurnPredecessor::Satisfied,
@@ -2230,7 +2398,10 @@ impl CdpScheduler {
     }
 
     pub(crate) async fn complete_next_protocol_residence(&mut self) -> ProtocolOutputSequence {
-        let Some(residence) = self.queues.pop_next_protocol_residence() else {
+        let Some(index) = self.next_ungated_protocol_residence_index() else {
+            return ProtocolOutputSequence::empty();
+        };
+        let Some(residence) = self.queues.take_protocol_residence_at(index) else {
             return ProtocolOutputSequence::empty();
         };
         self.complete_protocol_residence(residence).await
@@ -2351,8 +2522,9 @@ impl CdpScheduler {
     pub(crate) fn start_next_deferred_load_completion(
         &mut self,
     ) -> Option<PendingDeferredMainDocumentLoadCompletion> {
+        let index = self.next_ungated_protocol_residence_index()?;
         let should_start = matches!(
-            self.queues.protocol_residences.front(),
+            self.queues.protocol_residences.get(index),
             Some(ProtocolSchedulerResidence::ProtocolWork {
                 work,
                 client_turn_predecessor: ClientTurnPredecessor::Satisfied,
@@ -2365,7 +2537,7 @@ impl CdpScheduler {
             return None;
         }
         let Some(ProtocolSchedulerResidence::ProtocolWork { work, .. }) =
-            self.queues.pop_next_protocol_residence()
+            self.queues.take_protocol_residence_at(index)
         else {
             return None;
         };

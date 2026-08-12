@@ -50,6 +50,10 @@ impl TopLevelLocationNavigationOwnerAction {
         self.owner_scope.session_id()
     }
 
+    pub(crate) fn target_id(&self) -> Option<&str> {
+        self.page_owner.target_id()
+    }
+
     pub(crate) fn source_document(&self) -> moli_core::RendererDocumentLifecycleIdentity {
         self.navigation.source_document()
     }

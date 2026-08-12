@@ -1208,6 +1208,17 @@ impl BrowserContext {
                 .any(|target| target.runtime_slot().has_inflight_background_navigation())
     }
 
+    pub(crate) fn has_inflight_background_navigation_for_target(&self, target_id: &str) -> bool {
+        if self.active_target_id() == Some(target_id) {
+            return self
+                .active_target
+                .runtime_slot
+                .has_inflight_background_navigation();
+        }
+        self.background_target(target_id)
+            .is_some_and(|target| target.runtime_slot().has_inflight_background_navigation())
+    }
+
     pub(crate) fn accepts_document_body_completion_event(
         &self,
         token: &DocumentNavigationToken,

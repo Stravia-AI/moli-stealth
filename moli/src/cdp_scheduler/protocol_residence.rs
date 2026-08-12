@@ -108,7 +108,7 @@ pub(super) enum ClientTurnPredecessor {
 }
 
 impl ProtocolSchedulerResidence {
-    fn should_yield_to_client_turn(&self) -> bool {
+    pub(super) fn should_yield_to_client_turn(&self) -> bool {
         matches!(
             self,
             Self::RendererOutputPublication(RendererOutputPublicationWork {
@@ -198,7 +198,7 @@ impl ProtocolSchedulerResidence {
 
 #[derive(Debug)]
 pub(super) struct SchedulerQueues {
-    /// Concrete protocol output and owner work in scheduler selection order.
+    /// Concrete protocol output and owner work in scheduler admission order.
     ///
     /// Renderer source publications are concrete before admission. A projected
     /// event batch may briefly accept the load observation still being
@@ -206,7 +206,9 @@ pub(super) struct SchedulerQueues {
     /// from the same ingress turn inherits that predecessor as well. Publication
     /// stream cursor remains the admission invariant, while an exact
     /// predecessor may deliberately insert its load owner action before work
-    /// that was admitted earlier.
+    /// that was admitted earlier. Selection normally follows this order; a
+    /// target-local navigation gate may let an unrelated target advance while
+    /// preserving order within each target lane.
     pub(super) protocol_residences: VecDeque<ProtocolSchedulerResidence>,
     next_protocol_work_publish_sequence: u64,
 }
@@ -363,6 +365,21 @@ impl SchedulerQueues {
 
     pub(super) fn pop_next_protocol_residence(&mut self) -> Option<ProtocolSchedulerResidence> {
         self.protocol_residences.pop_front()
+    }
+
+    pub(super) fn satisfy_client_turn_predecessor_at(&mut self, index: usize) {
+        self.close_future_load_predecessor_window();
+        self.protocol_residences
+            .get_mut(index)
+            .expect("selected protocol residence must still exist")
+            .mark_client_turn_yielded();
+    }
+
+    pub(super) fn take_protocol_residence_at(
+        &mut self,
+        index: usize,
+    ) -> Option<ProtocolSchedulerResidence> {
+        self.protocol_residences.remove(index)
     }
 
     fn take_snapshot(

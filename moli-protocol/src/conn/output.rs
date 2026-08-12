@@ -880,6 +880,61 @@ impl ProtocolDeliveryEnvelope {
         self.route.wire_session_id()
     }
 
+    pub(crate) fn navigation_gate_target_id(&self) -> Option<&str> {
+        if let Some(target_id) = self.route.navigation_gate_target_id() {
+            return Some(target_id);
+        }
+        let BackgroundProtocolEventPayload::Protocol(event) = &self.payload else {
+            return None;
+        };
+        match event.automation_event.as_deref()? {
+            AutomationEvent::NetworkBeforeRequestSent(event)
+            | AutomationEvent::NetworkResponseStarted(event)
+            | AutomationEvent::NetworkResponseCompleted(event)
+            | AutomationEvent::NetworkFetchError(event)
+            | AutomationEvent::NetworkAuthRequired(event)
+            | AutomationEvent::RequestPaused(event) => Some(event.target_id.as_str()),
+            AutomationEvent::TargetCreated(event) | AutomationEvent::TargetDestroyed(event) => {
+                Some(event.target_id.as_str())
+            }
+            AutomationEvent::TargetAttached(event) => Some(event.target_id.as_str()),
+            AutomationEvent::TargetDetached(event) => Some(event.target_id.as_str()),
+            AutomationEvent::NavigationFrame(event) => Some(event.target_id.as_str()),
+            AutomationEvent::NavigationStarted(event)
+            | AutomationEvent::DomContentLoaded(event)
+            | AutomationEvent::Load(event) => Some(event.target_id.as_str()),
+            AutomationEvent::PageLifecycle(event) => Some(event.target_id.as_str()),
+            AutomationEvent::SameDocumentNavigation(event) => Some(event.target_id.as_str()),
+            AutomationEvent::UserPromptClosed(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::LogEntryAdded(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::RuntimeConsoleApiCalled(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::RuntimeExecutionContextCreated(event)
+            | AutomationEvent::RuntimeExecutionContextDestroyed(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::RuntimeExecutionContextsCleared(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::ScriptMessage(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::ScriptException(event) => {
+                event.target_id.as_ref().map(|target_id| target_id.as_str())
+            }
+            AutomationEvent::PageJavaScriptDialogOpening(_)
+            | AutomationEvent::PageFileChooserOpened(_)
+            | AutomationEvent::BrowserDownloadWillBegin(_)
+            | AutomationEvent::BrowserDownloadProgress(_)
+            | AutomationEvent::DomSetChildNodes(_) => None,
+        }
+    }
+
     pub fn route_is_current(&self, conn: &CdpConnection) -> bool {
         self.route.is_current(conn)
     }

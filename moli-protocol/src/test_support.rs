@@ -25,6 +25,10 @@ impl BackgroundNavigationRequestFixture {
     pub fn is_cancelled(&self) -> bool {
         self.cancellation.is_cancelled()
     }
+
+    pub fn target_id(&self) -> &str {
+        &self.token.target_id
+    }
 }
 
 pub fn arm_background_navigation_request(
@@ -38,11 +42,19 @@ pub fn arm_background_navigation_request(
         .and_then(|context| context.active_target_id())
         .expect("the default browser target must have an active target")
         .to_owned();
+    arm_background_navigation_request_for_target(conn, &target_id, loader_id)
+}
+
+pub fn arm_background_navigation_request_for_target(
+    conn: &mut CdpConnection,
+    target_id: &str,
+    loader_id: &str,
+) -> BackgroundNavigationRequestFixture {
     let token = conn
         .browser_context
         .as_mut()
         .and_then(|context| {
-            context.start_document_navigation_for_target(&target_id, loader_id.to_owned())
+            context.start_document_navigation_for_target(target_id, loader_id.to_owned())
         })
         .expect("the active target must accept a navigation request fixture");
     let cancellation = conn
@@ -94,6 +106,24 @@ pub fn root_frame_stopped_loading_work(
     ProtocolSchedulerWork::root_frame_stopped_loading_for_test_support(
         publish_sequence,
         session_ids,
+        frame_id,
+        loader_id,
+    )
+}
+
+pub fn root_frame_stopped_loading_work_for_target(
+    publish_sequence: u64,
+    session_ids: Vec<Option<String>>,
+    browser_context_id: String,
+    target_id: String,
+    frame_id: String,
+    loader_id: String,
+) -> ProtocolSchedulerWork {
+    ProtocolSchedulerWork::root_frame_stopped_loading_for_target_test_support(
+        publish_sequence,
+        session_ids,
+        browser_context_id,
+        target_id,
         frame_id,
         loader_id,
     )

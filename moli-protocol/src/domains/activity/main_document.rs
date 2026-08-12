@@ -726,6 +726,17 @@ impl DeferredMainDocumentLoadCompletionActivity {
         self.state.owner_scope.session_id()
     }
 
+    pub(crate) fn target_id(&self) -> &str {
+        self.state
+            .navigation_activity
+            .document_navigation_token
+            .as_ref()
+            .map_or(
+                self.state.navigation_activity.state.frame_id.as_str(),
+                |token| token.target_id.as_str(),
+            )
+    }
+
     pub(crate) fn observation_id(&self) -> DeferredMainDocumentLoadObservationId {
         self.observation_id
     }

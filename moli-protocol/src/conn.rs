@@ -1468,6 +1468,56 @@ impl CdpConnection {
             .any(BrowserContext::has_inflight_background_navigation)
     }
 
+    pub fn has_inflight_background_navigation_for_target(&self, target_id: &str) -> bool {
+        let Some(browser_context_id) = self.browser_context_id_for_target(target_id) else {
+            return false;
+        };
+        self.browser_context_by_id(browser_context_id)
+            .is_some_and(|browser_context| {
+                browser_context.has_inflight_background_navigation_for_target(target_id)
+            })
+    }
+
+    fn target_id_for_session_owner(&self, session_id: Option<&str>) -> Option<String> {
+        let (browser_context_id, target_id) = self.target_owner_identity_for_session(session_id)?;
+        target_id.or_else(|| {
+            self.browser_context_by_id(&browser_context_id)
+                .and_then(BrowserContext::active_target_id)
+                .map(str::to_owned)
+        })
+    }
+
+    pub fn background_navigation_target_id_for_event(
+        &self,
+        event: &BackgroundProtocolEvent,
+    ) -> Option<String> {
+        event
+            .navigation_gate_target_id()
+            .filter(|target_id| self.browser_context_id_for_target(target_id).is_some())
+            .map(str::to_owned)
+            .or_else(|| self.target_id_for_session_owner(event.protocol_session_id()))
+    }
+
+    pub fn has_inflight_background_navigation_for_devtools_context(
+        &self,
+        context: &crate::devtools_runtime::DevToolsCommandContext,
+    ) -> bool {
+        context
+            .target_id
+            .as_ref()
+            .map(crate::devtools_runtime::DevToolsTargetId::as_str)
+            .map(str::to_owned)
+            .or_else(|| {
+                self.target_id_for_session_owner(
+                    context
+                        .session_id
+                        .as_ref()
+                        .map(crate::devtools_runtime::DevToolsSessionId::as_str),
+                )
+            })
+            .is_some_and(|target_id| self.has_inflight_background_navigation_for_target(&target_id))
+    }
+
     pub fn has_pending_document_navigation_for_session_owner(
         &self,
         session_id: Option<&str>,

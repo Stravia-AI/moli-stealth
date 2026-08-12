@@ -258,6 +258,45 @@ fn background_navigation_completion_sender_routes_explicit_session_owners() {
 }
 
 #[test]
+fn navigation_gate_resolves_websocket_events_to_their_session_target() {
+    let mut conn = CdpConnection::new();
+    let mut target_a = BrowserContext::new("BID-A".to_owned());
+    target_a.set_active_target_id("TID-A");
+    target_a.attach_active_session("SID-A");
+    let navigation_a = target_a
+        .start_document_navigation_for_active_target("LOADER-A".to_owned())
+        .expect("target A should accept a navigation request");
+    conn.browser_context = Some(target_a);
+    assert!(conn.arm_background_navigation_completion(&navigation_a, None));
+
+    let mut target_b = BrowserContext::new("BID-B".to_owned());
+    target_b.set_active_target_id("TID-B");
+    target_b.attach_active_session("SID-B");
+    conn.inactive_browser_contexts.push(target_b);
+
+    let target_b_websocket = BackgroundProtocolEvent::immediate(json!({
+        "method": "Network.webSocketClosed",
+        "sessionId": "SID-B",
+        "params": {
+            "requestId": "REQ-B",
+            "timestamp": 1.0
+        }
+    }));
+
+    assert!(target_b_websocket.should_wait_for_background_navigation_completion());
+    assert!(conn.has_inflight_background_navigation());
+    assert_eq!(
+        conn.background_navigation_target_id_for_event(&target_b_websocket)
+            .as_deref(),
+        Some("TID-B")
+    );
+    assert!(
+        !conn.has_inflight_background_navigation_for_target("TID-B"),
+        "target A's navigation must not gate target B's WebSocket events"
+    );
+}
+
+#[test]
 fn none_session_owner_route_override_scope_restores_previous_route_on_drop() {
     let mut conn = CdpConnection::new();
     let previous_route = CdpSessionRoute::ActiveTarget {

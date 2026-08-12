@@ -76,11 +76,24 @@ impl ProtocolOutputWork {
         frame_id: String,
         loader_id: String,
     ) -> Self {
-        let page_owner = TargetPageResidenceIdentity::new(
+        Self::root_frame_stopped_loading_for_target_test_support(
+            session_ids,
             "__protocol_output_test_context__".to_owned(),
-            Some("__protocol_output_test_target__".to_owned()),
-            1,
-        );
+            "__protocol_output_test_target__".to_owned(),
+            frame_id,
+            loader_id,
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(super) fn root_frame_stopped_loading_for_target_test_support(
+        session_ids: Vec<Option<String>>,
+        browser_context_id: String,
+        target_id: String,
+        frame_id: String,
+        loader_id: String,
+    ) -> Self {
+        let page_owner = TargetPageResidenceIdentity::new(browser_context_id, Some(target_id), 1);
         let attachments = session_ids
             .into_iter()
             .map(|session_id| {
@@ -95,6 +108,20 @@ impl ProtocolOutputWork {
             &self.payload,
             ProtocolOutputPayload::RootFrameStoppedLoading(_)
         )
+    }
+
+    pub(crate) fn navigation_gate_target_id(&self) -> Option<&str> {
+        match &self.payload {
+            ProtocolOutputPayload::RootFrameStoppedLoading(output) => {
+                let target_id = output.attachments.first()?.page_owner().target_id()?;
+                debug_assert!(
+                    output.attachments.iter().all(|attachment| {
+                        attachment.page_owner().target_id() == Some(target_id)
+                    })
+                );
+                Some(target_id)
+            }
+        }
     }
 
     pub(crate) fn into_background_events(

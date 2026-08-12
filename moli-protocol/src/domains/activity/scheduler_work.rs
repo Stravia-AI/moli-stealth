@@ -246,6 +246,29 @@ impl ProtocolSchedulerWork {
         )
     }
 
+    pub fn navigation_gate_target_id(&self) -> Option<&str> {
+        match &self.payload {
+            ProtocolSchedulerWorkPayload::ProtocolObservation(output) => {
+                output.navigation_gate_target_id()
+            }
+            ProtocolSchedulerWorkPayload::MainDocumentLoadOwnerAction(completion) => {
+                Some(completion.target_id())
+            }
+            ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(action) => {
+                action.owner().target_id()
+            }
+            ProtocolSchedulerWorkPayload::TopLevelLocationNavigationOwnerAction(action) => {
+                action.target_id()
+            }
+            ProtocolSchedulerWorkPayload::PopupTargetNavigationOwnerAction(action) => {
+                Some(action.target_id())
+            }
+            ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(action) => {
+                Some(action.target_id())
+            }
+        }
+    }
+
     pub fn is_top_level_location_navigation_owner_action(&self) -> bool {
         matches!(
             &self.payload,
@@ -365,6 +388,27 @@ impl ProtocolSchedulerWork {
             ProtocolWorkPublishSequence::new(publish_sequence),
             ProtocolOutputWork::root_frame_stopped_loading_for_test_support(
                 session_ids,
+                frame_id,
+                loader_id,
+            ),
+        )
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn root_frame_stopped_loading_for_target_test_support(
+        publish_sequence: u64,
+        session_ids: Vec<Option<String>>,
+        browser_context_id: String,
+        target_id: String,
+        frame_id: String,
+        loader_id: String,
+    ) -> Self {
+        Self::protocol_observation(
+            ProtocolWorkPublishSequence::new(publish_sequence),
+            ProtocolOutputWork::root_frame_stopped_loading_for_target_test_support(
+                session_ids,
+                browser_context_id,
+                target_id,
                 frame_id,
                 loader_id,
             ),

@@ -64,6 +64,16 @@ impl ProtocolDeliveryRoute {
         self.wire_session.as_deref()
     }
 
+    pub(super) fn navigation_gate_target_id(&self) -> Option<&str> {
+        self.capabilities
+            .as_deref()?
+            .root_document
+            .as_ref()?
+            .attachment()
+            .page_owner()
+            .target_id()
+    }
+
     pub(super) fn ensure_wire_session_id(&mut self, session_id: &str) {
         match self.wire_session.as_deref() {
             Some(existing) => assert_eq!(
