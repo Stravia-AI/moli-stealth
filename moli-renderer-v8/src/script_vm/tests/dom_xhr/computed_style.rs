@@ -3368,6 +3368,36 @@ fn computed_width_resolves_percent_against_parent_and_child_frame_viewport() {
 }
 
 #[test]
+fn transformed_oversized_inline_iframe_uses_its_containing_block_percentage_basis() {
+    let mut vm = new_storage_test_vm("https://inline-iframe-percentage-size.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const html = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || html.appendChild(document.createElement('body'));
+  const container = document.createElement('div');
+  container.style.cssText = 'width:auto;max-width:200px;height:100px;overflow:hidden';
+  const frame = document.createElement('iframe');
+  frame.style.cssText = 'width:calc(100% / 0.8);height:50px;border:0;transform:scale(0.8);transform-origin:0 0';
+  container.appendChild(frame);
+  body.appendChild(container);
+  const rect = frame.getBoundingClientRect();
+  return [
+    frame.offsetWidth,
+    frame.clientWidth,
+    rect.width
+  ].join('|');
+})()
+"#,
+        )
+        .expect("transformed inline iframe geometry should evaluate");
+
+    assert_eq!(result, "250|250|200");
+}
+
+#[test]
 fn computed_horizontal_margin_reads_preserve_retained_style_viewport_context() {
     let mut vm = new_storage_test_vm("https://computed-margin-retained-context.test/");
     vm.set_viewport_surface(Some(crate::protocol_types::ViewportSurface {

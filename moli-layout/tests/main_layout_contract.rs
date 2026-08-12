@@ -63,6 +63,20 @@ impl FixtureNode {
             }),
         }
     }
+
+    fn iframe(label: &'static str) -> Self {
+        Self {
+            label,
+            semantics: LayoutElementSemantics::new(
+                LayoutNamespace::Html,
+                "iframe",
+                LayoutElementCategory::Generic,
+                Some(LayoutReplacedKind::Frame),
+            ),
+            children: Vec::new(),
+            replaced_metrics: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -824,6 +838,41 @@ fn centered_grid_item_with_percent_height_and_auto_block_margin_keeps_intrinsic_
     assert_rect(
         solid_rect(&snapshot, RED),
         PaintRect::new(504.0, 68.0, 272.0, 92.0),
+    );
+}
+
+#[test]
+fn oversized_percentage_inline_iframe_is_not_clamped_to_the_line_width() {
+    let source = FixtureSource {
+        nodes: vec![
+            FixtureNode::div("root", vec![1]),
+            FixtureNode::iframe("iframe"),
+        ],
+    };
+    let mut styles = FixtureStyles::default();
+    styles.0.insert(
+        0,
+        fixed_box(LayoutDisplay::Block, 200.0, 100.0, PaintColor::TRANSPARENT),
+    );
+    styles.0.insert(
+        1,
+        resolved(
+            LayoutDisplay::Inline,
+            Style {
+                size: Size {
+                    width: percent(1.25),
+                    height: length(40.0),
+                },
+                ..Style::default()
+            },
+            BLUE,
+        ),
+    );
+
+    let snapshot = render(&source, &mut styles, PaintViewport::new(300, 200, 1.0));
+    assert_rect(
+        solid_rect(&snapshot, BLUE),
+        PaintRect::new(0.0, 0.0, 250.0, 40.0),
     );
 }
 

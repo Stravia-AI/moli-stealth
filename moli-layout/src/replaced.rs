@@ -220,13 +220,15 @@ pub(crate) fn measure_replaced(
         .min_size
         .maybe_resolve(parent_size, resolve_stylo_calc_value)
         .maybe_sub(box_sizing_adjustment);
+    // Available space is not an implicit `max-width`/`max-height`. Blink
+    // resolves a replaced atomic inline's used size before line breaking and
+    // lets an oversized result overflow; only authored max-size constraints
+    // belong in this clamp.
     let mut max_size = style
         .max_size
         .maybe_resolve(preferred_basis, resolve_stylo_calc_value)
-        .or(available_space.into_options())
-        .maybe_min(available_space.into_options())
-        .maybe_max(min_size)
-        .maybe_sub(box_sizing_adjustment);
+        .maybe_sub(box_sizing_adjustment)
+        .maybe_max(min_size);
 
     // A replaced element's intrinsic min/max-content constraint transfers a
     // definite preferred size in the opposite axis through its preferred
