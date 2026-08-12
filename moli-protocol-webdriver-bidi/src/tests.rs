@@ -7030,6 +7030,8 @@ fn serializes_devtools_navigate_result_to_bidi_response() {
                     "LOADER-1",
                 )),
                 url: "https://example.test/".to_owned(),
+                error_text: None,
+                is_download: None,
             },
         ),
     );

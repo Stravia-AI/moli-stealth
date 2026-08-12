@@ -106,7 +106,7 @@ impl XmlParser {
         let target = XmlLiveTreeSinkTarget::new_borrowed(dom_host, document_handle)?;
         let sink = XmlDocumentSink::new(target);
         let mut parser = parse_xml_document(sink, XmlParseOpts::default());
-        for chunk in html_chunks(&xml) {
+        for chunk in html_chunks(xml) {
             parser.process(XmlStrTendril::from(chunk));
         }
         parser.finish().finish_live_tree();
