@@ -2,7 +2,6 @@ use crate::page_task_queue::{
     PageIndexedDbTaskTargetEffect, PageIndexedDbTaskTurnAction, PageIndexedDbTaskTurnOutcome,
     RendererPageIndexedDbTask, RendererPageIndexedDbTaskOwner,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 use crate::script_vm::IndexedDbTaskBodyEffect;
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -109,12 +108,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageIndexedDbTaskTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::IndexedDb,
-            ),
-        ))
+        Ok(PageIndexedDbTaskTurnOutcome::new(action))
     }
 }

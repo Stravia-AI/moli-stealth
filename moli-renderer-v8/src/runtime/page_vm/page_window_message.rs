@@ -2,7 +2,6 @@ use crate::page_task_queue::{
     PageWindowMessageTargetEffect, PageWindowMessageTurnAction, PageWindowMessageTurnOutcome,
     RendererPageWindowMessageOwner, RendererPageWindowMessageTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::PageVm;
 
@@ -91,12 +90,6 @@ impl PageVm {
             task_id,
             target_effect,
         };
-        Ok(PageWindowMessageTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::WindowMessage,
-            ),
-        ))
+        Ok(PageWindowMessageTurnOutcome::new(action))
     }
 }

@@ -149,14 +149,7 @@ pub(crate) struct PageWindowDocumentTaskTurnAction<I, K> {
     pub(crate) target_effect: PageWindowDocumentTaskTargetEffect,
 }
 
-impl<I, K> PageWindowDocumentTaskTurnAction<I, K> {
-    pub(crate) const fn requires_output_capture(&self) -> bool {
-        matches!(
-            self.target_effect,
-            PageWindowDocumentTaskTargetEffect::DispatchedToCurrentOwner
-        )
-    }
-}
+impl<I, K> PageWindowDocumentTaskTurnAction<I, K> {}
 
 pub(crate) use self::broadcast_channel_delivery::{
     PageBroadcastChannelDeliveryDocumentEffect, PageBroadcastChannelDeliveryTurnAction,
@@ -510,7 +503,7 @@ pub(crate) use self::worker_host_bridge::{
     PageWorkerHostBridgeCurrentEffect, PageWorkerHostBridgeTargetEffect,
     PageWorkerHostBridgeTurnAction, PageWorkerHostBridgeTurnOutcome,
     RendererPageWorkerHostBridgeOwner, RendererPageWorkerHostBridgeTask,
-    RendererWorkerHostBridgeEventSender, worker_host_bridge_activity,
+    RendererWorkerHostBridgeEventSender, is_worker_host_bridge_message,
 };
 
 /// Minimal page-owned task queue.

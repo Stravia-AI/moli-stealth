@@ -135,14 +135,5 @@ pub(crate) struct PageViewTransitionUpdateTurnAction {
     pub(crate) target_effect: PageViewTransitionUpdateTargetEffect,
 }
 
-impl PageViewTransitionUpdateTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageViewTransitionUpdateTargetEffect::ProcessedForCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageViewTransitionUpdateTurnOutcome =
     PageOwnerTurnOutcome<PageViewTransitionUpdateTurnAction>;

@@ -85,14 +85,5 @@ pub(crate) struct PageTextTrackDefaultModeTurnAction {
     pub(crate) target_effect: PageTextTrackDefaultModeTargetEffect,
 }
 
-impl PageTextTrackDefaultModeTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageTextTrackDefaultModeTargetEffect::AppliedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageTextTrackDefaultModeTurnOutcome =
     PageOwnerTurnOutcome<PageTextTrackDefaultModeTurnAction>;

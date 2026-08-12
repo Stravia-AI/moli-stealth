@@ -224,14 +224,5 @@ pub(crate) struct PageChildModuleScriptTerminalTurnAction {
     pub(crate) target_effect: PageChildModuleScriptTerminalTargetEffect,
 }
 
-impl PageChildModuleScriptTerminalTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildModuleScriptTerminalTargetEffect::AppliedToCurrentOwner { .. }
-        )
-    }
-}
-
 pub(crate) type PageChildModuleScriptTerminalTurnOutcome =
     PageOwnerTurnOutcome<PageChildModuleScriptTerminalTurnAction>;

@@ -64,11 +64,4 @@ impl PageParserOwnedModuleContinuationTurnAction {
     pub(crate) const fn target_effect(self) -> PageParserOwnedModuleContinuationTargetEffect {
         self.target_effect
     }
-
-    pub(super) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageParserOwnedModuleContinuationTargetEffect::AppliedToSelectedOwner(_)
-        )
-    }
 }

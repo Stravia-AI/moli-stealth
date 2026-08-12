@@ -6,7 +6,6 @@ use crate::{
         RendererPageChildModulepreloadEventActionOwner,
         RendererPageChildModulepreloadEventActionTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -126,12 +125,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildModulepreloadEventActionTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildModulepreloadEventActionTurnOutcome::new(action)
     }
 }

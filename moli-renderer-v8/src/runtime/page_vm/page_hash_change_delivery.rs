@@ -3,7 +3,6 @@ use crate::page_task_queue::{
     PageHashChangeDeliveryTurnOutcome, RendererPageHashChangeDeliveryOwner,
     RendererPageHashChangeDeliveryTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -74,12 +73,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageHashChangeDeliveryTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageHashChangeDeliveryTurnOutcome::new(action))
     }
 }

@@ -81,13 +81,4 @@ pub(crate) struct PageFileReadingTurnAction {
     pub(crate) target_effect: PageFileReadingTargetEffect,
 }
 
-impl PageFileReadingTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageFileReadingTargetEffect::CallbackInvokedForCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageFileReadingTurnOutcome = PageOwnerTurnOutcome<PageFileReadingTurnAction>;

@@ -391,13 +391,6 @@ impl PageModuleReactionTurnAction {
     pub(crate) const fn target_effect(self) -> PageModuleReactionTargetEffect {
         self.target_effect
     }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageModuleReactionTargetEffect::AppliedToCurrentOwner(_)
-        )
-    }
 }
 
 pub(crate) type PageModuleReactionTurnOutcome = PageOwnerTurnOutcome<PageModuleReactionTurnAction>;

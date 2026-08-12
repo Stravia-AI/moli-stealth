@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageMediaElementEventTask, RendererPageMediaElementEventTaskId,
     RendererPageMediaElementEventTaskKind,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{
     AuthorizedCurrentWindowDocumentTask, IntoPageTaskCompletion, PageTaskCompletion, PageVm,
@@ -87,12 +86,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageMediaElementEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::MediaElementEvent,
-            ),
-        ))
+        Ok(PageMediaElementEventTurnOutcome::new(action))
     }
 }

@@ -2,9 +2,7 @@ use std::time::Instant;
 
 use anyhow::{Result, ensure};
 
-use crate::runtime::{
-    PageOwnerTurnOutcome, PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource,
-};
+use crate::runtime::PageOwnerTurnOutcome;
 
 use super::PageVm;
 
@@ -22,12 +20,6 @@ pub(in crate::runtime) enum PageTimerTurnAction {
         expected_deadline: Instant,
         actual_deadline: Option<Instant>,
     },
-}
-
-impl PageTimerTurnAction {
-    pub(in crate::runtime) const fn requires_output_capture(self) -> bool {
-        matches!(self, Self::Consumed { .. })
-    }
 }
 
 impl PageVm {
@@ -59,12 +51,6 @@ impl PageVm {
                 actual_deadline,
             }
         };
-        Ok(PageOwnerTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::Timer,
-            ),
-        ))
+        Ok(PageOwnerTurnOutcome::new(action))
     }
 }

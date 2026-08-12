@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageFileEntryFileCallbackTask, RendererPageFileEntryFileCallbackTaskId,
     RendererPageFileEntryFileCallbackTaskKind,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{
     AuthorizedCurrentWindowDocumentTask, IntoPageTaskCompletion, PageTaskCompletion, PageVm,
@@ -78,12 +77,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageFileEntryFileCallbackTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageFileEntryFileCallbackTurnOutcome::new(action))
     }
 }

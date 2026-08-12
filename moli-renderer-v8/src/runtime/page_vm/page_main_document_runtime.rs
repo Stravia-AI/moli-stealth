@@ -6,7 +6,6 @@ use crate::page_task_queue::{
     PageRuntimeScriptContinuationTargetEffect, RendererPageMainDocumentRuntimeAction,
     RendererPageMainDocumentRuntimeOwner, RendererPageMainDocumentRuntimeTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -287,14 +286,7 @@ impl PageVm {
                 }
             }
         };
-        let requires_output_capture = action.requires_output_capture();
-        Ok(PageMainDocumentRuntimeTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                requires_output_capture,
-                RendererOwnerRuntimeActivitySource::SelectedTaskOutput,
-            ),
-        ))
+        Ok(PageMainDocumentRuntimeTurnOutcome::new(action))
     }
 
     /// Test-only body executor for assertions about one action's domain

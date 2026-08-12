@@ -351,14 +351,5 @@ pub(crate) struct PageDedicatedWorkerClientEventTurnAction {
     pub(crate) target_effect: PageDedicatedWorkerClientEventTargetEffect,
 }
 
-impl PageDedicatedWorkerClientEventTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageDedicatedWorkerClientEventTargetEffect::CallbackDispatchedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageDedicatedWorkerClientEventTurnOutcome =
     PageOwnerTurnOutcome<PageDedicatedWorkerClientEventTurnAction>;

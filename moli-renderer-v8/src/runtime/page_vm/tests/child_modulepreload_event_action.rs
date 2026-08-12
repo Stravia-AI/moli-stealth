@@ -298,10 +298,6 @@ async fn replaced_realm_discards_real_modulepreload_event_and_settles_its_exact_
             outcome.action.into_page_task_completion(),
             PageTaskCompletion::NoCompletion
         ));
-        assert!(
-            !outcome.action.requires_output_capture(),
-            "discarding a stale event must not publish a child runtime output"
-        );
         assert_eq!(
             page_vm
                 .vm_mut()

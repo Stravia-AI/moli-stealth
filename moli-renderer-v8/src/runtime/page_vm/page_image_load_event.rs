@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageImageLoadEventOwner, RendererPageImageLoadEventTask,
     RendererPageImageLoadEventTaskId,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{
     AuthorizedCurrentWindowDocumentTask, IntoPageTaskCompletion, PageTaskCompletion, PageVm,
@@ -94,12 +93,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageImageLoadEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageImageLoadEventTurnOutcome::new(action))
     }
 }

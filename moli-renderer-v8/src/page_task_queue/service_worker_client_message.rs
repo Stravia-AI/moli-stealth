@@ -228,17 +228,5 @@ pub(crate) struct PageServiceWorkerClientMessageTurnAction {
     pub(crate) target_effect: PageServiceWorkerClientMessageTargetEffect,
 }
 
-impl PageServiceWorkerClientMessageTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageServiceWorkerClientMessageTargetEffect::EventDispatchedToCurrentTarget {
-                callback_effect: ServiceWorkerClientMessageCallbackEffect::CallbackDispatched,
-                ..
-            }
-        )
-    }
-}
-
 pub(crate) type PageServiceWorkerClientMessageTurnOutcome =
     PageOwnerTurnOutcome<PageServiceWorkerClientMessageTurnAction>;

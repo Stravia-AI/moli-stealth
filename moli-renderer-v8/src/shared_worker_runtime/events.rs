@@ -3,7 +3,7 @@ use std::sync::Arc;
 use tracing::trace;
 
 use crate::{
-    page_task_queue::worker_host_bridge_activity,
+    page_task_queue::is_worker_host_bridge_message,
     worker::{
         WorkerErrorPhase, WorkerParentErrorEventKind, WorkerRuntimeEvent, WorkerToParentMessage,
     },
@@ -143,7 +143,7 @@ impl RendererSharedWorkerHost {
                 }
                 self.send_host_bridge_message(message, script_url);
             }
-            message if worker_host_bridge_activity(&message).is_some() => {
+            message if is_worker_host_bridge_message(&message) => {
                 self.send_host_bridge_message(message, script_url);
             }
             WorkerToParentMessage::SubresourceNetwork(_)

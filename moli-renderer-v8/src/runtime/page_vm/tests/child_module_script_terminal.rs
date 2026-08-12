@@ -108,10 +108,6 @@ async fn real_terminal_captures_realm_and_is_discarded_after_realm_replacement()
                 current_owner: None,
             }
         );
-        assert!(
-            !outcome.action.requires_output_capture(),
-            "discarding an old realm terminal must not publish current child output"
-        );
         Ok::<_, anyhow::Error>(())
     })
     .await

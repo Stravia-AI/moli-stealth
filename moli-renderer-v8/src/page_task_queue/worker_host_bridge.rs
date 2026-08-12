@@ -10,7 +10,7 @@
 use moli_shared_worker::SharedWorkerInstanceId;
 
 use crate::{
-    runtime::{PageOwnerTurnOutcome, RendererDocumentToken, RendererOwnerResourceActivitySource},
+    runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
     types::DedicatedWorkerId,
     worker::{WorkerRuntimeEvent, WorkerToParentMessage},
 };
@@ -50,82 +50,18 @@ impl RendererPageWorkerHostBridgeOwner {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WorkerHostBridgeActivity {
-    Subresource,
-    FetchInterception,
-    FetchCancellation,
-    ContinueEvent,
-    WebSocket,
-    Console,
-}
-
-impl WorkerHostBridgeActivity {
-    const fn activity_source(self) -> RendererOwnerResourceActivitySource {
-        match self {
-            Self::Subresource => RendererOwnerResourceActivitySource::WorkerSubresource,
-            Self::FetchInterception => RendererOwnerResourceActivitySource::WorkerFetchInterception,
-            Self::FetchCancellation => RendererOwnerResourceActivitySource::WorkerFetchCancellation,
-            Self::ContinueEvent => RendererOwnerResourceActivitySource::WorkerContinueEvent,
-            Self::WebSocket => RendererOwnerResourceActivitySource::WorkerWebSocket,
-            Self::Console => RendererOwnerResourceActivitySource::Worker,
-        }
-    }
-}
-
-pub(crate) fn worker_host_bridge_activity(
-    message: &WorkerToParentMessage,
-) -> Option<WorkerHostBridgeActivity> {
-    match message {
-        WorkerToParentMessage::SubresourceNetwork(_) => Some(WorkerHostBridgeActivity::Subresource),
-        WorkerToParentMessage::PendingSubresourceFetch(_) => {
-            Some(WorkerHostBridgeActivity::FetchInterception)
-        }
-        WorkerToParentMessage::PendingSubresourceFetchCanceled { .. } => {
-            Some(WorkerHostBridgeActivity::FetchCancellation)
-        }
-        WorkerToParentMessage::SubresourceContinue(_) => {
-            Some(WorkerHostBridgeActivity::ContinueEvent)
-        }
-        WorkerToParentMessage::WebSocketSubresource(_)
-        | WorkerToParentMessage::WebSocketLifecycle(_)
-        | WorkerToParentMessage::WebSocketFrame(_) => Some(WorkerHostBridgeActivity::WebSocket),
-        WorkerToParentMessage::Console(_) => Some(WorkerHostBridgeActivity::Console),
-        WorkerToParentMessage::Post(_)
-        | WorkerToParentMessage::Error { .. }
-        | WorkerToParentMessage::RuntimeInspectorMessages(_)
-        | WorkerToParentMessage::ServiceWorkerLifecycleCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerFetchCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerFetchStreamStarted(_)
-        | WorkerToParentMessage::ServiceWorkerFetchStreamChunk(_)
-        | WorkerToParentMessage::ServiceWorkerMessageCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerNotificationCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerPushCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerPushSubscribe(_)
-        | WorkerToParentMessage::ServiceWorkerPushGetSubscription(_)
-        | WorkerToParentMessage::ServiceWorkerPushUnsubscribe(_)
-        | WorkerToParentMessage::ServiceWorkerSyncCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerPeriodicSyncCompleted(_)
-        | WorkerToParentMessage::ServiceWorkerShowNotification(_)
-        | WorkerToParentMessage::ServiceWorkerGetNotifications(_)
-        | WorkerToParentMessage::ServiceWorkerSyncRegistration(_)
-        | WorkerToParentMessage::ServiceWorkerSyncGetTags(_)
-        | WorkerToParentMessage::ServiceWorkerPeriodicSyncRegistration(_)
-        | WorkerToParentMessage::ServiceWorkerPeriodicSyncGetTags(_)
-        | WorkerToParentMessage::ServiceWorkerPeriodicSyncUnregistration(_)
-        | WorkerToParentMessage::ServiceWorkerCloseNotification(_)
-        | WorkerToParentMessage::ServiceWorkerClientMessage(_)
-        | WorkerToParentMessage::ServiceWorkerWorkerMessage(_)
-        | WorkerToParentMessage::ServiceWorkerClientQuery(_)
-        | WorkerToParentMessage::ServiceWorkerClientNavigate(_)
-        | WorkerToParentMessage::ServiceWorkerClientFocus(_)
-        | WorkerToParentMessage::ServiceWorkerClientsOpenWindow(_)
-        | WorkerToParentMessage::ServiceWorkerSkipWaiting { .. }
-        | WorkerToParentMessage::ServiceWorkerClientsClaim { .. }
-        | WorkerToParentMessage::ServiceWorkerImportedScriptLoaded { .. }
-        | WorkerToParentMessage::SharedWorkerClosed
-        | WorkerToParentMessage::SharedWorkerRuntimeInspectorResponse(_) => None,
-    }
+pub(crate) fn is_worker_host_bridge_message(message: &WorkerToParentMessage) -> bool {
+    matches!(
+        message,
+        WorkerToParentMessage::SubresourceNetwork(_)
+            | WorkerToParentMessage::PendingSubresourceFetch(_)
+            | WorkerToParentMessage::PendingSubresourceFetchCanceled { .. }
+            | WorkerToParentMessage::SubresourceContinue(_)
+            | WorkerToParentMessage::WebSocketSubresource(_)
+            | WorkerToParentMessage::WebSocketLifecycle(_)
+            | WorkerToParentMessage::WebSocketFrame(_)
+            | WorkerToParentMessage::Console(_)
+    )
 }
 
 fn worker_host_bridge_target(event: &WorkerRuntimeEvent) -> RendererWorkerHostBridgeTarget {
@@ -140,25 +76,9 @@ fn worker_host_bridge_target(event: &WorkerRuntimeEvent) -> RendererWorkerHostBr
     }
 }
 
-fn worker_host_bridge_activity_source_for_event(
-    event: &WorkerRuntimeEvent,
-) -> RendererOwnerResourceActivitySource {
-    let message = match event {
-        WorkerRuntimeEvent::Message { message, .. }
-        | WorkerRuntimeEvent::SharedWorkerMessage { message, .. } => message,
-        WorkerRuntimeEvent::HostBridgeDrained { .. } => {
-            return RendererOwnerResourceActivitySource::Worker;
-        }
-    };
-    worker_host_bridge_activity(message)
-        .map(WorkerHostBridgeActivity::activity_source)
-        .unwrap_or(RendererOwnerResourceActivitySource::Worker)
-}
-
 #[derive(Debug)]
 pub(crate) struct RendererPageWorkerHostBridgeTask {
     owner: RendererPageWorkerHostBridgeOwner,
-    activity_source: RendererOwnerResourceActivitySource,
     event: WorkerRuntimeEvent,
 }
 
@@ -169,17 +89,12 @@ impl RendererPageWorkerHostBridgeTask {
                 root_document,
                 worker_host_bridge_target(&event),
             ),
-            activity_source: worker_host_bridge_activity_source_for_event(&event),
             event,
         }
     }
 
     pub(crate) const fn owner(&self) -> RendererPageWorkerHostBridgeOwner {
         self.owner
-    }
-
-    pub(crate) const fn activity_source(&self) -> RendererOwnerResourceActivitySource {
-        self.activity_source
     }
 
     pub(crate) fn into_event(self) -> WorkerRuntimeEvent {
@@ -241,19 +156,16 @@ pub(crate) enum PageWorkerHostBridgeTargetEffect {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PageWorkerHostBridgeTurnAction {
     owner: RendererPageWorkerHostBridgeOwner,
-    activity_source: RendererOwnerResourceActivitySource,
     target_effect: PageWorkerHostBridgeTargetEffect,
 }
 
 impl PageWorkerHostBridgeTurnAction {
     pub(crate) const fn new(
         owner: RendererPageWorkerHostBridgeOwner,
-        activity_source: RendererOwnerResourceActivitySource,
         target_effect: PageWorkerHostBridgeTargetEffect,
     ) -> Self {
         Self {
             owner,
-            activity_source,
             target_effect,
         }
     }
@@ -263,20 +175,8 @@ impl PageWorkerHostBridgeTurnAction {
         self.owner
     }
 
-    #[cfg(test)]
-    pub(crate) const fn activity_source(self) -> RendererOwnerResourceActivitySource {
-        self.activity_source
-    }
-
     pub(crate) const fn target_effect(self) -> PageWorkerHostBridgeTargetEffect {
         self.target_effect
-    }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageWorkerHostBridgeTargetEffect::AppliedToCurrentOwner(_)
-        )
     }
 }
 
@@ -290,8 +190,8 @@ mod tests {
             PageRuntimeWakeSignal, RendererOwnerWakeSender, RendererOwnerWakeSource,
             RendererPageNetworkingSource, RendererPageNetworkingTask,
         },
-        runtime::{RendererDocumentToken, RendererOwnerResourceActivitySource, RendererPageToken},
-        types::{DedicatedWorkerId, PendingSubresourceContinueEvent},
+        runtime::{RendererDocumentToken, RendererPageToken},
+        types::DedicatedWorkerId,
         worker::{WorkerRuntimeEvent, WorkerToParentMessage},
     };
     use moli_shared_worker::SharedWorkerInstanceId;
@@ -355,40 +255,6 @@ mod tests {
     }
 
     #[test]
-    fn fetch_cancellation_and_continue_keep_specific_activity_sources() {
-        let mut source = RendererPageNetworkingSource::new_for_test();
-        let sender = RendererWorkerHostBridgeEventSender::new(source.route(), root_document(1));
-        let worker_id = dedicated_worker_id(7);
-
-        sender
-            .send(WorkerRuntimeEvent::Message {
-                worker_id,
-                message: Box::new(WorkerToParentMessage::PendingSubresourceFetchCanceled {
-                    fetch_id: 99,
-                    error_text: "blocked".to_owned(),
-                }),
-            })
-            .expect("fetch cancellation should send");
-        sender
-            .send(WorkerRuntimeEvent::Message {
-                worker_id,
-                message: Box::new(WorkerToParentMessage::SubresourceContinue(
-                    PendingSubresourceContinueEvent::Completed { internal_id: 100 },
-                )),
-            })
-            .expect("continue event should send");
-
-        assert_eq!(
-            pop_worker_task(&mut source).activity_source(),
-            RendererOwnerResourceActivitySource::WorkerFetchCancellation
-        );
-        assert_eq!(
-            pop_worker_task(&mut source).activity_source(),
-            RendererOwnerResourceActivitySource::WorkerContinueEvent
-        );
-    }
-
-    #[test]
     fn dedicated_worker_terminal_stays_after_the_prior_bridge_burst() {
         let mut source = RendererPageNetworkingSource::new_for_test();
         let sender = RendererWorkerHostBridgeEventSender::new(source.route(), root_document(1));
@@ -437,7 +303,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_worker_target_and_activity_are_not_inferred_from_dedicated_ids() {
+    fn shared_worker_target_is_not_inferred_from_dedicated_ids() {
         let mut source = RendererPageNetworkingSource::new_for_test();
         let sender = RendererWorkerHostBridgeEventSender::new(source.route(), root_document(1));
         let instance_id = SharedWorkerInstanceId::from_u64(7);
@@ -456,10 +322,6 @@ mod tests {
         assert_eq!(
             task.owner().target(),
             RendererWorkerHostBridgeTarget::Shared(instance_id)
-        );
-        assert_eq!(
-            task.activity_source(),
-            RendererOwnerResourceActivitySource::WorkerFetchCancellation
         );
     }
 
@@ -487,17 +349,12 @@ mod tests {
         );
         let action = super::PageWorkerHostBridgeTurnAction::new(
             owner,
-            RendererOwnerResourceActivitySource::Worker,
             super::PageWorkerHostBridgeTargetEffect::AppliedToCurrentOwner(
                 super::PageWorkerHostBridgeCurrentEffect::StateAppliedWithoutPageContext,
             ),
         );
 
         assert_eq!(action.owner(), owner);
-        assert_eq!(
-            action.activity_source(),
-            RendererOwnerResourceActivitySource::Worker
-        );
         assert_eq!(
             action.target_effect(),
             super::PageWorkerHostBridgeTargetEffect::AppliedToCurrentOwner(

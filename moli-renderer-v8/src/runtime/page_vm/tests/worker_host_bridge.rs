@@ -5,10 +5,7 @@ use crate::{
         PageWorkerHostBridgeCurrentEffect, PageWorkerHostBridgeTargetEffect,
         RendererOwnerWakeSource,
     },
-    runtime::{
-        IntoPageTaskCompletion, PageOwnerTurnOutput, PageTaskCompletion,
-        RendererOwnerResourceActivitySource,
-    },
+    runtime::{IntoPageTaskCompletion, PageTaskCompletion},
     worker::{WorkerRuntimeEvent, WorkerToParentMessage},
 };
 
@@ -235,12 +232,6 @@ Promise.resolve().then(() => {
             ),
             "PageDiagnosticsSnapshot must observe without consuming the queued Worker task"
         );
-        assert_eq!(
-            current.into_settlement().produced_output,
-            Some(PageOwnerTurnOutput::Resource(
-                RendererOwnerResourceActivitySource::Worker,
-            ))
-        );
         let current_completion = current_action.into_page_task_completion();
         assert!(matches!(
             current_completion,
@@ -294,7 +285,6 @@ Promise.resolve().then(() => {
             stale_target_action.target_effect(),
             PageWorkerHostBridgeTargetEffect::IgnoredStaleTarget
         );
-        assert_eq!(stale_target.into_settlement().produced_output, None);
         let stale_target_completion = stale_target_action.into_page_task_completion();
         assert!(matches!(
             stale_target_completion,

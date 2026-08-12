@@ -5,10 +5,7 @@ use crate::{
         PageServiceWorkerInternalTargetEffect, RendererServiceWorkerInternalTaskKind,
         ServiceWorkerInternalCallbackEffect,
     },
-    runtime::{
-        IntoPageTaskCompletion, PageOwnerTurnOutput, PageTaskCompletion,
-        RendererOwnerResourceActivitySource,
-    },
+    runtime::{IntoPageTaskCompletion, PageTaskCompletion},
     service_worker_runtime::{ServiceWorkerRegistrationSnapshot, ServiceWorkerVersionId},
     types::{
         ServiceWorkerClientFocusRequestCompletion, ServiceWorkerLifecycleClientEvent,
@@ -224,12 +221,6 @@ __serviceWorkerInternalRegistration.addEventListener("updatefound", () => {
             PageServiceWorkerInternalTargetEffect::EventDispatchPassCompletedAtCurrentRoot {
                 callback_effect: ServiceWorkerInternalCallbackEffect::CallbackBodyDispatched,
             }
-        );
-        assert_eq!(
-            outcome.into_settlement().produced_output,
-            Some(PageOwnerTurnOutput::Resource(
-                RendererOwnerResourceActivitySource::ServiceWorker,
-            ))
         );
         assert_eq!(
             page_vm

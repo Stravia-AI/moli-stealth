@@ -240,13 +240,4 @@ pub(crate) struct PageWindowMessageTurnAction {
     pub(crate) target_effect: PageWindowMessageTargetEffect,
 }
 
-impl PageWindowMessageTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageWindowMessageTargetEffect::AppliedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageWindowMessageTurnOutcome = PageOwnerTurnOutcome<PageWindowMessageTurnAction>;

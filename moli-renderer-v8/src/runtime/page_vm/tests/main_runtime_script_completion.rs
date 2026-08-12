@@ -348,17 +348,19 @@ queueMicrotask(() => { __runtimeContinuationBodyCheckpoint = "wrong"; });
 #[tokio::test(flavor = "current_thread")]
 async fn spent_runtime_script_continuation_body_is_current_but_checkpoint_free() {
     run_page_vm_async_test(async move {
-        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
-        let mut page_vm =
-            runtime_script_test_page_vm(&loader, "runtime-continuation-spent-body");
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = runtime_script_test_page_vm(&loader, "runtime-continuation-spent-body");
         page_vm.vm_mut().enqueue_runtime_script_work_continuation();
-        page_vm.vm_mut().eval_without_microtask_checkpoint_for_test(
-            r#"
+        page_vm
+            .vm_mut()
+            .eval_without_microtask_checkpoint_for_test(
+                r#"
 globalThis.__spentRuntimeContinuationBody = "pending";
 queueMicrotask(() => { __spentRuntimeContinuationBody = "wrong"; });
 "queued"
 "#,
-        )?;
+            )?;
 
         let outcome = page_vm
             .run_page_main_document_runtime_body_for_test(&loader)
@@ -377,16 +379,9 @@ queueMicrotask(() => { __spentRuntimeContinuationBody = "wrong"; });
             Some(crate::script_vm::RuntimeScriptContinuationBodyEffect::ReservationSpent),
         );
         assert_eq!(
-            outcome.into_settlement().produced_output,
-            Some(crate::runtime::PageOwnerTurnOutput::Runtime(
-                crate::runtime::RendererOwnerRuntimeActivitySource::SelectedTaskOutput,
-            )),
-            "a current spent turn must retain output capture because its selected completion can run reactions"
-        );
-        assert_eq!(
-            page_vm.vm_mut().eval_without_microtask_checkpoint_for_test(
-                "__spentRuntimeContinuationBody",
-            )?,
+            page_vm
+                .vm_mut()
+                .eval_without_microtask_checkpoint_for_test("__spentRuntimeContinuationBody",)?,
             "pending",
             "body-only execution must leave the spent turn's checkpoint to the selected dispatcher"
         );

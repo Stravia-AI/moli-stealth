@@ -218,8 +218,6 @@ pub(super) enum RendererPageTurnAdmission {
     MissingPage,
 }
 
-pub(super) type RendererPageOwnerTurnAdvance = PageOwnerTurnSettlement;
-
 pub(super) struct RendererPendingPageCreation {
     pub(super) token: RendererPageToken,
     navigation_failure_observer: PageCreationNavigationFailureObserver,
@@ -2177,7 +2175,7 @@ pub(super) async fn advance_page_owner_one_turn_via_local_task(
     entry: RendererPageLocalEntry,
     task: RendererPageSchedulerTask,
     loader: ResourceRequestClient,
-) -> (RendererPageLocalEntry, Result<RendererPageOwnerTurnAdvance>) {
+) -> (RendererPageLocalEntry, Result<()>) {
     run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
         Box::pin(async move {
             let replacement_lifecycle_snapshot = entry
@@ -2190,7 +2188,7 @@ pub(super) async fn advance_page_owner_one_turn_via_local_task(
                 .page_vm()
                 .vm()
                 .begin_ordinary_page_turn_navigation_handoff()?;
-            let settlement = entry
+            let application = entry
                 .page_vm_mut()
                 .apply_selected_page_scheduler_task(task, &loader)
                 .await;
@@ -2212,8 +2210,8 @@ pub(super) async fn advance_page_owner_one_turn_via_local_task(
                     .await
             };
 
-            match (settlement, reconciliation) {
-                (Ok(settlement), Ok(_)) => Ok(settlement),
+            match (application, reconciliation) {
+                (Ok(()), Ok(_)) => Ok(()),
                 (Err(action_error), Ok(_)) => Err(action_error),
                 (Ok(_), Err(reconciliation_error)) => Err(reconciliation_error),
                 (Err(action_error), Err(reconciliation_error)) => Err(anyhow!(

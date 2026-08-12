@@ -1,10 +1,7 @@
-use crate::{
-    page_task_queue::{
-        PageFileReadingTargetEffect, PageFileReadingTurnAction, PageFileReadingTurnOutcome,
-        RendererPageFileReadingOwner, RendererPageFileReadingTask, RendererPageFileReadingTaskId,
-        RendererPageFileReadingTaskKind,
-    },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
+use crate::page_task_queue::{
+    PageFileReadingTargetEffect, PageFileReadingTurnAction, PageFileReadingTurnOutcome,
+    RendererPageFileReadingOwner, RendererPageFileReadingTask, RendererPageFileReadingTaskId,
+    RendererPageFileReadingTaskKind,
 };
 
 use super::{
@@ -80,12 +77,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageFileReadingTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::FileReading,
-            ),
-        ))
+        Ok(PageFileReadingTurnOutcome::new(action))
     }
 }

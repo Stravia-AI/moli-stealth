@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageUserInteractionTask, RendererPageUserInteractionTaskId,
     RendererPageUserInteractionTaskKind,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{
     AuthorizedCurrentWindowDocumentTask, IntoPageTaskCompletion, PageTaskCompletion, PageVm,
@@ -89,12 +88,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageUserInteractionTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::UserInteraction,
-            ),
-        ))
+        Ok(PageUserInteractionTurnOutcome::new(action))
     }
 }

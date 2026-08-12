@@ -445,8 +445,4 @@ impl MainDocumentPostParseExecution {
             }
         }
     }
-
-    pub(crate) const fn requires_output_capture(&self) -> bool {
-        self.target().applied_to_selected_owner()
-    }
 }

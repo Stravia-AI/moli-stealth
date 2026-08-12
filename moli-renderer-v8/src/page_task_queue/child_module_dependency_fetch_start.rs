@@ -306,13 +306,5 @@ pub(crate) struct PageChildModuleDependencyFetchStartTurnAction {
     pub(crate) target_effect: PageChildModuleDependencyFetchStartTargetEffect,
 }
 
-impl PageChildModuleDependencyFetchStartTurnAction {
-    /// Network output belongs to the later typed completion. Consuming the
-    /// start task itself publishes no completed output batch.
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        false
-    }
-}
-
 pub(crate) type PageChildModuleDependencyFetchStartTurnOutcome =
     PageOwnerTurnOutcome<PageChildModuleDependencyFetchStartTurnAction>;

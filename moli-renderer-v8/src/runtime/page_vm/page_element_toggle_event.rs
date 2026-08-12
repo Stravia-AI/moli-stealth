@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageElementToggleEventOwner, RendererPageElementToggleEventTask,
     RendererPageElementToggleEventTaskId,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{
     AuthorizedCurrentWindowDocumentTask, IntoPageTaskCompletion, PageTaskCompletion, PageVm,
@@ -87,12 +86,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageElementToggleEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageElementToggleEventTurnOutcome::new(action))
     }
 }

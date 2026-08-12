@@ -142,14 +142,5 @@ pub(crate) struct PageBroadcastChannelDeliveryTurnAction {
     pub(crate) document_effect: PageBroadcastChannelDeliveryDocumentEffect,
 }
 
-impl PageBroadcastChannelDeliveryTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.document_effect,
-            PageBroadcastChannelDeliveryDocumentEffect::DispatchedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageBroadcastChannelDeliveryTurnOutcome =
     PageOwnerTurnOutcome<PageBroadcastChannelDeliveryTurnAction>;

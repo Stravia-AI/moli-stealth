@@ -107,14 +107,5 @@ pub(crate) struct PageChildNavigationCommitTurnAction {
     pub(crate) target_effect: PageChildNavigationCommitTargetEffect,
 }
 
-impl PageChildNavigationCommitTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildNavigationCommitTargetEffect::AppliedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageChildNavigationCommitTurnOutcome =
     PageOwnerTurnOutcome<PageChildNavigationCommitTurnAction>;

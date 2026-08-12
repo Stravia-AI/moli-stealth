@@ -3,7 +3,6 @@ use crate::page_task_queue::{
     PageBroadcastChannelDeliveryTurnOutcome, RendererPageBroadcastChannelDeliveryOwner,
     RendererPageBroadcastChannelDeliveryTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -88,12 +87,6 @@ impl PageVm {
             channel_id,
             document_effect,
         };
-        Ok(PageBroadcastChannelDeliveryTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::BroadcastChannel,
-            ),
-        ))
+        Ok(PageBroadcastChannelDeliveryTurnOutcome::new(action))
     }
 }

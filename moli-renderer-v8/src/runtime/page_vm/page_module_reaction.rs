@@ -1,10 +1,7 @@
-use crate::{
-    page_task_queue::{
-        PageModuleReactionApplication, PageModuleReactionFollowup, PageModuleReactionTargetEffect,
-        PageModuleReactionTurnAction, PageModuleReactionTurnOutcome,
-        RendererPageModuleReactionOwner, RendererPageModuleReactionTask,
-    },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
+use crate::page_task_queue::{
+    PageModuleReactionApplication, PageModuleReactionFollowup, PageModuleReactionTargetEffect,
+    PageModuleReactionTurnAction, PageModuleReactionTurnOutcome, RendererPageModuleReactionOwner,
+    RendererPageModuleReactionTask,
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -107,12 +104,6 @@ impl PageVm {
             PageModuleReactionTargetEffect::IgnoredStaleOwner
         };
         let action = PageModuleReactionTurnAction::new(owner, target_effect);
-        Ok(PageModuleReactionTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::ModuleReaction,
-            ),
-        ))
+        Ok(PageModuleReactionTurnOutcome::new(action))
     }
 }

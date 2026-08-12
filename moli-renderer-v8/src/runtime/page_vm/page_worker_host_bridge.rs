@@ -6,7 +6,7 @@ use crate::{
         PageWorkerHostBridgeTurnAction, PageWorkerHostBridgeTurnOutcome,
         RendererPageWorkerHostBridgeTask,
     },
-    runtime::{PageOwnerTurnOutcome, PageOwnerTurnOutput},
+    runtime::PageOwnerTurnOutcome,
     script_vm::WorkerHostBridgeBodyEffect,
 };
 
@@ -58,7 +58,6 @@ impl PageVm {
         task: RendererPageWorkerHostBridgeTask,
     ) -> Result<PageWorkerHostBridgeTurnOutcome> {
         let owner = task.owner();
-        let activity_source = task.activity_source();
         let target_effect = if owner.root_document() != self.document_lifecycle.identity().document
         {
             PageWorkerHostBridgeTargetEffect::IgnoredStaleRoot
@@ -67,10 +66,7 @@ impl PageVm {
                 .apply_current_worker_host_bridge_event_body(task.into_event())?
                 .into()
         };
-        let action = PageWorkerHostBridgeTurnAction::new(owner, activity_source, target_effect);
-        Ok(PageOwnerTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(action.requires_output_capture(), activity_source),
-        ))
+        let action = PageWorkerHostBridgeTurnAction::new(owner, target_effect);
+        Ok(PageOwnerTurnOutcome::new(action))
     }
 }

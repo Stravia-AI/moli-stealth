@@ -343,7 +343,6 @@ async fn real_dependency_start_captures_realm_and_is_discarded_after_realm_repla
             },
             "the old realm's task must never be rebound to the replacement realm"
         );
-        assert!(!outcome.action.requires_output_capture());
         assert!(
             page_vm.vm_mut().take_network_output().is_empty(),
             "discarding a start task must not synthesize a Network terminal"

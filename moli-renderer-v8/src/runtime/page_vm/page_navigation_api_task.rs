@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageNavigationApiTaskId, RendererPageNavigationApiTaskKind,
     RendererPageNavigationApiTaskOwner,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 use crate::script_vm::NavigationApiTaskBodyApplied;
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -92,12 +91,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageNavigationApiTaskTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::NavigationAndTraversal,
-            ),
-        ))
+        Ok(PageNavigationApiTaskTurnOutcome::new(action))
     }
 }

@@ -1,10 +1,7 @@
-use crate::{
-    page_task_queue::{
-        PageViewTransitionUpdateTargetEffect, PageViewTransitionUpdateTurnAction,
-        PageViewTransitionUpdateTurnOutcome, RendererPageViewTransitionUpdateOwner,
-        RendererPageViewTransitionUpdateTask,
-    },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
+use crate::page_task_queue::{
+    PageViewTransitionUpdateTargetEffect, PageViewTransitionUpdateTurnAction,
+    PageViewTransitionUpdateTurnOutcome, RendererPageViewTransitionUpdateOwner,
+    RendererPageViewTransitionUpdateTask,
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -79,12 +76,6 @@ impl PageVm {
             task_id,
             target_effect,
         };
-        Ok(PageViewTransitionUpdateTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageViewTransitionUpdateTurnOutcome::new(action))
     }
 }

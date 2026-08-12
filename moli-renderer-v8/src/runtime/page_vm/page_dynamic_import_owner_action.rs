@@ -5,7 +5,6 @@ use crate::{
         PageDynamicImportOwnerActionTurnOutcome, RendererPageDynamicImportOwnerActionOwner,
         RendererPageDynamicImportOwnerActionTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -93,13 +92,7 @@ impl PageVm {
             owner,
             document_effect,
         };
-        PageDynamicImportOwnerActionTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::SelectedTaskOutput,
-            ),
-        )
+        PageDynamicImportOwnerActionTurnOutcome::new(action)
     }
 
     /// Test-only body executor for assertions about the owner-action domain

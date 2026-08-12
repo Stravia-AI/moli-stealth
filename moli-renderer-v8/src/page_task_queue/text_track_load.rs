@@ -1,7 +1,7 @@
 use crate::{
     document_runtime::DomHandle,
     native_bridge::{TextTrackLoadSequenceId, WindowDocumentTaskTarget},
-    runtime::{PageOwnerTurnOutcome, RendererDocumentToken, RendererOwnerRuntimeActivitySource},
+    runtime::{PageOwnerTurnOutcome, RendererDocumentToken},
 };
 
 use super::{
@@ -41,17 +41,6 @@ pub(crate) enum RendererPageTextTrackLoadTaskKind {
     /// URL/fetch/CORS/HTTP failure queued as an element task on the DOM-
     /// manipulation source.
     FetchFailureTerminal,
-}
-
-impl RendererPageTextTrackLoadTaskKind {
-    pub(crate) const fn activity_source(self) -> RendererOwnerRuntimeActivitySource {
-        match self {
-            Self::Start | Self::NetworkTerminal => {
-                RendererOwnerRuntimeActivitySource::SelectedTaskOutput
-            }
-            Self::FetchFailureTerminal => RendererOwnerRuntimeActivitySource::DomManipulation,
-        }
-    }
 }
 
 pub(crate) type RendererPageTextTrackLoadOwner = RendererPageWindowDocumentTaskOwner;
@@ -142,15 +131,6 @@ pub(crate) struct PageTextTrackLoadTurnAction {
     pub(crate) task_id: RendererPageTextTrackLoadTaskId,
     pub(crate) kind: RendererPageTextTrackLoadTaskKind,
     pub(crate) target_effect: PageTextTrackLoadTargetEffect,
-}
-
-impl PageTextTrackLoadTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageTextTrackLoadTargetEffect::AppliedToCurrentOwner
-        )
-    }
 }
 
 pub(crate) type PageTextTrackLoadTurnOutcome = PageOwnerTurnOutcome<PageTextTrackLoadTurnAction>;

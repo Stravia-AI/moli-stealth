@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::{page_task_queue::RendererPageSchedulerTask, runtime::PageOwnerTurnSettlement};
+use crate::page_task_queue::RendererPageSchedulerTask;
 
 use super::{IntoPageTaskCompletion, PageVm, page_timer::PageTimerTurnAction};
 
@@ -17,13 +17,13 @@ impl PageVm {
         &mut self,
         task: RendererPageSchedulerTask,
         loader: &crate::network::ResourceRequestClient,
-    ) -> Result<PageOwnerTurnSettlement> {
+    ) -> Result<()> {
         match task {
             RendererPageSchedulerTask::DomManipulation(task) => {
                 let outcome = self.apply_selected_page_dom_manipulation_turn(task)?;
                 self.finish_selected_page_dom_manipulation_task(outcome.action, loader)
                     .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::UserInteraction(task) => {
                 let outcome = self.apply_selected_page_user_interaction_turn(task)?;
@@ -32,7 +32,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::FileReading(task) => {
                 let outcome = self.apply_selected_page_file_reading_turn(task)?;
@@ -41,7 +41,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::MiscPlatformApi(task) => {
                 let outcome = self.apply_selected_page_misc_platform_api_turn(task)?;
@@ -50,7 +50,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::NavigationAndTraversal(task) => {
                 let outcome = self.apply_selected_page_navigation_and_traversal_turn(task)?;
@@ -83,7 +83,7 @@ impl PageVm {
                         .await?;
                     }
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::RenderingUpdate(task) => {
                 let outcome = self.apply_selected_page_rendering_update_turn(task)?;
@@ -92,7 +92,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::MediaElementEvent(task) => {
                 let outcome = self.apply_selected_page_media_element_event_turn(task)?;
@@ -101,7 +101,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::DedicatedWorkerClientEvent(task) => {
                 let outcome = self.apply_selected_page_dedicated_worker_client_event_turn(task)?;
@@ -110,7 +110,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::SharedWorkerClientEvent(task) => {
                 let outcome = self.apply_selected_page_shared_worker_client_event_turn(task)?;
@@ -119,7 +119,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ServiceWorkerInternal(task) => {
                 let outcome = self.apply_selected_page_service_worker_internal_turn(task)?;
@@ -128,7 +128,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ServiceWorkerClientMessage(task) => {
                 let outcome = self.apply_selected_page_service_worker_client_message_turn(task)?;
@@ -137,14 +137,14 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::WebCryptoTask(task) => {
                 let outcome = self.apply_selected_page_webcrypto_task_turn(task)?;
                 if outcome.action.settled_current_owner() {
                     self.finish_selected_page_task_checkpoint()?;
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::IndexedDbTask(task) => {
                 let outcome = self.apply_selected_page_indexed_db_task_turn(task)?;
@@ -153,7 +153,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::OpfsTask(task) => {
                 let outcome = self.apply_selected_page_opfs_task_turn(task)?;
@@ -162,7 +162,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::InternalLoading(task) => {
                 let outcome = self.apply_selected_page_internal_loading_turn(task);
@@ -171,13 +171,13 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::MainDocumentRuntime(task) => {
                 let outcome = self
                     .apply_selected_page_main_document_runtime_turn(task, loader)
                     .await?;
-                let (action, settlement) = outcome.into_parts();
+                let action = outcome.action;
                 let completion = match action {
                     crate::page_task_queue::PageMainDocumentRuntimeTurnAction::RuntimeScriptAdmission(
                         action,
@@ -229,7 +229,7 @@ impl PageVm {
                     self.finish_selected_page_task_completion(completion, loader)
                         .await?;
                 }
-                Ok(settlement)
+                Ok(())
             }
             RendererPageSchedulerTask::ChildModuleDependencyFetchStart(task) => {
                 let outcome =
@@ -239,7 +239,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ChildModuleScriptTerminal(task) => {
                 let outcome = self.apply_selected_page_child_module_script_terminal_turn(task);
@@ -248,7 +248,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ChildModulepreloadEventAction(task) => {
                 let outcome = self.apply_selected_page_child_modulepreload_event_action_turn(task);
@@ -257,7 +257,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ChildFrameTask(task) => {
                 self.apply_selected_page_child_frame_task_turn(task, loader)
@@ -268,7 +268,7 @@ impl PageVm {
                 if outcome.action.entered_isolate() {
                     self.finish_selected_page_task_checkpoint()?;
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ModuleReaction(task) => {
                 let outcome = self.apply_selected_page_module_reaction_turn(task)?;
@@ -277,7 +277,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::WindowMessage(task) => {
                 let outcome = self.apply_selected_page_window_message_turn(task)?;
@@ -296,7 +296,7 @@ impl PageVm {
                         ..
                     } => {}
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::MessagePortDelivery {
                 task,
@@ -322,7 +322,7 @@ impl PageVm {
                         ..
                     } => {}
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::DynamicImportOwnerAction(task) => {
                 let outcome = self.apply_selected_page_dynamic_import_owner_action_turn(task);
@@ -331,7 +331,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::ModulepreloadStart(task) => {
                 let outcome = self.apply_selected_page_modulepreload_start_turn(task);
@@ -340,13 +340,13 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::Networking(task) => {
                 let outcome = self.apply_selected_page_networking_turn(task)?;
                 self.finish_selected_page_networking_task(outcome.action, loader)
                     .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::WebSocket(task) => {
                 let outcome = self.apply_selected_page_websocket_turn(task)?;
@@ -355,14 +355,14 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageSchedulerTask::Timer { deadline } => {
                 let outcome = self.apply_selected_page_timer_turn(deadline)?;
                 if matches!(outcome.action, PageTimerTurnAction::Consumed { .. }) {
                     self.finish_selected_page_callback_task(loader).await?;
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
         }
     }
@@ -372,7 +372,7 @@ impl PageVm {
         &mut self,
         task: RendererPageSchedulerTask,
         loader: crate::network::ResourceRequestClient,
-    ) -> Result<PageOwnerTurnSettlement> {
+    ) -> Result<()> {
         let local_executor = self.local_executor.clone();
         let mut page_vm_ref = super::AwaitedOwnerLocalPageVm::new(self);
         super::run_named_owner_local_task(

@@ -3403,19 +3403,16 @@ impl PageVm {
             let crate::page_task_queue::RendererPageSchedulerTask::WebSocket(task) = task else {
                 unreachable!("WebSocket descriptor must dequeue its own typed source")
             };
+            let outcome = self.apply_selected_page_websocket_turn(task)?;
+            let action = outcome.action;
+            let produced_output = !matches!(
+                action.target_effect,
+                crate::page_task_queue::PageWebSocketTargetEffect::ParkedForReadableBackpressure
+            );
             let loader = self.request_client.clone();
-            let settlement = Box::pin(self.apply_selected_page_scheduler_task(
-                crate::page_task_queue::RendererPageSchedulerTask::WebSocket(task),
-                &loader,
-            ))
-            .await?;
-            return Ok(match settlement.produced_output {
-                Some(crate::runtime::PageOwnerTurnOutput::Resource(source)) => Some(source),
-                Some(crate::runtime::PageOwnerTurnOutput::Runtime(_)) => {
-                    unreachable!("WebSocket task cannot produce runtime-activity output")
-                }
-                None => None,
-            });
+            self.finish_selected_page_task_completion(action.into_page_task_completion(), &loader)
+                .await?;
+            return Ok(produced_output.then_some(RendererOwnerResourceActivitySource::WebSocket));
         }
         Ok(None)
     }

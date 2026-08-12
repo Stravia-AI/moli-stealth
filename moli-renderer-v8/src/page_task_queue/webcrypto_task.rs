@@ -264,10 +264,6 @@ impl PageWebCryptoTaskTurnAction {
             PageWebCryptoTaskTargetEffect::SettledCurrentOwner
         )
     }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        self.settled_current_owner()
-    }
 }
 
 pub(crate) type PageWebCryptoTaskTurnOutcome = PageOwnerTurnOutcome<PageWebCryptoTaskTurnAction>;

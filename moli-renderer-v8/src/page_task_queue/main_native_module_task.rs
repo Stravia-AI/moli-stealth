@@ -77,13 +77,6 @@ impl PageMainNativeModuleTurnResult {
         self.target_effect
     }
 
-    const fn requires_output_capture(&self) -> bool {
-        matches!(
-            self.target_effect,
-            PageMainNativeModuleTargetEffect::AppliedToSelectedOwner(_)
-        )
-    }
-
     fn into_parts(
         self,
     ) -> (
@@ -121,10 +114,6 @@ impl PageDynamicModuleJobTurnAction {
         self.0.target_effect()
     }
 
-    pub(super) const fn requires_output_capture(&self) -> bool {
-        self.0.requires_output_capture()
-    }
-
     pub(crate) fn into_parts(
         self,
     ) -> (
@@ -160,10 +149,6 @@ impl PageNativeModuleOwnerEventTurnAction {
     #[cfg(test)]
     pub(crate) const fn target_effect(&self) -> PageMainNativeModuleTargetEffect {
         self.0.target_effect()
-    }
-
-    pub(super) const fn requires_output_capture(&self) -> bool {
-        self.0.requires_output_capture()
     }
 
     pub(crate) fn into_parts(

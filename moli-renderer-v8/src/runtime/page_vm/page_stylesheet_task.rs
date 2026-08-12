@@ -1,14 +1,8 @@
-use crate::{
-    page_task_queue::{
-        PageConnectedStyleEventTargetEffect, PageConnectedStyleEventTurnAction,
-        PageConnectedStyleEventTurnOutcome, PageStylesheetNetworkingTargetEffect,
-        PageStylesheetNetworkingTurnAction, PageStylesheetNetworkingTurnOutcome,
-        RendererPageConnectedStyleEventTask, RendererPageStylesheetNetworkingTask,
-    },
-    runtime::{
-        PageOwnerTurnOutput, RendererOwnerResourceActivitySource,
-        RendererOwnerRuntimeActivitySource,
-    },
+use crate::page_task_queue::{
+    PageConnectedStyleEventTargetEffect, PageConnectedStyleEventTurnAction,
+    PageConnectedStyleEventTurnOutcome, PageStylesheetNetworkingTargetEffect,
+    PageStylesheetNetworkingTurnAction, PageStylesheetNetworkingTurnOutcome,
+    RendererPageConnectedStyleEventTask, RendererPageStylesheetNetworkingTask,
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -65,14 +59,12 @@ impl PageVm {
                 owner,
                 target_effect,
             },
-            PageOwnerTurnOutput::resource_if(true, RendererOwnerResourceActivitySource::Stylesheet),
         ))
     }
 
     pub(in crate::runtime) fn apply_selected_page_connected_style_event_turn(
         &mut self,
         task: RendererPageConnectedStyleEventTask,
-        activity_source: RendererOwnerRuntimeActivitySource,
     ) -> anyhow::Result<PageConnectedStyleEventTurnOutcome> {
         let owner = task.owner();
         let root_document = self.document_lifecycle.identity().document;
@@ -83,9 +75,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageConnectedStyleEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(action.requires_output_capture(), activity_source),
-        ))
+        Ok(PageConnectedStyleEventTurnOutcome::new(action))
     }
 }

@@ -168,14 +168,5 @@ pub(crate) struct PageStorageEventDeliveryTurnAction {
     pub(crate) target_effect: PageStorageEventDeliveryTargetEffect,
 }
 
-impl PageStorageEventDeliveryTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageStorageEventDeliveryTargetEffect::DispatchedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageStorageEventDeliveryTurnOutcome =
     PageOwnerTurnOutcome<PageStorageEventDeliveryTurnAction>;

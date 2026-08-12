@@ -4,7 +4,6 @@ use crate::{
         PageSharedWorkerClientEventTurnOutcome, RendererPageSharedWorkerClientEventOwner,
         RendererPageSharedWorkerClientEventTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
     script_vm::{SharedWorkerClientEventBodyEffect, SharedWorkerErrorDispatchEffect},
 };
 
@@ -107,12 +106,6 @@ impl PageVm {
             event_kind,
             target_effect,
         };
-        Ok(PageSharedWorkerClientEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::SharedWorker,
-            ),
-        ))
+        Ok(PageSharedWorkerClientEventTurnOutcome::new(action))
     }
 }

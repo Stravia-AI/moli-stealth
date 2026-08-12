@@ -38,12 +38,9 @@ impl PageVm {
         } else {
             PageMainParserContinuationTargetEffect::DiscardedStaleOrInactiveParser
         };
-        PageOwnerTurnOutcome::new(
-            PageMainParserContinuationTurnAction {
-                owner,
-                target_effect,
-            },
-            None,
-        )
+        PageOwnerTurnOutcome::new(PageMainParserContinuationTurnAction {
+            owner,
+            target_effect,
+        })
     }
 }

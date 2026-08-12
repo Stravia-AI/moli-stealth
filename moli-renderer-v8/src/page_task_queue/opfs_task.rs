@@ -241,15 +241,12 @@ pub(crate) struct PageOpfsTaskTurnAction {
 }
 
 impl PageOpfsTaskTurnAction {
+    #[cfg(test)]
     pub(crate) const fn settled_current_owner(self) -> bool {
         matches!(
             self.target_effect,
             PageOpfsTaskTargetEffect::SettledCurrentOwner
         )
-    }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        self.settled_current_owner()
     }
 }
 

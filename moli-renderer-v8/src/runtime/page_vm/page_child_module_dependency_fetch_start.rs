@@ -86,10 +86,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        debug_assert!(!action.requires_output_capture());
-        Ok(PageChildModuleDependencyFetchStartTurnOutcome::new(
-            action, None,
-        ))
+        Ok(PageChildModuleDependencyFetchStartTurnOutcome::new(action))
     }
 
     #[cfg(test)]

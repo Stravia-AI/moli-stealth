@@ -1,10 +1,7 @@
-use crate::{
-    page_task_queue::{
-        PageChildNavigationCommitTargetEffect, PageChildNavigationCommitTurnAction,
-        PageChildNavigationCommitTurnOutcome, RendererPageChildNavigationCommitOwner,
-        RendererPageChildNavigationCommitTask,
-    },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
+use crate::page_task_queue::{
+    PageChildNavigationCommitTargetEffect, PageChildNavigationCommitTurnAction,
+    PageChildNavigationCommitTurnOutcome, RendererPageChildNavigationCommitOwner,
+    RendererPageChildNavigationCommitTask,
 };
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
@@ -85,13 +82,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageChildNavigationCommitTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::NavigationAndTraversal,
-            ),
-        ))
+        Ok(PageChildNavigationCommitTurnOutcome::new(action))
     }
 
     #[cfg(test)]

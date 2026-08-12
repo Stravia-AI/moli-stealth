@@ -241,14 +241,6 @@ pub(crate) struct PageModulepreloadStartTurnAction {
     pub(crate) document_effect: PageModulepreloadStartDocumentEffect,
 }
 
-impl PageModulepreloadStartTurnAction {
-    /// Starting or joining a fetch can schedule later work, but this action
-    /// does not itself publish a completed runtime/resource output batch.
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        false
-    }
-}
-
 pub(crate) type PageModulepreloadStartTurnOutcome =
     PageOwnerTurnOutcome<PageModulepreloadStartTurnAction>;
 

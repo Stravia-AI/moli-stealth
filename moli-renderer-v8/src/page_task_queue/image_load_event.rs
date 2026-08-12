@@ -110,21 +110,6 @@ pub(crate) enum PageImageLoadEventStalePayloadEffect {
     SettledExactPayloadAndProcessedDecodeRequests,
 }
 
-impl PageImageLoadEventTargetEffect {
-    const fn requires_output_capture(self) -> bool {
-        matches!(
-            self,
-            Self::DispatchedToCurrentOwner
-                | Self::SettledCurrentOwnerWithoutEvent
-                | Self::DiscardedStaleOwner {
-                    stale_payload_effect:
-                        PageImageLoadEventStalePayloadEffect::SettledExactPayloadAndProcessedDecodeRequests,
-                    ..
-                }
-        )
-    }
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PageImageLoadEventTurnAction {
     pub(crate) owner: RendererPageImageLoadEventOwner,
@@ -133,39 +118,4 @@ pub(crate) struct PageImageLoadEventTurnAction {
     pub(crate) target_effect: PageImageLoadEventTargetEffect,
 }
 
-impl PageImageLoadEventTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        self.target_effect.requires_output_capture()
-    }
-}
-
 pub(crate) type PageImageLoadEventTurnOutcome = PageOwnerTurnOutcome<PageImageLoadEventTurnAction>;
-
-#[cfg(test)]
-mod tests {
-    use super::{PageImageLoadEventStalePayloadEffect, PageImageLoadEventTargetEffect};
-
-    #[test]
-    fn only_a_settled_stale_image_payload_publishes_runtime_output() {
-        assert!(
-            PageImageLoadEventTargetEffect::DiscardedStaleOwner {
-                current_owner: None,
-                stale_payload_effect:
-                    PageImageLoadEventStalePayloadEffect::SettledExactPayloadAndProcessedDecodeRequests,
-            }
-            .requires_output_capture()
-        );
-        for stale_payload_effect in [
-            PageImageLoadEventStalePayloadEffect::ForeignPageVmStatePreserved,
-            PageImageLoadEventStalePayloadEffect::NoSettledExactPayload,
-        ] {
-            assert!(
-                !PageImageLoadEventTargetEffect::DiscardedStaleOwner {
-                    current_owner: None,
-                    stale_payload_effect,
-                }
-                .requires_output_capture()
-            );
-        }
-    }
-}

@@ -358,10 +358,7 @@ document.head.appendChild(style);
 
         let task = take_next_style_element_event_task_for_test(&mut page_vm)
             .expect("one exact connected-style event task should be ready");
-        let body = page_vm.apply_selected_page_connected_style_event_turn(
-            task,
-            crate::runtime::RendererOwnerRuntimeActivitySource::Networking,
-        )?;
+        let body = page_vm.apply_selected_page_connected_style_event_turn(task)?;
         assert_eq!(
             body.action.target_effect,
             PageConnectedStyleEventTargetEffect::DispatchedToCurrentOwner {
@@ -523,10 +520,7 @@ async fn failed_inline_import_transitions_from_null_to_an_empty_child_stylesheet
 
         let task = take_next_style_element_event_task_for_test(&mut page_vm)
             .expect("the failed inline graph must publish one style event");
-        let body = page_vm.apply_selected_page_connected_style_event_turn(
-            task,
-            crate::runtime::RendererOwnerRuntimeActivitySource::Networking,
-        )?;
+        let body = page_vm.apply_selected_page_connected_style_event_turn(task)?;
         page_vm
             .finish_selected_page_networking_task(
                 PageNetworkingTurnAction::StyleElementEvent(body.action),
@@ -1064,10 +1058,7 @@ document.head.appendChild(style);
 
         let task = take_next_style_element_event_task_for_test(&mut page_vm)
             .expect("one exact connected-style event task should be ready");
-        let body = page_vm.apply_selected_page_connected_style_event_turn(
-            task,
-            crate::runtime::RendererOwnerRuntimeActivitySource::Networking,
-        )?;
+        let body = page_vm.apply_selected_page_connected_style_event_turn(task)?;
         assert_eq!(
             body.action.target_effect,
             PageConnectedStyleEventTargetEffect::DispatchedToCurrentOwner {

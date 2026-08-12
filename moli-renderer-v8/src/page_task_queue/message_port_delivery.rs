@@ -239,16 +239,5 @@ pub(crate) struct PageMessagePortDeliveryTurnAction {
     pub(crate) target_effect: PageMessagePortDeliveryTargetEffect,
 }
 
-impl PageMessagePortDeliveryTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageMessagePortDeliveryTargetEffect::ConsumedByCurrentOwner {
-                callback_dispatched: true
-            }
-        )
-    }
-}
-
 pub(crate) type PageMessagePortDeliveryTurnOutcome =
     PageOwnerTurnOutcome<PageMessagePortDeliveryTurnAction>;

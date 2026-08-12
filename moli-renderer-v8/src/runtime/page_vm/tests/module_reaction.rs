@@ -44,8 +44,6 @@ Promise.resolve().then(() => {
             action.target_effect(),
             PageModuleReactionTargetEffect::DiscardedMissingReaction
         );
-        assert_eq!(outcome.into_settlement().produced_output, None);
-
         let completion = action.into_page_task_completion();
         assert!(matches!(&completion, PageTaskCompletion::NoCompletion));
         // This test intentionally stops at the body/result boundary. A

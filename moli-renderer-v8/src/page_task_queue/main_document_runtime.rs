@@ -501,13 +501,6 @@ impl PageMainDocumentRuntimeActionResult {
     pub(crate) const fn target_effect(self) -> PageMainDocumentRuntimeTargetEffect {
         self.target_effect
     }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageMainDocumentRuntimeTargetEffect::AppliedToCurrentOwner
-        )
-    }
 }
 
 /// Exact-Document effect of one selected runtime-script admission.
@@ -547,13 +540,6 @@ impl PageRuntimeScriptAdmissionTurnAction {
     pub(crate) const fn target_effect(self) -> PageRuntimeScriptAdmissionTargetEffect {
         self.target_effect
     }
-
-    const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageRuntimeScriptAdmissionTargetEffect::AdmittedToCurrentOwner
-        )
-    }
 }
 
 /// Exact-Document effect of one selected runtime-script continuation.
@@ -589,13 +575,6 @@ impl PageRuntimeScriptContinuationTurnAction {
 
     pub(crate) const fn target_effect(self) -> PageRuntimeScriptContinuationTargetEffect {
         self.target_effect
-    }
-
-    const fn requires_output_capture(self) -> bool {
-        !matches!(
-            self.target_effect,
-            PageRuntimeScriptContinuationTargetEffect::DiscardedStaleOwner
-        )
     }
 }
 
@@ -678,7 +657,7 @@ impl PageMainDocumentPostParseTurnAction {
     )> {
         match self {
             Self::Executed { owner, execution } => Some((owner, execution)),
-            Self::CompletedByFamily(_) => None,
+            Self::CompletedByFamily(_result) => None,
         }
     }
 
@@ -701,13 +680,6 @@ impl PageMainDocumentPostParseTurnAction {
                 }
             }
             Self::CompletedByFamily(result) => result.target_effect(),
-        }
-    }
-
-    const fn requires_output_capture(&self) -> bool {
-        match self {
-            Self::Executed { execution, .. } => execution.requires_output_capture(),
-            Self::CompletedByFamily(result) => result.requires_output_capture(),
         }
     }
 }
@@ -939,19 +911,6 @@ impl PageMainDocumentRuntimeTurnAction {
                 PageRuntimeScriptContinuationTargetEffect::DiscardedStaleOwner => None,
             },
             _ => None,
-        }
-    }
-
-    pub(crate) const fn requires_output_capture(&self) -> bool {
-        match self {
-            Self::RuntimeScriptAdmission(action) => action.requires_output_capture(),
-            Self::ParserAsyncModuleAdmission(action) => action.requires_output_capture(),
-            Self::RuntimeScriptContinuation(action) => action.requires_output_capture(),
-            Self::DynamicModuleJob(action) => action.requires_output_capture(),
-            Self::NativeModuleOwnerEvent(action) => action.requires_output_capture(),
-            Self::PostParseWork(action) => action.requires_output_capture(),
-            Self::RuntimeOwnedModuleContinuation(action) => action.0.requires_output_capture(),
-            Self::ParserOwnedModuleContinuation(action) => action.requires_output_capture(),
         }
     }
 }

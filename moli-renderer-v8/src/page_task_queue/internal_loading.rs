@@ -264,16 +264,5 @@ pub(crate) struct PageInternalLoadingTurnAction {
     pub(crate) target_effect: PageInternalLoadingTargetEffect,
 }
 
-impl PageInternalLoadingTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageInternalLoadingTargetEffect::AppliedToCurrentOwner {
-                effect: PageOwnedInternalLoadingTaskEffect::MetaRefreshNavigationActivated,
-            }
-        )
-    }
-}
-
 pub(crate) type PageInternalLoadingTurnOutcome =
     PageOwnerTurnOutcome<PageInternalLoadingTurnAction>;

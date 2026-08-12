@@ -6,9 +6,7 @@ use crate::{
 };
 
 use super::{PageRuntimeWakeSignal, RendererOwnerWakeSender};
-use crate::runtime::{
-    PageOwnerTurnOutcome, PageOwnerTurnOutput, RendererOwnerResourceActivitySource,
-};
+use crate::runtime::PageOwnerTurnOutcome;
 
 const WEBSOCKET_EVENT_QUEUE_CAPACITY: usize = 1;
 
@@ -144,14 +142,7 @@ pub(crate) struct PageWebSocketTurnAction {
 
 impl PageWebSocketTurnAction {
     pub(crate) const fn outcome(self) -> PageWebSocketTurnOutcome {
-        let produced_output = PageOwnerTurnOutput::resource_if(
-            !matches!(
-                self.target_effect,
-                PageWebSocketTargetEffect::ParkedForReadableBackpressure
-            ),
-            RendererOwnerResourceActivitySource::WebSocket,
-        );
-        PageOwnerTurnOutcome::new(self, produced_output)
+        PageOwnerTurnOutcome::new(self)
     }
 }
 

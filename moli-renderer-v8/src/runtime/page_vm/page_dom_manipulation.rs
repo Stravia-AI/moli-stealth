@@ -34,10 +34,7 @@ impl PageVm {
                 .apply_selected_page_popup_load_event_turn(task)
                 .map(|outcome| outcome.map_action(PageDomManipulationTurnAction::PopupLoadEvent)),
             RendererPageDomManipulationTask::ConnectedStyleEvent(task) => self
-                .apply_selected_page_connected_style_event_turn(
-                    task,
-                    crate::runtime::RendererOwnerRuntimeActivitySource::DomManipulation,
-                )
+                .apply_selected_page_connected_style_event_turn(task)
                 .map(|outcome| {
                     outcome.map_action(PageDomManipulationTurnAction::ConnectedStyleEvent)
                 }),

@@ -22,7 +22,7 @@ impl PageVm {
                 self.finish_selected_page_resource_completion_task(action)?;
             }
             PageNetworkingTurnAction::StyleElementEvent(action) => {
-                let connected_style_event_settled_current_owner = action.requires_output_capture();
+                let connected_style_event_settled_current_owner = action.settled_current_owner();
                 self.finish_selected_page_task_completion(
                     action.into_page_task_completion(),
                     loader,

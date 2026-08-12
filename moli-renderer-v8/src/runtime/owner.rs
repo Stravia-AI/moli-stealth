@@ -4019,7 +4019,7 @@ impl RendererOwnerHandle {
         // belongs after the load boundary of the Document that authorized
         // this owner turn, never whichever Document is current at settlement.
         let turn_source_document = entry.page_vm().document_lifecycle.identity();
-        let failed_turn_output_ordering = if matches!(
+        let output_ordering = if matches!(
             &scheduled_task,
             crate::page_task_queue::RendererPageSchedulerTask::Timer { .. }
         ) {
@@ -4035,50 +4035,42 @@ impl RendererOwnerHandle {
             advance_page_owner_one_turn_via_local_task(executor, entry, scheduled_task, loader)
                 .await;
 
-        let settlement = match advance_result {
-            Ok(settlement) => settlement,
-            Err(error) => {
-                let has_pending_document_lifecycle_turn =
-                    has_pending_document_lifecycle_turn_on_entry(&mut entry);
-                let output = entry
-                    .page_vm_mut()
-                    .settle_renderer_output_publication()
-                    .map(|output| output.with_ordering(failed_turn_output_ordering));
-                self.restore_live_page_entry(token, entry);
-                if let Some(output) = output {
-                    self.publish_renderer_output(output);
-                }
-                let readiness = page_turn_readiness_after_restore_on_bound_owner_local_store(token);
-                let next_turn = readiness
-                    .map(|readiness| readiness.next_turn(has_pending_document_lifecycle_turn))
-                    .unwrap_or(PageOwnerNextTurn::None);
-                tracing::debug!(
-                    source = source_label,
-                    page_id = token.page_id.as_u64(),
-                    ?readiness,
-                    ?next_turn,
-                    "Page scheduler turn failed: {error}"
-                );
-                match next_turn {
-                    PageOwnerNextTurn::Ordinary => self.signal_internal_page_turn_source(
-                        token,
-                        RendererOwnerWakeSource::SchedulerContinuation,
-                    ),
-                    PageOwnerNextTurn::DocumentLifecycle => {
-                        self.signal_internal_document_lifecycle_turn(token);
-                    }
-                    PageOwnerNextTurn::None => {}
-                }
-                return RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()));
+        if let Err(error) = advance_result {
+            let has_pending_document_lifecycle_turn =
+                has_pending_document_lifecycle_turn_on_entry(&mut entry);
+            let output = entry
+                .page_vm_mut()
+                .settle_renderer_output_publication()
+                .map(|output| output.with_ordering(output_ordering));
+            self.restore_live_page_entry(token, entry);
+            if let Some(output) = output {
+                self.publish_renderer_output(output);
             }
-        };
+            let readiness = page_turn_readiness_after_restore_on_bound_owner_local_store(token);
+            let next_turn = readiness
+                .map(|readiness| readiness.next_turn(has_pending_document_lifecycle_turn))
+                .unwrap_or(PageOwnerNextTurn::None);
+            tracing::debug!(
+                source = source_label,
+                page_id = token.page_id.as_u64(),
+                ?readiness,
+                ?next_turn,
+                "Page scheduler turn failed: {error}"
+            );
+            match next_turn {
+                PageOwnerNextTurn::Ordinary => self.signal_internal_page_turn_source(
+                    token,
+                    RendererOwnerWakeSource::SchedulerContinuation,
+                ),
+                PageOwnerNextTurn::DocumentLifecycle => {
+                    self.signal_internal_document_lifecycle_turn(token);
+                }
+                PageOwnerNextTurn::None => {}
+            }
+            return RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()));
+        }
 
-        self.finish_page_turn(
-            token,
-            entry,
-            source_label,
-            settlement.renderer_output_ordering(turn_source_document),
-        )
+        self.finish_page_turn(token, entry, source_label, output_ordering)
     }
 
     async fn run_one_owner_maintenance_turn(

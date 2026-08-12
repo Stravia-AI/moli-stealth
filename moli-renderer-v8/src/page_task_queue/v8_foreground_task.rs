@@ -164,10 +164,6 @@ impl PageV8ForegroundTaskTurnAction {
     pub(crate) const fn entered_isolate(self) -> bool {
         matches!(self.effect, PageV8ForegroundTaskEffect::Ran)
     }
-
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(self.effect, PageV8ForegroundTaskEffect::Ran)
-    }
 }
 
 pub(crate) type PageV8ForegroundTaskTurnOutcome =

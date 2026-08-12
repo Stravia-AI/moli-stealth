@@ -744,6 +744,7 @@ impl FrameDocumentDynamicImportTerminalOutcome {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn made_progress(self) -> bool {
         self.terminal_work_consumed
             || self.missing_joined_client

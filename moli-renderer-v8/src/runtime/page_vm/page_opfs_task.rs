@@ -2,7 +2,6 @@ use crate::page_task_queue::{
     PageOpfsTaskTargetEffect, PageOpfsTaskTurnAction, PageOpfsTaskTurnOutcome,
     RendererPageOpfsTask, RendererPageOpfsTaskOwner,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -85,12 +84,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageOpfsTaskTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::StorageIo,
-            ),
-        ))
+        Ok(PageOpfsTaskTurnOutcome::new(action))
     }
 }

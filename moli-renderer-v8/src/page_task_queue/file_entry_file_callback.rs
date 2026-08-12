@@ -90,14 +90,5 @@ pub(crate) struct PageFileEntryFileCallbackTurnAction {
     pub(crate) target_effect: PageFileEntryFileCallbackTargetEffect,
 }
 
-impl PageFileEntryFileCallbackTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageFileEntryFileCallbackTargetEffect::CallbackInvokedForCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageFileEntryFileCallbackTurnOutcome =
     PageOwnerTurnOutcome<PageFileEntryFileCallbackTurnAction>;

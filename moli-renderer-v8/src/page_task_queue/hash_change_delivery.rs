@@ -134,14 +134,5 @@ pub(crate) struct PageHashChangeDeliveryTurnAction {
     pub(crate) target_effect: PageHashChangeDeliveryTargetEffect,
 }
 
-impl PageHashChangeDeliveryTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageHashChangeDeliveryTargetEffect::DispatchedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageHashChangeDeliveryTurnOutcome =
     PageOwnerTurnOutcome<PageHashChangeDeliveryTurnAction>;

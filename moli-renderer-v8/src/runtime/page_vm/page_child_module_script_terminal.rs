@@ -5,7 +5,6 @@ use crate::{
         PageChildModuleScriptTerminalTurnOutcome, RendererPageChildModuleScriptTerminalOwner,
         RendererPageChildModuleScriptTerminalTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
 };
 
 use super::PageVm;
@@ -91,13 +90,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildModuleScriptTerminalTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildModuleScriptTerminalTurnOutcome::new(action)
     }
 
     #[cfg(test)]

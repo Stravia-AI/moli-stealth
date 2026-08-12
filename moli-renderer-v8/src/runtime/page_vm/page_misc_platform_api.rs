@@ -1,11 +1,7 @@
-use crate::{
-    page_task_queue::{
-        PageMiscPlatformApiTargetEffect, PageMiscPlatformApiTurnAction,
-        PageMiscPlatformApiTurnOutcome, RendererPageMiscPlatformApiOwner,
-        RendererPageMiscPlatformApiTask, RendererPageMiscPlatformApiTaskId,
-        RendererPageMiscPlatformApiTaskKind,
-    },
-    runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource},
+use crate::page_task_queue::{
+    PageMiscPlatformApiTargetEffect, PageMiscPlatformApiTurnAction, PageMiscPlatformApiTurnOutcome,
+    RendererPageMiscPlatformApiOwner, RendererPageMiscPlatformApiTask,
+    RendererPageMiscPlatformApiTaskId, RendererPageMiscPlatformApiTaskKind,
 };
 
 use super::{
@@ -79,12 +75,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageMiscPlatformApiTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::MiscPlatformApi,
-            ),
-        ))
+        Ok(PageMiscPlatformApiTurnOutcome::new(action))
     }
 }

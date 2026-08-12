@@ -248,14 +248,5 @@ pub(crate) struct PageServiceWorkerInternalTurnAction {
     pub(crate) target_effect: PageServiceWorkerInternalTargetEffect,
 }
 
-impl PageServiceWorkerInternalTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        !matches!(
-            self.target_effect,
-            PageServiceWorkerInternalTargetEffect::DiscardedStaleRoot { .. }
-        )
-    }
-}
-
 pub(crate) type PageServiceWorkerInternalTurnOutcome =
     PageOwnerTurnOutcome<PageServiceWorkerInternalTurnAction>;

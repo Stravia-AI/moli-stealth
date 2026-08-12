@@ -2,7 +2,6 @@ use crate::page_task_queue::{
     PageV8ForegroundTaskEffect, PageV8ForegroundTaskTurnAction, PageV8ForegroundTaskTurnOutcome,
     RendererPageV8ForegroundTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::PageVm;
 
@@ -18,12 +17,6 @@ impl PageVm {
             PageV8ForegroundTaskEffect::IgnoredInactiveIsolateRegistration
         };
         let action = PageV8ForegroundTaskTurnAction { owner, effect };
-        Ok(PageV8ForegroundTaskTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::V8ForegroundTask,
-            ),
-        ))
+        Ok(PageV8ForegroundTaskTurnOutcome::new(action))
     }
 }

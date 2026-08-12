@@ -221,15 +221,5 @@ pub(crate) struct PageChildModulepreloadEventActionTurnAction {
     pub(crate) target_effect: PageChildModulepreloadEventActionTargetEffect,
 }
 
-impl PageChildModulepreloadEventActionTurnAction {
-    pub(crate) fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildModulepreloadEventActionTargetEffect::AppliedToCurrentOwner { outcome }
-                if outcome.event_was_dispatched()
-        )
-    }
-}
-
 pub(crate) type PageChildModulepreloadEventActionTurnOutcome =
     PageOwnerTurnOutcome<PageChildModulepreloadEventActionTurnAction>;

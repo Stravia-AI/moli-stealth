@@ -178,14 +178,5 @@ pub(crate) struct PageNavigationApiTaskTurnAction {
     pub(crate) target_effect: PageNavigationApiTaskTargetEffect,
 }
 
-impl PageNavigationApiTaskTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        !matches!(
-            self.target_effect,
-            PageNavigationApiTaskTargetEffect::DiscardedStaleOwner { .. }
-        )
-    }
-}
-
 pub(crate) type PageNavigationApiTaskTurnOutcome =
     PageOwnerTurnOutcome<PageNavigationApiTaskTurnAction>;

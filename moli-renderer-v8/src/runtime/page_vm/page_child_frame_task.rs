@@ -10,10 +10,6 @@ use crate::page_task_queue::{
     PageChildRealmMaterializationTurnAction, PageChildRealmMaterializationTurnOutcome,
     RendererPageChildFrameTask, RendererPageChildFrameTaskOwner, RendererPageChildFrameTaskTarget,
 };
-use crate::runtime::{
-    PageOwnerTurnOutput, PageOwnerTurnSettlement, RendererOwnerResourceActivitySource,
-    RendererOwnerRuntimeActivitySource,
-};
 use crate::script_vm::{
     ChildDocumentLifecycleRunOutcome, ChildDocumentScriptActivity,
     ChildDocumentScriptReadyRunOutcome, ChildHostLoadRunOutcome,
@@ -194,13 +190,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildDocumentLifecycleTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildDocumentLifecycleTurnOutcome::new(action)
     }
 
     fn current_page_child_host_load_owner(
@@ -263,13 +253,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildHostLoadTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildHostLoadTurnOutcome::new(action)
     }
 
     fn current_page_child_realm_materialization_owner(
@@ -337,13 +321,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildRealmMaterializationTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::ChildRealmMaterialization,
-            ),
-        )
+        PageChildRealmMaterializationTurnOutcome::new(action)
     }
 
     fn current_page_child_document_script_ready_owner(
@@ -423,13 +401,7 @@ impl PageVm {
             task_id,
             target_effect,
         };
-        Ok(PageChildDocumentScriptReadyTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        ))
+        Ok(PageChildDocumentScriptReadyTurnOutcome::new(action))
     }
 
     fn current_page_child_classic_source_load_owner(
@@ -487,13 +459,7 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildClassicScriptSourceLoadTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildClassicScriptSourceLoadTurnOutcome::new(action)
     }
 
     fn current_page_child_parser_module_root_start_owner(
@@ -545,25 +511,19 @@ impl PageVm {
             owner,
             target_effect,
         };
-        PageChildParserModuleRootStartTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ChildDocument,
-            ),
-        )
+        PageChildParserModuleRootStartTurnOutcome::new(action)
     }
 
     pub(in crate::runtime) async fn apply_selected_page_child_frame_task_turn(
         &mut self,
         task: RendererPageChildFrameTask,
         loader: &crate::network::ResourceRequestClient,
-    ) -> anyhow::Result<PageOwnerTurnSettlement> {
+    ) -> anyhow::Result<()> {
         match task.owner().target() {
             RendererPageChildFrameTaskTarget::RealmMaterialization(_) => {
                 let outcome = self.apply_selected_page_child_realm_materialization_turn(task);
                 self.finish_selected_page_child_realm_materialization(outcome.action)?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageChildFrameTaskTarget::DocumentLifecycle(_) => {
                 let outcome = self.apply_selected_page_child_document_lifecycle_turn(task);
@@ -572,7 +532,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageChildFrameTaskTarget::DocumentScriptReady(_) => {
                 let outcome = self
@@ -585,7 +545,7 @@ impl PageVm {
                     }
                     PageChildDocumentScriptReadyCompletionBoundary::DiscardedStale => {}
                 }
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageChildFrameTaskTarget::HostLoad(_) => {
                 let outcome = self.apply_selected_page_child_host_load_turn(task);
@@ -594,7 +554,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageChildFrameTaskTarget::ParserModuleRootStart(_) => {
                 let outcome = self.apply_selected_page_child_parser_module_root_start_turn(task);
@@ -603,7 +563,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
             RendererPageChildFrameTaskTarget::ClassicScriptSourceLoad(_) => {
                 let outcome = self.apply_selected_page_child_classic_source_load_turn(task);
@@ -612,7 +572,7 @@ impl PageVm {
                     loader,
                 )
                 .await?;
-                Ok(outcome.into_settlement())
+                Ok(())
             }
         }
     }

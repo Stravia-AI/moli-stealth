@@ -13,7 +13,7 @@ use crate::{
         PageServiceWorkerInternalTurnOutcome, RendererPageServiceWorkerInternalTask,
         ServiceWorkerInternalCallbackEffect,
     },
-    runtime::{PageOwnerTurnOutcome, PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
+    runtime::PageOwnerTurnOutcome,
     script_vm::{ServiceWorkerInternalBodyCallbackEffect, ServiceWorkerInternalBodyEffect},
 };
 
@@ -110,12 +110,6 @@ impl PageVm {
             task_kind,
             target_effect,
         };
-        Ok(PageOwnerTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ServiceWorker,
-            ),
-        ))
+        Ok(PageOwnerTurnOutcome::new(action))
     }
 }

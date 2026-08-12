@@ -20,7 +20,7 @@ impl PageVm {
         let connected_style_event_settled_current_owner = matches!(
             action,
             PageDomManipulationTurnAction::ConnectedStyleEvent(action)
-                if action.requires_output_capture()
+                if action.settled_current_owner()
         );
         let completion = match action {
             PageDomManipulationTurnAction::BroadcastChannel(action) => {

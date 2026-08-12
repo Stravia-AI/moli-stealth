@@ -220,14 +220,4 @@ pub(crate) struct PageIndexedDbTaskTurnAction {
     pub(crate) target_effect: PageIndexedDbTaskTargetEffect,
 }
 
-impl PageIndexedDbTaskTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageIndexedDbTaskTargetEffect::AppliedToCurrentOwner
-                | PageIndexedDbTaskTargetEffect::FailedCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageIndexedDbTaskTurnOutcome = PageOwnerTurnOutcome<PageIndexedDbTaskTurnAction>;

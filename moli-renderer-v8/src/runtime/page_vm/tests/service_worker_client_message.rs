@@ -74,12 +74,6 @@ navigator.serviceWorker.onmessage = event => {
                 callback_effect: ServiceWorkerClientMessageCallbackEffect::CallbackDispatched,
             }
         );
-        assert_eq!(
-            outcome.into_settlement().produced_output,
-            Some(crate::runtime::PageOwnerTurnOutput::Resource(
-                crate::runtime::RendererOwnerResourceActivitySource::ServiceWorker,
-            ))
-        );
         let completion = outcome.action.into_page_task_completion();
         assert!(matches!(completion, PageTaskCompletion::CallbackCompletion));
         assert_eq!(
@@ -160,12 +154,6 @@ navigator.serviceWorker.onmessageerror = event => {
                 callback_effect: ServiceWorkerClientMessageCallbackEffect::CallbackDispatched,
             }
         );
-        assert_eq!(
-            outcome.into_settlement().produced_output,
-            Some(crate::runtime::PageOwnerTurnOutput::Resource(
-                crate::runtime::RendererOwnerResourceActivitySource::ServiceWorker,
-            ))
-        );
         let completion = outcome.action.into_page_task_completion();
         assert!(matches!(completion, PageTaskCompletion::CallbackCompletion));
         assert_eq!(
@@ -230,7 +218,6 @@ Object.defineProperty(navigator, "serviceWorker", {
             outcome.action.target_effect,
             PageServiceWorkerClientMessageTargetEffect::CurrentTargetProducedNoDispatchableEvent
         );
-        assert_eq!(outcome.into_settlement().produced_output, None);
         let completion = outcome.action.into_page_task_completion();
         assert!(matches!(completion, PageTaskCompletion::CheckpointOnly));
         page_vm
@@ -286,7 +273,6 @@ async fn service_worker_client_message_without_listener_is_checkpoint_only() {
                     ServiceWorkerClientMessageCallbackEffect::CurrentTargetHadNoCallback,
             }
         );
-        assert_eq!(outcome.into_settlement().produced_output, None);
         let completion = outcome.action.into_page_task_completion();
         assert!(matches!(completion, PageTaskCompletion::CheckpointOnly));
         page_vm

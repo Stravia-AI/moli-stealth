@@ -2,7 +2,6 @@ use crate::page_task_queue::{
     PagePopupLoadEventTargetEffect, PagePopupLoadEventTurnAction, PagePopupLoadEventTurnOutcome,
     RendererPagePopupLoadEventOwner, RendererPagePopupLoadEventTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -71,12 +70,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PagePopupLoadEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PagePopupLoadEventTurnOutcome::new(action))
     }
 }

@@ -252,16 +252,6 @@ pub(crate) struct PageDynamicImportOwnerActionTurnAction {
     pub(crate) document_effect: PageDynamicImportOwnerActionDocumentEffect,
 }
 
-impl PageDynamicImportOwnerActionTurnAction {
-    pub(crate) fn requires_output_capture(self) -> bool {
-        matches!(
-            self.document_effect,
-            PageDynamicImportOwnerActionDocumentEffect::AppliedToCurrentOwner { outcome }
-                if outcome.made_progress()
-        )
-    }
-}
-
 pub(crate) type PageDynamicImportOwnerActionTurnOutcome =
     PageOwnerTurnOutcome<PageDynamicImportOwnerActionTurnAction>;
 

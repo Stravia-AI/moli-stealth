@@ -17,10 +17,10 @@ use crate::page_task_queue::{
 };
 use std::time::Instant;
 
+use super::RendererOwnerRuntimeActivitySource;
 use super::page_entry_residence::{
     RendererPageEntryCheckout, RendererPageEntryResidenceSlot, RendererPageEntryRestore,
 };
-use super::{RendererOwnerResourceActivitySource, RendererOwnerRuntimeActivitySource};
 
 #[derive(Debug)]
 pub(super) struct PageTurnScheduler<Entry> {
@@ -169,25 +169,15 @@ impl PageOwnerTurnReadiness {
     }
 }
 
-/// Observable settlement of exactly one ordinary Page action.
-///
-/// `Action` preserves the family-specific semantic result. The family
-/// executor also records the output fact it actually produced; the owner
-/// finish boundary decides when that fact becomes externally observable.
-/// Scheduler continuation state deliberately does not live here: it is
-/// derived from the stable Page residence after the action is complete.
+/// Semantic result of exactly one ordinary Page action.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PageOwnerTurnOutcome<Action> {
     pub(crate) action: Action,
-    settlement: PageOwnerTurnSettlement,
 }
 
 impl<Action> PageOwnerTurnOutcome<Action> {
-    pub(crate) const fn new(action: Action, produced_output: Option<PageOwnerTurnOutput>) -> Self {
-        Self {
-            action,
-            settlement: PageOwnerTurnSettlement { produced_output },
-        }
+    pub(crate) const fn new(action: Action) -> Self {
+        Self { action }
     }
 
     pub(crate) fn map_action<Mapped>(
@@ -196,71 +186,6 @@ impl<Action> PageOwnerTurnOutcome<Action> {
     ) -> PageOwnerTurnOutcome<Mapped> {
         PageOwnerTurnOutcome {
             action: map(self.action),
-            settlement: self.settlement,
-        }
-    }
-
-    pub(crate) fn into_settlement(self) -> PageOwnerTurnSettlement {
-        self.settlement
-    }
-
-    pub(crate) fn into_parts(self) -> (Action, PageOwnerTurnSettlement) {
-        (self.action, self.settlement)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PageOwnerTurnSettlement {
-    pub(crate) produced_output: Option<PageOwnerTurnOutput>,
-}
-
-impl PageOwnerTurnSettlement {
-    /// Preserve the one ordering fact that is not encoded by the concrete
-    /// records themselves.
-    ///
-    /// A timer callback selected after the exact Page load boundary must not
-    /// overtake a still-pending `Page.loadEventFired` projection. Other task
-    /// families either produce load prerequisites or carry their ordering in
-    /// their concrete record identity.
-    pub(crate) const fn renderer_output_ordering(
-        self,
-        source_document: super::RendererDocumentLifecycleIdentity,
-    ) -> super::RendererOutputPublicationOrdering {
-        match self.produced_output {
-            Some(PageOwnerTurnOutput::Runtime(RendererOwnerRuntimeActivitySource::Timer)) => {
-                super::RendererOutputPublicationOrdering::AfterPendingPageLoad { source_document }
-            }
-            _ => super::RendererOutputPublicationOrdering::Unconstrained,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PageOwnerTurnOutput {
-    Resource(RendererOwnerResourceActivitySource),
-    Runtime(RendererOwnerRuntimeActivitySource),
-}
-
-impl PageOwnerTurnOutput {
-    pub(crate) const fn resource_if(
-        produced: bool,
-        source: RendererOwnerResourceActivitySource,
-    ) -> Option<Self> {
-        if produced {
-            Some(Self::Resource(source))
-        } else {
-            None
-        }
-    }
-
-    pub(crate) const fn runtime_if(
-        produced: bool,
-        source: RendererOwnerRuntimeActivitySource,
-    ) -> Option<Self> {
-        if produced {
-            Some(Self::Runtime(source))
-        } else {
-            None
         }
     }
 }

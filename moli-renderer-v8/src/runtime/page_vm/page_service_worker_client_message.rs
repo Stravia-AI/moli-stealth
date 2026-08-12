@@ -13,7 +13,6 @@ use crate::{
         PageServiceWorkerClientMessageTurnOutcome, RendererPageServiceWorkerClientMessageTask,
         ServiceWorkerClientMessageCallbackEffect, ServiceWorkerClientMessageEventKind,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
     script_vm::{
         ServiceWorkerClientMessageBodyCallbackEffect, ServiceWorkerClientMessageBodyEffect,
         ServiceWorkerClientMessageBodyEventKind,
@@ -127,12 +126,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageServiceWorkerClientMessageTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::ServiceWorker,
-            ),
-        ))
+        Ok(PageServiceWorkerClientMessageTurnOutcome::new(action))
     }
 }

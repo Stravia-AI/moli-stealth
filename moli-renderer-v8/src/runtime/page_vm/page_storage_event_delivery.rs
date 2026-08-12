@@ -3,7 +3,6 @@ use crate::page_task_queue::{
     PageStorageEventDeliveryTurnOutcome, RendererPageStorageEventDeliveryOwner,
     RendererPageStorageEventDeliveryTask,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -74,12 +73,6 @@ impl PageVm {
             owner,
             target_effect,
         };
-        Ok(PageStorageEventDeliveryTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::StorageEvent,
-            ),
-        ))
+        Ok(PageStorageEventDeliveryTurnOutcome::new(action))
     }
 }

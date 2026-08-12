@@ -95,13 +95,4 @@ pub(crate) struct PagePopupLoadEventTurnAction {
     pub(crate) target_effect: PagePopupLoadEventTargetEffect,
 }
 
-impl PagePopupLoadEventTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PagePopupLoadEventTargetEffect::DispatchedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PagePopupLoadEventTurnOutcome = PageOwnerTurnOutcome<PagePopupLoadEventTurnAction>;

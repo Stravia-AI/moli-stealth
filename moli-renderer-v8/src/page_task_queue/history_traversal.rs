@@ -198,14 +198,5 @@ pub(crate) struct PageHistoryTraversalTurnAction {
     pub(crate) target_effect: PageHistoryTraversalTargetEffect,
 }
 
-impl PageHistoryTraversalTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageHistoryTraversalTargetEffect::AppliedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageHistoryTraversalTurnOutcome =
     PageOwnerTurnOutcome<PageHistoryTraversalTurnAction>;

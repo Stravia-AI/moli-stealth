@@ -196,15 +196,9 @@ impl PageResourceCompletionTurnAction {
         self
     }
 
+    #[cfg(test)]
     pub(crate) fn source(self) -> RendererOwnerResourceActivitySource {
         self.source
-    }
-
-    pub(crate) fn requires_output_capture(self) -> bool {
-        matches!(
-            self.output_effect,
-            PageResourceCompletionOutputEffect::CaptureRequired
-        )
     }
 }
 

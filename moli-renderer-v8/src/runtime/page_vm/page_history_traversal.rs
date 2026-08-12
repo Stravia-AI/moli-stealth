@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageHistoryTraversalTask, RendererPageHistoryTraversalTaskId,
     RendererPageHistoryTraversalTaskKind,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{IntoPageTaskCompletion, PageTaskCompletion, PageVm};
 
@@ -91,12 +90,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageHistoryTraversalTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::NavigationAndTraversal,
-            ),
-        ))
+        Ok(PageHistoryTraversalTurnOutcome::new(action))
     }
 }

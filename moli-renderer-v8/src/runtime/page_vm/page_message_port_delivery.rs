@@ -5,7 +5,6 @@ use crate::{
         PageMessagePortDeliveryTurnOutcome, RendererPageMessagePortDeliveryOwner,
         RendererPageMessagePortDeliveryTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
 };
 
 use super::PageVm;
@@ -76,12 +75,6 @@ impl PageVm {
             port_id,
             target_effect,
         };
-        Ok(PageMessagePortDeliveryTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::MessagePort,
-            ),
-        ))
+        Ok(PageMessagePortDeliveryTurnOutcome::new(action))
     }
 }

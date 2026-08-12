@@ -93,14 +93,5 @@ pub(crate) struct PageUserInteractionTurnAction {
     pub(crate) target_effect: PageUserInteractionTargetEffect,
 }
 
-impl PageUserInteractionTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageUserInteractionTargetEffect::AppliedToCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageUserInteractionTurnOutcome =
     PageOwnerTurnOutcome<PageUserInteractionTurnAction>;

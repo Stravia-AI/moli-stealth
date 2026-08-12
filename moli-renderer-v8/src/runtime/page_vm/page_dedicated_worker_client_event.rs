@@ -4,7 +4,6 @@ use crate::{
         PageDedicatedWorkerClientEventTurnOutcome, RendererPageDedicatedWorkerClientEventOwner,
         RendererPageDedicatedWorkerClientEventTask,
     },
-    runtime::{PageOwnerTurnOutput, RendererOwnerResourceActivitySource},
     script_vm::DedicatedWorkerClientEventBodyEffect,
 };
 
@@ -106,12 +105,6 @@ impl PageVm {
             event_kind,
             target_effect,
         };
-        Ok(PageDedicatedWorkerClientEventTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(
-                action.requires_output_capture(),
-                RendererOwnerResourceActivitySource::Worker,
-            ),
-        ))
+        Ok(PageDedicatedWorkerClientEventTurnOutcome::new(action))
     }
 }

@@ -61,16 +61,5 @@ pub(crate) struct PageChildRealmMaterializationTurnAction {
     pub(crate) target_effect: PageChildRealmMaterializationTargetEffect,
 }
 
-impl PageChildRealmMaterializationTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildRealmMaterializationTargetEffect::MaterializedCurrentOwnerWithoutDocumentStartScript
-                | PageChildRealmMaterializationTargetEffect::MaterializedCurrentOwnerAfterDocumentStartScript
-                | PageChildRealmMaterializationTargetEffect::FailedCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageChildRealmMaterializationTurnOutcome =
     PageOwnerTurnOutcome<PageChildRealmMaterializationTurnAction>;

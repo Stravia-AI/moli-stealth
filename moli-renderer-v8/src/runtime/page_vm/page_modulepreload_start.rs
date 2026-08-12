@@ -58,8 +58,7 @@ impl PageVm {
             owner,
             document_effect,
         };
-        debug_assert!(!action.requires_output_capture());
-        PageModulepreloadStartTurnOutcome::new(action, None)
+        PageModulepreloadStartTurnOutcome::new(action)
     }
 
     #[cfg(test)]

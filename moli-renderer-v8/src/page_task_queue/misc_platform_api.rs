@@ -73,14 +73,5 @@ pub(crate) struct PageMiscPlatformApiTurnAction {
     pub(crate) target_effect: PageMiscPlatformApiTargetEffect,
 }
 
-impl PageMiscPlatformApiTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageMiscPlatformApiTargetEffect::CallbackInvokedForCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageMiscPlatformApiTurnOutcome =
     PageOwnerTurnOutcome<PageMiscPlatformApiTurnAction>;

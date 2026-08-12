@@ -5,7 +5,6 @@ use crate::page_resource_completion::{
     PageResourceCompletionTurnOutcome, RendererPageResourceCompletion,
     RendererPageResourceTerminal,
 };
-use crate::runtime::PageOwnerTurnOutput;
 
 use super::PageVm;
 
@@ -117,10 +116,7 @@ impl PageVm {
         &self,
         action: PageResourceCompletionTurnAction,
     ) -> PageResourceCompletionTurnOutcome {
-        PageResourceCompletionTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::resource_if(action.requires_output_capture(), action.source()),
-        )
+        PageResourceCompletionTurnOutcome::new(action)
     }
 
     pub(in crate::runtime) fn apply_selected_page_resource_completion_turn(

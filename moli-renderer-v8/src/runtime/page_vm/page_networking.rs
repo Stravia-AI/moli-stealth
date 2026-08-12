@@ -17,10 +17,7 @@ impl PageVm {
                 .apply_selected_page_main_parser_continuation_turn(task)
                 .map_action(PageNetworkingTurnAction::MainParserContinuation)),
             RendererPageNetworkingTask::StyleElementEvent(task) => self
-                .apply_selected_page_connected_style_event_turn(
-                    task,
-                    crate::runtime::RendererOwnerRuntimeActivitySource::Networking,
-                )
+                .apply_selected_page_connected_style_event_turn(task)
                 .map(|outcome| outcome.map_action(PageNetworkingTurnAction::StyleElementEvent)),
             RendererPageNetworkingTask::TextTrackLoad(task) => self
                 .apply_selected_page_text_track_load_turn(task)

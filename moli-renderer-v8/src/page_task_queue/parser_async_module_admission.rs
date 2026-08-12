@@ -40,11 +40,4 @@ impl PageParserAsyncModuleAdmissionTurnAction {
     pub(crate) const fn target_effect(self) -> PageParserAsyncModuleAdmissionTargetEffect {
         self.target_effect
     }
-
-    pub(super) const fn requires_output_capture(self) -> bool {
-        !matches!(
-            self.target_effect,
-            PageParserAsyncModuleAdmissionTargetEffect::DiscardedStaleOwner
-        )
-    }
 }

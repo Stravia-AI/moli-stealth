@@ -5,10 +5,7 @@ use crate::{
         PageServiceWorkerClientMessageTargetEffect, PageServiceWorkerInternalTargetEffect,
         RendererOwnerWakeSource, RendererServiceWorkerInternalTaskKind,
     },
-    runtime::{
-        IntoPageTaskCompletion, PageOwnerTurnOutput, PageTaskCompletion,
-        RendererOwnerResourceActivitySource,
-    },
+    runtime::{IntoPageTaskCompletion, PageTaskCompletion},
     service_worker_runtime::{ServiceWorkerClientId, ServiceWorkerVersionId},
     structured_clone::V8StructuredClonePayload,
     types::{
@@ -76,12 +73,6 @@ async fn service_worker_internal_body_authorizes_the_exact_root_document() {
             PageTaskCompletion::NoCompletion
         ));
         assert_eq!(
-            current.into_settlement().produced_output,
-            Some(PageOwnerTurnOutput::Resource(
-                RendererOwnerResourceActivitySource::ServiceWorker,
-            ))
-        );
-        assert_eq!(
             page_vm
                 .vm()
                 .document_runtime
@@ -126,7 +117,6 @@ async fn service_worker_internal_body_authorizes_the_exact_root_document() {
         );
         let stale_completion = stale.action.into_page_task_completion();
         assert!(matches!(stale_completion, PageTaskCompletion::NoCompletion));
-        assert_eq!(stale.into_settlement().produced_output, None);
         assert_eq!(
             page_vm
                 .vm()
@@ -182,8 +172,6 @@ async fn service_worker_client_message_authorizes_root_before_window_client_targ
             stale_client.action.target_effect,
             PageServiceWorkerClientMessageTargetEffect::DiscardedStaleTarget
         );
-        assert_eq!(stale_client.into_settlement().produced_output, None);
-
         let stale_root = crate::runtime::RendererDocumentToken {
             page_id: current_root.page_id,
             generation: current_root.generation + 1,
@@ -210,7 +198,6 @@ async fn service_worker_client_message_authorizes_root_before_window_client_targ
             stale_document.action.target_effect,
             PageServiceWorkerClientMessageTargetEffect::DiscardedStaleRoot { current_root }
         );
-        assert_eq!(stale_document.into_settlement().produced_output, None);
         Ok::<_, anyhow::Error>(())
     })
     .await

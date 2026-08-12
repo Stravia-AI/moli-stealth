@@ -4,7 +4,6 @@ use crate::page_task_queue::{
     RendererPageTextTrackDefaultModeTask, RendererPageTextTrackDefaultModeTaskId,
     RendererPageTextTrackDefaultModeTaskKind,
 };
-use crate::runtime::{PageOwnerTurnOutput, RendererOwnerRuntimeActivitySource};
 
 use super::{AuthorizedCurrentWindowDocumentTask, PageVm};
 
@@ -67,12 +66,6 @@ impl PageVm {
             kind,
             target_effect,
         };
-        Ok(PageTextTrackDefaultModeTurnOutcome::new(
-            action,
-            PageOwnerTurnOutput::runtime_if(
-                action.requires_output_capture(),
-                RendererOwnerRuntimeActivitySource::DomManipulation,
-            ),
-        ))
+        Ok(PageTextTrackDefaultModeTurnOutcome::new(action))
     }
 }

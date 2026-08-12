@@ -180,7 +180,6 @@ async fn child_classic_script_ready_body_leaves_reactions_for_selected_completio
             .run_page_child_document_script_ready_body_for_test()
             .await?
             .expect("the realm-bound classic script must retain one exact task body");
-        assert!(body.action.requires_output_capture());
         assert!(matches!(
             body.action.target_effect,
             crate::page_task_queue::PageChildDocumentScriptReadyTargetEffect::AppliedScriptOrEventToCurrentOwner {

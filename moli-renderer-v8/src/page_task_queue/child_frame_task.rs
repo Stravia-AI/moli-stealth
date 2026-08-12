@@ -297,20 +297,6 @@ pub(crate) struct PageChildDocumentScriptReadyTurnAction {
     pub(crate) target_effect: PageChildDocumentScriptReadyTargetEffect,
 }
 
-impl PageChildDocumentScriptReadyTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildDocumentScriptReadyTargetEffect::AppliedScriptOrEventToCurrentOwner {
-                made_progress: true
-            }
-                | PageChildDocumentScriptReadyTargetEffect::AppliedWithoutScriptOrEventToCurrentOwner {
-                made_progress: true
-            }
-        )
-    }
-}
-
 pub(crate) type PageChildDocumentScriptReadyTurnOutcome =
     PageOwnerTurnOutcome<PageChildDocumentScriptReadyTurnAction>;
 
@@ -330,17 +316,6 @@ pub(crate) struct PageChildDocumentLifecycleTurnAction {
     pub(crate) target_effect: PageChildDocumentLifecycleTargetEffect,
 }
 
-impl PageChildDocumentLifecycleTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildDocumentLifecycleTargetEffect::EventDispatchedToCurrentOwner
-                | PageChildDocumentLifecycleTargetEffect::ConsumedCurrentOwnerWithoutEvent
-                | PageChildDocumentLifecycleTargetEffect::FailedForCurrentOwner
-        )
-    }
-}
-
 pub(crate) type PageChildDocumentLifecycleTurnOutcome =
     PageOwnerTurnOutcome<PageChildDocumentLifecycleTurnAction>;
 
@@ -358,17 +333,6 @@ pub(crate) enum PageChildHostLoadTargetEffect {
 pub(crate) struct PageChildHostLoadTurnAction {
     pub(crate) owner: RendererPageChildFrameTaskOwner,
     pub(crate) target_effect: PageChildHostLoadTargetEffect,
-}
-
-impl PageChildHostLoadTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildHostLoadTargetEffect::CallbackDispatchedToCurrentOwner
-                | PageChildHostLoadTargetEffect::ConsumedCurrentOwnerWithoutCallback
-                | PageChildHostLoadTargetEffect::FailedForCurrentOwner
-        )
-    }
 }
 
 pub(crate) type PageChildHostLoadTurnOutcome = PageOwnerTurnOutcome<PageChildHostLoadTurnAction>;
@@ -391,15 +355,6 @@ pub(crate) enum PageChildParserModuleRootStartTargetEffect {
 pub(crate) struct PageChildParserModuleRootStartTurnAction {
     pub(crate) owner: RendererPageChildFrameTaskOwner,
     pub(crate) target_effect: PageChildParserModuleRootStartTargetEffect,
-}
-
-impl PageChildParserModuleRootStartTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildParserModuleRootStartTargetEffect::ConsumedByCurrentOwner
-        )
-    }
 }
 
 pub(crate) type PageChildParserModuleRootStartTurnOutcome =
@@ -426,16 +381,6 @@ pub(crate) enum PageChildClassicScriptSourceLoadTargetEffect {
 pub(crate) struct PageChildClassicScriptSourceLoadTurnAction {
     pub(crate) owner: RendererPageChildFrameTaskOwner,
     pub(crate) target_effect: PageChildClassicScriptSourceLoadTargetEffect,
-}
-
-impl PageChildClassicScriptSourceLoadTurnAction {
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageChildClassicScriptSourceLoadTargetEffect::NetworkRequestStartedForCurrentOwner
-                | PageChildClassicScriptSourceLoadTargetEffect::RejectedBeforeNetworkStartForCurrentOwner
-        )
-    }
 }
 
 pub(crate) type PageChildClassicScriptSourceLoadTurnOutcome =
