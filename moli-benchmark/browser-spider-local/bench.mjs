@@ -528,8 +528,9 @@ Options:
   --moli-bin PATH         moli binary override.
   --chrome-bin PATH             Chromium/Chrome binary override.
   --assert-no-stale-page-leakage
-                                 Exit non-zero when a service run fails or timed-out navigations
-                                 / mismatched item links indicate stale previous-page scraping.
+                                 Exit non-zero when timed-out navigations / mismatched item links
+                                 indicate stale previous-page scraping. Service failures always
+                                 exit non-zero after writing benchmark evidence.
   --sample-interval-ms N         Process-tree CPU/RSS/PSS sample interval (minimum 100ms).
   --no-resource-sampling         Disable resource sampling; the HTML report is still generated.`);
 }
@@ -1705,11 +1706,11 @@ async function main() {
   writeJson(path.join(runDir, 'summary.json'), summary);
   console.log(JSON.stringify(summary, null, 2));
 
+  const serviceFailures = serviceRunFailures(allResults);
+  if (serviceFailures.length > 0) {
+    throw new Error(`service run failed: ${JSON.stringify(serviceFailures)}`);
+  }
   if (args.assertNoStalePageLeakage) {
-    const serviceFailures = serviceRunFailures(allResults);
-    if (serviceFailures.length > 0) {
-      throw new Error(`service run failed before stale-page assertion: ${JSON.stringify(serviceFailures)}`);
-    }
     const failures = stalePageLeakageFailures(allResults);
     if (failures.length > 0) {
       throw new Error(`stale page leakage detected: ${JSON.stringify(failures)}`);

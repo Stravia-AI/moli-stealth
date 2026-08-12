@@ -21,7 +21,7 @@ const SUITE_CONFIGS = {
     commandTimeout: '12m',
     gotoTimeoutMs: 1500,
     sampleIntervalMs: 100,
-    extraArgs: ['--assert-no-stale-page-leakage', '--server-hang-ms', '3000']
+    extraArgs: ['--server-hang-ms', '3000']
   },
   real48: {
     classification: 'informational',
@@ -348,6 +348,52 @@ export function buildSpiderComparison({ baseSha, headSha, executionOrder, runs }
   };
 }
 
+export function spiderBenchmarkExecutionFailures(comparison) {
+  const failures = [];
+  for (const suiteName of Object.keys(SUITE_CONFIGS)) {
+    const suite = comparison?.suites?.[suiteName];
+    for (const side of ['base', 'head']) {
+      const run = suite?.[side];
+      if (run?.availability !== 'available') {
+        failures.push({ suite: suiteName, side, reason: 'report-unavailable' });
+        continue;
+      }
+      const serviceRuns = run.metrics?.service_runs;
+      const successfulRuns = run.metrics?.successful_runs;
+      const failedRuns = run.metrics?.failed_runs;
+      if (
+        !Number.isInteger(serviceRuns)
+        || serviceRuns < 1
+        || !Number.isInteger(successfulRuns)
+        || !Number.isInteger(failedRuns)
+        || successfulRuns + failedRuns !== serviceRuns
+      ) {
+        failures.push({ suite: suiteName, side, reason: 'invalid-service-summary' });
+        continue;
+      }
+      if (failedRuns > 0) {
+        failures.push({
+          suite: suiteName,
+          side,
+          reason: 'service-run-failed',
+          failed_runs: failedRuns,
+          service_runs: serviceRuns
+        });
+        continue;
+      }
+      if (run.exit_code !== 0) {
+        failures.push({
+          suite: suiteName,
+          side,
+          reason: 'benchmark-command-failed',
+          exit_code: run.exit_code
+        });
+      }
+    }
+  }
+  return failures;
+}
+
 function safeSha(value) {
   return /^[0-9a-f]{7,40}$/i.test(value ?? '') ? value.toLowerCase() : 'unknown';
 }
@@ -508,6 +554,18 @@ function assessmentSummary(assessment) {
   return `⚠️ Deterministic fixture recorded diagnostic issues (non-blocking):\n${reasons}`;
 }
 
+function executionSummary(comparison) {
+  const failures = spiderBenchmarkExecutionFailures(comparison);
+  if (failures.length === 0) {
+    return '✅ All benchmark browser service runs completed.';
+  }
+  const labels = failures
+    .slice(0, 8)
+    .map((failure) => `${failure.suite}/${failure.side}: ${failure.reason}`)
+    .join(', ');
+  return `❌ Benchmark execution was incomplete (${labels}). The workflow fails while preserving the collected evidence.`;
+}
+
 function safeRunUrl(value) {
   try {
     const url = new URL(value);
@@ -561,6 +619,8 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     SPIDER_CI_COMMENT_MARKER,
     '## Spider Bench A/B',
     '',
+    executionSummary(comparison),
+    '',
     publicHeadline(real48),
     '',
     assessmentSummary(fixture.assessment),
@@ -584,7 +644,7 @@ export function renderSpiderComparison(comparison, { runUrl, conclusion }) {
     '',
     `Full HTML, JSON, CSV, logs, and page snapshots: ${workflowLink}.`,
     '',
-    '_Spider Bench is observational: fixture diagnostics and performance deltas never fail the PR. Investigate changes using the complete artifact and controlled repeated runs._'
+    '_Spider Bench gates execution integrity: missing reports and failed browser service runs fail the workflow. Site content, fixture diagnostics, timing, and performance deltas remain observational._'
   ].join('\n');
 }
 
@@ -683,10 +743,16 @@ async function runComparisonCommand(args) {
   writeJson(path.join(outputDir, 'comparison.json'), comparison);
   fs.writeFileSync(path.join(outputDir, 'comment.md'), `${renderSpiderComparison(comparison, {
     runUrl: args['run-url'],
-    conclusion: args['run-url'] ? 'success' : 'local'
+    conclusion: args['run-url']
+      ? (spiderBenchmarkExecutionFailures(comparison).length === 0 ? 'success' : 'failure')
+      : 'local'
   })}\n`, 'utf8');
   if (!comparison.suites.fixture.assessment.clean) {
     console.warn(`deterministic fixture recorded diagnostic issues: ${comparison.suites.fixture.assessment.reasons.join(', ')}`);
+  }
+  const executionFailures = spiderBenchmarkExecutionFailures(comparison);
+  if (executionFailures.length > 0) {
+    throw new Error(`Spider Bench execution failed: ${JSON.stringify(executionFailures)}`);
   }
 }
 
