@@ -362,7 +362,7 @@ async fn get_box_model() {
     navigate_to_data_html_async(
         &mut ctx,
         1,
-        "<!doctype html><html><body><p style='position:absolute;left:10px;top:10px;width:5px;height:5px'>box</p></body></html>",
+        "<!doctype html><html><body><p style='position:absolute;left:10px;top:10px;width:5px;height:5px;margin:0'>box</p></body></html>",
     )
     .await;
 
@@ -466,7 +466,7 @@ async fn geometry_and_remove_node_can_complete_through_pending_command_dispatch(
     navigate_to_data_html_async(
         &mut ctx,
         1,
-        "<!doctype html><html><body><p id='target' style='position:absolute;left:10px;top:10px;width:5px;height:5px'>box</p></body></html>",
+        "<!doctype html><html><body><p id='target' style='position:absolute;left:10px;top:10px;width:5px;height:5px;margin:0'>box</p></body></html>",
     )
     .await;
 
@@ -605,7 +605,7 @@ async fn geometry_and_remove_node_can_complete_through_pending_command_dispatch(
     assert_eq!(
         outer_response["result"]["outerHTML"],
         json!(
-            "<p id=\"target\" style=\"position:absolute;left:10px;top:10px;width:5px;height:5px\">box</p>"
+            "<p id=\"target\" style=\"position:absolute;left:10px;top:10px;width:5px;height:5px;margin:0\">box</p>"
         )
     );
 
@@ -709,7 +709,7 @@ async fn get_box_model_supports_backend_node_id() {
     navigate_to_data_html_async(
         &mut ctx,
         1,
-        "<!doctype html><html><body><p style='position:absolute;left:12px;top:8px;width:7px;height:6px'>box</p></body></html>",
+        "<!doctype html><html><body><p style='position:absolute;left:12px;top:8px;width:7px;height:6px;margin:0'>box</p></body></html>",
     )
     .await;
 
@@ -1036,7 +1036,7 @@ async fn get_content_quads_returns_single_quad_for_element() {
     navigate_to_data_html_async(
         &mut ctx,
         1,
-        "<!doctype html><html><body><p style='position:absolute;left:10px;top:10px;width:5px;height:5px'>box</p></body></html>",
+        "<!doctype html><html><body><p style='position:absolute;left:10px;top:10px;width:5px;height:5px;margin:0'>box</p></body></html>",
     )
     .await;
 
