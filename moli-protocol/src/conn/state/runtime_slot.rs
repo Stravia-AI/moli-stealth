@@ -332,13 +332,12 @@ impl TargetRuntimeSlot {
     pub(crate) fn start_document_navigation(
         &mut self,
         target_id: String,
-        session_id: Option<String>,
         loader_id: String,
     ) -> DocumentNavigationToken {
         self.devtools_renderer_channel.reopen_after_target_crash();
         let token = self
             .page_slot
-            .start_document_navigation(target_id, session_id, loader_id);
+            .start_document_navigation(target_id, loader_id);
         self.devtools_renderer_channel
             .navigation_started(token.clone())
             .expect("an open target runtime slot must accept a new document navigation");
@@ -536,6 +535,35 @@ impl TargetRuntimeSlot {
     ) -> bool {
         self.page_slot
             .accepts_pending_document_navigation_event(token)
+    }
+
+    pub(crate) fn document_navigation_cancellation_handle(
+        &self,
+        token: &DocumentNavigationToken,
+    ) -> Option<moli_fetch::FetchCancelHandle> {
+        self.page_slot
+            .document_navigation_cancellation_handle(token)
+    }
+
+    pub(crate) fn arm_background_navigation_completion(
+        &mut self,
+        token: &DocumentNavigationToken,
+        additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
+    ) -> bool {
+        self.page_slot
+            .arm_background_navigation_completion(token, additional_cancellation)
+    }
+
+    pub(crate) fn settle_background_navigation_completion(
+        &mut self,
+        token: &DocumentNavigationToken,
+    ) -> bool {
+        self.page_slot
+            .settle_background_navigation_completion(token)
+    }
+
+    pub(crate) fn has_inflight_background_navigation(&self) -> bool {
+        self.page_slot.has_inflight_background_navigation()
     }
 
     pub(crate) fn accepts_document_body_completion_event(

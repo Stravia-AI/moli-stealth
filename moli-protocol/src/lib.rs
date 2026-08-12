@@ -18,8 +18,7 @@ pub mod version;
 pub use devtools_runtime::*;
 
 pub use conn::{
-    BackgroundCommandResponsePayload, BackgroundNavigationCancellation,
-    BackgroundNavigationGateKey, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
+    BackgroundCommandResponsePayload, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
     CdpInitialStoragePartition, CdpRendererCommandAccess, CdpRendererCommandReplacement,
     CdpRendererCommandReplayDispatch, CdpSchedulerEvent, CdpTargetHostLifecycleDelta,
     CdpTargetHostLifecycleObserver, CdpTurnOutcome, CommandDispatchContext,

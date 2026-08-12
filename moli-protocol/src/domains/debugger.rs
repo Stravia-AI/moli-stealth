@@ -156,7 +156,6 @@ mod tests {
             .conn
             .start_document_navigation_for_session_owner(
                 None,
-                None,
                 "LOADER-debugger-interrupt".to_owned(),
             )
             .expect("start cross-Document navigation");

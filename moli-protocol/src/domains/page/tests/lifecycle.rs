@@ -2654,7 +2654,6 @@ async fn crash_targets_background_owner_without_promotion() {
     let background_document_token = bc
         .start_document_navigation_for_target(
             "TID-background",
-            Some("SID-background".to_owned()),
             "LOADER-background-crash".to_owned(),
         )
         .expect("background target should start document navigation");

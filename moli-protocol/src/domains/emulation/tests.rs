@@ -421,11 +421,7 @@ async fn idle_override_updates_idle_detector_and_clear_restores_actual_state() {
     }));
 
     ctx.conn
-        .start_document_navigation_for_session_owner(
-            Some("SID-1"),
-            Some("SID-1".to_owned()),
-            "LID-idle-same-site".to_owned(),
-        )
+        .start_document_navigation_for_session_owner(Some("SID-1"), "LID-idle-same-site".to_owned())
         .expect("same-site navigation should enter the pending state");
     let configuration = ctx
         .conn

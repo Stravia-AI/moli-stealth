@@ -10,10 +10,9 @@ use moli_core::{
     runtime::NavigationRuntimeConfig,
 };
 use moli_protocol::{
-    BackgroundNavigationCancellation, BackgroundNavigationCompletion, BackgroundNavigationGateKey,
-    BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition,
-    CdpRendererCommandAccess, CdpSchedulerEvent, CdpTargetHostLifecycleObserver,
-    CommandDispatchContext, CompletedCdpCommandDispatch,
+    BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
+    CdpInitialStoragePartition, CdpRendererCommandAccess, CdpSchedulerEvent,
+    CdpTargetHostLifecycleObserver, CommandDispatchContext, CompletedCdpCommandDispatch,
     CompletedDeferredMainDocumentLoadCompletion, DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadObservationId,
     DeferredMainDocumentLoadPredecessorCandidate, PageScreencastCaptureCompletion,
@@ -102,7 +101,6 @@ pub(crate) enum CommandStartAction {
 
 pub(crate) struct CdpScheduler {
     conn: CdpConnection,
-    background_navigation_gate: BackgroundNavigationGate,
     pending_navigation_background_events: VecDeque<BackgroundProtocolEvent>,
     runtime_command_output_barriers: RuntimeCommandOutputBarriers,
     queues: SchedulerQueues,
@@ -129,57 +127,6 @@ fn page_screencast_interval(every_nth_frame: u32) -> Duration {
 
 fn next_page_screencast_deadline(now: TokioInstant, interval: Duration) -> TokioInstant {
     now + interval
-}
-
-#[derive(Debug, Default)]
-struct BackgroundNavigationGate {
-    /// `Page.navigate` background tasks whose lifecycle
-    /// `BackgroundNavigationCompletion` has not yet been drained. The command
-    /// response may be produced independently; this gate does not claim where
-    /// that response falls relative to response-head or body EOF.
-    pending: HashMap<BackgroundNavigationGateKey, BackgroundNavigationCancellation>,
-}
-
-impl BackgroundNavigationGate {
-    fn has_inflight_navigation(&self) -> bool {
-        !self.pending.is_empty()
-    }
-
-    fn note_navigation_started(
-        &mut self,
-        key: BackgroundNavigationGateKey,
-        cancellation: BackgroundNavigationCancellation,
-    ) {
-        if self.pending.contains_key(&key) {
-            return;
-        }
-        let pending_before = self.pending.len();
-        self.pending.retain(|pending, pending_cancellation| {
-            if !key.supersedes(pending) {
-                return true;
-            }
-            pending_cancellation.cancel();
-            false
-        });
-        let superseded = pending_before - self.pending.len();
-        if superseded > 0 {
-            tracing::debug!(
-                superseded,
-                ?key,
-                "retired superseded background navigation gate"
-            );
-        }
-        self.pending.insert(key, cancellation);
-    }
-
-    fn note_navigation_completion_drained(&mut self, key: &BackgroundNavigationGateKey) {
-        if self.pending.remove(key).is_none() {
-            tracing::debug!(
-                ?key,
-                "background navigation completion did not match any pending gate"
-            );
-        }
-    }
 }
 
 #[derive(Debug, Default)]
@@ -667,7 +614,6 @@ impl CdpScheduler {
     fn new(conn: CdpConnection) -> Self {
         Self {
             conn,
-            background_navigation_gate: BackgroundNavigationGate::default(),
             pending_navigation_background_events: VecDeque::new(),
             runtime_command_output_barriers: RuntimeCommandOutputBarriers::default(),
             queues: SchedulerQueues::default(),
@@ -1809,7 +1755,7 @@ impl CdpScheduler {
     }
 
     pub(crate) fn has_inflight_background_navigation(&self) -> bool {
-        self.background_navigation_gate.has_inflight_navigation()
+        self.conn.has_inflight_background_navigation()
     }
 
     pub(crate) fn command_waits_for_navigation_flush(&self, command: &ParsedCdpCommand) -> bool {
@@ -1921,10 +1867,6 @@ impl CdpScheduler {
                 );
             }
             match event {
-                CdpSchedulerEvent::BackgroundNavigationStarted { key, cancellation } => {
-                    self.background_navigation_gate
-                        .note_navigation_started(key, cancellation);
-                }
                 CdpSchedulerEvent::ProtocolWorkPublished { work } => {
                     if moli_trace::cdp_nav_timing_enabled() {
                         tracing::info!(
@@ -2466,10 +2408,6 @@ impl CdpScheduler {
         Option<moli_core::RendererOutputFence>,
     ) {
         let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
-        if let Some(key) = completion.background_navigation_gate_key() {
-            self.background_navigation_gate
-                .note_navigation_completion_drained(&key);
-        }
         let outcome = self
             .conn
             .drain_background_navigation_completion_turn_async(completion)

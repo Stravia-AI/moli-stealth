@@ -1637,12 +1637,8 @@ mod tests {
             Some(&binding),
             RendererDocumentLifecycleMilestone::Load,
         );
-        conn.start_document_navigation_for_session_owner(
-            Some("SID-nav"),
-            Some("SID-nav".to_owned()),
-            "LID-2".to_owned(),
-        )
-        .expect("replacement navigation token");
+        conn.start_document_navigation_for_session_owner(Some("SID-nav"), "LID-2".to_owned())
+            .expect("replacement navigation token");
 
         assert_eq!(
             observer.wait().await,
@@ -1673,12 +1669,8 @@ mod tests {
         conn.enqueue_deferred_main_document_load_completion(old_completion);
         let work = take_deferred_load_work_for_test(&mut conn);
 
-        conn.start_document_navigation_for_session_owner(
-            Some("SID-nav"),
-            Some("SID-nav".to_owned()),
-            "LID-2".to_owned(),
-        )
-        .expect("replacement navigation token");
+        conn.start_document_navigation_for_session_owner(Some("SID-nav"), "LID-2".to_owned())
+            .expect("replacement navigation token");
 
         assert!(
             conn.take_scheduler_events().is_empty(),

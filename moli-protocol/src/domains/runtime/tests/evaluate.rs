@@ -1932,7 +1932,6 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
     browser_context
         .start_document_navigation_for_target(
             "TID-background",
-            Some("SID-background".to_owned()),
             "PENDING-BACKGROUND-LOADER".to_owned(),
         )
         .expect("background document navigation should start");

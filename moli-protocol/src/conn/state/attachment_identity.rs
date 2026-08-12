@@ -37,10 +37,6 @@ impl NavigationRequestId {
             "navigation request id",
         ))
     }
-
-    pub(crate) fn get(self) -> u64 {
-        self.0.get()
-    }
 }
 
 fn allocate_nonzero_u64(counter: &AtomicU64, name: &str) -> NonZeroU64 {
@@ -67,7 +63,7 @@ mod tests {
         assert_ne!(first_attachment, second_attachment);
         assert_ne!(first_navigation, second_navigation);
         assert_ne!(first_attachment.get(), 0);
-        assert_ne!(first_navigation.get(), 0);
+        assert_ne!(first_navigation.0.get(), 0);
     }
 
     #[test]

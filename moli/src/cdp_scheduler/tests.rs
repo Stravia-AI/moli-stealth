@@ -11,8 +11,8 @@ use moli_core::{
     },
 };
 use moli_protocol::{
-    BackgroundNavigationCancellation, BackgroundNavigationGateKey, BackgroundProtocolEvent,
-    CdpConnection, CdpSchedulerEvent, DeferredMainDocumentLoadCompletionOutputAction,
+    BackgroundProtocolEvent, CdpConnection, CdpSchedulerEvent,
+    DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadPredecessorCandidate,
     ProtocolSchedulerWork,
     conn::RuntimeInspectorResponseReady,
@@ -22,16 +22,17 @@ use moli_protocol::{
         NavigationFrameEvent, NavigationFrameEventKind, NetworkRequestEvent,
     },
     test_support::{
-        background_navigation_gate_key as make_background_navigation_gate_key,
-        deferred_main_document_load_observation_id, deferred_main_document_load_output_interest,
+        arm_background_navigation_request, deferred_main_document_load_observation_id,
+        deferred_main_document_load_output_interest,
         root_frame_stopped_loading_work as make_root_frame_stopped_loading_work,
+        settle_background_navigation_request,
     },
 };
 use serde_json::json;
 
 use super::{
-    BackgroundNavigationGate, CdpScheduler, ForegroundNavigationNetworkBarrier,
-    ProtocolOutputSequence, ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
+    CdpScheduler, ForegroundNavigationNetworkBarrier, ProtocolOutputSequence,
+    ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
     devtools_navigation_lifecycle_milestone, drain_pending_background_events,
     next_page_screencast_deadline, page_screencast_interval,
 };
@@ -450,26 +451,6 @@ fn root_document_lifecycle_identity(
         },
         epoch: RendererLifecycleEpoch(generation),
     }
-}
-
-fn background_navigation_gate_key() -> BackgroundNavigationGateKey {
-    background_navigation_gate_key_for("TID-nav", "SID-nav", "FRAME-nav", "LOADER-nav", 1)
-}
-
-fn background_navigation_gate_key_for(
-    target_id: &str,
-    session_id: &str,
-    frame_id: &str,
-    loader_id: &str,
-    navigation_request_id: u64,
-) -> BackgroundNavigationGateKey {
-    make_background_navigation_gate_key(
-        Some(target_id.to_owned()),
-        Some(session_id.to_owned()),
-        frame_id.to_owned(),
-        loader_id.to_owned(),
-        Some(navigation_request_id),
-    )
 }
 
 fn root_frame_stopped_loading_work(publish_sequence: u64, frame_id: &str) -> ProtocolSchedulerWork {
@@ -1090,13 +1071,9 @@ fn concrete_protocol_output_rejects_missing_earlier_publication() {
 
 #[test]
 fn background_navigation_blocks_concrete_protocol_residence_not_renderer_ingress() {
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
-    scheduler
-        .background_navigation_gate
-        .note_navigation_started(
-            background_navigation_gate_key(),
-            BackgroundNavigationCancellation::new(),
-        );
+    let mut conn = CdpConnection::new();
+    let _navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
+    let mut scheduler = CdpScheduler::new(conn);
     scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
         work: root_frame_stopped_loading_work(1, "FRAME-1"),
     }]);
@@ -1108,61 +1085,30 @@ fn background_navigation_blocks_concrete_protocol_residence_not_renderer_ingress
 }
 
 #[test]
-fn replacement_navigation_retires_only_the_superseded_frame_gate() {
-    let mut gate = BackgroundNavigationGate::default();
-    let source = background_navigation_gate_key_for(
-        "TID-nav",
-        "SID-source",
-        "FRAME-nav",
-        "LOADER-source",
-        1,
-    );
-    let replacement = background_navigation_gate_key_for(
-        "TID-nav",
-        "SID-replacement",
-        "FRAME-nav",
-        "LOADER-replacement",
-        2,
-    );
-    let unrelated = background_navigation_gate_key_for(
-        "TID-other",
-        "SID-other",
-        "FRAME-other",
-        "LOADER-other",
-        3,
-    );
-    let source_cancellation = BackgroundNavigationCancellation::new();
-    let replacement_cancellation = BackgroundNavigationCancellation::new();
-    let unrelated_cancellation = BackgroundNavigationCancellation::new();
+fn replacement_navigation_cancels_and_exactly_settles_the_target_owned_request() {
+    let mut conn = CdpConnection::new();
+    let source = arm_background_navigation_request(&mut conn, "LOADER-source");
+    let replacement = arm_background_navigation_request(&mut conn, "LOADER-replacement");
+    assert!(source.is_cancelled());
+    assert!(!replacement.is_cancelled());
 
-    gate.note_navigation_started(source.clone(), source_cancellation.clone());
-    gate.note_navigation_started(unrelated.clone(), unrelated_cancellation.clone());
-    gate.note_navigation_started(replacement.clone(), replacement_cancellation.clone());
-    assert!(source_cancellation.is_cancelled());
-    assert!(!replacement_cancellation.is_cancelled());
-    assert!(!unrelated_cancellation.is_cancelled());
-
-    gate.note_navigation_completion_drained(&source);
+    assert!(!settle_background_navigation_request(&mut conn, &source));
     assert!(
-        gate.has_inflight_navigation(),
-        "a stale completion must not clear either live navigation gate"
+        conn.has_inflight_background_navigation(),
+        "a stale completion must not clear the replacement request"
     );
-    gate.note_navigation_completion_drained(&replacement);
-    assert!(
-        gate.has_inflight_navigation(),
-        "replacing one frame must not clear an unrelated target's gate"
-    );
-    gate.note_navigation_completion_drained(&unrelated);
-    assert!(!gate.has_inflight_navigation());
+    assert!(settle_background_navigation_request(
+        &mut conn,
+        &replacement
+    ));
+    assert!(!conn.has_inflight_background_navigation());
 }
 
 #[test]
 fn scheduler_defers_subresource_network_events_until_background_navigation_gate_clears() {
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
-    let key = background_navigation_gate_key();
-    scheduler
-        .background_navigation_gate
-        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
+    let mut conn = CdpConnection::new();
+    let navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
+    let mut scheduler = CdpScheduler::new(conn);
 
     let document_output = scheduler.route_background_event_around_inflight_navigation(
         network_response_event(DevToolsNetworkResourceType::Document, "REQ-document"),
@@ -1179,9 +1125,10 @@ fn scheduler_defers_subresource_network_events_until_background_navigation_gate_
     assert!(script_terminal.is_empty());
     assert_eq!(scheduler.pending_navigation_background_events.len(), 2);
 
-    scheduler
-        .background_navigation_gate
-        .note_navigation_completion_drained(&key);
+    assert!(settle_background_navigation_request(
+        &mut scheduler.conn,
+        &navigation
+    ));
     let released = scheduler.drain_pending_navigation_background_events();
     let released = released
         .into_background_events()
@@ -1211,11 +1158,9 @@ fn scheduler_defers_subresource_network_events_until_background_navigation_gate_
 
 #[test]
 fn navigation_gate_release_precedes_later_renderer_boundary_network_output() {
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
-    let key = background_navigation_gate_key();
-    scheduler
-        .background_navigation_gate
-        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
+    let mut conn = CdpConnection::new();
+    let navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
+    let mut scheduler = CdpScheduler::new(conn);
 
     let request_id = "REQ-boundary-race";
     assert!(
@@ -1227,9 +1172,10 @@ fn navigation_gate_release_precedes_later_renderer_boundary_network_output() {
             .is_empty()
     );
 
-    scheduler
-        .background_navigation_gate
-        .note_navigation_completion_drained(&key);
+    assert!(settle_background_navigation_request(
+        &mut scheduler.conn,
+        &navigation
+    ));
     let mut output = ProtocolOutputSequence::empty();
     scheduler.append_navigation_gate_release_before_renderer_boundary(&mut output);
     output.append(ProtocolOutputSequence::from_background_event(

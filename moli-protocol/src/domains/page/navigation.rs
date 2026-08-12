@@ -535,20 +535,6 @@ impl BackgroundNavigationCompletion {
             Self::MainDocumentBody(_) => "main_document_body",
         }
     }
-
-    pub fn background_navigation_gate_key(
-        &self,
-    ) -> Option<crate::conn::BackgroundNavigationGateKey> {
-        match self {
-            Self::Lifecycle(completion) => {
-                Some(crate::conn::BackgroundNavigationGateKey::for_navigation(
-                    &completion.token,
-                    &completion.state,
-                ))
-            }
-            Self::MainDocumentBody(_) => None,
-        }
-    }
 }
 
 pub struct BackgroundNavigationLifecycleCompletion {
@@ -580,6 +566,10 @@ impl BackgroundNavigationLifecycleCompletion {
 
     pub(crate) fn navigate_session_id(&self) -> Option<&str> {
         self.state.navigate_session_id.as_deref()
+    }
+
+    pub(crate) fn navigation_token(&self) -> &DocumentNavigationToken {
+        &self.token
     }
 
     pub(crate) fn none_session_owner_route(&self) -> Option<CdpSessionRoute> {
@@ -2892,7 +2882,6 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     let navigation_loader_id = navigation_state.loader_id.as_str();
     let document_navigation_token = conn.start_document_navigation_for_session_owner(
         command_session_id,
-        session_id.clone(),
         navigation_loader_id.to_owned(),
     );
     let Some(document_navigation_token) = document_navigation_token else {
@@ -3026,22 +3015,22 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
                 )
             })
         });
-        let job = conn.background_navigation_load_job_for_navigation(
+        let Some(job) = conn.background_navigation_load_job_for_navigation(
+            &document_navigation_token,
             &completion_state,
             body_progress_source,
             early_result,
-        );
-        let cancellation = job.cancellation();
+        ) else {
+            return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
+                -31998,
+                "NavigationRequestNotCurrent",
+            ));
+        };
         let none_session_owner_route = completion_state
             .navigate_session_id
             .is_none()
             .then(|| conn.none_session_owner_route_override())
             .flatten();
-        conn.record_background_navigation_started_scheduler_event(
-            &document_navigation_token,
-            &completion_state,
-            cancellation,
-        );
         tokio::task::spawn_local(async move {
             let body_completion_sink = crate::conn::BackgroundNavigationBodyCompletionSink::new(
                 sender.clone(),
@@ -3092,11 +3081,17 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         network::MainDocumentBodyProgressSource::default()
     };
     navigation_state.request_announced = navigation_state.request_id.is_some();
-    let job = conn.background_navigation_load_job_for_navigation(
+    let Some(job) = conn.navigation_load_job_for_navigation(
+        &document_navigation_token,
         &navigation_state,
         body_progress_source,
         None,
-    );
+    ) else {
+        return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
+            -31998,
+            "NavigationRequestNotCurrent",
+        ));
+    };
     NavigateCommandStart::PendingLoad(Box::new(PendingNavigateLoadCommand {
         prefix_events: out,
         token: document_navigation_token,

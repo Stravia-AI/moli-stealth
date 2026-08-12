@@ -1875,7 +1875,6 @@ fn enqueue_scheduler_events_like_scheduler(
             CdpSchedulerEvent::ProtocolWorkPublished { work } => {
                 queue.push_back(TestDeferredSchedulerWork(work));
             }
-            CdpSchedulerEvent::BackgroundNavigationStarted { .. } => {}
             CdpSchedulerEvent::PageScreencastStarted { .. } => {}
         }
     }

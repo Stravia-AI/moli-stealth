@@ -1093,12 +1093,10 @@ impl BrowserContext {
         loader_id: String,
     ) -> Option<DocumentNavigationToken> {
         let target_id = self.active_target_id()?.to_owned();
-        let session_id = self.active_session_id_owned();
-        let token = self.active_target.runtime_slot.start_document_navigation(
-            target_id.clone(),
-            session_id,
-            loader_id,
-        );
+        let token = self
+            .active_target
+            .runtime_slot
+            .start_document_navigation(target_id.clone(), loader_id);
         self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
         Some(token)
     }
@@ -1106,26 +1104,21 @@ impl BrowserContext {
     pub(crate) fn start_document_navigation_for_target(
         &mut self,
         target_id: &str,
-        session_id: Option<String>,
         loader_id: String,
     ) -> Option<DocumentNavigationToken> {
         if self.active_target_id() == Some(target_id) {
             let target_id = target_id.to_owned();
-            let token = self.active_target.runtime_slot.start_document_navigation(
-                target_id.clone(),
-                session_id.or_else(|| self.active_session_id_owned()),
-                loader_id,
-            );
+            let token = self
+                .active_target
+                .runtime_slot
+                .start_document_navigation(target_id.clone(), loader_id);
             self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
             return Some(token);
         }
         let target = self.background_target_mut(target_id)?;
-        let target_session_id = session_id.or_else(|| target.session_id().map(str::to_owned));
-        let token = target.runtime_slot.start_document_navigation(
-            target_id.to_owned(),
-            target_session_id,
-            loader_id,
-        );
+        let token = target
+            .runtime_slot
+            .start_document_navigation(target_id.to_owned(), loader_id);
         self.mark_target_initial_empty_document_pending_cross_document_navigation(target_id);
         Some(token)
     }
@@ -1146,6 +1139,73 @@ impl BrowserContext {
                     .runtime_slot()
                     .accepts_pending_document_navigation_event(token)
             })
+    }
+
+    pub(crate) fn document_navigation_cancellation_handle(
+        &self,
+        token: &DocumentNavigationToken,
+    ) -> Option<moli_fetch::FetchCancelHandle> {
+        if self.active_target_id() == Some(token.target_id.as_str()) {
+            return self
+                .active_target
+                .runtime_slot
+                .document_navigation_cancellation_handle(token);
+        }
+        self.background_target(&token.target_id).and_then(|target| {
+            target
+                .runtime_slot()
+                .document_navigation_cancellation_handle(token)
+        })
+    }
+
+    pub(crate) fn arm_background_navigation_completion(
+        &mut self,
+        token: &DocumentNavigationToken,
+        additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
+    ) -> bool {
+        if self.active_target_id() == Some(token.target_id.as_str()) {
+            return self
+                .active_target
+                .runtime_slot
+                .arm_background_navigation_completion(token, additional_cancellation);
+        }
+        let Some(target) = self.background_target_mut(&token.target_id) else {
+            if let Some(cancellation) = additional_cancellation {
+                cancellation.cancel();
+            }
+            return false;
+        };
+        target
+            .runtime_slot
+            .arm_background_navigation_completion(token, additional_cancellation)
+    }
+
+    pub(crate) fn settle_background_navigation_completion(
+        &mut self,
+        token: &DocumentNavigationToken,
+    ) -> bool {
+        if self.active_target_id() == Some(token.target_id.as_str()) {
+            return self
+                .active_target
+                .runtime_slot
+                .settle_background_navigation_completion(token);
+        }
+        self.background_target_mut(&token.target_id)
+            .is_some_and(|target| {
+                target
+                    .runtime_slot
+                    .settle_background_navigation_completion(token)
+            })
+    }
+
+    pub(crate) fn has_inflight_background_navigation(&self) -> bool {
+        self.active_target
+            .runtime_slot
+            .has_inflight_background_navigation()
+            || self
+                .background_targets
+                .iter()
+                .any(|target| target.runtime_slot().has_inflight_background_navigation())
     }
 
     pub(crate) fn accepts_document_body_completion_event(

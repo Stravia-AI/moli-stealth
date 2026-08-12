@@ -442,7 +442,6 @@ mod tests {
     fn navigation(label: u64) -> DocumentNavigationToken {
         DocumentNavigationToken {
             target_id: "TID-channel".to_owned(),
-            initiating_session_id: None,
             loader_id: format!("LID-{label}"),
             request_id: crate::conn::state::NavigationRequestId::allocate(),
         }

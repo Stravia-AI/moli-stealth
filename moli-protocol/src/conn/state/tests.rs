@@ -1471,12 +1471,6 @@ fn navigation_request_identity_rejects_stale_tokens_without_ordering() {
         .start_document_navigation_for_active_target("LOADER-1".to_owned())
         .expect("active target should create first navigation token");
     assert!(context.accepts_pending_document_navigation_event(&first));
-    let mut same_request_from_different_session = first.clone();
-    same_request_from_different_session.initiating_session_id = Some("SID-other".to_owned());
-    assert_eq!(
-        same_request_from_different_session, first,
-        "initiating session is dispatch metadata, not navigation identity"
-    );
 
     let second = context
         .start_document_navigation_for_active_target("LOADER-2".to_owned())
@@ -1488,7 +1482,6 @@ fn navigation_request_identity_rejects_stale_tokens_without_ordering() {
     );
     assert_ne!(second.request_id, first.request_id);
     assert_eq!(second.target_id, "TID-nav");
-    assert_eq!(second.initiating_session_id.as_deref(), Some("SID-nav"));
     assert_eq!(second.loader_id, "LOADER-2");
 }
 
@@ -1658,11 +1651,7 @@ fn background_target_initial_empty_document_record_tracks_navigation_lifecycle()
     );
 
     let token = context
-        .start_document_navigation_for_target(
-            "TID-initial-bg",
-            Some("SID-initial-bg".to_owned()),
-            "LOADER-initial-bg".to_owned(),
-        )
+        .start_document_navigation_for_target("TID-initial-bg", "LOADER-initial-bg".to_owned())
         .expect("background target should start document navigation");
     assert!(
         context

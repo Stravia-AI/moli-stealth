@@ -512,10 +512,7 @@ pub(crate) use runtime_load::{
 };
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
-pub use scheduler_state::{
-    BackgroundNavigationCancellation, BackgroundNavigationGateKey, CdpSchedulerEvent,
-    CdpTurnOutcome,
-};
+pub use scheduler_state::{CdpSchedulerEvent, CdpTurnOutcome};
 #[cfg(test)]
 pub(crate) use site_data_manager_surface::{
     BrowserContextReservedSiteDataOwnerState, BrowserContextSiteDataManagerOwnerState,
@@ -1421,18 +1418,54 @@ impl CdpConnection {
             .runtime_inspector_response_ready_sender()
     }
 
-    pub(crate) fn record_background_navigation_started_scheduler_event(
+    pub(crate) fn document_navigation_cancellation_handle(
+        &self,
+        token: &DocumentNavigationToken,
+    ) -> Option<moli_fetch::FetchCancelHandle> {
+        let browser_context_id = self.browser_context_id_for_target(&token.target_id)?;
+        self.browser_context_by_id(browser_context_id)?
+            .document_navigation_cancellation_handle(token)
+    }
+
+    pub(crate) fn arm_background_navigation_completion(
         &mut self,
         token: &DocumentNavigationToken,
-        state: &NavigationDispatchState,
-        cancellation: BackgroundNavigationCancellation,
-    ) {
-        let key = BackgroundNavigationGateKey::for_navigation(token, state);
-        self.scheduler_state
-            .push_scheduler_event(CdpSchedulerEvent::BackgroundNavigationStarted {
-                key,
-                cancellation,
-            });
+        additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
+    ) -> bool {
+        let browser_context_id = self
+            .browser_context_id_for_target(&token.target_id)
+            .map(str::to_owned);
+        let Some(browser_context_id) = browser_context_id else {
+            if let Some(cancellation) = additional_cancellation {
+                cancellation.cancel();
+            }
+            return false;
+        };
+        self.browser_context_by_id_mut(&browser_context_id)
+            .is_some_and(|browser_context| {
+                browser_context.arm_background_navigation_completion(token, additional_cancellation)
+            })
+    }
+
+    pub(crate) fn settle_background_navigation_completion(
+        &mut self,
+        token: &DocumentNavigationToken,
+    ) -> bool {
+        let browser_context_id = self
+            .browser_context_id_for_target(&token.target_id)
+            .map(str::to_owned);
+        let Some(browser_context_id) = browser_context_id else {
+            return false;
+        };
+        self.browser_context_by_id_mut(&browser_context_id)
+            .is_some_and(|browser_context| {
+                browser_context.settle_background_navigation_completion(token)
+            })
+    }
+
+    pub fn has_inflight_background_navigation(&self) -> bool {
+        self.browser_contexts()
+            .any(BrowserContext::has_inflight_background_navigation)
     }
 
     pub fn has_pending_document_navigation_for_session_owner(
@@ -1613,13 +1646,12 @@ impl CdpConnection {
     pub(crate) fn start_document_navigation_for_session_owner(
         &mut self,
         session_id: Option<&str>,
-        event_session_id: Option<String>,
         loader_id: String,
     ) -> Option<DocumentNavigationToken> {
         let (browser_context_id, target_id) = self.target_owner_identity_for_session(session_id)?;
         let target_id = target_id?;
         self.browser_context_by_id_mut(&browser_context_id)?
-            .start_document_navigation_for_target(&target_id, event_session_id, loader_id)
+            .start_document_navigation_for_target(&target_id, loader_id)
     }
 
     pub(crate) fn commit_document_navigation_for_session_owner_if_matches(
@@ -2245,6 +2277,12 @@ impl CdpConnection {
     ) -> Vec<BackgroundProtocolEvent> {
         let completion = match completion {
             crate::domains::page::BackgroundNavigationCompletion::Lifecycle(completion) => {
+                if !self.settle_background_navigation_completion(completion.navigation_token()) {
+                    tracing::debug!(
+                        token = ?completion.navigation_token(),
+                        "background navigation completion did not match the target-owned request"
+                    );
+                }
                 completion
             }
             crate::domains::page::BackgroundNavigationCompletion::MainDocumentBody(completion) => {

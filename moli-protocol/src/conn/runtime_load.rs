@@ -694,7 +694,7 @@ fn spawn_captured_body_replay(
 pub(crate) struct BackgroundNavigationLoadJob {
     engine: NavigationEngine,
     page_reservation: RendererPageReservationToken,
-    cancellation: BackgroundNavigationCancellation,
+    cancellation: FetchCancelHandle,
     early_result: Option<BackgroundNavigationEarlyResult>,
     load_inputs: TargetNavigationLoadInputs,
     method: String,
@@ -808,10 +808,6 @@ impl BackgroundNavigationEarlyResult {
 }
 
 impl BackgroundNavigationLoadJob {
-    pub(crate) fn cancellation(&self) -> BackgroundNavigationCancellation {
-        self.cancellation.clone()
-    }
-
     fn emit_early_result_for_successful_document(
         early_result: &mut Option<BackgroundNavigationEarlyResult>,
         navigation: &Result<NavigationLoadOutcome, String>,
@@ -904,7 +900,7 @@ impl BackgroundNavigationLoadJob {
                     self.body,
                     self.request_headers.clone(),
                     None,
-                    self.cancellation.fetch_cancel_handle(),
+                    self.cancellation.clone(),
                 )
                 .await;
             let navigation_response = match navigation_response {
@@ -2370,12 +2366,14 @@ impl CdpConnection {
         .await
     }
 
-    pub(crate) fn background_navigation_load_job_for_navigation(
+    pub(crate) fn navigation_load_job_for_navigation(
         &mut self,
+        token: &DocumentNavigationToken,
         navigation: &NavigationDispatchState,
         body_progress_source: MainDocumentBodyProgressSource,
         early_result: Option<BackgroundNavigationEarlyResult>,
-    ) -> BackgroundNavigationLoadJob {
+    ) -> Option<BackgroundNavigationLoadJob> {
+        let cancellation = self.document_navigation_cancellation_handle(token)?;
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         // Ensure the connection's resident browser resource runtime exists,
         // then share only that transport/cache owner with the background job.
@@ -2388,10 +2386,10 @@ impl CdpConnection {
             &load_inputs,
             &engine,
         );
-        BackgroundNavigationLoadJob {
+        Some(BackgroundNavigationLoadJob {
             engine,
             page_reservation,
-            cancellation: BackgroundNavigationCancellation::new(),
+            cancellation,
             early_result,
             load_inputs,
             method: navigation.request_method.clone(),
@@ -2400,7 +2398,24 @@ impl CdpConnection {
             request_headers: navigation.request_headers.clone(),
             body_progress_source,
             shared_resource_runtime,
-        }
+        })
+    }
+
+    pub(crate) fn background_navigation_load_job_for_navigation(
+        &mut self,
+        token: &DocumentNavigationToken,
+        navigation: &NavigationDispatchState,
+        body_progress_source: MainDocumentBodyProgressSource,
+        early_result: Option<BackgroundNavigationEarlyResult>,
+    ) -> Option<BackgroundNavigationLoadJob> {
+        let job = self.navigation_load_job_for_navigation(
+            token,
+            navigation,
+            body_progress_source,
+            early_result,
+        )?;
+        self.arm_background_navigation_completion(token, None)
+            .then_some(job)
     }
 
     pub(crate) fn background_streaming_response_navigation_load_job_for_navigation(

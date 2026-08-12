@@ -1,7 +1,6 @@
 use crate::conn::{
-    BackgroundNavigationBodyCompletionSink, BackgroundNavigationCancellation, CapturedBody,
-    CdpConnection, Cmd, DEFAULT_LOADER_ID, PendingStreamingDocumentResponseNavigation,
-    monotonic_timestamp_seconds,
+    BackgroundNavigationBodyCompletionSink, CapturedBody, CdpConnection, Cmd, DEFAULT_LOADER_ID,
+    PendingStreamingDocumentResponseNavigation, monotonic_timestamp_seconds,
 };
 use crate::devtools_runtime::{
     DevToolsAuthChallengeAction, DevToolsCommand, DevToolsContinueInterceptedRequestCommand,
@@ -1896,17 +1895,12 @@ fn continue_streaming_document_response_in_background(
         .is_none()
         .then(|| conn.none_session_owner_route_override())
         .flatten();
-    let cancellation =
-        BackgroundNavigationCancellation::from_fetch_cancel_handle(response.cancellation_handle());
+    let cancellation = response.cancellation_handle();
     if response_code.is_none()
         && response_headers.is_empty()
         && let Some(prepared_document) = prepared_document
     {
-        conn.record_background_navigation_started_scheduler_event(
-            &document_navigation_token,
-            &navigation,
-            cancellation,
-        );
+        conn.arm_background_navigation_completion(&document_navigation_token, Some(cancellation));
         tokio::task::spawn_local(async move {
             let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(
                 sender.clone(),
@@ -1934,11 +1928,7 @@ fn continue_streaming_document_response_in_background(
         response_headers,
         body_progress_source,
     );
-    conn.record_background_navigation_started_scheduler_event(
-        &document_navigation_token,
-        &navigation,
-        cancellation,
-    );
+    conn.arm_background_navigation_completion(&document_navigation_token, Some(cancellation));
     tokio::task::spawn_local(async move {
         let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(
             sender.clone(),
