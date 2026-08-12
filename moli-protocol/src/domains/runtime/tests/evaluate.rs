@@ -2699,9 +2699,8 @@ async fn evaluate_can_complete_through_pending_command_dispatch() {
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("simple Runtime.evaluate should start as a pending command");
-    let completed = pending.wait().await;
-    let outcome = ctx.conn.complete_pending_command_dispatch(completed).await;
-    let (mut messages, scheduler_events) = outcome.into_parts();
+    let (mut messages, scheduler_events) =
+        super::complete_pending_command_task_for_test(&mut ctx, pending).await;
 
     let msg = messages
         .pop()
@@ -2964,11 +2963,7 @@ async fn isolated_evaluate_can_complete_through_pending_command_dispatch() {
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("Runtime.evaluate with isolated contextId should start as a pending command");
-    let outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(pending.wait().await)
-        .await;
-    let (messages, _) = outcome.into_parts();
+    let (messages, _) = super::complete_pending_command_task_for_test(&mut ctx, pending).await;
     let response = messages
         .iter()
         .find(|message| message["id"] == json!(3_022))
@@ -3018,11 +3013,8 @@ async fn call_function_context_resolution_can_complete_through_pending_command_d
         .conn
         .try_start_pending_command_dispatch(&isolated_raw)
         .expect("Runtime.callFunctionOn with isolated executionContextId should start pending");
-    let isolated_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(isolated_pending.wait().await)
-        .await;
-    let (isolated_messages, _) = isolated_outcome.into_parts();
+    let (isolated_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, isolated_pending).await;
     let isolated_response = isolated_messages
         .iter()
         .find(|message| message["id"] == json!(3_025))
@@ -3042,11 +3034,8 @@ async fn call_function_context_resolution_can_complete_through_pending_command_d
         .conn
         .try_start_pending_command_dispatch(&default_raw)
         .expect("Runtime.callFunctionOn without objectId should start pending");
-    let default_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(default_pending.wait().await)
-        .await;
-    let (default_messages, _) = default_outcome.into_parts();
+    let (default_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, default_pending).await;
     let default_response = default_messages
         .iter()
         .find(|message| message["id"] == json!(3_026))
@@ -3086,11 +3075,8 @@ async fn object_runtime_commands_can_complete_through_pending_command_dispatch()
         .conn
         .try_start_pending_command_dispatch(&call_raw)
         .expect("Runtime.callFunctionOn with objectId should start as a pending command");
-    let call_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(call_pending.wait().await)
-        .await;
-    let (call_messages, _) = call_outcome.into_parts();
+    let (call_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, call_pending).await;
     let call_response = call_messages
         .iter()
         .find(|message| message["id"] == json!(3_04))
@@ -3107,11 +3093,8 @@ async fn object_runtime_commands_can_complete_through_pending_command_dispatch()
         .conn
         .try_start_pending_command_dispatch(&properties_raw)
         .expect("Runtime.getProperties with objectId should start as a pending command");
-    let properties_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(properties_pending.wait().await)
-        .await;
-    let (properties_messages, _) = properties_outcome.into_parts();
+    let (properties_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, properties_pending).await;
     let properties_response = properties_messages
         .iter()
         .find(|message| message["id"] == json!(3_05))
@@ -3157,11 +3140,8 @@ async fn object_runtime_commands_can_complete_through_pending_command_dispatch()
         .conn
         .try_start_pending_command_dispatch(&release_raw)
         .expect("Runtime.releaseObject should start as a pending command");
-    let release_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(release_pending.wait().await)
-        .await;
-    let (release_messages, _) = release_outcome.into_parts();
+    let (release_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, release_pending).await;
     let release_response = release_messages
         .iter()
         .find(|message| message["id"] == json!(3_07))
@@ -3188,11 +3168,8 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .conn
         .try_start_pending_command_dispatch(&heap_raw)
         .expect("Runtime.getHeapUsage should start as a pending command");
-    let heap_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(heap_pending.wait().await)
-        .await;
-    let (heap_messages, _) = heap_outcome.into_parts();
+    let (heap_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, heap_pending).await;
     let heap_response = heap_messages
         .iter()
         .find(|message| message["id"] == json!(3_08))
@@ -3226,11 +3203,8 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .conn
         .try_start_pending_command_dispatch(&release_group_raw)
         .expect("Runtime.releaseObjectGroup should start as a pending command");
-    let release_group_outcome = ctx
-        .conn
-        .complete_pending_command_dispatch(release_group_pending.wait().await)
-        .await;
-    let (release_group_messages, _) = release_group_outcome.into_parts();
+    let (release_group_messages, _) =
+        super::complete_pending_command_task_for_test(&mut ctx, release_group_pending).await;
     let release_group_response = release_group_messages
         .iter()
         .find(|message| message["id"] == json!(3_10))

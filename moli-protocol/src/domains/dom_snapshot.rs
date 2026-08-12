@@ -225,35 +225,18 @@ mod tests {
 
     async fn process_via_command_dispatch(ctx: &mut TestContext, msg: serde_json::Value) {
         let raw = serde_json::to_string(&msg).expect("test command should serialize");
-        let mut step = ctx.conn.start_command_dispatch(&raw);
-        loop {
-            match step {
-                CdpCommandTaskStep::Complete(outcome) => {
-                    let (messages, _) = outcome.into_parts();
-                    ctx.sent.extend(messages);
-                    break;
-                }
-                CdpCommandTaskStep::Pending(pending) => {
-                    step = ctx
-                        .conn
-                        .complete_pending_command_dispatch(pending.wait().await)
-                        .await;
-                }
-            }
-        }
+        let step = ctx.conn.start_command_dispatch(&raw);
+        let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
+        ctx.sent.extend(messages);
     }
 
     async fn complete_pending_command_task_for_test(
         ctx: &mut TestContext,
-        mut pending: crate::conn::PendingCdpCommandDispatch,
+        pending: crate::conn::PendingCdpCommandDispatch,
     ) -> Vec<serde_json::Value> {
-        loop {
-            let completed = pending.wait().await;
-            match ctx.conn.complete_pending_command_dispatch(completed).await {
-                CdpCommandTaskStep::Pending(next) => pending = *next,
-                CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
-            }
-        }
+        ctx.complete_command_task_step_for_test(CdpCommandTaskStep::Pending(Box::new(pending)))
+            .await
+            .0
     }
 
     async fn wait_until_runtime_value(

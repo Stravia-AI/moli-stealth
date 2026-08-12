@@ -3485,7 +3485,7 @@ async fn close_command_background_events_keep_target_detached_sidecar() {
         post_response_events,
         scheduler_events,
         renderer_output_predecessor,
-    ) = outcome.into_command_turn_parts();
+    ) = outcome.into_renderer_owner_turn_parts();
     assert!(renderer_output_boundary.is_none());
     assert!(post_renderer_output_events.is_empty());
     assert!(renderer_output_predecessor.is_none());
@@ -3505,12 +3505,11 @@ async fn close_command_background_events_keep_target_detached_sidecar() {
     // only then may this owner action retire the session route and materialize
     // the detach sidecar. Exercise that real scheduler boundary instead of
     // expecting the old command-local destructive drain.
-    let (mut termination_events, nested_scheduler_events, termination_predecessor) = ctx
+    let (mut termination_events, nested_scheduler_events) = ctx
         .conn
         .complete_ready_protocol_scheduler_work_turn(work)
         .await
         .into_protocol_event_parts();
-    assert!(termination_predecessor.is_none());
     assert!(nested_scheduler_events.is_empty());
     events.append(&mut termination_events);
 

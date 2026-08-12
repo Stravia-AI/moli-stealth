@@ -24,6 +24,18 @@ pub struct CdpTurnOutcome {
     renderer_output_boundary: Option<moli_core::RendererOutputFence>,
     post_response_events: Vec<BackgroundProtocolEvent>,
     scheduler_events: Vec<CdpSchedulerEvent>,
+}
+
+/// One renderer-owner turn whose exact publication predecessor must be
+/// projected before its protocol result becomes observable.
+///
+/// This wrapper is intentionally a different type from [`CdpTurnOutcome`]. A
+/// scheduler hook cannot pass it to a protocol-only turn consumer and rely on
+/// a runtime assertion to catch the lost predecessor.
+#[must_use = "renderer owner turns must project or explicitly consume their predecessor"]
+#[derive(Debug)]
+pub struct CdpRendererOwnerTurnOutcome {
+    turn: CdpTurnOutcome,
     renderer_output_predecessor: Option<moli_core::RendererOutputFence>,
 }
 
@@ -64,7 +76,6 @@ impl CdpTurnOutcome {
             renderer_output_boundary: None,
             post_response_events,
             scheduler_events,
-            renderer_output_predecessor: None,
         }
     }
 
@@ -104,13 +115,13 @@ impl CdpTurnOutcome {
     /// contributions in that stream collapse to its latest cursor; combining
     /// unrelated streams is an ownership error rather than a frontier.
     pub(crate) fn with_renderer_output_predecessor(
-        mut self,
+        self,
         predecessor: Option<moli_core::RendererOutputFence>,
-    ) -> Self {
-        if let Some(predecessor) = predecessor {
-            predecessor.merge_into_same_stream_tail(&mut self.renderer_output_predecessor);
+    ) -> CdpRendererOwnerTurnOutcome {
+        CdpRendererOwnerTurnOutcome {
+            turn: self,
+            renderer_output_predecessor: predecessor,
         }
-        self
     }
 
     #[cfg(test)]
@@ -133,11 +144,7 @@ impl CdpTurnOutcome {
 
     pub fn into_protocol_event_parts(
         self,
-    ) -> (
-        Vec<BackgroundProtocolEvent>,
-        Vec<CdpSchedulerEvent>,
-        Option<moli_core::RendererOutputFence>,
-    ) {
+    ) -> (Vec<BackgroundProtocolEvent>, Vec<CdpSchedulerEvent>) {
         let mut protocol_events = self.protocol_events;
         assert!(
             self.renderer_output_boundary.is_none(),
@@ -145,11 +152,7 @@ impl CdpTurnOutcome {
         );
         protocol_events.extend(self.post_renderer_output_events);
         protocol_events.extend(self.post_response_events);
-        (
-            protocol_events,
-            self.scheduler_events,
-            self.renderer_output_predecessor,
-        )
+        (protocol_events, self.scheduler_events)
     }
 
     pub fn into_command_turn_parts(
@@ -160,7 +163,6 @@ impl CdpTurnOutcome {
         Option<moli_core::RendererOutputFence>,
         Vec<BackgroundProtocolEvent>,
         Vec<CdpSchedulerEvent>,
-        Option<moli_core::RendererOutputFence>,
     ) {
         (
             self.protocol_events,
@@ -168,6 +170,58 @@ impl CdpTurnOutcome {
             self.renderer_output_boundary,
             self.post_response_events,
             self.scheduler_events,
+        )
+    }
+}
+
+impl CdpRendererOwnerTurnOutcome {
+    #[cfg(test)]
+    pub fn into_parts(self) -> (Vec<serde_json::Value>, Vec<CdpSchedulerEvent>) {
+        assert!(
+            self.renderer_output_predecessor.is_none(),
+            "tests must project an exact renderer predecessor instead of flattening it"
+        );
+        self.turn.into_parts()
+    }
+
+    pub fn into_protocol_event_parts(
+        self,
+    ) -> (
+        Vec<BackgroundProtocolEvent>,
+        Vec<CdpSchedulerEvent>,
+        Option<moli_core::RendererOutputFence>,
+    ) {
+        let (protocol_events, scheduler_events) = self.turn.into_protocol_event_parts();
+        (
+            protocol_events,
+            scheduler_events,
+            self.renderer_output_predecessor,
+        )
+    }
+
+    pub fn into_renderer_owner_turn_parts(
+        self,
+    ) -> (
+        Vec<BackgroundProtocolEvent>,
+        Vec<BackgroundProtocolEvent>,
+        Option<moli_core::RendererOutputFence>,
+        Vec<BackgroundProtocolEvent>,
+        Vec<CdpSchedulerEvent>,
+        Option<moli_core::RendererOutputFence>,
+    ) {
+        let (
+            protocol_events,
+            post_renderer_output_events,
+            renderer_output_boundary,
+            post_response_events,
+            scheduler_events,
+        ) = self.turn.into_command_turn_parts();
+        (
+            protocol_events,
+            post_renderer_output_events,
+            renderer_output_boundary,
+            post_response_events,
+            scheduler_events,
             self.renderer_output_predecessor,
         )
     }
@@ -193,10 +247,8 @@ mod tests {
             Vec::new(),
         );
 
-        let (events, scheduler_events, renderer_output_predecessor) =
-            outcome.into_protocol_event_parts();
+        let (events, scheduler_events) = outcome.into_protocol_event_parts();
         assert!(scheduler_events.is_empty());
-        assert!(renderer_output_predecessor.is_none());
         let [(message, automation_event)] = events
             .into_iter()
             .map(BackgroundProtocolEvent::into_parts)

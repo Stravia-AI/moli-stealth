@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use super::conn::{
     BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition,
-    CdpSchedulerEvent, CdpTurnOutcome, CommandDispatchContext, CommandResponseFlushPermit,
+    CdpSchedulerEvent, CommandDispatchContext, CommandResponseFlushPermit,
     LoadedNavigationRendererAttachmentCommit, ParsedCdpCommand, PendingCdpCommandDispatch,
     RuntimeInspectorResponseReady,
 };
@@ -759,7 +759,7 @@ impl TestContext {
                         mut post_response_events,
                         mut new_scheduler_events,
                         mut renderer_output_predecessor,
-                    ) = outcome.into_command_turn_parts();
+                    ) = outcome.into_renderer_owner_turn_parts();
                     if let Some(command_predecessor) =
                         command_context.take_renderer_output_predecessor()
                     {
@@ -913,7 +913,7 @@ impl TestContext {
     /// outcome into a message-only vector.
     pub(crate) async fn route_completed_command_outcome_for_test(
         &mut self,
-        outcome: CdpTurnOutcome,
+        outcome: crate::CdpRendererOwnerTurnOutcome,
     ) -> (Vec<Value>, Vec<CdpSchedulerEvent>) {
         let sent_start = self.sent.len();
         let (
@@ -923,7 +923,7 @@ impl TestContext {
             post_response_events,
             scheduler_events,
             renderer_output_predecessor,
-        ) = outcome.into_command_turn_parts();
+        ) = outcome.into_renderer_owner_turn_parts();
         if let Some(predecessor) = renderer_output_predecessor {
             Box::pin(self.route_renderer_output_predecessor_before_command_response(predecessor))
                 .await;
@@ -956,12 +956,8 @@ impl TestContext {
                 permit,
             )
             .await;
-        let (protocol_events, scheduler_events, renderer_output_predecessor) =
+        let (protocol_events, scheduler_events) =
             completion.into_outcome().into_protocol_event_parts();
-        assert!(
-            renderer_output_predecessor.is_none(),
-            "releasing a Runtime output barrier cannot introduce another renderer fence"
-        );
         if route_scheduler_events {
             Box::pin(self.route_test_scheduler_causal_batch(protocol_events, scheduler_events))
                 .await;
@@ -977,12 +973,8 @@ impl TestContext {
         completion: RuntimeCommandOutputBarrierCompletion,
         work: &mut VecDeque<TestSchedulerWork>,
     ) {
-        let (protocol_events, scheduler_events, renderer_output_predecessor) =
+        let (protocol_events, scheduler_events) =
             completion.into_outcome().into_protocol_event_parts();
-        assert!(
-            renderer_output_predecessor.is_none(),
-            "a Runtime output barrier terminal cannot introduce another renderer fence"
-        );
         if !scheduler_events.is_empty() {
             work.push_front(TestSchedulerWork::SchedulerEvents(scheduler_events));
         }
@@ -1151,7 +1143,7 @@ impl TestContext {
             mut post_response_events,
             scheduler_events,
             renderer_output_predecessor,
-        ) = outcome.into_command_turn_parts();
+        ) = outcome.into_renderer_owner_turn_parts();
         assert!(
             renderer_output_predecessor.is_none(),
             "background navigation completion must use an insertion boundary"
@@ -1491,15 +1483,11 @@ impl TestContext {
                 .pending_protocol_scheduler_work
                 .remove(selected_index)
                 .expect("ready protocol work must remain resident");
-            let (events, scheduler_events, renderer_output_predecessor) = self
+            let (events, scheduler_events) = self
                 .conn
                 .complete_ready_protocol_scheduler_work_turn(protocol_work)
                 .await
                 .into_protocol_event_parts();
-            assert!(
-                renderer_output_predecessor.is_none(),
-                "protocol scheduler work must not introduce a renderer command fence"
-            );
             if !events.is_empty() {
                 work.push_back(TestSchedulerWork::ProtocolEvents(events));
             }
@@ -1533,12 +1521,7 @@ impl TestContext {
                 &mut self.runtime_command_output_barriers,
             )
             .await;
-        let (protocol_events, scheduler_events, renderer_output_predecessor) =
-            outcome.into_protocol_event_parts();
-        assert!(
-            renderer_output_predecessor.is_none(),
-            "renderer ingress cannot recursively introduce a renderer command fence"
-        );
+        let (protocol_events, scheduler_events) = outcome.into_protocol_event_parts();
         if !protocol_events.is_empty() {
             work.push_back(TestSchedulerWork::ProtocolEvents(protocol_events));
         }
@@ -1841,11 +1824,10 @@ async fn drain_scheduler_events_like_scheduler_with_materializer(
             protocol_work.is_ready(),
             "the stateless compatibility materializer cannot own pending protocol work; use TestContext or the production CdpScheduler"
         );
-        let (events, nested_scheduler_events, renderer_output_predecessor) = conn
+        let (events, nested_scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(protocol_work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         out.extend(events.into_iter().map(materialize_event));
         enqueue_scheduler_events_like_scheduler(&mut queue, nested_scheduler_events);
         enqueue_scheduler_events_like_scheduler(&mut queue, conn.take_scheduler_events());

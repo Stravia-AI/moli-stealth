@@ -462,7 +462,7 @@ async fn send_message_to_target_inner_async(
         post_response_events,
         nested_scheduler_events,
         renderer_output_predecessor,
-    ) = nested_outcome.into_command_turn_parts();
+    ) = nested_outcome.into_renderer_owner_turn_parts();
     if let Some(predecessor) = renderer_output_predecessor {
         command_context.set_renderer_output_predecessor(predecessor);
     }

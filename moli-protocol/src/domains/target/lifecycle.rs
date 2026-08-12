@@ -1263,11 +1263,7 @@ async fn settle_target_close_after_pending_fetches_async(
     let outcome =
         crate::domains::page::complete_page_target_termination_owner_action_async(conn, action)
             .await;
-    let (events, scheduler_events, unexpected_predecessor) = outcome.into_protocol_event_parts();
-    assert!(
-        unexpected_predecessor.is_none(),
-        "a target-termination owner action cannot produce renderer output"
-    );
+    let (events, scheduler_events) = outcome.into_protocol_event_parts();
     out.extend_background_events(events);
     conn.extend_scheduler_events(scheduler_events);
 }

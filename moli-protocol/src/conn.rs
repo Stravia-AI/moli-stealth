@@ -512,7 +512,7 @@ pub(crate) use runtime_load::{
 };
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
-pub use scheduler_state::{CdpSchedulerEvent, CdpTurnOutcome};
+pub use scheduler_state::{CdpRendererOwnerTurnOutcome, CdpSchedulerEvent, CdpTurnOutcome};
 #[cfg(test)]
 pub(crate) use site_data_manager_surface::{
     BrowserContextReservedSiteDataOwnerState, BrowserContextSiteDataManagerOwnerState,
@@ -2248,7 +2248,7 @@ impl CdpConnection {
     pub async fn drain_background_navigation_completion_turn_async(
         &mut self,
         completion: crate::domains::page::BackgroundNavigationCompletion,
-    ) -> CdpTurnOutcome {
+    ) -> CdpRendererOwnerTurnOutcome {
         let mut command_context = CommandDispatchContext::default();
         let protocol_events = self
             .drain_background_navigation_completion_events_with_context(

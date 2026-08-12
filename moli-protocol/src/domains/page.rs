@@ -3627,11 +3627,10 @@ mod producer_tests {
         }
 
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (navigation_events, nested_scheduler_events, renderer_output_predecessor) = conn
+        let (navigation_events, nested_scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         assert!(
             !nested_scheduler_events.iter().any(|event| {
                 matches!(
@@ -5048,11 +5047,10 @@ mod producer_tests {
         );
 
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (events, scheduler_events, renderer_output_predecessor) = conn
+        let (events, scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         assert!(!scheduler_events.iter().any(|event| {
             matches!(
                 event,
@@ -5124,11 +5122,10 @@ mod producer_tests {
             Some(&mut prepared),
         );
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (out, scheduler_events, renderer_output_predecessor) = conn
+        let (out, scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         assert!(!scheduler_events.iter().any(|event| {
             matches!(
                 event,
@@ -5185,11 +5182,10 @@ mod producer_tests {
             Some(&mut prepared),
         );
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (out, scheduler_events, renderer_output_predecessor) = conn
+        let (out, scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         assert!(scheduler_events.is_empty());
 
         assert!(out.is_empty(), "a retired Page must start no navigation");

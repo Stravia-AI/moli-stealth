@@ -1,6 +1,6 @@
 use super::target_session_owner::{TargetSessionOwnerMut, TargetSessionStateMut};
 use super::*;
-use crate::CdpTurnOutcome;
+use crate::CdpRendererOwnerTurnOutcome;
 use moli_core::page::V8InspectorSessionState;
 use serde_json::json;
 
@@ -158,7 +158,7 @@ impl CdpConnection {
     pub async fn enable_runtime_listener_for_target(
         &mut self,
         target_id: &str,
-    ) -> Option<CdpTurnOutcome> {
+    ) -> Option<CdpRendererOwnerTurnOutcome> {
         let route = self.target_session_route_for_target_id(target_id)?;
         if matches!(route, CdpSessionRoute::ServiceWorkerTarget { .. }) {
             let session_id =
@@ -216,7 +216,7 @@ impl CdpConnection {
     pub async fn disable_runtime_listener_for_target(
         &mut self,
         target_id: &str,
-    ) -> Option<CdpTurnOutcome> {
+    ) -> Option<CdpRendererOwnerTurnOutcome> {
         let route = self.target_session_route_for_target_id(target_id)?;
         if matches!(route, CdpSessionRoute::ServiceWorkerTarget { .. }) {
             let session_id = self.service_worker_runtime_listener_session_for_route(&route)?;

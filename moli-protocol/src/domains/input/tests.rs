@@ -1274,7 +1274,7 @@ async fn coordinate_mouse_event_completes_through_pending_layout_dispatch() {
             .conn
             .complete_pending_command_dispatch(pending.wait().await)
             .await;
-        let (messages, scheduler_events) = outcome.into_parts();
+        let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
 
         assert!(
             scheduler_events.is_empty(),
@@ -1320,7 +1320,7 @@ async fn dispatch_key_event_can_complete_through_pending_command_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = outcome.into_parts();
+    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
 
     assert!(
         scheduler_events.is_empty(),
@@ -1363,7 +1363,7 @@ async fn insert_text_can_complete_through_pending_command_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = outcome.into_parts();
+    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
 
     assert!(
         scheduler_events.is_empty(),
@@ -1421,7 +1421,7 @@ async fn coordinate_touch_commands_complete_through_pending_layout_dispatch() {
             .conn
             .complete_pending_command_dispatch(pending.wait().await)
             .await;
-        let (messages, scheduler_events) = outcome.into_parts();
+        let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
 
         assert!(
             scheduler_events.is_empty(),
@@ -1518,7 +1518,7 @@ async fn coordinate_drag_event_completes_through_pending_layout_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = outcome.into_parts();
+    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
     assert!(
         scheduler_events.is_empty(),
         "drag event dispatch should not enqueue scheduler work"

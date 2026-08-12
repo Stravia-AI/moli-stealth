@@ -730,7 +730,7 @@ impl CdpScheduler {
                     post_response_events,
                     scheduler_events,
                     renderer_output_predecessor,
-                ) = result.into_command_turn_parts();
+                ) = result.into_renderer_owner_turn_parts();
                 CommandTaskStep::Complete(Box::new(
                     CommandTurnOutput::new_with_post_response_events(
                         self.route_background_events_around_inflight_navigation(events),
@@ -776,7 +776,7 @@ impl CdpScheduler {
                     post_response_events,
                     scheduler_events,
                     renderer_output_predecessor,
-                ) = result.into_command_turn_parts();
+                ) = result.into_renderer_owner_turn_parts();
                 CommandTaskStep::Complete(Box::new(
                     CommandTurnOutput::new_with_post_response_events(
                         self.route_background_events_around_inflight_navigation(events),
@@ -886,7 +886,7 @@ impl CdpScheduler {
             .conn
             .process_message_with_turn_outcome_async(&message.to_string())
             .await;
-        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+        self.apply_renderer_owner_turn_outcome(receivers, outcome)
             .await
     }
 
@@ -938,7 +938,7 @@ impl CdpScheduler {
         else {
             return Ok(ProtocolOutputSequence::empty());
         };
-        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+        self.apply_renderer_owner_turn_outcome(receivers, outcome)
             .await
     }
 
@@ -954,7 +954,7 @@ impl CdpScheduler {
         else {
             return Ok(ProtocolOutputSequence::empty());
         };
-        self.apply_turn_outcome_at_renderer_owner_boundary(receivers, outcome)
+        self.apply_renderer_owner_turn_outcome(receivers, outcome)
             .await
     }
 
@@ -1896,35 +1896,27 @@ impl CdpScheduler {
         }
     }
 
-    fn apply_turn_outcome(
+    fn apply_protocol_only_turn_outcome(
         &mut self,
         outcome: moli_protocol::CdpTurnOutcome,
     ) -> ProtocolOutputSequence {
-        let (
-            mut output,
-            post_renderer_output,
-            renderer_output_boundary,
-            renderer_output_predecessor,
-        ) = self.materialize_turn_outcome(outcome);
+        let (mut output, post_renderer_output, renderer_output_boundary) =
+            self.materialize_protocol_only_turn_outcome(outcome);
         assert!(
             renderer_output_boundary.is_none(),
             "non-command turn must consume its renderer insertion boundary at its owner boundary"
-        );
-        assert!(
-            renderer_output_predecessor.is_none(),
-            "non-command turn must consume its renderer output predecessor at its owner boundary"
         );
         output.append(post_renderer_output);
         output
     }
 
-    async fn apply_turn_outcome_at_renderer_owner_boundary(
+    async fn apply_renderer_owner_turn_outcome(
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
-        outcome: moli_protocol::CdpTurnOutcome,
+        outcome: moli_protocol::CdpRendererOwnerTurnOutcome,
     ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
         let (output, post_renderer_output, renderer_output_boundary, renderer_output_predecessor) =
-            self.materialize_turn_outcome(outcome);
+            self.materialize_renderer_owner_turn_outcome(outcome);
         assert!(
             renderer_output_boundary.is_none(),
             "non-navigation owner turn must not carry a renderer insertion boundary"
@@ -1945,9 +1937,33 @@ impl CdpScheduler {
         Ok(causal_output)
     }
 
-    fn materialize_turn_outcome(
+    fn materialize_protocol_only_turn_outcome(
         &mut self,
         outcome: moli_protocol::CdpTurnOutcome,
+    ) -> (
+        ProtocolOutputSequence,
+        ProtocolOutputSequence,
+        Option<moli_core::RendererOutputFence>,
+    ) {
+        let (
+            events,
+            mut post_renderer_output_events,
+            renderer_output_boundary,
+            mut post_response_events,
+            scheduler_events,
+        ) = outcome.into_command_turn_parts();
+        post_renderer_output_events.append(&mut post_response_events);
+        self.apply_scheduler_events(scheduler_events);
+        (
+            self.route_background_events_around_inflight_navigation(events),
+            self.route_background_events_around_inflight_navigation(post_renderer_output_events),
+            renderer_output_boundary,
+        )
+    }
+
+    fn materialize_renderer_owner_turn_outcome(
+        &mut self,
+        outcome: moli_protocol::CdpRendererOwnerTurnOutcome,
     ) -> (
         ProtocolOutputSequence,
         ProtocolOutputSequence,
@@ -1961,7 +1977,7 @@ impl CdpScheduler {
             mut post_response_events,
             scheduler_events,
             renderer_output_predecessor,
-        ) = outcome.into_command_turn_parts();
+        ) = outcome.into_renderer_owner_turn_parts();
         post_renderer_output_events.append(&mut post_response_events);
         self.apply_scheduler_events(scheduler_events);
         (
@@ -2021,15 +2037,10 @@ impl CdpScheduler {
             renderer_output_boundary,
             mut post_response_events,
             scheduler_events,
-            renderer_output_predecessor,
         ) = outcome.into_command_turn_parts();
         assert!(
             renderer_output_boundary.is_none(),
             "renderer output ingress cannot recursively insert another renderer cursor"
-        );
-        assert!(
-            renderer_output_predecessor.is_none(),
-            "renderer output ingress cannot recursively depend on another renderer cursor"
         );
         events.append(&mut post_renderer_output_events);
         events.append(&mut post_response_events);
@@ -2170,7 +2181,7 @@ impl CdpScheduler {
                 terminal = ?completion.terminal(),
             );
         }
-        self.apply_turn_outcome(completion.into_outcome())
+        self.apply_protocol_only_turn_outcome(completion.into_outcome())
     }
 
     fn next_protocol_scheduler_step(&self) -> ProtocolSchedulerStep {
@@ -2233,7 +2244,7 @@ impl CdpScheduler {
             .conn
             .project_protocol_local_command_outputs_turn_async(session_id)
             .await;
-        self.apply_turn_outcome(outcome)
+        self.apply_protocol_only_turn_outcome(outcome)
     }
 
     async fn complete_protocol_residence(
@@ -2288,7 +2299,7 @@ impl CdpScheduler {
                     .conn
                     .complete_ready_protocol_scheduler_work_turn(work)
                     .await;
-                out.append(self.apply_turn_outcome(outcome));
+                out.append(self.apply_protocol_only_turn_outcome(outcome));
                 if let Some(observation_id) = load_observation_id {
                     self.queues.satisfy_load_predecessor(observation_id);
                 }
@@ -2385,7 +2396,7 @@ impl CdpScheduler {
             .conn
             .complete_deferred_main_document_load_completion_for_scheduler(completion)
             .await;
-        let output = self.apply_turn_outcome(outcome);
+        let output = self.apply_protocol_only_turn_outcome(outcome);
         self.queues.satisfy_load_predecessor(observation_id);
         if let Some(started) = trace_started {
             tracing::info!(
@@ -2413,7 +2424,7 @@ impl CdpScheduler {
             .drain_background_navigation_completion_turn_async(completion)
             .await;
         let (out, post_renderer_output, renderer_output_boundary, renderer_output_predecessor) =
-            self.materialize_turn_outcome(outcome);
+            self.materialize_renderer_owner_turn_outcome(outcome);
         if let Some(started) = trace_started {
             tracing::info!(
                 target: "moli_cdp_runtime",

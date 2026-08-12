@@ -633,11 +633,10 @@ mod tests {
             panic!("barrier release must publish concrete protocol work");
         };
         assert!(work.is_top_level_location_navigation_owner_action());
-        let (events, nested_scheduler_events, renderer_output_predecessor) = conn
+        let (events, nested_scheduler_events) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
-        assert!(renderer_output_predecessor.is_none());
         assert!(
             !nested_scheduler_events.iter().any(|event| {
                 matches!(

@@ -1330,20 +1330,8 @@ async fn direct_network_enable_routes_to_inactive_active_owner_without_promoting
 
 #[tokio::test]
 async fn direct_runtime_evaluate_routes_to_inactive_active_owner_without_promoting_slot() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
 
-    let mut page = conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><title>runtime-direct-owner</title>",
-        )
-        .await
-        .expect("test page should load");
-    let _ = page
-        .dispatch_runtime_protocol_message_async(
-            &json!({"id": 9001, "method": "Runtime.enable", "params": {}}).to_string(),
-        )
-        .await
-        .expect("Runtime.enable should create the owner inspector context");
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B".to_owned());
     inactive.attach_active_session("SID-B");
@@ -1351,23 +1339,35 @@ async fn direct_runtime_evaluate_routes_to_inactive_active_owner_without_promoti
         .devtools_session_state
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    inactive.replace_loaded_page(Some(page));
-    conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><title>runtime-direct-owner</title>",
+        Some("SID-B"),
+    )
+    .await;
 
-    let response = conn
-        .process_message_messages_only_for_test(
-            r#"{"id":1,"method":"Runtime.evaluate","sessionId":"SID-B","params":{"expression":"document.title","returnByValue":true}}"#,
-        )
-        .await;
-    assert_eq!(response[0]["id"], json!(1));
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-B",
+        "params": {"expression": "document.title", "returnByValue": true}
+    }))
+    .await;
+    let response = std::mem::take(&mut ctx.sent);
+    let response = response
+        .iter()
+        .find(|message| message["id"] == json!(1))
+        .unwrap_or_else(|| panic!("missing Runtime.evaluate response: {response:?}"));
+    assert_eq!(response["id"], json!(1));
     assert_eq!(
-        response[0]["result"]["result"]["value"],
+        response["result"]["result"]["value"],
         json!("runtime-direct-owner"),
         "{response:?}"
     );
-    assert_eq!(response[0]["sessionId"], json!("SID-B"));
+    assert_eq!(response["sessionId"], json!("SID-B"));
     assert!(
-        conn.browser_context.is_none(),
+        ctx.conn.browser_context.is_none(),
         "direct Runtime.evaluate should not promote the inactive owner into the active slot"
     );
 }
@@ -1887,15 +1887,16 @@ async fn direct_runtime_evaluate_popup_creates_target_in_inactive_background_own
 
 #[tokio::test]
 async fn direct_runtime_evaluate_self_popup_does_not_navigate_active_target_for_inactive_owner() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
 
     let mut active = BrowserContext::new("BID-active".into());
     active.set_active_target_id("TID-active".to_owned());
     active.attach_active_session("SID-active");
     active.set_target_url("https://active.example/current".to_owned());
-    conn.browser_context = Some(active);
+    ctx.conn.browser_context = Some(active);
 
-    let mut page = conn
+    let mut page = ctx
+        .conn
         .load_page_via_runtime_async("data:text/html,<!doctype html><title>self-popup</title>")
         .await
         .expect("background page should load");
@@ -1920,13 +1921,19 @@ async fn direct_runtime_evaluate_self_popup_does_not_navigate_active_target_for_
             .runtime_session_state
             .runtime_frontend_enabled = true;
     });
-    conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.inactive_browser_contexts.push(inactive);
 
-    let response = conn
-        .process_message_messages_only_for_test(
-            r#"{"id":1,"method":"Runtime.evaluate","sessionId":"SID-self-popup-background","params":{"expression":"window.open('https://example.com/should-not-hit-active', '_self') !== null"}}"#,
-        )
-        .await;
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-self-popup-background",
+        "params": {
+            "expression": "window.open('https://example.com/should-not-hit-active', '_self') !== null"
+        }
+    }))
+    .await;
+    let response = std::mem::take(&mut ctx.sent);
 
     assert!(
         response.iter().any(|message| {
@@ -1943,7 +1950,7 @@ async fn direct_runtime_evaluate_self_popup_does_not_navigate_active_target_for_
         "_self window.open should not create a popup target: {response:?}"
     );
     assert_eq!(
-        conn.browser_context.as_ref().map(|bc| bc.target_url()),
+        ctx.conn.browser_context.as_ref().map(|bc| bc.target_url()),
         Some("https://active.example/current"),
         "inactive owner _self popup must not navigate the currently active target"
     );
@@ -2026,20 +2033,8 @@ async fn direct_runtime_evaluate_file_chooser_uses_inactive_background_owner() {
 
 #[tokio::test]
 async fn direct_runtime_evaluate_routes_to_inactive_auxiliary_owner_without_promoting_slot() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
 
-    let mut page = conn
-        .load_page_via_runtime_async(
-            "data:text/html,<!doctype html><title>runtime-direct-aux</title>",
-        )
-        .await
-        .expect("test page should load");
-    let _ = page
-        .dispatch_runtime_protocol_message_async(
-            &json!({"id": 9002, "method": "Runtime.enable", "params": {}}).to_string(),
-        )
-        .await
-        .expect("Runtime.enable should create the owner inspector context");
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B".to_owned());
     inactive.attach_active_session("SID-primary");
@@ -2048,23 +2043,35 @@ async fn direct_runtime_evaluate_routes_to_inactive_auxiliary_owner_without_prom
         .devtools_session_state
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    inactive.replace_loaded_page(Some(page));
-    conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<!doctype html><title>runtime-direct-aux</title>",
+        Some("SID-aux"),
+    )
+    .await;
 
-    let response = conn
-        .process_message_messages_only_for_test(
-            r#"{"id":1,"method":"Runtime.evaluate","sessionId":"SID-aux","params":{"expression":"document.title","returnByValue":true}}"#,
-        )
-        .await;
-    assert_eq!(response[0]["id"], json!(1));
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-aux",
+        "params": {"expression": "document.title", "returnByValue": true}
+    }))
+    .await;
+    let response = std::mem::take(&mut ctx.sent);
+    let response = response
+        .iter()
+        .find(|message| message["id"] == json!(1))
+        .unwrap_or_else(|| panic!("missing Runtime.evaluate response: {response:?}"));
+    assert_eq!(response["id"], json!(1));
     assert_eq!(
-        response[0]["result"]["result"]["value"],
+        response["result"]["result"]["value"],
         json!("runtime-direct-aux"),
         "{response:?}"
     );
-    assert_eq!(response[0]["sessionId"], json!("SID-aux"));
+    assert_eq!(response["sessionId"], json!("SID-aux"));
     assert!(
-        conn.browser_context.is_none(),
+        ctx.conn.browser_context.is_none(),
         "direct auxiliary Runtime.evaluate should not promote the inactive owner"
     );
 }

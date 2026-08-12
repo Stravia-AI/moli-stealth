@@ -19,7 +19,7 @@ pub struct CompletedCdpCommandDispatch {
 
 pub enum CdpCommandTaskStep {
     Pending(Box<PendingCdpCommandDispatch>),
-    Complete(CdpTurnOutcome),
+    Complete(CdpRendererOwnerTurnOutcome),
 }
 
 impl CdpCommandTaskStep {
@@ -1295,7 +1295,10 @@ impl CdpConnection {
         )
     }
 
-    pub async fn process_message_with_turn_outcome_async(&mut self, raw: &str) -> CdpTurnOutcome {
+    pub async fn process_message_with_turn_outcome_async(
+        &mut self,
+        raw: &str,
+    ) -> CdpRendererOwnerTurnOutcome {
         let outcome = self
             .process_message_through_command_dispatch_async(raw)
             .await;
@@ -1306,7 +1309,7 @@ impl CdpConnection {
             post_response_events,
             mut scheduler_events,
             renderer_output_predecessor,
-        ) = outcome.into_command_turn_parts();
+        ) = outcome.into_renderer_owner_turn_parts();
         scheduler_events.extend(self.take_scheduler_events());
         CdpTurnOutcome::new_with_protocol_and_post_response_events(
             protocol_events,
@@ -1335,7 +1338,7 @@ impl CdpConnection {
     async fn process_message_through_command_dispatch_async(
         &mut self,
         raw: &str,
-    ) -> CdpTurnOutcome {
+    ) -> CdpRendererOwnerTurnOutcome {
         let command = ParsedCdpCommand::parse_str(raw.to_owned());
         let output_session_id = command
             .as_ref()
@@ -1372,7 +1375,7 @@ impl CdpConnection {
                         mut complete_post_response_events,
                         mut complete_events,
                         complete_renderer_output_predecessor,
-                    ) = outcome.into_command_turn_parts();
+                    ) = outcome.into_renderer_owner_turn_parts();
                     assert!(
                         renderer_output_boundary.is_none(),
                         "one direct command cannot complete multiple renderer insertion boundaries"
