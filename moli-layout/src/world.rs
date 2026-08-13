@@ -6,7 +6,7 @@ use taffy::{Cache, Layout, Point, Style};
 use crate::{
     LayoutCssImageReference, LayoutElementSemantics, LayoutError, LayoutPoint, LayoutPseudo,
     LayoutScrollbarAxis, LayoutScrollbarColors, LayoutScrollbarGutter, LayoutScrollbarWidth,
-    ReplacedMetrics, ResolvedLayoutStyle, inline::InlineFormattingContext,
+    ResolvedLayoutStyle, inline::InlineFormattingContext, replaced::ReplacedContext,
     style::LayoutOverflowMode,
 };
 
@@ -237,7 +237,8 @@ pub struct LayoutBox<N> {
     pub(crate) outside_list_marker: bool,
     /// Current source-owned scroll offset sampled at construction time.
     pub(crate) scroll_offset: LayoutPoint,
-    pub(crate) replaced_metrics: Option<ReplacedMetrics>,
+    /// Pass-local natural sizing retained once at box construction.
+    pub(crate) replaced_context: Option<ReplacedContext>,
     pub(crate) replaced_image: Option<crate::LayoutImageResource>,
     pub(crate) css_images: crate::source::LayoutCssImageResources,
     /// Winning collapsed-table edges owned by the table wrapper for this pass.
@@ -542,6 +543,15 @@ impl<N> LayoutBox<N> {
         self.element_semantics
             .as_ref()
             .is_some_and(LayoutElementSemantics::is_replaced)
+    }
+
+    /// Resolve the used ratio at the layout-node boundary, after both authored
+    /// style and natural replaced-element sizing are available.
+    pub(crate) fn resolved_aspect_ratio(&self) -> Option<taffy::ResolvedAspectRatio> {
+        let natural_ratio = self
+            .replaced_context
+            .and_then(|context| context.inherent_ratio());
+        self.style.resolved_aspect_ratio(natural_ratio)
     }
 }
 
@@ -957,7 +967,6 @@ where
         kind: LayoutBoxKind,
         style: ResolvedLayoutStyle,
         text: Option<Arc<str>>,
-        replaced_metrics: Option<ReplacedMetrics>,
     ) -> LayoutBox<N> {
         let capability_diagnostics =
             default_capability_diagnostics(kind, element_semantics.as_ref(), &style);
@@ -986,7 +995,7 @@ where
             inline_flattened: false,
             outside_list_marker: false,
             scroll_offset: LayoutPoint::ZERO,
-            replaced_metrics,
+            replaced_context: None,
             replaced_image: None,
             css_images: crate::source::LayoutCssImageResources::default(),
             collapsed_table_borders: None,

@@ -8,13 +8,10 @@
 use style::Atom;
 use taffy::{
     AvailableSpace, BoxSizing, CoreStyle as _, MaybeMath, MaybeResolve, RequestedAxis,
-    ResolveOrZero as _, Size, SizingMode,
+    ResolveOrZero as _, ResolvedAspectRatio, Size, SizingMode,
 };
 
-use crate::{
-    LayoutReplacedKind, ReplacedMetrics,
-    style::{ResolvedAspectRatio, resolve_stylo_calc_value},
-};
+use crate::{LayoutReplacedKind, ReplacedMetrics, style::resolve_stylo_calc_value};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct ReplacedContext {
@@ -179,12 +176,15 @@ fn content_width_from_height(
     aspect_ratio: ResolvedAspectRatio,
     padding_border: Size<f32>,
 ) -> Option<f32> {
-    let ratio = aspect_ratio.ratio?;
-    let width = match aspect_ratio.box_sizing {
-        BoxSizing::ContentBox => height * ratio,
-        BoxSizing::BorderBox => (height + padding_border.height) * ratio - padding_border.width,
-    };
-    width.is_finite().then_some(width.max(0.0))
+    apply_aspect_ratio_to_content_size(
+        Size {
+            width: None,
+            height: Some(height),
+        },
+        Some(aspect_ratio),
+        padding_border,
+    )
+    .width
 }
 
 fn content_height_from_width(
@@ -192,40 +192,30 @@ fn content_height_from_width(
     aspect_ratio: ResolvedAspectRatio,
     padding_border: Size<f32>,
 ) -> Option<f32> {
-    let ratio = aspect_ratio.ratio?;
-    let height = match aspect_ratio.box_sizing {
-        BoxSizing::ContentBox => width / ratio,
-        BoxSizing::BorderBox => (width + padding_border.width) / ratio - padding_border.height,
-    };
-    height.is_finite().then_some(height.max(0.0))
+    apply_aspect_ratio_to_content_size(
+        Size {
+            width: Some(width),
+            height: None,
+        },
+        Some(aspect_ratio),
+        padding_border,
+    )
+    .height
 }
 
 fn apply_aspect_ratio_to_content_size(
     size: Size<Option<f32>>,
-    aspect_ratio: ResolvedAspectRatio,
+    aspect_ratio: Option<ResolvedAspectRatio>,
     padding_border: Size<f32>,
 ) -> Size<Option<f32>> {
-    match size {
-        Size {
-            width: Some(width),
-            height: None,
-        } => Size {
-            width: Some(width),
-            height: content_height_from_width(width, aspect_ratio, padding_border),
-        },
-        Size {
-            width: None,
-            height: Some(height),
-        } => Size {
-            width: content_width_from_height(height, aspect_ratio, padding_border),
-            height: Some(height),
-        },
-        _ => size,
-    }
+    size.maybe_add(padding_border)
+        .maybe_apply_resolved_aspect_ratio(aspect_ratio, padding_border)
+        .maybe_sub(padding_border)
+        .maybe_max(Size::ZERO)
 }
 
-fn ratio_basis_scale(constrained: f32, original: f32, inset: f32, box_sizing: BoxSizing) -> f32 {
-    match box_sizing {
+fn ratio_basis_scale(constrained: f32, original: f32, inset: f32, sizing_box: BoxSizing) -> f32 {
+    match sizing_box {
         BoxSizing::ContentBox => constrained / original,
         BoxSizing::BorderBox => (constrained + inset) / (original + inset),
     }
@@ -236,7 +226,7 @@ pub(crate) fn measure_replaced(
     parent_size: Size<Option<f32>>,
     available_space: Size<AvailableSpace>,
     context: &ReplacedContext,
-    resolved_aspect_ratio: ResolvedAspectRatio,
+    resolved_aspect_ratio: Option<ResolvedAspectRatio>,
     style: &taffy::Style<Atom>,
     sizing_mode: SizingMode,
     requested_axis: RequestedAxis,
@@ -260,7 +250,6 @@ pub(crate) fn measure_replaced(
     // The browser-owned style seam has already resolved the three CSS states
     // (`auto`, `<ratio>`, and `auto <ratio>`) against the natural ratio. Do not
     // reconstruct that precedence from Taffy's lossy numeric field here.
-    let aspect_ratio = resolved_aspect_ratio.ratio;
     let preferred_basis = Size {
         width: if available_space.width == AvailableSpace::MinContent {
             Some(0.0)
@@ -300,7 +289,7 @@ pub(crate) fn measure_replaced(
     // reaches the complete replaced-element measure callback, and it has no
     // vertical intrinsic-keyword resolver, so resolve both physical axes at
     // this browser-owned sizing boundary.
-    if aspect_ratio.is_some() {
+    if let Some(resolved_aspect_ratio) = resolved_aspect_ratio {
         let transferred_width = preferred_size.height.and_then(|height| {
             content_width_from_height(height, resolved_aspect_ratio, padding_border_sum)
         });
@@ -384,7 +373,7 @@ pub(crate) fn measure_replaced(
     } else {
         Violation::None
     };
-    let Some(_) = aspect_ratio else {
+    let Some(resolved_aspect_ratio) = resolved_aspect_ratio else {
         return size.maybe_clamp(min_size, max_size) + padding_border_sum;
     };
     let size = match (width_violation, height_violation) {
@@ -432,12 +421,12 @@ pub(crate) fn measure_replaced(
                 width,
                 size.width,
                 padding_border_sum.width,
-                resolved_aspect_ratio.box_sizing,
+                resolved_aspect_ratio.sizing_box(),
             ) <= ratio_basis_scale(
                 height,
                 size.height,
                 padding_border_sum.height,
-                resolved_aspect_ratio.box_sizing,
+                resolved_aspect_ratio.sizing_box(),
             ) {
                 Size {
                     width,
@@ -469,12 +458,12 @@ pub(crate) fn measure_replaced(
                 width,
                 size.width,
                 padding_border_sum.width,
-                resolved_aspect_ratio.box_sizing,
+                resolved_aspect_ratio.sizing_box(),
             ) <= ratio_basis_scale(
                 height,
                 size.height,
                 padding_border_sum.height,
-                resolved_aspect_ratio.box_sizing,
+                resolved_aspect_ratio.sizing_box(),
             ) {
                 Size {
                     width: content_width_from_height(
@@ -540,13 +529,11 @@ mod tests {
                 height: AvailableSpace::MaxContent,
             },
             &image_context(),
-            ResolvedAspectRatio {
-                ratio: style
-                    .aspect_ratio
-                    .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
-                    .or(Some(1.0)),
-                box_sizing: style.box_sizing,
-            },
+            style
+                .aspect_ratio
+                .filter(|ratio| ratio.is_finite() && *ratio > 0.0)
+                .or(Some(1.0))
+                .and_then(|ratio| ResolvedAspectRatio::new(ratio, style.box_sizing)),
             style,
             SizingMode::InherentSize,
             RequestedAxis::Both,
@@ -579,10 +566,7 @@ mod tests {
                     height: AvailableSpace::MaxContent,
                 },
                 &image_context(),
-                ResolvedAspectRatio {
-                    ratio: Some(2.0),
-                    box_sizing,
-                },
+                ResolvedAspectRatio::new(2.0, box_sizing),
                 &style,
                 SizingMode::InherentSize,
                 RequestedAxis::Both,

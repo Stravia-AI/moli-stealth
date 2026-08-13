@@ -16,6 +16,7 @@ use crate::{
     LayoutAnonymousReason, LayoutBoxId, LayoutBoxKind, LayoutCapabilityDiagnostic, LayoutDisplay,
     LayoutElementCategory, LayoutElementSemantics, LayoutError, LayoutPseudo, LayoutSource,
     LayoutSourceKind, LayoutStyleResolver, LayoutWorld, ResolvedLayoutStyle,
+    form::form_control_context,
     replaced::ReplacedContext,
     style::{InlineWhiteSpaceCollapse, LayoutOverflowMode},
     world::{ViewportDefiningBox, ViewportScrollPolicy},
@@ -105,7 +106,7 @@ where
             root_style.force_display_none();
         }
         if root_semantics.is_replaced() {
-            root_style.mark_replaced(natural_replaced_ratio(&root_semantics, root_metrics));
+            root_style.mark_replaced();
         } else if matches!(
             root_semantics.category,
             crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Button)
@@ -201,7 +202,6 @@ where
                     LayoutBoxKind::Text,
                     ResolvedLayoutStyle::text_leaf_from(inherited_style),
                     Some(Arc::from(text)),
-                    None,
                 ));
                 world.boxes[id.index()].text_selection = self.source.text_selection(source_node);
                 world.map_source(source_node, id);
@@ -243,7 +243,7 @@ where
             }
             let metrics = self.source.replaced_metrics(source_node);
             if semantics.is_replaced() {
-                style.mark_replaced(natural_replaced_ratio(&semantics, metrics));
+                style.mark_replaced();
             } else if matches!(
                 semantics.category,
                 crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Button)
@@ -343,6 +343,7 @@ where
         style: ResolvedLayoutStyle,
         metrics: Option<crate::ReplacedMetrics>,
     ) -> crate::LayoutBox<S::NodeId> {
+        let replaced_context = build_replaced_context(&semantics, metrics, &style);
         let mut layout_box = LayoutWorld::new_box(
             Some(source_node),
             None,
@@ -354,8 +355,8 @@ where
             kind,
             style.clone(),
             None,
-            metrics,
         );
+        layout_box.replaced_context = replaced_context;
         layout_box.replaced_image = self.source.replaced_image(source_node, &style);
         if !matches!(
             style.display(),
@@ -436,7 +437,6 @@ where
             kind,
             style.clone(),
             None,
-            None,
         );
         layout_box.css_images = self.css_image_resources(owner, &style);
         if style.has_unsupported_generated_content() {
@@ -469,7 +469,6 @@ where
             LayoutBoxKind::Text,
             ResolvedLayoutStyle::text_leaf_from(pseudo_style),
             Some(Arc::from(text)),
-            None,
         ))
     }
 
@@ -616,7 +615,6 @@ where
             Some(LayoutAnonymousReason::InlineSplitContinuation),
             LayoutBoxKind::InlineContinuation,
             style.clone(),
-            None,
             None,
         );
         continuation.css_images = self.css_image_resources(owner, style);
@@ -841,7 +839,6 @@ where
             Some(reason),
             anonymous_kind,
             style,
-            None,
             None,
         );
         anonymous.inline_formatting_context = true;
@@ -1102,7 +1099,6 @@ where
             kind,
             style,
             None,
-            None,
         ));
         output.push(id);
         Ok(id)
@@ -1289,21 +1285,30 @@ struct ViewportBodyCandidate<N> {
     blocks_propagation: bool,
 }
 
-fn natural_replaced_ratio(
+fn build_replaced_context(
     semantics: &LayoutElementSemantics,
     metrics: Option<crate::ReplacedMetrics>,
-) -> Option<f32> {
-    let sizing_kind = if matches!(
+    style: &ResolvedLayoutStyle,
+) -> Option<ReplacedContext> {
+    if !semantics.is_replaced() {
+        return None;
+    }
+    if matches!(
         semantics.category,
         crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Input(
             crate::LayoutInputControlKind::Image
         ))
     ) {
-        crate::LayoutReplacedKind::Image
-    } else {
-        semantics.replaced?
-    };
-    ReplacedContext::for_element(sizing_kind, metrics).inherent_ratio()
+        return Some(ReplacedContext::for_element(
+            crate::LayoutReplacedKind::Image,
+            metrics,
+        ));
+    }
+    form_control_context(semantics, style.font_size(), style.line_height()).or_else(|| {
+        semantics
+            .replaced
+            .map(|kind| ReplacedContext::for_element(kind, metrics))
+    })
 }
 
 fn whitespace_text_is_ignorable(text: &str, mode: InlineWhiteSpaceCollapse) -> bool {

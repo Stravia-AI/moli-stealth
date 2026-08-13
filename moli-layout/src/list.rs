@@ -143,7 +143,6 @@ where
         LayoutBoxKind::Text,
         text_style,
         Some(Arc::from(text)),
-        None,
     );
     let text_id = world.allocate(text_box);
     world.append_synthesized_child(marker, text_id)?;
