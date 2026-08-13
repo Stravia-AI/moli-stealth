@@ -1029,16 +1029,19 @@ fn runtime_generation_mismatch_is_rejected_by_the_page_arbiter() {
                 Some(current_target),
                 "a mismatched generation must not consume the current pending load"
             );
-            let result = evaluate_pending_on_owner_local_task(
+            let (pending, result) = evaluate_pending_on_owner_local_task(
                 pending,
                 "String(globalThis.__staleGenerationScriptRan)",
             )
-            .await
-            .1;
+            .await;
             assert_eq!(result.get("value").and_then(serde_json::Value::as_str), Some("undefined"));
+            // Keep the pending page, and therefore its request client, alive until the server has
+            // accepted and served the current-generation script. Dropping it before this await can
+            // cancel the connect while the server is still blocked in `accept()`.
             server
                 .await
                 .expect("current document.write script server should finish");
+            drop(pending);
         }));
     });
 }
