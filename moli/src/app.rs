@@ -6,7 +6,6 @@ use crate::{
     cli::{Cli, Commands, FetchWaitUntil, normalize_args_for_compat},
     config::AppConfig,
     cookie_cache, fetch_dump, mcp_server,
-    protocol_server::ProtocolServer,
 };
 use anyhow::Result;
 use anyhow::{Context, anyhow};
@@ -16,6 +15,7 @@ use moli_core::runtime::{
     storage_partition::StoragePartitionState,
 };
 use moli_fetch::Request;
+use moli_protocol_server::ProtocolServer;
 
 pub async fn run_from_env() -> Result<()> {
     let cli = Cli::parse_from(normalize_args_for_compat(std::env::args_os()));

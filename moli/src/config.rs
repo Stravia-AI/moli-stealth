@@ -12,6 +12,8 @@ use std::str::FromStr;
 use crate::cli::{Cli, Commands, CommonArgs, DumpFormat, LogFormat, StripOptions};
 use crate::network_trace::NetworkTraceConfigSummary;
 
+pub use moli_protocol_server::ServerConfig;
+
 #[derive(Debug, Clone)]
 pub struct AppConfig {
     pub log_filter: String,
@@ -297,32 +299,5 @@ pub fn response_wait_criteria_from_args(
                 path: json.path.clone(),
                 expected: json.expected.clone(),
             }),
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct ServerConfig {
-    pub host: String,
-    pub port: u16,
-    pub timeout_secs: u32,
-    pub cdp_max_connections: u16,
-    pub cdp_max_pending_connections: u16,
-}
-
-impl ServerConfig {
-    pub fn bind_target(&self) -> (&str, u16) {
-        (&self.host, self.port)
-    }
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            host: "127.0.0.1".to_owned(),
-            port: 9222,
-            timeout_secs: 10,
-            cdp_max_connections: 16,
-            cdp_max_pending_connections: 128,
-        }
     }
 }

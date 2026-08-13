@@ -28,9 +28,10 @@ use parking_lot::Mutex;
 use tokio::net::TcpListener;
 use tracing::info;
 
-use crate::config::ServerConfig;
 #[cfg(test)]
-use crate::cookie_cache;
+use moli_cookie_cache as cookie_cache;
+
+pub use crate::config::ServerConfig;
 
 mod cdp;
 mod cdp_agent_host;

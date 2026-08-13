@@ -1,19 +1,21 @@
 //! Application support crate for the Moli CLI binary.
 //!
-//! This crate groups CLI parsing, runtime/server configuration, telemetry
-//! setup, and the embedded protocol server used by the `moli` executable.
+//! This crate groups CLI parsing, application configuration, telemetry setup,
+//! and command wiring for the `moli` executable.
 
 pub mod app;
-mod cdp_frontend;
-mod cdp_frontend_router;
-mod cdp_scheduler;
-mod cdp_writer;
 pub mod cli;
 pub mod config;
 pub mod cookie_cache;
 pub mod fetch_dump;
 pub mod mcp_server;
 mod network_trace;
-pub mod protocol_server;
-pub mod runtime_thread_budget;
 pub mod telemetry;
+
+/// Compatibility namespace for callers that used the embedded server through
+/// the `moli` support crate before it became an independent crate.
+pub mod protocol_server {
+    pub use moli_protocol_server::{ProtocolServer, ServerConfig};
+}
+
+pub use moli_protocol_server::runtime_thread_budget;
