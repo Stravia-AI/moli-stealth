@@ -393,8 +393,13 @@ mod tests {
 
     use crate::{conn::BrowserContext, testing::TestContext};
 
+    // Full-workspace CI runs these renderer-owner tests alongside CPU-heavy
+    // suites. Keep the guard diagnostic, but allow the same scheduling
+    // headroom as the test scheduler's external-input waits.
+    const DOM_DEBUGGER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
     async fn command(ctx: &mut TestContext, message: Value, command_id: u64) -> Value {
-        tokio::time::timeout(Duration::from_secs(5), ctx.process_async(message))
+        tokio::time::timeout(DOM_DEBUGGER_COMMAND_TIMEOUT, ctx.process_async(message))
             .await
             .unwrap_or_else(|_| {
                 panic!("timed out processing DOMDebugger test command {command_id}")
@@ -417,7 +422,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         let (mut messages, scheduler_events) = tokio::time::timeout(
-            Duration::from_secs(5),
+            DOM_DEBUGGER_COMMAND_TIMEOUT,
             ctx.complete_command_task_step_for_test(evaluate_step),
         )
         .await
@@ -425,7 +430,7 @@ mod tests {
         assert!(scheduler_events.is_empty(), "{scheduler_events:?}");
         for resume_step in resume_steps {
             let (mut resume_messages, scheduler_events) = tokio::time::timeout(
-                Duration::from_secs(5),
+                DOM_DEBUGGER_COMMAND_TIMEOUT,
                 ctx.complete_command_task_step_for_test(resume_step),
             )
             .await
