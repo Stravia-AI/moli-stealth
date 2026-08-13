@@ -55,9 +55,6 @@ impl AppConfig {
                 config.server.cdp_max_connections = args.cdp_max_connections;
                 config.server.cdp_max_pending_connections = args.cdp_max_pending_connections;
             }
-            Commands::Mcp(args) => {
-                apply_common_args(&mut config, &args.common)?;
-            }
             Commands::Help | Commands::Version => {}
         }
 

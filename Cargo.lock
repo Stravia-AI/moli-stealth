@@ -2013,7 +2013,6 @@ dependencies = [
  "moli-protocol-server",
  "moli-test-support",
  "parking_lot",
- "serde",
  "serde_json",
  "strip-ansi-escapes",
  "tikv-jemalloc-sys",

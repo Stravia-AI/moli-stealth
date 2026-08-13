@@ -34,7 +34,7 @@ const FETCH_INFER_FLAGS: &[&str] = &[
     "--profile-dir",
 ];
 const SERVE_INFER_FLAGS: &[&str] = &["--host", "--port", "--timeout", "--layout"];
-const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve", "mcp", "help", "version"];
+const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve", "help", "version"];
 const DUMP_MODES: &[&str] = &[
     "json",
     "html",
@@ -62,8 +62,7 @@ pub struct Cli {
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
 pub enum Commands {
     Fetch(Box<FetchArgs>),
-    Serve(ServeArgs),
-    Mcp(McpArgs),
+    Serve(Box<ServeArgs>),
     Help,
     Version,
 }
@@ -223,12 +222,6 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = 128)]
     pub cdp_max_pending_connections: u16,
 
-    #[command(flatten)]
-    pub common: CommonArgs,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Args)]
-pub struct McpArgs {
     #[command(flatten)]
     pub common: CommonArgs,
 }

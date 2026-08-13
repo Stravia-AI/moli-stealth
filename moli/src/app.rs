@@ -5,7 +5,7 @@ use std::{io::Write, sync::Arc};
 use crate::{
     cli::{Cli, Commands, FetchWaitUntil, normalize_args_for_compat},
     config::AppConfig,
-    cookie_cache, fetch_dump, mcp_server,
+    cookie_cache, fetch_dump,
 };
 use anyhow::Result;
 use anyhow::{Context, anyhow};
@@ -203,14 +203,6 @@ pub async fn run_cli_with_config<W: Write>(
                 NavigationRuntimeConfig::from(&config.browser),
             );
             server.serve().await.context("protocol server failed")?;
-        }
-        Commands::Mcp(_) => {
-            let browser = Browser::new(config.browser.clone())
-                .context("failed to initialize browser runtime")?;
-            load_cookie_state(&browser, &config)?;
-            mcp_server::serve_stdio(browser.clone())
-                .await
-                .context("MCP server failed")?;
         }
         Commands::Help | Commands::Version => unreachable!(),
     }

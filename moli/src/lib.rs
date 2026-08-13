@@ -8,7 +8,6 @@ pub mod cli;
 pub mod config;
 pub mod cookie_cache;
 pub mod fetch_dump;
-pub mod mcp_server;
 mod network_trace;
 pub mod telemetry;
 

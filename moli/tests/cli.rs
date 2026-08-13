@@ -2,7 +2,7 @@ use clap::Parser;
 use std::{num::NonZeroU32, process::Command};
 
 use moli::cli::{
-    Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogFormat, LogLevel, McpArgs,
+    Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogFormat, LogLevel,
     RequestHeaderArg, ResponseJsonPathArg, ServeArgs, StripModeChoice, StripOptions,
     normalize_args_for_compat,
 };
@@ -470,14 +470,14 @@ fn infers_serve_mode_when_called_without_args() {
 
     assert_eq!(
         cli.command,
-        Commands::Serve(ServeArgs {
+        Commands::Serve(Box::new(ServeArgs {
             host: "127.0.0.1".to_owned(),
             port: 9222,
             timeout: 10,
             cdp_max_connections: 16,
             cdp_max_pending_connections: 128,
             common: CommonArgs::default(),
-        })
+        }))
     );
 }
 
@@ -496,39 +496,14 @@ fn infers_serve_mode_from_legacy_serve_flags() {
 
     assert_eq!(
         cli.command,
-        Commands::Serve(ServeArgs {
+        Commands::Serve(Box::new(ServeArgs {
             host: "0.0.0.0".to_owned(),
             port: 9333,
             timeout: 42,
             cdp_max_connections: 16,
             cdp_max_pending_connections: 128,
             common: CommonArgs::default(),
-        })
-    );
-}
-
-#[test]
-fn parses_mcp_command_with_common_flags() {
-    let cli = Cli::try_parse_from(normalize_args_for_compat([
-        "moli",
-        "mcp",
-        "--log-level",
-        "warn",
-        "--user-agent-suffix",
-        "bot",
-    ]))
-    .unwrap();
-
-    assert_eq!(
-        cli.command,
-        Commands::Mcp(McpArgs {
-            common: CommonArgs {
-                log_level: Some(LogLevel::Warn),
-                user_agent: None,
-                user_agent_suffix: Some("bot".to_owned()),
-                ..CommonArgs::default()
-            },
-        })
+        }))
     );
 }
 
