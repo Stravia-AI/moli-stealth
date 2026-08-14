@@ -950,6 +950,18 @@ pub(super) fn dedicated_worker_auto_attach_owner_session_allowed(
         == Some(owner_page)
 }
 
+fn shared_worker_auto_attach_owner_sessions(conn: &CdpConnection) -> Vec<Option<String>> {
+    conn.auto_attach_owner_sessions_for_target_type("shared_worker")
+        .into_iter()
+        .filter(|owner_session_id| {
+            super::browser_level_auto_attach_owner_session_allowed(
+                conn,
+                owner_session_id.as_deref(),
+            )
+        })
+        .collect()
+}
+
 fn dedicated_worker_auto_attach_owner_sessions(
     conn: &CdpConnection,
     owner_page: &TargetPageResidenceIdentity,
@@ -1500,7 +1512,7 @@ fn register_shared_worker_target(
     }
     let target_id = conn.gen_target_id();
     let should_emit_created = conn.has_any_target_discovery();
-    let auto_attach_owners = conn.auto_attach_owner_sessions_for_target_type("shared_worker");
+    let auto_attach_owners = shared_worker_auto_attach_owner_sessions(conn);
     let attached_sessions = auto_attach_owners
         .iter()
         .map(|owner| {
@@ -3576,7 +3588,9 @@ mod worker_target_attachment_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conn::{BrowserContext, CdpTargetFilter, CdpTargetFilterEntry};
+    use crate::conn::{
+        BrowserContext, CdpTargetFilter, CdpTargetFilterEntry, DedicatedWorkerTargetState,
+    };
 
     fn runtime_inspector_messages(messages: Vec<Value>) -> Vec<RendererRuntimeInspectorMessage> {
         messages
@@ -5944,6 +5958,87 @@ mod tests {
             Some(crate::conn::CdpSessionRoute::SharedWorkerTarget { .. })
         ));
         assert!(attachment.is_current());
+    }
+
+    #[test]
+    fn shared_worker_registration_only_auto_attaches_browser_level_owners() {
+        let (mut conn, owner_page, owner_renderer_page) = dedicated_worker_fixture();
+        assert!(
+            conn.prepare_auto_attached_page_session_binding("TID-page", "SID-page".to_owned(),)
+        );
+        conn.register_browser_session("SID-browser-1".to_owned());
+        conn.register_browser_session("SID-browser-2".to_owned());
+
+        conn.browser_context
+            .as_mut()
+            .expect("browser context")
+            .insert_dedicated_worker_target(DedicatedWorkerTargetState::new(
+                owner_page,
+                owner_renderer_page.owner_local_host_id(),
+                91,
+                "TID-dedicated-worker".to_owned(),
+                "https://example.test/worker.js".to_owned(),
+                Vec::new(),
+            ));
+        assert!(conn.prepare_auto_attached_dedicated_worker_session_binding(
+            "TID-dedicated-worker",
+            "SID-dedicated-worker".to_owned(),
+        ));
+
+        let mut owner_shared_worker = SharedWorkerTargetState::new(
+            moli_core::RendererOwnerLocalHostId::new_for_testing(2),
+            SharedWorkerInstanceId::from_u64(92),
+            "TID-owner-shared-worker".to_owned(),
+            None,
+            "https://example.test/owner-shared-worker.js".to_owned(),
+            "owner".to_owned(),
+        );
+        owner_shared_worker.attach_session("SID-shared-worker".to_owned());
+        conn.browser_context
+            .as_mut()
+            .expect("browser context")
+            .insert_shared_worker_target(owner_shared_worker);
+
+        for (owner, wait_for_debugger_on_start) in [
+            (None, false),
+            (Some("SID-browser-1"), false),
+            (Some("SID-browser-2"), true),
+            (Some("SID-page"), true),
+            (Some("SID-dedicated-worker"), true),
+            (Some("SID-shared-worker"), true),
+        ] {
+            conn.set_auto_attach_owner(
+                owner,
+                true,
+                wait_for_debugger_on_start,
+                CdpTargetFilter::default_auto_attach(),
+            );
+        }
+
+        let outputs =
+            register_shared_worker_target(&mut conn, "BID-1", None, shared_worker_info(93))
+                .worker_target_lifecycle_outputs;
+        let mut attached_owners = outputs
+            .iter()
+            .filter_map(shared_worker_attached_output)
+            .map(|(_, prepared_attach)| {
+                assert_eq!(prepared_attach.sessions().len(), 1);
+                let (_, owner, _, _, waiting_for_debugger) =
+                    prepared_attach.sessions()[0].clone().into_parts();
+                (owner, waiting_for_debugger)
+            })
+            .collect::<Vec<_>>();
+        attached_owners.sort();
+
+        assert_eq!(
+            attached_owners,
+            vec![
+                (None, false),
+                (Some("SID-browser-1".to_owned()), false),
+                (Some("SID-browser-2".to_owned()), true),
+            ],
+            "page and worker TargetHandlers must not receive browser-level shared workers"
+        );
     }
 
     #[test]

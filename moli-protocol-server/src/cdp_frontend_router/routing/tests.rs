@@ -512,6 +512,144 @@ fn legacy_target_id_reference_requires_one_direct_child_session() {
 }
 
 #[test]
+fn rejected_nested_detach_preserves_the_request_session_route() {
+    let mut routing = CdpFrontendRoutingState::default();
+    routing
+        .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
+        .expect("register browser frontend");
+    routing.register_child_session(5, Some("SID-browser"), "SID-page", Some("TID-page"));
+    routing.register_child_session(5, Some("SID-page"), "SID-worker", Some("TID-worker"));
+    routing.register_child_session(
+        5,
+        Some("SID-worker"),
+        "SID-shared-worker",
+        Some("TID-shared-worker"),
+    );
+
+    let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+        .prepare_command(
+            5,
+            parsed_command(
+                json!({
+                    "id": 61,
+                    "method": "Target.detachFromTarget",
+                    "sessionId": "SID-page",
+                    "params": { "sessionId": "SID-shared-worker" },
+                })
+                .to_string(),
+            ),
+        )
+    else {
+        panic!("non-direct nested session was accepted by the page Target handler");
+    };
+
+    assert_eq!(message["id"], json!(61));
+    assert_eq!(message["error"]["code"], json!(-32602));
+    assert_eq!(message["sessionId"], json!("SID-page"));
+
+    let command = expect_prepared_command(
+        routing.prepare_command(
+            5,
+            parsed_command(
+                json!({
+                    "id": 62,
+                    "method": "Target.detachFromTarget",
+                    "sessionId": "SID-worker",
+                    "params": { "sessionId": "SID-shared-worker" },
+                })
+                .to_string(),
+            ),
+        ),
+        "direct shared-worker detach",
+    );
+    let command = serde_json::from_str::<Value>(command.json()).expect("detach command JSON");
+    assert_eq!(command["sessionId"], json!("SID-worker"));
+    assert_eq!(command["params"]["sessionId"], json!("SID-shared-worker"));
+}
+
+#[test]
+fn target_command_errors_preserve_only_valid_client_session_routes() {
+    let mut routing = CdpFrontendRoutingState::default();
+    routing
+        .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
+        .expect("register browser frontend");
+    routing.register_child_session(5, Some("SID-browser"), "SID-page", Some("TID-page"));
+
+    for (id, method, params, expected_message) in [
+        (
+            70,
+            "Target.sendMessageToTarget",
+            json!({ "sessionId": "SID-missing", "message": "{}" }),
+            "No session with given id",
+        ),
+        (
+            71,
+            "Target.detachFromTarget",
+            json!({ "targetId": "TID-missing" }),
+            "No session for given target id",
+        ),
+    ] {
+        let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+            .prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": id,
+                        "method": method,
+                        "sessionId": "SID-page",
+                        "params": params,
+                    })
+                    .to_string(),
+                ),
+            )
+        else {
+            panic!("invalid {method} target session reference was accepted");
+        };
+
+        assert_eq!(message["id"], json!(id));
+        assert_eq!(message["error"]["code"], json!(-32602));
+        assert_eq!(message["error"]["message"], json!(expected_message));
+        assert_eq!(message["sessionId"], json!("SID-page"));
+    }
+
+    let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+        .prepare_command(
+            5,
+            parsed_command(
+                json!({
+                    "id": 72,
+                    "method": "Target.detachFromTarget",
+                    "params": { "sessionId": "SID-missing" },
+                })
+                .to_string(),
+            ),
+        )
+    else {
+        panic!("invalid root Target session reference was accepted");
+    };
+    assert!(message.get("sessionId").is_none());
+
+    let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+        .prepare_command(
+            5,
+            parsed_command(
+                json!({
+                    "id": 73,
+                    "method": "Runtime.evaluate",
+                    "sessionId": "SID-stale",
+                    "params": { "expression": "1" },
+                })
+                .to_string(),
+            ),
+        )
+    else {
+        panic!("unknown outer session was accepted");
+    };
+    assert_eq!(message["error"]["code"], json!(-32001));
+    assert!(message.get("sessionId").is_none());
+}
+
+#[test]
 fn attached_event_registers_child_before_attach_response() {
     let mut routing = CdpFrontendRoutingState::default();
     routing

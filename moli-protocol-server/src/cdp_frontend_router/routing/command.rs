@@ -6,8 +6,24 @@ use super::{
     CdpFrontendRoutingState, cdp_error_response,
     frontend_registry::DirectChildLookupError,
     pending_commands::{CdpCommandFrontend, PendingCommandEffect, PendingCommandRoute},
+    set_top_level_session_id,
 };
 use crate::cdp_frontend_router::CdpPreparedFrontendCommand;
+
+fn immediate_error_response(
+    frontend_id: u64,
+    command_id: Option<u64>,
+    client_session_id: Option<&str>,
+    code: i32,
+    error_message: &str,
+) -> CdpPreparedFrontendCommand {
+    let mut message = cdp_error_response(command_id, code, error_message);
+    set_top_level_session_id(&mut message, client_session_id);
+    CdpPreparedFrontendCommand::ImmediateResponse {
+        frontend_id,
+        message,
+    }
+}
 
 impl CdpFrontendRoutingState {
     pub(in crate::cdp_frontend_router) fn prepare_command_str(
@@ -17,14 +33,13 @@ impl CdpFrontendRoutingState {
     ) -> Option<CdpPreparedFrontendCommand> {
         match ParsedCdpCommand::parse_str(raw) {
             Ok(command) => self.prepare_command(frontend_id, command),
-            Err(error) => Some(CdpPreparedFrontendCommand::ImmediateResponse {
+            Err(error) => Some(immediate_error_response(
                 frontend_id,
-                message: cdp_error_response(
-                    error.command_id(),
-                    error.response_code(),
-                    error.response_message(),
-                ),
-            }),
+                error.command_id(),
+                None,
+                error.response_code(),
+                error.response_message(),
+            )),
         }
     }
 
@@ -51,14 +66,13 @@ impl CdpFrontendRoutingState {
         let base_session_id = self.frontends.base_session_id(frontend_id)?.to_owned();
         let dispatch_session_id = if let Some(session_id) = client_session_id.as_deref() {
             if !self.frontends.owns_client_session(frontend_id, session_id) {
-                return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                return Some(immediate_error_response(
                     frontend_id,
-                    message: cdp_error_response(
-                        Some(client_command_id),
-                        -32001,
-                        "Unknown sessionId",
-                    ),
-                });
+                    Some(client_command_id),
+                    None,
+                    -32001,
+                    "Unknown sessionId",
+                ));
             }
             Some(session_id.to_owned())
         } else {
@@ -81,10 +95,13 @@ impl CdpFrontendRoutingState {
                         (-32000, "Multiple sessions attached, specify id.")
                     }
                 };
-                return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                return Some(immediate_error_response(
                     frontend_id,
-                    message: cdp_error_response(Some(client_command_id), code, message),
-                });
+                    Some(client_command_id),
+                    client_session_id.as_deref(),
+                    code,
+                    message,
+                ));
             }
         };
         let command = if let Some(session_id) = target_session_reference.as_deref() {
@@ -95,14 +112,13 @@ impl CdpFrontendRoutingState {
                         ?error,
                         "frontend routing could not serialize a Target session reference"
                     );
-                    return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                    return Some(immediate_error_response(
                         frontend_id,
-                        message: cdp_error_response(
-                            Some(client_command_id),
-                            -32603,
-                            "Internal error",
-                        ),
-                    });
+                        Some(client_command_id),
+                        client_session_id.as_deref(),
+                        -32603,
+                        "Internal error",
+                    ));
                 }
             }
         } else {
@@ -116,10 +132,13 @@ impl CdpFrontendRoutingState {
             Ok(command_id) => command_id,
             Err(error) => {
                 tracing::error!(?error, "frontend routing command id allocation failed");
-                return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                return Some(immediate_error_response(
                     frontend_id,
-                    message: cdp_error_response(Some(client_command_id), -32603, "Internal error"),
-                });
+                    Some(client_command_id),
+                    client_session_id.as_deref(),
+                    -32603,
+                    "Internal error",
+                ));
             }
         };
         let command = match command
@@ -131,10 +150,13 @@ impl CdpFrontendRoutingState {
                     ?error,
                     "frontend routing could not serialize a rewritten typed CDP command"
                 );
-                return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                return Some(immediate_error_response(
                     frontend_id,
-                    message: cdp_error_response(Some(client_command_id), -32603, "Internal error"),
-                });
+                    Some(client_command_id),
+                    client_session_id.as_deref(),
+                    -32603,
+                    "Internal error",
+                ));
             }
         };
         self.pending_commands.insert(

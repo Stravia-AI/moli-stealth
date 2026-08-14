@@ -2505,6 +2505,126 @@ async fn set_auto_attach_true_attaches_existing_unattached_shared_worker_target(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn non_browser_auto_attach_owners_do_not_replay_existing_shared_worker_targets() {
+    let mut ctx = TestContext::new();
+    load_bc_with_target(&mut ctx, "BID-9", "TID-page");
+    assert!(
+        ctx.conn
+            .prepare_auto_attached_page_session_binding("TID-page", "SID-page".to_owned())
+    );
+    let owner_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-page"))
+        .expect("page owner residence");
+    push_dedicated_worker_target(&mut ctx, 2401, "TID-dedicated-worker", owner_page);
+    assert!(
+        ctx.conn
+            .prepare_auto_attached_dedicated_worker_session_binding(
+                "TID-dedicated-worker",
+                "SID-dedicated-worker".to_owned(),
+            )
+    );
+    push_shared_worker_target(
+        &mut ctx,
+        SharedWorkerInstanceId::from_u64(2402),
+        "TID-shared-worker",
+        "https://example.test/shared-worker.js",
+        "shared",
+        Some("SID-shared-worker"),
+    );
+
+    for (id, owner_session_id) in [
+        (2403, "SID-page"),
+        (2404, "SID-dedicated-worker"),
+        (2405, "SID-shared-worker"),
+    ] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Target.setAutoAttach",
+            "sessionId": owner_session_id,
+            "params": {
+                "autoAttach": true,
+                "waitForDebuggerOnStart": true,
+                "flatten": true,
+                "filter": [{"type": "shared_worker"}],
+            }
+        }))
+        .await;
+
+        ctx.expect_result(id, json!({}), Some(owner_session_id));
+        assert!(
+            ctx.sent.is_empty(),
+            "{owner_session_id} must not receive a browser-level shared-worker target: {:?}",
+            ctx.sent
+        );
+    }
+
+    let shared_worker_sessions = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .and_then(|context| context.shared_worker_target("TID-shared-worker"))
+        .expect("shared-worker target should remain registered")
+        .session_ids();
+    assert_eq!(
+        shared_worker_sessions,
+        vec!["SID-shared-worker"],
+        "a shared-worker TargetHandler must not auto-attach its own target"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_session_auto_attach_replays_an_existing_shared_worker_once() {
+    let mut ctx = TestContext::new();
+    load_bc(&mut ctx, "BID-9");
+    push_shared_worker_target(
+        &mut ctx,
+        SharedWorkerInstanceId::from_u64(2410),
+        "TID-shared-worker",
+        "https://example.test/shared-worker.js",
+        "shared",
+        None,
+    );
+    ctx.conn.register_browser_session("SID-browser".to_owned());
+
+    for id in [2411, 2412] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Target.setAutoAttach",
+            "sessionId": "SID-browser",
+            "params": {
+                "autoAttach": true,
+                "waitForDebuggerOnStart": false,
+                "flatten": true,
+                "filter": [{"type": "shared_worker"}],
+            }
+        }))
+        .await;
+
+        if id == 2411 {
+            let attached = ctx.take_one();
+            assert_eq!(attached["method"], "Target.attachedToTarget");
+            assert_eq!(attached["sessionId"], "SID-browser");
+            assert_eq!(
+                attached["params"]["targetInfo"]["targetId"],
+                "TID-shared-worker"
+            );
+            assert_eq!(attached["params"]["targetInfo"]["type"], "shared_worker");
+        }
+        ctx.expect_result(id, json!({}), Some("SID-browser"));
+        assert!(ctx.sent.is_empty());
+    }
+
+    assert_eq!(
+        ctx.conn
+            .attached_sessions_for_target("TID-shared-worker")
+            .len(),
+        1,
+        "re-enabling one browser TargetHandler must not duplicate its attachment"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn dedicated_worker_existing_target_auto_attach_requires_its_owner_page_session() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-owner-page");

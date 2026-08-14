@@ -58,6 +58,18 @@ pub(in crate::domains) use worker_target::{
     service_worker_target_lifecycle_prepared_outputs_for_event,
     shared_worker_target_lifecycle_prepared_outputs_for_event,
 };
+
+/// Browser-owned auto-attach policies may observe browser-level targets.
+///
+/// A target filter narrows the target kinds requested by one TargetHandler; it
+/// does not expand a page or worker TargetHandler to browser-global targets.
+fn browser_level_auto_attach_owner_session_allowed(
+    conn: &CdpConnection,
+    owner_session_id: Option<&str>,
+) -> bool {
+    owner_session_id.is_none() || conn.is_browser_session_id(owner_session_id)
+}
+
 pub(crate) struct PendingTargetCommandDispatch {
     command_id: Option<u64>,
     session_id: Option<String>,

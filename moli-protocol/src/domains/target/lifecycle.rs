@@ -386,7 +386,10 @@ fn top_level_page_auto_attach_owner_sessions(conn: &CdpConnection) -> Vec<Option
     conn.auto_attach_owner_sessions_for_target_type("page")
         .into_iter()
         .filter(|owner_session_id| {
-            top_level_page_auto_attach_owner_session_allowed(conn, owner_session_id.as_deref())
+            super::browser_level_auto_attach_owner_session_allowed(
+                conn,
+                owner_session_id.as_deref(),
+            )
         })
         .collect()
 }
@@ -395,37 +398,12 @@ fn top_level_tab_auto_attach_owner_sessions(conn: &CdpConnection) -> Vec<Option<
     conn.auto_attach_owner_sessions_for_target_type("tab")
         .into_iter()
         .filter(|owner_session_id| {
-            top_level_tab_auto_attach_owner_session_allowed(conn, owner_session_id.as_deref())
+            super::browser_level_auto_attach_owner_session_allowed(
+                conn,
+                owner_session_id.as_deref(),
+            )
         })
         .collect()
-}
-
-fn top_level_page_auto_attach_owner_session_allowed(
-    conn: &CdpConnection,
-    owner_session_id: Option<&str>,
-) -> bool {
-    match owner_session_id {
-        None => true,
-        Some(owner_session_id) => matches!(
-            conn.session_route(Some(owner_session_id)),
-            Some(crate::conn::CdpSessionRoute::Browser)
-        ),
-    }
-}
-
-fn top_level_tab_auto_attach_owner_session_allowed(
-    conn: &CdpConnection,
-    owner_session_id: Option<&str>,
-) -> bool {
-    match owner_session_id {
-        None => true,
-        Some(session_id) => {
-            matches!(
-                conn.session_route(Some(session_id)),
-                Some(crate::conn::CdpSessionRoute::Browser)
-            )
-        }
-    }
 }
 
 fn activate_browser_context_for_create_target(
@@ -1792,12 +1770,13 @@ async fn set_auto_attach_inner_async(
             }
             let attach_page_targets = conn
                 .auto_attach_owner_allows_target_type(owner_session_id, "page")
-                && top_level_page_auto_attach_owner_session_allowed(conn, owner_session_id);
+                && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
             let attach_tab_targets = conn
                 .auto_attach_owner_allows_target_type(owner_session_id, "tab")
-                && top_level_tab_auto_attach_owner_session_allowed(conn, owner_session_id);
-            let attach_shared_worker_targets =
-                conn.auto_attach_owner_allows_target_type(owner_session_id, "shared_worker");
+                && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
+            let attach_shared_worker_targets = conn
+                .auto_attach_owner_allows_target_type(owner_session_id, "shared_worker")
+                && super::browser_level_auto_attach_owner_session_allowed(conn, owner_session_id);
             let attach_dedicated_worker_targets =
                 conn.auto_attach_owner_allows_target_type(owner_session_id, "worker");
             let attach_service_worker_targets =
