@@ -207,9 +207,12 @@ Runner layout:
 - `assertions.py`, `helpers.py`, `state.py`, `config.py`: shared runner utilities and state.
 - `groups/core.py`: discovery-adjacent page workflows: navigation, iframe, wait, cookies, redirects, and history.
 - `groups/protocol.py`: raw CDP protocol workflows that intentionally avoid Playwright helper commands, including shared worker target discovery, Runtime context/log replay, the Chromium/V8 `Debugger.pause` response-event-resume and nested-function `Debugger.stepOut` resume/re-pause sequences, and profiler session state.
-- `groups/multi_client.py`: Chromium-calibrated 2/3/7-client browser/direct-page
-  WebSocket routing, session ownership, command-id collision, per-client FIFO,
-  attach event/response ordering, and staged disconnect isolation contracts.
+- `groups/multi_client.py`, `groups/multi_client_fanout.py`, and
+  `groups/multi_client_support.py`: Chromium-calibrated 2/3/7-client
+  browser/direct-page WebSocket routing, session ownership, command-id
+  collision, per-client FIFO, attach event/response ordering, and staged
+  disconnect isolation contracts, split into two-client, fan-out, and shared
+  support layers.
 - `groups/agent_episode.py`: short raw-CDP RL-shaped observation/action,
   response/realm ordering, and failed-navigation error-Document contract.
 - `groups/fetch_runtime_teardown.py`: holds an exact module-fetch lease while CDP disposes its BrowserContext, then verifies that callback-thread cancellation, browser commands, and a replacement context survive teardown.

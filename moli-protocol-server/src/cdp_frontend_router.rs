@@ -79,8 +79,8 @@ impl CdpFrontendRouter {
             .unregister_page_frontends_for_target(target_id);
     }
 
-    pub(crate) fn register_private_session(&self, session_id: String) {
-        self.routing.lock().register_private_session(session_id);
+    pub(crate) fn register_private_session(&self, session_id: String) -> Result<()> {
+        self.routing.lock().register_private_session(session_id)
     }
 
     pub(crate) fn enqueue_protocol_output_sequence(&self, output: ProtocolOutputSequence) -> bool {

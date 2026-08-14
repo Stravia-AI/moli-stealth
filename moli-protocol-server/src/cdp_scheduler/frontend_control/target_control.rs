@@ -268,7 +268,9 @@ impl CdpFrontendTargetControl {
                 .and_then(|message| message.pointer("/result/sessionId"))
                 .and_then(Value::as_str)
         {
-            frontend_router.register_private_session(session_id.to_owned());
+            frontend_router
+                .register_private_session(session_id.to_owned())
+                .context("failed to register CDP internal control session")?;
         }
         frontend_router.enqueue_protocol_output_sequence(
             ProtocolOutputSequence::from_background_events(passthrough_events),
