@@ -2,10 +2,10 @@ use std::collections::HashMap;
 
 use moli_layout::{
     DocumentLayoutServices, LayoutDisplay, LayoutElementCategory, LayoutElementSemantics,
-    LayoutError, LayoutFlushReason, LayoutFragmentKind, LayoutNamespace, LayoutPassOutput,
-    LayoutPassRequest, LayoutPoint, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch, LayoutRect,
+    LayoutError, LayoutFlushReason, LayoutFragmentKind, LayoutNamespace, LayoutPassRequest,
+    LayoutPassResult, LayoutPoint, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch, LayoutRect,
     LayoutSource, LayoutSourceKind, LayoutStyleResolver, LayoutTransform2D, LayoutViewport,
-    PaintColor, ResolvedLayoutStyle, build_layout_pass_output,
+    PaintColor, ResolvedLayoutStyle, build_layout_pass,
 };
 use style::Atom;
 use taffy::{
@@ -126,7 +126,7 @@ fn fixed_size(display: LayoutDisplay, width: f32, height: f32) -> ResolvedLayout
     )
 }
 
-fn build(source: &Source, styles: &mut Styles) -> LayoutPassOutput<usize> {
+fn build(source: &Source, styles: &mut Styles) -> LayoutPassResult<usize> {
     build_with_request(
         source,
         styles,
@@ -138,8 +138,8 @@ fn build_with_request(
     source: &Source,
     styles: &mut Styles,
     request: LayoutPassRequest,
-) -> LayoutPassOutput<usize> {
-    build_layout_pass_output(source, styles, &mut DocumentLayoutServices::new(), request).unwrap()
+) -> LayoutPassResult<usize> {
+    build_layout_pass(source, styles, &mut DocumentLayoutServices::new(), request).unwrap()
 }
 
 fn assert_close(actual: f32, expected: f32) {
@@ -178,7 +178,7 @@ fn display_none_root_uses_an_unmapped_internal_carrier() {
 }
 
 #[test]
-fn output_owns_complete_box_models_and_answers_a_batch_from_one_pass() {
+fn pass_result_owns_complete_box_models_and_answers_a_batch_from_one_pass() {
     let source = Source(vec![Node::element("root", Vec::new())]);
     let mut styles = Styles::default();
     styles.0.insert(
@@ -254,6 +254,46 @@ fn output_owns_complete_box_models_and_answers_a_batch_from_one_pass() {
     assert!(matches!(
         &answers.answers[2],
         LayoutQueryAnswer::ClientRects(rects) if rects.len() == 1
+    ));
+}
+
+#[test]
+fn pass_output_freezes_into_the_sole_queryable_retained_tree() {
+    let source = Source(vec![
+        Node::element("root", vec![1]),
+        Node::element("target", Vec::new()),
+    ]);
+    let mut styles = Styles::default();
+    styles
+        .0
+        .insert(0, fixed_size(LayoutDisplay::Block, 200.0, 100.0));
+    styles
+        .0
+        .insert(1, fixed_size(LayoutDisplay::Block, 80.0, 30.0));
+
+    let output = build_with_request(
+        &source,
+        &mut styles,
+        LayoutPassRequest::with_paint(LayoutViewport::new(200, 100, 1.0), LayoutFlushReason::Test),
+    );
+    assert!(output.paint_snapshot().is_some());
+    let metrics = output.metrics;
+    let tree = output.into_tree();
+
+    assert!(tree.source_output(1).is_some());
+    assert_eq!(
+        tree.hit_test(LayoutPoint::new(10.0, 10.0), false)
+            .expect("the frozen tree derives a hit-test view")
+            .source,
+        1
+    );
+    let answers = tree.answer_queries(
+        &LayoutQueryBatch::new(vec![LayoutQuery::BoxModel { source: 1 }]),
+        metrics,
+    );
+    assert!(matches!(
+        answers.answers.as_slice(),
+        [LayoutQueryAnswer::BoxModel(Some(_))]
     ));
 }
 
@@ -377,18 +417,14 @@ fn inline_output_preserves_line_text_and_utf16_source_fragments() {
         .filter_map(|id| output.fragment(*id))
         .filter_map(|fragment| match &fragment.kind {
             LayoutFragmentKind::Text {
-                source_byte_range,
-                source_utf16_range,
-                ..
-            } => Some((source_byte_range.clone(), source_utf16_range.clone())),
+                source_utf16_range, ..
+            } => Some(source_utf16_range.clone()),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert!(!text_fragments.is_empty());
-    assert_eq!(text_fragments.first().unwrap().0.start, 0);
-    assert_eq!(text_fragments.last().unwrap().0.end, "ab😀cd".len());
-    assert_eq!(text_fragments.first().unwrap().1.start, 0);
-    assert_eq!(text_fragments.last().unwrap().1.end, 6);
+    assert_eq!(text_fragments.first().unwrap().start, 0);
+    assert_eq!(text_fragments.last().unwrap().end, 6);
 
     let inline_model = output.box_model_for_source(1).unwrap();
     assert!(inline_model.border.bounding_rect().width > 0.0);
@@ -553,8 +589,8 @@ fn caret_query_uses_parley_cluster_sides_and_inline_direction() {
         let fragment = output
             .source_output(1)
             .into_iter()
-            .flat_map(|source| &source.fragments)
-            .filter_map(|id| output.fragment(*id))
+            .flat_map(|source| source.fragments)
+            .filter_map(|id| output.fragment(id))
             .find(|fragment| {
                 matches!(
                     fragment.kind,
@@ -681,13 +717,8 @@ fn scroll_is_sampled_per_pass_and_updates_geometry_clip_and_hit_testing() {
         .insert(2, fixed_size(LayoutDisplay::Block, 300.0, 200.0));
 
     let first = build(&source, &mut styles);
-    let scroll_extent = &first.scroll_extents[first
-        .source_output(1)
-        .unwrap()
-        .principal_box
-        .unwrap()
-        .index()];
-    assert_eq!(scroll_extent.requested_offset, LayoutPoint::new(40.0, 30.0));
+    let scroll_box = first.source_output(1).unwrap().principal_box.unwrap();
+    let scroll_extent = first.scroll_extent(scroll_box).unwrap();
     assert_eq!(scroll_extent.applied_offset, LayoutPoint::new(40.0, 30.0));
     assert_eq!(scroll_extent.minimum_offset, LayoutPoint::ZERO);
     assert_eq!(scroll_extent.maximum_offset, LayoutPoint::new(200.0, 120.0));

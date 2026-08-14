@@ -136,8 +136,8 @@ Lo que la mayoría de las tareas de automatización de navegadores necesitan rea
 | Solicitud del agente | Qué hace Moli |
 | --- | --- |
 | Extraer HTML/Markdown, consultar el DOM, ejecutar JS, inspeccionar la red o el almacenamiento | Lee directamente el estado del entorno de ejecución del navegador, sin activar la disposición ni el dibujo |
-| Leer el rectángulo delimitador de un elemento, comprobar unas coordenadas, enviar entradas por coordenadas | Ejecuta un cálculo de disposición y conserva únicamente la instantánea de geometría más reciente |
-| Capturar una pantalla o actualizar un screencast | Reconstruye desde el DOM y los estilos actuales, renderiza un fotograma nuevo y lo descarta después de usarlo |
+| Leer el rectángulo delimitador de un elemento, comprobar unas coordenadas, enviar entradas por coordenadas | Ejecuta un cálculo de disposición y conserva únicamente el árbol de disposición congelado más reciente |
+| Capturar una pantalla o actualizar un screencast | Reconstruye desde el DOM y los estilos actuales, sustituye el árbol congelado, renderiza un fotograma nuevo y descarta el fotograma después de usarlo |
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
@@ -177,7 +177,7 @@ En Moli, las operaciones costosas del navegador deben activarse explícitamente 
 | `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Activa por separado una familia concreta de recursos opcionales |
 | `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Activa selectivamente la persistencia que necesita la carga de trabajo |
 
-El resultado de la disposición es una instantánea tomada bajo demanda, no un estado que se mantenga continuamente: la primera solicitud de geometría (inicio en frío) construye una disposición completa a partir del DOM y de los estilos actuales, y solo conserva el `LayoutPassOutput` más reciente. A partir de ese momento, las lecturas de geometría ordinarias pueden reutilizar esa instantánea aunque la página haya cambiado; las capturas de pantalla y los screencasts, en cambio, se reconstruyen siempre y nunca reutilizan resultados antiguos.
+El resultado de la disposición es una instantánea tomada bajo demanda, no un estado que se mantenga continuamente: la primera solicitud de geometría (inicio en frío) construye un árbol de trabajo temporal a partir del DOM y de los estilos actuales, congela su geometría canónica en un `FrozenLayoutTree` inmutable e independiente del DOM y conserva únicamente ese árbol más reciente. Las lecturas de geometría ordinarias pueden reutilizarlo aunque la página haya cambiado; las capturas de pantalla y los screencasts siempre reconstruyen y sustituyen el árbol congelado, y nunca reutilizan resultados de dibujo antiguos.
 
 ## Arquitectura
 
@@ -190,7 +190,7 @@ Moli es un núcleo de navegador independiente, no una envoltura de Chromium. Est
 - Taffy + Parley — disposición de cajas y texto
 - AnyRender/Vello CPU, `usvg` y el ecosistema de imágenes de Rust — renderizado por software
 
-El documento y los estilos tienen una única fuente de verdad: la integración del DOM nativo con Stylo. Cada actualización real reconstruye la disposición a partir de esa fuente, convierte el resultado en datos inmutables e independientes del DOM y después descarta el estado temporal producido durante esa pasada de disposición y dibujo. En todo el sistema no hay ningún árbol de disposición incremental, grafo de daños, lista de visualización retenida, compositor de GPU ni ventana persistente.
+El documento y los estilos tienen una única fuente de verdad: la integración del DOM nativo con Stylo. Cada actualización real crea un árbol de trabajo temporal, produce y consume bajo demanda una instantánea de dibujo nueva, congela la geometría final de cajas y fragmentos en un `FrozenLayoutTree` compacto y después descarta el árbol de trabajo, las referencias de estilo, las cachés de disposición, los diagnósticos y el estado de dibujo. La asociación con las fuentes y los candidatos de hit-test se derivan del árbol congelado al consultarlos. No hay ningún árbol de disposición mantenido incrementalmente, grafo de daños, lista de visualización retenida, compositor de GPU ni ventana persistente.
 
 ## Datos de las pruebas
 

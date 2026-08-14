@@ -2379,7 +2379,7 @@ impl ScriptVm {
         &mut self,
         viewport: moli_layout::LayoutViewport,
     ) -> Result<bool, moli_layout::LayoutError> {
-        self.with_fresh_layout_output(
+        self.with_fresh_layout_pass(
             moli_layout::LayoutPassRequest::new(viewport, moli_layout::LayoutFlushReason::Test),
             |_| Ok(()),
         )
@@ -2405,18 +2405,18 @@ impl ScriptVm {
         reason: moli_layout::LayoutFlushReason,
         capture: moli_layout::PaintCaptureRequest,
     ) -> anyhow::Result<Option<moli_layout::PaintSnapshot>> {
-        self.with_fresh_layout_output(
+        self.with_fresh_layout_pass(
             moli_layout::LayoutPassRequest::with_capture(viewport, reason, capture),
-            moli_layout::LayoutPassOutput::take_paint_snapshot,
+            moli_layout::LayoutPassResult::take_paint_snapshot,
         )
         .map_err(anyhow::Error::new)
     }
 
-    fn with_fresh_layout_output<T>(
+    fn with_fresh_layout_pass<T>(
         &mut self,
         request: moli_layout::LayoutPassRequest,
         consume: impl FnOnce(
-            &mut moli_layout::LayoutPassOutput<DomHandle>,
+            &mut moli_layout::LayoutPassResult<DomHandle>,
         ) -> Result<T, moli_layout::LayoutError>,
     ) -> Result<Option<T>, moli_layout::LayoutError> {
         // Font/CSS source reconciliation is a pre-pass lifecycle step. Once
@@ -2430,7 +2430,7 @@ impl ScriptVm {
             let context_host = self._context_host.borrow();
             let document = context_host.document_handle();
             let result =
-                context_host.with_fresh_layout_output_for_document(document, request, consume);
+                context_host.with_fresh_layout_pass_for_document(document, request, consume);
             (document, result)
         };
         if matches!(&result, Ok(Some(_)))
@@ -2498,7 +2498,7 @@ impl ScriptVm {
         u64,
         u64,
         u64,
-        Option<(DomHandle, moli_layout::LayoutOutputRetentionMetrics, bool)>,
+        Option<(DomHandle, moli_layout::LayoutTreeRetentionMetrics)>,
     ) {
         let observability = self
             ._context_host

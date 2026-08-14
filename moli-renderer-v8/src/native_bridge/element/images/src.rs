@@ -74,7 +74,7 @@ pub(crate) fn queue_revealed_lazy_image_loads(
     let handles = {
         let runtime = unsafe { &*runtime_ptr };
         runtime
-            .with_latest_layout_output_for_document(document, |output| {
+            .with_latest_layout_tree_for_document(document, |output| {
                 revealed_lazy_image_handles(runtime, document, output)
             })
             .unwrap_or_default()

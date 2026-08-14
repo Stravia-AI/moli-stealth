@@ -150,8 +150,8 @@ operations that genuinely require them.
 | Agent request | What Moli does |
 | --- | --- |
 | Extract HTML/Markdown, query the DOM, run JS, inspect network/storage | Reads browser runtime state directly — does not trigger layout or paint |
-| Read an element's box, hit-test coordinates, send coordinate input | Runs one layout calculation and keeps only the latest geometry snapshot |
-| Capture a screenshot or refresh a screencast | Rebuilds from the current DOM/style, renders a fresh frame, and discards it after use |
+| Read an element's box, hit-test coordinates, send coordinate input | Runs one layout calculation and retains only the latest frozen layout tree |
+| Capture a screenshot or refresh a screencast | Rebuilds from the current DOM/style, replaces the frozen tree, renders a fresh frame, and discards the frame after use |
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
@@ -211,10 +211,12 @@ enabled by default:
 | `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Selectively enable the persistence required by the workload |
 
 Layout is an on-demand snapshot rather than continuously maintained state. The
-first geometry request (a cold start) builds one complete layout from the
-current DOM/style and retains only the latest `LayoutPassOutput`. After that,
-ordinary geometry reads may reuse the snapshot even if the page has changed;
-screenshots and screencasts always rebuild and never reuse stale results.
+first geometry request (a cold start) builds a working layout tree from the
+current DOM/style, freezes its canonical geometry into an immutable,
+DOM-independent `FrozenLayoutTree`, and retains only that latest tree. Ordinary
+geometry reads may reuse it even if the page has changed; screenshots and
+screencasts always rebuild, replace the frozen tree, and never reuse stale
+paint results.
 
 ## Architecture
 
@@ -229,11 +231,13 @@ Rust, has its own ownership and lifecycle rules, and relies on:
 - AnyRender/Vello CPU, `usvg`, and the Rust image ecosystem — software rendering
 
 Document and style have a single source of truth: the native DOM and its Stylo
-integration. Every real refresh rebuilds layout from that source, converts the
-result into immutable, DOM-independent data, and then discards the temporary
-state created during that layout and paint pass. The system has no incremental
-layout tree, damage graph, retained display list, GPU compositor, or persistent
-window.
+integration. Every real refresh builds a temporary working tree from that
+source, optionally produces and consumes one fresh paint snapshot, freezes the
+canonical box/fragment geometry into a compact `FrozenLayoutTree`, and discards
+the working tree, style borrows, layout caches, diagnostics, and paint state.
+Source lookup and hit-test candidates are derived from the frozen tree when
+queried. The system has no incrementally maintained layout tree, damage graph,
+retained display list, GPU compositor, or persistent window.
 
 ## Test data
 

@@ -1,17 +1,17 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fmt::Debug,
     hash::Hash,
-    ops::Range,
+    ops::{Deref, Range},
     time::Duration,
 };
 
-use crate::{LayoutBoxKind, LayoutError, LayoutPosition, PaintDiagnostic, PaintSnapshot};
+use crate::{LayoutError, LayoutPosition, PaintDiagnostic, PaintSnapshot};
 
 /// Viewport inputs shared by layout, geometry queries, and paint projection.
 ///
 /// Dimensions are CSS pixels. Device-pixel conversion belongs to the paint
-/// backend and never changes the geometry stored in a layout output.
+/// backend and never changes the geometry stored in a frozen layout tree.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutViewport {
     pub css_width: u32,
@@ -59,7 +59,7 @@ impl LayoutSize {
     }
 }
 
-/// An axis-aligned rectangle in one explicit [`LayoutCoordinateSpace`].
+/// An axis-aligned rectangle in one explicit layout coordinate space.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct LayoutRect {
     pub x: f32,
@@ -230,7 +230,9 @@ macro_rules! dense_output_id {
 
         impl $name {
             pub(crate) fn from_index(index: usize) -> Self {
-                Self(u32::try_from(index).expect("one layout output exceeded the u32 id limit"))
+                Self(
+                    u32::try_from(index).expect("one frozen layout tree exceeded the u32 id limit"),
+                )
             }
 
             pub const fn index(self) -> usize {
@@ -244,33 +246,47 @@ dense_output_id!(LayoutOutputBoxId);
 dense_output_id!(LayoutFragmentId);
 dense_output_id!(LayoutCoordinateSpaceId);
 dense_output_id!(LayoutClipChainId);
-dense_output_id!(LayoutScrollExtentId);
 
-/// One explicit local coordinate system in a pass output.
+/// One explicit local coordinate system in a frozen layout tree.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LayoutCoordinateSpace {
-    pub id: LayoutCoordinateSpaceId,
-    pub owner: Option<LayoutOutputBoxId>,
-    pub parent: Option<LayoutCoordinateSpaceId>,
-    pub local_to_parent: LayoutTransform2D,
+pub(crate) struct LayoutCoordinateSpace {
+    pub(crate) id: LayoutCoordinateSpaceId,
+    pub(crate) owner: Option<LayoutOutputBoxId>,
+    pub(crate) parent: Option<LayoutCoordinateSpaceId>,
+    pub(crate) local_to_parent: LayoutTransform2D,
     /// Maps local coordinates to the visual document coordinate system. This
     /// includes element scrolling but excludes the viewport scroll offset.
-    pub local_to_document: LayoutTransform2D,
+    pub(crate) local_to_document: LayoutTransform2D,
     /// Maps local coordinates directly to viewport CSS pixels.
+    pub(crate) local_to_viewport: LayoutTransform2D,
+}
+
+/// Query-facing coordinate data retained for one frozen box-tree node.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrozenCoordinateSpace {
+    pub owner: Option<LayoutOutputBoxId>,
     pub local_to_viewport: LayoutTransform2D,
+}
+
+impl From<LayoutCoordinateSpace> for FrozenCoordinateSpace {
+    fn from(space: LayoutCoordinateSpace) -> Self {
+        Self {
+            owner: space.owner,
+            local_to_viewport: space.local_to_viewport,
+        }
+    }
 }
 
 /// One rectangular clip linked to its ancestor clip.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutClipNode {
-    pub id: LayoutClipChainId,
     pub parent: Option<LayoutClipChainId>,
     pub owner: Option<LayoutOutputBoxId>,
     pub coordinate_space: LayoutCoordinateSpaceId,
     pub rect: LayoutRect,
 }
 
-/// Complete physical box model for one output-local CSS box.
+/// Complete physical box model for one tree-local CSS box.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutBoxModel {
     pub content: LayoutQuad,
@@ -282,12 +298,9 @@ pub struct LayoutBoxModel {
 /// Per-box scroll geometry in the box's own coordinate space.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutScrollExtent {
-    pub id: LayoutScrollExtentId,
-    pub owner: LayoutOutputBoxId,
     pub scrollport: LayoutRect,
     pub scrollable_overflow: LayoutRect,
     pub scroll_size: LayoutSize,
-    pub requested_offset: LayoutPoint,
     pub applied_offset: LayoutPoint,
     pub minimum_offset: LayoutPoint,
     pub maximum_offset: LayoutPoint,
@@ -295,15 +308,12 @@ pub struct LayoutScrollExtent {
     pub clips_overflow: bool,
 }
 
-/// Geometry and provenance retained for one output-local box.
+/// Geometry retained for one tree-local box.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutBoxGeometry {
     pub id: LayoutOutputBoxId,
     pub parent: Option<LayoutOutputBoxId>,
     pub layout_parent: Option<LayoutOutputBoxId>,
-    pub positioned_containing_block: Option<LayoutOutputBoxId>,
-    pub role: LayoutBoxKind,
-    pub source_label: String,
     pub position: LayoutPosition,
     pub coordinate_space: LayoutCoordinateSpaceId,
     pub clip_chain: Option<LayoutClipChainId>,
@@ -311,7 +321,6 @@ pub struct LayoutBoxGeometry {
     pub padding_box: LayoutRect,
     pub border_box: LayoutRect,
     pub margin_box: LayoutRect,
-    pub scroll_extent: LayoutScrollExtentId,
     pub fragments: Vec<LayoutFragmentId>,
     /// Untransformed border-box origin in document layout coordinates.
     pub layout_origin_in_document: LayoutPoint,
@@ -321,6 +330,31 @@ pub struct LayoutBoxGeometry {
     pub establishes_fixed_containing_block: bool,
     pub visible: bool,
     pub pointer_events: bool,
+}
+
+/// One node in the immutable layout tree retained after a full pass.
+///
+/// `geometry_source` associates ordinary CSSOM geometry with its source. A
+/// split inline continuation can therefore share its originating source while
+/// remaining a distinct box-tree node. `hit_source` is separate because a
+/// generated pseudo box participates in hit testing as its originating DOM
+/// element without manufacturing CSSOM rects for that element.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FrozenLayoutBox<N> {
+    pub geometry: LayoutBoxGeometry,
+    pub scroll_extent: LayoutScrollExtent,
+    pub coordinate_space: FrozenCoordinateSpace,
+    pub geometry_source: Option<N>,
+    pub principal_source: Option<N>,
+    pub hit_source: Option<N>,
+}
+
+impl<N> Deref for FrozenLayoutBox<N> {
+    type Target = LayoutBoxGeometry;
+
+    fn deref(&self) -> &Self::Target {
+        &self.geometry
+    }
 }
 
 /// Physical boxes retained for one box fragment in that fragment's local
@@ -334,7 +368,7 @@ pub struct LayoutFragmentBoxModel {
 }
 
 /// A geometry fragment kind. IDs contained here are valid only in the same
-/// [`LayoutPassOutput`].
+/// [`FrozenLayoutTree`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LayoutFragmentKind {
     Box {
@@ -353,7 +387,6 @@ pub enum LayoutFragmentKind {
     Text {
         box_id: LayoutOutputBoxId,
         line_index: usize,
-        source_byte_range: Range<usize>,
         source_utf16_range: Range<usize>,
         rtl: bool,
     },
@@ -366,13 +399,12 @@ pub struct LayoutFragment {
     pub kind: LayoutFragmentKind,
     pub rect: LayoutRect,
     pub box_model: Option<LayoutFragmentBoxModel>,
-    pub baseline: Option<f32>,
     pub coordinate_space: LayoutCoordinateSpaceId,
     pub clip_chain: Option<LayoutClipChainId>,
     pub paint_order: Option<u32>,
 }
 
-/// Output references associated with one source-tree node.
+/// A short-lived source view derived from frozen box provenance.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct LayoutNodeOutput {
     pub principal_box: Option<LayoutOutputBoxId>,
@@ -385,35 +417,28 @@ pub struct LayoutNodeOutput {
 
 /// One front-to-back hit-test candidate.
 #[derive(Clone, Debug, PartialEq)]
-pub struct LayoutHitTestEntry<N> {
-    pub source: N,
-    pub fragment: LayoutFragmentId,
-    pub coordinate_space: LayoutCoordinateSpaceId,
-    pub clip_chain: Option<LayoutClipChainId>,
-    pub local_rect: LayoutRect,
-    pub paint_order: u32,
-    pub is_text: bool,
-    pub pointer_events: bool,
+struct LayoutHitTestEntry<N> {
+    source: N,
+    fragment: LayoutFragmentId,
+    coordinate_space: LayoutCoordinateSpaceId,
+    clip_chain: Option<LayoutClipChainId>,
+    local_rect: LayoutRect,
+    paint_order: u32,
+    is_text: bool,
+    pointer_events: bool,
 }
 
-/// A pass-local spatial index. The initial implementation is a compact
-/// paint-ordered vector; the schema does not expose or require a retained R-tree.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct LayoutHitTestIndex<N> {
-    pub entries: Vec<LayoutHitTestEntry<N>>,
-}
-
-/// Result of resolving a point against the pass-local hit-test index.
+/// Result of resolving a point against hit candidates derived from the tree.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LayoutHit<N> {
     pub source: N,
     /// The real provider identifies the exact fragment. Explicit mock
     /// providers can return a source-only hit without manufacturing a
-    /// pass-local fragment identity.
+    /// tree-local fragment identity.
     pub fragment: Option<LayoutFragmentId>,
     pub local_point: LayoutPoint,
     pub is_text: bool,
-    /// Box geometry copied from the same output when the hit source owns a
+    /// Box geometry copied from the same frozen tree when the hit source owns a
     /// CSS box. Consumers use it for source-dependent follow-up work such as
     /// descending through a transformed child-frame content box without
     /// forcing a second parent-document pass.
@@ -596,7 +621,7 @@ pub enum LayoutQueryAnswer<N> {
     EventOffset(Option<LayoutPoint>),
 }
 
-/// Minimal owned results copied from one transient pass output.
+/// Minimal owned results derived from one frozen layout tree.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LayoutAnswers<N> {
     pub answers: Vec<LayoutQueryAnswer<N>>,
@@ -610,7 +635,7 @@ pub trait GeometryProvider {
     /// Answers a batch from the provider's latest layout state.
     ///
     /// The provider decides whether this requires a fresh pass or can reuse an
-    /// already-owned output; callers must not assume that one call equals one
+    /// already-owned tree; callers must not assume that one call equals one
     /// layout computation.
     fn answer(
         &mut self,
@@ -620,14 +645,13 @@ pub trait GeometryProvider {
     ) -> Result<LayoutAnswers<Self::NodeId>, LayoutError>;
 }
 
-/// Retained geometry footprint for one owned pass output.
+/// Retained footprint for one frozen layout tree.
 ///
-/// The byte count is an allocation-capacity estimate for the output's
-/// geometry, fragment, mapping, hit-test, and diagnostic storage. It excludes
-/// allocator metadata and the optional paint snapshot, which consumers must
-/// remove before retaining an output as a latest-layout snapshot.
+/// The byte count is an allocation-capacity estimate for the tree's box,
+/// fragment, source-provenance, scroll, transform, and clip storage. It
+/// excludes allocator metadata and every pass-only diagnostic or paint value.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LayoutOutputRetentionMetrics {
+pub struct LayoutTreeRetentionMetrics {
     pub box_count: usize,
     pub fragment_count: usize,
     pub estimated_geometry_bytes: usize,
@@ -637,40 +661,63 @@ pub struct LayoutOutputRetentionMetrics {
 pub const MAX_RETAINED_LAYOUT_BOXES: usize = 1_000_000;
 /// Maximum fragments retained in the single latest-layout snapshot.
 pub const MAX_RETAINED_LAYOUT_FRAGMENTS: usize = 4_000_000;
-/// Maximum estimated allocation capacity retained by one latest-layout output.
-pub const MAX_RETAINED_LAYOUT_OUTPUT_BYTES: usize = 256 * 1024 * 1024;
+/// Maximum estimated allocation capacity retained by one frozen layout tree.
+pub const MAX_RETAINED_LAYOUT_TREE_BYTES: usize = 256 * 1024 * 1024;
 
-/// Immutable geometry, fragment, hit-test, diagnostics, and paint projection
-/// produced by exactly one full layout demand.
-pub struct LayoutPassOutput<N>
+/// Immutable, DOM-independent layout tree produced by one complete pass.
+///
+/// The box tree is stored densely through parent IDs. Text/inline fragments,
+/// coordinate spaces, clips, and scroll extents are canonical layout data:
+/// they preserve results that cannot be reconstructed after the working tree,
+/// Taffy caches, Parley state, and computed styles are dropped. Source and
+/// hit-test indexes are derived from the box provenance and fragments.
+pub struct FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
-    pub schema_version: u32,
     pub viewport: LayoutViewport,
     pub viewport_scroll: LayoutPoint,
     pub content_size: LayoutSize,
     pub root_box: LayoutOutputBoxId,
-    pub boxes: Vec<LayoutBoxGeometry>,
-    pub box_sources: Vec<Option<N>>,
+    pub boxes: Vec<FrozenLayoutBox<N>>,
     pub fragments: Vec<LayoutFragment>,
-    pub source_mapping: HashMap<N, LayoutNodeOutput>,
-    pub scroll_extents: Vec<LayoutScrollExtent>,
-    pub coordinate_spaces: Vec<LayoutCoordinateSpace>,
+    /// Source/box relationships for `display: contents` nodes, which own no
+    /// principal box but can still nominate rendered descendants for scroll.
+    pub scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
+    viewport_coordinate_space: FrozenCoordinateSpace,
     pub clip_chain: Vec<LayoutClipNode>,
-    pub paint_order: Vec<LayoutFragmentId>,
-    pub hit_test_index: LayoutHitTestIndex<N>,
+}
+
+/// Transient products of exactly one complete layout demand.
+///
+/// Consumers may inspect the tree and take an optional paint snapshot while
+/// handling the demand. Only [`FrozenLayoutTree`] crosses the latest-layout
+/// retention boundary; diagnostics, metrics, and paint remain pass-owned.
+pub struct LayoutPassResult<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    pub tree: FrozenLayoutTree<N>,
     pub diagnostics: Vec<PaintDiagnostic>,
     pub metrics: LayoutPassMetrics,
     paint_snapshot: Option<PaintSnapshot>,
 }
 
-impl<N> LayoutPassOutput<N>
+impl<N> Deref for LayoutPassResult<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
-    pub const SCHEMA_VERSION: u32 = 2;
+    type Target = FrozenLayoutTree<N>;
 
+    fn deref(&self) -> &Self::Target {
+        &self.tree
+    }
+}
+
+impl<N> LayoutPassResult<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
     pub fn paint_snapshot(&self) -> Option<&PaintSnapshot> {
         self.paint_snapshot.as_ref()
     }
@@ -686,81 +733,115 @@ where
             .ok_or(LayoutError::PaintProjectionNotRequested)
     }
 
-    pub fn retention_metrics(&self) -> LayoutOutputRetentionMetrics {
+    /// Consumes every pass-only product and returns the sole retainable tree.
+    pub fn into_tree(self) -> FrozenLayoutTree<N> {
+        self.tree
+    }
+
+    pub fn retention_metrics(&self) -> LayoutTreeRetentionMetrics {
+        self.tree.retention_metrics()
+    }
+
+    pub fn validate_retention_budget(&self) -> Result<(), LayoutError> {
+        self.tree.validate_retention_budget()
+    }
+
+    pub fn answer_queries(&self, batch: &LayoutQueryBatch<N>) -> LayoutAnswers<N> {
+        self.tree.answer_queries(batch, self.metrics)
+    }
+}
+
+impl<N> FrozenLayoutTree<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    pub fn retention_metrics(&self) -> LayoutTreeRetentionMetrics {
         fn allocation<T>(capacity: usize) -> usize {
             capacity.saturating_mul(std::mem::size_of::<T>())
         }
 
-        let box_allocations = self.boxes.iter().fold(0usize, |bytes, geometry| {
-            bytes
-                .saturating_add(geometry.source_label.capacity())
-                .saturating_add(allocation::<LayoutFragmentId>(
-                    geometry.fragments.capacity(),
-                ))
-        });
-        let source_mapping_allocations = self.source_mapping.values().fold(
-            allocation::<(N, LayoutNodeOutput)>(self.source_mapping.capacity()),
-            |bytes, output| {
-                bytes
-                    .saturating_add(allocation::<LayoutFragmentId>(output.fragments.capacity()))
-                    .saturating_add(allocation::<LayoutOutputBoxId>(
-                        output.scroll_proxy_boxes.capacity(),
-                    ))
-            },
-        );
-        let diagnostic_allocations = self.diagnostics.iter().fold(0usize, |bytes, diagnostic| {
-            bytes
-                .saturating_add(diagnostic.code.capacity())
-                .saturating_add(diagnostic.message.capacity())
+        let box_allocations = self.boxes.iter().fold(0usize, |bytes, layout_box| {
+            bytes.saturating_add(allocation::<LayoutFragmentId>(
+                layout_box.fragments.capacity(),
+            ))
         });
         let estimated_geometry_bytes = std::mem::size_of::<Self>()
-            .saturating_add(allocation::<LayoutBoxGeometry>(self.boxes.capacity()))
-            .saturating_add(allocation::<Option<N>>(self.box_sources.capacity()))
+            .saturating_add(allocation::<FrozenLayoutBox<N>>(self.boxes.capacity()))
             .saturating_add(allocation::<LayoutFragment>(self.fragments.capacity()))
-            .saturating_add(allocation::<LayoutScrollExtent>(
-                self.scroll_extents.capacity(),
-            ))
-            .saturating_add(allocation::<LayoutCoordinateSpace>(
-                self.coordinate_spaces.capacity(),
+            .saturating_add(allocation::<(N, LayoutOutputBoxId)>(
+                self.scroll_proxy_links.capacity(),
             ))
             .saturating_add(allocation::<LayoutClipNode>(self.clip_chain.capacity()))
-            .saturating_add(allocation::<LayoutFragmentId>(self.paint_order.capacity()))
-            .saturating_add(allocation::<LayoutHitTestEntry<N>>(
-                self.hit_test_index.entries.capacity(),
-            ))
-            .saturating_add(allocation::<PaintDiagnostic>(self.diagnostics.capacity()))
-            .saturating_add(box_allocations)
-            .saturating_add(source_mapping_allocations)
-            .saturating_add(diagnostic_allocations);
-        LayoutOutputRetentionMetrics {
+            .saturating_add(box_allocations);
+        LayoutTreeRetentionMetrics {
             box_count: self.boxes.len(),
             fragment_count: self.fragments.len(),
             estimated_geometry_bytes,
         }
     }
 
-    /// Rejects an output that would make the single latest-layout slot an
-    /// unbounded retained allocation. Paint resources are intentionally not
-    /// counted here because consumers remove them before publication and the
-    /// raster boundary applies separate command/glyph/pixel/surface budgets.
+    /// Rejects a tree that would make the single latest-layout slot an
+    /// unbounded retained allocation.
     pub fn validate_retention_budget(&self) -> Result<(), LayoutError> {
         validate_retention_metrics(self.retention_metrics())
     }
 
     pub fn box_geometry(&self, id: LayoutOutputBoxId) -> Option<&LayoutBoxGeometry> {
-        self.boxes.get(id.index())
+        self.boxes
+            .get(id.index())
+            .map(|layout_box| &layout_box.geometry)
     }
 
     pub fn fragment(&self, id: LayoutFragmentId) -> Option<&LayoutFragment> {
         self.fragments.get(id.index())
     }
 
-    pub fn coordinate_space(&self, id: LayoutCoordinateSpaceId) -> Option<&LayoutCoordinateSpace> {
-        self.coordinate_spaces.get(id.index())
+    pub fn coordinate_space(&self, id: LayoutCoordinateSpaceId) -> Option<&FrozenCoordinateSpace> {
+        match id.index() {
+            0 => Some(&self.viewport_coordinate_space),
+            index => self
+                .boxes
+                .get(index - 1)
+                .map(|layout_box| &layout_box.coordinate_space),
+        }
     }
 
-    pub fn source_output(&self, source: N) -> Option<&LayoutNodeOutput> {
-        self.source_mapping.get(&source)
+    pub fn scroll_extent(&self, id: LayoutOutputBoxId) -> Option<&LayoutScrollExtent> {
+        self.boxes
+            .get(id.index())
+            .map(|layout_box| &layout_box.scroll_extent)
+    }
+
+    /// Derives the source view from canonical box provenance.
+    ///
+    /// No source hash table survives the pass. The returned IDs are copied
+    /// into one short-lived query value.
+    pub fn source_output(&self, source: N) -> Option<LayoutNodeOutput> {
+        let mut found = false;
+        let mut output = LayoutNodeOutput::default();
+        for layout_box in &self.boxes {
+            if layout_box.principal_source == Some(source) {
+                output.principal_box = Some(layout_box.id);
+                found = true;
+            }
+            if layout_box.geometry_source == Some(source) {
+                output
+                    .fragments
+                    .extend(layout_box.fragments.iter().copied().filter(|id| {
+                        self.fragment(*id).is_some_and(|fragment| {
+                            !matches!(fragment.kind, LayoutFragmentKind::Line { .. })
+                        })
+                    }));
+                found = true;
+            }
+        }
+        for (proxy_source, box_id) in &self.scroll_proxy_links {
+            if *proxy_source == source {
+                output.scroll_proxy_boxes.push(*box_id);
+                found = true;
+            }
+        }
+        found.then_some(output)
     }
 
     pub fn element_metrics_for_source(&self, source: N) -> Option<LayoutElementMetrics<N>> {
@@ -772,7 +853,7 @@ where
     /// ancestor tree scopes.
     ///
     /// Shadow DOM tree-scope visibility is an HTML/DOM concern, not a CSS box
-    /// tree concern. The pass output therefore retains the complete box chain
+    /// tree concern. The frozen tree therefore retains the complete box chain
     /// and lets its short-lived consumer supply that one predicate. Geometry
     /// is still derived wholly from this pass; no live layout state is read or
     /// retained here.
@@ -784,12 +865,15 @@ where
         let output = self.source_output(source)?;
         let box_id = output.principal_box?;
         let geometry = self.box_geometry(box_id)?;
-        let extent = self.scroll_extents.get(geometry.scroll_extent.index())?;
+        let extent = self.scroll_extent(box_id)?;
         let coordinate_space = self.coordinate_space(geometry.coordinate_space)?;
         let is_root = box_id == self.root_box;
         let offset_parent_id = self.offset_parent_box(box_id, &mut offset_parent_is_exposed);
-        let offset_parent =
-            offset_parent_id.and_then(|id| self.box_sources.get(id.index()).copied().flatten());
+        let offset_parent = offset_parent_id.and_then(|id| {
+            self.boxes
+                .get(id.index())
+                .and_then(|layout_box| layout_box.geometry_source)
+        });
         let offset_parent_origin = offset_parent_id
             .and_then(|id| self.box_geometry(id))
             .map(|parent| {
@@ -978,10 +1062,12 @@ where
         let mut scroll_containers = Vec::new();
         while let Some(box_id) = candidate {
             let geometry = self.box_geometry(box_id)?;
-            let extent = self.scroll_extents.get(geometry.scroll_extent.index())?;
+            let extent = self.scroll_extent(box_id)?;
             if (extent.is_scroll_container || box_id == self.root_box)
-                && let Some(container_source) =
-                    self.box_sources.get(box_id.index()).copied().flatten()
+                && let Some(container_source) = self
+                    .boxes
+                    .get(box_id.index())
+                    .and_then(|layout_box| layout_box.geometry_source)
                 && seen.insert(container_source)
                 && let Some(metrics) = self.element_metrics_for_source(container_source)
             {
@@ -1048,7 +1134,9 @@ where
         root: Option<N>,
     ) -> Option<LayoutIntersectionGeometry> {
         let target_output = self.source_output(target);
-        let target_box = target_output.and_then(|output| output.principal_box);
+        let target_box = target_output
+            .as_ref()
+            .and_then(|output| output.principal_box);
         let root_box = root.and_then(|source| self.source_output(source)?.principal_box);
         let root_is_layout_ancestor = match (target_box, root_box, root) {
             (_, _, None) => true,
@@ -1058,8 +1146,7 @@ where
             _ => false,
         };
         let root_clips_overflow = root_box
-            .and_then(|root_box| self.box_geometry(root_box))
-            .and_then(|geometry| self.scroll_extents.get(geometry.scroll_extent.index()))
+            .and_then(|root_box| self.scroll_extent(root_box))
             .is_some_and(|extent| extent.clips_overflow);
         let root_rect = if root.is_none() {
             LayoutTransform2D::IDENTITY.map_rect(LayoutRect::new(
@@ -1072,7 +1159,7 @@ where
             let geometry = self.box_geometry(root_box)?;
             Some((
                 geometry,
-                self.scroll_extents.get(geometry.scroll_extent.index())?,
+                self.scroll_extent(root_box)?,
                 self.coordinate_space(geometry.coordinate_space)?,
             ))
         }) {
@@ -1105,7 +1192,7 @@ where
                 clip = node.parent;
             }
         };
-        if let Some(target_output) = target_output {
+        if let Some(target_output) = target_output.as_ref() {
             for fragment in target_output
                 .fragments
                 .iter()
@@ -1114,7 +1201,9 @@ where
                 add_clip_chain(fragment.clip_chain);
             }
         }
-        if target_output.is_none_or(|output| output.fragments.is_empty())
+        if target_output
+            .as_ref()
+            .is_none_or(|output| output.fragments.is_empty())
             && let Some(target_box) = target_box
             && let Some(geometry) = self.box_geometry(target_box)
         {
@@ -1337,10 +1426,9 @@ where
         viewport_point: LayoutPoint,
         ignore_pointer_events_none: bool,
     ) -> Option<LayoutHit<N>> {
-        self.hit_test_index
-            .entries
-            .iter()
-            .find_map(|entry| self.hit_for_entry(entry, viewport_point, ignore_pointer_events_none))
+        self.hit_test_entries().into_iter().find_map(|entry| {
+            self.hit_for_entry(&entry, viewport_point, ignore_pointer_events_none)
+        })
     }
 
     pub fn hit_test_all(
@@ -1350,8 +1438,8 @@ where
     ) -> Vec<LayoutHit<N>> {
         let mut seen = HashSet::new();
         let mut hits = Vec::new();
-        for entry in &self.hit_test_index.entries {
-            let Some(hit) = self.hit_for_entry(entry, viewport_point, ignore_pointer_events_none)
+        for entry in self.hit_test_entries() {
+            let Some(hit) = self.hit_for_entry(&entry, viewport_point, ignore_pointer_events_none)
             else {
                 continue;
             };
@@ -1363,15 +1451,12 @@ where
     }
 
     pub fn caret_position(&self, viewport_point: LayoutPoint) -> Option<LayoutCaretPosition<N>> {
-        let top_entry = self
-            .hit_test_index
-            .entries
+        let entries = self.hit_test_entries();
+        let top_entry = entries
             .iter()
             .find(|entry| self.hit_for_entry(entry, viewport_point, true).is_some())?;
         let top_box = self.fragment_box_id(top_entry.fragment)?;
-        let text_entry = self
-            .hit_test_index
-            .entries
+        let text_entry = entries
             .iter()
             .filter(|entry| entry.is_text)
             .filter(|entry| {
@@ -1409,6 +1494,42 @@ where
             rect,
             ancestor_boxes: self.ancestor_box_models(top_box),
         })
+    }
+
+    /// Builds the front-to-back hit candidates for one query.
+    ///
+    /// Paint order, source provenance, transforms, and clips are canonical
+    /// tree data. The duplicated candidate vector is deliberately temporary.
+    fn hit_test_entries(&self) -> Vec<LayoutHitTestEntry<N>> {
+        let mut entries = self
+            .fragments
+            .iter()
+            .filter_map(|fragment| {
+                let paint_order = fragment.paint_order?;
+                let (box_id, is_text) = match fragment.kind {
+                    LayoutFragmentKind::Box { box_id }
+                    | LayoutFragmentKind::InlineBox { box_id, .. } => (box_id, false),
+                    LayoutFragmentKind::Text { box_id, .. } => (box_id, true),
+                    LayoutFragmentKind::Line { .. } => return None,
+                };
+                let layout_box = self.boxes.get(box_id.index())?;
+                if !layout_box.visible {
+                    return None;
+                }
+                Some(LayoutHitTestEntry {
+                    source: layout_box.hit_source?,
+                    fragment: fragment.id,
+                    coordinate_space: fragment.coordinate_space,
+                    clip_chain: fragment.clip_chain,
+                    local_rect: fragment.rect,
+                    paint_order,
+                    is_text,
+                    pointer_events: layout_box.pointer_events,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.paint_order));
+        entries
     }
 
     fn caret_position_for_text_entry(
@@ -1505,7 +1626,10 @@ where
         let mut seen = HashSet::new();
         let mut ancestors = Vec::new();
         loop {
-            if let Some(source) = self.box_sources.get(box_id.index()).copied().flatten()
+            if let Some(source) = self
+                .boxes
+                .get(box_id.index())
+                .and_then(|layout_box| layout_box.geometry_source)
                 && seen.insert(source)
                 && let Some(model) = self.box_model_for_source(source)
             {
@@ -1545,7 +1669,11 @@ where
         })
     }
 
-    pub fn answer_queries(&self, batch: &LayoutQueryBatch<N>) -> LayoutAnswers<N> {
+    pub fn answer_queries(
+        &self,
+        batch: &LayoutQueryBatch<N>,
+        metrics: LayoutPassMetrics,
+    ) -> LayoutAnswers<N> {
         let answers = batch
             .queries
             .iter()
@@ -1603,10 +1731,7 @@ where
                 }
             })
             .collect();
-        LayoutAnswers {
-            answers,
-            metrics: self.metrics,
-        }
+        LayoutAnswers { answers, metrics }
     }
 
     fn point_passes_clip_chain(
@@ -1676,7 +1801,10 @@ where
         let mut candidate = geometry.parent;
         while let Some(id) = candidate {
             let parent = self.box_geometry(id)?;
-            let source = self.box_sources.get(id.index()).copied().flatten();
+            let source = self
+                .boxes
+                .get(id.index())
+                .and_then(|layout_box| layout_box.geometry_source);
             let Some(source) = source else {
                 candidate = parent.parent;
                 continue;
@@ -1727,34 +1855,38 @@ where
         viewport_scroll: LayoutPoint,
         content_size: LayoutSize,
         root_box: LayoutOutputBoxId,
-        boxes: Vec<LayoutBoxGeometry>,
-        box_sources: Vec<Option<N>>,
+        boxes: Vec<FrozenLayoutBox<N>>,
         fragments: Vec<LayoutFragment>,
-        source_mapping: HashMap<N, LayoutNodeOutput>,
-        scroll_extents: Vec<LayoutScrollExtent>,
-        coordinate_spaces: Vec<LayoutCoordinateSpace>,
+        scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
+        viewport_coordinate_space: FrozenCoordinateSpace,
         clip_chain: Vec<LayoutClipNode>,
-        paint_order: Vec<LayoutFragmentId>,
-        hit_test_index: LayoutHitTestIndex<N>,
-        diagnostics: Vec<PaintDiagnostic>,
-        metrics: LayoutPassMetrics,
-        paint_snapshot: Option<PaintSnapshot>,
     ) -> Self {
         Self {
-            schema_version: Self::SCHEMA_VERSION,
             viewport,
             viewport_scroll,
             content_size,
             root_box,
             boxes,
-            box_sources,
             fragments,
-            source_mapping,
-            scroll_extents,
-            coordinate_spaces,
+            scroll_proxy_links,
+            viewport_coordinate_space,
             clip_chain,
-            paint_order,
-            hit_test_index,
+        }
+    }
+}
+
+impl<N> LayoutPassResult<N>
+where
+    N: Copy + Debug + Eq + Hash,
+{
+    pub(crate) fn new(
+        tree: FrozenLayoutTree<N>,
+        diagnostics: Vec<PaintDiagnostic>,
+        metrics: LayoutPassMetrics,
+        paint_snapshot: Option<PaintSnapshot>,
+    ) -> Self {
+        Self {
+            tree,
             diagnostics,
             metrics,
             paint_snapshot,
@@ -1766,18 +1898,18 @@ fn axis_aligned_union(left: LayoutQuad, right: LayoutQuad) -> LayoutQuad {
     LayoutTransform2D::IDENTITY.map_rect(left.bounding_rect().union(right.bounding_rect()))
 }
 
-fn validate_retention_metrics(metrics: LayoutOutputRetentionMetrics) -> Result<(), LayoutError> {
+fn validate_retention_metrics(metrics: LayoutTreeRetentionMetrics) -> Result<(), LayoutError> {
     if metrics.box_count > MAX_RETAINED_LAYOUT_BOXES
         || metrics.fragment_count > MAX_RETAINED_LAYOUT_FRAGMENTS
-        || metrics.estimated_geometry_bytes > MAX_RETAINED_LAYOUT_OUTPUT_BYTES
+        || metrics.estimated_geometry_bytes > MAX_RETAINED_LAYOUT_TREE_BYTES
     {
-        return Err(LayoutError::OutputRetentionBudgetExceeded {
+        return Err(LayoutError::TreeRetentionBudgetExceeded {
             boxes: metrics.box_count,
             fragments: metrics.fragment_count,
             estimated_bytes: metrics.estimated_geometry_bytes,
             max_boxes: MAX_RETAINED_LAYOUT_BOXES,
             max_fragments: MAX_RETAINED_LAYOUT_FRAGMENTS,
-            max_bytes: MAX_RETAINED_LAYOUT_OUTPUT_BYTES,
+            max_bytes: MAX_RETAINED_LAYOUT_TREE_BYTES,
         });
     }
     Ok(())
@@ -1810,30 +1942,30 @@ mod tests {
     }
 
     #[test]
-    fn retained_output_budget_reports_each_bounded_dimension() {
+    fn retained_tree_budget_reports_each_bounded_dimension() {
         for metrics in [
-            LayoutOutputRetentionMetrics {
+            LayoutTreeRetentionMetrics {
                 box_count: MAX_RETAINED_LAYOUT_BOXES + 1,
                 ..Default::default()
             },
-            LayoutOutputRetentionMetrics {
+            LayoutTreeRetentionMetrics {
                 fragment_count: MAX_RETAINED_LAYOUT_FRAGMENTS + 1,
                 ..Default::default()
             },
-            LayoutOutputRetentionMetrics {
-                estimated_geometry_bytes: MAX_RETAINED_LAYOUT_OUTPUT_BYTES + 1,
+            LayoutTreeRetentionMetrics {
+                estimated_geometry_bytes: MAX_RETAINED_LAYOUT_TREE_BYTES + 1,
                 ..Default::default()
             },
         ] {
             assert!(matches!(
                 validate_retention_metrics(metrics),
-                Err(LayoutError::OutputRetentionBudgetExceeded { .. })
+                Err(LayoutError::TreeRetentionBudgetExceeded { .. })
             ));
         }
-        validate_retention_metrics(LayoutOutputRetentionMetrics {
+        validate_retention_metrics(LayoutTreeRetentionMetrics {
             box_count: MAX_RETAINED_LAYOUT_BOXES,
             fragment_count: MAX_RETAINED_LAYOUT_FRAGMENTS,
-            estimated_geometry_bytes: MAX_RETAINED_LAYOUT_OUTPUT_BYTES,
+            estimated_geometry_bytes: MAX_RETAINED_LAYOUT_TREE_BYTES,
         })
         .expect("each exact retention limit should be accepted");
     }

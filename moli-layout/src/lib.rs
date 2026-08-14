@@ -3,7 +3,7 @@
 //! The crate knows Stylo and Taffy but never knows Moli's live DOM or V8
 //! runtime. Renderer-owned adapters lend a canonical source view and resolve
 //! styles; all source/style borrows and per-pass caches are gone before the
-//! returned [`LayoutPassOutput`] or [`PaintSnapshot`] crosses into a consumer.
+//! returned [`FrozenLayoutTree`] or [`PaintSnapshot`] crosses into a consumer.
 
 mod builder;
 mod capture;
@@ -41,20 +41,19 @@ pub use normalize_source::{
     NormalizedLayoutSourceNode, NormalizedLayoutSourceTree, normalize_layout_source,
 };
 pub use output::{
-    GeometryProvider, LayoutAnswers, LayoutBoxGeometry, LayoutBoxModel, LayoutCaretPosition,
-    LayoutClipChainId, LayoutClipNode, LayoutCoordinateSpace, LayoutCoordinateSpaceId,
-    LayoutDocumentMetrics, LayoutElementMetrics, LayoutFlushReason, LayoutFragment,
-    LayoutFragmentBoxModel, LayoutFragmentId, LayoutFragmentKind, LayoutHit, LayoutHitTestEntry,
-    LayoutHitTestIndex, LayoutIntersectionGeometry, LayoutNodeOutput, LayoutOutputBoxId,
-    LayoutOutputRetentionMetrics, LayoutPassMetrics, LayoutPassOutput, LayoutPoint, LayoutQuad,
-    LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch, LayoutRect, LayoutScrollContainerMetrics,
-    LayoutScrollExtent, LayoutScrollExtentId, LayoutScrollIntoViewGeometry, LayoutSize,
-    LayoutTransform2D, LayoutViewport, MAX_RETAINED_LAYOUT_BOXES, MAX_RETAINED_LAYOUT_FRAGMENTS,
-    MAX_RETAINED_LAYOUT_OUTPUT_BYTES,
+    FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, GeometryProvider, LayoutAnswers,
+    LayoutBoxGeometry, LayoutBoxModel, LayoutCaretPosition, LayoutClipChainId, LayoutClipNode,
+    LayoutCoordinateSpaceId, LayoutDocumentMetrics, LayoutElementMetrics, LayoutFlushReason,
+    LayoutFragment, LayoutFragmentBoxModel, LayoutFragmentId, LayoutFragmentKind, LayoutHit,
+    LayoutIntersectionGeometry, LayoutNodeOutput, LayoutOutputBoxId, LayoutPassMetrics,
+    LayoutPassResult, LayoutPoint, LayoutQuad, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch,
+    LayoutRect, LayoutScrollContainerMetrics, LayoutScrollExtent, LayoutScrollIntoViewGeometry,
+    LayoutSize, LayoutTransform2D, LayoutTreeRetentionMetrics, LayoutViewport,
+    MAX_RETAINED_LAYOUT_BOXES, MAX_RETAINED_LAYOUT_FRAGMENTS, MAX_RETAINED_LAYOUT_TREE_BYTES,
 };
 pub use pass::{
-    EmbeddedFrameRenderer, LayoutPassRequest, ScreenshotLayoutRequest, build_layout_pass_output,
-    build_layout_pass_output_with_embedded_frames, build_screenshot_snapshot,
+    EmbeddedFrameRenderer, LayoutPassRequest, ScreenshotLayoutRequest, build_layout_pass,
+    build_layout_pass_with_embedded_frames, build_screenshot_snapshot,
 };
 pub use snapshot::{
     PaintBlendMode, PaintBorderColors, PaintBorderStyle, PaintBorderStyles, PaintBoxShadow,

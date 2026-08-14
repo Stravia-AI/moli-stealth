@@ -2,25 +2,25 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, time::Instant};
 
 use taffy::ResolveOrZero;
 
+use crate::output::LayoutCoordinateSpace;
 use crate::stacking::{PaintOrderEvent, build_paint_order};
 use crate::{
-    LayoutAnonymousReason, LayoutBoxGeometry, LayoutBoxId, LayoutClipChainId, LayoutClipNode,
-    LayoutCoordinateSpace, LayoutCoordinateSpaceId, LayoutError, LayoutFlushReason, LayoutFragment,
-    LayoutFragmentBoxModel, LayoutFragmentId, LayoutFragmentKind, LayoutHitTestEntry,
-    LayoutHitTestIndex, LayoutNodeOutput, LayoutOutputBoxId, LayoutPassMetrics, LayoutPassOutput,
-    LayoutPoint, LayoutRect, LayoutScrollExtent, LayoutScrollExtentId, LayoutSize,
-    LayoutTransform2D, LayoutViewport, LayoutWorld, PaintCaptureRequest, PaintDiagnostic,
-    PaintDiagnosticSeverity,
+    FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, LayoutAnonymousReason,
+    LayoutBoxGeometry, LayoutBoxId, LayoutClipChainId, LayoutClipNode, LayoutCoordinateSpaceId,
+    LayoutError, LayoutFlushReason, LayoutFragment, LayoutFragmentBoxModel, LayoutFragmentId,
+    LayoutFragmentKind, LayoutOutputBoxId, LayoutPassMetrics, LayoutPassResult, LayoutPoint,
+    LayoutRect, LayoutScrollExtent, LayoutSize, LayoutTransform2D, LayoutViewport, LayoutWorld,
+    PaintCaptureRequest, PaintDiagnostic, PaintDiagnosticSeverity,
 };
 
-pub(crate) fn project_layout_output<N>(
+pub(crate) fn finish_layout_pass<N>(
     world: &LayoutWorld<N>,
     viewport: LayoutViewport,
     reason: LayoutFlushReason,
     started: Instant,
     paint_capture: Option<PaintCaptureRequest>,
     embedded_frames: &mut HashMap<LayoutBoxId, crate::PaintSnapshot>,
-) -> Result<LayoutPassOutput<N>, LayoutError>
+) -> Result<LayoutPassResult<N>, LayoutError>
 where
     N: Copy + Debug + Eq + Hash,
 {
@@ -28,7 +28,7 @@ where
     projection.build_local_box_geometry();
     projection.resolve_scrollable_overflow();
     projection.build_coordinate_spaces()?;
-    projection.build_fragments_and_source_mapping();
+    projection.build_fragments();
     projection.assign_clip_and_paint_order();
 
     let content_size = projection.document_content_size();
@@ -72,22 +72,9 @@ where
             .count(),
     };
 
-    Ok(LayoutPassOutput::new(
-        viewport,
-        projection.viewport_scroll,
-        content_size,
-        LayoutOutputBoxId::from_index(world.root.index()),
-        projection.boxes,
-        projection.box_sources,
-        projection.fragments,
-        projection.source_mapping,
-        projection.scroll_extents,
-        projection.coordinate_spaces,
-        projection.clip_chain,
-        projection.paint_order,
-        LayoutHitTestIndex {
-            entries: projection.hit_entries,
-        },
+    let tree = projection.into_frozen_tree(content_size);
+    Ok(LayoutPassResult::new(
+        tree,
         diagnostics,
         metrics,
         paint_snapshot,
@@ -103,13 +90,14 @@ where
     viewport_scroll: LayoutPoint,
     pub(crate) boxes: Vec<LayoutBoxGeometry>,
     box_sources: Vec<Option<N>>,
+    principal_sources: Vec<Option<N>>,
+    hit_sources: Vec<Option<N>>,
     fragments: Vec<LayoutFragment>,
-    source_mapping: HashMap<N, LayoutNodeOutput>,
+    scroll_proxy_links: Vec<(N, LayoutOutputBoxId)>,
     pub(crate) scroll_extents: Vec<LayoutScrollExtent>,
     pub(crate) coordinate_spaces: Vec<LayoutCoordinateSpace>,
     pub(crate) clip_chain: Vec<LayoutClipNode>,
-    paint_order: Vec<LayoutFragmentId>,
-    hit_entries: Vec<LayoutHitTestEntry<N>>,
+    paint_order_count: usize,
     pub(crate) diagnostics: Vec<PaintDiagnostic>,
     resolved_transforms: Vec<LayoutTransform2D>,
     overflow: Vec<LayoutRect>,
@@ -127,19 +115,33 @@ where
 {
     fn new(world: &'a LayoutWorld<N>, viewport: LayoutViewport) -> Self {
         let count = world.boxes.len();
+        let mut principal_sources = vec![None; count];
+        for (source, box_id) in &world.source_mapping {
+            principal_sources[box_id.index()] = Some(*source);
+        }
+        let scroll_proxy_links = world
+            .display_contents_mapping
+            .iter()
+            .flat_map(|(source, boxes)| {
+                boxes
+                    .iter()
+                    .map(|box_id| (*source, LayoutOutputBoxId::from_index(box_id.index())))
+            })
+            .collect();
         Self {
             world,
             viewport,
             viewport_scroll: LayoutPoint::ZERO,
             boxes: Vec::with_capacity(count),
             box_sources: Vec::with_capacity(count),
+            principal_sources,
+            hit_sources: Vec::with_capacity(count),
             fragments: Vec::new(),
-            source_mapping: HashMap::with_capacity(world.source_mapping.len()),
+            scroll_proxy_links,
             scroll_extents: Vec::with_capacity(count),
             coordinate_spaces: Vec::with_capacity(count + 1),
             clip_chain: Vec::new(),
-            paint_order: Vec::new(),
-            hit_entries: Vec::new(),
+            paint_order_count: 0,
             diagnostics: Vec::new(),
             resolved_transforms: vec![LayoutTransform2D::IDENTITY; count],
             overflow: vec![LayoutRect::ZERO; count],
@@ -239,6 +241,13 @@ where
                 .flatten()
             });
             self.box_sources.push(source);
+            self.hit_sources.push(layout_box.source.or_else(|| {
+                (layout_box.pseudo.is_some()
+                    || layout_box.anonymous_reason
+                        == Some(LayoutAnonymousReason::InlineSplitContinuation))
+                .then_some(layout_box.owner)
+                .flatten()
+            }));
             let semantics = layout_box.element_semantics();
             let (layout_x, layout_y) = self
                 .world
@@ -251,11 +260,6 @@ where
                 layout_parent: layout_box
                     .layout_parent
                     .map(|parent| LayoutOutputBoxId::from_index(parent.index())),
-                positioned_containing_block: layout_box
-                    .positioned_containing_block
-                    .map(|parent| LayoutOutputBoxId::from_index(parent.index())),
-                role: layout_box.kind,
-                source_label: layout_box.source_label.clone(),
                 position: layout_box.style.position(),
                 coordinate_space: LayoutCoordinateSpaceId::from_index(index + 1),
                 clip_chain: None,
@@ -263,7 +267,6 @@ where
                 padding_box,
                 border_box,
                 margin_box,
-                scroll_extent: LayoutScrollExtentId::from_index(index),
                 fragments: Vec::new(),
                 layout_origin_in_document: LayoutPoint::new(layout_x, layout_y),
                 is_body_element: semantics.is_some_and(|element| element.is_html_element("body")),
@@ -368,12 +371,9 @@ where
                 LayoutPoint::ZERO
             };
             self.scroll_extents.push(LayoutScrollExtent {
-                id: LayoutScrollExtentId::from_index(index),
-                owner: LayoutOutputBoxId::from_index(index),
                 scrollport,
                 scrollable_overflow: overflow,
                 scroll_size,
-                requested_offset: requested,
                 applied_offset: applied,
                 minimum_offset,
                 maximum_offset,
@@ -419,23 +419,7 @@ where
         Ok(())
     }
 
-    fn build_fragments_and_source_mapping(&mut self) {
-        for (source, box_id) in &self.world.source_mapping {
-            self.source_mapping
-                .entry(*source)
-                .or_default()
-                .principal_box = Some(LayoutOutputBoxId::from_index(box_id.index()));
-        }
-        for (source, boxes) in &self.world.display_contents_mapping {
-            self.source_mapping
-                .entry(*source)
-                .or_default()
-                .scroll_proxy_boxes = boxes
-                .iter()
-                .map(|id| LayoutOutputBoxId::from_index(id.index()))
-                .collect();
-        }
-
+    fn build_fragments(&mut self) {
         for index in 0..self.world.boxes.len() {
             let layout_box = &self.world.boxes[index];
             let output_box = LayoutOutputBoxId::from_index(index);
@@ -451,7 +435,6 @@ where
                         border: self.boxes[index].border_box,
                         margin: self.boxes[index].margin_box,
                     }),
-                    baseline: None,
                     coordinate_space,
                     clip_chain: None,
                     paint_order: None,
@@ -477,7 +460,6 @@ where
                     },
                     rect: offset_rect(line.rect, content_origin),
                     box_model: None,
-                    baseline: Some(content_origin.y + line.baseline),
                     coordinate_space,
                     clip_chain: None,
                     paint_order: None,
@@ -497,7 +479,6 @@ where
                     },
                     rect: box_model.border,
                     box_model: Some(box_model),
-                    baseline: None,
                     coordinate_space,
                     clip_chain: None,
                     paint_order: None,
@@ -512,13 +493,11 @@ where
                     kind: LayoutFragmentKind::Text {
                         box_id: LayoutOutputBoxId::from_index(target),
                         line_index: text.line_index,
-                        source_byte_range: text.source_byte_range.clone(),
                         source_utf16_range: text.source_utf16_range.clone(),
                         rtl: text.rtl,
                     },
                     rect: offset_rect(text.rect, content_origin),
                     box_model: None,
-                    baseline: None,
                     coordinate_space,
                     clip_chain: None,
                     paint_order: None,
@@ -531,19 +510,6 @@ where
 
     fn register_box_fragment(&mut self, box_index: usize, fragment: LayoutFragmentId) {
         self.boxes[box_index].fragments.push(fragment);
-        let layout_box = &self.world.boxes[box_index];
-        let source = layout_box.source.or_else(|| {
-            (layout_box.anonymous_reason == Some(LayoutAnonymousReason::InlineSplitContinuation))
-                .then_some(layout_box.owner)
-                .flatten()
-        });
-        if let Some(source) = source {
-            self.source_mapping
-                .entry(source)
-                .or_default()
-                .fragments
-                .push(fragment);
-        }
     }
 
     fn push_fragment(&mut self, mut fragment: LayoutFragment) -> LayoutFragmentId {
@@ -589,8 +555,6 @@ where
                 | PaintOrderEvent::PopStackingContext(_) => {}
             }
         }
-        self.hit_entries
-            .sort_by_key(|entry| std::cmp::Reverse(entry.paint_order));
     }
 
     fn assign_box_clip_metadata(
@@ -644,42 +608,18 @@ where
         fragment_id: LayoutFragmentId,
         clip_chain: Option<LayoutClipChainId>,
     ) {
-        let order = u32::try_from(self.paint_order.len())
-            .expect("one layout output exceeded the u32 paint-order limit");
-        let (box_index, is_text) = match self.fragments[fragment_id.index()].kind {
-            LayoutFragmentKind::Box { box_id } => (box_id.index(), false),
-            LayoutFragmentKind::InlineBox { box_id, .. } => (box_id.index(), false),
-            LayoutFragmentKind::Text { box_id, .. } => (box_id.index(), true),
+        let order = u32::try_from(self.paint_order_count)
+            .expect("one frozen layout tree exceeded the u32 paint-order limit");
+        match self.fragments[fragment_id.index()].kind {
+            LayoutFragmentKind::Box { .. }
+            | LayoutFragmentKind::InlineBox { .. }
+            | LayoutFragmentKind::Text { .. } => {}
             LayoutFragmentKind::Line { .. } => return,
-        };
+        }
         let fragment = &mut self.fragments[fragment_id.index()];
         fragment.clip_chain = clip_chain;
         fragment.paint_order = Some(order);
-        self.paint_order.push(fragment_id);
-
-        let layout_box = &self.world.boxes[box_index];
-        if !layout_box.style.is_visible() {
-            return;
-        }
-        let source = layout_box.source.or_else(|| {
-            (layout_box.pseudo.is_some()
-                || layout_box.anonymous_reason
-                    == Some(LayoutAnonymousReason::InlineSplitContinuation))
-            .then_some(layout_box.owner)
-            .flatten()
-        });
-        if let Some(source) = source {
-            self.hit_entries.push(LayoutHitTestEntry {
-                source,
-                fragment: fragment_id,
-                coordinate_space: fragment.coordinate_space,
-                clip_chain,
-                local_rect: fragment.rect,
-                paint_order: order,
-                is_text,
-                pointer_events: layout_box.style.accepts_pointer_events(),
-            });
-        }
+        self.paint_order_count = self.paint_order_count.saturating_add(1);
     }
 
     fn push_clip(
@@ -691,7 +631,6 @@ where
     ) -> LayoutClipChainId {
         let id = LayoutClipChainId::from_index(self.clip_chain.len());
         self.clip_chain.push(LayoutClipNode {
-            id,
             parent,
             owner,
             coordinate_space,
@@ -716,6 +655,49 @@ where
         LayoutSize::new(
             (self.viewport.css_width as f32).max(overflow.right().max(0.0)),
             (self.viewport.css_height as f32).max(overflow.bottom().max(0.0)),
+        )
+    }
+
+    fn into_frozen_tree(self, content_size: LayoutSize) -> FrozenLayoutTree<N> {
+        let root_box = LayoutOutputBoxId::from_index(self.world.root.index());
+        let mut coordinate_spaces = self.coordinate_spaces.into_iter();
+        let viewport_coordinate_space = FrozenCoordinateSpace::from(
+            coordinate_spaces
+                .next()
+                .expect("a frozen layout tree always owns the viewport coordinate space"),
+        );
+        let boxes = self
+            .boxes
+            .into_iter()
+            .zip(self.box_sources)
+            .zip(self.principal_sources)
+            .zip(self.hit_sources)
+            .zip(self.scroll_extents)
+            .zip(coordinate_spaces.map(FrozenCoordinateSpace::from))
+            .map(
+                |(
+                    ((((geometry, geometry_source), principal_source), hit_source), scroll_extent),
+                    coordinate_space,
+                )| FrozenLayoutBox {
+                    geometry,
+                    scroll_extent,
+                    coordinate_space,
+                    geometry_source,
+                    principal_source,
+                    hit_source,
+                },
+            )
+            .collect();
+        FrozenLayoutTree::new(
+            self.viewport,
+            self.viewport_scroll,
+            content_size,
+            root_box,
+            boxes,
+            self.fragments,
+            self.scroll_proxy_links,
+            viewport_coordinate_space,
+            self.clip_chain,
         )
     }
 }

@@ -80,7 +80,7 @@ fn default_child_frame_client_rect() -> ClientRect {
 // Legacy geometry policy for explicit LayoutPolicy::Mock:
 //
 // OnDemand consumers must enter the unified GeometryProvider, which answers
-// from the latest owned output or performs a cold refresh, and must never call
+// from the latest frozen tree or performs a cold refresh, and must never call
 // these helpers. Mock remains deterministic, cheap, and side-effect free for
 // the default CLI policy without `--layout`:
 //

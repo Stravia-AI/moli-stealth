@@ -136,8 +136,8 @@ Was die meisten Browserautomatisierungen wirklich benötigen, ist die Seitenstru
 | Agentenanfrage | Verhalten von Moli |
 | --- | --- |
 | HTML/Markdown extrahieren, DOM abfragen, JS ausführen, Netzwerk/Speicher untersuchen | Liest den Zustand der Browser-Laufzeit direkt aus — löst weder Layout noch Zeichnen aus |
-| Begrenzungsrahmen eines Elements lesen, Koordinaten testen, Koordinateneingaben senden | Führt eine Layoutberechnung aus und behält nur den neuesten Geometrie-Snapshot |
-| Screenshot aufnehmen oder Screencast aktualisieren | Baut aus dem aktuellen DOM/Stil neu auf, rendert einen neuen Frame und verwirft ihn nach Gebrauch |
+| Begrenzungsrahmen eines Elements lesen, Koordinaten testen, Koordinateneingaben senden | Führt eine Layoutberechnung aus und behält nur den neuesten eingefrorenen Layoutbaum |
+| Screenshot aufnehmen oder Screencast aktualisieren | Baut aus dem aktuellen DOM/Stil neu auf, ersetzt den eingefrorenen Baum, rendert einen neuen Frame und verwirft den Frame nach Gebrauch |
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
@@ -177,7 +177,7 @@ Aufwendige Browseroperationen müssen in Moli ausdrücklich aktiviert werden und
 | `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Eine bestimmte optionale Ressourcengruppe aktivieren |
 | `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Persistenz je nach Bedarf des Workloads gezielt aktivieren |
 
-Das Layoutergebnis ist ein bei Bedarf erstellter Snapshot und kein dauerhaft gepflegter Zustand: Die erste Geometrieanfrage (Kaltstart) baut ein vollständiges Layout aus dem aktuellen DOM/Stil auf und behält nur die neueste `LayoutPassOutput`. Danach können normale Geometrieabfragen diesen Snapshot selbst dann wiederverwenden, wenn sich die Seite geändert hat. Screenshots und Screencasts werden dagegen jedes Mal neu aufgebaut und verwenden keine alten Ergebnisse.
+Das Layoutergebnis ist ein bei Bedarf erstellter Snapshot und kein dauerhaft gepflegter Zustand: Die erste Geometrieanfrage (Kaltstart) baut aus dem aktuellen DOM/Stil einen temporären Arbeitsbaum auf, friert dessen kanonische Geometrie in einen unveränderlichen, DOM-unabhängigen `FrozenLayoutTree` ein und behält nur diesen neuesten Baum. Normale Geometrieabfragen können ihn auch nach Seitenänderungen wiederverwenden; Screenshots und Screencasts bauen stets neu auf, ersetzen den eingefrorenen Baum und verwenden keine alten Zeichenergebnisse.
 
 ## Architektur
 
@@ -190,7 +190,7 @@ Moli ist ein eigenständiger Browser-Kernel und kein Chromium-Wrapper. Er ist in
 - Taffy + Parley — Box- und Textlayout
 - AnyRender/Vello CPU, `usvg` und das Rust-Bildökosystem — Software-Rendering
 
-Dokument und Stil haben genau eine maßgebliche Datenquelle: die Integration von nativem DOM und Stylo. Jede echte Aktualisierung baut das Layout daraus neu auf, überführt das Ergebnis in DOM-neutrale, unveränderliche Daten und verwirft anschließend den temporären Zustand aus diesem Layout- und Zeichendurchlauf. Das gesamte System besitzt keinen inkrementellen Layoutbaum, keinen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
+Dokument und Stil haben genau eine maßgebliche Datenquelle: die Integration von nativem DOM und Stylo. Jede echte Aktualisierung erstellt daraus einen temporären Arbeitsbaum, erzeugt und verbraucht bei Bedarf einen frischen Paint-Snapshot, friert die endgültige Box- und Fragmentgeometrie in einen kompakten `FrozenLayoutTree` ein und verwirft Arbeitsbaum, Stilreferenzen, Layout-Caches, Diagnosen und Paint-Zustand. Quellzuordnung und Hit-Test-Kandidaten werden bei Abfragen aus dem eingefrorenen Baum abgeleitet. Das System besitzt keinen inkrementell gepflegten Layoutbaum, keinen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
 
 ## Testdaten
 

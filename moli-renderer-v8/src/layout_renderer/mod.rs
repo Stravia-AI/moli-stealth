@@ -5,8 +5,8 @@ mod style_resolver;
 use std::collections::HashMap;
 
 use moli_layout::{
-    DocumentLayoutServices, EmbeddedFrameRenderer, LayoutPassOutput, LayoutPassRequest,
-    LayoutSource, LayoutViewport, PaintSnapshot, build_layout_pass_output_with_embedded_frames,
+    DocumentLayoutServices, EmbeddedFrameRenderer, LayoutPassRequest, LayoutPassResult,
+    LayoutSource, LayoutViewport, PaintSnapshot, build_layout_pass_with_embedded_frames,
 };
 use style::values::generics::image::GenericImage;
 
@@ -105,15 +105,15 @@ fn collect_computed_css_image_urls(
     }
 }
 
-pub(crate) fn build_native_layout_pass_output(
+pub(crate) fn build_native_layout_pass(
     runtime: &JsContextHost,
     root: DomHandle,
     services: &mut DocumentLayoutServices,
     embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
     request: LayoutPassRequest,
-) -> Result<LayoutPassOutput<DomHandle>, moli_layout::LayoutError> {
+) -> Result<LayoutPassResult<DomHandle>, moli_layout::LayoutError> {
     let mut document_stack = Vec::new();
-    build_native_layout_pass_output_recursive(
+    build_native_layout_pass_recursive(
         runtime,
         root,
         services,
@@ -123,14 +123,14 @@ pub(crate) fn build_native_layout_pass_output(
     )
 }
 
-fn build_native_layout_pass_output_recursive(
+fn build_native_layout_pass_recursive(
     runtime: &JsContextHost,
     root: DomHandle,
     services: &mut DocumentLayoutServices,
     embedded_document_services: &mut HashMap<DomHandle, DocumentLayoutServices>,
     request: LayoutPassRequest,
     document_stack: &mut Vec<DomHandle>,
-) -> Result<LayoutPassOutput<DomHandle>, moli_layout::LayoutError> {
+) -> Result<LayoutPassResult<DomHandle>, moli_layout::LayoutError> {
     let document = runtime
         .dom_host()
         .owner_document_handle(root)
@@ -152,13 +152,7 @@ fn build_native_layout_pass_output_recursive(
             document_stack,
             embedded_document_services,
         };
-        build_layout_pass_output_with_embedded_frames(
-            &source,
-            &mut styles,
-            services,
-            request,
-            &mut frames,
-        )
+        build_layout_pass_with_embedded_frames(&source, &mut styles, services, request, &mut frames)
     };
     document_stack.pop();
     result
@@ -202,7 +196,7 @@ impl EmbeddedFrameRenderer<DomHandle> for NativeEmbeddedFrameRenderer<'_> {
             .unwrap_or_default();
         let mut capture = moli_layout::PaintCaptureRequest::viewport();
         capture.include_backgrounds = self.include_backgrounds;
-        let result = build_native_layout_pass_output_recursive(
+        let result = build_native_layout_pass_recursive(
             self.runtime,
             root,
             &mut services,

@@ -136,8 +136,8 @@ Ce dont la plupart des tâches d'automatisation ont réellement besoin, c'est de
 | Requête de l'agent | Traitement par Moli |
 | --- | --- |
 | Extraire du HTML/Markdown, interroger le DOM, exécuter du JS, inspecter le réseau ou le stockage | Lit directement l'état de l'environnement d'exécution du navigateur — ne déclenche ni mise en page ni dessin |
-| Lire la boîte englobante d'un élément, tester des coordonnées, envoyer une entrée par coordonnées | Exécute un calcul de mise en page et ne conserve que le dernier instantané de géométrie |
-| Prendre une capture d'écran ou actualiser un screencast | Reconstruit à partir du DOM et des styles actuels, rend une nouvelle image, puis la supprime après usage |
+| Lire la boîte englobante d'un élément, tester des coordonnées, envoyer une entrée par coordonnées | Exécute un calcul de mise en page et ne conserve que le dernier arbre de mise en page figé |
+| Prendre une capture d'écran ou actualiser un screencast | Reconstruit à partir du DOM et des styles actuels, remplace l'arbre figé, rend une nouvelle image, puis supprime l'image après usage |
 
 <p align="center">
   <a href="assets/moli_ondemand_rendering_flow.svg">
@@ -177,7 +177,7 @@ Dans Moli, les opérations coûteuses du navigateur doivent être activées expl
 | `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Active une famille précise de ressources facultatives |
 | `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Active sélectivement la persistance nécessaire à la charge de travail |
 
-Le résultat de la mise en page est un instantané produit à la demande, et non un état maintenu en continu : la première demande de géométrie (à froid) construit une mise en page complète à partir du DOM et des styles actuels, puis ne conserve que le dernier `LayoutPassOutput`. Par la suite, les lectures de géométrie ordinaires peuvent réutiliser cet instantané même si la page a changé. Les captures d'écran et les screencasts, eux, sont reconstruits à chaque fois et ne réutilisent jamais d'anciens résultats.
+Le résultat de la mise en page est un instantané produit à la demande, et non un état maintenu en continu : la première demande de géométrie (à froid) construit un arbre de travail temporaire à partir du DOM et des styles actuels, fige sa géométrie canonique dans un `FrozenLayoutTree` immuable et indépendant du DOM, puis ne conserve que ce dernier arbre. Les lectures de géométrie ordinaires peuvent le réutiliser même si la page a changé. Les captures d'écran et les screencasts reconstruisent et remplacent toujours l'arbre figé, sans réutiliser d'anciens résultats de dessin.
 
 ## Architecture
 
@@ -190,7 +190,7 @@ Moli est un noyau de navigateur autonome, et non une surcouche de Chromium. Dév
 - Taffy + Parley — mise en page des boîtes et du texte
 - AnyRender/Vello CPU, `usvg` et l'écosystème d'images Rust — rendu logiciel
 
-Le document et les styles n'ont qu'une seule source de vérité : le DOM natif et son intégration à Stylo. Chaque véritable actualisation reconstruit la mise en page à partir de cette source, convertit le résultat en données immuables indépendantes du DOM, puis élimine l'état temporaire produit pendant cette passe de mise en page et de dessin. L'ensemble du système ne comporte ni arbre de mise en page incrémental, ni graphe de dommages, ni liste d'affichage persistante, ni compositeur GPU, ni fenêtre persistante.
+Le document et les styles n'ont qu'une seule source de vérité : le DOM natif et son intégration à Stylo. Chaque véritable actualisation crée un arbre de travail temporaire, produit et consomme au besoin un nouvel instantané de dessin, fige la géométrie finale des boîtes et fragments dans un `FrozenLayoutTree` compact, puis élimine l'arbre de travail, les références de style, les caches de mise en page, les diagnostics et l'état de dessin. Les associations aux sources et les candidats de hit-test sont dérivés de l'arbre figé lors des requêtes. Le système ne comporte ni arbre de mise en page maintenu incrémentalement, ni graphe de dommages, ni liste d'affichage persistante, ni compositeur GPU, ni fenêtre persistante.
 
 ## Données de test
 

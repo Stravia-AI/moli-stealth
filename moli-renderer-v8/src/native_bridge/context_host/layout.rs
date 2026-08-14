@@ -1,7 +1,8 @@
 use moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE;
 use moli_layout::{
-    GeometryProvider, LayoutAnswers, LayoutError, LayoutFlushReason, LayoutPassOutput,
-    LayoutPassRequest, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch, LayoutViewport,
+    FrozenLayoutTree, GeometryProvider, LayoutAnswers, LayoutError, LayoutFlushReason,
+    LayoutPassRequest, LayoutPassResult, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch,
+    LayoutViewport,
 };
 
 use super::JsContextHost;
@@ -40,7 +41,7 @@ pub(crate) struct LayoutSnapshotCacheObservability {
     pub(crate) hits: u64,
     pub(crate) misses: u64,
     pub(crate) publishes: u64,
-    pub(crate) cached: Option<(DomHandle, moli_layout::LayoutOutputRetentionMetrics, bool)>,
+    pub(crate) cached: Option<(DomHandle, moli_layout::LayoutTreeRetentionMetrics)>,
 }
 
 impl JsContextHost {
@@ -92,11 +93,11 @@ impl JsContextHost {
         )
     }
 
-    pub(crate) fn with_fresh_layout_output_for_document<T>(
+    pub(crate) fn with_fresh_layout_pass_for_document<T>(
         &self,
         document: DomHandle,
         request: LayoutPassRequest,
-        consume: impl FnOnce(&mut LayoutPassOutput<DomHandle>) -> Result<T, LayoutError>,
+        consume: impl FnOnce(&mut LayoutPassResult<DomHandle>) -> Result<T, LayoutError>,
     ) -> Result<Option<T>, LayoutError> {
         let Some(root) = self
             .dom_host()
@@ -106,7 +107,7 @@ impl JsContextHost {
             return Ok(None);
         };
         let _active = ActiveLayoutPass::enter(&self.layout_pass_active)?;
-        let mut output = {
+        let mut pass = {
             let mut state = self.document_layout_state.borrow_mut();
             state.retain_live_embedded_document_services(|candidate| {
                 self.child_browsing_context_host_for_document_handle(candidate)
@@ -116,7 +117,7 @@ impl JsContextHost {
                 document,
                 self.document_handle(),
                 |services, embedded_document_services| {
-                    crate::layout_renderer::build_native_layout_pass_output(
+                    crate::layout_renderer::build_native_layout_pass(
                         self,
                         root,
                         services,
@@ -131,14 +132,16 @@ impl JsContextHost {
         self.completed_layout_pass_time.set(
             self.completed_layout_pass_time
                 .get()
-                .saturating_add(output.metrics.elapsed),
+                .saturating_add(pass.metrics.elapsed),
         );
-        self.last_layout_pass_metrics.set(Some(output.metrics));
-        output.validate_retention_budget()?;
-        let consumed = consume(&mut output)?;
+        pass.validate_retention_budget()?;
+        let consumed = consume(&mut pass)?;
+        let metrics = pass.metrics;
+        let tree = pass.into_tree();
         self.document_layout_state
             .borrow_mut()
-            .publish_latest_layout(document, output);
+            .publish_latest_layout(document, tree);
+        self.last_layout_pass_metrics.set(Some(metrics));
         self.layout_snapshot_cache_publishes
             .set(self.layout_snapshot_cache_publishes.get().saturating_add(1));
         Ok(Some(consumed))
@@ -165,16 +168,16 @@ impl JsContextHost {
             .is_some()
     }
 
-    /// Inspects the latest owned geometry snapshot for one exact Document.
+    /// Inspects the latest frozen layout tree for one exact Document.
     ///
-    /// The callback cannot retain the output or force a refresh. Consumers
+    /// The callback cannot retain the tree or force a refresh. Consumers
     /// such as lazy-image admission may combine this sampled geometry with
     /// cheap live browser state, but must tolerate the snapshot being absent
     /// or stale after DOM/style mutation.
-    pub(crate) fn with_latest_layout_output_for_document<T>(
+    pub(crate) fn with_latest_layout_tree_for_document<T>(
         &self,
         document: DomHandle,
-        inspect: impl FnOnce(&LayoutPassOutput<DomHandle>) -> T,
+        inspect: impl FnOnce(&FrozenLayoutTree<DomHandle>) -> T,
     ) -> Option<T> {
         let state = self.document_layout_state.borrow();
         state.latest_layout(document).map(inspect)
@@ -193,9 +196,11 @@ impl JsContextHost {
         let reuse_latest = true;
         let cached = if reuse_latest {
             let state = self.document_layout_state.borrow();
-            state
-                .latest_layout(document)
-                .map(|output| self.answer_layout_queries(output, viewport, queries))
+            state.latest_layout(document).and_then(|tree| {
+                self.last_layout_pass_metrics
+                    .get()
+                    .map(|metrics| self.answer_layout_queries(tree, metrics, viewport, queries))
+            })
         } else {
             None
         };
@@ -207,21 +212,22 @@ impl JsContextHost {
 
         self.layout_snapshot_cache_misses
             .set(self.layout_snapshot_cache_misses.get().saturating_add(1));
-        self.with_fresh_layout_output_for_document(
+        self.with_fresh_layout_pass_for_document(
             document,
             LayoutPassRequest::new(viewport, reason),
-            |output| Ok(self.answer_layout_queries(output, viewport, queries)),
+            |pass| Ok(self.answer_layout_queries(&pass.tree, pass.metrics, viewport, queries)),
         )?
         .ok_or(LayoutError::NoLayoutRoot)
     }
 
     fn answer_layout_queries(
         &self,
-        output: &LayoutPassOutput<DomHandle>,
+        tree: &FrozenLayoutTree<DomHandle>,
+        metrics: moli_layout::LayoutPassMetrics,
         viewport: LayoutViewport,
         queries: &LayoutQueryBatch<DomHandle>,
     ) -> LayoutAnswers<DomHandle> {
-        let mut answers = output.answer_queries(queries);
+        let mut answers = tree.answer_queries(queries, metrics);
         for (query, answer) in queries.queries.iter().zip(&mut answers.answers) {
             match (query, answer) {
                 (LayoutQuery::DocumentMetrics, LayoutQueryAnswer::DocumentMetrics(metrics)) => {
@@ -235,7 +241,7 @@ impl JsContextHost {
                     LayoutQuery::ElementMetrics { source },
                     LayoutQueryAnswer::ElementMetrics(metrics),
                 ) => {
-                    *metrics = output.element_metrics_for_source_with_offset_parent_filter(
+                    *metrics = tree.element_metrics_for_source_with_offset_parent_filter(
                         *source,
                         |candidate| self.offset_parent_candidate_is_exposed(*source, candidate),
                     );

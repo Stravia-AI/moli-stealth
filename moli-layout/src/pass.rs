@@ -1,9 +1,8 @@
 use crate::{
-    DocumentLayoutServices, LayoutError, LayoutFlushReason, LayoutPassOutput, LayoutSource,
+    DocumentLayoutServices, LayoutError, LayoutFlushReason, LayoutPassResult, LayoutSource,
     LayoutStyleResolver, LayoutViewport, PaintCaptureRequest, PaintSnapshot, PaintViewport,
     build_layout_world, form::prepare_form_controls, inline::prepare_inline_contexts,
-    list::prepare_list_markers, projection::project_layout_output,
-    taffy_tree::compute_world_layout,
+    list::prepare_list_markers, projection::finish_layout_pass, taffy_tree::compute_world_layout,
 };
 use std::collections::HashMap;
 use std::time::Instant;
@@ -101,10 +100,11 @@ impl ScreenshotLayoutRequest {
     }
 }
 
-/// Builds, lays out, and projects one synchronous source view into an owned snapshot.
+/// Builds, lays out, and paints one synchronous source view into an owned snapshot.
 ///
-/// The pass-local box tree and Taffy caches are dropped before this function
-/// returns. The snapshot contains no DOM handles or computed-style references.
+/// The working box tree and Taffy caches are dropped before this function
+/// returns. This convenience path consumes the frozen tree as well and returns
+/// only DOM-neutral paint input.
 pub fn build_screenshot_snapshot<S, R>(
     source: &S,
     styles: &mut R,
@@ -115,39 +115,34 @@ where
     S: LayoutSource,
     R: LayoutStyleResolver<S::NodeId>,
 {
-    build_layout_pass_output(
+    build_layout_pass(
         source,
         styles,
         services,
         LayoutPassRequest::with_paint(request.viewport, LayoutFlushReason::Screenshot),
     )
-    .and_then(LayoutPassOutput::into_paint_snapshot)
+    .and_then(LayoutPassResult::into_paint_snapshot)
 }
 
 /// Builds one complete layout result from a borrowed source view.
 ///
 /// Box construction, inline shaping, Taffy caches, and all style borrows remain
-/// local to this call. The returned value owns geometry, source handles,
-/// diagnostics, and hit-test data. A DOM-neutral paint snapshot is included
-/// only when requested. Consumers that need several geometry answers must batch
-/// them against this one value instead of triggering a layout per query.
-pub fn build_layout_pass_output<S, R>(
+/// local to this call. The returned pass value owns one [`crate::FrozenLayoutTree`]
+/// plus pass-only metrics, diagnostics, and an optional DOM-neutral paint
+/// snapshot. Consumers may retain the tree, but not the surrounding pass
+/// value. Several geometry answers should be batched against one tree instead
+/// of triggering a layout per query.
+pub fn build_layout_pass<S, R>(
     source: &S,
     styles: &mut R,
     services: &mut DocumentLayoutServices,
     request: LayoutPassRequest,
-) -> Result<LayoutPassOutput<S::NodeId>, LayoutError>
+) -> Result<LayoutPassResult<S::NodeId>, LayoutError>
 where
     S: LayoutSource,
     R: LayoutStyleResolver<S::NodeId>,
 {
-    build_layout_pass_output_with_embedded_frames(
-        source,
-        styles,
-        services,
-        request,
-        &mut NoEmbeddedFrames,
-    )
+    build_layout_pass_with_embedded_frames(source, styles, services, request, &mut NoEmbeddedFrames)
 }
 
 /// Builds one complete layout result and resolves embedded frame pixels after
@@ -156,13 +151,13 @@ where
 /// This is a one-shot composition seam, not a retained subframe tree. Child
 /// snapshots are consumed into the parent snapshot before all layout worlds
 /// are dropped.
-pub fn build_layout_pass_output_with_embedded_frames<S, R, F>(
+pub fn build_layout_pass_with_embedded_frames<S, R, F>(
     source: &S,
     styles: &mut R,
     services: &mut DocumentLayoutServices,
     request: LayoutPassRequest,
     frames: &mut F,
-) -> Result<LayoutPassOutput<S::NodeId>, LayoutError>
+) -> Result<LayoutPassResult<S::NodeId>, LayoutError>
 where
     S: LayoutSource,
     R: LayoutStyleResolver<S::NodeId>,
@@ -212,7 +207,7 @@ where
             }
         }
     }
-    project_layout_output(
+    finish_layout_pass(
         &world,
         request.viewport,
         request.reason,

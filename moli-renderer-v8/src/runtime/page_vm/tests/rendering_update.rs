@@ -100,7 +100,7 @@ getComputedStyle(document.getElementById('fallback')).display
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn geometry_batch_reuses_latest_output_until_fresh_paint_replaces_it() {
+async fn geometry_batch_reuses_latest_tree_until_fresh_paint_replaces_it() {
     run_page_vm_async_test(async move {
         let loader =
             crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
@@ -257,16 +257,12 @@ document.body.innerHTML = '<div id="target"></div><div id="pass-through"></div><
         assert_eq!(cache_after_screenshot.0, cache_before.0 + 1);
         assert_eq!(cache_after_screenshot.1, cache_before.1 + 1);
         assert_eq!(cache_after_screenshot.2, cache_before.2 + 2);
-        let (_, retention, retains_paint) = cache_after_screenshot
+        let (_, retention) = cache_after_screenshot
             .3
-            .expect("fresh paint layout should publish its geometry output");
+            .expect("fresh paint layout should publish its frozen tree");
         assert!(retention.box_count > 0);
         assert!(retention.fragment_count > 0);
         assert!(retention.estimated_geometry_bytes > 0);
-        assert!(
-            !retains_paint,
-            "the cached output must not retain paint resources"
-        );
         let screenshot_metrics = after_screenshot.3.expect("screenshot layout metrics");
         assert_eq!(
             screenshot_metrics.reason,
@@ -354,7 +350,7 @@ document.body.innerHTML = '<div id=target></div>';
             .vm()
             .layout_snapshot_cache_observability_for_test();
         assert_eq!(cache_after_first.2, cache_before.2 + 1);
-        assert!(cache_after_first.3.is_some_and(|(_, _, paint)| !paint));
+        assert!(cache_after_first.3.is_some());
 
         page_vm
             .vm_mut()
@@ -394,7 +390,7 @@ document.body.innerHTML = '<div id=target></div>';
         assert_eq!(cache_after_second.0, cache_before.0 + 1);
         assert_eq!(cache_after_second.1, cache_before.1);
         assert_eq!(cache_after_second.2, cache_before.2 + 2);
-        assert!(cache_after_second.3.is_some_and(|(_, _, paint)| !paint));
+        assert!(cache_after_second.3.is_some());
 
         let refreshed = moli_layout::GeometryProvider::answer(
             page_vm.vm_mut(),

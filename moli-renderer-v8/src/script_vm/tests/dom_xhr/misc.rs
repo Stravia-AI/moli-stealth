@@ -1482,7 +1482,7 @@ fn switching_to_mock_geometry_drops_the_latest_real_layout_snapshot() {
         vm.layout_snapshot_cache_observability_for_test()
             .3
             .is_none(),
-        "Mock policy must not retain a real layout output"
+        "Mock policy must not retain a real frozen layout tree"
     );
     let passes_before_mock = vm.layout_pass_observability_for_test().1;
     vm.eval("document.body.offsetTop")

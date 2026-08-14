@@ -8023,7 +8023,7 @@ fn inner_text_new_sources_wait_for_a_fresh_paint_layout() {
         )
         .expect("the warm innerText read should evaluate"),
         "a",
-        "a text source absent from the latest layout output remains unrendered until refresh"
+        "a text source absent from the latest frozen layout tree remains unrendered until refresh"
     );
     assert_eq!(vm.layout_pass_observability_for_test().1, passes_before + 1);
 

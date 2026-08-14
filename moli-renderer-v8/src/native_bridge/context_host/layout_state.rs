@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use moli_layout::{DocumentLayoutServices, LayoutPassOutput};
+use moli_layout::{DocumentLayoutServices, FrozenLayoutTree};
 
-use super::layout_snapshot::LatestLayoutSnapshotCache;
+use super::layout_snapshot::LatestLayoutTreeCache;
 use crate::{
     css_resource_urls::{CompletedStylesheetWebFont, StylesheetLoadBlockingResource},
     document_runtime::DomHandle,
@@ -13,18 +13,18 @@ use crate::{
 ///
 /// `ScriptVm` outlives `document.open()`, so the main-document owner
 /// transition replaces this value explicitly. Full layout passes borrow the
-/// services and discard every pass-local tree/cache. Only the latest owned
-/// geometry projection and document-owned font/text sidecars survive a pass.
+/// services and discard every working tree/cache. Only the latest frozen
+/// layout tree and document-owned font/text sidecars survive a pass.
 /// Embedded documents receive separate Parley services so a main-document
 /// `@font-face` registration cannot leak across the browsing-context boundary.
 /// The single snapshot slot may describe any exact Document in the current
-/// document tree; its identity is stored alongside the output.
+/// document tree; its identity is stored alongside the tree.
 pub(super) struct DocumentLayoutState {
     services: DocumentLayoutServices,
     embedded_document_services: HashMap<DomHandle, DocumentLayoutServices>,
     web_fonts: DocumentWebFontState,
     web_font_sources_dirty: bool,
-    latest_layout: LatestLayoutSnapshotCache,
+    latest_layout: LatestLayoutTreeCache,
 }
 
 impl Default for DocumentLayoutState {
@@ -34,7 +34,7 @@ impl Default for DocumentLayoutState {
             embedded_document_services: HashMap::new(),
             web_fonts: DocumentWebFontState::default(),
             web_font_sources_dirty: true,
-            latest_layout: LatestLayoutSnapshotCache::default(),
+            latest_layout: LatestLayoutTreeCache::default(),
         }
     }
 }
@@ -84,16 +84,16 @@ impl DocumentLayoutState {
     pub(super) fn latest_layout(
         &self,
         document: DomHandle,
-    ) -> Option<&LayoutPassOutput<DomHandle>> {
+    ) -> Option<&FrozenLayoutTree<DomHandle>> {
         self.latest_layout.get(document)
     }
 
     pub(super) fn publish_latest_layout(
         &mut self,
         document: DomHandle,
-        output: LayoutPassOutput<DomHandle>,
+        tree: FrozenLayoutTree<DomHandle>,
     ) {
-        self.latest_layout.publish(document, output);
+        self.latest_layout.publish(document, tree);
     }
 
     pub(super) fn clear_latest_layout(&mut self) {
@@ -103,7 +103,7 @@ impl DocumentLayoutState {
     #[cfg(test)]
     pub(super) fn latest_layout_observability(
         &self,
-    ) -> Option<(DomHandle, moli_layout::LayoutOutputRetentionMetrics, bool)> {
+    ) -> Option<(DomHandle, moli_layout::LayoutTreeRetentionMetrics)> {
         self.latest_layout.observability()
     }
 

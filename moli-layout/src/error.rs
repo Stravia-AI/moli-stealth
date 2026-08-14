@@ -15,11 +15,11 @@ pub enum LayoutError {
     /// A screenshot or screencast requested an invalid capture surface.
     #[error("invalid paint capture: {detail}")]
     InvalidPaintCapture { detail: String },
-    /// One owned geometry projection is too large to publish or retain.
+    /// One frozen layout tree is too large to publish or retain.
     #[error(
-        "layout output contains {boxes} boxes, {fragments} fragments, and an estimated {estimated_bytes} bytes; limits are {max_boxes} boxes, {max_fragments} fragments, and {max_bytes} bytes"
+        "frozen layout tree contains {boxes} boxes, {fragments} fragments, and an estimated {estimated_bytes} bytes; limits are {max_boxes} boxes, {max_fragments} fragments, and {max_bytes} bytes"
     )]
-    OutputRetentionBudgetExceeded {
+    TreeRetentionBudgetExceeded {
         boxes: usize,
         fragments: usize,
         estimated_bytes: usize,

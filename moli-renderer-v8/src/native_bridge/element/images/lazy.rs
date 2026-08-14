@@ -2,11 +2,11 @@
 //!
 //! Lazy loading is a resource decision, not observable geometry. It must not
 //! force layout or retain a layout world. The renderer instead inspects its
-//! one latest owned [`LayoutPassOutput`] and combines that sampled geometry
+//! one latest owned [`FrozenLayoutTree`] and combines that sampled geometry
 //! with live scroll offsets. A later fresh screenshot or screencast frame
 //! naturally replaces the sample.
 
-use moli_layout::{LayoutPassOutput, LayoutPosition, LayoutRect};
+use moli_layout::{FrozenLayoutTree, LayoutPosition, LayoutRect};
 
 use crate::{document_runtime::DomHandle, dom::native::Node, native_bridge::JsContextHost};
 
@@ -54,7 +54,7 @@ pub(super) fn image_load_is_deferred(runtime: &JsContextHost, handle: DomHandle)
 pub(super) fn revealed_lazy_image_handles(
     runtime: &JsContextHost,
     document: DomHandle,
-    output: &LayoutPassOutput<DomHandle>,
+    output: &FrozenLayoutTree<DomHandle>,
 ) -> Vec<DomHandle> {
     (0..runtime.dom_host().dom().nodes().len())
         .map(DomHandle::new)
@@ -85,7 +85,7 @@ fn is_unadmitted_lazy_image(
 fn image_is_near_live_viewport(
     runtime: &JsContextHost,
     document: DomHandle,
-    output: &LayoutPassOutput<DomHandle>,
+    output: &FrozenLayoutTree<DomHandle>,
     handle: DomHandle,
 ) -> bool {
     let Some(geometry) = output.intersection_geometry(handle, None) else {
@@ -122,7 +122,7 @@ fn image_is_near_live_viewport(
 
 fn live_scroll_translation(
     runtime: &JsContextHost,
-    output: &LayoutPassOutput<DomHandle>,
+    output: &FrozenLayoutTree<DomHandle>,
     handle: DomHandle,
 ) -> (f32, f32) {
     let Some(geometry) = output.scroll_into_view_geometry_for_source(handle) else {
