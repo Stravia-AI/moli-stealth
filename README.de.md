@@ -19,7 +19,7 @@
 
 Moli ist ein produktionsreifer Headless-Browser für KI-Agenten. Sein Design mit Layout und Rendering nach Bedarf verbindet eine vollständige Browser-Laufzeit mit einem geringen Ressourcenbedarf.
 
-Sie führt standardmäßig echtes JavaScript aus, verwaltet ein echtes DOM und stellt echte Browser-APIs bereit. Layoutberechnungen oder das Rendern von Pixeln erfolgen jedoch nur, wenn sie tatsächlich benötigt werden.
+Moli hilft deinem KI-Agenten, Webseiten abzurufen und zu extrahieren, das Web zu durchsuchen und Browseraufgaben zu automatisieren.
 
 Moli kann über die CLI, CDP, WebDriver Classic oder WebDriver BiDi genutzt werden.
 
@@ -28,7 +28,10 @@ Moli kann über die CLI, CDP, WebDriver Classic oder WebDriver BiDi genutzt werd
 Gib deinem KI-Coding-Agenten diese Anweisung:
 
 ```text
-Installiere die skills unter https://github.com/lexmount/moli/tree/main/skills, folge ihren Anweisungen zum Herunterladen und Installieren des neuesten vorkompilierten Moli-Binarys, rufe anschließend mit moli-webfetch die Seite https://example.com ab und zeige mir das Ergebnis.
+Installiere die skills unter https://github.com/lexmount/moli/tree/main/skills,
+folge ihren Anweisungen zum Herunterladen und Installieren des neuesten
+vorkompilierten Moli-Binarys, rufe anschließend mit moli-webfetch die Seite
+https://example.com ab und zeige mir das Ergebnis.
 ```
 
 ## Demo

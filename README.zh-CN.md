@@ -19,7 +19,7 @@
 
 Moli 是一款面向 AI 智能体、可用于生产环境的无头浏览器。它采用按需布局与渲染的设计，兼顾完整的浏览器运行时与轻量的资源占用。
 
-它默认会执行真实的 JavaScript、维护真实的 DOM、提供真实的浏览器 API，但只有在确实需要时才会计算布局或渲染像素。
+Moli 可以帮助你的 AI 智能体抓取和提取网页、搜索网络，以及自动化各类浏览器任务。
 
 你可以通过 CLI、CDP、WebDriver Classic 或 WebDriver BiDi 来使用它。
 
@@ -28,7 +28,9 @@ Moli 是一款面向 AI 智能体、可用于生产环境的无头浏览器。�
 把这句话发给你的 AI 编程智能体：
 
 ```text
-安装 https://github.com/lexmount/moli/tree/main/skills 下面的 skills，根据 skills 指引下载并安装最新版预编译 Moli 二进制，然后用 moli-webfetch 抓取 https://example.com 并把结果给我。
+安装 https://github.com/lexmount/moli/tree/main/skills 下面的 skills，
+根据 skills 指引下载并安装最新版预编译 Moli 二进制，然后用 moli-webfetch
+抓取 https://example.com 并把结果给我。
 ```
 
 ## 效果展示

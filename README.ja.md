@@ -19,7 +19,7 @@
 
 Moli は AI エージェント向けの本番運用可能なヘッドレスブラウザです。オンデマンドのレイアウトとレンダリングにより、完全なブラウザランタイムと軽量なリソース使用量を両立します。
 
-標準で実際の JavaScript を実行し、実際の DOM を維持し、実際のブラウザ API を提供しますが、レイアウトの計算やピクセルのレンダリングは本当に必要なときにだけ行います。
+Moli は、AI エージェントによる Web ページの取得・抽出、Web 検索、ブラウザタスクの自動化を支援します。
 
 CLI、CDP、WebDriver Classic、または WebDriver BiDi から利用できます。
 
@@ -28,7 +28,9 @@ CLI、CDP、WebDriver Classic、または WebDriver BiDi から利用できま�
 次の文を AI コーディングエージェントに渡してください。
 
 ```text
-https://github.com/lexmount/moli/tree/main/skills 以下の skills をインストールし、その指示に従って最新のビルド済み Moli バイナリをダウンロードしてインストールしたうえで、moli-webfetch を使って https://example.com を取得し、結果を見せてください。
+https://github.com/lexmount/moli/tree/main/skills 以下の skills をインストールし、
+その指示に従って最新のビルド済み Moli バイナリをダウンロードしてインストールしたうえで、
+moli-webfetch を使って https://example.com を取得し、結果を見せてください。
 ```
 
 ## デモ

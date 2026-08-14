@@ -19,7 +19,7 @@
 
 Moli es un navegador sin interfaz gráfica para agentes de IA y listo para su uso en producción. Su diseño de disposición y renderizado bajo demanda combina un entorno de ejecución de navegador completo con un bajo consumo de recursos.
 
-De forma predeterminada, ejecuta JavaScript real, mantiene un DOM real y ofrece API de navegador reales. Solo calcula la disposición o renderiza píxeles cuando son realmente necesarios.
+Moli ayuda a su agente de IA a obtener y extraer páginas web, buscar en la web y automatizar tareas del navegador.
 
 Puede utilizarse mediante la CLI, CDP, WebDriver Classic o WebDriver BiDi.
 
@@ -28,7 +28,10 @@ Puede utilizarse mediante la CLI, CDP, WebDriver Classic o WebDriver BiDi.
 Dé esta instrucción a su agente de programación con IA:
 
 ```text
-Instala los skills de https://github.com/lexmount/moli/tree/main/skills, sigue sus instrucciones para descargar e instalar el binario precompilado más reciente de Moli y usa moli-webfetch para obtener https://example.com y mostrarme el resultado.
+Instala los skills de https://github.com/lexmount/moli/tree/main/skills, sigue sus
+instrucciones para descargar e instalar el binario precompilado más reciente de
+Moli y usa moli-webfetch para obtener https://example.com y mostrarme el
+resultado.
 ```
 
 ## Demostración
