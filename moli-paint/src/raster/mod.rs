@@ -1456,10 +1456,7 @@ fn paint_text_shadow(
             None,
         );
     }
-    let glyph_transform = shadow
-        .run
-        .glyph_skew_radians
-        .map(|radians| Affine::skew(f64::from(radians).tan(), 0.0));
+    let glyph_transform = backend_glyph_transform(shadow.run.glyph_skew_radians);
     let glyph_embolden = backend_glyph_embolden(shadow.run.glyph_embolden);
     scene.draw_glyphs(
         &font.font,
@@ -1493,9 +1490,7 @@ fn paint_glyph_run(
     let Some(font) = snapshot.font(run.font) else {
         return;
     };
-    let glyph_transform = run
-        .glyph_skew_radians
-        .map(|radians| Affine::skew(f64::from(radians).tan(), 0.0));
+    let glyph_transform = backend_glyph_transform(run.glyph_skew_radians);
     let glyph_embolden = backend_glyph_embolden(run.glyph_embolden);
     scene.draw_glyphs(
         &font.font,
@@ -1593,6 +1588,16 @@ fn backend_glyph_embolden(embolden: moli_layout::PaintPoint) -> Vec2 {
         f64::from(finite_nonnegative(embolden.x)),
         f64::from(finite_nonnegative(embolden.y)),
     )
+}
+
+fn backend_glyph_transform(skew_radians: Option<f32>) -> Option<Affine> {
+    skew_radians.map(|radians| {
+        // A positive Fontique faux-oblique angle means a right lean. AnyRender
+        // composes this transform in layout's Y-down space after flipping the
+        // glyph outline from font-space Y-up, so preserve the CSS direction by
+        // negating the horizontal shear at this boundary.
+        Affine::skew(-f64::from(radians).tan(), 0.0)
+    })
 }
 
 fn paint_stroke(scene: &mut impl PaintScene, stroke: &PaintStroke, scale: f64) {
@@ -2265,6 +2270,25 @@ mod tests {
     }
 
     #[test]
+    fn synthetic_oblique_angles_preserve_css_direction_after_the_glyph_y_flip() {
+        let right_leaning = raster_synthetic_oblique_box(14.0);
+        let right_top = ink_centroid(&right_leaning, 15);
+        let right_bottom = ink_centroid(&right_leaning, 45);
+        assert!(
+            right_top > right_bottom + 5.0,
+            "positive oblique angle must move the glyph top right: top={right_top}, bottom={right_bottom}"
+        );
+
+        let left_leaning = raster_synthetic_oblique_box(-14.0);
+        let left_top = ink_centroid(&left_leaning, 15);
+        let left_bottom = ink_centroid(&left_leaning, 45);
+        assert!(
+            left_top + 5.0 < left_bottom,
+            "negative oblique angle must move the glyph top left: top={left_top}, bottom={left_bottom}"
+        );
+    }
+
+    #[test]
     fn snapshot_image_resource_rasterizes_without_copying_the_owned_pixels() {
         let pixels = std::sync::Arc::new(
             moli_image::RgbaImage::try_new(2, 1, vec![255, 0, 0, 255, 0, 255, 0, 255]).unwrap(),
@@ -2470,6 +2494,46 @@ mod tests {
             raster_snapshot(&glyph),
             Err(PaintError::MissingFontResource { index: 0 })
         );
+    }
+
+    fn raster_synthetic_oblique_box(skew_degrees: f32) -> RasterImage {
+        let mut snapshot = snapshot(80, 60, 1.0);
+        let font = peniko::FontData::new(
+            Blob::from(
+                include_bytes!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../moli-layout/tests/fixtures/moli-ahem.ttf"
+                ))
+                .to_vec(),
+            ),
+            0,
+        );
+        let font = snapshot.intern_font(&font);
+        snapshot.push_fragment(PaintFragment::GlyphRun(moli_layout::PaintGlyphRun {
+            font,
+            font_size: 50.0,
+            normalized_coords: Vec::new(),
+            color: PaintColor::BLACK,
+            glyph_skew_radians: Some(skew_degrees.to_radians()),
+            glyph_embolden: moli_layout::PaintPoint::ZERO,
+            // The fixture's .notdef glyph is a deterministic 600 x 800 box.
+            glyphs: vec![moli_layout::PaintGlyph {
+                id: 0,
+                x: 20.0,
+                y: 50.0,
+            }],
+            transform: moli_layout::PaintTransform2D::IDENTITY,
+        }));
+        raster_snapshot(&snapshot).expect("synthetic oblique fixture should rasterize")
+    }
+
+    fn ink_centroid(image: &RasterImage, y: u32) -> f32 {
+        let (weighted_x, coverage) = (0..image.width).fold((0.0, 0.0), |acc, x| {
+            let ink = f32::from(255 - pixel(image, x, y)[0]);
+            (acc.0 + x as f32 * ink, acc.1 + ink)
+        });
+        assert!(coverage > 0.0, "fixture row {y} must contain glyph ink");
+        weighted_x / coverage
     }
 
     fn pixel(image: &RasterImage, x: u32, y: u32) -> [u8; 4] {
