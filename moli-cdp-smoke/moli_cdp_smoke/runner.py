@@ -35,6 +35,7 @@ from .groups.emulation_storage import run_emulation_storage_group
 from .groups.error_document import run_error_document_group
 from .groups.fetch_runtime_teardown import run_fetch_runtime_teardown_group
 from .groups.layout_screenshot import run_layout_screenshot_group
+from .groups.multi_client import run_multi_client_group
 from .groups.multi_context import run_multi_context_group
 from .groups.network import (
     run_download_group,
@@ -123,6 +124,13 @@ RAW_GROUPS: tuple[SmokeGroup, ...] = (
         "Cross-engine raw CDP target creation, attachment, detach, and close contracts.",
         "raw",
         run_target_semantics_group,
+    ),
+    SmokeGroup(
+        "multi-client",
+        "Concurrent 2/3/7-client browser/page WebSocket routing, isolation, "
+        "and per-client ordering.",
+        "raw",
+        run_multi_client_group,
     ),
     SmokeGroup(
         "protocol",

@@ -97,7 +97,7 @@ async fn rollback_unpublished_target(
     if let Err(error) = endpoint.close_target(target_id.to_owned()).await {
         tracing::warn!(
             target_id,
-            error,
+            ?error,
             "failed to roll back unpublished CDP target"
         );
     }
@@ -245,7 +245,7 @@ async fn run_shared_frontend_socket(
     let endpoint = match owner_registry.shared_owner() {
         Ok(endpoint) => endpoint,
         Err(error) => {
-            tracing::warn!(error, "failed to start shared CDP owner");
+            tracing::warn!(?error, "failed to start shared CDP owner");
             return;
         }
     };

@@ -9,6 +9,32 @@ use super::super::runtime_command_barrier::RuntimeCommandOutputBarriers;
 use super::prepared_outputs::PreparedProtocolOutputs;
 use crate::conn::{BackgroundProtocolEvent, CdpConnection, CommandDispatchContext};
 
+fn renderer_owner_action_session_id(
+    conn: &CdpConnection,
+    publication_session_id: Option<&str>,
+    renderer_cause: Option<&moli_core::RendererRuntimeCommandCausalIdentity>,
+) -> Option<String> {
+    if let Some(cause) = renderer_cause
+        && let Some(attachment) = conn
+            .target_page_protocol_attachment_identity_for_renderer_inspector_route(
+                publication_session_id,
+                cause.inspector_session_id(),
+            )
+    {
+        // `None` is a valid exact attachment for a command sent through the
+        // implicit primary inspector session, so do not replace it by a peer.
+        return attachment.session_id().map(str::to_owned);
+    }
+    if let Some(session_id) = publication_session_id {
+        return Some(session_id.to_owned());
+    }
+    let (browser_context_id, target_id) =
+        conn.target_owner_identity_for_session(publication_session_id)?;
+    let target_id = target_id?;
+    conn.target_page_protocol_attachment_identity_for_target(&browser_context_id, &target_id)
+        .and_then(|attachment| attachment.session_id().map(str::to_owned))
+}
+
 /// Ingests one renderer transport message against only the exact Runtime
 /// command identity carried by its records.
 ///
@@ -150,9 +176,20 @@ async fn project_renderer_output_records_for_route(
         }
         match item {
             RendererOutputItem::OwnerAction(action) => {
-                let outputs =
-                    PreparedProtocolOutputs::from_renderer_owner_action(conn, session_id, action)
-                        .await;
+                // A Page stream can remain bound to its implicit primary owner while a
+                // Runtime command arrives through an auxiliary DevTools session. Owner
+                // actions caused by that command (notably modal dialogs) belong to the
+                // exact inspector attachment, not merely to the stream's base route.
+                // Asynchronous actions have no command cause; an unbound stream then
+                // selects the target's stable concrete Page attachment.
+                let action_session_id =
+                    renderer_owner_action_session_id(conn, session_id, renderer_cause.as_ref());
+                let outputs = PreparedProtocolOutputs::from_renderer_owner_action(
+                    conn,
+                    action_session_id.as_deref(),
+                    action,
+                )
+                .await;
                 barriers
                     .route_publication_outputs(
                         conn,
@@ -202,5 +239,55 @@ async fn project_renderer_output_records_for_route(
                     .await;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use moli_core::RendererRuntimeCommandCausalIdentity;
+
+    use crate::conn::{BrowserContext, CdpConnection};
+
+    use super::renderer_owner_action_session_id;
+
+    #[test]
+    fn unbound_owner_actions_choose_a_stable_attachment_without_overriding_exact_root_cause() {
+        let mut conn = CdpConnection::default();
+        let mut browser_context = BrowserContext::new("BID-owner-action".to_owned());
+        browser_context.set_active_target_id("TID-owner-action".to_owned());
+        assert!(
+            browser_context.assign_auxiliary_session_to_target(
+                "TID-owner-action",
+                "SID-owner-action".to_owned(),
+            )
+        );
+        conn.browser_context = Some(browser_context);
+
+        assert_eq!(
+            renderer_owner_action_session_id(&conn, None, None).as_deref(),
+            Some("SID-owner-action"),
+            "an asynchronous target action should use its concrete attachment"
+        );
+        assert_eq!(
+            renderer_owner_action_session_id(
+                &conn,
+                None,
+                Some(&RendererRuntimeCommandCausalIdentity::new(
+                    Some("SID-owner-action".to_owned()),
+                    1,
+                )),
+            )
+            .as_deref(),
+            Some("SID-owner-action"),
+        );
+        assert_eq!(
+            renderer_owner_action_session_id(
+                &conn,
+                None,
+                Some(&RendererRuntimeCommandCausalIdentity::new(None, 2)),
+            ),
+            None,
+            "an exact implicit-primary command must not be reassigned to a peer session"
+        );
     }
 }

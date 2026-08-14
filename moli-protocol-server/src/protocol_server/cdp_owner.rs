@@ -3,6 +3,7 @@ use std::{
     sync::{Arc, Weak, atomic::AtomicU64},
 };
 
+use anyhow::{Context, Result, bail};
 use moli_core::runtime::{NavigationRuntimeConfig, storage_partition::StoragePartitionState};
 use moli_protocol::CdpInitialStoragePartition;
 use parking_lot::Mutex;
@@ -81,17 +82,19 @@ impl SharedCdpOwnerRegistry {
         }
     }
 
-    pub(super) fn shared_owner(&self) -> Result<CdpFrontendEndpoint, String> {
+    pub(super) fn shared_owner(&self) -> Result<CdpFrontendEndpoint> {
         let mut shared_owner = self.inner.shared_owner.lock();
         if let Some((_, endpoint)) = shared_owner.as_ref() {
             return Ok(endpoint.clone());
         }
-        let (owner_id, endpoint) = self.spawn_owner()?;
+        let (owner_id, endpoint) = self
+            .spawn_owner()
+            .context("failed to spawn shared CDP owner")?;
         *shared_owner = Some((owner_id, endpoint.clone()));
         Ok(endpoint)
     }
 
-    fn spawn_owner(&self) -> Result<(u64, CdpFrontendEndpoint), String> {
+    fn spawn_owner(&self) -> Result<(u64, CdpFrontendEndpoint)> {
         let owner_id = self.inner.config.directory.allocate_owner_id();
         let (endpoint, receivers) = cdp_frontend_channel();
         let lifecycle_observer = self
@@ -102,7 +105,7 @@ impl SharedCdpOwnerRegistry {
         {
             let mut state = self.inner.state.lock();
             if state.shutting_down {
-                return Err("CDP owner registry is shutting down".to_owned());
+                bail!("CDP owner registry is shutting down");
             }
             state.owners.insert(
                 owner_id,

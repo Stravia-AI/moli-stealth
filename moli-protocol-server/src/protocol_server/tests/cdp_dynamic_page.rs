@@ -695,34 +695,268 @@ async fn websocket_cdp_dynamic_page_detach_reconnect_and_target_close_follow_hos
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn websocket_cdp_rejects_second_concurrent_browser_frontend() {
+async fn websocket_cdp_supports_concurrent_browser_frontends_with_isolated_sessions() {
     let (addr, server) = spawn_test_protocol_server().await;
     let (mut first_browser, _) =
         connect_async(format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"))
             .await
             .expect("connect first browser websocket");
-    let initial_probe =
-        send_cdp_command(&mut first_browser, 1, "Browser.getVersion", None, json!({})).await;
-    assert!(
-        response_by_id(&initial_probe, 1)["result"]["product"]
-            .as_str()
-            .is_some(),
-        "first browser frontend did not finish attaching"
-    );
-
     let (mut second_browser, _) =
         connect_async(format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"))
             .await
             .expect("connect second browser websocket");
 
-    wait_for_websocket_close(&mut second_browser, "second concurrent browser").await;
-    let first_probe =
-        send_cdp_command(&mut first_browser, 2, "Browser.getVersion", None, json!({})).await;
+    for browser in [&mut first_browser, &mut second_browser] {
+        browser
+            .send(WsMessage::Text(
+                json!({ "id": 1, "method": "Browser.getVersion", "params": {} })
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .expect("send colliding browser command id");
+    }
+    let first_probe = recv_until_id(&mut first_browser, 1).await;
+    let second_probe = recv_until_id(&mut second_browser, 1).await;
     assert!(
-        response_by_id(&first_probe, 2)["result"]["product"]
+        response_by_id(&first_probe, 1)["result"]["product"]
             .as_str()
             .is_some(),
-        "rejecting a second browser frontend disrupted the active root frontend"
+        "first browser frontend did not respond"
+    );
+    assert!(
+        response_by_id(&second_probe, 1)["result"]["product"]
+            .as_str()
+            .is_some(),
+        "second browser frontend did not respond"
+    );
+    assert!(
+        first_probe
+            .iter()
+            .chain(&second_probe)
+            .all(|message| message.get("sessionId").is_none()),
+        "a hidden browser base session leaked onto the public wire"
+    );
+
+    let discover = send_cdp_command(
+        &mut first_browser,
+        2,
+        "Target.setDiscoverTargets",
+        None,
+        json!({ "discover": true, "filter": [{ "type": "page" }] }),
+    )
+    .await;
+    assert_eq!(response_by_id(&discover, 2)["result"], json!({}));
+    let create = send_cdp_command(
+        &mut second_browser,
+        2,
+        "Target.createTarget",
+        None,
+        json!({ "url": "about:blank" }),
+    )
+    .await;
+    let target_id = response_by_id(&create, 2)["result"]["targetId"]
+        .as_str()
+        .expect("created target id")
+        .to_owned();
+    assert!(
+        create.iter().all(|message| {
+            message["method"] != json!("Target.targetCreated")
+                || message["params"]["targetInfo"]["targetId"] != json!(target_id)
+        }),
+        "second frontend inherited first frontend's discovery state: {create:#?}"
+    );
+    let discovered = recv_until_match(&mut first_browser, |message| {
+        message["method"] == json!("Target.targetCreated")
+            && message["params"]["targetInfo"]["targetId"] == json!(target_id)
+    })
+    .await;
+    assert!(
+        discovered
+            .last()
+            .is_some_and(|message| message.get("sessionId").is_none()),
+        "discovery event leaked the first browser's hidden base session"
+    );
+
+    let first_attach = send_cdp_command(
+        &mut first_browser,
+        3,
+        "Target.attachToTarget",
+        None,
+        json!({ "targetId": target_id, "flatten": true }),
+    )
+    .await;
+    let first_session_id = response_by_id(&first_attach, 3)["result"]["sessionId"]
+        .as_str()
+        .expect("first target session id")
+        .to_owned();
+    let second_attach = send_cdp_command(
+        &mut second_browser,
+        3,
+        "Target.attachToTarget",
+        None,
+        json!({ "targetId": target_id, "flatten": true }),
+    )
+    .await;
+    let second_session_id = response_by_id(&second_attach, 3)["result"]["sessionId"]
+        .as_str()
+        .expect("second target session id")
+        .to_owned();
+    assert_ne!(first_session_id, second_session_id);
+
+    let first_write = send_cdp_command(
+        &mut first_browser,
+        4,
+        "Runtime.evaluate",
+        Some(&first_session_id),
+        json!({ "expression": "globalThis.__moli_multi_browser = 41" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&first_write, 4)["result"]["result"]["value"],
+        json!(41)
+    );
+    let second_read = send_cdp_command(
+        &mut second_browser,
+        4,
+        "Runtime.evaluate",
+        Some(&second_session_id),
+        json!({ "expression": "globalThis.__moli_multi_browser" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&second_read, 4)["result"]["result"]["value"],
+        json!(41),
+        "browser frontends did not share the target runtime"
+    );
+
+    let foreign_flat_session = send_cdp_command(
+        &mut second_browser,
+        5,
+        "Runtime.evaluate",
+        Some(&first_session_id),
+        json!({ "expression": "1" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&foreign_flat_session, 5)["error"]["code"],
+        json!(-32001)
+    );
+    let foreign_legacy_session = send_cdp_command(
+        &mut second_browser,
+        6,
+        "Target.detachFromTarget",
+        None,
+        json!({ "sessionId": first_session_id }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&foreign_legacy_session, 6)["error"]["code"],
+        json!(-32602)
+    );
+
+    first_browser
+        .close(None)
+        .await
+        .expect("close first browser websocket");
+    wait_for_websocket_close(&mut first_browser, "first concurrent browser").await;
+    let surviving_read = send_cdp_command(
+        &mut second_browser,
+        7,
+        "Runtime.evaluate",
+        Some(&second_session_id),
+        json!({ "expression": "globalThis.__moli_multi_browser + 1" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&surviving_read, 7)["result"]["result"]["value"],
+        json!(42),
+        "disconnecting one browser detached another browser's target session"
+    );
+
+    let (mut third_browser, _) =
+        connect_async(format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"))
+            .await
+            .expect("connect third browser while second remains connected");
+    let third_probe =
+        send_cdp_command(&mut third_browser, 1, "Browser.getVersion", None, json!({})).await;
+    assert!(
+        response_by_id(&third_probe, 1)["result"]["product"]
+            .as_str()
+            .is_some(),
+        "replacement browser could not connect alongside surviving browser"
+    );
+    let third_attach = send_cdp_command(
+        &mut third_browser,
+        2,
+        "Target.attachToTarget",
+        None,
+        json!({ "targetId": target_id, "flatten": true }),
+    )
+    .await;
+    let third_session_id = response_by_id(&third_attach, 2)["result"]["sessionId"]
+        .as_str()
+        .expect("third target session id")
+        .to_owned();
+    let third_read = send_cdp_command(
+        &mut third_browser,
+        3,
+        "Runtime.evaluate",
+        Some(&third_session_id),
+        json!({ "expression": "globalThis.__moli_multi_browser" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&third_read, 3)["result"]["result"]["value"],
+        json!(41)
+    );
+
+    let close = send_cdp_command(
+        &mut third_browser,
+        4,
+        "Target.closeTarget",
+        None,
+        json!({ "targetId": target_id }),
+    )
+    .await;
+    assert_eq!(response_by_id(&close, 4)["result"]["success"], json!(true));
+    let second_detached = recv_until_match(&mut second_browser, |message| {
+        message["method"] == json!("Target.detachedFromTarget")
+            && message["params"]["sessionId"] == json!(second_session_id)
+    })
+    .await;
+    assert!(
+        second_detached
+            .last()
+            .is_some_and(|message| message.get("sessionId").is_none()),
+        "target-close detach leaked the second browser's hidden base session"
+    );
+    let stale_session = send_cdp_command(
+        &mut second_browser,
+        8,
+        "Runtime.evaluate",
+        Some(&second_session_id),
+        json!({ "expression": "1" }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&stale_session, 8)["error"]["code"],
+        json!(-32001),
+        "closed target session remained routable"
+    );
+    let final_second_probe = send_cdp_command(
+        &mut second_browser,
+        9,
+        "Browser.getVersion",
+        None,
+        json!({}),
+    )
+    .await;
+    assert!(
+        response_by_id(&final_second_probe, 9)["result"]["product"]
+            .as_str()
+            .is_some(),
+        "closing a shared target disrupted the surviving browser frontend"
     );
 
     abort_test_cdp_server(server).await;

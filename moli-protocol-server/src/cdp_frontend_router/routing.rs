@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use anyhow::{Result, bail};
 use moli_protocol::ParsedCdpCommand;
 use serde_json::{Value, json};
 
@@ -17,12 +18,13 @@ struct PendingCommandRoute {
     frontend: CdpCommandFrontend,
     client_command_id: u64,
     method: String,
+    attach_target_id: Option<String>,
 }
 
 struct CdpSessionFrontendRoute {
     kind: CdpSessionFrontendKind,
     target_id: Option<String>,
-    base_session_id: Option<String>,
+    base_session_id: String,
     sink: CdpSocketSink,
 }
 
@@ -40,8 +42,21 @@ struct FrontendSessionRoute {
 
 #[derive(Clone)]
 enum FrontendSessionKind {
+    /// One hidden browser-target or page-target session owned by exactly one
+    /// WebSocket frontend. Commands without a public sessionId dispatch here.
     Base,
-    Child { parent_session_id: Option<String> },
+    /// A client-visible session created underneath the base session (or one
+    /// of its descendants). Parent and target identity enforce Chromium's
+    /// per-TargetHandler session lookup boundary.
+    Child {
+        parent_session_id: Option<String>,
+        target_id: Option<String>,
+    },
+}
+
+struct CdpTargetSessionReferenceError {
+    code: i32,
+    message: &'static str,
 }
 
 pub(super) struct CdpRoutedFrontend {
@@ -61,6 +76,8 @@ impl CdpRoutedFrontend {
 
 #[derive(Default)]
 pub(super) struct CdpFrontendRoutingState {
+    // The downstream protocol connection is shared, so client command ids and
+    // session ownership must never be used as global frontend identities.
     next_internal_command_id: u64,
     pending_commands: HashMap<u64, PendingCommandRoute>,
     frontends: HashMap<u64, CdpSessionFrontendRoute>,
@@ -104,7 +121,16 @@ impl CdpFrontendRoutingState {
         let client_command_id = request.id();
         let method = request.method().to_owned();
         let client_session_id = request.session_id().map(str::to_owned);
-        let route = self.frontends.get(&frontend_id)?;
+        let attach_target_id = (method == "Target.attachToTarget")
+            .then(|| {
+                request
+                    .params()
+                    .and_then(|params| params.get("targetId"))
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+            })
+            .flatten();
+        let base_session_id = self.frontends.get(&frontend_id)?.base_session_id.clone();
         let dispatch_session_id = if let Some(session_id) = client_session_id.as_deref() {
             let Some(session) = self.sessions.get(session_id) else {
                 return Some(CdpPreparedFrontendCommand::ImmediateResponse {
@@ -130,7 +156,42 @@ impl CdpFrontendRoutingState {
             }
             Some(session_id.to_owned())
         } else {
-            route.base_session_id.clone()
+            Some(base_session_id)
+        };
+        let target_session_reference = match self.resolve_target_session_reference(
+            frontend_id,
+            dispatch_session_id.as_deref(),
+            &method,
+            request.params(),
+        ) {
+            Ok(session_id) => session_id,
+            Err(error) => {
+                return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                    frontend_id,
+                    message: cdp_error_response(Some(client_command_id), error.code, error.message),
+                });
+            }
+        };
+        let command = if let Some(session_id) = target_session_reference.as_deref() {
+            match command.rewrite_target_session_reference(session_id) {
+                Ok(command) => command,
+                Err(error) => {
+                    tracing::error!(
+                        ?error,
+                        "frontend routing could not serialize a Target session reference"
+                    );
+                    return Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                        frontend_id,
+                        message: cdp_error_response(
+                            Some(client_command_id),
+                            -32603,
+                            "Internal error",
+                        ),
+                    });
+                }
+            }
+        } else {
+            command
         };
         let internal_command_id = self.allocate_internal_command_id();
         let command = match command
@@ -158,9 +219,83 @@ impl CdpFrontendRoutingState {
                 },
                 client_command_id,
                 method,
+                attach_target_id,
             },
         );
         Some(CdpPreparedFrontendCommand::Command(command))
+    }
+
+    fn resolve_target_session_reference(
+        &self,
+        frontend_id: u64,
+        dispatch_session_id: Option<&str>,
+        method: &str,
+        params: Option<&serde_json::Map<String, Value>>,
+    ) -> std::result::Result<Option<String>, CdpTargetSessionReferenceError> {
+        if !matches!(
+            method,
+            "Target.detachFromTarget" | "Target.sendMessageToTarget"
+        ) {
+            return Ok(None);
+        }
+        let Some(params) = params else {
+            return Ok(None);
+        };
+        if let Some(session_id) = params.get("sessionId") {
+            if let Some(session_id) = session_id.as_str() {
+                let owned_direct_child = self.sessions.get(session_id).is_some_and(|session| {
+                    session.frontend_id == frontend_id
+                        && matches!(
+                            &session.kind,
+                            FrontendSessionKind::Child {
+                                parent_session_id,
+                                ..
+                            } if parent_session_id.as_deref() == dispatch_session_id
+                        )
+                });
+                return if owned_direct_child {
+                    Ok(None)
+                } else {
+                    Err(CdpTargetSessionReferenceError {
+                        code: -32602,
+                        message: "No session with given id",
+                    })
+                };
+            }
+            if !session_id.is_null() {
+                // Preserve domain validation for a malformed optional value;
+                // do not turn it into a valid command via targetId fallback.
+                return Ok(None);
+            }
+        }
+        let Some(target_id) = params.get("targetId").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let mut matching_sessions = self.sessions.iter().filter_map(|(session_id, session)| {
+            (session.frontend_id == frontend_id
+                && matches!(
+                    &session.kind,
+                    FrontendSessionKind::Child {
+                        parent_session_id,
+                        target_id: Some(session_target_id),
+                    } if parent_session_id.as_deref() == dispatch_session_id
+                        && session_target_id == target_id
+                ))
+            .then_some(session_id.as_str())
+        });
+        let Some(session_id) = matching_sessions.next() else {
+            return Err(CdpTargetSessionReferenceError {
+                code: -32602,
+                message: "No session for given target id",
+            });
+        };
+        if matching_sessions.next().is_some() {
+            return Err(CdpTargetSessionReferenceError {
+                code: -32000,
+                message: "Multiple sessions attached, specify id.",
+            });
+        }
+        Ok(Some(session_id.to_owned()))
     }
 
     fn allocate_internal_command_id(&mut self) -> u64 {
@@ -179,27 +314,17 @@ impl CdpFrontendRoutingState {
     pub(super) fn register_browser_frontend(
         &mut self,
         frontend_id: u64,
+        session_id: String,
         sink: CdpSocketSink,
-    ) -> Result<(), String> {
-        if self
-            .frontends
-            .values()
-            .any(|route| route.kind == CdpSessionFrontendKind::Browser)
-        {
-            return Err("CDP owner already has a browser frontend".to_owned());
-        }
-        if self.frontends.contains_key(&frontend_id) {
-            return Err("CDP frontend id is already registered".to_owned());
-        }
-        self.frontends.insert(
+    ) -> Result<()> {
+        self.register_session_frontend(
             frontend_id,
-            CdpSessionFrontendRoute {
-                kind: CdpSessionFrontendKind::Browser,
-                target_id: None,
-                base_session_id: None,
-                sink,
-            },
-        );
+            CdpSessionFrontendKind::Browser,
+            None,
+            session_id.clone(),
+            sink,
+        )?;
+        self.private_sessions.remove(&session_id);
         Ok(())
     }
 
@@ -209,7 +334,7 @@ impl CdpFrontendRoutingState {
         target_id: String,
         session_id: String,
         sink: CdpSocketSink,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.register_session_frontend(
             frontend_id,
             CdpSessionFrontendKind::Page,
@@ -226,12 +351,12 @@ impl CdpFrontendRoutingState {
         target_id: Option<String>,
         session_id: String,
         sink: CdpSocketSink,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if self.frontends.contains_key(&frontend_id) {
-            return Err("CDP frontend id is already registered".to_owned());
+            bail!("CDP frontend id is already registered");
         }
         if self.sessions.contains_key(&session_id) {
-            return Err("CDP frontend session is already registered".to_owned());
+            bail!("CDP frontend session is already registered");
         }
         self.sessions.insert(
             session_id.clone(),
@@ -245,21 +370,21 @@ impl CdpFrontendRoutingState {
             CdpSessionFrontendRoute {
                 kind,
                 target_id,
-                base_session_id: Some(session_id),
+                base_session_id: session_id,
                 sink,
             },
         );
         Ok(())
     }
 
-    pub(super) fn unregister_browser_frontend(&mut self, frontend_id: u64) -> bool {
+    pub(super) fn unregister_browser_frontend(&mut self, frontend_id: u64) -> Option<String> {
         self.unregister_session_frontend(frontend_id, CdpSessionFrontendKind::Browser)
-            .is_some()
+            .map(|route| route.base_session_id)
     }
 
     pub(super) fn unregister_page_frontend(&mut self, frontend_id: u64) -> Option<String> {
         self.unregister_session_frontend(frontend_id, CdpSessionFrontendKind::Page)
-            .and_then(|route| route.base_session_id)
+            .map(|route| route.base_session_id)
     }
 
     fn unregister_session_frontend(
@@ -337,6 +462,7 @@ impl CdpFrontendRoutingState {
                     frontend_id,
                     dispatch_session_id.as_deref(),
                     &child_session_id,
+                    pending.attach_target_id.as_deref(),
                 );
             }
             set_top_level_session_id(&mut message, client_session_id.as_deref());
@@ -364,22 +490,25 @@ impl CdpFrontendRoutingState {
             .pointer("/params/sessionId")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let target_event_target_id = message
+            .pointer("/params/targetInfo/targetId")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         if method.as_deref() == Some("Target.attachedToTarget")
             && let Some(child_session_id) = target_event_session_id.as_deref()
         {
             if self.private_sessions.contains(child_session_id) {
                 return None;
             }
-            if let Some(parent_session_id) = parent_session_id.as_deref() {
-                if let Some(parent) = self.sessions.get(parent_session_id) {
-                    self.register_child_session(
-                        parent.frontend_id,
-                        Some(parent_session_id),
-                        child_session_id,
-                    );
-                }
-            } else if let Some(frontend_id) = self.browser_frontend_id() {
-                self.register_child_session(frontend_id, None, child_session_id);
+            if let Some(parent_session_id) = parent_session_id.as_deref()
+                && let Some(parent) = self.sessions.get(parent_session_id)
+            {
+                self.register_child_session(
+                    parent.frontend_id,
+                    Some(parent_session_id),
+                    child_session_id,
+                    target_event_target_id.as_deref(),
+                );
             }
         }
 
@@ -415,28 +544,38 @@ impl CdpFrontendRoutingState {
             if self.private_sessions.remove(session_id) {
                 return None;
             }
-            if self
-                .sessions
-                .get(session_id)
-                .is_some_and(|session| matches!(session.kind, FrontendSessionKind::Base))
-            {
-                // Base sessions are private transport adapters and never
-                // surface on their frontend's wire protocol.
-                self.remove_session_descendants(session_id);
-                return None;
+            if let Some(session) = self.sessions.get(session_id).cloned() {
+                match session.kind {
+                    FrontendSessionKind::Base => {
+                        // Base sessions are private transport adapters and
+                        // never surface on their frontend's wire protocol.
+                        self.remove_session_descendants(session_id);
+                        return None;
+                    }
+                    FrontendSessionKind::Child {
+                        parent_session_id, ..
+                    } => {
+                        let route = self.frontends.get(&session.frontend_id)?;
+                        let client_parent_session_id = parent_session_id
+                            .as_deref()
+                            .filter(|parent| route.base_session_id.as_str() != *parent);
+                        let sink = route.sink.clone();
+                        set_top_level_session_id(&mut message, client_parent_session_id);
+                        self.remove_child_session_cascade(session_id);
+                        return Some((
+                            CdpRoutedFrontend {
+                                frontend_id: session.frontend_id,
+                                sink,
+                            },
+                            message,
+                        ));
+                    }
+                }
             }
             self.remove_child_session_cascade(session_id);
         }
 
-        let frontend_id = self.browser_frontend_id()?;
-        let sink = self.frontends.get(&frontend_id)?.sink.clone();
-        Some((CdpRoutedFrontend { frontend_id, sink }, message))
-    }
-
-    fn browser_frontend_id(&self) -> Option<u64> {
-        self.frontends.iter().find_map(|(frontend_id, route)| {
-            (route.kind == CdpSessionFrontendKind::Browser).then_some(*frontend_id)
-        })
+        None
     }
 
     fn register_child_session(
@@ -444,6 +583,7 @@ impl CdpFrontendRoutingState {
         frontend_id: u64,
         parent_session_id: Option<&str>,
         child_session_id: &str,
+        target_id: Option<&str>,
     ) {
         let frontend = self.frontends.get(&frontend_id);
         if frontend.is_none() {
@@ -472,6 +612,7 @@ impl CdpFrontendRoutingState {
                 frontend_id,
                 kind: FrontendSessionKind::Child {
                     parent_session_id: parent_session_id.map(str::to_owned),
+                    target_id: target_id.map(str::to_owned),
                 },
             },
         );
@@ -501,6 +642,7 @@ impl CdpFrontendRoutingState {
                 .filter_map(|(child_session_id, route)| match &route.kind {
                     FrontendSessionKind::Child {
                         parent_session_id: parent,
+                        ..
                     } if parent.as_deref() == Some(parent_session_id.as_str()) => {
                         Some(child_session_id.clone())
                     }
@@ -574,7 +716,7 @@ mod tests {
     fn browser_and_page_client_command_ids_are_isolated_and_restored() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
         routing
             .register_page_frontend(10, "TID-1".to_owned(), "SID-page".to_owned(), test_sink())
@@ -598,6 +740,10 @@ mod tests {
             .expect("browser command JSON")["id"]
             .as_u64()
             .expect("browser internal id");
+        assert_eq!(
+            serde_json::from_str::<Value>(browser_command.json()).expect("browser command JSON")["sessionId"],
+            json!("SID-browser")
+        );
         let page_internal_id = serde_json::from_str::<Value>(page_command.json())
             .expect("page command JSON")["id"]
             .as_u64()
@@ -609,8 +755,9 @@ mod tests {
                 json!({
                     "id": browser_internal_id,
                     "result": {},
+                    "sessionId": "SID-browser",
                 }),
-                None,
+                Some("SID-browser"),
             )
             .expect("route browser response");
         assert_eq!(browser_frontend.frontend_id, 5);
@@ -633,12 +780,263 @@ mod tests {
     }
 
     #[test]
+    fn browser_frontends_with_the_same_client_command_id_route_independently() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
+            .expect("register first browser frontend");
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
+
+        let first = expect_prepared_command(
+            routing.prepare_command(
+                5,
+                parsed_command(json!({ "id": 7, "method": "Browser.getVersion" }).to_string()),
+            ),
+            "first browser",
+        );
+        let second = expect_prepared_command(
+            routing.prepare_command(
+                6,
+                parsed_command(json!({ "id": 7, "method": "Browser.getVersion" }).to_string()),
+            ),
+            "second browser",
+        );
+        let first = serde_json::from_str::<Value>(first.json()).expect("first command JSON");
+        let second = serde_json::from_str::<Value>(second.json()).expect("second command JSON");
+        assert_ne!(first["id"], second["id"]);
+        assert_eq!(first["sessionId"], json!("SID-browser-1"));
+        assert_eq!(second["sessionId"], json!("SID-browser-2"));
+
+        let (frontend, response) = routing
+            .route_message(
+                json!({
+                    "id": second["id"],
+                    "result": { "product": "second" },
+                    "sessionId": "SID-browser-2",
+                }),
+                Some("SID-browser-2"),
+            )
+            .expect("route second response");
+        assert_eq!(frontend.frontend_id(), 6);
+        assert_eq!(response["id"], json!(7));
+        assert_eq!(response["result"]["product"], json!("second"));
+        assert!(response.get("sessionId").is_none());
+
+        let (frontend, response) = routing
+            .route_message(
+                json!({
+                    "id": first["id"],
+                    "result": { "product": "first" },
+                    "sessionId": "SID-browser-1",
+                }),
+                Some("SID-browser-1"),
+            )
+            .expect("route first response");
+        assert_eq!(frontend.frontend_id(), 5);
+        assert_eq!(response["id"], json!(7));
+        assert_eq!(response["result"]["product"], json!("first"));
+        assert!(response.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn browser_base_session_events_are_private_and_frontend_scoped() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
+            .expect("register first browser frontend");
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
+
+        let (frontend, event) = routing
+            .route_message(
+                json!({
+                    "method": "Target.targetCreated",
+                    "sessionId": "SID-browser-1",
+                    "params": { "targetInfo": { "targetId": "TID-1" } },
+                }),
+                Some("SID-browser-1"),
+            )
+            .expect("route first browser event");
+        assert_eq!(frontend.frontend_id(), 5);
+        assert!(event.get("sessionId").is_none());
+
+        assert!(
+            routing
+                .route_message(
+                    json!({
+                        "method": "Target.targetCreated",
+                        "params": { "targetInfo": { "targetId": "TID-root" } },
+                    }),
+                    None,
+                )
+                .is_none(),
+            "unowned root event must not be assigned to an arbitrary browser frontend"
+        );
+    }
+
+    #[test]
+    fn root_detach_with_a_known_child_routes_to_its_exact_frontend() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
+            .expect("register first browser frontend");
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
+        routing.register_child_session(5, Some("SID-browser-1"), "SID-child-1", Some("TID-1"));
+        routing.register_child_session(6, Some("SID-browser-2"), "SID-child-2", Some("TID-1"));
+
+        let (frontend, event) = routing
+            .route_message(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": {
+                        "targetId": "TID-1",
+                        "sessionId": "SID-child-1",
+                    },
+                }),
+                None,
+            )
+            .expect("route owner-qualified root detach");
+        assert_eq!(frontend.frontend_id(), 5);
+        assert!(event.get("sessionId").is_none());
+
+        assert!(matches!(
+            routing.prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "sessionId": "SID-child-1",
+                    })
+                    .to_string(),
+                ),
+            ),
+            Some(CdpPreparedFrontendCommand::ImmediateResponse { .. })
+        ));
+        assert!(matches!(
+            routing.prepare_command(
+                6,
+                parsed_command(
+                    json!({
+                        "id": 1,
+                        "method": "Runtime.evaluate",
+                        "sessionId": "SID-child-2",
+                    })
+                    .to_string(),
+                ),
+            ),
+            Some(CdpPreparedFrontendCommand::Command(_))
+        ));
+    }
+
+    #[test]
+    fn root_detach_restores_visible_parent_for_nested_child() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
+            .expect("register browser frontend");
+        routing.register_child_session(5, Some("SID-browser"), "SID-child", Some("TID-child"));
+        routing.register_child_session(
+            5,
+            Some("SID-child"),
+            "SID-grandchild",
+            Some("TID-grandchild"),
+        );
+
+        let (_, event) = routing
+            .route_message(
+                json!({
+                    "method": "Target.detachedFromTarget",
+                    "params": {
+                        "targetId": "TID-grandchild",
+                        "sessionId": "SID-grandchild",
+                    },
+                }),
+                None,
+            )
+            .expect("route nested root detach");
+        assert_eq!(event["sessionId"], json!("SID-child"));
+    }
+
+    #[test]
+    fn unregistering_one_browser_drops_only_its_pending_commands() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
+            .expect("register first browser frontend");
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
+        let first = expect_prepared_command(
+            routing.prepare_command(
+                5,
+                parsed_command(json!({ "id": 1, "method": "Browser.getVersion" }).to_string()),
+            ),
+            "first browser",
+        );
+        let second = expect_prepared_command(
+            routing.prepare_command(
+                6,
+                parsed_command(json!({ "id": 1, "method": "Browser.getVersion" }).to_string()),
+            ),
+            "second browser",
+        );
+        let first_internal_id = serde_json::from_str::<Value>(first.json())
+            .expect("first command JSON")["id"]
+            .as_u64()
+            .expect("first internal id");
+        let second_internal_id = serde_json::from_str::<Value>(second.json())
+            .expect("second command JSON")["id"]
+            .as_u64()
+            .expect("second internal id");
+
+        assert_eq!(
+            routing.unregister_browser_frontend(5).as_deref(),
+            Some("SID-browser-1")
+        );
+        assert!(
+            routing
+                .route_message(
+                    json!({
+                        "id": first_internal_id,
+                        "result": {},
+                        "sessionId": "SID-browser-1",
+                    }),
+                    Some("SID-browser-1"),
+                )
+                .is_none()
+        );
+        let (frontend, response) = routing
+            .route_message(
+                json!({
+                    "id": second_internal_id,
+                    "result": {},
+                    "sessionId": "SID-browser-2",
+                }),
+                Some("SID-browser-2"),
+            )
+            .expect("second browser response remains routable");
+        assert_eq!(frontend.frontend_id(), 6);
+        assert_eq!(response["id"], json!(1));
+    }
+
+    #[test]
     fn browser_child_session_is_preserved_on_browser_frontend() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
-        routing.register_child_session(5, None, "SID-client-child");
+        routing.register_child_session(
+            5,
+            Some("SID-browser"),
+            "SID-client-child",
+            Some("TID-child"),
+        );
 
         let command = expect_prepared_command(
             routing.prepare_command(
@@ -673,10 +1071,214 @@ mod tests {
     }
 
     #[test]
-    fn browser_frontend_preserves_root_wire_shape() {
+    fn legacy_target_session_references_cannot_cross_browser_frontends() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
+            .expect("register first browser frontend");
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
+        routing.register_child_session(5, Some("SID-browser-1"), "SID-child-1", Some("TID-shared"));
+        routing.register_child_session(6, Some("SID-browser-2"), "SID-child-2", Some("TID-shared"));
+
+        for method in ["Target.detachFromTarget", "Target.sendMessageToTarget"] {
+            let Some(CdpPreparedFrontendCommand::ImmediateResponse {
+                frontend_id,
+                message,
+            }) = routing.prepare_command(
+                6,
+                parsed_command(
+                    json!({
+                        "id": 11,
+                        "method": method,
+                        "params": {
+                            "sessionId": "SID-child-1",
+                            "message": "{}",
+                        },
+                    })
+                    .to_string(),
+                ),
+            )
+            else {
+                panic!("foreign {method} session reference was not rejected");
+            };
+            assert_eq!(frontend_id, 6);
+            assert_eq!(message["id"], json!(11));
+            assert_eq!(message["error"]["code"], json!(-32602));
+        }
+
+        let command = expect_prepared_command(
+            routing.prepare_command(
+                6,
+                parsed_command(
+                    json!({
+                        "id": 12,
+                        "method": "Target.detachFromTarget",
+                        "params": { "targetId": "TID-shared" },
+                    })
+                    .to_string(),
+                ),
+            ),
+            "owned target-id detach",
+        );
+        let command = serde_json::from_str::<Value>(command.json()).expect("detach command JSON");
+        assert_eq!(command["sessionId"], json!("SID-browser-2"));
+        assert_eq!(command["params"]["sessionId"], json!("SID-child-2"));
+        assert_eq!(command["params"]["targetId"], json!("TID-shared"));
+    }
+
+    #[test]
+    fn legacy_target_id_reference_requires_one_direct_child_session() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
+            .expect("register browser frontend");
+        routing.register_child_session(5, Some("SID-browser"), "SID-child-1", Some("TID-shared"));
+        routing.register_child_session(5, Some("SID-browser"), "SID-child-2", Some("TID-shared"));
+        routing.register_child_session(
+            5,
+            Some("SID-child-1"),
+            "SID-grandchild",
+            Some("TID-grandchild"),
+        );
+
+        let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+            .prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 20,
+                        "method": "Target.detachFromTarget",
+                        "params": { "targetId": "TID-shared" },
+                    })
+                    .to_string(),
+                ),
+            )
+        else {
+            panic!("ambiguous target-id detach was not rejected");
+        };
+        assert_eq!(message["error"]["code"], json!(-32000));
+
+        let Some(CdpPreparedFrontendCommand::ImmediateResponse { message, .. }) = routing
+            .prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 21,
+                        "method": "Target.detachFromTarget",
+                        "params": { "sessionId": "SID-grandchild" },
+                    })
+                    .to_string(),
+                ),
+            )
+        else {
+            panic!("non-direct child session was accepted by the base Target handler");
+        };
+        assert_eq!(message["error"]["code"], json!(-32602));
+
+        let command = expect_prepared_command(
+            routing.prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 22,
+                        "method": "Target.detachFromTarget",
+                        "sessionId": "SID-child-1",
+                        "params": { "sessionId": "SID-grandchild" },
+                    })
+                    .to_string(),
+                ),
+            ),
+            "direct grandchild detach",
+        );
+        let command = serde_json::from_str::<Value>(command.json()).expect("detach command JSON");
+        assert_eq!(command["sessionId"], json!("SID-child-1"));
+        assert_eq!(command["params"]["sessionId"], json!("SID-grandchild"));
+    }
+
+    #[test]
+    fn attached_event_registers_child_before_attach_response() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
+            .expect("register browser frontend");
+        let attach = expect_prepared_command(
+            routing.prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 30,
+                        "method": "Target.attachToTarget",
+                        "params": { "targetId": "TID-child", "flatten": true },
+                    })
+                    .to_string(),
+                ),
+            ),
+            "attach",
+        );
+        let attach_internal_id = serde_json::from_str::<Value>(attach.json())
+            .expect("attach command JSON")["id"]
+            .as_u64()
+            .expect("attach internal id");
+
+        let (frontend, event) = routing
+            .route_message(
+                json!({
+                    "method": "Target.attachedToTarget",
+                    "sessionId": "SID-browser",
+                    "params": {
+                        "sessionId": "SID-child",
+                        "targetInfo": { "targetId": "TID-child", "type": "page" },
+                        "waitingForDebugger": false,
+                    },
+                }),
+                Some("SID-browser"),
+            )
+            .expect("route attached event");
+        assert_eq!(frontend.frontend_id(), 5);
+        assert!(event.get("sessionId").is_none());
+        assert_eq!(event["params"]["sessionId"], json!("SID-child"));
+
+        let child_command = expect_prepared_command(
+            routing.prepare_command(
+                5,
+                parsed_command(
+                    json!({
+                        "id": 31,
+                        "method": "Runtime.evaluate",
+                        "sessionId": "SID-child",
+                        "params": { "expression": "1" },
+                    })
+                    .to_string(),
+                ),
+            ),
+            "event-registered child",
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(child_command.json()).expect("child command JSON")["sessionId"],
+            json!("SID-child")
+        );
+
+        let (_, response) = routing
+            .route_message(
+                json!({
+                    "id": attach_internal_id,
+                    "result": { "sessionId": "SID-child" },
+                    "sessionId": "SID-browser",
+                }),
+                Some("SID-browser"),
+            )
+            .expect("route attach response");
+        assert_eq!(response["id"], json!(30));
+        assert!(response.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn browser_frontend_hides_base_session_on_wire() {
+        let mut routing = CdpFrontendRoutingState::default();
+        routing
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
 
         let command = expect_prepared_command(
@@ -688,7 +1290,7 @@ mod tests {
         );
         let command_json =
             serde_json::from_str::<Value>(command.json()).expect("prepared command JSON");
-        assert!(command_json.get("sessionId").is_none());
+        assert_eq!(command_json["sessionId"], json!("SID-browser"));
         let internal_id = command_json["id"].as_u64().expect("internal id");
 
         let (_, response) = routing
@@ -696,8 +1298,9 @@ mod tests {
                 json!({
                     "id": internal_id,
                     "result": {},
+                    "sessionId": "SID-browser",
                 }),
-                None,
+                Some("SID-browser"),
             )
             .expect("route browser response");
         assert_eq!(response["id"], json!(9));
@@ -732,7 +1335,7 @@ mod tests {
     fn malformed_command_keeps_its_originating_frontend() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
         routing
             .register_page_frontend(10, "TID-1".to_owned(), "SID-page".to_owned(), test_sink())
@@ -755,7 +1358,7 @@ mod tests {
     fn structurally_invalid_command_preserves_frontend_id_in_invalid_request() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
 
         let Some(CdpPreparedFrontendCommand::ImmediateResponse {
@@ -783,12 +1386,17 @@ mod tests {
     fn private_page_session_detach_does_not_fall_back_to_browser_frontend() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
         routing
             .register_page_frontend(10, "TID-1".to_owned(), "SID-page".to_owned(), test_sink())
             .expect("register page frontend");
-        routing.register_child_session(5, None, "SID-browser-child");
+        routing.register_child_session(
+            5,
+            Some("SID-browser"),
+            "SID-browser-child",
+            Some("TID-root"),
+        );
 
         assert!(
             routing
@@ -810,12 +1418,13 @@ mod tests {
             .route_message(
                 json!({
                     "method": "Target.detachedFromTarget",
+                    "sessionId": "SID-browser",
                     "params": {
                         "targetId": "TID-root",
                         "sessionId": "SID-browser-child",
                     },
                 }),
-                None,
+                Some("SID-browser"),
             )
             .expect("route browser-owned target detach");
         assert_eq!(frontend.frontend_id, 5);
@@ -935,7 +1544,7 @@ mod tests {
         let (root_sink, mut root_writer) = CdpSocketSink::with_stalled_writer_for_test(2);
         let (page_sink, mut page_writer) = CdpSocketSink::with_stalled_writer_for_test(2);
         router
-            .register_browser_frontend(5, root_sink)
+            .register_browser_frontend(5, "SID-browser".to_owned(), root_sink)
             .expect("register browser frontend");
         router
             .register_page_frontend(10, "TID-page".to_owned(), "SID-page".to_owned(), page_sink)
@@ -945,6 +1554,7 @@ mod tests {
             router.enqueue_protocol_output_sequence(ProtocolOutputSequence::from_messages(vec![
                 json!({
                     "method": "Target.targetCreated",
+                    "sessionId": "SID-browser",
                     "params": { "targetInfo": { "targetId": "TID-root" } },
                 }),
                 json!({
@@ -967,27 +1577,29 @@ mod tests {
     }
 
     #[test]
-    fn second_browser_frontend_is_rejected_without_replacing_first() {
+    fn browser_frontends_register_with_independent_base_sessions() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser-1".to_owned(), test_sink())
             .expect("register first browser frontend");
-
-        assert_eq!(
-            routing
-                .register_browser_frontend(6, test_sink())
-                .expect_err("reject second browser frontend"),
-            "CDP owner already has a browser frontend"
-        );
+        routing
+            .register_browser_frontend(6, "SID-browser-2".to_owned(), test_sink())
+            .expect("register second browser frontend");
         assert!(routing.frontend_by_id(5).is_some());
-        assert!(routing.frontend_by_id(6).is_none());
+        assert!(routing.frontend_by_id(6).is_some());
+        assert_eq!(
+            routing.unregister_browser_frontend(5).as_deref(),
+            Some("SID-browser-1")
+        );
+        assert!(routing.frontend_by_id(5).is_none());
+        assert!(routing.frontend_by_id(6).is_some());
     }
 
     #[test]
     fn private_control_session_events_do_not_reach_browser_frontend() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
         routing.register_private_session("SID-control".to_owned());
 
@@ -1034,7 +1646,7 @@ mod tests {
     fn orphaned_responses_and_unknown_session_events_do_not_fall_back_to_browser() {
         let mut routing = CdpFrontendRoutingState::default();
         routing
-            .register_browser_frontend(5, test_sink())
+            .register_browser_frontend(5, "SID-browser".to_owned(), test_sink())
             .expect("register browser frontend");
 
         assert!(

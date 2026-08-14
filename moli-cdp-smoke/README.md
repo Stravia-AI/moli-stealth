@@ -2,7 +2,7 @@
 
 This is a standalone CDP smoke project for moli. The default suite uses Playwright and raw CDP because those dependencies are managed by `uv`; the Puppeteer group uses the pinned `puppeteer-core` development dependency in this directory. Optional agent-browser, chrome-remote-interface, cdp-use, and Stagehand groups exercise their real published clients when the corresponding local dependencies are installed. High-value protocol contracts should also be mirrored as focused Rust tests near their owning `moli-protocol` boundary so they run under `cargo nextest`.
 
-The suite covers real CDP-client workflows: `connect_over_cdp`, multiple pages and contexts, navigation, history, `Page.setDocumentContent`, popup target creation, JavaScript dialog events, Network/Fetch routing, workers, WebSocket, file upload, downloads, locator/input flows, DOM/handle flows, Chromium-derived CDP protocol samples, Playwright-upstream-derived route/CDPSession samples, screenshots, `Page.printToPDF`, viewport, and storage/profile behavior. It is not a replacement for unit tests. Its job is to answer whether moli is usable as a Playwright/Puppeteer-style CDP endpoint.
+The suite covers real CDP-client workflows: `connect_over_cdp`, concurrent browser and direct-page clients, multiple pages and contexts, navigation, history, `Page.setDocumentContent`, popup target creation, JavaScript dialog events, Network/Fetch routing, workers, WebSocket, file upload, downloads, locator/input flows, DOM/handle flows, Chromium-derived CDP protocol samples, Playwright-upstream-derived route/CDPSession samples, screenshots, `Page.printToPDF`, viewport, and storage/profile behavior. It is not a replacement for unit tests. Its job is to answer whether moli is usable as a Playwright/Puppeteer-style CDP endpoint.
 
 ## Chromium Behavior Evidence
 
@@ -42,6 +42,23 @@ its earlier admission boundary, so the smoke records no pause as a hosted
 security contract rather than claiming identical interception placement. The
 local `~/chromium/src/out/Default/chrome` 147 binary remains unusable for this
 probe because its V8 snapshot does not match the executable.
+
+The default raw `multi-client` group was calibrated on 2026-08-14 against
+Debian `/usr/bin/chromium` 145.0.7632.116 and then run unchanged against Moli.
+The group covers 2-, 3-, and 7-client browser and direct-page WebSocket fan-out
+against one target. Every connection can reuse the same command ids without
+response crossover and observe the same target runtime through distinct
+sessions. For each connection, `Target.attachedToTarget` precedes its attach
+response and four-command bursts preserve both response order and runtime
+side-effect order; ordering between different WebSockets is intentionally
+unconstrained. Target discovery enabled on alternating browser connections does
+not leak to their peers, and subscribers observe `Target.targetCreated` before
+their attach event and response. Chromium rejects a foreign flattened session with
+`-32001` and a foreign
+`Target.detachFromTarget` session reference with `-32602`. Closing either kind
+of peer connection leaves the other client's root and target sessions usable.
+The final matrix passed five consecutive runs against one Chromium process and
+ten runs against freshly started Moli processes.
 
 The default `xhr-sync-semantics` group was calibrated on 2026-08-09 against the
 same executable Chromium and then run unchanged against Moli. It ports 14
@@ -83,6 +100,12 @@ Covered well:
 - Optional Stagehand 3.7.0 deterministic coverage for explicit CDP binding, navigation/evaluate, locator fill, attached-state waiting, shadow piercing, multiple pages and storage ownership, history, frame registry/deep locators, Network extra headers plus page fetch, and the declared position-click boundary. LLM `act`/`extract`/`observe` and a route API are not part of this group.
 - Optional agent-browser CLI coverage for explicit CDP binding identity, navigation/read/evaluate, fill and keyboard input, media override, Network route/request observation, tab lifecycle, trace/profiler transport, and the declared position-click boundary. The group uses a unique daemon namespace and an empty config so it cannot silently attach to or launch a different browser.
 - CDP discovery and `chromium.connect_over_cdp()`.
+- Concurrent 2-, 3-, and 7-client raw browser and direct-page WebSocket fan-out
+  against the same target, including colliding per-client command ids, distinct
+  session ids, alternating discovery subscriptions, attach-event-before-response
+  ordering, four-command per-client FIFO bursts, shared target state without
+  response/event crossover, foreign flattened and legacy session rejection,
+  and staged peer-disconnect isolation.
 - Raw CDP websocket command flow for `Runtime.evaluate(awaitPromise=true)` resolving page `fetch()`, timer-triggered `fetch()`, and WebSocket echo work without any follow-up client command; emitted `Runtime.executionContextCreated.uniqueId` round-tripping through DevTools-shaped `Runtime.evaluate` and `Runtime.callFunctionOn`; Chromium-calibrated pre-commit navigation suspension where DOM/Runtime/Debugger main-thread commands wait while `Performance.getMetrics`, `Runtime.terminateExecution`, and browser commands remain dispatchable; `Debugger.pause` responding before `Debugger.paused`, interrupting an in-flight `Runtime.evaluate`, and resuming that evaluation; commands queued behind a winning `Debugger.resume` completing through normal owner dispatch rather than synthetic cancellation; deterministic nested-function `Debugger.stepOut` response/resumed/caller-pause ordering; browser-global Tracing ownership across independent browser/page WebSocket frontends, including exactly one response for a synchronously completed start and the stop-before-start-ack `end response -> start error -> data -> complete` sequence; shared worker target discovery through `Target.getTargets`, worker-session `Runtime.executionContextCreated` / console log replay, and `Profiler.enable` / `Profiler.start` / `Profiler.stop` through `Target.setAutoAttach`; plus Chromium-calibrated DedicatedWorker target creation/update/attach ordering, exact worker-isolate Runtime/Console routing, `Inspector.workerScriptLoaded`, terminate, and owner-navigation cleanup.
 - The focused raw `agent-episode` group copies the recorded RL
   `Runtime.evaluate(awaitPromise=true)` observe/fill/click path. It requires the
@@ -184,6 +207,9 @@ Runner layout:
 - `assertions.py`, `helpers.py`, `state.py`, `config.py`: shared runner utilities and state.
 - `groups/core.py`: discovery-adjacent page workflows: navigation, iframe, wait, cookies, redirects, and history.
 - `groups/protocol.py`: raw CDP protocol workflows that intentionally avoid Playwright helper commands, including shared worker target discovery, Runtime context/log replay, the Chromium/V8 `Debugger.pause` response-event-resume and nested-function `Debugger.stepOut` resume/re-pause sequences, and profiler session state.
+- `groups/multi_client.py`: Chromium-calibrated 2/3/7-client browser/direct-page
+  WebSocket routing, session ownership, command-id collision, per-client FIFO,
+  attach event/response ordering, and staged disconnect isolation contracts.
 - `groups/agent_episode.py`: short raw-CDP RL-shaped observation/action,
   response/realm ordering, and failed-navigation error-Document contract.
 - `groups/fetch_runtime_teardown.py`: holds an exact module-fetch lease while CDP disposes its BrowserContext, then verifies that callback-thread cancellation, browser commands, and a replacement context survive teardown.
@@ -247,6 +273,7 @@ Run a focused subset while developing a CDP area:
 
 ```bash
 uv run moli-cdp-smoke --group protocol --group network
+uv run moli-cdp-smoke --group multi-client
 uv run moli-cdp-smoke --group layout-screenshot
 uv run moli-cdp-smoke --group pdf
 uv run moli-cdp-smoke --group agent-episode

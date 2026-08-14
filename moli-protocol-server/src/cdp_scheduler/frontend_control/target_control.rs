@@ -1,3 +1,4 @@
+use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
 use crate::cdp_frontend_router::CdpFrontendRouter;
@@ -26,7 +27,7 @@ impl CdpFrontendTargetControl {
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
         target_id: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String> {
         let control_session_id = self
             .ensure_page_control_session(scheduler, frontend_router)
             .await?;
@@ -41,47 +42,53 @@ impl CdpFrontendTargetControl {
             .await?;
         let session_id = response["result"]["sessionId"]
             .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| format!("CDP target {target_id} did not return an attach session"))?;
+            .with_context(|| format!("CDP target {target_id} did not return an attach session"))?
+            .to_owned();
         if target_id == scheduler.conn.default_target_id() {
             self.default_target_materialized = true;
         }
         Ok(session_id)
     }
 
-    pub(super) async fn prepare_browser_frontend(
+    pub(super) async fn attach_browser(
         &mut self,
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
-    ) -> Result<(), String> {
+    ) -> Result<String> {
         self.ensure_default_target_is_materialized(scheduler, frontend_router)
-            .await
+            .await?;
+        let response = self
+            .execute_command(
+                scheduler,
+                frontend_router,
+                None,
+                "Target.attachToBrowserTarget",
+                json!({}),
+            )
+            .await?;
+        response["result"]["sessionId"]
+            .as_str()
+            .map(str::to_owned)
+            .context("CDP browser frontend did not return an attach session")
     }
 
-    pub(super) async fn detach_page(
+    pub(super) async fn detach_frontend_session(
         &mut self,
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
         session_id: &str,
     ) {
-        let Some(control_session_id) = self.page_control_session_id.clone() else {
-            return;
-        };
         if let Err(error) = self
             .execute_command(
                 scheduler,
                 frontend_router,
-                Some(&control_session_id),
+                None,
                 "Target.detachFromTarget",
                 json!({ "sessionId": session_id }),
             )
             .await
         {
-            tracing::debug!(
-                session_id,
-                error,
-                "failed to detach CDP page frontend session"
-            );
+            tracing::debug!(session_id, ?error, "failed to detach CDP frontend session");
         }
     }
 
@@ -90,7 +97,7 @@ impl CdpFrontendTargetControl {
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
         target_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.execute_command(
             scheduler,
             frontend_router,
@@ -107,7 +114,7 @@ impl CdpFrontendTargetControl {
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
         target_url: &str,
-    ) -> Result<String, String> {
+    ) -> Result<String> {
         self.ensure_default_target_is_materialized(scheduler, frontend_router)
             .await?;
         let response = self
@@ -122,7 +129,7 @@ impl CdpFrontendTargetControl {
         response["result"]["targetId"]
             .as_str()
             .map(str::to_owned)
-            .ok_or_else(|| "Target.createTarget returned no targetId".to_owned())
+            .context("Target.createTarget returned no targetId")
     }
 
     pub(super) async fn close_target(
@@ -130,7 +137,7 @@ impl CdpFrontendTargetControl {
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
         target_id: &str,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         let response = self
             .execute_command(
                 scheduler,
@@ -141,7 +148,7 @@ impl CdpFrontendTargetControl {
             )
             .await?;
         if response["result"]["success"].as_bool() == Some(false) {
-            return Err(format!("Target.closeTarget rejected target {target_id}"));
+            bail!("Target.closeTarget rejected target {target_id}");
         }
         Ok(())
     }
@@ -150,7 +157,7 @@ impl CdpFrontendTargetControl {
         &mut self,
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
-    ) -> Result<String, String> {
+    ) -> Result<String> {
         if let Some(control_session_id) = self.page_control_session_id.as_ref() {
             return Ok(control_session_id.clone());
         }
@@ -165,8 +172,8 @@ impl CdpFrontendTargetControl {
             .await?;
         let session_id = response["result"]["sessionId"]
             .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "CDP browser target did not return an attach session".to_owned())?;
+            .context("CDP browser target did not return an attach session")?
+            .to_owned();
         self.page_control_session_id = Some(session_id.clone());
         Ok(session_id)
     }
@@ -175,7 +182,7 @@ impl CdpFrontendTargetControl {
         &mut self,
         scheduler: &mut CdpScheduler,
         frontend_router: &CdpFrontendRouter,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         if self.default_target_materialized {
             return Ok(());
         }
@@ -197,8 +204,8 @@ impl CdpFrontendTargetControl {
             .await?;
         let reservation_session_id = response["result"]["sessionId"]
             .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| "default target reservation returned no sessionId".to_owned())?;
+            .context("default target reservation returned no sessionId")?
+            .to_owned();
         self.execute_command(
             scheduler,
             frontend_router,
@@ -218,7 +225,7 @@ impl CdpFrontendTargetControl {
         session_id: Option<&str>,
         method: &str,
         params: Value,
-    ) -> Result<Value, String> {
+    ) -> Result<Value> {
         let command_id = self.next_command_id;
         self.next_command_id = self.next_command_id.wrapping_sub(1);
         let mut command = json!({
@@ -270,14 +277,14 @@ impl CdpFrontendTargetControl {
     }
 }
 
-fn control_command_result(response: Option<Value>, method: &str) -> Result<Value, String> {
-    let response = response.ok_or_else(|| format!("{method} returned no response"))?;
+fn control_command_result(response: Option<Value>, method: &str) -> Result<Value> {
+    let response = response.with_context(|| format!("{method} returned no response"))?;
     if let Some(error) = response.get("error") {
-        return Err(error
+        let message = error
             .get("message")
             .and_then(Value::as_str)
-            .unwrap_or("CDP frontend control command failed")
-            .to_owned());
+            .unwrap_or("unknown protocol error");
+        bail!("CDP frontend control command {method} failed: {message}");
     }
     Ok(response)
 }

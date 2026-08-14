@@ -1,3 +1,4 @@
+use anyhow::{Context, Result, bail};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::cdp_writer::CdpSocketSink;
@@ -19,12 +20,12 @@ pub(crate) struct CdpFrontendEndpoint {
 pub(crate) enum CdpFrontendControlRequest {
     AttachBrowser {
         sink: CdpSocketSink,
-        completion_tx: oneshot::Sender<Result<u64, String>>,
+        completion_tx: oneshot::Sender<Result<u64>>,
     },
     AttachPage {
         target_id: String,
         sink: CdpSocketSink,
-        completion_tx: oneshot::Sender<Result<u64, String>>,
+        completion_tx: oneshot::Sender<Result<u64>>,
     },
     DetachBrowser {
         frontend_id: u64,
@@ -37,15 +38,15 @@ pub(crate) enum CdpFrontendControlRequest {
     },
     ActivateTarget {
         target_id: String,
-        completion_tx: oneshot::Sender<Result<(), String>>,
+        completion_tx: oneshot::Sender<Result<()>>,
     },
     CloseTarget {
         target_id: String,
-        completion_tx: oneshot::Sender<Result<(), String>>,
+        completion_tx: oneshot::Sender<Result<()>>,
     },
     CreateManagedTarget {
         target_url: String,
-        completion_tx: oneshot::Sender<Result<String, String>>,
+        completion_tx: oneshot::Sender<Result<String>>,
     },
     Shutdown,
 }
@@ -73,9 +74,9 @@ pub(crate) fn cdp_frontend_channel() -> (CdpFrontendEndpoint, CdpFrontendReceive
 }
 
 impl CdpFrontendEndpoint {
-    pub(crate) async fn attach_browser(&self, sink: CdpSocketSink) -> Result<u64, String> {
+    pub(crate) async fn attach_browser(&self, sink: CdpSocketSink) -> Result<u64> {
         if self.is_shutting_down() {
-            return Err("CDP owner is shutting down".to_owned());
+            bail!("CDP owner is shutting down");
         }
         let (completion_tx, completion_rx) = oneshot::channel();
         self.control_tx
@@ -83,22 +84,18 @@ impl CdpFrontendEndpoint {
                 sink,
                 completion_tx,
             })
-            .map_err(|_| "CDP owner is no longer available".to_owned())?;
+            .context("CDP owner is no longer available")?;
         tokio::select! {
             biased;
-            _ = self.wait_for_shutdown() => Err("CDP owner stopped before browser frontend attach".to_owned()),
+            _ = self.wait_for_shutdown() => bail!("CDP owner stopped before browser frontend attach"),
             completion = completion_rx => completion
-                .map_err(|_| "CDP owner stopped before browser frontend attach".to_owned())?,
+                .context("CDP owner stopped before browser frontend attach")?,
         }
     }
 
-    pub(crate) async fn attach_page(
-        &self,
-        target_id: String,
-        sink: CdpSocketSink,
-    ) -> Result<u64, String> {
+    pub(crate) async fn attach_page(&self, target_id: String, sink: CdpSocketSink) -> Result<u64> {
         if self.is_shutting_down() {
-            return Err("CDP target owner is shutting down".to_owned());
+            bail!("CDP target owner is shutting down");
         }
         let (completion_tx, completion_rx) = oneshot::channel();
         self.control_tx
@@ -107,12 +104,12 @@ impl CdpFrontendEndpoint {
                 sink,
                 completion_tx,
             })
-            .map_err(|_| "CDP target owner is no longer available".to_owned())?;
+            .context("CDP target owner is no longer available")?;
         tokio::select! {
             biased;
-            _ = self.wait_for_shutdown() => Err("CDP target owner stopped before page frontend attach".to_owned()),
+            _ = self.wait_for_shutdown() => bail!("CDP target owner stopped before page frontend attach"),
             completion = completion_rx => completion
-                .map_err(|_| "CDP target owner stopped before page frontend attach".to_owned())?,
+                .context("CDP target owner stopped before page frontend attach")?,
         }
     }
 
@@ -142,9 +139,9 @@ impl CdpFrontendEndpoint {
             .send(CdpFrontendControlRequest::TargetDestroyed { target_id });
     }
 
-    pub(crate) async fn activate_target(&self, target_id: String) -> Result<(), String> {
+    pub(crate) async fn activate_target(&self, target_id: String) -> Result<()> {
         if self.is_shutting_down() {
-            return Err("CDP target owner is shutting down".to_owned());
+            bail!("CDP target owner is shutting down");
         }
         let (completion_tx, completion_rx) = oneshot::channel();
         self.control_tx
@@ -152,18 +149,18 @@ impl CdpFrontendEndpoint {
                 target_id,
                 completion_tx,
             })
-            .map_err(|_| "CDP target owner is no longer available".to_owned())?;
+            .context("CDP target owner is no longer available")?;
         tokio::select! {
             biased;
-            _ = self.wait_for_shutdown() => Err("CDP target owner stopped before target activation".to_owned()),
+            _ = self.wait_for_shutdown() => bail!("CDP target owner stopped before target activation"),
             completion = completion_rx => completion
-                .map_err(|_| "CDP target owner stopped before target activation".to_owned())?,
+                .context("CDP target owner stopped before target activation")?,
         }
     }
 
-    pub(crate) async fn close_target(&self, target_id: String) -> Result<(), String> {
+    pub(crate) async fn close_target(&self, target_id: String) -> Result<()> {
         if self.is_shutting_down() {
-            return Err("CDP target owner is shutting down".to_owned());
+            bail!("CDP target owner is shutting down");
         }
         let (completion_tx, completion_rx) = oneshot::channel();
         self.control_tx
@@ -171,18 +168,18 @@ impl CdpFrontendEndpoint {
                 target_id,
                 completion_tx,
             })
-            .map_err(|_| "CDP target owner is no longer available".to_owned())?;
+            .context("CDP target owner is no longer available")?;
         tokio::select! {
             biased;
-            _ = self.wait_for_shutdown() => Err("CDP target owner stopped before target close".to_owned()),
+            _ = self.wait_for_shutdown() => bail!("CDP target owner stopped before target close"),
             completion = completion_rx => completion
-                .map_err(|_| "CDP target owner stopped before target close".to_owned())?,
+                .context("CDP target owner stopped before target close")?,
         }
     }
 
-    pub(crate) async fn create_managed_target(&self, target_url: String) -> Result<String, String> {
+    pub(crate) async fn create_managed_target(&self, target_url: String) -> Result<String> {
         if self.is_shutting_down() {
-            return Err("CDP target owner is shutting down".to_owned());
+            bail!("CDP target owner is shutting down");
         }
         let (completion_tx, completion_rx) = oneshot::channel();
         self.control_tx
@@ -190,12 +187,12 @@ impl CdpFrontendEndpoint {
                 target_url,
                 completion_tx,
             })
-            .map_err(|_| "CDP target owner is no longer available".to_owned())?;
+            .context("CDP target owner is no longer available")?;
         tokio::select! {
             biased;
-            _ = self.wait_for_shutdown() => Err("CDP target owner stopped before target creation".to_owned()),
+            _ = self.wait_for_shutdown() => bail!("CDP target owner stopped before target creation"),
             completion = completion_rx => completion
-                .map_err(|_| "CDP target owner stopped before target creation".to_owned())?,
+                .context("CDP target owner stopped before target creation")?,
         }
     }
 

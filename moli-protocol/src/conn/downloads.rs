@@ -556,16 +556,12 @@ impl CdpConnection {
             return Ok(None);
         };
 
-        let frame_id = self
-            .browser_context
-            .as_ref()
-            .and_then(|bc| bc.active_target_id_owned())
-            .unwrap_or_else(|| state.frame_id.clone());
-
         let (response_body, response_headers) = body_artifact.into_parts();
 
         Ok(Some(PreparedNavigationDownload {
-            frame_id,
+            // Navigation may complete after another frontend has changed the active target.
+            // The dispatch snapshot is the authority for the frame that initiated this download.
+            frame_id: state.frame_id.clone(),
             response_url: final_url,
             response_headers,
             response_body,

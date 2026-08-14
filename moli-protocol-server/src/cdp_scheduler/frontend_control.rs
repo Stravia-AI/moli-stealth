@@ -48,23 +48,41 @@ impl CdpFrontendControlState {
                 sink,
                 completion_tx,
             } => {
-                let result = self
+                let result = match self
                     .target_control
-                    .prepare_browser_frontend(scheduler, frontend_router)
+                    .attach_browser(scheduler, frontend_router)
                     .await
-                    .and_then(|()| {
+                {
+                    Ok(session_id) => {
                         let frontend_id = self.allocate_frontend_id();
-                        frontend_router
-                            .register_browser_frontend(frontend_id, sink)
-                            .map(|()| frontend_id)
-                    });
+                        match frontend_router.register_browser_frontend(
+                            frontend_id,
+                            session_id.clone(),
+                            sink,
+                        ) {
+                            Ok(()) => Ok(frontend_id),
+                            Err(error) => {
+                                self.target_control
+                                    .detach_frontend_session(
+                                        scheduler,
+                                        frontend_router,
+                                        &session_id,
+                                    )
+                                    .await;
+                                Err(error)
+                            }
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
                 match completion_tx.send(result) {
                     Ok(()) => {}
                     Err(Ok(frontend_id)) => {
-                        if frontend_router.unregister_browser_frontend(frontend_id) {
-                            scheduler
-                                .conn
-                                .release_root_target_frontend_state_async()
+                        if let Some(session_id) =
+                            frontend_router.unregister_browser_frontend(frontend_id)
+                        {
+                            self.target_control
+                                .detach_frontend_session(scheduler, frontend_router, &session_id)
                                 .await;
                         }
                         send_cookie_checkpoint(scheduler, owner_lifecycle);
@@ -94,7 +112,11 @@ impl CdpFrontendControlState {
                             Ok(()) => Ok(frontend_id),
                             Err(error) => {
                                 self.target_control
-                                    .detach_page(scheduler, frontend_router, &session_id)
+                                    .detach_frontend_session(
+                                        scheduler,
+                                        frontend_router,
+                                        &session_id,
+                                    )
                                     .await;
                                 Err(error)
                             }
@@ -109,7 +131,7 @@ impl CdpFrontendControlState {
                             frontend_router.unregister_page_frontend(frontend_id)
                         {
                             self.target_control
-                                .detach_page(scheduler, frontend_router, &session_id)
+                                .detach_frontend_session(scheduler, frontend_router, &session_id)
                                 .await;
                         }
                         send_cookie_checkpoint(scheduler, owner_lifecycle);
@@ -119,10 +141,9 @@ impl CdpFrontendControlState {
                 true
             }
             CdpFrontendControlRequest::DetachBrowser { frontend_id } => {
-                if frontend_router.unregister_browser_frontend(frontend_id) {
-                    scheduler
-                        .conn
-                        .release_root_target_frontend_state_async()
+                if let Some(session_id) = frontend_router.unregister_browser_frontend(frontend_id) {
+                    self.target_control
+                        .detach_frontend_session(scheduler, frontend_router, &session_id)
                         .await;
                     send_cookie_checkpoint(scheduler, owner_lifecycle);
                 }
@@ -131,7 +152,7 @@ impl CdpFrontendControlState {
             CdpFrontendControlRequest::DetachPage { frontend_id } => {
                 if let Some(session_id) = frontend_router.unregister_page_frontend(frontend_id) {
                     self.target_control
-                        .detach_page(scheduler, frontend_router, &session_id)
+                        .detach_frontend_session(scheduler, frontend_router, &session_id)
                         .await;
                     send_cookie_checkpoint(scheduler, owner_lifecycle);
                 }

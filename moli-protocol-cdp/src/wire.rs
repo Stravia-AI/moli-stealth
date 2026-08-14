@@ -147,6 +147,12 @@ impl CdpRequest {
         self.id = internal_command_id;
         self.session_id = dispatch_session_id.map(str::to_owned);
     }
+
+    fn rewrite_target_session_reference(&mut self, session_id: &str) {
+        self.params
+            .get_or_insert_default()
+            .insert("sessionId".to_owned(), Value::String(session_id.to_owned()));
+    }
 }
 
 /// Renderer access required by one parsed CDP command.
@@ -301,6 +307,21 @@ impl ParsedCdpCommand {
     ) -> serde_json::Result<Self> {
         self.request
             .rewrite_frontend_route(internal_command_id, dispatch_session_id);
+        self.json = serde_json::to_string(&self.request)?;
+        Ok(self)
+    }
+
+    /// Resolve a legacy Target-domain `params.targetId` route to its concrete
+    /// session before dispatch.
+    ///
+    /// Frontend adapters use this to preserve Chromium's per-client
+    /// `TargetHandler::FindSession` ownership boundary even though all socket
+    /// clients share one downstream protocol connection.
+    pub fn rewrite_target_session_reference(
+        mut self,
+        session_id: &str,
+    ) -> serde_json::Result<Self> {
+        self.request.rewrite_target_session_reference(session_id);
         self.json = serde_json::to_string(&self.request)?;
         Ok(self)
     }
@@ -847,6 +868,31 @@ mod tests {
                 "params": {"probe": true},
                 "sessionId": "dispatch-session",
                 "futureExtension": {"enabled": true},
+            })
+        );
+    }
+
+    #[test]
+    fn target_session_reference_rewrite_preserves_other_command_fields() {
+        let command = parse(
+            r#"{"id":14,"method":"Target.detachFromTarget","params":{"targetId":"TID-1"},"futureExtension":true}"#,
+        )
+        .rewrite_target_session_reference("SID-owned")
+        .expect("target session reference rewrite must serialize")
+        .rewrite_frontend_route(91, Some("SID-browser"))
+        .expect("frontend route rewrite must serialize");
+
+        assert_eq!(
+            serde_json::from_str::<Value>(command.json()).expect("rewritten dispatch JSON"),
+            serde_json::json!({
+                "id": 91,
+                "method": "Target.detachFromTarget",
+                "params": {
+                    "targetId": "TID-1",
+                    "sessionId": "SID-owned",
+                },
+                "sessionId": "SID-browser",
+                "futureExtension": true,
             })
         );
     }

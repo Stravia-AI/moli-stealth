@@ -46,6 +46,25 @@ async def discover_page_websocket_url(endpoint: str) -> str:
     raise RawCdpError(f"CDP target discovery response included no page websocket: {payload!r}")
 
 
+async def discover_target_websocket_url(endpoint: str, target_id: str) -> str:
+    targets_url = endpoint.rstrip("/") + "/json/list"
+    payload = await asyncio.to_thread(_read_json_url, targets_url)
+    if not isinstance(payload, list):
+        raise RawCdpError(f"CDP target discovery response was not a list: {payload!r}")
+    for target in payload:
+        if not isinstance(target, dict) or target.get("id") != target_id:
+            continue
+        websocket_url = target.get("webSocketDebuggerUrl")
+        if isinstance(websocket_url, str) and websocket_url:
+            return websocket_url
+        raise RawCdpError(
+            f"CDP target {target_id} did not include webSocketDebuggerUrl: {target!r}"
+        )
+    raise RawCdpError(
+        f"CDP target {target_id} was not present in discovery: {payload!r}"
+    )
+
+
 @dataclass
 class RawCdpClient:
     websocket: ClientConnection

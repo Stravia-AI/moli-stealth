@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use anyhow::Result;
 use moli_protocol::ParsedCdpCommand;
 use parking_lot::Mutex;
 use serde_json::Value;
@@ -44,11 +45,12 @@ impl CdpFrontendRouter {
     pub(crate) fn register_browser_frontend(
         &self,
         frontend_id: u64,
+        session_id: String,
         sink: CdpSocketSink,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.routing
             .lock()
-            .register_browser_frontend(frontend_id, sink)
+            .register_browser_frontend(frontend_id, session_id, sink)
     }
 
     pub(crate) fn register_page_frontend(
@@ -57,13 +59,13 @@ impl CdpFrontendRouter {
         target_id: String,
         session_id: String,
         sink: CdpSocketSink,
-    ) -> Result<(), String> {
+    ) -> Result<()> {
         self.routing
             .lock()
             .register_page_frontend(frontend_id, target_id, session_id, sink)
     }
 
-    pub(crate) fn unregister_browser_frontend(&self, frontend_id: u64) -> bool {
+    pub(crate) fn unregister_browser_frontend(&self, frontend_id: u64) -> Option<String> {
         self.routing.lock().unregister_browser_frontend(frontend_id)
     }
 

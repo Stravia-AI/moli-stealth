@@ -26,7 +26,7 @@ pub(super) async fn run_cdp_frontend_socket(
     let frontend_id = match frontend_id {
         Ok(frontend_id) => frontend_id,
         Err(error) => {
-            tracing::warn!(error, "failed to attach CDP WebSocket frontend");
+            tracing::warn!(?error, "failed to attach CDP WebSocket frontend");
             return false;
         }
     };
