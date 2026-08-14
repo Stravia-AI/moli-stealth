@@ -13,10 +13,10 @@ mod form;
 mod gradient;
 mod inline;
 mod intrinsic;
+mod layout_tree;
 mod list;
 mod normalize;
 mod normalize_source;
-mod output;
 mod paint;
 mod pass;
 mod positioned;
@@ -36,11 +36,7 @@ mod world;
 pub use builder::build_layout_world;
 pub use capture::{PaintCaptureRegion, PaintCaptureRequest, PaintCaptureSurface};
 pub use error::LayoutError;
-pub use normalize::{NormalizedBoxNode, NormalizedBoxTree, NormalizedFormattingContext};
-pub use normalize_source::{
-    NormalizedLayoutSourceNode, NormalizedLayoutSourceTree, normalize_layout_source,
-};
-pub use output::{
+pub use layout_tree::{
     FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, GeometryProvider, LayoutAnswers,
     LayoutBoxGeometry, LayoutBoxModel, LayoutCaretPosition, LayoutClipChainId, LayoutClipNode,
     LayoutCoordinateSpaceId, LayoutDocumentMetrics, LayoutElementMetrics, LayoutFlushReason,
@@ -50,6 +46,10 @@ pub use output::{
     LayoutRect, LayoutScrollContainerMetrics, LayoutScrollExtent, LayoutScrollIntoViewGeometry,
     LayoutSize, LayoutTransform2D, LayoutTreeRetentionMetrics, LayoutViewport,
     MAX_RETAINED_LAYOUT_BOXES, MAX_RETAINED_LAYOUT_FRAGMENTS, MAX_RETAINED_LAYOUT_TREE_BYTES,
+};
+pub use normalize::{NormalizedBoxNode, NormalizedBoxTree, NormalizedFormattingContext};
+pub use normalize_source::{
+    NormalizedLayoutSourceNode, NormalizedLayoutSourceTree, normalize_layout_source,
 };
 pub use pass::{
     EmbeddedFrameRenderer, LayoutPassRequest, ScreenshotLayoutRequest, build_layout_pass,

@@ -2,7 +2,7 @@ use std::{collections::HashMap, fmt::Debug, hash::Hash, time::Instant};
 
 use taffy::ResolveOrZero;
 
-use crate::output::LayoutCoordinateSpace;
+use crate::layout_tree::LayoutCoordinateSpace;
 use crate::stacking::{PaintOrderEvent, build_paint_order};
 use crate::{
     FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, LayoutAnonymousReason,
