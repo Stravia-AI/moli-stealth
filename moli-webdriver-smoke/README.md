@@ -35,12 +35,14 @@ liveness. The baseline was executed on 2026-08-09 with Debian Chromium
 - Classic navigation, current URL, title, page source, CSS/XPath element lookup and identity, element
   text/tag/displayed/enabled/rect/attribute/property/computed label/computed
   role, send keys, clear form controls with input/change events, file upload, click, execute script,
+  key actions whose handler performs a top-level Page replacement while the action request is completing,
   explicit screenshot unsupported errors, cookies, alerts, unhandled prompt behavior, window-scoped prompt
   switching, shadow roots, page-side SharedWorker probe without polluting window
   handles, `document.open()` replacement stale-element behavior, and headless window state surface.
 - WebDriver BiDi `session.status`, `session.new`, `browsingContext.create`,
   `session.subscribe`, `browsingContext.navigate`, DOMContentLoaded lifecycle
-  events, `input.performActions`, `input.releaseActions`, element-origin input
+  events, `input.performActions`, `input.releaseActions`, key actions that trigger a top-level Page
+  replacement and remain successful through the replacement lifecycle, element-origin input
   action routing without asserting layout hit-test effects, `input.setFiles`,
   `network.getData`, `browser.setDownloadBehavior`,
   `browsingContext.downloadWillBegin`/`downloadEnd`, `network.setCacheBehavior`,

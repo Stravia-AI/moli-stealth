@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import urllib.parse
@@ -192,6 +193,7 @@ async def run_dom_input_group(state: SmokeState) -> None:
     await run_locator_composition_workflows(state)
     await run_keyboard_editing_workflows(state)
     await run_cdp_control_key_name_workflow(state)
+    await run_cdp_input_navigation_replacement_workflows(state)
     await run_mouse_event_workflows(state)
     await run_fill_input_type_workflows(state)
     await run_check_input_workflows(state)
@@ -1028,6 +1030,98 @@ async def run_cdp_control_key_name_workflow(state: SmokeState) -> None:
         if session is not None:
             await session.detach()
         await page.close()
+
+
+async def run_cdp_input_navigation_replacement_workflows(state: SmokeState) -> None:
+    page = state.page
+    cdp = state.cdp
+
+    key_destination = f"{state.fixture}/plain?input-navigation=key"
+    await page.set_content(
+        f"""
+        <input id="navigation-field" autofocus>
+        <script>
+          const navigationField = document.getElementById("navigation-field");
+          navigationField.addEventListener("keydown", event => {{
+            if (event.key === "Enter") location.href = {json.dumps(key_destination)};
+          }});
+        </script>
+        """,
+        wait_until="domcontentloaded",
+    )
+    await page.focus("#navigation-field")
+    async with page.expect_navigation(
+        url=key_destination,
+        wait_until="domcontentloaded",
+        timeout=10_000,
+    ):
+        key_result = await asyncio.wait_for(
+            cdp.send(
+                "Input.dispatchKeyEvent",
+                {
+                    "type": "keyDown",
+                    "key": "Enter",
+                    "code": "Enter",
+                    "text": "",
+                    "unmodifiedText": "",
+                    "windowsVirtualKeyCode": 13,
+                    "nativeVirtualKeyCode": 13,
+                },
+            ),
+            timeout=5,
+        )
+    assert_equal(key_result, {}, "CDP key input response across Page replacement")
+    assert_equal(
+        await page.text_content("main"),
+        "plain ok",
+        "CDP key input replacement Page remains usable",
+    )
+
+    mouse_destination = f"{state.fixture}/plain?input-navigation=mouse"
+    await page.set_content(
+        f"""
+        <style>
+          body {{ margin: 0; }}
+          #navigation-button {{ position: fixed; left: 0; top: 0; width: 200px; height: 100px; }}
+        </style>
+        <button id="navigation-button">navigate</button>
+        <script>
+          document.getElementById("navigation-button").addEventListener("mousedown", () => {{
+            location.href = {json.dumps(mouse_destination)};
+          }});
+        </script>
+        """,
+        wait_until="domcontentloaded",
+    )
+    async with page.expect_navigation(
+        url=mouse_destination,
+        wait_until="domcontentloaded",
+        timeout=10_000,
+    ):
+        mouse_result = await asyncio.wait_for(
+            cdp.send(
+                "Input.dispatchMouseEvent",
+                {
+                    "type": "mousePressed",
+                    "x": 10,
+                    "y": 10,
+                    "button": "left",
+                    "buttons": 1,
+                    "clickCount": 1,
+                },
+            ),
+            timeout=5,
+        )
+    assert_equal(mouse_result, {}, "CDP mouse input response across Page replacement")
+    assert_equal(
+        await page.text_content("main"),
+        "plain ok",
+        "CDP mouse input replacement Page remains usable",
+    )
+    state.record(
+        "cdp_input_navigation_replacement_liveness",
+        {"methods": ["Input.dispatchKeyEvent", "Input.dispatchMouseEvent"]},
+    )
 
 
 async def run_mouse_event_workflows(state: SmokeState) -> None:

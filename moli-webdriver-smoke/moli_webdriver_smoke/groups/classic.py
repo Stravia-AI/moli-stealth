@@ -51,6 +51,29 @@ async def _wait_for_alert_text(
         return
 
 
+async def _wait_for_current_url(
+    client: ClassicClient,
+    session_id: str,
+    expected: str,
+    *,
+    timeout: float = 5.0,
+) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    observed: list[str] = []
+    while True:
+        actual = classic_value(client.get(f"/session/{session_id}/url"))
+        if actual == expected:
+            return
+        if not observed or observed[-1] != actual:
+            observed.append(actual)
+        if loop.time() >= deadline:
+            raise AssertionError(
+                f"timed out waiting for Classic URL {expected!r}; observed {observed!r}"
+            )
+        await asyncio.sleep(0.01)
+
+
 async def run_classic_group(
     endpoint: str,
     fixture: str,
@@ -86,6 +109,7 @@ def _classic_scenarios() -> tuple[tuple[str, ClassicScenario], ...]:
     return (
         ("classic_navigation_element_script", _run_navigation_element_script_smoke),
         ("classic_document_open_replacement_stale_element", _run_document_open_replacement_stale_element_smoke),
+        ("classic_input_navigation_replacement", _run_input_navigation_replacement_smoke),
         ("classic_clear_form", _run_clear_form_smoke),
         ("classic_file_upload", _run_file_upload_smoke),
         ("classic_alert_prompt", _run_alert_smoke),
@@ -444,6 +468,61 @@ async def _run_document_open_replacement_stale_element_smoke(
         "classic_document_open_replacement_stale_element",
         {"oldElementId": old_element_id, "newElementId": new_element_id},
     )
+
+
+async def _run_input_navigation_replacement_smoke(
+    client: ClassicClient,
+    fixture: str,
+    session_id: str,
+    results: list[dict[str, Any]],
+) -> None:
+    page_url = f"{fixture}/webdriver/input-navigation"
+    destination = f"{fixture}/webdriver/input-navigation-complete"
+    assert_equal(
+        client.post(f"/session/{session_id}/url", {"url": page_url}),
+        {"value": None},
+        "Classic input-navigation setup",
+    )
+
+    field = client.post(
+        f"/session/{session_id}/element",
+        {"using": "css selector", "value": "#navigation-field"},
+    )
+    field_id = classic_element_id(field)
+    assert_equal(
+        client.post(f"/session/{session_id}/element/{field_id}/click"),
+        {"value": None},
+        "Classic input-navigation focus",
+    )
+
+    actions = client.post(
+        f"/session/{session_id}/actions",
+        {
+            "actions": [
+                {
+                    "type": "key",
+                    "id": "navigation-keyboard",
+                    "actions": [{"type": "keyDown", "value": "\ue007"}],
+                }
+            ]
+        },
+    )
+    assert_equal(
+        actions,
+        {"value": None},
+        "Classic input action responds across Page replacement",
+    )
+    await _wait_for_current_url(client, session_id, destination)
+    assert_true(
+        "input navigation complete" in classic_value(client.get(f"/session/{session_id}/source")),
+        "Classic input action replacement Page remains usable",
+    )
+    assert_equal(
+        client.delete(f"/session/{session_id}/actions"),
+        {"value": None},
+        "Classic input action release after Page replacement",
+    )
+    record(results, "classic_input_navigation_replacement", {"url": destination})
 
 
 def _assert_classic_stale_element(action: Callable[[], Any], label: str) -> None:

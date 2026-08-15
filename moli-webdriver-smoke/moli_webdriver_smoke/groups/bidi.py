@@ -490,6 +490,83 @@ async def _run_bidi_input_smoke(
         )
         record(results, "bidi_input_set_files", {"context": context})
 
+    input_navigation_url = f"{fixture}/webdriver/input-navigation"
+    input_navigation_destination = f"{fixture}/webdriver/input-navigation-complete"
+    await _navigate_complete(
+        websocket,
+        20,
+        context,
+        input_navigation_url,
+        "BiDi input-navigation setup",
+    )
+    focus = await _evaluate_remote_value(
+        websocket,
+        21,
+        context,
+        "document.getElementById('navigation-field').focus(); document.activeElement.id",
+        "BiDi input-navigation focus",
+    )
+    assert_equal(focus["value"], "navigation-field", "BiDi input-navigation active element")
+
+    await _send(
+        websocket,
+        22,
+        "input.performActions",
+        {
+            "context": context,
+            "actions": [
+                {
+                    "type": "key",
+                    "id": "navigation-keyboard",
+                    "actions": [{"type": "keyDown", "value": "\ue007"}],
+                }
+            ],
+        },
+    )
+    action_messages = await asyncio.wait_for(_recv_until_id(websocket, 22), timeout=5)
+    action = action_messages[-1]
+    assert_equal(
+        action["type"],
+        "success",
+        f"BiDi input action responds across Page replacement: {action!r}",
+    )
+    assert_equal(action["result"], {}, "BiDi input-navigation action result")
+
+    lifecycle = _find_bidi_event(
+        action_messages,
+        "browsingContext.domContentLoaded",
+        lambda message: message.get("params", {}).get("url") == input_navigation_destination,
+    )
+    if lifecycle is None:
+        lifecycle = await _recv_until_bidi_event(
+            websocket,
+            "browsingContext.domContentLoaded",
+            "BiDi input-navigation DOMContentLoaded",
+            lambda message: message.get("params", {}).get("url") == input_navigation_destination,
+        )
+    assert_equal(
+        lifecycle["params"]["context"],
+        context,
+        "BiDi input-navigation lifecycle context",
+    )
+
+    await _send(websocket, 23, "input.releaseActions", {"context": context})
+    release = await _recv_success(websocket, 23, "BiDi input-navigation releaseActions")
+    assert_equal(release["result"], {}, "BiDi input-navigation release result")
+    marker = await _evaluate_remote_value(
+        websocket,
+        24,
+        context,
+        "document.getElementById('input-navigation-complete')?.textContent",
+        "BiDi input-navigation replacement marker",
+    )
+    assert_equal(
+        marker["value"],
+        "input navigation complete",
+        "BiDi input-navigation replacement Page remains usable",
+    )
+    record(results, "bidi_input_navigation_replacement", {"context": context})
+
 
 async def _run_bidi_network_get_data_smoke(
     websocket: Any, context: str, fixture: str, results: list[dict[str, Any]]

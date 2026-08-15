@@ -80,6 +80,12 @@ class FixtureServer:
                 if route == "/webdriver/actions":
                     self._send_html(self._actions_page())
                     return
+                if route == "/webdriver/input-navigation":
+                    self._send_html(self._input_navigation_page())
+                    return
+                if route == "/webdriver/input-navigation-complete":
+                    self._send_html(self._input_navigation_complete_page())
+                    return
                 if route == "/webdriver/form":
                     self._send_html(self._form_page())
                     return
@@ -274,6 +280,29 @@ class FixtureServer:
     root.innerHTML = '<span id="shadow-text" class="shadow-item">shadow ready</span><button id="shadow-button" class="shadow-item">Shadow</button>';
   </script>
 </body>
+</html>"""
+
+            @staticmethod
+            def _input_navigation_page() -> str:
+                return """<!doctype html>
+<html>
+<head><title>WebDriver Input Navigation</title></head>
+<body>
+  <input id="navigation-field" autofocus>
+  <script>
+    document.getElementById("navigation-field").addEventListener("keydown", event => {
+      if (event.key === "Enter") location.href = "/webdriver/input-navigation-complete";
+    });
+  </script>
+</body>
+</html>"""
+
+            @staticmethod
+            def _input_navigation_complete_page() -> str:
+                return """<!doctype html>
+<html>
+<head><title>WebDriver Input Navigation Complete</title></head>
+<body><main id="input-navigation-complete">input navigation complete</main></body>
 </html>"""
 
             @staticmethod
