@@ -32,15 +32,9 @@ const WAIT_UNTIL_TIMER_CALLBACK_ERROR_HTML: &str = "<!doctype html><html><body d
 const WAIT_UNTIL_INTERVAL_CALLBACK_ERROR_HTML: &str = "<!doctype html><html><body data-state=\"init\"><script>window.addEventListener('load', () => { let count = 0; const id = setInterval(() => { count += 1; document.body.setAttribute('data-interval-count', String(count)); if (count === 1) { document.body.setAttribute('data-interval-before-error', 'yes'); throw new Error('interval boom'); } clearInterval(id); document.body.setAttribute('data-interval-after-error', 'yes'); const main = document.createElement('main'); main.id = 'after-interval-error'; main.textContent = 'after-interval-error'; document.body.appendChild(main); }, 20); });</script></body></html>";
 const WAIT_UNTIL_TIMER_DRIVER_WRAPPER_TAMPER_HTML: &str = "<!doctype html><html><body data-state=\"init\"><script>document.body.setAttribute('data-public-timer-driver-exposed', String('__moliRunNextTimeout' in globalThis)); document.body.setAttribute('data-host-timer-driver-exposed', String('__moliHostRunNextTimeout' in globalThis)); globalThis.__moliRunNextTimeout = () => { throw new Error('tampered timer driver wrapper'); }; window.addEventListener('load', () => { setTimeout(() => { document.body.setAttribute('data-after-tamper', 'yes'); const main = document.createElement('main'); main.id = 'after-tamper'; main.textContent = 'after-tamper'; document.body.appendChild(main); }, 20); });</script></body></html>";
 const WAIT_UNTIL_OUTER_HTML_TAMPER_HTML: &str = "<!doctype html><html><body data-state=\"init\"><script>Object.defineProperty(document.documentElement, 'outerHTML', { configurable: true, get() { throw new Error('domstable must not read outerHTML'); } }); window.addEventListener('load', () => { setTimeout(() => { document.body.setAttribute('data-after-outerhtml-tamper', 'yes'); const main = document.createElement('main'); main.id = 'after-outerhtml-tamper'; main.textContent = 'after-outerhtml-tamper'; document.body.appendChild(main); }, 20); });</script></body></html>";
-// 50 ms interval (was 200 ms): the only caller of this fixture
-// (fetch_with_networkidle_times_out_with_periodic_interval_fetch) asserts
-// that the page *never* reaches network idle inside its 1200 ms test
-// deadline by keeping a periodic fetch in flight. The fetcher's idle
-// threshold is in the ~500 ms range, so a 200 ms interval has only a
-// ~2.5x safety margin — when the renderer's tokio thread is contended
-// the timer can easily stretch past 500 ms, the wait declares idle, and
-// the test sees `Ok` instead of the expected timeout error. 50 ms gives
-// a ~10x margin while still landing many fetches inside 1200 ms.
+// Keep activity frequent enough that network-idle cannot complete before the
+// best-effort timeout tests reach their deadline. The fetcher's idle threshold
+// is around 500 ms; a 50 ms interval leaves enough margin under nextest load.
 const WAIT_UNTIL_INTERVAL_FETCH_HTML: &str = "<!doctype html><html><body data-state=\"init\"><script>window.addEventListener('load', () => { setInterval(() => { fetch('/wait-until-data').then(() => { document.body.setAttribute('data-ping', String((Number(document.body.getAttribute('data-ping') || '0') + 1))); }); }, 50); });</script></body></html>";
 const WAIT_UNTIL_INTERVAL_DOM_MUTATION_HTML: &str = "<!doctype html><html><body data-state=\"init\"><main id=\"mutation-count\">0</main><script>window.addEventListener('load', () => { setInterval(() => { const count = Number(document.body.getAttribute('data-mutation-count') || '0') + 1; document.body.setAttribute('data-mutation-count', String(count)); document.getElementById('mutation-count').textContent = String(count); }, 50); });</script></body></html>";
 

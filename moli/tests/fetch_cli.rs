@@ -1915,6 +1915,47 @@ fn cli_domstable_waits_for_late_content() -> Result<()> {
 }
 
 #[test]
+fn cli_networkidle_timeout_logs_warning_and_returns_best_effort_output() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-interval-fetch");
+    let output = run_moli([
+        "moli",
+        "fetch",
+        "--log-level",
+        "warn",
+        "--http-no-proxy",
+        "*",
+        "--wait-until",
+        "networkidle",
+        "--timeout",
+        "1200",
+        "--dump",
+        "html",
+        &url,
+    ])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = clean_output(&output.stdout);
+    let stderr = clean_output(&output.stderr);
+    assert!(stdout.contains("data-ping="), "stdout={stdout}");
+    assert!(
+        stderr.contains("fetch readiness wait timed out; returning best-effort page"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("wait_until=NetworkIdle"), "stderr={stderr}");
+    assert!(stderr.contains("timeout_ms=1200"), "stderr={stderr}");
+    Ok(())
+}
+
+#[test]
 fn cli_domstable_waits_for_inflight_slow_fetch_content() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;

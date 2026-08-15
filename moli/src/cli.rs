@@ -119,7 +119,9 @@ pub struct FetchArgs {
     #[arg(long, value_parser = parse_response_json_path_arg)]
     pub wait_response_json: Option<ResponseJsonPathArg>,
 
-    #[arg(long, alias = "wait-ms", default_value_t = 30_000)]
+    /// Maximum wait time in milliseconds. Network-idle and DOM-stable fetches
+    /// return the current page with a warning when this deadline expires.
+    #[arg(long, alias = "wait-ms", default_value_t = 10_000)]
     pub timeout: u64,
 
     #[command(flatten)]

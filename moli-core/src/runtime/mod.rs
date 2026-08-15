@@ -59,6 +59,18 @@ fn wait_until_outer_timeout(wait_until: RenderedDomWaitUntil, timeout: Duration)
     }
 }
 
+fn is_fetch_readiness_timeout(error: &anyhow::Error, wait_until: RenderedDomWaitUntil) -> bool {
+    let expected = match wait_until {
+        RenderedDomWaitUntil::NetworkIdle => "timed out waiting for networkidle",
+        RenderedDomWaitUntil::DomStable => "timed out waiting for domstable",
+        RenderedDomWaitUntil::DomContentLoaded
+        | RenderedDomWaitUntil::Load
+        | RenderedDomWaitUntil::Done => return false,
+    };
+
+    error.chain().any(|cause| cause.to_string() == expected)
+}
+
 #[derive(Debug, Clone, Default)]
 struct AutomationController;
 
@@ -607,6 +619,47 @@ impl Browser {
             .await
     }
 
+    async fn wait_for_fetch_readiness(
+        &self,
+        page: &mut Page,
+        raw_url: &str,
+        wait: Option<(RenderedDomWaitUntil, Duration)>,
+    ) -> Result<()> {
+        let Some((wait_until, timeout)) = wait else {
+            return Ok(());
+        };
+        let result = match wait_until {
+            RenderedDomWaitUntil::NetworkIdle => {
+                page.wait_for_network_idle(&self.resource_request_client(), timeout)
+                    .await
+            }
+            RenderedDomWaitUntil::DomStable => {
+                page.wait_for_dom_stable(&self.resource_request_client(), timeout)
+                    .await
+            }
+            RenderedDomWaitUntil::DomContentLoaded
+            | RenderedDomWaitUntil::Load
+            | RenderedDomWaitUntil::Done => return Ok(()),
+        };
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) if is_fetch_readiness_timeout(&error, wait_until) => {
+                warn!(
+                    page_id = page.page_id(),
+                    url = %raw_url,
+                    final_url = %page.final_url(),
+                    wait_until = ?wait_until,
+                    timeout_ms = timeout.as_millis(),
+                    error = %error,
+                    "fetch readiness wait timed out; returning best-effort page"
+                );
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     async fn fetch_internal(
         &self,
         request: Request,
@@ -897,17 +950,8 @@ impl Browser {
             .await
             .with_context(|| anyhow!("failed to execute scripts for page `{raw_url}`"))?;
         let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
-        match wait {
-            Some((RenderedDomWaitUntil::NetworkIdle, timeout)) => {
-                page.wait_for_network_idle(&self.resource_request_client(), timeout)
-                    .await?;
-            }
-            Some((RenderedDomWaitUntil::DomStable, timeout)) => {
-                page.wait_for_dom_stable(&self.resource_request_client(), timeout)
-                    .await?;
-            }
-            _ => {}
-        }
+        self.wait_for_fetch_readiness(&mut page, raw_url, wait)
+            .await?;
         info!(
             page_id = page.page_id(),
             url = %page.requested_url(),
@@ -1027,17 +1071,8 @@ impl Browser {
             page_state,
             page_creation_artifacts,
         );
-        match wait {
-            Some((RenderedDomWaitUntil::NetworkIdle, timeout)) => {
-                page.wait_for_network_idle(&self.resource_request_client(), timeout)
-                    .await?;
-            }
-            Some((RenderedDomWaitUntil::DomStable, timeout)) => {
-                page.wait_for_dom_stable(&self.resource_request_client(), timeout)
-                    .await?;
-            }
-            _ => {}
-        }
+        self.wait_for_fetch_readiness(&mut page, raw_url, wait)
+            .await?;
         info!(
             page_id = page.page_id(),
             url = %page.requested_url(),

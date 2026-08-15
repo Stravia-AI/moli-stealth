@@ -1939,20 +1939,21 @@ async fn fetch_with_domstable_ignores_page_tampered_outer_html_getter() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_with_networkidle_times_out_when_quiet_window_cannot_complete() -> Result<()> {
+async fn fetch_with_networkidle_returns_best_effort_when_quiet_window_cannot_complete() -> Result<()>
+{
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
-    let error = browser
+    let page = browser
         .fetch_with_wait_until(
             &server.url("/wait-until-delayed-fetch"),
             RenderedDomWaitUntil::NetworkIdle,
             Duration::from_millis(100),
         )
-        .await
-        .unwrap_err();
+        .await?;
 
-    assert!(error.to_string().contains("timed out"));
+    let html = page.serialize_html_async().await?;
+    assert!(html.contains("data-state=\"init\""), "html={html}");
 
     server.shutdown().await;
     Ok(())
@@ -2012,24 +2013,45 @@ async fn fetch_with_networkidle_waits_for_later_activity_before_quiet_window() -
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_with_networkidle_times_out_with_periodic_interval_fetch() -> Result<()> {
+async fn fetch_with_networkidle_returns_best_effort_with_periodic_interval_fetch() -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
-    let error = browser
+    let page = browser
         .fetch_with_wait_until(
             &server.url("/wait-until-interval-fetch"),
             RenderedDomWaitUntil::NetworkIdle,
             Duration::from_millis(1200),
         )
-        .await
-        .unwrap_err();
+        .await?;
 
+    let html = page.serialize_html_async().await?;
     assert!(
-        error
-            .to_string()
-            .contains("timed out waiting for networkidle"),
-        "expected networkidle timeout, got: {error:#}"
+        html.contains("data-ping=") && html.contains("data-state=\"init\""),
+        "html={html}"
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_with_domstable_returns_best_effort_with_periodic_dom_mutation() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+
+    let page = browser
+        .fetch_with_wait_until(
+            &server.url("/wait-until-interval-dom-mutation"),
+            RenderedDomWaitUntil::DomStable,
+            Duration::from_millis(700),
+        )
+        .await?;
+
+    let html = page.serialize_html_async().await?;
+    assert!(
+        html.contains("data-mutation-count=") && html.contains("id=\"mutation-count\""),
+        "html={html}"
     );
 
     server.shutdown().await;

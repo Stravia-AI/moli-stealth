@@ -94,7 +94,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
             wait_response_url: None,
             wait_response_body: None,
             wait_response_json: None,
-            timeout: 30_000,
+            timeout: 10_000,
             common: CommonArgs {
                 insecure_disable_tls_host_verification: false,
                 obey_robots: true,
@@ -323,7 +323,7 @@ fn infers_fetch_mode_from_bare_url() {
             wait_response_url: None,
             wait_response_body: None,
             wait_response_json: None,
-            timeout: 30_000,
+            timeout: 10_000,
             common: CommonArgs::default(),
             url: "https://example.com".to_owned(),
         }))
@@ -358,7 +358,7 @@ fn infers_fetch_mode_from_fetch_only_flags_and_defaults_dump_to_html() {
             wait_response_url: None,
             wait_response_body: None,
             wait_response_json: None,
-            timeout: 30_000,
+            timeout: 10_000,
             common: CommonArgs::default(),
             url: "https://example.com".to_owned(),
         }))
@@ -397,7 +397,7 @@ fn infers_fetch_mode_from_header_flag() {
             wait_response_url: None,
             wait_response_body: None,
             wait_response_json: None,
-            timeout: 30_000,
+            timeout: 10_000,
             common: CommonArgs::default(),
             url: "https://example.com".to_owned(),
         }))
