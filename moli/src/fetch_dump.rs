@@ -16,87 +16,6 @@ use crate::{
     network_trace::{NetworkTraceConfigSummary, NetworkTraceOptions, render_network_trace},
 };
 
-const WPT_DUMP_SCRIPT: &str = r#"
-(() => {
-  const unavailable = (message) => JSON.stringify({
-    url: window.location.href,
-    status: 'Unavailable',
-    message,
-    summary: { total: 0, passed: 0, failed: 0, timeout: 0, notrun: 0, unsupported: 0 },
-    cases: []
-  }, null, 2);
-  const summarize = (cases) => ({
-    total: cases.length,
-    passed: cases.filter(c => c.status === 'Pass').length,
-    failed: cases.filter(c => c.status === 'Fail').length,
-    timeout: cases.filter(c => c.status === 'Timeout').length,
-    notrun: cases.filter(c => c.status === 'Not Run').length,
-    unsupported: cases.filter(c => c.status === 'Optional Feature Unsupported').length
-  });
-  const normalizeWptStatus = (status) => {
-    switch (status) {
-      case 'PASS':
-      case 'Pass':
-        return 'Pass';
-      case 'FAIL':
-      case 'Fail':
-        return 'Fail';
-      case 'TIMEOUT':
-      case 'Timeout':
-        return 'Timeout';
-      case 'NOTRUN':
-      case 'Not Run':
-        return 'Not Run';
-      case 'Optional Feature Unsupported':
-        return 'Optional Feature Unsupported';
-      default:
-        return status || 'Unknown';
-    }
-  };
-  const moliReport = window.__moliWptReport;
-  if (moliReport && typeof moliReport === 'object' && Array.isArray(moliReport.tests)) {
-    const cases = moliReport.tests.map(test => ({
-      name: String(test.name ?? ''),
-      status: normalizeWptStatus(test.status),
-      message: test.message || null
-    }));
-    return JSON.stringify({
-      url: window.location.href,
-      status: moliReport.status?.status ?? (moliReport.complete ? 'OK' : 'PENDING'),
-      message: moliReport.status?.message ?? null,
-      complete: moliReport.complete === true,
-      summary: summarize(cases),
-      cases
-    }, null, 2);
-  }
-  const statuses = ['Pass', 'Fail', 'Timeout', 'Not Run', 'Optional Feature Unsupported'];
-  const reportRef = globalThis.report;
-  if (!reportRef || typeof reportRef !== 'object' || !reportRef.cases) {
-    return unavailable('WPT report is unavailable');
-  }
-  const parse = (raw) => {
-    for (const status of statuses) {
-      const idx = raw.indexOf('|' + status);
-      if (idx !== -1) {
-        const name = raw.slice(0, idx);
-        const rest = raw.slice(idx + status.length + 1);
-        const message = rest.length > 0 && rest[0] === '|' ? rest.slice(1) : null;
-        return { name, status, message };
-      }
-    }
-    return { name: raw, status: 'Unknown', message: null };
-  };
-  const cases = Object.values(reportRef.cases).map(parse);
-  return JSON.stringify({
-    url: window.location.href,
-    status: reportRef.status ?? 'Unknown',
-    message: reportRef.message ?? null,
-    summary: summarize(cases),
-    cases
-  }, null, 2);
-})()
-"#;
-
 struct CapturedRaster {
     mime_type: String,
     width: u32,
@@ -152,7 +71,6 @@ pub fn render_raw_document_dump(
         DumpFormat::Markdown
         | DumpFormat::Screenshot
         | DumpFormat::Pdf
-        | DumpFormat::Wpt
         | DumpFormat::SemanticTree
         | DumpFormat::SemanticTreeText => {
             anyhow::bail!("raw non-HTML document output only supports --dump html or --dump json")
@@ -215,7 +133,6 @@ async fn render_page_dump_with_trace_config_async(
         }
         DumpFormat::SemanticTree => render_semantic_tree_dump_async(page).await,
         DumpFormat::SemanticTreeText => render_semantic_tree_text_dump_async(page).await,
-        DumpFormat::Wpt => render_wpt_dump_async(page).await,
     }
 }
 
@@ -413,17 +330,6 @@ async fn render_semantic_tree_text_dump_async(page: &mut Page) -> Result<String>
         render_semantic_node_text(root_id, &by_id, 0, &mut out);
     }
     Ok(out.trim_end().to_owned())
-}
-
-async fn render_wpt_dump_async(page: &mut Page) -> Result<String> {
-    let payload = page
-        .evaluate_runtime_expression_async(WPT_DUMP_SCRIPT)
-        .await?;
-    let rendered = payload
-        .get("value")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    Ok(format!("== WPT Results ==\n{rendered}"))
 }
 
 fn render_semantic_node_text(
@@ -756,67 +662,6 @@ mod tests {
 
         assert!(rendered.contains("data-moli-frame-url="));
         assert!(rendered.contains("child frame"));
-        http_server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn render_page_dump_async_renders_legacy_wpt_payload() -> Result<()> {
-        let (_browser, mut page, http_server) = load_page(
-            r#"<!doctype html><html><body><script>globalThis.report={status:"OK",cases:{caseOne:"alpha|Pass"}};</script></body></html>"#,
-        )
-        .await?;
-
-        let rendered = render_page_dump_async(
-            &mut page,
-            &FetchCommandConfig {
-                dump_mode: Some(DumpFormat::Wpt),
-                ..FetchCommandConfig::default()
-            },
-        )
-        .await?;
-
-        assert!(rendered.starts_with("== WPT Results ==\n"));
-        assert!(rendered.contains(r#""status": "OK""#));
-        assert!(rendered.contains(r#""name": "alpha""#));
-        http_server.abort();
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn render_page_dump_async_prefers_moli_wpt_report_payload() -> Result<()> {
-        let (_browser, mut page, http_server) = load_page(
-            r#"<!doctype html><html><body><script>
-            window.__moliWptReport={
-              complete:true,
-              status:{status:"OK",message:""},
-              tests:[
-                {name:"modern pass",status:"PASS",message:""},
-                {name:"modern fail",status:"FAIL",message:"expected true"}
-              ]
-            };
-            globalThis.report={status:"LEGACY",cases:{caseOne:"legacy|Pass"}};
-            </script></body></html>"#,
-        )
-        .await?;
-
-        let rendered = render_page_dump_async(
-            &mut page,
-            &FetchCommandConfig {
-                dump_mode: Some(DumpFormat::Wpt),
-                ..FetchCommandConfig::default()
-            },
-        )
-        .await?;
-
-        assert!(rendered.starts_with("== WPT Results ==\n"));
-        assert!(rendered.contains(r#""status": "OK""#));
-        assert!(rendered.contains(r#""complete": true"#));
-        assert!(rendered.contains(r#""name": "modern pass""#));
-        assert!(rendered.contains(r#""name": "modern fail""#));
-        assert!(rendered.contains(r#""passed": 1"#));
-        assert!(rendered.contains(r#""failed": 1"#));
-        assert!(!rendered.contains("legacy"));
         http_server.abort();
         Ok(())
     }

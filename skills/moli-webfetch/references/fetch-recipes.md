@@ -22,7 +22,6 @@
 | Diagnose requests | `--dump json --trace-network` | Adds the `network` object |
 | Capture the viewport | `--layout --dump screenshot` | Writes PNG bytes to stdout |
 | Capture a paginated document | `--layout --dump pdf` | Writes PDF bytes to stdout |
-| Run repository WPT workflows | `--dump wpt` | Emits Moli's WPT-oriented report |
 
 Raw non-HTML responses support only `html` and `json`.
 
@@ -50,7 +49,7 @@ a better completion signal:
 - `--wait-response-json <path=value>`: require a JSON field value. All supplied
   response criteria must match one response.
 - `--delay-ms <ms>`: use only when the site has no observable readiness signal.
-- `--timeout <ms>`: bound navigation and explicit waits; the default is 30000.
+- `--timeout <ms>`: bound navigation and explicit waits; the default is 10000.
 
 Examples:
 

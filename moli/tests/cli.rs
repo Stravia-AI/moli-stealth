@@ -56,12 +56,6 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
         "http,event",
         "--user-agent-suffix",
         "internal-tester",
-        "--web-bot-auth-key-file",
-        "/tmp/key.pem",
-        "--web-bot-auth-keyid",
-        "kid",
-        "--web-bot-auth-domain",
-        "example.com",
         "https://example.com",
     ]))
     .unwrap();
@@ -131,9 +125,6 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                 log_filter_scopes: Some("http,event".to_owned()),
                 user_agent: None,
                 user_agent_suffix: Some("internal-tester".to_owned()),
-                web_bot_auth_key_file: Some("/tmp/key.pem".to_owned()),
-                web_bot_auth_keyid: Some("kid".to_owned()),
-                web_bot_auth_domain: Some("example.com".to_owned()),
             },
             url: "https://example.com".to_owned(),
         }))
@@ -175,6 +166,19 @@ fn parses_json_dump_mode() {
 }
 
 #[test]
+fn rejects_removed_wpt_dump_mode() {
+    let result = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--dump",
+        "wpt",
+        "https://example.com",
+    ]));
+
+    assert!(result.is_err());
+}
+
+#[test]
 fn parses_binary_dump_modes_with_inferred_fetch_command() {
     for (value, expected) in [
         ("screenshot", DumpFormat::Screenshot),
@@ -196,32 +200,23 @@ fn parses_binary_dump_modes_with_inferred_fetch_command() {
 }
 
 #[test]
-fn app_config_rejects_unimplemented_web_bot_auth_flags() {
-    let cli = Cli::try_parse_from(normalize_args_for_compat([
-        "moli",
-        "fetch",
+fn rejects_removed_web_bot_auth_flags() {
+    for flag in [
         "--web-bot-auth-key-file",
-        "/tmp/key.pem",
         "--web-bot-auth-keyid",
-        "kid",
         "--web-bot-auth-domain",
-        "example.com",
-        "https://example.com",
-    ]))
-    .unwrap();
+    ] {
+        let error = Cli::try_parse_from(normalize_args_for_compat([
+            "moli",
+            "fetch",
+            flag,
+            "unused",
+            "https://example.com",
+        ]))
+        .unwrap_err();
 
-    let error = AppConfig::from_cli(&cli).unwrap_err().to_string();
-    assert!(
-        error.contains("web bot auth is not implemented yet"),
-        "error={error}"
-    );
-    assert!(error.contains("--web-bot-auth-key-file"), "error={error}");
-    assert!(error.contains("--web-bot-auth-keyid"), "error={error}");
-    assert!(error.contains("--web-bot-auth-domain"), "error={error}");
-    assert!(
-        error.contains("No request signing would be performed"),
-        "error={error}"
-    );
+        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    }
 }
 
 #[test]

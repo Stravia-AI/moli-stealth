@@ -183,7 +183,6 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
         .browser
         .fetch_mut()
         .set_tls_verify_host(!common.insecure_disable_tls_host_verification);
-    reject_unsupported_web_bot_auth(common)?;
 
     for source in &common.document_start_script {
         config.add_document_start_script(source.clone());
@@ -219,28 +218,6 @@ fn validate_http_host_resolve_entry(entry: &str) -> Result<()> {
     port.parse::<u16>()
         .with_context(|| format!("invalid --http-host-resolve port in `{entry}`"))?;
     Ok(())
-}
-
-fn reject_unsupported_web_bot_auth(common: &CommonArgs) -> Result<()> {
-    let mut flags = Vec::new();
-    if common.web_bot_auth_key_file.is_some() {
-        flags.push("--web-bot-auth-key-file");
-    }
-    if common.web_bot_auth_keyid.is_some() {
-        flags.push("--web-bot-auth-keyid");
-    }
-    if common.web_bot_auth_domain.is_some() {
-        flags.push("--web-bot-auth-domain");
-    }
-    if flags.is_empty() {
-        return Ok(());
-    }
-
-    bail!(
-        "web bot auth is not implemented yet; unsupported flag(s): {}. \
-         No request signing would be performed, so these flags now fail explicitly.",
-        flags.join(", ")
-    )
 }
 
 fn parse_block_cidrs(raw: Option<&str>) -> Vec<AnyIpCidr> {

@@ -41,7 +41,6 @@ const DUMP_MODES: &[&str] = &[
     "markdown",
     "screenshot",
     "pdf",
-    "wpt",
     "semantic_tree",
     "semantic_tree_text",
 ];
@@ -368,15 +367,6 @@ pub struct CommonArgs {
 
     #[arg(long)]
     pub user_agent_suffix: Option<String>,
-
-    #[arg(long)]
-    pub web_bot_auth_key_file: Option<String>,
-
-    #[arg(long)]
-    pub web_bot_auth_keyid: Option<String>,
-
-    #[arg(long)]
-    pub web_bot_auth_domain: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -423,7 +413,6 @@ pub enum DumpFormat {
     Markdown,
     Screenshot,
     Pdf,
-    Wpt,
     SemanticTree,
     SemanticTreeText,
 }
