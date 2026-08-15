@@ -244,21 +244,12 @@ pub(crate) fn outgoing_request_headers_for_url(
     outgoing
 }
 
-pub(crate) fn network_request_extra_info_for_url(
+pub(crate) fn network_request_extra_info_from_headers(
     config: &FetchConfig,
-    request: &Request,
-    request_url: &Url,
-    redirect_chain: &[RedirectInfo],
-    cookie_header: Option<&str>,
+    outgoing_headers: &[(String, String)],
     cookie_report: Option<&StoredCookieQueryReport>,
 ) -> NetworkRequestExtraInfo {
-    let mut headers = outgoing_request_headers_for_url(
-        config,
-        request,
-        request_url,
-        redirect_chain,
-        cookie_header,
-    );
+    let mut headers = outgoing_headers.to_vec();
     append_header_if_missing(&mut headers, "User-Agent", config.user_agent().to_owned());
     NetworkRequestExtraInfo {
         headers,
@@ -599,7 +590,7 @@ pub(crate) fn configure_easy<H: Handler>(
     cookie_header: Option<&str>,
     http_version: RequestHttpVersion,
     validation_headers: Option<Vec<(String, String)>>,
-) -> Result<()> {
+) -> Result<Vec<(String, String)>> {
     ensure_http_network_transport_url(request_url)?;
     enforce_request_target_policy(config, request_url)?;
     configure_curl_http_protocol_allowlist(easy)?;
@@ -712,17 +703,22 @@ pub(crate) fn configure_easy<H: Handler>(
     }
 
     let mut headers = List::new();
-    let outgoing_headers = outgoing_request_headers_for_url(
+    let mut outgoing_headers = outgoing_request_headers_for_url(
         config,
         request,
         request_url,
         redirect_chain,
         cookie_header,
     );
+    if let Some(web_bot_auth) = config.web_bot_auth() {
+        web_bot_auth
+            .append_request_headers(&mut outgoing_headers, &request.method, request_url)
+            .with_context(|| anyhow!("failed to sign web bot auth request for {request_url}"))?;
+    }
     let mut has_headers = false;
 
     let mut has_content_type_header = false;
-    for (name, value) in outgoing_headers {
+    for (name, value) in &outgoing_headers {
         has_content_type_header |= name.eq_ignore_ascii_case("content-type");
         let header_line = if value.is_empty() {
             format!("{name}:")
@@ -797,7 +793,7 @@ pub(crate) fn configure_easy<H: Handler>(
         }
     }
 
-    Ok(())
+    Ok(outgoing_headers)
 }
 
 pub(crate) fn configure_openssl_tls_context(

@@ -135,6 +135,12 @@ For a crawl rather than a single lookup:
 - Use `--http-proxy`, `--http-no-proxy`, or
   `--http-host-resolve HOST:PORT:ADDR` when required by the environment.
 - Use either `--user-agent` or `--user-agent-suffix`, not both.
+- Use `--web-bot-auth-key-file <PKCS8-PEM>` together with
+  `--web-bot-auth-domain <DOMAIN>` only when the user supplied an authorized
+  bot identity. The key remains local, and Moli signs HTTPS requests only.
+- Add `--web-bot-auth-keyid <THUMBPRINT>` to assert the derived JWK thumbprint.
+  Keep the default Cloudflare profile unless the receiver explicitly supports
+  `--web-bot-auth-profile ietf-01`.
 - Use `--document-start-script` or `--document-start-script-file` only when the
   task explicitly requires pre-navigation instrumentation.
 - Combine `--block-private-networks` with `--block-cidrs` for untrusted URL

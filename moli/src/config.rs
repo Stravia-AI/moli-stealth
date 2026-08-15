@@ -6,10 +6,13 @@ use moli_core::{
     page::{SubresourceJsonPathEquals, SubresourceResponseWaitCriteria},
     runtime::BrowserConfig,
 };
+use moli_fetch::{FetchConfig, WebBotAuthProfile, WebBotAuthSigner};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::cli::{Cli, Commands, CommonArgs, DumpFormat, LogFormat, StripOptions};
+use crate::cli::{
+    Cli, Commands, CommonArgs, DumpFormat, LogFormat, StripOptions, WebBotAuthProfileChoice,
+};
 use crate::network_trace::NetworkTraceConfigSummary;
 
 pub use moli_protocol_server::ServerConfig;
@@ -183,6 +186,7 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
         .browser
         .fetch_mut()
         .set_tls_verify_host(!common.insecure_disable_tls_host_verification);
+    configure_web_bot_auth(config.browser.fetch_mut(), common)?;
 
     for source in &common.document_start_script {
         config.add_document_start_script(source.clone());
@@ -196,6 +200,37 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
 
     config.fetch.log_format = common.log_format;
     config.fetch.log_filter_scopes = common.log_filter_scopes.clone();
+    Ok(())
+}
+
+fn configure_web_bot_auth(fetch: &mut FetchConfig, common: &CommonArgs) -> Result<()> {
+    let (key_file, domain) = match (
+        common.web_bot_auth_key_file.as_deref(),
+        common.web_bot_auth_domain.as_deref(),
+    ) {
+        (None, None) => {
+            if common.web_bot_auth_keyid.is_some() {
+                bail!("--web-bot-auth-keyid requires --web-bot-auth-key-file");
+            }
+            return Ok(());
+        }
+        (Some(_), None) => bail!("--web-bot-auth-key-file requires --web-bot-auth-domain"),
+        (None, Some(_)) => bail!("--web-bot-auth-domain requires --web-bot-auth-key-file"),
+        (Some(key_file), Some(domain)) => (key_file, domain),
+    };
+    let private_key_pem = std::fs::read(key_file)
+        .with_context(|| format!("failed to read Web Bot Auth private key `{key_file}`"))?;
+    let profile = match common.web_bot_auth_profile {
+        WebBotAuthProfileChoice::Cloudflare => WebBotAuthProfile::Cloudflare,
+        WebBotAuthProfileChoice::IetfDraft01 => WebBotAuthProfile::IetfDraft01,
+    };
+    let signer = WebBotAuthSigner::from_pem(
+        &private_key_pem,
+        domain,
+        common.web_bot_auth_keyid.as_deref(),
+        profile,
+    )?;
+    fetch.set_web_bot_auth(Some(signer));
     Ok(())
 }
 

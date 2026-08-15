@@ -32,6 +32,10 @@ const FETCH_INFER_FLAGS: &[&str] = &[
     "--disable-subframes",
     "--wait-ms",
     "--profile-dir",
+    "--web-bot-auth-key-file",
+    "--web-bot-auth-keyid",
+    "--web-bot-auth-domain",
+    "--web-bot-auth-profile",
 ];
 const SERVE_INFER_FLAGS: &[&str] = &["--host", "--port", "--timeout", "--layout"];
 const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve", "help", "version"];
@@ -367,6 +371,35 @@ pub struct CommonArgs {
 
     #[arg(long)]
     pub user_agent_suffix: Option<String>,
+
+    /// Unencrypted PKCS#8 Ed25519 private key used for Web Bot Auth signatures.
+    #[arg(long, value_name = "PATH", requires = "web_bot_auth_domain")]
+    pub web_bot_auth_key_file: Option<String>,
+
+    /// Assert the RFC 7638 JWK thumbprint derived from the Web Bot Auth key.
+    #[arg(long, value_name = "THUMBPRINT", requires = "web_bot_auth_key_file")]
+    pub web_bot_auth_keyid: Option<String>,
+
+    /// Operator domain publishing /.well-known/http-message-signatures-directory.
+    #[arg(long, value_name = "DOMAIN", requires = "web_bot_auth_key_file")]
+    pub web_bot_auth_domain: Option<String>,
+
+    /// Signature-Agent wire format. Cloudflare compatibility is the default.
+    #[arg(
+        long,
+        value_enum,
+        default_value = "cloudflare",
+        requires = "web_bot_auth_key_file"
+    )]
+    pub web_bot_auth_profile: WebBotAuthProfileChoice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum WebBotAuthProfileChoice {
+    #[default]
+    Cloudflare,
+    #[value(name = "ietf-01")]
+    IetfDraft01,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

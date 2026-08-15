@@ -43,6 +43,7 @@ pub(super) struct ScriptedHttps11Server {
     addr: std::net::SocketAddr,
     hits: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<String>>>,
+    request_heads: Arc<Mutex<Vec<String>>>,
     shutdown_tx: std_mpsc::Sender<()>,
     join_handle: Option<thread::JoinHandle<()>>,
 }
@@ -56,16 +57,19 @@ impl ScriptedHttps11Server {
         let addr = listener.local_addr().unwrap();
         let hits = Arc::new(AtomicUsize::new(0));
         let requests = Arc::new(Mutex::new(Vec::new()));
+        let request_heads = Arc::new(Mutex::new(Vec::new()));
         let (shutdown_tx, shutdown_rx) = std_mpsc::channel();
         let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
         let hits_for_thread = Arc::clone(&hits);
         let requests_for_thread = Arc::clone(&requests);
+        let request_heads_for_thread = Arc::clone(&request_heads);
         let join_handle = thread::spawn(move || {
             run_https11_server(
                 listener,
                 shutdown_rx,
                 hits_for_thread,
                 requests_for_thread,
+                request_heads_for_thread,
                 responses,
             );
         });
@@ -74,6 +78,7 @@ impl ScriptedHttps11Server {
             addr,
             hits,
             requests,
+            request_heads,
             shutdown_tx,
             join_handle: Some(join_handle),
         }
@@ -83,12 +88,21 @@ impl ScriptedHttps11Server {
         format!("https://{}/cache", self.addr)
     }
 
+    pub(super) fn url_path(&self, path: &str) -> String {
+        let path = path.strip_prefix('/').unwrap_or(path);
+        format!("https://{}/{}", self.addr, path)
+    }
+
     pub(super) fn hits(&self) -> usize {
         self.hits.load(Ordering::SeqCst)
     }
 
     pub(super) fn requests(&self) -> Vec<String> {
         self.requests.lock().clone()
+    }
+
+    pub(super) fn request_heads(&self) -> Vec<String> {
+        self.request_heads.lock().clone()
     }
 
     pub(super) fn shutdown(mut self) {
@@ -710,6 +724,7 @@ fn run_https11_server(
     shutdown_rx: std_mpsc::Receiver<()>,
     hits: Arc<AtomicUsize>,
     requests: Arc<Mutex<Vec<String>>>,
+    request_heads: Arc<Mutex<Vec<String>>>,
     responses: Arc<Mutex<VecDeque<ScriptedResponse>>>,
 ) {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -731,6 +746,7 @@ fn run_https11_server(
             let tls_acceptor = tls_acceptor.clone();
             let hits = Arc::clone(&hits);
             let requests = Arc::clone(&requests);
+            let request_heads = Arc::clone(&request_heads);
             let responses = Arc::clone(&responses);
             tokio::spawn(async move {
                 let Ok(mut stream) = tls_acceptor.accept(stream).await else {
@@ -751,6 +767,9 @@ fn run_https11_server(
                 if let Some(path) = request_path_from_head(&request) {
                     requests.lock().push(path);
                 }
+                request_heads
+                    .lock()
+                    .push(String::from_utf8_lossy(&request).into_owned());
                 let _ = hits.fetch_add(1, Ordering::SeqCst) + 1;
                 let response_spec = {
                     let mut responses = responses.lock();

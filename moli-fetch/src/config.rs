@@ -3,6 +3,8 @@ use std::num::NonZeroU32;
 use cidr::AnyIpCidr;
 use moli_browser_profile::{BrowserIdentityProfile, DEFAULT_ACCEPT_LANGUAGE};
 
+use crate::WebBotAuthSigner;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FetchConfig {
     browser_identity: BrowserIdentityProfile,
@@ -34,6 +36,7 @@ pub struct FetchConfig {
     block_private_networks: bool,
     block_cidrs: Vec<AnyIpCidr>,
     tls_verify_host: bool,
+    web_bot_auth: Option<WebBotAuthSigner>,
 }
 
 impl FetchConfig {
@@ -142,6 +145,14 @@ impl FetchConfig {
 
     pub fn set_tls_verify_host(&mut self, tls_verify_host: bool) {
         self.tls_verify_host = tls_verify_host;
+    }
+
+    pub fn web_bot_auth(&self) -> Option<&WebBotAuthSigner> {
+        self.web_bot_auth.as_ref()
+    }
+
+    pub fn set_web_bot_auth(&mut self, web_bot_auth: Option<WebBotAuthSigner>) {
+        self.web_bot_auth = web_bot_auth;
     }
 
     pub fn set_http_proxy(&mut self, http_proxy: Option<String>) {
@@ -274,6 +285,7 @@ impl Default for FetchConfig {
             block_private_networks: false,
             block_cidrs: Vec::new(),
             tls_verify_host: true,
+            web_bot_auth: None,
         }
     }
 }

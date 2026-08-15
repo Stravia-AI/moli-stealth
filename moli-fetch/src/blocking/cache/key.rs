@@ -19,6 +19,7 @@ pub(super) fn cache_store_and_key_for_request(
         || !request.method.eq_ignore_ascii_case("GET")
         || request.body.is_some()
         || request.auth().is_some()
+        || config.web_bot_auth().is_some()
         || !config.default_request_headers().is_empty()
         || !subresource_validation_allows_http_cache(request)
         || cookie_header.is_some()

@@ -23,6 +23,7 @@ moli-http-cache = { path = "../moli-http-cache" }
 moli-trace = { path = "../moli-trace" }
 moli-url = { path = "../moli-url" }
 moli-url-policy = { path = "../moli-url-policy" }
+moli-web-bot-auth = { path = "../moli-web-bot-auth" }
 moli-web-mime = { path = "../moli-web-mime" }
 parking_lot = "0.12"
 strum = { version = "0.28.0", features = ["derive"] }

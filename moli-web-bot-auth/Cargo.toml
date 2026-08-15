@@ -1,0 +1,18 @@
+[package]
+license.workspace = true
+name = "moli-web-bot-auth"
+version = "0.1.0"
+edition = "2024"
+description = "Web Bot Auth HTTP message signatures for Moli"
+
+[dependencies]
+anyhow = "1.0.100"
+base64 = "0.22"
+moli-crypto = { path = "../moli-crypto" }
+url = "2.5.7"
+
+[dev-dependencies]
+aws-lc-rs = { version = "1.16.2", default-features = false, features = ["aws-lc-sys"] }
+
+[lints]
+workspace = true

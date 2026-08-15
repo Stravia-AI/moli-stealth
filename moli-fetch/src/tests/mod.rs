@@ -8,6 +8,7 @@ use moli_browser_profile::DEFAULT_ACCEPT_LANGUAGE;
 use moli_cookie_jar::{NetworkCookieRequestContext, new_shared_browser_cookie_store};
 use moli_http_cache::{HttpCacheEntryMetadata, HttpCacheStore};
 use std::{
+    collections::BTreeSet,
     fs,
     io::Read,
     num::NonZeroU32,
@@ -28,7 +29,8 @@ use crate::{
     RequestAuthScheme, RequestAuthTarget, RequestCacheMode, RequestCredentialsMode, RequestMode,
     RequestRedirectMode, RequestResourceType, Response, ResponseBody, ResponseHead,
     ScriptFetchRequestMetadata, ScriptFetchSchedulerPriority, StreamingResponseCollector,
-    SubresourceRequestMetadata, http_cache_stats, runtime::FetchRuntimeOwner,
+    SubresourceRequestMetadata, WebBotAuthProfile, WebBotAuthSigner, http_cache_stats,
+    runtime::FetchRuntimeOwner,
 };
 
 use self::support::{
@@ -39,6 +41,19 @@ use self::support::{
 const ENV_PROXY_CHILD_TEST: &str = "MOLI_FETCH_ENV_PROXY_CHILD";
 const ENV_PROXY_URL: &str = "MOLI_FETCH_ENV_PROXY_URL";
 const TEST_HIGH_ENTROPY_CLIENT_HINTS: &str = "Sec-CH-UA-Full-Version, Sec-CH-UA-Full-Version-List, Sec-CH-UA-Arch, Sec-CH-UA-Bitness, Sec-CH-UA-Platform-Version, Sec-CH-UA-Model, Sec-CH-UA-WoW64";
+const RFC_9421_ED25519_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF\n\
+-----END PRIVATE KEY-----\n";
+
+fn test_web_bot_auth_signer() -> WebBotAuthSigner {
+    WebBotAuthSigner::from_pem(
+        RFC_9421_ED25519_PRIVATE_KEY.as_bytes(),
+        "bot.example",
+        Some("poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U"),
+        WebBotAuthProfile::Cloudflare,
+    )
+    .unwrap()
+}
 
 fn sample_response_head() -> ResponseHead {
     ResponseHead {
@@ -1188,6 +1203,172 @@ async fn fetch_raw_stream_treats_https11_switching_protocols_as_final_response()
     assert_eq!(server.hits(), 1);
     assert_eq!(server.requests(), ["/cache".to_owned()]);
     server.shutdown();
+    Ok(())
+}
+
+#[test]
+fn web_bot_auth_resigns_restarts_redirects_and_subresources() -> Result<()> {
+    let server = ScriptedHttps11Server::spawn(vec![
+        ScriptedResponse::status(403, "Challenge")
+            .with_header("Accept-CH", "Sec-CH-UA-Arch")
+            .with_header("Critical-CH", "Sec-CH-UA-Arch"),
+        ScriptedResponse::status(302, "Found").with_header("Location", "/final"),
+        ScriptedResponse::ok("final"),
+        ScriptedResponse::ok("asset"),
+    ]);
+    let mut config = FetchConfig::default();
+    config.set_tls_verify_host(false);
+    config.set_web_bot_auth(Some(test_web_bot_auth_signer()));
+    let client = FetchClient::new(&config, new_shared_browser_cookie_store());
+
+    let response = fetch_response_for_test(&client, Request::get(&server.url_path("/start"))?)?;
+    assert_eq!(response.body_text(), "final");
+    assert_eq!(response.redirect_chain.len(), 2);
+    assert_eq!(response.redirect_chain[0].status, 307);
+    assert_eq!(response.redirect_chain[1].status, 302);
+
+    let final_url = Url::parse(&server.url_path("/final"))?;
+    let subresource = Request::new(
+        "POST",
+        &server.url_path("/asset"),
+        Some("probe".to_owned()),
+        Vec::new(),
+    )?
+    .with_browser_request_metadata(BrowserRequestMetadata::Fetch)
+    .with_initiator_url(&final_url);
+    assert_eq!(
+        fetch_response_for_test(&client, subresource)?.body_text(),
+        "asset"
+    );
+
+    assert_eq!(
+        server.requests(),
+        [
+            "/start".to_owned(),
+            "/start".to_owned(),
+            "/final".to_owned(),
+            "/asset".to_owned(),
+        ]
+    );
+    let request_heads = server.request_heads();
+    assert_eq!(request_heads.len(), 4);
+    for request_head in &request_heads {
+        assert_eq!(
+            request_head_header_value(request_head, "Signature-Agent"),
+            Some("\"https://bot.example\"")
+        );
+        let signature_input = request_head_header_value(request_head, "Signature-Input")
+            .expect("signed request should include Signature-Input");
+        assert!(
+            signature_input.contains("(\"@authority\" \"@method\" \"@path\" \"signature-agent\")")
+        );
+        assert!(request_head_header_value(request_head, "Signature").is_some());
+    }
+    assert!(request_heads[3].starts_with("POST /asset HTTP/1.1\r\n"));
+
+    let nonces = request_heads
+        .iter()
+        .map(|request_head| {
+            nonce_from_signature_input(
+                request_head_header_value(request_head, "Signature-Input").unwrap(),
+            )
+            .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(nonces.len(), request_heads.len());
+
+    let restart = &response.redirect_chain[0];
+    assert_request_extra_signature_matches_wire(
+        &restart
+            .response_extra_info
+            .as_ref()
+            .expect("restart response extra info")
+            .request_extra_info,
+        &request_heads[0],
+    );
+    assert_request_extra_signature_matches_wire(
+        restart
+            .request_extra_info
+            .as_ref()
+            .expect("restarted request extra info"),
+        &request_heads[1],
+    );
+    let redirect = &response.redirect_chain[1];
+    assert_request_extra_signature_matches_wire(
+        &redirect
+            .response_extra_info
+            .as_ref()
+            .expect("redirect response extra info")
+            .request_extra_info,
+        &request_heads[1],
+    );
+    assert_request_extra_signature_matches_wire(
+        redirect
+            .request_extra_info
+            .as_ref()
+            .expect("redirect target request extra info"),
+        &request_heads[2],
+    );
+    assert_request_extra_signature_matches_wire(
+        response
+            .network_request_extra_info()
+            .expect("final request extra info"),
+        &request_heads[2],
+    );
+
+    server.shutdown();
+    Ok(())
+}
+
+#[test]
+fn web_bot_auth_is_not_sent_over_plain_http() -> Result<()> {
+    let server = ScriptedHttpServer::spawn(vec![ScriptedResponse::ok("plain")]);
+    let mut config = FetchConfig::default();
+    config.set_web_bot_auth(Some(test_web_bot_auth_signer()));
+
+    let response = fetch_with_config_for_test(&config, Request::get(&server.url())?)?;
+    assert_eq!(response.body_text(), "plain");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    for name in ["Signature-Agent", "Signature-Input", "Signature"] {
+        assert_eq!(request_head_header_value(&requests[0], name), None);
+    }
+
+    server.shutdown();
+    Ok(())
+}
+
+#[test]
+fn web_bot_auth_bypasses_shared_http_cache() -> Result<()> {
+    let cache_dir = unique_test_cache_dir();
+    let server = ScriptedHttps11Server::spawn(vec![
+        ScriptedResponse::ok("first").with_header("Cache-Control", "max-age=60"),
+        ScriptedResponse::ok("second").with_header("Cache-Control", "max-age=60"),
+    ]);
+    let mut config = FetchConfig::default();
+    config.set_tls_verify_host(false);
+    config.set_http_cache_dir(Some(cache_dir.display().to_string()));
+    config.set_web_bot_auth(Some(test_web_bot_auth_signer()));
+
+    let first = fetch_with_config_for_test(&config, Request::get(&server.url())?)?;
+    let second = fetch_with_config_for_test(&config, Request::get(&server.url())?)?;
+    assert_eq!(first.body_text(), "first");
+    assert_eq!(second.body_text(), "second");
+    assert!(!first.from_cache);
+    assert!(!second.from_cache);
+    assert_eq!(server.hits(), 2);
+    let request_heads = server.request_heads();
+    assert_ne!(
+        request_head_header_value(&request_heads[0], "Signature-Input"),
+        request_head_header_value(&request_heads[1], "Signature-Input")
+    );
+    assert!(
+        !cache_dir.exists() || fs::read_dir(&cache_dir)?.next().is_none(),
+        "authenticated responses must not enter the shared disk cache"
+    );
+
+    server.shutdown();
+    let _ = fs::remove_dir_all(cache_dir);
     Ok(())
 }
 
@@ -3614,6 +3795,34 @@ fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a s
         .iter()
         .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.as_str())
+}
+
+fn request_head_header_value<'a>(request_head: &'a str, name: &str) -> Option<&'a str> {
+    request_head.lines().skip(1).find_map(|line| {
+        let (header_name, value) = line.split_once(':')?;
+        header_name.eq_ignore_ascii_case(name).then(|| value.trim())
+    })
+}
+
+fn nonce_from_signature_input(signature_input: &str) -> &str {
+    signature_input
+        .split(";nonce=\"")
+        .nth(1)
+        .and_then(|value| value.split('"').next())
+        .expect("Signature-Input should contain a nonce parameter")
+}
+
+fn assert_request_extra_signature_matches_wire(
+    extra_info: &crate::NetworkRequestExtraInfo,
+    request_head: &str,
+) {
+    for name in ["Signature-Agent", "Signature-Input", "Signature"] {
+        assert_eq!(
+            header_value(&extra_info.headers, name),
+            request_head_header_value(request_head, name),
+            "network extra info and wire request differ for {name}"
+        );
+    }
 }
 
 #[test]

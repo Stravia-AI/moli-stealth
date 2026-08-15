@@ -1,15 +1,27 @@
 use clap::Parser;
-use std::{num::NonZeroU32, process::Command};
+use std::{
+    fs,
+    num::NonZeroU32,
+    path::PathBuf,
+    process::Command,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use moli::cli::{
     Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogFormat, LogLevel,
     RequestHeaderArg, ResponseJsonPathArg, ServeArgs, StripModeChoice, StripOptions,
-    normalize_args_for_compat,
+    WebBotAuthProfileChoice, normalize_args_for_compat,
 };
 use moli::config::AppConfig;
 use moli_browser_profile::BrowserProfilePaths;
 use moli_core::OptionalResourceFetchMask;
-use moli_fetch::FetchConfig;
+use moli_fetch::{FetchConfig, WebBotAuthProfile};
+
+const RFC_9421_ED25519_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\n\
+MC4CAQAwBQYDK2VwBCIEIJ+DYvh6SEqVTm50DFtMDoQikTmiCqirVv9mWG9qfSnF\n\
+-----END PRIVATE KEY-----\n";
+const RFC_9421_ED25519_KEYID: &str = "poqkLGiymh_W0uP6PZFw-dvez3QJT5SolqXBCW38r0U";
+static NEXT_TEMP_KEY_FILE: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn parses_explicit_fetch_command_with_compatibility_flags() {
@@ -125,6 +137,10 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                 log_filter_scopes: Some("http,event".to_owned()),
                 user_agent: None,
                 user_agent_suffix: Some("internal-tester".to_owned()),
+                web_bot_auth_key_file: None,
+                web_bot_auth_keyid: None,
+                web_bot_auth_domain: None,
+                web_bot_auth_profile: WebBotAuthProfileChoice::Cloudflare,
             },
             url: "https://example.com".to_owned(),
         }))
@@ -200,22 +216,79 @@ fn parses_binary_dump_modes_with_inferred_fetch_command() {
 }
 
 #[test]
-fn rejects_removed_web_bot_auth_flags() {
-    for flag in [
+fn parses_web_bot_auth_flags() {
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
         "--web-bot-auth-key-file",
+        "bot-key.pem",
         "--web-bot-auth-keyid",
+        RFC_9421_ED25519_KEYID,
         "--web-bot-auth-domain",
-    ] {
-        let error = Cli::try_parse_from(normalize_args_for_compat([
-            "moli",
-            "fetch",
-            flag,
-            "unused",
-            "https://example.com",
-        ]))
-        .unwrap_err();
+        "bot.example",
+        "--web-bot-auth-profile",
+        "ietf-01",
+        "https://example.com",
+    ]))
+    .unwrap();
 
-        assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
+    let Commands::Fetch(args) = cli.command else {
+        panic!("expected fetch command");
+    };
+    assert_eq!(
+        args.common.web_bot_auth_key_file.as_deref(),
+        Some("bot-key.pem")
+    );
+    assert_eq!(
+        args.common.web_bot_auth_keyid.as_deref(),
+        Some(RFC_9421_ED25519_KEYID)
+    );
+    assert_eq!(
+        args.common.web_bot_auth_domain.as_deref(),
+        Some("bot.example")
+    );
+    assert_eq!(
+        args.common.web_bot_auth_profile,
+        WebBotAuthProfileChoice::IetfDraft01
+    );
+}
+
+#[test]
+fn web_bot_auth_profile_default_does_not_enable_signing() {
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "https://example.com",
+    ]))
+    .unwrap();
+
+    let Commands::Fetch(args) = cli.command else {
+        panic!("expected fetch command");
+    };
+    assert_eq!(
+        args.common.web_bot_auth_profile,
+        WebBotAuthProfileChoice::Cloudflare
+    );
+    assert!(args.common.web_bot_auth_key_file.is_none());
+}
+
+#[test]
+fn web_bot_auth_flags_require_key_and_domain_together() {
+    for args in [
+        vec!["--web-bot-auth-key-file", "bot-key.pem"],
+        vec!["--web-bot-auth-domain", "bot.example"],
+        vec!["--web-bot-auth-keyid", RFC_9421_ED25519_KEYID],
+        vec!["--web-bot-auth-profile", "ietf-01"],
+    ] {
+        let mut command = vec!["moli", "fetch"];
+        command.extend(args);
+        command.push("https://example.com");
+        let error = Cli::try_parse_from(normalize_args_for_compat(command)).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }
 
@@ -551,6 +624,54 @@ fn app_config_uses_moli_user_agent_defaults() {
 }
 
 #[test]
+fn app_config_loads_and_validates_web_bot_auth_key() {
+    let key_file = write_temp_web_bot_auth_key();
+    let key_path_arg = key_file.path.to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--web-bot-auth-key-file",
+        key_path_arg.as_str(),
+        "--web-bot-auth-keyid",
+        RFC_9421_ED25519_KEYID,
+        "--web-bot-auth-domain",
+        "bot.example:8443",
+        "--web-bot-auth-profile",
+        "ietf-01",
+        "https://example.com",
+    ]))
+    .unwrap();
+
+    let config = AppConfig::from_cli(&cli).unwrap();
+    let signer = config.browser.fetch().web_bot_auth().unwrap();
+    assert_eq!(signer.keyid(), RFC_9421_ED25519_KEYID);
+    assert_eq!(signer.signature_agent_origin(), "https://bot.example:8443");
+    assert_eq!(signer.profile(), WebBotAuthProfile::IetfDraft01);
+}
+
+#[test]
+fn app_config_rejects_mismatched_web_bot_auth_keyid() {
+    let key_file = write_temp_web_bot_auth_key();
+    let key_path_arg = key_file.path.to_string_lossy().into_owned();
+    let cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--web-bot-auth-key-file",
+        key_path_arg.as_str(),
+        "--web-bot-auth-keyid",
+        "wrong-thumbprint",
+        "--web-bot-auth-domain",
+        "bot.example",
+        "https://example.com",
+    ]))
+    .unwrap();
+
+    let error = AppConfig::from_cli(&cli).unwrap_err().to_string();
+    assert!(error.contains("does not match the private key"));
+    assert!(error.contains(RFC_9421_ED25519_KEYID));
+}
+
+#[test]
 fn app_config_preserves_repeatable_request_headers() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
@@ -572,6 +693,26 @@ fn app_config_preserves_repeatable_request_headers() {
         ]
     );
     assert!(config.browser.fetch().default_request_headers().is_empty());
+}
+
+struct TempWebBotAuthKeyFile {
+    path: PathBuf,
+}
+
+impl Drop for TempWebBotAuthKeyFile {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn write_temp_web_bot_auth_key() -> TempWebBotAuthKeyFile {
+    let sequence = NEXT_TEMP_KEY_FILE.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "moli-web-bot-auth-{}-{sequence}.pem",
+        std::process::id()
+    ));
+    fs::write(&path, RFC_9421_ED25519_PRIVATE_KEY).unwrap();
+    TempWebBotAuthKeyFile { path }
 }
 
 #[test]

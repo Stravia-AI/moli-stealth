@@ -2221,6 +2221,7 @@ dependencies = [
  "moli-trace",
  "moli-url",
  "moli-url-policy",
+ "moli-web-bot-auth",
  "moli-web-mime",
  "openssl-sys",
  "parking_lot",
@@ -2823,6 +2824,17 @@ dependencies = [
  "moli-web-errors",
  "serde_json",
  "v8",
+]
+
+[[package]]
+name = "moli-web-bot-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "moli-crypto",
+ "url",
 ]
 
 [[package]]

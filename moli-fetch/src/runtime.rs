@@ -45,7 +45,7 @@ use crate::{
         cookie_access_report_for_request, cookie_header_from_report,
         finish_streaming_cached_response, load_cached_streaming_response_lookup,
         log_request_completion, merge_cached_not_modified_streaming_response_lookup,
-        network_request_extra_info_for_url, next_followed_redirect_url_from_parts,
+        network_request_extra_info_from_headers, next_followed_redirect_url_from_parts,
         remove_cached_response, response_headers_forbid_cache_storage, store_response_cookies,
         transfer_metrics_from_easy, validation_headers_for_cached_streaming_response_lookup,
     },
@@ -863,22 +863,6 @@ impl RuntimeOwner {
             &job.request,
             &job.current_url,
         );
-        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
-            network_request_extra_info_for_url(
-                &self.config,
-                &prepared_request.request,
-                &job.current_url,
-                &job.redirect_chain,
-                cookie_header.as_deref(),
-                request_cookie_report.as_ref(),
-            )
-        });
-        attach_next_request_extra_info(
-            &mut job.redirect_chain,
-            request_cookie_report.clone(),
-            request_extra_info.as_ref(),
-        );
-
         let mut easy = Easy2::new(FetchTransferHandler::new_buffered(ResponseCollector::new(
             Some(job.cancel_handle.clone()),
         )));
@@ -894,7 +878,7 @@ impl RuntimeOwner {
         ) {
             return Err((job.response_tx, error));
         }
-        if let Err(error) = configure_easy(
+        let outgoing_headers = match configure_easy(
             &mut easy,
             &self.config,
             &prepared_request.request,
@@ -909,8 +893,21 @@ impl RuntimeOwner {
         )
         .with_context(|| anyhow!("failed to configure curl request for {}", job.current_url))
         {
-            return Err((job.response_tx, error));
-        }
+            Ok(headers) => headers,
+            Err(error) => return Err((job.response_tx, error)),
+        };
+        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
+            network_request_extra_info_from_headers(
+                &self.config,
+                &outgoing_headers,
+                request_cookie_report.as_ref(),
+            )
+        });
+        attach_next_request_extra_info(
+            &mut job.redirect_chain,
+            request_cookie_report.clone(),
+            request_extra_info.as_ref(),
+        );
 
         let label = job.current_url.to_string();
         let dns_resolution = curl_dns_resolution(&self.config, &job.current_url);
@@ -995,16 +992,6 @@ impl RuntimeOwner {
             &job.request,
             &job.current_url,
         );
-        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
-            network_request_extra_info_for_url(
-                &self.config,
-                &prepared_request.request,
-                &job.current_url,
-                &job.redirect_chain,
-                cookie_header.as_deref(),
-                request_cookie_report.as_ref(),
-            )
-        });
         match load_cached_streaming_response_lookup(
             &self.config,
             &prepared_request.request,
@@ -1033,12 +1020,6 @@ impl RuntimeOwner {
             Err(error) => return Err((Box::new(job), None, error)),
         }
 
-        attach_next_request_extra_info(
-            &mut job.redirect_chain,
-            request_cookie_report.clone(),
-            request_extra_info.as_ref(),
-        );
-
         let mut easy = job.easy.take().unwrap_or_else(|| {
             Easy2::new(FetchTransferHandler::new_streaming(
                 StreamingResponseCollector::new(
@@ -1061,6 +1042,41 @@ impl RuntimeOwner {
             cookie_header.clone(),
         ));
 
+        if let Err(error) = configure_network_observation(
+            &mut easy,
+            &job.request,
+            request_cookie_report.as_ref(),
+            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
+        ) {
+            return Err((Box::new(job), Some(easy), error));
+        }
+        let outgoing_headers = match configure_easy(
+            &mut easy,
+            &self.config,
+            &prepared_request.request,
+            &job.current_url,
+            &job.redirect_chain,
+            cookie_header.as_deref(),
+            job.http_version,
+            None,
+        )
+        .with_context(|| anyhow!("failed to configure curl request for {}", job.current_url))
+        {
+            Ok(headers) => headers,
+            Err(error) => return Err((Box::new(job), Some(easy), error)),
+        };
+        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
+            network_request_extra_info_from_headers(
+                &self.config,
+                &outgoing_headers,
+                request_cookie_report.as_ref(),
+            )
+        });
+        attach_next_request_extra_info(
+            &mut job.redirect_chain,
+            request_cookie_report.clone(),
+            request_extra_info.as_ref(),
+        );
         let collector = easy
             .get_mut()
             .streaming_mut()
@@ -1076,28 +1092,6 @@ impl RuntimeOwner {
             cache_plan,
         );
         collector.set_client_hint_response_policy(prepared_request.response_policy);
-        if let Err(error) = configure_network_observation(
-            &mut easy,
-            &job.request,
-            request_cookie_report.as_ref(),
-            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
-        ) {
-            return Err((Box::new(job), Some(easy), error));
-        }
-        if let Err(error) = configure_easy(
-            &mut easy,
-            &self.config,
-            &prepared_request.request,
-            &job.current_url,
-            &job.redirect_chain,
-            cookie_header.as_deref(),
-            job.http_version,
-            None,
-        )
-        .with_context(|| anyhow!("failed to configure curl request for {}", job.current_url))
-        {
-            return Err((Box::new(job), Some(easy), error));
-        }
 
         let label = job.current_url.to_string();
         let dns_resolution = curl_dns_resolution(&self.config, &job.current_url);
@@ -1189,16 +1183,6 @@ impl RuntimeOwner {
             &job.request,
             &job.current_url,
         );
-        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
-            network_request_extra_info_for_url(
-                &self.config,
-                &prepared_request.request,
-                &job.current_url,
-                &job.redirect_chain,
-                cookie_header.as_deref(),
-                request_cookie_report.as_ref(),
-            )
-        });
         let mut stale_cached_lookup = None;
         match load_cached_streaming_response_lookup(
             &self.config,
@@ -1231,12 +1215,6 @@ impl RuntimeOwner {
             Err(error) => return Err((Box::new(job), None, error)),
         }
 
-        attach_next_request_extra_info(
-            &mut job.redirect_chain,
-            request_cookie_report.clone(),
-            request_extra_info.as_ref(),
-        );
-
         let mut easy = job.easy.take().unwrap_or_else(|| {
             Easy2::new(FetchTransferHandler::new_raw_streaming(
                 RawStreamingResponseCollector::new(
@@ -1258,6 +1236,43 @@ impl RuntimeOwner {
             job.current_url.clone(),
             cookie_header.clone(),
         ));
+        if let Err(error) = configure_network_observation(
+            &mut easy,
+            &job.request,
+            request_cookie_report.as_ref(),
+            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
+        ) {
+            return Err((Box::new(job), Some(easy), error));
+        }
+        let outgoing_headers = match configure_easy(
+            &mut easy,
+            &self.config,
+            &prepared_request.request,
+            &job.current_url,
+            &job.redirect_chain,
+            cookie_header.as_deref(),
+            job.http_version,
+            stale_cached_lookup
+                .as_ref()
+                .map(validation_headers_for_cached_streaming_response_lookup),
+        )
+        .with_context(|| anyhow!("failed to configure curl request for {}", job.current_url))
+        {
+            Ok(headers) => headers,
+            Err(error) => return Err((Box::new(job), Some(easy), error)),
+        };
+        let request_extra_info = job.request.is_top_level_navigation_request().then(|| {
+            network_request_extra_info_from_headers(
+                &self.config,
+                &outgoing_headers,
+                request_cookie_report.as_ref(),
+            )
+        });
+        attach_next_request_extra_info(
+            &mut job.redirect_chain,
+            request_cookie_report.clone(),
+            request_extra_info.as_ref(),
+        );
         let collector = easy
             .get_mut()
             .raw_streaming_mut()
@@ -1274,30 +1289,6 @@ impl RuntimeOwner {
             stale_cached_lookup.is_some(),
         );
         collector.set_client_hint_response_policy(prepared_request.response_policy);
-        if let Err(error) = configure_network_observation(
-            &mut easy,
-            &job.request,
-            request_cookie_report.as_ref(),
-            self.config.http_proxy().is_some() && job.current_url.scheme() == "https",
-        ) {
-            return Err((Box::new(job), Some(easy), error));
-        }
-        if let Err(error) = configure_easy(
-            &mut easy,
-            &self.config,
-            &prepared_request.request,
-            &job.current_url,
-            &job.redirect_chain,
-            cookie_header.as_deref(),
-            job.http_version,
-            stale_cached_lookup
-                .as_ref()
-                .map(validation_headers_for_cached_streaming_response_lookup),
-        )
-        .with_context(|| anyhow!("failed to configure curl request for {}", job.current_url))
-        {
-            return Err((Box::new(job), Some(easy), error));
-        }
 
         let label = job.current_url.to_string();
         let dns_resolution = curl_dns_resolution(&self.config, &job.current_url);
