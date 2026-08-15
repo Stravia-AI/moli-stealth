@@ -37,6 +37,21 @@ binary, then use moli-webfetch to fetch https://example.com and show me the
 result.
 ```
 
+### Direct installation
+
+On Linux or macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+```
+
+On Windows, run in PowerShell:
+
+```powershell
+irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
+```
+
 ## Showcase
 
 <p align="center">
