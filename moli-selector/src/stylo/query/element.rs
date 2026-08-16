@@ -409,7 +409,7 @@ impl<'a> TElement for QueryElement<'a> {
     ) where
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
-        self.synthesize_svg_presentational_hints(hints);
+        self.synthesize_presentational_hints(hints);
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::parser::SelectorImpl>::BorrowedLocalName {

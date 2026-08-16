@@ -1566,11 +1566,11 @@ impl<'a> StyleElement<'a> {
         )
     }
 
-    fn synthesize_svg_presentational_hints<V>(&self, hints: &mut V)
+    fn synthesize_presentational_hints<V>(&self, hints: &mut V)
     where
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
-        self.as_query().synthesize_svg_presentational_hints(hints);
+        self.as_query().synthesize_presentational_hints(hints);
     }
 
     fn from_handle(state: &'a StyleDomState, handle: NodeId) -> Option<Self> {
@@ -2101,7 +2101,7 @@ impl<'a> TElement for StyleElement<'a> {
     ) where
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
-        self.synthesize_svg_presentational_hints(hints);
+        self.synthesize_presentational_hints(hints);
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::parser::SelectorImpl>::BorrowedLocalName {

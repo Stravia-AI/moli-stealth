@@ -157,6 +157,7 @@ pub(crate) enum StyleAttributeImpact {
     None,
     LayoutMetric,
     ComputedStyle,
+    DescendantComputedStyle,
     StylesheetLinkage,
     LayoutMetricAndStylesheetLinkage,
 }
@@ -168,6 +169,7 @@ impl StyleAttributeImpact {
             "style" | "class" | "id" => Self::ComputedStyle,
             "hidden" | "width" | "height" | "cols" | "rows" | "size" | "value" | "border"
             | "slot" | "align" => Self::LayoutMetric,
+            "cellpadding" => Self::DescendantComputedStyle,
             "href" | "rel" | "media" | "blocking" | "disabled" => Self::StylesheetLinkage,
             "type" => Self::LayoutMetricAndStylesheetLinkage,
             _ if moli_selector::is_svg_presentation_attribute_name(&name) => Self::LayoutMetric,
@@ -178,13 +180,16 @@ impl StyleAttributeImpact {
     pub(crate) fn affects_layout_metric(self) -> bool {
         matches!(
             self,
-            Self::LayoutMetric | Self::ComputedStyle | Self::LayoutMetricAndStylesheetLinkage
+            Self::LayoutMetric
+                | Self::ComputedStyle
+                | Self::DescendantComputedStyle
+                | Self::LayoutMetricAndStylesheetLinkage
         )
     }
 
     #[cfg(test)]
     pub(crate) fn changes_computed_style(self) -> bool {
-        matches!(self, Self::ComputedStyle)
+        matches!(self, Self::ComputedStyle | Self::DescendantComputedStyle)
     }
 
     #[cfg(test)]

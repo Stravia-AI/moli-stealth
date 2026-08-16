@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// SVG presentation-attribute synthesis is narrowly ported from
-// DioxusLabs/blitz packages/blitz-dom/src/stylo.rs. Keeping it in the Stylo
-// adapter lets the normal cascade, inheritance, and relative-length resolver
-// own the result instead of teaching layout about authored attribute strings.
+// Presentational hints belong at the Stylo adapter boundary. Keeping legacy
+// HTML attributes and SVG presentation attributes here lets the normal
+// cascade, inheritance, and relative-length resolver own the result instead
+// of teaching layout about authored attribute strings.
 
-use selectors::sink::Push;
+use selectors::{Element as SelectorsElement, sink::Push};
 use style::{
     applicable_declarations::ApplicableDeclarationBlock,
     context::QuirksMode,
@@ -16,7 +16,10 @@ use style::{
     rule_tree::{CascadeLevel, CascadeOrigin},
     servo_arc::Arc,
     stylesheets::{CssRuleType, Origin, UrlExtraData, layer_rule::LayerOrder},
-    values::specified::{LengthPercentage, NoCalcLength, NoCalcPercentage},
+    values::{
+        generics::NonNegative,
+        specified::{LengthPercentage, NoCalcLength, NoCalcPercentage},
+    },
 };
 use style_traits::ParsingMode;
 
@@ -24,6 +27,7 @@ use crate::dom::native::Element;
 
 use super::query::QueryElement;
 
+const HTML_NAMESPACE: &str = "http://www.w3.org/1999/xhtml";
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
 // Mirrors Blink's CSSPropertyIdForSVGAttributeName allowlist. These attributes
@@ -99,31 +103,35 @@ pub fn is_svg_presentation_attribute_name(name: &str) -> bool {
 }
 
 impl QueryElement<'_> {
-    pub(in crate::stylo) fn synthesize_svg_presentational_hints<V>(&self, hints: &mut V)
+    pub(in crate::stylo) fn synthesize_presentational_hints<V>(&self, hints: &mut V)
     where
         V: Push<ApplicableDeclarationBlock>,
     {
         let element = self.element();
-        if element.namespace() != SVG_NAMESPACE {
-            return;
-        }
-
         let mut block = PropertyDeclarationBlock::new();
-        if element.local_name() == "svg" {
-            append_root_svg_size_declarations(element, &mut block);
-        }
+        if element.namespace() == SVG_NAMESPACE {
+            if element.local_name() == "svg" {
+                append_root_svg_size_declarations(element, &mut block);
+            }
 
-        let base_url = self
-            .host()
-            .owner_document_handle(self.handle())
-            .and_then(|document| self.host().document_base_url_for_handle(document));
-        if let Some(base_url) = base_url {
-            append_svg_style_presentation_declarations(
-                element,
-                &UrlExtraData::from(base_url),
-                self.read_quirks_mode(),
-                &mut block,
-            );
+            let base_url = self
+                .host()
+                .owner_document_handle(self.handle())
+                .and_then(|document| self.host().document_base_url_for_handle(document));
+            if let Some(base_url) = base_url {
+                append_svg_style_presentation_declarations(
+                    element,
+                    &UrlExtraData::from(base_url),
+                    self.read_quirks_mode(),
+                    &mut block,
+                );
+            }
+        } else if element.namespace() == HTML_NAMESPACE
+            && matches!(element.local_name(), "td" | "th")
+        {
+            append_html_table_cell_padding_declarations(*self, &mut block);
+        } else {
+            return;
         }
 
         if !block.is_empty() {
@@ -144,7 +152,7 @@ fn append_root_svg_size_declarations(element: &Element, block: &mut PropertyDecl
         let Some(size) = parse_svg_size_attribute(value) else {
             continue;
         };
-        use style::values::generics::{NonNegative, length::Size};
+        use style::values::generics::length::Size;
         let size = Size::LengthPercentage(NonNegative(size));
         let declaration = if is_width {
             PropertyDeclaration::Width(size)
@@ -187,6 +195,73 @@ fn append_svg_style_presentation_declarations(
             block.extend(declarations.drain(), Importance::Normal);
         }
     }
+}
+
+fn append_html_table_cell_padding_declarations(
+    element: QueryElement<'_>,
+    block: &mut PropertyDeclarationBlock,
+) {
+    // Blink's HTMLTableCellElement asks its nearest parent table for a shared
+    // cell style. Cells without a parent table instead receive the equivalent
+    // 1px fallback from the UA stylesheet.
+    let mut ancestor = element.parent_element();
+    let padding = loop {
+        let Some(current) = ancestor else {
+            return;
+        };
+        let native = current.element();
+        if native.namespace() == HTML_NAMESPACE && native.local_name() == "table" {
+            break parse_html_table_cell_padding(native.attribute("cellpadding"));
+        }
+        ancestor = current.parent_element();
+    };
+
+    // Chromium omits the shared declaration for zero rather than emitting
+    // `padding: 0`. That distinction lets lower cascade origins remain
+    // observable when the legacy attribute disables the default padding.
+    if padding == 0 {
+        return;
+    }
+
+    let padding = NonNegative(LengthPercentage::Length(NoCalcLength::from_px(f32::from(
+        padding,
+    ))));
+    for declaration in [
+        PropertyDeclaration::PaddingTop(padding.clone()),
+        PropertyDeclaration::PaddingRight(padding.clone()),
+        PropertyDeclaration::PaddingBottom(padding.clone()),
+        PropertyDeclaration::PaddingLeft(padding),
+    ] {
+        block.push(declaration, Importance::Normal);
+    }
+}
+
+/// Mirrors Blink's legacy `cellpadding` state: an absent or exactly empty
+/// attribute keeps the historical 1px default; non-empty values use loose
+/// signed-integer parsing and are clamped to `uint16_t`.
+fn parse_html_table_cell_padding(value: Option<&str>) -> u16 {
+    let Some(value) = value else {
+        return 1;
+    };
+    if value.is_empty() {
+        return 1;
+    }
+
+    parse_loose_i32(value)
+        .unwrap_or(0)
+        .clamp(0, i32::from(u16::MAX)) as u16
+}
+
+fn parse_loose_i32(value: &str) -> Option<i32> {
+    let value = value.trim_start();
+    let digits_start = usize::from(value.starts_with(['+', '-']));
+    let digits_len = value[digits_start..]
+        .bytes()
+        .take_while(u8::is_ascii_digit)
+        .count();
+    (digits_len != 0)
+        .then(|| &value[..digits_start + digits_len])
+        .and_then(|number| number.parse().ok())
 }
 
 /// Parses the SVG 2 root `width`/`height` presentation attributes.
@@ -256,5 +331,18 @@ mod tests {
         }
         assert!(!is_svg_presentation_attribute_name("viewBox"));
         assert!(!is_svg_presentation_attribute_name("d"));
+    }
+
+    #[test]
+    fn html_table_cell_padding_matches_blink_legacy_parsing() {
+        assert_eq!(parse_html_table_cell_padding(None), 1);
+        assert_eq!(parse_html_table_cell_padding(Some("")), 1);
+        assert_eq!(parse_html_table_cell_padding(Some("0")), 0);
+        assert_eq!(parse_html_table_cell_padding(Some("  +12px")), 12);
+        assert_eq!(parse_html_table_cell_padding(Some("-3")), 0);
+        assert_eq!(parse_html_table_cell_padding(Some("70000")), u16::MAX);
+        assert_eq!(parse_html_table_cell_padding(Some("not-a-number")), 0);
+        assert_eq!(parse_html_table_cell_padding(Some("   ")), 0);
+        assert_eq!(parse_html_table_cell_padding(Some("2147483648")), 0);
     }
 }
