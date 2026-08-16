@@ -161,7 +161,7 @@ def binary_reported_version(binary: Path) -> str:
 def copy_release_materials(package_dir: Path) -> None:
     files = [
         REPO_ROOT / "README.md",
-        REPO_ROOT / "RELEASING.md",
+        REPO_ROOT / "docs" / "RELEASING.md",
         REPO_ROOT / "LICENSE",
         REPO_ROOT / "LICENSE-APACHE",
         REPO_ROOT / "LICENSE-MIT",

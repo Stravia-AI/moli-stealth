@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.jpg"
+    src="../assets/moli-browser-banner.jpg"
     alt="Moli Browser — 構造を優先し、画素は必要なときだけ。AI エージェント向けのオープンソースブラウザ。"
     width="1086"
   />
@@ -9,7 +9,7 @@
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <a href="README.md">English</a> |
+  <a href="../README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
   <strong>日本語</strong> |
   <a href="README.de.md">Deutsch</a> |
@@ -36,9 +36,9 @@ https://github.com/lexmount/moli/tree/main/skills にあるスキルをインス
 ## 動作例
 
 <p align="center">
-  <a href="assets/moli-game.jpg">
+  <a href="../assets/moli-game.jpg">
     <img
-      src="assets/moli-game.jpg"
+      src="../assets/moli-game.jpg"
       alt="Moli で描画した HTML5 ゲームを Chrome DevTools で確認"
       width="1200"
     />
@@ -50,9 +50,9 @@ https://github.com/lexmount/moli/tree/main/skills にあるスキルをインス
 </p>
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.jpg">
+  <a href="../assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.jpg"
+      src="../assets/moli-devtools-rust-lang.jpg"
       alt="Moli で描画した rust-lang.org を Chrome DevTools で確認"
       width="1200"
     />
@@ -139,9 +139,9 @@ AI エージェントの処理では、機能の充実度と速度に加え、�
 | 画面画像の取得、連続画面配信の更新 | 現在の DOM とスタイルから再構築して凍結木を置き換え、新しいフレームを描画し、フレームは使用後すぐに破棄します。 |
 
 <p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
+  <a href="../assets/moli_ondemand_rendering_flow.svg">
     <img
-      src="assets/moli_ondemand_rendering_flow.svg"
+      src="../assets/moli_ondemand_rendering_flow.svg"
       alt="Moli の処理の流れ：標準では DOM を優先し、レイアウトと描画は必要なときだけ新たに構築"
       width="680"
     />
@@ -231,8 +231,6 @@ Moli は、Chromium を外から操作するだけの仕組みではなく、独
 
 未対応の操作には、明確なエラーを返します。Moli は、実行していないブラウザ操作やイベント、通信状況の確認、画面出力を、実行済みであるかのように扱うことはありません。
 
-保守担当者は、[リリース手順](RELEASING.md)に従い、GitHub Actions からタグ付きのビルド済み実行ファイルを公開できます。
-
 ## ライセンス
 
-ファイルまたはディレクトリに別の記載がない限り、Moli は [Apache License 2.0](LICENSE-APACHE) または [MIT License](LICENSE-MIT) のいずれかを選択して利用できます。個別のライセンスが適用される第三者提供の構成要素やテスト用データについては、それぞれのライセンスと告知事項に従います。
+ファイルまたはディレクトリに別の記載がない限り、Moli は [Apache License 2.0](../LICENSE-APACHE) または [MIT License](../LICENSE-MIT) のいずれかを選択して利用できます。個別のライセンスが適用される第三者提供の構成要素やテスト用データについては、それぞれのライセンスと告知事項に従います。

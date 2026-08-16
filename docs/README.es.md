@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.jpg"
+    src="../assets/moli-browser-banner.jpg"
     alt="Moli Browser — La estructura primero. Píxeles bajo demanda. Un navegador de código abierto para agentes de IA."
     width="1086"
   />
@@ -9,7 +9,7 @@
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <a href="README.md">English</a> |
+  <a href="../README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
   <a href="README.ja.md">日本語</a> |
   <a href="README.de.md">Deutsch</a> |
@@ -37,9 +37,9 @@ resultado.
 ## Demostración
 
 <p align="center">
-  <a href="assets/moli-game.jpg">
+  <a href="../assets/moli-game.jpg">
     <img
-      src="assets/moli-game.jpg"
+      src="../assets/moli-game.jpg"
       alt="Un juego HTML5 renderizado por Moli e inspeccionado con Chrome DevTools"
       width="1200"
     />
@@ -51,9 +51,9 @@ resultado.
 </p>
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.jpg">
+  <a href="../assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.jpg"
+      src="../assets/moli-devtools-rust-lang.jpg"
       alt="El sitio rust-lang.org renderizado por Moli e inspeccionado con Chrome DevTools"
       width="1200"
     />
@@ -140,9 +140,9 @@ Lo que la mayoría de las tareas de automatización de navegadores necesitan rea
 | Capturar una pantalla o actualizar un screencast | Reconstruye desde el DOM y los estilos actuales, sustituye el árbol congelado, renderiza un fotograma nuevo y descarta el fotograma después de usarlo |
 
 <p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
+  <a href="../assets/moli_ondemand_rendering_flow.svg">
     <img
-      src="assets/moli_ondemand_rendering_flow.svg"
+      src="../assets/moli_ondemand_rendering_flow.svg"
       alt="Cómo procesa Moli una solicitud: prioriza el DOM de forma predeterminada y solo reconstruye la disposición y el dibujo bajo demanda"
       width="680"
     />
@@ -232,8 +232,6 @@ Los límites que se mantienen de forma intencionada incluyen:
 
 Las rutas de protocolo no compatibles devuelven un error explícito: Moli nunca simula que se haya producido una acción del navegador, un evento, una observación de red o un resultado visual.
 
-Los mantenedores pueden seguir la [guía de publicación](RELEASING.md) para publicar una versión binaria etiquetada mediante GitHub Actions.
-
 ## Licencia
 
-Salvo que un archivo o directorio indique lo contrario, Moli puede utilizarse, a elección del usuario, bajo la [Licencia Apache 2.0](LICENSE-APACHE) o la [Licencia MIT](LICENSE-MIT). Los componentes y fixtures de terceros con licencias independientes siguen sujetos a sus respectivas licencias y avisos.
+Salvo que un archivo o directorio indique lo contrario, Moli puede utilizarse, a elección del usuario, bajo la [Licencia Apache 2.0](../LICENSE-APACHE) o la [Licencia MIT](../LICENSE-MIT). Los componentes y fixtures de terceros con licencias independientes siguen sujetos a sus respectivas licencias y avisos.

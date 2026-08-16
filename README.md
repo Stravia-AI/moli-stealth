@@ -10,11 +10,11 @@
 
 <p align="center">
   <strong>English</strong> |
-  <a href="README.zh-CN.md">简体中文</a> |
-  <a href="README.ja.md">日本語</a> |
-  <a href="README.de.md">Deutsch</a> |
-  <a href="README.fr.md">Français</a> |
-  <a href="README.es.md">Español</a>
+  <a href="docs/README.zh-CN.md">简体中文</a> |
+  <a href="docs/README.ja.md">日本語</a> |
+  <a href="docs/README.de.md">Deutsch</a> |
+  <a href="docs/README.fr.md">Français</a> |
+  <a href="docs/README.es.md">Español</a>
 </p>
 
 Moli is a production-ready headless browser for AI agents. Its on-demand layout
@@ -306,9 +306,6 @@ Its current intentional boundaries include:
 
 Unsupported protocol paths return explicit errors — Moli never pretends that a
 browser action, event, network observation, or visual result occurred.
-
-Maintainers can publish a tagged binary release from GitHub Actions by following
-the [release guide](RELEASING.md).
 
 ## License
 

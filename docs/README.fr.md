@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.jpg"
+    src="../assets/moli-browser-banner.jpg"
     alt="Moli Browser — La structure d'abord. Les pixels à la demande. Un navigateur open source pour les agents d'IA."
     width="1086"
   />
@@ -9,7 +9,7 @@
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <a href="README.md">English</a> |
+  <a href="../README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
   <a href="README.ja.md">日本語</a> |
   <a href="README.de.md">Deutsch</a> |
@@ -37,9 +37,9 @@ montre-moi le résultat.
 ## Démonstration
 
 <p align="center">
-  <a href="assets/moli-game.jpg">
+  <a href="../assets/moli-game.jpg">
     <img
-      src="assets/moli-game.jpg"
+      src="../assets/moli-game.jpg"
       alt="Un jeu HTML5 rendu par Moli et inspecté avec Chrome DevTools"
       width="1200"
     />
@@ -51,9 +51,9 @@ montre-moi le résultat.
 </p>
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.jpg">
+  <a href="../assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.jpg"
+      src="../assets/moli-devtools-rust-lang.jpg"
       alt="Le site rust-lang.org rendu par Moli et inspecté avec Chrome DevTools"
       width="1200"
     />
@@ -140,9 +140,9 @@ Ce dont la plupart des tâches d'automatisation ont réellement besoin, c'est de
 | Prendre une capture d'écran ou actualiser un screencast | Reconstruit à partir du DOM et des styles actuels, remplace l'arbre figé, rend une nouvelle image, puis supprime l'image après usage |
 
 <p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
+  <a href="../assets/moli_ondemand_rendering_flow.svg">
     <img
-      src="assets/moli_ondemand_rendering_flow.svg"
+      src="../assets/moli_ondemand_rendering_flow.svg"
       alt="Traitement d'une requête par Moli : priorité au DOM par défaut, mise en page et dessin reconstruits uniquement à la demande"
       width="680"
     />
@@ -232,8 +232,6 @@ Les limites actuellement conservées de manière intentionnelle comprennent :
 
 Les chemins de protocole non pris en charge renvoient une erreur explicite : Moli ne prétend jamais qu'une action du navigateur, un événement, une observation réseau ou un résultat visuel a eu lieu.
 
-Les mainteneurs peuvent publier une version binaire balisée depuis GitHub Actions en suivant le [guide de publication](RELEASING.md).
-
 ## Licence
 
-Sauf indication contraire dans un fichier ou un répertoire, Moli peut être utilisé, au choix, sous [licence Apache 2.0](LICENSE-APACHE) ou sous [licence MIT](LICENSE-MIT). Les composants et les fixtures tiers sous licence distincte restent soumis à leurs propres licences et mentions.
+Sauf indication contraire dans un fichier ou un répertoire, Moli peut être utilisé, au choix, sous [licence Apache 2.0](../LICENSE-APACHE) ou sous [licence MIT](../LICENSE-MIT). Les composants et les fixtures tiers sous licence distincte restent soumis à leurs propres licences et mentions.

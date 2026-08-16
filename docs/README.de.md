@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.jpg"
+    src="../assets/moli-browser-banner.jpg"
     alt="Moli Browser — Struktur zuerst. Pixel bei Bedarf. Open-Source-Browser für KI-Agenten."
     width="1086"
   />
@@ -9,7 +9,7 @@
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <a href="README.md">English</a> |
+  <a href="../README.md">English</a> |
   <a href="README.zh-CN.md">简体中文</a> |
   <a href="README.ja.md">日本語</a> |
   <strong>Deutsch</strong> |
@@ -37,9 +37,9 @@ https://example.com ab und zeige mir das Ergebnis.
 ## Demo
 
 <p align="center">
-  <a href="assets/moli-game.jpg">
+  <a href="../assets/moli-game.jpg">
     <img
-      src="assets/moli-game.jpg"
+      src="../assets/moli-game.jpg"
       alt="Ein von Moli gerendertes und mit Chrome DevTools untersuchtes HTML5-Spiel"
       width="1200"
     />
@@ -51,9 +51,9 @@ https://example.com ab und zeige mir das Ergebnis.
 </p>
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.jpg">
+  <a href="../assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.jpg"
+      src="../assets/moli-devtools-rust-lang.jpg"
       alt="Die von Moli gerenderte und mit Chrome DevTools untersuchte Website rust-lang.org"
       width="1200"
     />
@@ -140,9 +140,9 @@ Was die meisten Browserautomatisierungen wirklich benötigen, ist die Seitenstru
 | Screenshot aufnehmen oder Screencast aktualisieren | Baut aus dem aktuellen DOM/Stil neu auf, ersetzt den eingefrorenen Baum, rendert einen neuen Frame und verwirft den Frame nach Gebrauch |
 
 <p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
+  <a href="../assets/moli_ondemand_rendering_flow.svg">
     <img
-      src="assets/moli_ondemand_rendering_flow.svg"
+      src="../assets/moli_ondemand_rendering_flow.svg"
       alt="So verarbeitet Moli eine Anfrage: standardmäßig DOM-orientiert; Layout und Zeichnung werden nur bei Bedarf neu aufgebaut"
       width="680"
     />
@@ -232,8 +232,6 @@ Zu den derzeit bewusst beibehaltenen Grenzen gehören:
 
 Nicht unterstützte Protokollpfade geben einen eindeutigen Fehler zurück — Moli täuscht nie vor, dass eine Browseraktion, ein Ereignis, eine Netzwerkbeobachtung oder ein visuelles Ergebnis stattgefunden hat.
 
-Maintainer können mithilfe von GitHub Actions ein getaggtes Binär-Release veröffentlichen, indem sie der [Release-Anleitung](RELEASING.md) folgen.
-
 ## Lizenz
 
-Sofern eine Datei oder ein Verzeichnis nichts anderes angibt, kann Moli wahlweise unter der [Apache License 2.0](LICENSE-APACHE) oder der [MIT License](LICENSE-MIT) genutzt werden. Separat lizenzierte Komponenten und Fixtures von Drittanbietern unterliegen weiterhin ihren jeweiligen Lizenzen und Hinweisen.
+Sofern eine Datei oder ein Verzeichnis nichts anderes angibt, kann Moli wahlweise unter der [Apache License 2.0](../LICENSE-APACHE) oder der [MIT License](../LICENSE-MIT) genutzt werden. Separat lizenzierte Komponenten und Fixtures von Drittanbietern unterliegen weiterhin ihren jeweiligen Lizenzen und Hinweisen.

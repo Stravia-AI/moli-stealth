@@ -1,6 +1,6 @@
 <p align="center">
   <img
-    src="assets/moli-browser-banner.jpg"
+    src="../assets/moli-browser-banner.jpg"
     alt="Moli 浏览器——结构优先，按需生成像素，面向 AI 智能体的开源浏览器。"
     width="1086"
   />
@@ -9,7 +9,7 @@
 <h1 align="center">Moli</h1>
 
 <p align="center">
-  <a href="README.md">English</a> |
+  <a href="../README.md">English</a> |
   <strong>简体中文</strong> |
   <a href="README.ja.md">日本語</a> |
   <a href="README.de.md">Deutsch</a> |
@@ -36,9 +36,9 @@ Moli 可以帮助你的 AI 智能体抓取和提取网页、搜索网络，以�
 ## 效果展示
 
 <p align="center">
-  <a href="assets/moli-game.jpg">
+  <a href="../assets/moli-game.jpg">
     <img
-      src="assets/moli-game.jpg"
+      src="../assets/moli-game.jpg"
       alt="由 Moli 渲染并通过 Chrome DevTools 检查的 HTML5 游戏"
       width="1200"
     />
@@ -50,9 +50,9 @@ Moli 可以帮助你的 AI 智能体抓取和提取网页、搜索网络，以�
 </p>
 
 <p align="center">
-  <a href="assets/moli-devtools-rust-lang.jpg">
+  <a href="../assets/moli-devtools-rust-lang.jpg">
     <img
-      src="assets/moli-devtools-rust-lang.jpg"
+      src="../assets/moli-devtools-rust-lang.jpg"
       alt="由 Moli 渲染并通过 Chrome DevTools 检查的 rust-lang.org"
       width="1200"
     />
@@ -139,9 +139,9 @@ await browser.close();
 | 截图或刷新屏幕串流 | 根据当前 DOM/样式重新构建并替换冻结树，渲染新的一帧，帧用完即丢弃 |
 
 <p align="center">
-  <a href="assets/moli_ondemand_rendering_flow.svg">
+  <a href="../assets/moli_ondemand_rendering_flow.svg">
     <img
-      src="assets/moli_ondemand_rendering_flow.svg"
+      src="../assets/moli_ondemand_rendering_flow.svg"
       alt="Moli 如何处理请求：默认采用 DOM 优先，仅在需要时重新构建布局和绘制"
       width="680"
     />
@@ -231,8 +231,6 @@ Moli 是一个独立的浏览器内核，而不是对 Chromium 的封装。它�
 
 遇到不支持的协议路径，Moli 会直接明确报错——它不会假装某个浏览器操作、事件、网络观测或者视觉结果已经发生。
 
-维护者可以参照[发布指南](RELEASING.md)，通过 GitHub Actions 发布带标签的二进制版本。
-
 ## 许可证
 
-除非文件或目录中另有说明，你可以自行选择依据 [Apache License 2.0](LICENSE-APACHE) 或 [MIT License](LICENSE-MIT) 来使用 Moli。采用独立许可证的第三方组件和测试夹具，仍然遵循各自的许可证和声明。
+除非文件或目录中另有说明，你可以自行选择依据 [Apache License 2.0](../LICENSE-APACHE) 或 [MIT License](../LICENSE-MIT) 来使用 Moli。采用独立许可证的第三方组件和测试夹具，仍然遵循各自的许可证和声明。
