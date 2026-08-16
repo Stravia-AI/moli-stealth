@@ -27,6 +27,11 @@ pub(super) struct HtmlParserSession {
     suspended_input_buffers: Vec<BufferQueue>,
 }
 
+pub(super) enum HtmlParserSessionResult {
+    InputDrained,
+    Script(ParseHandle),
+}
+
 struct EmbedderPausingTreeBuilder {
     inner: TreeBuilder<ParseHandle, DocumentSink>,
 }
@@ -93,7 +98,7 @@ impl TokenSink for EmbedderPausingTreeBuilder {
             None
         };
         if let Some(script) = svg_script_handoff {
-            // html5ever 0.35 has an explicit FIXME for </script> in SVG and
+            // html5ever 0.39 has an explicit FIXME for </script> in SVG and
             // does not return TokenSinkResult::Script for it. Preserve the
             // ordinary tokenizer pause contract at this narrow adapter.
             return TokenSinkResult::Script(ParseHandle::new(script, None));
@@ -103,9 +108,9 @@ impl TokenSink for EmbedderPausingTreeBuilder {
             .sink
             .pending_custom_element_construction_handoff_placeholder()
         {
-            // html5ever 0.35 only exposes tokenizer pauses through the script handoff
-            // result. Moli interprets this handle as a custom-element handoff when
-            // the parser sink has a matching pending construction record.
+            // html5ever has no custom-element pause result. Moli interprets the
+            // script handoff handle as a custom-element handoff when the parser
+            // sink has a matching pending construction record.
             return TokenSinkResult::Script(ParseHandle::new(placeholder, None));
         }
         if let Some(stylesheet) = self.inner.sink.pending_blocking_stylesheet_pause() {
@@ -162,7 +167,9 @@ impl HtmlParserSession {
 
     pub(super) fn process(&mut self, input: StrTendril) {
         self.input_buffer.push_back(input);
-        while let TokenizerResult::Script(_) = self.tokenizer.feed(&self.input_buffer) {
+        while let HtmlParserSessionResult::Script(_) =
+            feed_with_definitive_encoding(&self.tokenizer, &self.input_buffer)
+        {
             // Non-pump callers intentionally parse through embedder pauses. They have no
             // runtime owner to notify, so parser-side custom-element handoffs and
             // blocking-stylesheet pauses must be discarded before continuing.
@@ -222,9 +229,9 @@ impl HtmlParserSession {
         buffered
     }
 
-    pub(super) fn feed(&mut self) -> TokenizerResult<ParseHandle> {
-        let result = self.tokenizer.feed(&self.input_buffer);
-        if matches!(result, TokenizerResult::Done)
+    pub(super) fn feed(&mut self) -> HtmlParserSessionResult {
+        let result = feed_with_definitive_encoding(&self.tokenizer, &self.input_buffer);
+        if matches!(result, HtmlParserSessionResult::InputDrained)
             && self.input_buffer.is_empty()
             && let Some(parent) = self.suspended_input_buffers.pop()
         {
@@ -244,7 +251,9 @@ impl HtmlParserSession {
             mut suspended_input_buffers,
         } = self;
         restore_all_suspended_input(&mut input_buffer, &mut suspended_input_buffers);
-        while let TokenizerResult::Script(_) = tokenizer.feed(&input_buffer) {
+        while let HtmlParserSessionResult::Script(_) =
+            feed_with_definitive_encoding(&tokenizer, &input_buffer)
+        {
             tokenizer
                 .sink
                 .sink()
@@ -267,7 +276,9 @@ impl HtmlParserSession {
             mut suspended_input_buffers,
         } = self;
         restore_all_suspended_input(&mut input_buffer, &mut suspended_input_buffers);
-        while let TokenizerResult::Script(_) = tokenizer.feed(&input_buffer) {
+        while let HtmlParserSessionResult::Script(_) =
+            feed_with_definitive_encoding(&tokenizer, &input_buffer)
+        {
             tokenizer
                 .sink
                 .sink()
@@ -302,6 +313,25 @@ impl HtmlParserSession {
             .sink
             .sink()
             .pop_pending_blocking_stylesheet_pause();
+    }
+}
+
+fn feed_with_definitive_encoding(
+    tokenizer: &Tokenizer<EmbedderPausingTreeBuilder>,
+    input_buffer: &BufferQueue,
+) -> HtmlParserSessionResult {
+    loop {
+        match tokenizer.feed(input_buffer) {
+            // Moli resolves the document encoding from the response and byte-level
+            // meta prescan before creating this Unicode parser session. The tree
+            // builder cannot change that definitive decoding, so continue past its
+            // advisory notification without exposing a false parser pause.
+            TokenizerResult::EncodingIndicator(_) => {}
+            TokenizerResult::Done => return HtmlParserSessionResult::InputDrained,
+            TokenizerResult::Script(handle) => {
+                return HtmlParserSessionResult::Script(handle);
+            }
+        }
     }
 }
 

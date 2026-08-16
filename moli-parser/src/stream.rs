@@ -1,6 +1,4 @@
 use html5ever::tendril::StrTendril;
-use markup5ever::TokenizerResult;
-
 use moli_dom::{
     NodeId,
     native::{DomHost, NativeDom, NativeNodeId},
@@ -27,7 +25,10 @@ use super::{
         ParserYield,
     },
     live_target::{ParserRuntimeDomSinks, ParserStreamHtmlTreeSinkTarget},
-    session::{HtmlParserSession, new_fragment_html_tree_sink_session, new_html_tree_sink_session},
+    session::{
+        HtmlParserSession, HtmlParserSessionResult, new_fragment_html_tree_sink_session,
+        new_html_tree_sink_session,
+    },
 };
 
 pub(super) struct HtmlTreeSinkStream {
@@ -532,28 +533,29 @@ impl HtmlTreeSinkStream {
         }
 
         let tokenizer_result = self.parser.feed();
-        let paused_for_custom_element = matches!(tokenizer_result, TokenizerResult::Script(_))
-            && self.has_pending_custom_element_construction_handoff();
-        let paused_for_stylesheet = matches!(tokenizer_result, TokenizerResult::Script(_))
+        let paused_for_custom_element =
+            matches!(tokenizer_result, HtmlParserSessionResult::Script(_))
+                && self.has_pending_custom_element_construction_handoff();
+        let paused_for_stylesheet = matches!(tokenizer_result, HtmlParserSessionResult::Script(_))
             && !paused_for_custom_element
             && self.peek_pending_blocking_stylesheet_pause().is_some();
         let result = match tokenizer_result {
-            TokenizerResult::Script(handle) if paused_for_custom_element => {
+            HtmlParserSessionResult::Script(handle) if paused_for_custom_element => {
                 debug_assert_eq!(
                     self.peek_pending_custom_element_construction_handoff_placeholder(),
                     Some(handle.node_id())
                 );
                 RawParserStep::CustomElementConstruction
             }
-            TokenizerResult::Script(handle) if paused_for_stylesheet => {
+            HtmlParserSessionResult::Script(handle) if paused_for_stylesheet => {
                 debug_assert_eq!(
                     self.peek_pending_blocking_stylesheet_pause(),
                     Some(handle.node_id())
                 );
                 RawParserStep::BlockingStylesheet(handle.node_id())
             }
-            TokenizerResult::Script(handle) => RawParserStep::Script(handle.node_id()),
-            TokenizerResult::Done => RawParserStep::InputDrained,
+            HtmlParserSessionResult::Script(handle) => RawParserStep::Script(handle.node_id()),
+            HtmlParserSessionResult::InputDrained => RawParserStep::InputDrained,
         };
         let discovered_async_prefetch_candidate_node_ids =
             self.drain_discovered_async_prefetch_candidates();
@@ -1232,6 +1234,68 @@ mod tests {
             | ParserScriptPreparation::NoExecution(_)
             | ParserScriptPreparation::PreparationFailure(_) => None,
         }
+    }
+
+    #[test]
+    fn parser_stream_feed_continues_past_definitive_encoding_indicator() {
+        let mut stream = DocumentStream::new_parser_stream_for_testing(
+            Url::parse("https://example.test/page.html").expect("test url"),
+        );
+
+        stream.feed("<!doctype html><meta charset='utf-8'><body><p>after meta</p>");
+
+        let document = stream.snapshot_parser_stream_document();
+        assert_eq!(
+            document
+                .elements_by_tag_name(document.document_node_id(), "p", false)
+                .len(),
+            1,
+            "the advisory encoding indicator must not leave decoded input buffered"
+        );
+    }
+
+    #[test]
+    fn parser_stream_pump_continues_past_definitive_encoding_indicator() {
+        let mut stream = DocumentStream::new_parser_stream_for_testing(
+            Url::parse("https://example.test/page.html").expect("test url"),
+        );
+
+        let outcome =
+            stream.pump_parser_step("<!doctype html><meta charset='utf-8'><body><p>after meta</p>");
+
+        assert!(matches!(outcome.result, ParserPumpStep::InputDrained));
+        let document = stream.snapshot_parser_stream_document();
+        assert_eq!(
+            document
+                .elements_by_tag_name(document.document_node_id(), "p", false)
+                .len(),
+            1,
+            "the parser pump must consume the tail after an encoding indicator"
+        );
+    }
+
+    #[test]
+    fn parser_stream_finish_continues_past_definitive_encoding_indicator() {
+        let mut stream = DocumentStream::new_parser_stream_for_testing(
+            Url::parse("https://example.test/page.html").expect("test url"),
+        );
+        let outcome = stream.pump_parser_step(concat!(
+            "<!doctype html><script>window.ready = true;</script>",
+            "<meta charset='utf-8'><p>after meta</p>"
+        ));
+        assert!(matches!(
+            outcome.result,
+            ParserPumpStep::Yield(ParserYield::Script(_))
+        ));
+
+        let document = stream.finish();
+        assert_eq!(
+            document
+                .elements_by_tag_name(document.document_node_id(), "p", false)
+                .len(),
+            1,
+            "finishing must consume the buffered tail after an encoding indicator"
+        );
     }
 
     #[test]

@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-html5ever = "0.35.0"
+html5ever = "0.39.0"
 indexmap = "2.6"
 moli-css-parse = { path = "../moli-css-parse" }
 moli-html-input-temporal = { path = "../moli-html-input-temporal" }

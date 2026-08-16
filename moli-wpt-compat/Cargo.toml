@@ -7,7 +7,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 axum = { version = "0.8.6", features = ["ws"] }
-html5ever = "0.35.0"
+html5ever = "0.39.0"
 parking_lot = "0.12"
 rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs"] }
 serde = { version = "1.0.228", features = ["derive"] }
