@@ -228,9 +228,7 @@ Estos son los límites que se mantienen a propósito:
 
 - No es un navegador con interfaz gráfica, no tiene ventana persistente ni compositor de GPU, y tampoco implementa una arquitectura de pintado retenido multi-frame.
 - No busca un renderizado pixel-perfect idéntico al de Chrome, ni ofrece reproducción de Canvas, WebGL o contenido multimedia de alta fidelidad.
-- Cubre una parte de CDP, WebDriver Classic y WebDriver BiDi, no una implementación con soporte completo de los tres protocolos.
 - El modo `--layout` soporta capturas de pantalla por software y generación de PDF rasterizado vía CDP, pero no implementa todos los modos de captura o impresión de Chrome.
-- La carga de recursos, la frescura de la geometría y el coste del renderizado visual siguen siendo decisiones de política que hay que configurar de forma explícita: no vienen activadas por defecto.
 
 Los caminos de protocolo no soportados devuelven un error explícito: Moli nunca finge que ha ocurrido una acción del navegador, un evento, una observación de red o un resultado visual.
 

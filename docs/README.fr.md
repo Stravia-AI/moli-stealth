@@ -228,9 +228,7 @@ Voici les limites actuellement conservées de façon délibérée :
 
 - Pas de navigateur avec interface graphique, pas de fenêtre persistante, pas de compositeur GPU, pas d'architecture de rendu persistante multi-frame.
 - Moli ne vise pas une fidélité pixel-perfect avec Chrome, et ne propose pas de rendu haute fidélité pour Canvas, WebGL ou les médias.
-- Seule une partie des fonctionnalités de CDP, WebDriver Classic et WebDriver BiDi est couverte — ce n'est pas une implémentation intégralement conforme à ces protocoles.
 - Le mode `--layout` gère les captures d'écran logicielles et la génération de PDF CDP rastérisés, mais pas l'ensemble des modes de capture ou d'impression de Chrome.
-- Le chargement des ressources, le rafraîchissement de la géométrie et le coût du rendu visuel restent des choix de politique explicites, jamais activés en permanence par défaut.
 
 Les chemins de protocole non pris en charge renvoient toujours une erreur explicite : Moli ne fait jamais semblant qu'une action du navigateur, un événement, une observation réseau ou un résultat visuel a eu lieu.
 

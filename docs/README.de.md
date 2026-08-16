@@ -228,9 +228,7 @@ Zu den aktuell bewusst gesetzten Grenzen gehören:
 
 - Kein GUI-Browser: Es gibt weder ein persistentes Fenster noch einen GPU-Compositor oder eine über mehrere Frames hinweg beibehaltene Zeichenarchitektur.
 - Moli strebt keine pixelgenaue Übereinstimmung mit Chrome an und bietet keine originalgetreue Canvas-/WebGL-/Medienwiedergabe.
-- Von CDP, WebDriver Classic und WebDriver BiDi wird nur eine ausgewählte Teilmenge der Funktionen abgedeckt; volle Protokollkompatibilität ist nicht implementiert.
 - Im `--layout`-Modus werden Software-Screenshots und rasterbasierte CDP-PDF-Erzeugung unterstützt, aber nicht sämtliche Screenshot- oder Druckmodi von Chrome.
-- Ressourcenladen, Aktualität der Geometrie und die Kosten des visuellen Renderings bleiben explizit zu setzende Richtlinienoptionen — sie sind nicht dauerhaft standardmäßig aktiv.
 
 Nicht unterstützte Protokollpfade liefern einen eindeutigen Fehler zurück — Moli täuscht nie vor, dass eine Browseraktion, ein Ereignis, eine Netzwerkbeobachtung oder ein visuelles Ergebnis stattgefunden hätte.
 

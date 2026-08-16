@@ -299,12 +299,8 @@ Its current intentional boundaries include:
   paint architecture.
 - It does not pursue pixel-for-pixel parity with Chrome or provide
   high-fidelity Canvas/WebGL/media playback.
-- It covers selected CDP, WebDriver Classic, and WebDriver BiDi functionality
-  rather than implementing full protocol parity.
 - `--layout` supports software screenshots and raster-backed CDP PDF
   generation, but not every Chrome screenshot or print mode is implemented.
-- Resource loading, geometry freshness, and visual rendering cost remain
-  explicit policy choices instead of being continuously enabled by default.
 
 Unsupported protocol paths return explicit errors — Moli never pretends that a
 browser action, event, network observation, or visual result occurred.
