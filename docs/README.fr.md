@@ -17,11 +17,11 @@
   <a href="README.es.md">Español</a>
 </p>
 
-Moli est un navigateur headless conçu pour la production, pensé dès le départ pour les agents d'IA. Grâce à une architecture de mise en page et de rendu à la demande, il combine un moteur de navigateur complet avec une empreinte mémoire minimale.
+Moli est un navigateur headless conçu pour la production, pensé dès le départ pour les agents d'IA. Grâce à une architecture de mise en page et de rendu à la demande, il combine un moteur de navigateur complet avec une faible consommation de ressources.
 
 Il permet à votre agent d'IA de récupérer et d'extraire le contenu de pages web, d'effectuer des recherches en ligne et d'automatiser des tâches dans le navigateur.
 
-Utilisable en ligne de commande, ou via CDP, WebDriver Classic et WebDriver BiDi.
+Vous pouvez utiliser Moli via la CLI, CDP, WebDriver Classic ou WebDriver BiDi.
 
 ## Démarrage rapide
 

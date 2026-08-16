@@ -17,7 +17,7 @@
   <a href="README.es.md">Español</a>
 </p>
 
-Moli ist ein produktionsreifer Headless-Browser für KI-Agenten. Durch sein bedarfsgesteuertes Layout- und Rendering-Design vereint er eine vollständige Browser-Laufzeitumgebung mit einem minimalen Ressourcenbedarf.
+Moli ist ein produktionsreifer Headless-Browser für KI-Agenten. Durch sein bedarfsgesteuertes Layout- und Rendering-Design vereint er eine vollständige Browser-Laufzeitumgebung mit einem geringen Ressourcenbedarf.
 
 Moli hilft deinem KI-Agenten dabei, Webseiten abzurufen und ihre Inhalte zu extrahieren, im Web zu recherchieren und Browser-Aufgaben zu automatisieren.
 
@@ -190,7 +190,7 @@ Moli ist ein eigenständiger Browser-Kernel, kein Chromium-Wrapper. Er ist in Ru
 - Taffy + Parley — Box- und Textlayout
 - AnyRender/Vello CPU, `usvg` und das Rust-Bildökosystem — Software-Rendering
 
-Dokument und Stil haben genau eine verbindliche Datenquelle: die Integration aus nativem DOM und Stylo. Jede echte Aktualisierung baut daraus einen temporären Arbeitsbaum auf, erzeugt und verbraucht bei Bedarf einen frischen Paint-Snapshot und friert die endgültige Box- und Fragmentgeometrie in einem kompakten `FrozenLayoutTree` ein. Anschließend verwirft sie Arbeitsbaum, Stilreferenzen, Layout-Caches, Diagnosedaten und Paint-Zustand wieder. Quellzuordnung und Hit-Test-Kandidaten werden bei Abfragen jeweils aus dem eingefrorenen Baum abgeleitet. Das System kennt weder einen inkrementell gepflegten Layoutbaum noch einen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
+Dokument und Stil haben genau eine verbindliche Datenquelle: die Integration aus nativem DOM und Stylo. Jede echte Aktualisierung baut daraus einen temporären Arbeitsbaum auf, erzeugt und verbraucht bei Bedarf einen frischen Paint-Snapshot und friert die endgültige Box- und Fragmentgeometrie in einen kompakten `FrozenLayoutTree` ein. Anschließend verwirft sie Arbeitsbaum, Stilreferenzen, Layout-Caches, Diagnosedaten und Paint-Zustand wieder. Quellzuordnung und Hit-Test-Kandidaten werden bei Abfragen jeweils aus dem eingefrorenen Baum abgeleitet. Das System kennt weder einen inkrementell gepflegten Layoutbaum noch einen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
 
 ## Benchmarks
 
@@ -216,7 +216,7 @@ Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler W
 | PSS-Spitzenwert | 102.46 MiB | 348.82 MiB |
 | Maximale Prozesse / Threads | 1 / 24 | 11 / 123 |
 
-In der aktuellen WPT-Auswahl, mit der Molis Funktionsumfang als Agenten-Browser überprüft wird, bestand ein vollständiger Testlauf **1,612 Millionen Tests**.
+Ein vollständiger Lauf der aktuellen WPT-Auswahl zur Überprüfung von Molis Funktionsumfang als Agenten-Browser verzeichnete **1,612 Millionen bestandene Tests**.
 
 ## Projektumfang
 

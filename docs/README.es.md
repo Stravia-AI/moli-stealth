@@ -17,7 +17,7 @@
   <strong>Español</strong>
 </p>
 
-Moli es un navegador headless para agentes de IA, listo para producción. Su render bajo demanda le permite ofrecer un entorno de navegador completo sin disparar el consumo de recursos.
+Moli es un navegador headless para agentes de IA, listo para producción. Su diseño de layout y renderizado bajo demanda combina un entorno de ejecución de navegador completo con un consumo reducido de recursos.
 
 Moli ayuda a tu agente de IA a obtener y extraer páginas web, buscar en la web y automatizar tareas de navegador.
 
@@ -190,7 +190,7 @@ Moli es un motor de navegador independiente, no un wrapper de Chromium. Está co
 - Taffy + Parley — layout de cajas y de texto
 - AnyRender/Vello CPU, `usvg` y el ecosistema de imágenes de Rust — renderizado por software
 
-El documento y los estilos tienen una única fuente de verdad: la integración del DOM nativo con Stylo. Cada actualización real crea un árbol de trabajo temporal, genera y consume bajo demanda una nueva instantánea de pintado, congela la geometría final de cajas y fragmentos en un `FrozenLayoutTree` compacto, y después descarta el árbol de trabajo, las referencias de estilo, las cachés de layout, los diagnósticos y el estado de pintado. El shaping de fuentes y los candidatos de hit-test se derivan del árbol congelado en el momento de la consulta. No hay ningún árbol de layout mantenido de forma incremental, ni damage graph, ni display list retenida, ni compositor de GPU, ni ventana persistente.
+El documento y los estilos tienen una única fuente de verdad: la integración del DOM nativo con Stylo. Cada actualización real crea un árbol de trabajo temporal, genera y consume bajo demanda una nueva instantánea de pintado, congela la geometría final de cajas y fragmentos en un `FrozenLayoutTree` compacto, y después descarta el árbol de trabajo, las referencias de estilo, las cachés de layout, los diagnósticos y el estado de pintado. Los índices de origen y los candidatos de hit-test se derivan del árbol congelado en el momento de la consulta. No hay ningún árbol de layout mantenido de forma incremental, ni damage graph, ni display list retenida, ni compositor de GPU, ni ventana persistente.
 
 ## Datos de las pruebas
 
