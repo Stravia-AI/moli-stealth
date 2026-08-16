@@ -120,7 +120,7 @@ pub struct FetchArgs {
 
     /// Maximum wait time in milliseconds. Network-idle and DOM-stable fetches
     /// return the current page with a warning when this deadline expires.
-    #[arg(long, alias = "wait-ms", default_value_t = 10_000)]
+    #[arg(long, alias = "wait-ms", default_value_t = 25_000)]
     pub timeout: u64,
 
     #[command(flatten)]
