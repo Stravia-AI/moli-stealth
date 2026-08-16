@@ -27,13 +27,28 @@ Moli es compatible con Linux, macOS y Windows.
 
 ## Inicio rápido
 
-Dale esta instrucción a tu agente de programación con IA:
+Dale esta instrucción a tu agente de IA:
 
 ```text
 Instala los skills de https://github.com/lexmount/moli/tree/main/skills y sigue sus
 instrucciones para descargar e instalar el binario precompilado más reciente de
 Moli. Después usa moli-webfetch para obtener https://example.com y enséñame el
 resultado.
+```
+
+### Instalación directa
+
+En Linux o macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+```
+
+En Windows, ejecuta este comando en PowerShell:
+
+```powershell
+irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
 ```
 
 ## Demostración

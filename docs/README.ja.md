@@ -27,12 +27,27 @@ Moli は Linux、macOS、Windows に対応しています。
 
 ## すぐに試す
 
-次の指示を AI コーディングエージェントに渡してください。
+次の指示を AI エージェントに渡してください。
 
 ```text
 https://github.com/lexmount/moli/tree/main/skills にあるスキルをインストールしてください。
 各スキルの手順に従って、ビルド済みの最新 Moli 実行ファイルをダウンロードし、インストールしてください。
 最後に、moli-webfetch で https://example.com を取得し、結果を表示してください。
+```
+
+### 直接インストール
+
+Linux または macOS の場合：
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+```
+
+Windows の場合は、PowerShell で次のコマンドを実行します：
+
+```powershell
+irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
 ```
 
 ## 動作例

@@ -30,7 +30,7 @@ Moli supports Linux, macOS, and Windows.
 
 ## Quick start
 
-Give this prompt to your AI coding agent:
+Give this prompt to your AI agent:
 
 ```text
 Install the skills under https://github.com/lexmount/moli/tree/main/skills,

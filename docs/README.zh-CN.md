@@ -27,12 +27,27 @@ Moli 支持 Linux、macOS 和 Windows。
 
 ## 快速开始
 
-把这句话发给你的 AI 编程智能体：
+把这句话发给你的 AI 智能体：
 
 ```text
 安装 https://github.com/lexmount/moli/tree/main/skills 下面的 skills，
 根据 skills 指引下载并安装最新版预编译 Moli 二进制，然后用 moli-webfetch
 抓取 https://example.com 并把结果给我。
+```
+
+### 直接安装
+
+在 Linux 或 macOS 上：
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+```
+
+在 Windows 上，请在 PowerShell 中运行：
+
+```powershell
+irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
 ```
 
 ## 效果展示

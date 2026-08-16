@@ -27,13 +27,28 @@ Moli unterstützt Linux, macOS und Windows.
 
 ## Schnellstart
 
-Gib deinem KI-Coding-Agenten folgende Anweisung:
+Gib deinem KI-Agenten folgende Anweisung:
 
 ```text
 Installiere die Skills unter https://github.com/lexmount/moli/tree/main/skills,
 folge deren Anleitung zum Herunterladen und Installieren des neuesten
 vorkompilierten Moli-Binaries, rufe anschließend mit moli-webfetch die Seite
 https://example.com ab und zeig mir das Ergebnis.
+```
+
+### Direkte Installation
+
+Unter Linux oder macOS:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/lexmount/moli/releases/latest/download/moli-installer.sh | sh
+```
+
+Unter Windows in PowerShell ausführen:
+
+```powershell
+irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
 ```
 
 ## Demo
