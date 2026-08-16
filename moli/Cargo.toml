@@ -28,11 +28,13 @@ moli-protocol-server = { path = "../moli-protocol-server" }
 parking_lot = "0.12"
 serde_json = "1.0.145"
 tokio = { version = "1.51.0", features = ["macros", "net", "rt-multi-thread", "signal", "sync"] }
-tikv-jemalloc-sys = { version = "0.7.1", optional = true, default-features = false }
-tikv-jemallocator = { version = "0.7.0", optional = true, default-features = false, features = ["override_allocator_on_supported_platforms"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "fmt"] }
 url = "2.5.7"
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+tikv-jemalloc-sys = { version = "0.7.1", optional = true, default-features = false }
+tikv-jemallocator = { version = "0.7.0", optional = true, default-features = false, features = ["override_allocator_on_supported_platforms"] }
 
 [dev-dependencies]
 libc = "0.2"

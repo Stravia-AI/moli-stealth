@@ -107,10 +107,8 @@ def default_binary_path(target: str) -> Path:
     return target_dir / "release" / f"moli{suffix}"
 
 
-def build_release(*, no_default_features: bool) -> None:
+def build_release() -> None:
     command = ["cargo", "build", "--locked", "--release", "--package", "moli"]
-    if no_default_features:
-        command.append("--no-default-features")
     run_checked(command)
 
 
@@ -295,11 +293,6 @@ def parse_args() -> argparse.Namespace:
         "--expected-target",
         help="fail unless the native rustc host target matches this value",
     )
-    parser.add_argument(
-        "--no-default-features",
-        action="store_true",
-        help="pass --no-default-features to cargo build",
-    )
     return parser.parse_args()
 
 
@@ -321,7 +314,7 @@ def main() -> int:
             )
 
         if not args.skip_build:
-            build_release(no_default_features=args.no_default_features)
+            build_release()
 
         binary = (
             resolve_repo_path(args.binary)

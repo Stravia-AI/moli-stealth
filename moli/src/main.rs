@@ -6,7 +6,7 @@
 
 use anyhow::Result;
 
-#[cfg(feature = "jemalloc")]
+#[cfg(all(feature = "jemalloc", not(target_os = "windows")))]
 mod allocator;
 
 fn main() -> Result<()> {

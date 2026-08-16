@@ -25,9 +25,9 @@ only a staging copy, leaving the binary under `target/release` unchanged for
 debugging. Because stripping invalidates a Mach-O signature, macOS staging
 binaries are ad-hoc signed again and verified before packaging. They are not
 Developer ID signed or notarized. Windows executables are not Authenticode
-signed. The Windows build disables the default `jemalloc` feature and uses the
-system allocator because upstream treats the Windows/MSVC combination as
-untested.
+signed. The allocator behind the default `jemalloc` feature is target-gated
+out on Windows, so Windows builds use the system allocator because upstream
+treats the Windows/MSVC combination as untested.
 
 ## Prepare the release
 
@@ -44,7 +44,7 @@ untested.
    Windows PowerShell:
 
    ```powershell
-   python scripts/release.py --version 0.1.1 --no-default-features
+   python scripts/release.py --version 0.1.1
    ```
 
    Artifacts are written to `dist/`. The packager rejects a version that does
