@@ -113,6 +113,7 @@ impl EmbeddedFrameRenderer<DomHandle> for NativeEmbeddedFrameRenderer<'_> {
         let request = if self.capture_paint {
             let mut capture = moli_layout::PaintCaptureRequest::viewport();
             capture.include_backgrounds = self.include_backgrounds;
+            capture.base_background_color = moli_layout::PaintColor::TRANSPARENT;
             LayoutPassRequest::with_capture(viewport, self.reason, capture)
         } else {
             LayoutPassRequest::new(viewport, self.reason)
