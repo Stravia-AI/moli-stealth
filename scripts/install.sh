@@ -78,6 +78,6 @@ printf 'Installed moli to %s/moli\n' "$moli_install_dir"
 case ":${PATH:-}:" in
     *":$moli_install_dir:"*) ;;
     *)
-        printf 'Add %s to PATH, then run: moli version\n' "$moli_install_dir"
+        printf 'Add %s to PATH, then run: moli --version\n' "$moli_install_dir"
         ;;
 esac

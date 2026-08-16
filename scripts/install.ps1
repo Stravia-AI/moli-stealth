@@ -39,7 +39,7 @@ try {
 
     $pathEntries = $env:PATH -split ";"
     if ($installDir -notin $pathEntries) {
-        Write-Host "Add $installDir to PATH, then run: moli version"
+        Write-Host "Add $installDir to PATH, then run: moli --version"
     }
 } finally {
     if (Test-Path -LiteralPath $tempDir) {

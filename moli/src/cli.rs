@@ -39,7 +39,7 @@ const FETCH_INFER_FLAGS: &[&str] = &[
     "--web-bot-auth-profile",
 ];
 const SERVE_INFER_FLAGS: &[&str] = &["--host", "--port", "--timeout", "--layout"];
-const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve", "help", "version"];
+const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve"];
 const DUMP_MODES: &[&str] = &[
     "json",
     "html",
@@ -69,8 +69,6 @@ pub struct Cli {
 pub enum Commands {
     Fetch(Box<FetchArgs>),
     Serve(Box<ServeArgs>),
-    Help,
-    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]

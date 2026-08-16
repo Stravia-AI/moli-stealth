@@ -580,15 +580,22 @@ fn infers_serve_mode_from_legacy_serve_flags() {
 }
 
 #[test]
-fn parses_version_and_help_commands() {
-    assert_eq!(
-        Cli::try_parse_from(["moli", "version"]).unwrap().command,
-        Commands::Version
-    );
-    assert_eq!(
-        Cli::try_parse_from(["moli", "help"]).unwrap().command,
-        Commands::Help
-    );
+fn rejects_removed_version_and_help_subcommands() {
+    for command in ["version", "help"] {
+        let error = Cli::try_parse_from(["moli", command]).unwrap_err();
+        assert_eq!(error.kind(), clap::error::ErrorKind::InvalidSubcommand);
+    }
+}
+
+#[test]
+fn standard_version_and_help_flags_remain_available() {
+    for (flag, expected_kind) in [
+        ("--version", clap::error::ErrorKind::DisplayVersion),
+        ("--help", clap::error::ErrorKind::DisplayHelp),
+    ] {
+        let error = Cli::try_parse_from(["moli", flag]).unwrap_err();
+        assert_eq!(error.kind(), expected_kind);
+    }
 }
 
 #[test]

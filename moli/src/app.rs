@@ -11,7 +11,7 @@ use crate::{
 };
 use anyhow::Result;
 use anyhow::{Context, anyhow};
-use clap::{CommandFactory, Parser};
+use clap::Parser;
 use moli_core::runtime::{
     Browser, FetchedDocument, NavigationRuntimeConfig, PageVmInitStage, RenderedDomWaitUntil,
     storage_partition::StoragePartitionState,
@@ -39,23 +39,6 @@ pub async fn run_cli_with_config<W: Write>(
     config: AppConfig,
     stdout: &mut W,
 ) -> Result<()> {
-    match cli.command.clone() {
-        Commands::Help => {
-            let mut command = Cli::command();
-            command
-                .write_long_help(&mut *stdout)
-                .context("failed to print CLI help")?;
-            writeln!(stdout).context("failed to write CLI help trailing newline")?;
-            return Ok(());
-        }
-        Commands::Version => {
-            writeln!(stdout, "{}", env!("CARGO_PKG_VERSION"))
-                .context("failed to write CLI version")?;
-            return Ok(());
-        }
-        _ => {}
-    }
-
     match cli.command {
         Commands::Fetch(args) => {
             let browser = Browser::new(config.browser.clone())
@@ -253,7 +236,6 @@ pub async fn run_cli_with_config<W: Write>(
             );
             server.serve().await.context("protocol server failed")?;
         }
-        Commands::Help | Commands::Version => unreachable!(),
     }
 
     Ok(())

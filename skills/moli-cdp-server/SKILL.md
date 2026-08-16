@@ -26,7 +26,7 @@ Preserve the client's existing API where Moli supports it.
    irm https://github.com/lexmount/moli/releases/latest/download/moli-installer.ps1 | iex
    ```
 
-   Resolve the installed binary again and run `moli version`. The default
+   Resolve the installed binary again and run `moli --version`. The default
    location is `~/.local/bin/moli` on Linux/macOS and
    `%LOCALAPPDATA%\Moli\bin\moli.exe` on Windows when it is not yet on `PATH`.
 2. Start `moli serve` on the default loopback endpoint
