@@ -43,3 +43,18 @@ pub(super) async fn fetch_with_http_error_navigation(
         )
         .await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::is_http_error_status;
+
+    #[test]
+    fn http_error_status_covers_only_four_hundred_and_five_hundred_ranges() {
+        assert!(!is_http_error_status(399));
+        assert!(is_http_error_status(400));
+        assert!(is_http_error_status(499));
+        assert!(is_http_error_status(500));
+        assert!(is_http_error_status(599));
+        assert!(!is_http_error_status(600));
+    }
+}

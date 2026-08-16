@@ -2099,6 +2099,33 @@ fn cli_load_recovers_from_delayed_403_navigation_at_same_stage() -> Result<()> {
 }
 
 #[test]
+fn cli_load_follows_five_same_url_replacements_after_403() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-five-navigations");
+    let output = run_fetch_cli_with_wait_until(&url, "load")?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    assert!(
+        stdout.contains("id=\"http-error-five-navigation-target\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("id=\"http-error-five-navigation-load-tail\""),
+        "the fifth replacement must still reach Load: stdout={stdout}"
+    );
+    assert!(!stdout.contains("id=\"challenge\""), "stdout={stdout}");
+    Ok(())
+}
+
+#[test]
 fn cli_load_keeps_the_successor_stage_timeout_after_403_navigation() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
@@ -2230,6 +2257,49 @@ fn cli_redirect_time_can_extend_http_error_navigation_grace() -> Result<()> {
         stdout.contains("id=\"http-error-navigation-load-tail\""),
         "the configured grace must still preserve the requested Load stage: stdout={stdout}"
     );
+    Ok(())
+}
+
+#[test]
+fn cli_zero_redirect_time_accepts_navigation_already_pending_at_stage() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-immediate-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-time", "0"])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "a replacement already pending at the 403 Load stage must not need a grace timer: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    assert!(
+        stdout.contains("id=\"http-error-navigation-target\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        stdout.contains("id=\"http-error-navigation-load-tail\""),
+        "stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_zero_redirect_time_rejects_navigation_that_starts_later() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-time", "0"])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(!output.status.success());
+    let stdout = clean_output(&output.stdout);
+    let stderr = clean_output(&output.stderr);
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(stderr.contains("403 Forbidden"), "stderr={stderr}");
+    assert!(stderr.contains("0 ms grace period"), "stderr={stderr}");
     Ok(())
 }
 

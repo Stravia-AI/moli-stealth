@@ -1,6 +1,6 @@
 use moli_test_support as support;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use moli_core::{
     page::Page,
     runtime::{
@@ -13,7 +13,7 @@ use moli_fetch::Request;
 use parking_lot::Mutex;
 use std::sync::Arc;
 use support::FixtureServer;
-use tokio::time::Duration;
+use tokio::{sync::oneshot, time::Duration};
 
 fn executable_page(document: FetchedDocument) -> Result<Page> {
     match document {
@@ -27,6 +27,35 @@ fn executable_page(document: FetchedDocument) -> Result<Page> {
 
 fn diagnostic_global<'a>(page: &'a Page, name: &str) -> Option<&'a JsValueSnapshot> {
     page.script_execution().global(name)
+}
+
+async fn follow_http_error_navigation(
+    browser: &Browser,
+    url: &str,
+    wait_until: RenderedDomWaitUntil,
+    navigation_grace_ms: u64,
+    successor_timeout: Duration,
+) -> Result<Page> {
+    executable_page(
+        browser
+            .fetch_document_with_lifecycle_decider(
+                Request::get(url)?,
+                wait_until,
+                Duration::from_secs(5),
+                successor_timeout,
+                move |target| {
+                    ensure!(
+                        (400..=599).contains(&target.status),
+                        "expected an HTTP error lifecycle target, got status {}",
+                        target.status
+                    );
+                    Ok(RendererLifecycleDecision::FollowNextDocument {
+                        navigation_grace_ms,
+                    })
+                },
+            )
+            .await?,
+    )
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -221,6 +250,93 @@ async fn http_error_navigation_wait_follows_same_url_reload_to_domcontentloaded(
         diagnostic_global(&page, "httpErrorNavigationDcl"),
         Some(&JsValueSnapshot::Bool(true))
     );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationLoad"),
+        Some(&JsValueSnapshot::Bool(false)),
+        "the successor snapshot must stop at DCL rather than drifting to Load"
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationSlowScript"),
+        None,
+        "the DCL-inserted slow script must not complete before the DCL reply"
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_error_navigation_wait_follows_five_same_url_reloads_to_domcontentloaded() -> Result<()>
+{
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/wait-until-http-error-five-navigations");
+
+    let page = follow_http_error_navigation(
+        &browser,
+        &url,
+        RenderedDomWaitUntil::DomContentLoaded,
+        1_000,
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    assert_eq!(page.status(), 200);
+    assert_eq!(page.final_url().as_str(), url);
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationChainStep"),
+        Some(&JsValueSnapshot::Number(5.0))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationDcl"),
+        Some(&JsValueSnapshot::Bool(true))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationLoad"),
+        Some(&JsValueSnapshot::Bool(false))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationSlowScript"),
+        None
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_error_navigation_wait_follows_five_same_url_reloads_to_load() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/wait-until-http-error-five-navigations");
+
+    let page = follow_http_error_navigation(
+        &browser,
+        &url,
+        RenderedDomWaitUntil::Load,
+        1_000,
+        Duration::from_secs(10),
+    )
+    .await?;
+
+    assert_eq!(page.status(), 200);
+    assert_eq!(page.final_url().as_str(), url);
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationChainStep"),
+        Some(&JsValueSnapshot::Number(5.0))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationDcl"),
+        Some(&JsValueSnapshot::Bool(true))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationLoad"),
+        Some(&JsValueSnapshot::Bool(true))
+    );
+    assert_eq!(
+        diagnostic_global(&page, "httpErrorNavigationSlowScript"),
+        Some(&JsValueSnapshot::Bool(true))
+    );
 
     server.shutdown().await;
     Ok(())
@@ -300,6 +416,152 @@ async fn http_error_navigation_wait_reports_no_navigation_without_refetching() -
     let error = format!("{error:#}");
     assert!(error.contains("404 Not Found"), "error={error}");
     assert!(error.contains("100 ms grace period"), "error={error}");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn same_document_navigation_does_not_satisfy_http_error_replacement_wait() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/wait-until-http-error-same-document-navigation");
+
+    let error = browser
+        .fetch_document_with_lifecycle_decider(
+            Request::get(&url)?,
+            RenderedDomWaitUntil::Load,
+            Duration::from_secs(5),
+            Duration::from_secs(1),
+            |target| {
+                ensure!(target.status == 403, "expected 403, got {}", target.status);
+                Ok(RendererLifecycleDecision::FollowNextDocument {
+                    navigation_grace_ms: 150,
+                })
+            },
+        )
+        .await
+        .expect_err("a fragment-only navigation must not replace the HTTP error Document");
+    let error = format!("{error:#}");
+    assert!(error.contains("403 Forbidden"), "error={error}");
+    assert!(error.contains("150 ms grace period"), "error={error}");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_http_error_navigation_wait_keeps_renderer_owner_usable() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/net/upstream/xhr/404");
+    let (decision_tx, decision_rx) = oneshot::channel();
+
+    let mut waiting_fetch = Box::pin(browser.fetch_document_with_lifecycle_decider(
+        Request::get(&url)?,
+        RenderedDomWaitUntil::Load,
+        Duration::from_secs(5),
+        Duration::from_secs(11),
+        move |target| {
+            ensure!(target.status == 404, "expected 404, got {}", target.status);
+            decision_tx
+                .send(())
+                .map_err(|_| anyhow!("decision observer was dropped"))?;
+            Ok(RendererLifecycleDecision::FollowNextDocument {
+                navigation_grace_ms: 10_000,
+            })
+        },
+    ));
+    tokio::select! {
+        decision = decision_rx => decision.context("lifecycle decider did not signal")?,
+        result = &mut waiting_fetch => {
+            result?;
+            bail!("HTTP error wait completed before it could be cancelled");
+        }
+    }
+    drop(waiting_fetch);
+
+    let page = tokio::time::timeout(
+        Duration::from_secs(2),
+        browser.fetch_request_document_allow_http_error(Request::get("about:blank")?),
+    )
+    .await
+    .context("renderer owner stayed blocked after cancelling the lifecycle wait")??;
+    assert_eq!(executable_page(page)?.status(), 200);
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn parked_http_error_navigation_wait_does_not_block_another_page() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/net/upstream/xhr/404");
+    let (decision_tx, decision_rx) = oneshot::channel();
+
+    let mut waiting_fetch = Box::pin(browser.fetch_document_with_lifecycle_decider(
+        Request::get(&url)?,
+        RenderedDomWaitUntil::Load,
+        Duration::from_secs(5),
+        Duration::from_secs(11),
+        move |target| {
+            ensure!(target.status == 404, "expected 404, got {}", target.status);
+            decision_tx
+                .send(())
+                .map_err(|_| anyhow!("decision observer was dropped"))?;
+            Ok(RendererLifecycleDecision::FollowNextDocument {
+                navigation_grace_ms: 10_000,
+            })
+        },
+    ));
+    tokio::select! {
+        decision = decision_rx => decision.context("lifecycle decider did not signal")?,
+        result = &mut waiting_fetch => {
+            result?;
+            bail!("HTTP error wait completed before the concurrency check");
+        }
+    }
+
+    let quick_page = tokio::time::timeout(
+        Duration::from_secs(2),
+        browser.fetch_request_document_allow_http_error(Request::get("about:blank")?),
+    )
+    .await
+    .context("a parked lifecycle wait blocked an unrelated Page creation")??;
+    assert_eq!(executable_page(quick_page)?.status(), 200);
+    drop(waiting_fetch);
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_error_replacement_wait_keeps_chained_navigation_limit() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/wait-until-http-error-navigation-loop");
+
+    let error = browser
+        .fetch_document_with_lifecycle_decider(
+            Request::get(&url)?,
+            RenderedDomWaitUntil::Load,
+            Duration::from_secs(5),
+            Duration::from_secs(20),
+            |target| {
+                ensure!(target.status == 403, "expected 403, got {}", target.status);
+                Ok(RendererLifecycleDecision::FollowNextDocument {
+                    navigation_grace_ms: 1_000,
+                })
+            },
+        )
+        .await
+        .expect_err("the replacement navigation loop must hit the owner chain limit");
+    let error = format!("{error:#}");
+    assert!(
+        error.contains("too many chained location navigations"),
+        "error={error}"
+    );
 
     server.shutdown().await;
     Ok(())

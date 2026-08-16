@@ -40,6 +40,73 @@ const WAIT_UNTIL_INTERVAL_DOM_MUTATION_HTML: &str = "<!doctype html><html><body 
 const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 75); });</script></body></html>";
 const WAIT_UNTIL_HTTP_ERROR_LATE_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>late 403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=late-challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 1200); });</script></body></html>";
 const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML: &str = "<!doctype html><html><head><title>challenge passed</title></head><body><main id=\"http-error-navigation-target\">http-error-navigation=done</main><script>window.httpErrorNavigationDcl = false; window.httpErrorNavigationLoad = false; document.addEventListener('DOMContentLoaded', () => { window.httpErrorNavigationDcl = true; document.body.setAttribute('data-reached-dcl', 'true'); const script = document.createElement('script'); script.src = '/assets/runtime_owned_in_order_load_very_slow.js'; script.onload = () => { window.httpErrorNavigationSlowScript = true; const tail = document.createElement('main'); tail.id = 'http-error-navigation-load-tail'; tail.textContent = 'http-error-navigation=load-tail'; document.body.appendChild(tail); }; document.head.appendChild(script); }); window.addEventListener('load', () => { window.httpErrorNavigationLoad = true; document.body.setAttribute('data-reached-load', 'true'); });</script></body></html>";
+const WAIT_UNTIL_HTTP_ERROR_IMMEDIATE_NAVIGATION_CHALLENGE_HTML: &str = r#"<!doctype html>
+<html><head><title>immediate 403 challenge</title></head><body>
+<main id="challenge">http-error-navigation=immediate-challenge</main>
+<script>
+window.addEventListener('load', () => {
+  document.cookie = 'moli-http-error-immediate-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax';
+  location.reload();
+});
+</script>
+</body></html>"#;
+const WAIT_UNTIL_HTTP_ERROR_SAME_DOCUMENT_NAVIGATION_HTML: &str = r#"<!doctype html>
+<html><head><title>same-document 403 challenge</title></head><body>
+<main id="challenge">http-error-navigation=same-document</main>
+<script>
+window.addEventListener('load', () => {
+  setTimeout(() => { location.hash = 'same-document-only'; }, 25);
+});
+</script>
+</body></html>"#;
+const WAIT_UNTIL_HTTP_ERROR_FIVE_NAVIGATION_CHALLENGE_HTML: &str = r#"<!doctype html>
+<html><head><title>five-navigation 403 challenge</title></head><body>
+<main id="challenge">http-error-navigation=five-navigation-challenge</main>
+<script>
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    document.cookie = 'moli-http-error-five-navigation-step=1; Path=/; Max-Age=3600; SameSite=Lax';
+    location.reload();
+  }, 75);
+});
+</script>
+</body></html>"#;
+const WAIT_UNTIL_HTTP_ERROR_FIVE_NAVIGATION_FINAL_HTML: &str = r#"<!doctype html>
+<html><head><title>five-navigation challenge passed</title></head><body>
+<main id="http-error-five-navigation-target">http-error-navigation=five-navigation-done</main>
+<script>
+window.httpErrorNavigationChainStep = 5;
+window.httpErrorNavigationDcl = false;
+window.httpErrorNavigationLoad = false;
+document.addEventListener('DOMContentLoaded', () => {
+  window.httpErrorNavigationDcl = true;
+  document.body.setAttribute('data-reached-dcl', 'true');
+  const script = document.createElement('script');
+  script.src = '/assets/runtime_owned_in_order_load_very_slow.js';
+  script.onload = () => {
+    window.httpErrorNavigationSlowScript = true;
+    const tail = document.createElement('main');
+    tail.id = 'http-error-five-navigation-load-tail';
+    tail.textContent = 'http-error-navigation=five-navigation-load-tail';
+    document.body.appendChild(tail);
+  };
+  document.head.appendChild(script);
+});
+window.addEventListener('load', () => {
+  window.httpErrorNavigationLoad = true;
+  document.body.setAttribute('data-reached-load', 'true');
+});
+</script>
+</body></html>"#;
+const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_LOOP_HTML: &str = r#"<!doctype html>
+<html><head><title>navigation-loop 403 challenge</title></head><body>
+<main id="challenge">http-error-navigation=loop-challenge</main>
+<script>
+window.addEventListener('load', () => {
+  setTimeout(() => { location.replace('/location-nav/loop-a'); }, 25);
+});
+</script>
+</body></html>"#;
 
 pub(super) fn add_wait_routes(router: Router) -> Router {
     router
@@ -126,6 +193,22 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
             get(wait_until_http_error_navigation_to_error_page),
         )
         .route(
+            "/wait-until-http-error-immediate-navigation",
+            get(wait_until_http_error_immediate_navigation_page),
+        )
+        .route(
+            "/wait-until-http-error-same-document-navigation",
+            get(wait_until_http_error_same_document_navigation_page),
+        )
+        .route(
+            "/wait-until-http-error-five-navigations",
+            get(wait_until_http_error_five_navigations_page),
+        )
+        .route(
+            "/wait-until-http-error-navigation-loop",
+            get(wait_until_http_error_navigation_loop_page),
+        )
+        .route(
             "/wait-until-http-error-late-navigation",
             get(wait_until_http_error_late_navigation_page),
         )
@@ -168,6 +251,68 @@ async fn wait_until_http_error_navigation_to_error_page(headers: HeaderMap) -> R
     (
         StatusCode::FORBIDDEN,
         Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_immediate_navigation_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-http-error-immediate-navigation=passed") {
+        return Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_IMMEDIATE_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_same_document_navigation_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_SAME_DOCUMENT_NAVIGATION_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_five_navigations_page(headers: HeaderMap) -> Response {
+    let step = (1_u8..=5)
+        .find(|step| {
+            has_cookie(
+                &headers,
+                &format!("moli-http-error-five-navigation-step={step}"),
+            )
+        })
+        .unwrap_or(0);
+    if step == 0 {
+        return (
+            StatusCode::FORBIDDEN,
+            Html(WAIT_UNTIL_HTTP_ERROR_FIVE_NAVIGATION_CHALLENGE_HTML),
+        )
+            .into_response();
+    }
+    if step == 5 {
+        return Html(WAIT_UNTIL_HTTP_ERROR_FIVE_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    let next_step = step + 1;
+    Html(format!(
+        r#"<!doctype html>
+<html><head><title>five-navigation step {step}</title></head><body>
+<main id="http-error-five-navigation-step-{step}">step={step}</main>
+<script>
+document.cookie = 'moli-http-error-five-navigation-step={next_step}; Path=/; Max-Age=3600; SameSite=Lax';
+location.reload();
+</script>
+</body></html>"#
+    ))
+    .into_response()
+}
+
+async fn wait_until_http_error_navigation_loop_page() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_LOOP_HTML),
     )
         .into_response()
 }
