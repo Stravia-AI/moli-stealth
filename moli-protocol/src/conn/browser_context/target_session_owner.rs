@@ -2964,7 +2964,8 @@ impl CdpConnection {
     ///
     /// The connection actor is mutably borrowed while a renderer output is
     /// taken, so callers can capture this identity immediately before starting
-    /// that Page command and attach it to the returned prepared payload.
+    /// that Page command and attach it to the returned prepared payload. A
+    /// target without an installed Page has no current Page residence.
     pub(crate) fn target_page_residence_identity_for_session(
         &self,
         session_id: Option<&str>,
@@ -2985,7 +2986,7 @@ impl CdpConnection {
         let page_attachment_id = self
             .runtime_session_owner_slot(session_id)
             .ok()?
-            .page_residence_id();
+            .page_attachment_id()?;
         Some(TargetPageResidenceIdentity::new(
             browser_context_id,
             target_id,
@@ -3718,12 +3719,21 @@ mod tests {
         browser_context.set_active_target_id("TID-active".to_owned());
         browser_context.attach_active_session("SID-active-primary".to_owned());
         browser_context
+            .active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
+        browser_context
             .background_targets
             .push(crate::conn::BackgroundTarget::with_url(
                 "TID-background".to_owned(),
                 Some("SID-background-primary".to_owned()),
                 "about:blank#background".to_owned(),
             ));
+        browser_context
+            .background_target_mut("TID-background")
+            .expect("background target")
+            .runtime_slot
+            .set_page_attachment_id_for_test(2);
         assert!(
             browser_context
                 .assign_auxiliary_session_to_target("TID-active", "SID-active-aux".to_owned(),)
@@ -4608,6 +4618,39 @@ mod tests {
                 "every Page residence identity component must participate in authorization"
             );
         }
+    }
+
+    #[test]
+    fn target_without_page_has_only_a_pending_page_residence() {
+        let mut conn = CdpConnection::default();
+        let mut browser_context = BrowserContext::new("BID-pending-residence".to_owned());
+        browser_context.set_active_target_id("TID-pending-residence");
+        browser_context.attach_active_session("SID-pending-residence".to_owned());
+        conn.browser_context = Some(browser_context);
+
+        assert_eq!(
+            conn.target_page_residence_identity_for_session(Some("SID-pending-residence")),
+            None,
+            "an empty target slot must not manufacture a current Page identity"
+        );
+
+        conn.runtime_session_owner_slot_mut(Some("SID-pending-residence"))
+            .expect("active target runtime slot")
+            .start_document_navigation(
+                "TID-pending-residence".to_owned(),
+                "LOADER-pending-residence".to_owned(),
+            );
+
+        assert_eq!(
+            conn.target_page_residence_identity_for_session(Some("SID-pending-residence")),
+            None,
+            "a reservation must not masquerade as the current Page"
+        );
+        assert!(
+            conn.pending_target_page_residence_identity_for_session(Some("SID-pending-residence"))
+                .is_some(),
+            "the future Page attachment should remain explicitly addressable"
+        );
     }
 
     #[test]

@@ -291,10 +291,6 @@ impl TargetRuntimeSlot {
         self.page_slot.page_attachment_id()
     }
 
-    pub(crate) fn page_residence_id(&self) -> TargetPageAttachmentId {
-        self.page_slot.page_residence_id()
-    }
-
     pub(crate) fn pending_page_attachment_id(&self) -> Option<TargetPageAttachmentId> {
         self.page_slot.pending_page_attachment_id()
     }

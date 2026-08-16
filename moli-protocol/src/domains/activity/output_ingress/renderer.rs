@@ -261,6 +261,10 @@ mod tests {
                 "SID-owner-action".to_owned(),
             )
         );
+        browser_context
+            .active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(browser_context);
 
         assert_eq!(

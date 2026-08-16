@@ -580,6 +580,9 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
+        bc.active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
@@ -676,6 +679,9 @@ mod tests {
         let mut bc = BrowserContext::new("BID-collision".into());
         bc.set_active_target_id("TID-collision");
         bc.attach_active_session("SID-collision");
+        bc.active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(bc);
 
         let old_owner = conn
@@ -758,6 +764,9 @@ mod tests {
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
         assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
+        bc.active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(bc);
         assert!(conn.enable_network_listener_for_session_owner(Some("FETCH-SID")));
         let page_owner = conn
@@ -820,6 +829,9 @@ mod tests {
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
         assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
+        bc.active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))

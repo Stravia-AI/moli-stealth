@@ -67,8 +67,7 @@ impl RendererPageResidenceIdentity {
     }
 }
 
-/// Identifies one current or reserved Page-slot residence within a protocol
-/// target.
+/// Identifies one current or reserved Page attachment within a protocol target.
 ///
 /// This identity deliberately does not include the renderer Document. A
 /// `document.open()` replacement keeps the same Page residence, while taking,
@@ -77,9 +76,8 @@ impl RendererPageResidenceIdentity {
 /// authorization and may carry a renderer Document identity separately as
 /// causal metadata. The attachment id is allocated when the Page is reserved,
 /// so work emitted before installation and work emitted after commit retain the
-/// same identity without predicting a numeric generation. An empty slot owns a
-/// distinct tombstone id, which prevents output captured in one absence from
-/// matching a later absence or Page.
+/// same identity without predicting a numeric generation. A target without a
+/// current or reserved Page has no Page residence identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TargetPageResidenceIdentity {
     browser_context_id: String,

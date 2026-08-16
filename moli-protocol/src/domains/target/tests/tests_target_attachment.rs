@@ -2512,6 +2512,10 @@ async fn non_browser_auto_attach_owners_do_not_replay_existing_shared_worker_tar
         ctx.conn
             .prepare_auto_attached_page_session_binding("TID-page", "SID-page".to_owned())
     );
+    ctx.conn
+        .runtime_session_owner_slot_mut(Some("SID-page"))
+        .expect("page owner runtime slot")
+        .set_page_attachment_id_for_test(1);
     let owner_page = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-page"))

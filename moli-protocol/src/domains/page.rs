@@ -2509,9 +2509,15 @@ mod producer_tests {
     }
 
     fn page_residence_identity_for_test(
-        conn: &CdpConnection,
+        conn: &mut CdpConnection,
         session_id: &str,
     ) -> crate::conn::TargetPageResidenceIdentity {
+        let runtime_slot = conn
+            .runtime_session_owner_slot_mut(Some(session_id))
+            .expect("test target should expose a runtime owner slot");
+        if runtime_slot.page_attachment_id().is_none() {
+            runtime_slot.replace_page_attachment_id_for_test();
+        }
         conn.target_page_residence_identity_for_session(Some(session_id))
             .expect("test target should expose a Page residence identity")
     }
@@ -2714,7 +2720,7 @@ mod producer_tests {
         bc.set_active_target_id("TID-active");
         bc.attach_active_session("SID-1");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-1");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-1");
         let source_document = renderer_document_identity_for_test(1, 1);
         let mut out: Vec<BackgroundProtocolEvent> = Vec::new();
         let mut prepared =
@@ -2780,7 +2786,7 @@ mod producer_tests {
                 .assign_auxiliary_session_to_target("TID-dialog-attachment", "SID-aux".to_owned(),)
         );
         conn.browser_context = Some(browser_context);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-aux");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-aux");
         let mut prepared =
             ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_javascript_dialogs_for_test(
@@ -2844,7 +2850,7 @@ mod producer_tests {
         let mut prepared =
             ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_javascript_dialogs_for_test(
-                    page_residence_identity_for_test(&conn, "SID-detached"),
+                    page_residence_identity_for_test(&mut conn, "SID-detached"),
                     Some("SID-detached"),
                     javascript_dialog_scope_for_test(&conn, "SID-detached"),
                     "TID-dialog-detached",
@@ -2895,7 +2901,7 @@ mod producer_tests {
         );
         conn.browser_context = Some(browser_context);
         conn.set_auto_attach_owner(None, true, false, CdpTargetFilter::default_auto_attach());
-        let page_owner = page_residence_identity_for_test(&conn, "SID-source");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-source");
         let source_document = renderer_document_identity_for_test(1, 1);
         let completion = RendererJavaScriptDialogCompletion::pending();
         let mut dialog_output =
@@ -2983,7 +2989,7 @@ mod producer_tests {
         browser_context.attach_active_session("SID-opener");
         conn.browser_context = Some(browser_context);
         conn.set_auto_attach_owner(None, true, false, CdpTargetFilter::default_auto_attach());
-        let page_owner = page_residence_identity_for_test(&conn, "SID-opener");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-opener");
         let source_dialog_scope = javascript_dialog_scope_for_test(&conn, "SID-opener");
         let source_document = renderer_document_identity_for_test(1, 1);
         let completion = RendererJavaScriptDialogCompletion::pending();
@@ -3139,7 +3145,7 @@ mod producer_tests {
         browser_context.set_active_target_id("TID-opener-no-session");
         browser_context.attach_active_session("SID-opener-no-session");
         conn.browser_context = Some(browser_context);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-opener-no-session");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-opener-no-session");
         let source_document = renderer_document_identity_for_test(1, 1);
         let completion = RendererJavaScriptDialogCompletion::pending();
         let mut prepared =
@@ -3261,7 +3267,7 @@ mod producer_tests {
         bc.set_active_target_id("TID-dialog-stale-page");
         bc.attach_active_session("SID-dialog-stale-page");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-dialog-stale-page");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-dialog-stale-page");
         let completion = moli_core::page::RendererJavaScriptDialogCompletion::pending();
         let dialog = renderer_javascript_dialog_for_test(
             renderer_document_identity_for_test(1, 1),
@@ -3315,7 +3321,7 @@ mod producer_tests {
         bc.set_active_target_id("TID-dialog-generation");
         bc.attach_active_session("SID-dialog-generation");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-dialog-generation");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-dialog-generation");
         let completion = moli_core::page::RendererJavaScriptDialogCompletion::pending();
         let dialog = renderer_javascript_dialog_for_test(
             renderer_document_identity_for_test(1, 1),
@@ -3364,7 +3370,7 @@ mod producer_tests {
         bc.set_target_url("https://example.test/current-before-capture".to_owned());
         bc.attach_active_session("SID-dialog-source");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-dialog-source");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-dialog-source");
         let dialog = RendererPendingJavaScriptDialog::new(
             RendererJavaScriptDialogId::new(9),
             renderer_document_identity_for_test(2, 3),
@@ -3433,7 +3439,7 @@ mod producer_tests {
             "TID-activity-order",
             source_document,
         );
-        let page_owner = page_residence_identity_for_test(&conn, "SID-activity-order");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-activity-order");
 
         let mut prepared =
             ProtocolOutputPayloads::from_slot(InputPreparedOutputSlot::from_outputs(
@@ -3605,7 +3611,7 @@ mod producer_tests {
         prepared.extend_payload(
             super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_same_document_navigations_for_test(
-                    page_residence_identity_for_test(&conn, "SID-later-activity-order"),
+                    page_residence_identity_for_test(&mut conn, "SID-later-activity-order"),
                     vec![document_sourced_same_document_navigation_for_test(
                         source_document,
                         "https://example.test/page#ordered",
@@ -3617,7 +3623,7 @@ mod producer_tests {
         prepared.extend_payload(
             super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_top_level_location_navigation_for_test(
-                    page_residence_identity_for_test(&conn, "SID-later-activity-order"),
+                    page_residence_identity_for_test(&mut conn, "SID-later-activity-order"),
                     Some(RendererDocumentSourcedTopLevelLocationNavigation::new(
                         source_document,
                         "data:text/html,%3Cmain%3Eordered-location%3C/main%3E".to_owned(),
@@ -4695,7 +4701,7 @@ mod producer_tests {
         bc.set_active_target_id("TID-active");
         bc.attach_active_session("SID-1");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-1");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-1");
         let source_document = renderer_document_identity_for_test(1, 1);
         let mut out = Vec::new();
         let mut prepared =
@@ -4779,7 +4785,7 @@ mod producer_tests {
         bc.set_active_target_id("TID-opener");
         bc.attach_active_session("SID-opener");
         conn.browser_context = Some(bc);
-        let page_owner = page_residence_identity_for_test(&conn, "SID-opener");
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-opener");
         let source_document = renderer_document_identity_for_test(1, 1);
         let mut prepared =
             ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
@@ -4855,7 +4861,7 @@ mod producer_tests {
         let mut prepared =
             ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_same_document_navigations_for_test(
-                    page_residence_identity_for_test(&conn, "SID-1"),
+                    page_residence_identity_for_test(&mut conn, "SID-1"),
                     vec![document_sourced_same_document_navigation_for_test(
                         source_document,
                         "https://example.test/page#prepared",
@@ -4932,7 +4938,7 @@ mod producer_tests {
             "TID-document-open-same-document",
             source_document,
         );
-        let owner = page_residence_identity_for_test(&conn, "SID-document-open-same-document");
+        let owner = page_residence_identity_for_test(&mut conn, "SID-document-open-same-document");
         bind_renderer_document_for_test(
             &mut conn,
             "SID-document-open-same-document",
@@ -4987,7 +4993,7 @@ mod producer_tests {
             "TID-stale-page-same-document",
             source_document,
         );
-        let owner = page_residence_identity_for_test(&conn, "SID-stale-page-same-document");
+        let owner = page_residence_identity_for_test(&mut conn, "SID-stale-page-same-document");
         conn.runtime_session_owner_slot_mut(Some("SID-stale-page-same-document"))
             .expect("test runtime slot should exist")
             .replace_page_attachment_id_for_test();
@@ -5037,7 +5043,7 @@ mod producer_tests {
         let mut prepared =
             ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
                 super::PagePreparedOutputs::from_top_level_location_navigation_for_test(
-                    page_residence_identity_for_test(&conn, "SID-location"),
+                    page_residence_identity_for_test(&mut conn, "SID-location"),
                     Some(RendererDocumentSourcedTopLevelLocationNavigation::new(
                         source_document,
                         target_url.clone(),
@@ -5113,7 +5119,7 @@ mod producer_tests {
             "TID-document-open-location",
             source_document,
         );
-        let owner = page_residence_identity_for_test(&conn, "SID-document-open-location");
+        let owner = page_residence_identity_for_test(&mut conn, "SID-document-open-location");
         bind_renderer_document_for_test(
             &mut conn,
             "SID-document-open-location",
@@ -5177,7 +5183,7 @@ mod producer_tests {
             "TID-stale-page-location",
             source_document,
         );
-        let owner = page_residence_identity_for_test(&conn, "SID-stale-page-location");
+        let owner = page_residence_identity_for_test(&mut conn, "SID-stale-page-location");
         conn.runtime_session_owner_slot_mut(Some("SID-stale-page-location"))
             .expect("test runtime slot should exist")
             .replace_page_attachment_id_for_test();

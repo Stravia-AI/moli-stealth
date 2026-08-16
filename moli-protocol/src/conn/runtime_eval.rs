@@ -5724,6 +5724,10 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-owner".to_owned());
         browser_context.set_active_target_id("TID-active");
         browser_context.attach_active_session("SID-active".to_owned());
+        browser_context
+            .active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(browser_context);
         conn
     }
@@ -6437,6 +6441,10 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-listener-cancel".to_owned());
         browser_context.set_active_target_id("TID-listener-cancel".to_owned());
         browser_context.attach_active_session("SID-listener-cancel".to_owned());
+        browser_context
+            .active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(browser_context);
 
         conn.try_register_renderer_call_for_session_owner(

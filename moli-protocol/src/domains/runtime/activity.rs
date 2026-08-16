@@ -477,6 +477,10 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-1".to_owned());
         browser_context.set_active_target_id("TID-1");
         browser_context.attach_active_session("SID-1");
+        browser_context
+            .active_target
+            .runtime_slot
+            .set_page_attachment_id_for_test(1);
         conn.browser_context = Some(browser_context);
         let attachment = conn
             .target_page_protocol_attachment_identity_for_session(Some("SID-1"))
