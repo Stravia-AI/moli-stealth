@@ -52,20 +52,6 @@ pub(super) struct CompletedAddScriptToEvaluateOnNewDocumentCommand {
     command: DevToolsAddPreloadScriptCommand,
 }
 
-impl CompletedCreateIsolatedWorldCommand {
-    pub(super) fn renderer_output_predecessor(&self) -> Option<moli_core::RendererOutputFence> {
-        match &self.completed {
-            CompletedCreateIsolatedWorldPhase::RendererPageCommand(completed) => completed
-                .as_ref()
-                .as_ref()
-                .ok()
-                .and_then(CompletedPageCommand::renderer_output_predecessor),
-            CompletedCreateIsolatedWorldPhase::InitialDocumentNavigation(_)
-            | CompletedCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(_) => None,
-        }
-    }
-}
-
 struct RecordedDocumentStartScript {
     identifier: String,
     script: DocumentStartScript,

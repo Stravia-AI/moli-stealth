@@ -1,5 +1,6 @@
 use super::super::tests_cdp_smoke_fixture::SmokeFixtureServer;
 use super::super::*;
+use crate::{CdpCommandTaskStep, CommandDispatchContext, ParsedCdpCommand};
 use serde_json::{Value, json};
 
 fn event<'a>(messages: &'a [Value], method: &str) -> &'a Value {
@@ -249,6 +250,75 @@ async fn rust_cdp_chromiumoxide_loaded_target_replays_renderer_lifecycle_when_en
         );
     }
     assert_eq!(response(&messages, 2_600_065)["result"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn create_isolated_world_restart_does_not_inherit_the_stale_renderer_stream() {
+    let fixture = SmokeFixtureServer::start().await;
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    let target_id = create_target(&mut ctx, 2_600_070, None, "about:blank").await;
+    let session_id = attach_to_target(&mut ctx, 2_600_071, None, &target_id).await;
+    ctx.take_all();
+
+    // Start the utility-world command on the initial renderer, but deliberately
+    // leave its completed turn pending at the protocol boundary. Navigating now
+    // replaces the attachment before that completion is decoded, deterministically
+    // exercising the same stale-completion restart as popup initialization.
+    let command = ParsedCdpCommand::parse_value(json!({
+        "id": 2_600_072,
+        "method": "Page.createIsolatedWorld",
+        "sessionId": session_id,
+        "params": {
+            "frameId": target_id,
+            "worldName": "__playwright_utility_world_page"
+        }
+    }))
+    .expect("createIsolatedWorld command should parse");
+    let mut command_context = CommandDispatchContext::default();
+    let CdpCommandTaskStep::Pending(first_pending) = ctx
+        .conn
+        .start_parsed_command_dispatch_with_context(&command, &mut command_context)
+    else {
+        panic!("createIsolatedWorld should start on the initial renderer");
+    };
+
+    ctx.process_async(json!({
+        "id": 2_600_073,
+        "method": "Page.navigate",
+        "sessionId": session_id,
+        "params": { "url": fixture.url("/plain?replacement=isolated-world") }
+    }))
+    .await;
+    let navigation = take_response_by_id(&mut ctx, 2_600_073);
+    assert_eq!(navigation["result"]["frameId"], json!(target_id));
+
+    let first_completed = first_pending.wait().await;
+    let CdpCommandTaskStep::Pending(restarted) = ctx
+        .conn
+        .complete_pending_command_dispatch_with_context(first_completed, &mut command_context)
+        .await
+    else {
+        panic!("the stale initial-renderer completion should restart on the replacement");
+    };
+    assert!(
+        command_context.take_renderer_output_predecessor().is_none(),
+        "an abandoned renderer stream must not become the final response predecessor"
+    );
+
+    let replacement_completed = restarted.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) = ctx
+        .conn
+        .complete_pending_command_dispatch_with_context(replacement_completed, &mut command_context)
+        .await
+    else {
+        panic!("the replacement renderer should complete createIsolatedWorld");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(
+        response(&messages, 2_600_072)["result"]["executionContextId"]
+            .as_i64()
+            .is_some()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

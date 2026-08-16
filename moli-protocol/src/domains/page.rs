@@ -295,14 +295,17 @@ impl CompletedPageCommandKind {
             Self::SameDocumentNavigate(completed) => completed.renderer_output_predecessor(),
             Self::TraverseSameDocumentHistory(completed) => completed.renderer_output_predecessor(),
             Self::ChildFrameNavigate(completed) => completed.renderer_output_predecessor(),
-            Self::CreateIsolatedWorld(completed) => completed.renderer_output_predecessor(),
             Self::BringToFront { .. }
             | Self::AddScriptToEvaluateOnNewDocument(_)
             | Self::Navigate(_)
             | Self::ContinueNavigationWithoutRequestPause(_)
             | Self::StopLoading
             | Self::Crash
-            | Self::Close => None,
+            | Self::Close
+            // createIsolatedWorld may restart on a replacement renderer attachment. Its
+            // completion handler records the fence only after rejecting a stale completion,
+            // so an abandoned stream cannot become the predecessor of the final response.
+            | Self::CreateIsolatedWorld(_) => None,
         }
     }
 }
