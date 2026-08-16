@@ -2235,11 +2235,11 @@ fn cli_explicit_load_rejects_navigation_after_the_one_second_grace() -> Result<(
 }
 
 #[test]
-fn cli_redirect_time_can_extend_http_error_navigation_grace() -> Result<()> {
+fn cli_redirect_wait_can_extend_http_error_navigation_grace() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-late-navigation");
-    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-time", "1500"])?;
+    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-wait-ms", "1500"])?;
     runtime.block_on(server.shutdown());
 
     assert!(
@@ -2261,11 +2261,11 @@ fn cli_redirect_time_can_extend_http_error_navigation_grace() -> Result<()> {
 }
 
 #[test]
-fn cli_zero_redirect_time_accepts_navigation_already_pending_at_stage() -> Result<()> {
+fn cli_zero_redirect_wait_accepts_navigation_already_pending_at_stage() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-immediate-navigation");
-    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-time", "0"])?;
+    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-wait-ms", "0"])?;
     runtime.block_on(server.shutdown());
 
     assert!(
@@ -2287,11 +2287,11 @@ fn cli_zero_redirect_time_accepts_navigation_already_pending_at_stage() -> Resul
 }
 
 #[test]
-fn cli_zero_redirect_time_rejects_navigation_that_starts_later() -> Result<()> {
+fn cli_zero_redirect_wait_rejects_navigation_that_starts_later() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-navigation");
-    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-time", "0"])?;
+    let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-wait-ms", "0"])?;
     runtime.block_on(server.shutdown());
 
     assert!(!output.status.success());

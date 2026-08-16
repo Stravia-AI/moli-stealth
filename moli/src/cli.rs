@@ -13,7 +13,7 @@ const FETCH_INFER_FLAGS: &[&str] = &[
     "--with-base",
     "--with-frames",
     "--wait-until",
-    "--redirect-time",
+    "--redirect-wait-ms",
     "--wait-selector",
     "--wait-script",
     "--wait-script-file",
@@ -50,7 +50,7 @@ const DUMP_MODES: &[&str] = &[
     "semantic_tree_text",
 ];
 
-pub const DEFAULT_REDIRECT_TIME_MS: u64 = 1_000;
+pub const DEFAULT_REDIRECT_WAIT_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
@@ -112,9 +112,9 @@ pub struct FetchArgs {
     #[arg(
         long,
         value_name = "MILLISECONDS",
-        default_value_t = DEFAULT_REDIRECT_TIME_MS
+        default_value_t = DEFAULT_REDIRECT_WAIT_MS
     )]
-    pub redirect_time: u64,
+    pub redirect_wait_ms: u64,
 
     #[arg(long)]
     pub wait_selector: Option<String>,
@@ -578,15 +578,25 @@ mod tests {
     }
 
     #[test]
-    fn redirect_time_infers_fetch_command() {
+    fn redirect_wait_ms_infers_fetch_command() {
         let args =
-            normalize_args_for_compat(["moli", "--redirect-time=1500", "https://example.test/"]);
+            normalize_args_for_compat(["moli", "--redirect-wait-ms=1500", "https://example.test/"]);
         let cli = Cli::parse_from(args);
 
         match cli.command {
-            Commands::Fetch(args) => assert_eq!(args.redirect_time, 1_500),
+            Commands::Fetch(args) => assert_eq!(args.redirect_wait_ms, 1_500),
             other => panic!("expected fetch command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn fetch_help_exposes_only_redirect_wait_ms() {
+        let help = Cli::try_parse_from(["moli", "fetch", "--help"])
+            .unwrap_err()
+            .to_string();
+
+        assert!(help.contains("--redirect-wait-ms <MILLISECONDS>"));
+        assert!(!help.contains("--redirect-time"));
     }
 
     #[test]

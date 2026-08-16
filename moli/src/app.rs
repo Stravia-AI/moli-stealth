@@ -62,7 +62,7 @@ pub async fn run_cli_with_config<W: Write>(
                 .context("failed to initialize browser runtime")?;
             load_cookie_state(&browser, &config)?;
             let timeout = std::time::Duration::from_millis(args.timeout);
-            let navigation_grace = Duration::from_millis(args.redirect_time);
+            let navigation_grace = Duration::from_millis(args.redirect_wait_ms);
             let request = build_fetch_request(&args.url, &config)?;
             let fetch_result = match args.wait_until {
                 FetchWaitUntil::Done => {
