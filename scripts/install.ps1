@@ -4,7 +4,13 @@ $releaseBaseUrl = if ($env:MOLI_RELEASE_BASE_URL) {
 } else {
     "https://github.com/lexmount/moli/releases/latest/download"
 }
-$assetName = "moli-x86_64-pc-windows-msvc.zip"
+$architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+$target = switch ($architecture) {
+    "X64" { "x86_64-pc-windows-msvc" }
+    "Arm64" { "aarch64-pc-windows-msvc" }
+    default { throw "Unsupported Windows architecture: $architecture" }
+}
+$assetName = "moli-$target.zip"
 $installDir = if ($env:MOLI_INSTALL_DIR) {
     $env:MOLI_INSTALL_DIR
 } else {

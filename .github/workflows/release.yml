@@ -78,11 +78,23 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
   build-linux:
-    name: Build Linux x86_64
+    name: Build Linux ${{ matrix.arch }}
     needs: validate
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    container: rust:1.96.1-bookworm
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: release-linux-x86_64
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            artifact: release-linux-aarch64
+    container: rust:1.96.1-bullseye
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -104,12 +116,12 @@ jobs:
         run: >-
           python3 scripts/release.py
           --version "${{ needs.validate.outputs.version }}"
-          --expected-target x86_64-unknown-linux-gnu
+          --expected-target "${{ matrix.target }}"
 
       - name: Upload Linux artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-linux-x86_64
+          name: ${{ matrix.artifact }}
           path: dist/
           if-no-files-found: error
           compression-level: 0
@@ -165,10 +177,22 @@ jobs:
           retention-days: 7
 
   build-windows:
-    name: Build Windows x86_64
+    name: Build Windows ${{ matrix.arch }}
     needs: validate
-    runs-on: windows-2025
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            artifact: release-windows-x86_64
+          - arch: aarch64
+            runner: windows-11-arm
+            target: aarch64-pc-windows-msvc
+            artifact: release-windows-aarch64
     steps:
       - name: Checkout repository
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -204,12 +228,12 @@ jobs:
         run: >-
           python scripts/release.py
           --version "${{ needs.validate.outputs.version }}"
-          --expected-target x86_64-pc-windows-msvc
+          --expected-target "${{ matrix.target }}"
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-windows-x86_64
+          name: ${{ matrix.artifact }}
           path: dist/
           if-no-files-found: error
           compression-level: 0
@@ -252,9 +276,11 @@ jobs:
 
           expected_archives=(
             "moli-x86_64-unknown-linux-gnu.tar.gz"
+            "moli-aarch64-unknown-linux-gnu.tar.gz"
             "moli-x86_64-apple-darwin.tar.gz"
             "moli-aarch64-apple-darwin.tar.gz"
             "moli-x86_64-pc-windows-msvc.zip"
+            "moli-aarch64-pc-windows-msvc.zip"
           )
           for archive in "${expected_archives[@]}"; do
             test -f "dist/$archive"
@@ -264,8 +290,8 @@ jobs:
           sh -n dist/moli-installer.sh
 
           artifact_count=$(find dist -maxdepth 1 -type f | wc -l)
-          if [[ "$artifact_count" -ne 6 ]]; then
-            echo "Expected 6 release assets, found $artifact_count." >&2
+          if [[ "$artifact_count" -ne 8 ]]; then
+            echo "Expected 8 release assets, found $artifact_count." >&2
             find dist -maxdepth 1 -type f -print >&2
             exit 1
           fi

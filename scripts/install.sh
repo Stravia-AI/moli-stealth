@@ -41,6 +41,9 @@ case "$moli_system:$moli_machine" in
     Linux:x86_64 | Linux:amd64)
         moli_target=x86_64-unknown-linux-gnu
         ;;
+    Linux:arm64 | Linux:aarch64)
+        moli_target=aarch64-unknown-linux-gnu
+        ;;
     Darwin:x86_64 | Darwin:amd64)
         moli_target=x86_64-apple-darwin
         ;;
