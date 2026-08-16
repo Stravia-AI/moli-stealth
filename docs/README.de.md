@@ -23,6 +23,8 @@ Moli hilft deinem KI-Agenten dabei, Webseiten abzurufen und ihre Inhalte zu extr
 
 Du kannst Moli über die CLI, CDP, WebDriver Classic oder WebDriver BiDi ansteuern.
 
+Moli unterstützt Linux, macOS und Windows.
+
 ## Schnellstart
 
 Gib deinem KI-Coding-Agenten folgende Anweisung:

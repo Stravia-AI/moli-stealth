@@ -23,6 +23,8 @@ Moli 可以帮助你的 AI 智能体抓取和提取网页、搜索网络，以�
 
 你可以通过 CLI、CDP、WebDriver Classic 或 WebDriver BiDi 来使用它。
 
+Moli 支持 Linux、macOS 和 Windows。
+
 ## 快速开始
 
 把这句话发给你的 AI 编程智能体：

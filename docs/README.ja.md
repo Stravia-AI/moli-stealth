@@ -23,6 +23,8 @@ Moli は、AI エージェントが行う Web ページの取得や情報抽出�
 
 コマンドライン（CLI）、CDP、WebDriver Classic、WebDriver BiDi から利用できます。
 
+Moli は Linux、macOS、Windows に対応しています。
+
 ## すぐに試す
 
 次の指示を AI コーディングエージェントに渡してください。

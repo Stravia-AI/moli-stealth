@@ -23,6 +23,8 @@ Moli ayuda a tu agente de IA a obtener y extraer páginas web, buscar en la web 
 
 Puedes usarlo desde la CLI, o mediante CDP, WebDriver Classic o WebDriver BiDi.
 
+Moli es compatible con Linux, macOS y Windows.
+
 ## Inicio rápido
 
 Dale esta instrucción a tu agente de programación con IA:

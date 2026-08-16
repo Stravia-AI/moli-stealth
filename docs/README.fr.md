@@ -23,6 +23,8 @@ Il permet à votre agent d'IA de récupérer et d'extraire le contenu de pages w
 
 Vous pouvez utiliser Moli via la CLI, CDP, WebDriver Classic ou WebDriver BiDi.
 
+Moli prend en charge Linux, macOS et Windows.
+
 ## Démarrage rapide
 
 Donnez l'instruction suivante à votre agent de codage IA :

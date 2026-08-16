@@ -26,6 +26,8 @@ automate browser tasks.
 
 Use it through the CLI, CDP, WebDriver Classic, or WebDriver BiDi.
 
+Moli supports Linux, macOS, and Windows.
+
 ## Quick start
 
 Give this prompt to your AI coding agent:
