@@ -3169,6 +3169,61 @@ const y = rect.top + 1;
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn inline_offset_metrics_keep_empty_trailing_space_anchor_after_bordered_inline() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let mut page_vm = test_page_vm_with_loader_and_document_url(
+            &loader,
+            Vec::new(),
+            Url::parse("https://example.com/inline-offset-fragments.html")?,
+        );
+        page_vm.vm_mut().eval(
+            r#"
+document.head.innerHTML = `<style>
+html,body { margin:0 }
+.container { position:relative; width:80px; height:70px; padding:10px; font:10px/10px sans-serif }
+.reference { border:1px solid transparent; padding:0 6px }
+</style>`;
+document.body.innerHTML = `
+<div class=container><br><span class=reference></span><span class=target> </span></div>`;
+'installed'
+"#,
+        )?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        page_vm
+            .vm_mut()
+            .screenshot_layout_snapshot(moli_layout::PaintViewport::new(100, 90, 1.0))?
+            .expect("inline offset fixture must retain a layout root");
+
+        let geometry = page_vm.vm_mut().eval(
+            r#"(()=>{const target=document.querySelector('.target');const reference=target.previousSibling;return JSON.stringify({reference:[reference.offsetLeft,reference.offsetTop,reference.offsetWidth,reference.offsetHeight],target:[target.offsetLeft,target.offsetTop]})})()"#,
+        )?;
+        let geometry: serde_json::Value = serde_json::from_str(&geometry)?;
+        let reference = geometry["reference"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing reference metrics: {geometry}"));
+        let target = geometry["target"]
+            .as_array()
+            .unwrap_or_else(|| panic!("missing target metrics: {geometry}"));
+        let number = |values: &[serde_json::Value], axis: usize| {
+            values[axis].as_f64().expect("numeric offset geometry")
+        };
+        assert_eq!(number(reference, 2), 14.0, "reference width: {geometry}");
+        assert_eq!(
+            number(target, 0),
+            number(reference, 0) + number(reference, 2),
+            "the empty inline starts after the reference fragment: {geometry}"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("inline offset fragment fixture should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn stylesheet_lifecycle_registers_only_the_current_documents_data_web_fonts() {
     run_page_vm_async_test(async move {
         let loader =

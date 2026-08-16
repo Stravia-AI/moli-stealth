@@ -13,6 +13,13 @@ use super::{
     tree::FrozenLayoutTree,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct InlineOffsetGeometry {
+    layout_origin_in_document: LayoutPoint,
+    border_origin_in_viewport_ignoring_css_transforms: LayoutPoint,
+    size: LayoutSize,
+}
+
 impl<N> FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
@@ -109,44 +116,24 @@ where
                 }
             })
             .unwrap_or(LayoutPoint::ZERO);
-        let fragment_origins = output.fragments.iter().find_map(|id| {
-            let fragment = self.fragment(*id)?;
-            let LayoutFragmentKind::InlineBox {
-                box_id: fragment_box,
-                ..
-            } = fragment.kind
-            else {
-                return None;
-            };
-            if fragment_box != box_id {
-                return None;
-            }
-            let border = fragment.box_model?.border;
-            let fragment_space = self.coordinate_space(fragment.coordinate_space)?;
-            let owner = fragment_space.owner?;
-            let owner_origin = self.box_geometry(owner)?.layout_origin_in_document;
-            let local_border_origin = LayoutPoint::new(border.x, border.y);
-            Some((
-                LayoutPoint::new(
-                    owner_origin.x + local_border_origin.x,
-                    owner_origin.y + local_border_origin.y,
-                ),
-                fragment_space
-                    .local_to_viewport_ignoring_css_transforms
-                    .map_point(local_border_origin),
-            ))
-        });
-        let (layout_origin, border_origin_in_viewport_ignoring_css_transforms) = fragment_origins
+        let inline_offset_geometry = self.inline_offset_geometry(&output, box_id);
+        let layout_origin = inline_offset_geometry
+            .map(|geometry| geometry.layout_origin_in_document)
+            .unwrap_or(geometry.layout_origin_in_document);
+        let offset_size = inline_offset_geometry
+            .map(|geometry| geometry.size)
             .unwrap_or_else(|| {
-                (
-                    geometry.layout_origin_in_document,
-                    coordinate_space
-                        .local_to_viewport_ignoring_css_transforms
-                        .map_point(LayoutPoint::new(
-                            geometry.border_box.x,
-                            geometry.border_box.y,
-                        )),
-                )
+                LayoutSize::new(geometry.border_box.width, geometry.border_box.height)
+            });
+        let border_origin_in_viewport_ignoring_css_transforms = inline_offset_geometry
+            .map(|geometry| geometry.border_origin_in_viewport_ignoring_css_transforms)
+            .unwrap_or_else(|| {
+                coordinate_space
+                    .local_to_viewport_ignoring_css_transforms
+                    .map_point(LayoutPoint::new(
+                        geometry.border_box.x,
+                        geometry.border_box.y,
+                    ))
             });
         let client_size = if is_root {
             // CSSOM defines root client dimensions from the viewport and only
@@ -176,7 +163,7 @@ where
                 layout_origin.y - offset_parent_origin.y,
             ),
             border_origin_in_viewport_ignoring_css_transforms,
-            offset_size: LayoutSize::new(geometry.border_box.width, geometry.border_box.height),
+            offset_size,
             content_size: LayoutSize::new(geometry.content_box.width, geometry.content_box.height),
             client_size,
             client_border: LayoutPoint::new(
@@ -466,6 +453,86 @@ impl<N> FrozenLayoutTree<N>
 where
     N: Copy + Debug + Eq + Hash,
 {
+    /// Returns the untransformed CSSOM offset geometry for a flattened inline.
+    ///
+    /// CSSOM View defines `offsetLeft`/`offsetTop` from the first fragment and
+    /// `offsetWidth`/`offsetHeight` from the bounding box of all non-empty
+    /// border-box fragments. Mapping each fragment through its IFC owner's
+    /// document-layout origin keeps that geometry in one physical coordinate
+    /// system while intentionally excluding transforms and scrolling.
+    fn inline_offset_geometry(
+        &self,
+        output: &LayoutNodeOutput,
+        box_id: LayoutOutputBoxId,
+    ) -> Option<InlineOffsetGeometry> {
+        let mut first_fragment = None;
+        let mut bounds = None::<LayoutRect>;
+
+        for id in &output.fragments {
+            let Some(fragment) = self.fragment(*id) else {
+                continue;
+            };
+            let LayoutFragmentKind::InlineBox {
+                box_id: fragment_box,
+                ..
+            } = fragment.kind
+            else {
+                continue;
+            };
+            if fragment_box != box_id {
+                continue;
+            }
+            let Some(box_model) = fragment.box_model else {
+                continue;
+            };
+            let Some(fragment_space) = self.coordinate_space(fragment.coordinate_space) else {
+                continue;
+            };
+            let Some(owner) = fragment_space.owner else {
+                continue;
+            };
+            let Some(owner_geometry) = self.box_geometry(owner) else {
+                continue;
+            };
+            let border = box_model.border;
+            let owner_origin = owner_geometry.layout_origin_in_document;
+            let local_origin = LayoutPoint::new(border.x, border.y);
+            let document_border = LayoutRect::new(
+                owner_origin.x + border.x,
+                owner_origin.y + border.y,
+                border.width,
+                border.height,
+            );
+            first_fragment.get_or_insert_with(|| {
+                (
+                    LayoutPoint::new(document_border.x, document_border.y),
+                    fragment_space
+                        .local_to_viewport_ignoring_css_transforms
+                        .map_point(local_origin),
+                )
+            });
+
+            // Blink's BoundingBoxRelativeToFirstFragment uses UniteIfNonZero:
+            // an empty fragment supplies the offset anchor but cannot stretch
+            // the size union across lines by its zero-area position alone.
+            if document_border.width <= 0.0 || document_border.height <= 0.0 {
+                continue;
+            }
+            bounds = Some(bounds.map_or(document_border, |current| current.union(document_border)));
+        }
+
+        let (layout_origin_in_document, border_origin_in_viewport_ignoring_css_transforms) =
+            first_fragment?;
+        let size = bounds.map_or(LayoutSize::ZERO, |rect| {
+            LayoutSize::new(rect.width, rect.height)
+        });
+        Some(InlineOffsetGeometry {
+            layout_origin_in_document,
+            border_origin_in_viewport_ignoring_css_transforms,
+            size,
+        })
+    }
+
     fn project_fragment_box_models(
         &self,
         models: &[(LayoutCoordinateSpaceId, LayoutFragmentBoxModel)],
@@ -562,4 +629,129 @@ where
 
 fn axis_aligned_union(left: LayoutQuad, right: LayoutQuad) -> LayoutQuad {
     LayoutTransform2D::IDENTITY.map_rect(left.bounding_rect().union(right.bounding_rect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::layout_tree::{
+        FrozenCoordinateSpace, FrozenLayoutBox, LayoutBoxGeometry, LayoutFragment,
+        LayoutFragmentId, LayoutScrollExtent, LayoutViewport,
+    };
+
+    fn identity_space(owner: Option<LayoutOutputBoxId>) -> FrozenCoordinateSpace {
+        FrozenCoordinateSpace {
+            owner,
+            local_to_viewport: LayoutTransform2D::IDENTITY,
+            local_to_viewport_ignoring_css_transforms: LayoutTransform2D::IDENTITY,
+        }
+    }
+
+    #[test]
+    fn inline_offset_geometry_skips_an_unprojectable_fragment_before_valid_geometry() {
+        let box_id = LayoutOutputBoxId::from_index(0);
+        let coordinate_space = LayoutCoordinateSpaceId::from_index(1);
+        let skipped_fragment = LayoutFragmentId::from_index(0);
+        let valid_fragment = LayoutFragmentId::from_index(1);
+        let fragment = |id, box_model| LayoutFragment {
+            id,
+            kind: LayoutFragmentKind::InlineBox {
+                box_id,
+                line_index: 0,
+                has_start_edge: true,
+                has_end_edge: true,
+            },
+            rect: LayoutRect::ZERO,
+            box_model,
+            coordinate_space,
+            clip_chain: None,
+            paint_order: None,
+        };
+        let valid_box_model = LayoutFragmentBoxModel {
+            content: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
+            padding: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
+            border: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
+            margin: LayoutRect::new(3.0, 4.0, 10.0, 5.0),
+        };
+        let scroll_extent = LayoutScrollExtent {
+            scrollport: LayoutRect::ZERO,
+            scrollable_overflow: LayoutRect::ZERO,
+            scroll_size: LayoutSize::ZERO,
+            applied_offset: LayoutPoint::ZERO,
+            minimum_offset: LayoutPoint::ZERO,
+            maximum_offset: LayoutPoint::ZERO,
+            is_scroll_container: false,
+            allows_user_scroll_x: false,
+            allows_user_scroll_y: false,
+            clips_overflow: false,
+            horizontal_scrollbar: None,
+            vertical_scrollbar: None,
+            scrollbar_corner: None,
+            scrollbar_colors: None,
+        };
+        let tree = FrozenLayoutTree::new(
+            0_u8,
+            LayoutViewport::new(100, 100, 1.0),
+            LayoutPoint::ZERO,
+            LayoutSize::new(100.0, 100.0),
+            box_id,
+            vec![FrozenLayoutBox {
+                geometry: LayoutBoxGeometry {
+                    id: box_id,
+                    structural_parent: None,
+                    parent: None,
+                    layout_parent: None,
+                    position: LayoutPosition::Static,
+                    coordinate_space,
+                    clip_chain: None,
+                    content_box: LayoutRect::ZERO,
+                    padding_box: LayoutRect::ZERO,
+                    border_box: LayoutRect::ZERO,
+                    margin_box: LayoutRect::ZERO,
+                    fragments: vec![skipped_fragment, valid_fragment],
+                    layout_origin_in_document: LayoutPoint::new(100.0, 200.0),
+                    is_body_element: false,
+                    is_table_offset_parent: false,
+                    establishes_positioned_containing_block: false,
+                    establishes_fixed_containing_block: false,
+                    visible: true,
+                    pointer_events: true,
+                },
+                scroll_extent,
+                coordinate_space: identity_space(Some(box_id)),
+                geometry_source: Some(1),
+                principal_source: Some(1),
+                hit_source: Some(1),
+                control_paint_order: None,
+            }],
+            vec![
+                fragment(skipped_fragment, None),
+                fragment(valid_fragment, Some(valid_box_model)),
+            ],
+            Vec::new(),
+            identity_space(None),
+            Vec::new(),
+            Vec::new(),
+            true,
+        );
+        let output = LayoutNodeOutput {
+            principal_box: Some(box_id),
+            fragments: vec![skipped_fragment, valid_fragment],
+            scroll_proxy_boxes: Vec::new(),
+        };
+
+        let geometry = tree
+            .inline_offset_geometry(&output, box_id)
+            .expect("the valid fragment after the skipped entry must contribute geometry");
+
+        assert_eq!(
+            geometry.layout_origin_in_document,
+            LayoutPoint::new(103.0, 204.0)
+        );
+        assert_eq!(
+            geometry.border_origin_in_viewport_ignoring_css_transforms,
+            LayoutPoint::new(3.0, 4.0)
+        );
+        assert_eq!(geometry.size, LayoutSize::new(10.0, 5.0));
+    }
 }
