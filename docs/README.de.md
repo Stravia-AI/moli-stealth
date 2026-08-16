@@ -17,21 +17,21 @@
   <a href="README.es.md">Español</a>
 </p>
 
-Moli ist ein produktionsreifer Headless-Browser für KI-Agenten. Sein Design mit Layout und Rendering nach Bedarf verbindet eine vollständige Browser-Laufzeit mit einem geringen Ressourcenbedarf.
+Moli ist ein produktionsreifer Headless-Browser für KI-Agenten. Durch sein bedarfsgesteuertes Layout- und Rendering-Design vereint er eine vollständige Browser-Laufzeitumgebung mit einem minimalen Ressourcenbedarf.
 
-Moli hilft deinem KI-Agenten, Webseiten abzurufen und zu extrahieren, das Web zu durchsuchen und Browseraufgaben zu automatisieren.
+Moli hilft deinem KI-Agenten dabei, Webseiten abzurufen und ihre Inhalte zu extrahieren, im Web zu recherchieren und Browser-Aufgaben zu automatisieren.
 
-Moli kann über die CLI, CDP, WebDriver Classic oder WebDriver BiDi genutzt werden.
+Du kannst Moli über die CLI, CDP, WebDriver Classic oder WebDriver BiDi ansteuern.
 
 ## Schnellstart
 
-Gib deinem KI-Coding-Agenten diese Anweisung:
+Gib deinem KI-Coding-Agenten folgende Anweisung:
 
 ```text
-Installiere die skills unter https://github.com/lexmount/moli/tree/main/skills,
-folge ihren Anweisungen zum Herunterladen und Installieren des neuesten
-vorkompilierten Moli-Binarys, rufe anschließend mit moli-webfetch die Seite
-https://example.com ab und zeige mir das Ergebnis.
+Installiere die Skills unter https://github.com/lexmount/moli/tree/main/skills,
+folge deren Anleitung zum Herunterladen und Installieren des neuesten
+vorkompilierten Moli-Binaries, rufe anschließend mit moli-webfetch die Seite
+https://example.com ab und zeig mir das Ergebnis.
 ```
 
 ## Demo
@@ -47,7 +47,7 @@ https://example.com ab und zeige mir das Ergebnis.
 </p>
 
 <p align="center">
-  <sub>Ein von Moli gerendertes und live mit Chrome DevTools untersuchtes HTML5-Spiel.</sub>
+  <sub>Ein von Moli gerendertes HTML5-Spiel, live mit Chrome DevTools untersucht.</sub>
 </p>
 
 <p align="center">
@@ -61,14 +61,14 @@ https://example.com ab und zeige mir das Ergebnis.
 </p>
 
 <p align="center">
-  <sub>Die von Moli gerenderte Website rust-lang.org, deren Live-DOM, CSS und Geometrie in Chrome DevTools verfügbar sind.</sub>
+  <sub>Die von Moli gerenderte Website rust-lang.org — Live-DOM, CSS und Geometrie stehen direkt in Chrome DevTools zur Verfügung.</sub>
 </p>
 
 ## CLI-Verwendung
 
 ### Eine Seite extrahieren
 
-Die Seite mit Molis standardmäßiger Abschlussstrategie als Markdown rendern:
+So renderst du eine Seite mit Molis Standard-Abschlussstrategie als Markdown:
 
 ```bash
 moli fetch \
@@ -77,7 +77,7 @@ moli fetch \
   https://example.com
 ```
 
-Alternativ direkt einen kompakten, modellfreundlichen semantischen Baum zurückgeben:
+Alternativ lässt du dir direkt einen kompakten, modellfreundlichen semantischen Baum ausgeben:
 
 ```bash
 moli fetch \
@@ -86,14 +86,14 @@ moli fetch \
   https://example.com
 ```
 
-Für eine visuelle Ausgabe kann das On-Demand-Layout aktiviert und entweder ein PNG-Screenshot des Viewports oder ein mehrseitiges PDF direkt erzeugt werden:
+Für visuelle Ausgaben aktivierst du das On-Demand-Layout und erzeugst wahlweise einen PNG-Screenshot des Viewports oder direkt ein mehrseitiges PDF:
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 
-`fetch --help` zeigt die vollständige Parameterliste, darunter Ausgabeformate, Wartebedingungen für das Laden von Seiten und für Antworten, Profile, Proxy-Einstellungen, Ressourcenrichtlinien und Tracing-Optionen.
+Die vollständige Liste aller Parameter — darunter Ausgabeformate, Wartebedingungen für Seiten- und Antwortladevorgänge, Profile, Proxy-Einstellungen, Ressourcenrichtlinien und Tracing-Optionen — zeigt dir `fetch --help`.
 
 ### Den Automatisierungsserver starten
 
@@ -104,7 +104,7 @@ moli serve
 # Echte Geometrie, Koordinateneingaben sowie Screenshot-/Screencast-Funktionen aktivieren
 moli serve --layout
 
-# Zusätzlich optionale Bild-, Schrift-, Audio-, Video-, Medien- und Textspurressourcen abrufen
+# Zusätzlich optionale Bild-, Schrift-, Audio-, Video-, Medien- und Textspur-Ressourcen laden
 moli serve --layout --resource
 ```
 
@@ -125,19 +125,19 @@ await browser.close();
 
 ## Warum Moli?
 
-Für Agenten-Workloads sind drei Eigenschaften besonders wichtig, und Moli vereint sie:
+Für Agenten-Workloads zählen vor allem drei Eigenschaften — und Moli vereint sie:
 
-- **Vollständig** — echtes JavaScript, DOM, CSS, Netzwerk, Speicher, Layout, Screenshots und Standard-Automatisierungsprotokolle, alles in einem einzigen Headless-Browser integriert.
-- **Schnell** — die meisten Automatisierungsanfragen benötigen überhaupt kein visuelles Rendering; strukturorientierte Vorgänge überspringen Layout und Zeichnen deshalb vollständig.
-- **Ressourceneffizient** — Layout und Pixel entstehen nur bei Bedarf. Moli muss daher keinen vollständig gerenderten visuellen Zustand dauerhaft pflegen und aktualisieren.
+- **Vollständig** — echtes JavaScript, DOM, CSS, Netzwerk, Speicher, Layout, Screenshots und die gängigen Automatisierungsprotokolle, alles in einem einzigen Headless-Browser vereint.
+- **Schnell** — die meisten Automatisierungsanfragen benötigen gar kein visuelles Rendering; strukturorientierte Vorgänge überspringen Layout und Zeichnen deshalb vollständig.
+- **Ressourceneffizient** — Layout und Pixel entstehen nur bei Bedarf, wodurch Moli keinen vollständig gerenderten visuellen Zustand dauerhaft vorhalten und aktualisieren muss.
 
-Was die meisten Browserautomatisierungen wirklich benötigen, ist die Seitenstruktur und keine kontinuierlich gerenderte visuelle Welt. Moli behandelt das native DOM und den Stilzustand als einzige maßgebliche Datenquelle und löst Layout oder Software-Zeichnung nur bei Vorgängen aus, die diese Berechnungen tatsächlich benötigen.
+Die meisten Browser-Automatisierungen brauchen in Wirklichkeit die Struktur einer Seite, nicht eine fortlaufend gerenderte visuelle Welt. Moli behandelt natives DOM und Stilzustand als einzige verbindliche Datenquelle und löst Layout- oder Software-Rendering nur dort aus, wo eine Operation diese Berechnung tatsächlich braucht.
 
 | Agentenanfrage | Verhalten von Moli |
 | --- | --- |
 | HTML/Markdown extrahieren, DOM abfragen, JS ausführen, Netzwerk/Speicher untersuchen | Liest den Zustand der Browser-Laufzeit direkt aus — löst weder Layout noch Zeichnen aus |
 | Begrenzungsrahmen eines Elements lesen, Koordinaten testen, Koordinateneingaben senden | Führt eine Layoutberechnung aus und behält nur den neuesten eingefrorenen Layoutbaum |
-| Screenshot aufnehmen oder Screencast aktualisieren | Baut aus dem aktuellen DOM/Stil neu auf, ersetzt den eingefrorenen Baum, rendert einen neuen Frame und verwirft den Frame nach Gebrauch |
+| Screenshot aufnehmen oder Screencast aktualisieren | Baut aus dem aktuellen DOM/Stil neu auf, ersetzt den eingefrorenen Baum, rendert einen neuen Frame und verwirft ihn nach Gebrauch |
 
 <p align="center">
   <a href="../assets/moli_ondemand_rendering_flow.svg">
@@ -149,56 +149,56 @@ Was die meisten Browserautomatisierungen wirklich benötigen, ist die Seitenstru
   </a>
 </p>
 
-Moli enthält weiterhin den vollständigen Funktionsumfang mit V8, CSS, Layout, Textsatz, Treffertests, Software-Zeichnung und mehr. Der einzige Unterschied liegt darin, *wann* visuelle Arbeit ausgeführt und *wie lange* ihr Ergebnis vorgehalten wird. Dieses Kostenmodell eignet sich besonders für Crawling, Browser-Agenten, Retrieval-Pipelines, Evaluierungsumgebungen und Reinforcement-Learning-Workloads.
+Dabei bringt Moli weiterhin den vollen Funktionsumfang mit — V8, CSS, Layout, Textsatz, Hit-Testing, Software-Rendering und mehr. Der einzige Unterschied ist, *wann* diese visuelle Arbeit anfällt und *wie lange* ihr Ergebnis aufbewahrt wird. Dieses Kostenmodell passt besonders gut zu Crawling, Browser-Agenten, Retrieval-Pipelines, Evaluierungsumgebungen und Reinforcement-Learning-Workloads.
 
 ## Derzeit unterstützte Funktionen
 
 - **Vollständige Web-Laufzeit** — Streaming-HTML-Parsing, natives DOM, V8 JavaScript, Module/Timer/Microtasks/Events, iframes und Worker, CSS-Kaskade, Fetch/XHR/WebSocket, Cookies, WebCrypto und profilspezifischer Speicher (localStorage, IndexedDB, OPFS).
-- **Für Extraktion optimierte Ausgaben** — die CLI gibt HTML, Markdown, JSON, semantische Textbäume und framebewusste Serialisierung direkt aus und unterstützt das Warten auf Selektoren/Skripte/Antworten sowie Netzwerk-Tracing.
-- **Einheitliches Automatisierungsprogramm** — CDP, WebDriver Classic und WebDriver BiDi verwenden denselben Kernel und Scheduler. Eine separate Installation von ChromeDriver, geckodriver oder einem Browser ist nicht erforderlich.
-- **Echte visuelle Funktionen bei Bedarf** — `--layout` aktiviert die vollständige Box-Konstruktion, Taffy-Layout, Parley-Textsatz, layoutgestützte Treffertests/Eingaben, Viewport-Screenshots und niedrigfrequente, CPU-gerenderte DevTools-Screencasts.
-- **Kontrollierbare Betriebsoptionen** — Profile, Cookies, HTTP-Cache, Proxys, Ressourcengruppen, Verbindungslimits, Zeitüberschreitungen, Richtlinien für private Netzwerke, User-Agent-Überschreibungen, strukturierte Protokollierung und Netzwerkdiagnose sind vollständig verfügbar.
+- **Für Extraktion optimierte Ausgaben** — die CLI liefert HTML, Markdown, JSON, semantische Textbäume und framebewusste Serialisierung direkt als Ausgabe und unterstützt das Warten auf Selektoren, Skripte oder Antworten sowie Netzwerk-Tracing.
+- **Ein einheitlicher Automatisierungs-Stack** — CDP, WebDriver Classic und WebDriver BiDi laufen über denselben Kernel und Scheduler. Eine separate Installation von ChromeDriver, geckodriver oder einem eigenen Browser ist nicht nötig.
+- **Echte visuelle Funktionen bei Bedarf** — `--layout` aktiviert die vollständige Box-Konstruktion, Taffy-Layout, Parley-Textsatz, layoutgestützte Hit-Tests und Eingaben, Viewport-Screenshots sowie niedrigfrequente, CPU-gerenderte DevTools-Screencasts.
+- **Fein steuerbare Betriebsoptionen** — Profile, Cookies, HTTP-Cache, Proxys, Ressourcengruppen, Verbindungslimits, Zeitüberschreitungen, Richtlinien für private Netzwerke, User-Agent-Überschreibungen, strukturierte Protokollierung und Netzwerkdiagnose stehen vollständig zur Verfügung.
 
 ## Die Beziehung zwischen Moli und Lexmount
 
-Moli ist der Open-Source-Headless-Browser von Lexmount; Lexmount Browser ist die darum herum aufgebaute verwaltete Cloud-Laufzeit und Steuerungsebene.
+Moli ist der quelloffene Headless-Browser von Lexmount. Lexmount Browser ist die verwaltete Cloud-Laufzeitumgebung und Steuerungsebene, die darauf aufbaut.
 
-**Der Open-Source-Headless-Browser selbst ist vollständig nutzbar und nicht von Lexmount Browser abhängig.**
+**Der quelloffene Headless-Browser lässt sich eigenständig nutzen und ist nicht von Lexmount Browser abhängig.**
 
 ## Kostensteuerung
 
-Aufwendige Browseroperationen müssen in Moli ausdrücklich aktiviert werden und sind standardmäßig ausgeschaltet:
+Rechenintensive Browser-Operationen sind in Moli standardmäßig deaktiviert und müssen ausdrücklich aktiviert werden:
 
 | Modus oder Option | Verhalten |
 | --- | --- |
 | Standard | `LayoutPolicy::Mock` — deterministische, formatkompatible Geometrie, kein echtes Layout und kein Zeichnen |
-| `--layout` | `LayoutPolicy::OnDemand` — echtes Layout, Geometrie, Treffertests, Koordinateneingaben, Screenshots und Screencast |
-| `--resource` | Alle optionalen visuellen und Medienressourcengruppen abrufen |
-| `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Eine bestimmte optionale Ressourcengruppe aktivieren |
-| `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Persistenz je nach Bedarf des Workloads gezielt aktivieren |
+| `--layout` | `LayoutPolicy::OnDemand` — echtes Layout, Geometrie, Hit-Testing, Koordinateneingaben, Screenshots und Screencast |
+| `--resource` | Alle optionalen visuellen und Medienressourcengruppen laden |
+| `--image`, `--font`, `--audio`, `--video`, `--media`, `--text-track` | Eine bestimmte optionale Ressourcengruppe einzeln aktivieren |
+| `--profile-dir`, `--http-cache-dir`, `--cookie-file` | Persistenz gezielt aktivieren, je nach Bedarf des Workloads |
 
-Das Layoutergebnis ist ein bei Bedarf erstellter Snapshot und kein dauerhaft gepflegter Zustand: Die erste Geometrieanfrage (Kaltstart) baut aus dem aktuellen DOM/Stil einen temporären Arbeitsbaum auf, friert dessen kanonische Geometrie in einen unveränderlichen, DOM-unabhängigen `FrozenLayoutTree` ein und behält nur diesen neuesten Baum. Normale Geometrieabfragen können ihn auch nach Seitenänderungen wiederverwenden; Screenshots und Screencasts bauen stets neu auf, ersetzen den eingefrorenen Baum und verwenden keine alten Zeichenergebnisse.
+Das Layoutergebnis ist ein bei Bedarf erzeugter Snapshot, kein dauerhaft gepflegter Zustand: Die erste Geometrieanfrage (Kaltstart) baut aus dem aktuellen DOM/Stil einen temporären Arbeitsbaum auf und friert dessen kanonische Geometrie in einen unveränderlichen, vom DOM unabhängigen `FrozenLayoutTree` ein — nur dieser jeweils neueste Baum wird vorgehalten. Normale Geometrieabfragen können ihn auch nach Seitenänderungen weiterverwenden; Screenshots und Screencasts dagegen bauen jedes Mal neu auf, ersetzen den eingefrorenen Baum und greifen nie auf alte Zeichenergebnisse zurück.
 
 ## Architektur
 
-Moli ist ein eigenständiger Browser-Kernel und kein Chromium-Wrapper. Er ist in Rust entwickelt, folgt eigenen Regeln für Besitz und Lebenszyklus und verwendet als zentrale Abhängigkeiten:
+Moli ist ein eigenständiger Browser-Kernel, kein Chromium-Wrapper. Er ist in Rust geschrieben, folgt eigenen Ownership- und Lifecycle-Regeln und stützt sich auf folgende zentrale Abhängigkeiten:
 
-- `libcurl` — Netzwerktransport und Laufzeit für mehrere Anfragen
+- `libcurl` — Netzwerktransport und Laufzeit für parallele Anfragen
 - `html5ever` — HTML-Parsing
 - `rusty_v8` / V8 — JavaScript-Ausführung
 - Servo/Stylo — Selektoren, Kaskade und berechnete Stile
 - Taffy + Parley — Box- und Textlayout
 - AnyRender/Vello CPU, `usvg` und das Rust-Bildökosystem — Software-Rendering
 
-Dokument und Stil haben genau eine maßgebliche Datenquelle: die Integration von nativem DOM und Stylo. Jede echte Aktualisierung erstellt daraus einen temporären Arbeitsbaum, erzeugt und verbraucht bei Bedarf einen frischen Paint-Snapshot, friert die endgültige Box- und Fragmentgeometrie in einen kompakten `FrozenLayoutTree` ein und verwirft Arbeitsbaum, Stilreferenzen, Layout-Caches, Diagnosen und Paint-Zustand. Quellzuordnung und Hit-Test-Kandidaten werden bei Abfragen aus dem eingefrorenen Baum abgeleitet. Das System besitzt keinen inkrementell gepflegten Layoutbaum, keinen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
+Dokument und Stil haben genau eine verbindliche Datenquelle: die Integration aus nativem DOM und Stylo. Jede echte Aktualisierung baut daraus einen temporären Arbeitsbaum auf, erzeugt und verbraucht bei Bedarf einen frischen Paint-Snapshot und friert die endgültige Box- und Fragmentgeometrie in einem kompakten `FrozenLayoutTree` ein. Anschließend verwirft sie Arbeitsbaum, Stilreferenzen, Layout-Caches, Diagnosedaten und Paint-Zustand wieder. Quellzuordnung und Hit-Test-Kandidaten werden bei Abfragen jeweils aus dem eingefrorenen Baum abgeleitet. Das System kennt weder einen inkrementell gepflegten Layoutbaum noch einen Damage-Graph, keine beibehaltene Displayliste, keinen GPU-Compositor und kein persistentes Fenster.
 
-## Testdaten
+## Benchmarks
 
 Die folgenden zwei Messreihen zeigen Molis derzeitigen Funktionsumfang. Die Tests decken reale Websites, reale Automatisierungsclients, gezielte Prüfungen des Chromium-/WPT-Verhaltens und eine große nextest-Regressionssuite ab.
 
-### Gemischter Crawl-Test des öffentlichen Webs
+### Gemischter Crawling-Test im öffentlichen Web
 
-Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler Websites. Als Erfolg galt nur eine Seite, die nach Ausführung von JavaScript inhaltlich verwertbare Ergebnisse lieferte — ein HTTP-200-Status, eine Verifizierungsseite, eine Anmeldesperre, eine leere Antwort oder eine reine App-Hülle wurden nicht als Erfolg gewertet.
+Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler Websites. Als Erfolg zählte ausschließlich eine Seite, die nach Ausführung von JavaScript inhaltlich verwertbare Ergebnisse lieferte — ein bloßer HTTP-200-Status, eine Verifizierungsseite, eine Anmeldesperre, eine leere Antwort oder eine reine App-Hülle galten nicht als Erfolg.
 
 | Browser | Verwertbare Seiten | Erfolgsquote | Medianzeit | Median-RSS |
 | --- | ---: | ---: | ---: | ---: |
@@ -216,21 +216,21 @@ Getestet wurden 192 öffentliche URLs großer chinesischer und internationaler W
 | PSS-Spitzenwert | 102.46 MiB | 348.82 MiB |
 | Maximale Prozesse / Threads | 1 / 24 | 11 / 123 |
 
-In der aktuellen WPT-Auswahl zur Überprüfung von Molis Agenten-Browser-Funktionsumfang verzeichnete ein vollständiger Testlauf **1,612 Millionen bestandene Tests**.
+In der aktuellen WPT-Auswahl, mit der Molis Funktionsumfang als Agenten-Browser überprüft wird, bestand ein vollständiger Testlauf **1,612 Millionen Tests**.
 
 ## Projektumfang
 
-In den in der Dokumentation definierten Agenten-Browser-Szenarien ist Moli bereits produktionsreif und wird weiterhin kontinuierlich entwickelt.
+Für die in der Dokumentation beschriebenen Agenten-Browser-Szenarien ist Moli bereits produktionsreif und wird laufend weiterentwickelt.
 
-Zu den derzeit bewusst beibehaltenen Grenzen gehören:
+Zu den aktuell bewusst gesetzten Grenzen gehören:
 
-- Kein GUI-Browser, persistentes Fenster oder GPU-Compositor und keine beibehaltene Mehrfach-Frame-Zeichenarchitektur.
+- Kein GUI-Browser: Es gibt weder ein persistentes Fenster noch einen GPU-Compositor oder eine über mehrere Frames hinweg beibehaltene Zeichenarchitektur.
 - Moli strebt keine pixelgenaue Übereinstimmung mit Chrome an und bietet keine originalgetreue Canvas-/WebGL-/Medienwiedergabe.
-- Nur ein ausgewählter Teil der Funktionen von CDP, WebDriver Classic und WebDriver BiDi wird abgedeckt; eine vollständige Protokollkompatibilität ist nicht implementiert.
-- Im `--layout`-Modus werden Software-Screenshots und rasterbasierte CDP-PDF-Erzeugung unterstützt, jedoch nicht sämtliche Screenshot- oder Druckmodi von Chrome.
-- Ressourcenladen, Aktualität der Geometrie und Kosten des visuellen Renderings bleiben ausdrücklich festzulegende Richtlinienoptionen und sind nicht dauerhaft standardmäßig aktiv.
+- Von CDP, WebDriver Classic und WebDriver BiDi wird nur eine ausgewählte Teilmenge der Funktionen abgedeckt; volle Protokollkompatibilität ist nicht implementiert.
+- Im `--layout`-Modus werden Software-Screenshots und rasterbasierte CDP-PDF-Erzeugung unterstützt, aber nicht sämtliche Screenshot- oder Druckmodi von Chrome.
+- Ressourcenladen, Aktualität der Geometrie und die Kosten des visuellen Renderings bleiben explizit zu setzende Richtlinienoptionen — sie sind nicht dauerhaft standardmäßig aktiv.
 
-Nicht unterstützte Protokollpfade geben einen eindeutigen Fehler zurück — Moli täuscht nie vor, dass eine Browseraktion, ein Ereignis, eine Netzwerkbeobachtung oder ein visuelles Ergebnis stattgefunden hat.
+Nicht unterstützte Protokollpfade liefern einen eindeutigen Fehler zurück — Moli täuscht nie vor, dass eine Browseraktion, ein Ereignis, eine Netzwerkbeobachtung oder ein visuelles Ergebnis stattgefunden hätte.
 
 ## Lizenz
 
