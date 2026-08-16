@@ -219,9 +219,10 @@ where
             .is_none_or(|body| world.box_by_id(body).is_some()),
         "viewport policy must retain only a live pass-local body box identity"
     );
-    prepare_list_markers(&mut world);
-    prepare_form_controls(&mut world);
+    prepare_list_markers(&mut world)?;
+    prepare_form_controls(&mut world)?;
     prepare_inline_contexts(&mut world, services);
+    world.validate_invariants()?;
     compute_world_layout_with_scrollbars(&mut world, request.viewport);
     let mut embedded_frames = HashMap::new();
     if request.requests_embedded_frames() {
