@@ -1038,7 +1038,12 @@ async fn capture_screenshot_with_request(
 fn decoded_png_pixel(bytes: &[u8], x: u32, y: u32) -> [u8; 4] {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("valid PNG header");
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("decoded PNG buffer size fits in memory")
+    ];
     let output = reader.next_frame(&mut buffer).expect("valid PNG data");
     assert_eq!(output.color_type, png::ColorType::Rgba);
     assert_eq!(output.bit_depth, png::BitDepth::Eight);
@@ -1057,7 +1062,12 @@ fn decoded_png_dark_pixel_count(
 ) -> usize {
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("valid PNG header");
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("decoded PNG buffer size fits in memory")
+    ];
     let output = reader.next_frame(&mut buffer).expect("valid PNG data");
     assert_eq!(output.color_type, png::ColorType::Rgba);
     assert_eq!(output.bit_depth, png::BitDepth::Eight);

@@ -136,7 +136,12 @@ fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     let decoder = png::Decoder::new(Cursor::new(bytes));
     let mut reader = decoder.read_info().expect("valid PNG header");
-    let mut buffer = vec![0; reader.output_buffer_size()];
+    let mut buffer = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("decoded PNG buffer size fits in memory")
+    ];
     let output = reader.next_frame(&mut buffer).expect("valid PNG data");
     assert_eq!(output.color_type, png::ColorType::Rgba);
     assert_eq!(output.bit_depth, png::BitDepth::Eight);

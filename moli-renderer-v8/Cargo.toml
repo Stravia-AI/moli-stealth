@@ -110,7 +110,7 @@ moli-fetch = { path = "../moli-fetch", features = ["test-support"] }
 moli-page-types = { path = "../moli-page-types", features = ["test-support"] }
 moli-v8-test-util = { path = "../moli-v8-test-util" }
 moli-websocket = { path = "../moli-websocket", features = ["test-support"] }
-png = "0.17"
+png = "0.18"
 wuff = "=0.2.5"
 
 [lints]

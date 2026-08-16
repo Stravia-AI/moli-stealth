@@ -86,7 +86,7 @@ pub fn encode_png_rgba8_with_options(
         encoder.set_depth(png::BitDepth::Eight);
         if options.optimize_for_speed {
             encoder.set_compression(png::Compression::Fast);
-            encoder.set_filter(png::FilterType::NoFilter);
+            encoder.set_filter(png::Filter::NoFilter);
         }
         let mut writer = encoder.write_header()?;
         writer.write_image_data(rgba)?;
@@ -117,8 +117,12 @@ pub fn decode_png(bytes: &[u8]) -> Result<RgbaImage, PngDecodeError> {
     );
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info()?;
-    checked_rgba_len(reader.info().width, reader.info().height)?;
-    let mut decoded = vec![0; reader.output_buffer_size()];
+    let (width, height) = (reader.info().width, reader.info().height);
+    checked_rgba_len(width, height)?;
+    let output_buffer_size = reader
+        .output_buffer_size()
+        .ok_or(RgbaImageError::BufferLengthOverflow { width, height })?;
+    let mut decoded = vec![0; output_buffer_size];
     let output = reader.next_frame(&mut decoded)?;
     decoded.truncate(output.buffer_size());
 
