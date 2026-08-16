@@ -370,7 +370,14 @@ fn observable_hit_test_in_viewport(
     ignore_pointer_events_none: bool,
 ) -> Result<Option<LayoutHit<DomHandle>>, LayoutError> {
     if !runtime.layout_policy().uses_real_layout() {
-        return observable_hit_test(runtime, document, point, ignore_pointer_events_none);
+        return observable_hit_test(
+            runtime,
+            document,
+            point,
+            ignore_pointer_events_none,
+            LayoutFlushReason::HitTest,
+        )
+        .map(|(_, hit)| hit);
     }
     let answers = runtime.answer_layout_at_viewport(
         document,
@@ -387,23 +394,40 @@ fn observable_hit_test_in_viewport(
     }
 }
 
-fn observable_hit_test(
+/// Resolve the foremost painted hit and the viewport sampled by the same
+/// frozen layout pass. Single-point DOM APIs consume this query while
+/// penetrating-list APIs use `observable_hit_test_all`.
+pub(crate) fn observable_hit_test(
     runtime: &JsContextHost,
     document: DomHandle,
     point: LayoutPoint,
     ignore_pointer_events_none: bool,
-) -> Result<Option<LayoutHit<DomHandle>>, LayoutError> {
+    reason: LayoutFlushReason,
+) -> Result<
+    (
+        moli_layout::LayoutDocumentMetrics,
+        Option<LayoutHit<DomHandle>>,
+    ),
+    LayoutError,
+> {
     let answers = observable_geometry_batch(
         runtime,
         document,
-        LayoutFlushReason::HitTest,
-        &LayoutQueryBatch::new(vec![LayoutQuery::HitTest {
-            point,
-            ignore_pointer_events_none,
-        }]),
+        reason,
+        &LayoutQueryBatch::new(vec![
+            LayoutQuery::DocumentMetrics,
+            LayoutQuery::HitTest {
+                point,
+                ignore_pointer_events_none,
+            },
+        ]),
     )?;
-    match answers.answers.into_iter().next() {
-        Some(LayoutQueryAnswer::HitTest(hit)) => Ok(hit),
+    let mut answers = answers.answers.into_iter();
+    match (answers.next(), answers.next()) {
+        (
+            Some(LayoutQueryAnswer::DocumentMetrics(metrics)),
+            Some(LayoutQueryAnswer::HitTest(hit)),
+        ) => Ok((metrics, hit)),
         _ => Err(provider_contract_error("hit test")),
     }
 }
