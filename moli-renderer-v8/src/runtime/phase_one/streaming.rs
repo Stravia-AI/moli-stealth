@@ -224,7 +224,7 @@ impl ConcurrentParseTimeRuntime {
         response_status: u16,
         response_headers: Vec<(String, String)>,
         raw_body: ExternalRawDocumentBodyStream,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
     ) -> Result<StreamingNavigationPageCreationResult> {
         if response_headers_indicate_download(&response_headers) {
             let mut body_source = RawDocumentBodySource::External(raw_body);
@@ -243,13 +243,10 @@ impl ConcurrentParseTimeRuntime {
             ));
         }
 
-        let bootstrap_boundary = match reply_boundary {
-            crate::RendererPageCreationReplyBoundary::LifecycleTarget => {
-                CommittedNavigationBootstrapBoundary::ContinuePhaseOne
-            }
-            crate::RendererPageCreationReplyBoundary::DocumentCommit => {
-                CommittedNavigationBootstrapBoundary::DocumentCommit
-            }
+        let bootstrap_boundary = if reply_boundary.waits_for_stage() {
+            CommittedNavigationBootstrapBoundary::ContinuePhaseOne
+        } else {
+            CommittedNavigationBootstrapBoundary::DocumentCommit
         };
         Self::create_from_committed_external_raw_document_response(
             page_id,

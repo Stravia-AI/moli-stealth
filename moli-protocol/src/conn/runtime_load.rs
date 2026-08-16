@@ -5,7 +5,7 @@ use moli_core::{
     runtime::{
         CommittedDocumentResourceSource, PageVmInitStage, PreparedDocumentPage,
         PreparedDocumentPageCommitConfiguration, PreparedDocumentPageCommitPermit,
-        RendererPageCreationReplyBoundary, RendererPageReservationToken,
+        RendererPageReservationToken, RendererReplyBoundary,
     },
 };
 use moli_fetch::{
@@ -92,7 +92,7 @@ async fn prepare_browser_owned_error_page_navigation_with_engine_async(
     request_headers: Vec<(String, String)>,
     error_text: String,
     body: CapturedBody,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let error_page_url = Url::parse(NETWORK_ERROR_PAGE_URL)
         .expect("the browser-owned network error page URL must be valid");
@@ -138,7 +138,7 @@ async fn prepare_network_error_page_navigation_with_engine_async(
     request_method: String,
     request_headers: Vec<(String, String)>,
     error_text: String,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Result<NavigationLoadOutcome, String> {
     let body = CapturedBody::from_string(network_error_page_html(&unreachable_url, &error_text));
     prepare_browser_owned_error_page_navigation_with_engine_async(
@@ -855,7 +855,7 @@ impl BackgroundNavigationLoadJob {
                 &self.method,
                 &self.raw_url,
                 self.request_headers.clone(),
-                RendererPageCreationReplyBoundary::DocumentCommit,
+                RendererReplyBoundary::DocumentCommit,
             )
             .await
             {
@@ -871,7 +871,7 @@ impl BackgroundNavigationLoadJob {
                 &self.method,
                 &self.raw_url,
                 self.request_headers.clone(),
-                RendererPageCreationReplyBoundary::DocumentCommit,
+                RendererReplyBoundary::DocumentCommit,
             )
             .await
             {
@@ -941,7 +941,7 @@ impl BackgroundNavigationLoadJob {
                             self.method,
                             self.request_headers,
                             failure.network_error_text().to_owned(),
-                            RendererPageCreationReplyBoundary::DocumentCommit,
+                            RendererReplyBoundary::DocumentCommit,
                         )
                         .await;
                     }
@@ -976,7 +976,7 @@ impl BackgroundNavigationLoadJob {
                 body_completion_sink,
                 reserved_service_worker_client,
                 CommittedDocumentResourceSource::Navigation(Box::new(document_fetch_context_seed)),
-                RendererPageCreationReplyBoundary::DocumentCommit,
+                RendererReplyBoundary::DocumentCommit,
             )
             .await;
             if defer_early_result_for_http_error_body {
@@ -1024,7 +1024,7 @@ impl BackgroundStreamingResponseNavigationLoadJob {
             body_completion_sink,
             None,
             CommittedDocumentResourceSource::Synthetic,
-            RendererPageCreationReplyBoundary::DocumentCommit,
+            RendererReplyBoundary::DocumentCommit,
         )
         .await;
         (engine, navigation)
@@ -1154,7 +1154,7 @@ async fn load_inline_html_navigation_with_engine_async(
     method: &str,
     raw_url: &str,
     request_headers: Vec<(String, String)>,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Option<Result<NavigationLoadOutcome, String>> {
     let source = inline_html_navigation_source(raw_url)?;
     Some(
@@ -1204,7 +1204,7 @@ async fn load_data_url_navigation_with_engine_async(
     method: &str,
     raw_url: &str,
     request_headers: Vec<(String, String)>,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Option<Result<NavigationLoadOutcome, String>> {
     let source = decoded_data_url_navigation_response(raw_url)?;
     Some(
@@ -1252,7 +1252,7 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
     body_completion_sink: Option<BackgroundNavigationBodyCompletionSink>,
     reserved_service_worker_client: Option<moli_core::runtime::RendererReservedServiceWorkerClient>,
     resource_source: CommittedDocumentResourceSource,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Result<NavigationLoadOutcome, String> {
     let timing_enabled = moli_trace::cdp_nav_timing_enabled();
     let timing_started = std::time::Instant::now();
@@ -1714,7 +1714,7 @@ impl CdpConnection {
                 fetch_subresource_interception_enabled,
                 fetch_subresource_interception_resource_type,
                 PageVmInitStage::DomContentLoaded,
-                RendererPageCreationReplyBoundary::DocumentCommit,
+                RendererReplyBoundary::DocumentCommit,
                 load_inputs.root_frame_id.clone(),
                 CommittedDocumentResourceSource::Synthetic,
                 None,
@@ -2291,7 +2291,7 @@ impl CdpConnection {
                 method,
                 raw_url,
                 request_headers.clone(),
-                RendererPageCreationReplyBoundary::LifecycleTarget,
+                RendererReplyBoundary::Stage,
             )
             .await
             {
@@ -2312,7 +2312,7 @@ impl CdpConnection {
                     method,
                     raw_url,
                     request_headers.clone(),
-                    RendererPageCreationReplyBoundary::LifecycleTarget,
+                    RendererReplyBoundary::Stage,
                 )
                 .await
             {
@@ -2326,7 +2326,7 @@ impl CdpConnection {
                 method,
                 raw_url,
                 request_headers.clone(),
-                RendererPageCreationReplyBoundary::LifecycleTarget,
+                RendererReplyBoundary::Stage,
             )
             .await
             {
@@ -2694,7 +2694,7 @@ impl CdpConnection {
             method,
             raw_url,
             request_headers,
-            RendererPageCreationReplyBoundary::LifecycleTarget,
+            RendererReplyBoundary::Stage,
         )
         .await
     }
@@ -2707,7 +2707,7 @@ impl CdpConnection {
         method: &str,
         raw_url: &str,
         request_headers: Vec<(String, String)>,
-        reply_boundary: RendererPageCreationReplyBoundary,
+        reply_boundary: RendererReplyBoundary,
     ) -> Option<Result<NavigationLoadOutcome, String>> {
         load_inline_html_navigation_with_engine_async(
             engine,
@@ -2915,7 +2915,7 @@ impl CdpConnection {
             network_observation_journal,
             None,
             false,
-            RendererPageCreationReplyBoundary::LifecycleTarget,
+            RendererReplyBoundary::Stage,
         )
         .await
         .map(NavigationLoadOutcome::response_commit_ready)
@@ -3483,7 +3483,7 @@ impl CdpConnection {
             network_observation_journal,
             None,
             false,
-            RendererPageCreationReplyBoundary::LifecycleTarget,
+            RendererReplyBoundary::Stage,
         )
         .await
         .map(NavigationLoadOutcome::response_commit_ready)
@@ -3608,7 +3608,7 @@ impl CdpConnection {
                 None,
                 None,
                 CommittedDocumentResourceSource::Synthetic,
-                RendererPageCreationReplyBoundary::LifecycleTarget,
+                RendererReplyBoundary::Stage,
             )
             .await;
         }
@@ -3631,7 +3631,7 @@ impl CdpConnection {
             None,
             None,
             CommittedDocumentResourceSource::Synthetic,
-            RendererPageCreationReplyBoundary::LifecycleTarget,
+            RendererReplyBoundary::Stage,
         )
         .await?;
         Ok(navigation.with_navigation_engine(engine))
@@ -3716,7 +3716,7 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
     network_observation_journal: NetworkObservationJournal,
     network_error_page: Option<NetworkErrorPageNavigation>,
     synthetic_body: bool,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let network_extra_info_available = !network_observation_journal.is_empty();
     if network_error_page.is_none()
@@ -3785,7 +3785,7 @@ async fn prepare_captured_document_response_with_engine_async(
     network_observation_journal: NetworkObservationJournal,
     network_error_page: Option<NetworkErrorPageNavigation>,
     synthetic_body: bool,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let network_extra_info_available = !network_observation_journal.is_empty();
     body_progress_source.emit_response_metadata(

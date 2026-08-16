@@ -45,6 +45,7 @@ mod browser_context_runtime;
 mod document_lifecycle;
 mod document_lifecycle_turn;
 mod javascript_dialog;
+mod lifecycle_decision;
 mod main_document_ready_gate;
 mod navigation;
 mod owner;
@@ -270,6 +271,9 @@ pub(crate) use self::javascript_dialog::{
 };
 pub use self::javascript_dialog::{
     RendererJavaScriptDialogCompletion, RendererJavaScriptDialogResult,
+};
+pub use self::lifecycle_decision::{
+    RendererLifecycleDecider, RendererLifecycleDecision, RendererLifecycleSnapshot,
 };
 use self::owner::RendererOwnerState;
 pub use self::owner::{

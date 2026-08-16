@@ -14,8 +14,7 @@ use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_j
 use crate::network::ResourceRequestClient;
 use crate::{
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleMilestone,
-    RendererPageCreationNavigationReplyPolicy, RendererPageCreationReplyBoundary,
-    RendererTopLevelNavigationDispatch,
+    RendererNavigationReplyPolicy, RendererReplyBoundary, RendererTopLevelNavigationDispatch,
 };
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -57,7 +56,7 @@ async fn prepare_test_external_raw_document_with_content_type(
         url,
         content_type,
         raw_body,
-        RendererPageCreationReplyBoundary::LifecycleTarget,
+        RendererReplyBoundary::Stage,
     )
     .await
 }
@@ -68,7 +67,7 @@ async fn prepare_test_external_raw_document_with_content_type_and_reply_boundary
     url: url::Url,
     content_type: &str,
     raw_body: ExternalRawDocumentBodyStream,
-    reply_boundary: RendererPageCreationReplyBoundary,
+    reply_boundary: RendererReplyBoundary,
 ) -> PreparedRendererDocument {
     runtime
         .prepare_streaming_raw_document_from_external_body_with_inspector_session_restores(
@@ -104,7 +103,8 @@ async fn prepare_test_external_raw_document_with_content_type_and_reply_boundary
             PageVmInitStage::Load,
             reply_boundary,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
+            None,
             None,
             None,
             None,
@@ -2038,7 +2038,7 @@ async fn external_raw_streaming_page_command_builds_phase_one_page() {
             false,
             PageVmInitStage::Load,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
         )
         .await
         .expect("external raw streaming page should build");
@@ -2080,7 +2080,7 @@ async fn external_raw_streaming_body_failure_preserves_committed_document_and_ow
         url,
         "text/html",
         raw_body,
-        RendererPageCreationReplyBoundary::DocumentCommit,
+        RendererReplyBoundary::DocumentCommit,
     )
     .await;
     drop(body_tx);
@@ -2765,7 +2765,7 @@ async fn external_raw_streaming_empty_document_reaches_dom_content_loaded() {
             false,
             PageVmInitStage::DomContentLoaded,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
         )
         .await
         .expect("empty external raw streaming page should reach DOMContentLoaded");
@@ -2997,7 +2997,7 @@ async fn external_raw_streaming_delegates_post_load_meta_refresh_to_browser() {
             false,
             PageVmInitStage::Load,
             RendererTopLevelNavigationDispatch::DelegateToBrowser,
-            RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+            RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
         )
         .await
         .expect("meta refresh streaming page should attach first document");
@@ -3085,7 +3085,7 @@ async fn external_raw_streaming_defers_dcl_handler_navigation_to_page_reply() {
             false,
             PageVmInitStage::DomContentLoaded,
             RendererTopLevelNavigationDispatch::DelegateToBrowser,
-            RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+            RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
         )
         .await
         .expect("DCL handler page should reach its reply boundary");
@@ -3171,7 +3171,7 @@ globalThis.__ordinaryAfterDcl = new Promise(resolve => {
             false,
             PageVmInitStage::DomContentLoaded,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
         )
         .await
         .expect("page should reach its DCL reply boundary");
@@ -3264,9 +3264,10 @@ async fn renderer_owned_navigation_survives_page_creation_observer_detach() {
             Vec::new(),
             false,
             PageVmInitStage::Load,
-            RendererPageCreationReplyBoundary::DocumentCommit,
+            RendererReplyBoundary::DocumentCommit,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
+            None,
             None,
             None,
             None,
@@ -15626,7 +15627,7 @@ async fn domcontentloaded_page_creation_reply_resumes_owner_to_load_without_exte
             false,
             PageVmInitStage::DomContentLoaded,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
         )
         .await
         .expect("page should reply at DOMContentLoaded");
@@ -15714,10 +15715,11 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
             Vec::new(),
             false,
             PageVmInitStage::DomContentLoaded,
-            RendererPageCreationReplyBoundary::DocumentCommit,
+            RendererReplyBoundary::DocumentCommit,
             RendererTopLevelNavigationDispatch::DelegateToBrowser,
-            RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+            RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
             Some("TID-1".to_owned()),
+            None,
             None,
             None,
         )
@@ -15868,7 +15870,7 @@ document.addEventListener("DOMContentLoaded", () => {
         page_url,
         html,
         RendererTopLevelNavigationDispatch::DelegateToBrowser,
-        RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+        RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
     )
     .await;
 
@@ -15936,7 +15938,7 @@ async fn document_commit_release_runs_parser_script_location_handoff_in_backgrou
         page_url,
         r#"<!doctype html><script>location.href = "/final"</script>"#,
         RendererTopLevelNavigationDispatch::DelegateToBrowser,
-        RendererPageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+        RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
     )
     .await;
 
@@ -16026,7 +16028,7 @@ async fn owner_loop_completes_post_dcl_async_script_without_wait_command() {
             false,
             PageVmInitStage::DomContentLoaded,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
         )
         .await
         .expect("page should reach DOMContentLoaded");
@@ -16417,7 +16419,7 @@ document.addEventListener("DOMContentLoaded", () => {
         false,
         PageVmInitStage::Load,
         RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-        RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+        RendererNavigationReplyPolicy::FollowBeforeReply,
     );
     tokio::pin!(creation);
 
@@ -16543,7 +16545,7 @@ blocked page
         false,
         PageVmInitStage::Load,
         RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-        RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+        RendererNavigationReplyPolicy::FollowBeforeReply,
     );
     tokio::pin!(blocked_creation);
     tokio::select! {
@@ -16999,7 +17001,7 @@ async fn create_test_html_page_at_document_commit(
         url,
         html,
         RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-        RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+        RendererNavigationReplyPolicy::FollowBeforeReply,
     )
     .await
 }
@@ -17010,7 +17012,7 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
     url: url::Url,
     html: &str,
     top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-    navigation_reply_policy: RendererPageCreationNavigationReplyPolicy,
+    navigation_reply_policy: RendererNavigationReplyPolicy,
 ) -> RendererPageHandle {
     let (completion_tx, completion_rx) = oneshot::channel();
     let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
@@ -17056,9 +17058,10 @@ async fn create_test_html_page_at_document_commit_with_navigation_dispatch(
             Vec::new(),
             false,
             PageVmInitStage::Load,
-            RendererPageCreationReplyBoundary::DocumentCommit,
+            RendererReplyBoundary::DocumentCommit,
             top_level_navigation_dispatch,
             navigation_reply_policy,
+            None,
             None,
             None,
             None,

@@ -18,6 +18,11 @@ pub(in crate::runtime) enum PageCreationResolution<Pending, Attached> {
         pending: Pending,
         document: RendererDocumentLifecycleIdentity,
     },
+    /// The exact lifecycle target was reached, but a synchronous decider must
+    /// run before page creation can either reply or follow another
+    /// Document. This is an intra-owner-turn result, not a request to enqueue
+    /// another turn.
+    LifecycleDecisionRequired { pending: Pending },
     /// The owner-local store retired the Page before returning this result.
     Retired { failure: PageCreationRetirement },
     /// Checkout did not obtain the resident entry. The store remains its

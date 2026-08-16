@@ -270,7 +270,7 @@ impl<Entry> PageTurnScheduler<Entry> {
     /// ordinary source one turn before lifecycle arbitration resumes. This
     /// keeps post-target work behind the reply boundary without starving
     /// resource tasks needed to reach that boundary.
-    pub(super) fn select_lifecycle_target_turn_class(
+    pub(super) fn select_lifecycle_turn(
         &mut self,
         reconsider_displaced_ordinary: bool,
         has_eligible_ordinary_task: bool,
@@ -1369,7 +1369,7 @@ mod tests {
 
         for _ in 0..=MAX_CONSECUTIVE_PAGE_TURNS_PER_CLASS {
             assert_eq!(
-                scheduler.select_lifecycle_target_turn_class(
+                scheduler.select_lifecycle_turn(
                     false,
                     true,
                     DocumentLifecycleClassReadiness::Available,
@@ -1378,23 +1378,16 @@ mod tests {
             );
         }
         assert_eq!(
-            scheduler.select_lifecycle_target_turn_class(
-                true,
-                true,
-                DocumentLifecycleClassReadiness::Available,
-            ),
+            scheduler
+                .select_lifecycle_turn(true, true, DocumentLifecycleClassReadiness::Available,),
             Some(PageTurnClass::Ordinary)
         );
         assert_eq!(
-            scheduler.select_lifecycle_target_turn_class(
-                false,
-                true,
-                DocumentLifecycleClassReadiness::Absent,
-            ),
+            scheduler.select_lifecycle_turn(false, true, DocumentLifecycleClassReadiness::Absent,),
             Some(PageTurnClass::Ordinary)
         );
         assert_eq!(
-            scheduler.select_lifecycle_target_turn_class(
+            scheduler.select_lifecycle_turn(
                 true,
                 true,
                 DocumentLifecycleClassReadiness::ReadyMainParserScriptContinuation,

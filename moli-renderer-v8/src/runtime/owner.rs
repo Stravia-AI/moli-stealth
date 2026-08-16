@@ -7,13 +7,13 @@ use super::owner_local::RendererAttachedPage;
 use super::owner_local_store::{
     LivePageNavigationFailureRecipient, LivePageNavigationFollowOutcome,
     LivePageNavigationFollowTurn, LivePagePendingNavigationCompletion,
-    LivePagePendingNavigationPhaseOneAdvance, PageCreationNavigationReplyPolicy,
-    RendererDisplacedOrdinaryTurn, RendererDocumentIsolateAllocator,
-    RendererDocumentIsolateReservation, RendererOwnerLocalContext, RendererOwnerLocalStore,
-    RendererPageCommandDispatch, RendererPageCreationResolution, RendererPageLocalEntry,
-    RendererPageLocalEntryCheckoutError, RendererPageScheduledTurn, RendererPageToken,
-    RendererPageTurnAdmission, RendererPageTurnCheckoutError, RendererPendingPageCreation,
-    RendererPreparedDocumentResidence, advance_document_lifecycle_one_page_turn_via_local_task,
+    LivePagePendingNavigationPhaseOneAdvance, NavigationReplyPolicy, RendererDisplacedOrdinaryTurn,
+    RendererDocumentIsolateAllocator, RendererDocumentIsolateReservation,
+    RendererOwnerLocalContext, RendererOwnerLocalStore, RendererPageCommandDispatch,
+    RendererPageCreationResolution, RendererPageLocalEntry, RendererPageLocalEntryCheckoutError,
+    RendererPageScheduledTurn, RendererPageToken, RendererPageTurnAdmission,
+    RendererPageTurnCheckoutError, RendererPendingPageCreation, RendererPreparedDocumentResidence,
+    advance_document_lifecycle_one_page_turn_via_local_task,
     advance_dom_stable_wait_turn_on_entry_via_local_task,
     advance_network_idle_wait_turn_on_entry_via_local_task,
     advance_page_owner_one_turn_via_local_task,
@@ -39,6 +39,7 @@ use super::owner_local_store::{
     owner_local_store_session, page_turn_readiness_after_restore_on_bound_owner_local_store,
     pending_phase_one_admission_after_restore_on_bound_owner_local_store,
     publish_page_navigation_failure_on_bound_owner_local_store,
+    release_lifecycle_gate_on_bound_owner_local_store,
     release_post_response_document_lifecycle_on_bound_owner_local_store,
     remove_page_on_bound_owner_local_store, remove_page_on_bound_owner_local_store_via_local_task,
     renderer_output_fence_for_tail_on_bound_owner_local_store,
@@ -86,6 +87,10 @@ use crate::shared_worker_runtime::{
 use moli_page_types::LayoutPolicy;
 use std::collections::VecDeque;
 use tokio::sync::{mpsc, oneshot};
+
+mod lifecycle_decision;
+
+use self::lifecycle_decision::PendingLifecycleNavigation;
 
 #[derive(Debug, Clone)]
 pub struct RendererPreparedDocumentCommitConfiguration {
@@ -153,6 +158,8 @@ pub struct RendererCreateHtmlPageRequest {
     pub layout_policy: LayoutPolicy,
     pub wpt_extensions_enabled: bool,
     pub stage: PageVmInitStage,
+    pub reply_boundary: crate::RendererReplyBoundary,
+    pub lifecycle_decider: Option<RendererLifecycleDecider>,
     /// Decides whether a non-`javascript:` location request remains inside
     /// the standalone adapter or becomes a browser-owner output action.
     ///
@@ -198,9 +205,10 @@ pub struct RendererCreateStreamingRawPageRequest {
     pub layout_policy: LayoutPolicy,
     pub wpt_extensions_enabled: bool,
     pub stage: PageVmInitStage,
-    pub reply_boundary: crate::RendererPageCreationReplyBoundary,
+    pub reply_boundary: crate::RendererReplyBoundary,
+    pub lifecycle_decider: Option<RendererLifecycleDecider>,
     pub(super) top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-    pub(super) navigation_reply_policy: PageCreationNavigationReplyPolicy,
+    pub(super) navigation_reply_policy: NavigationReplyPolicy,
     pub reserved_service_worker_client: Option<RendererReservedServiceWorkerClient>,
 }
 
@@ -520,15 +528,16 @@ enum RenderRuntimeTurn {
         page_tasks: Vec<PostParsePageOwnedWork>,
         stage: PageVmInitStage,
         started: Instant,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     },
     ContinueAttachedPageCreationLifecycle {
         pending: RendererPendingPageCreation,
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     },
     DrainSharedWorkerServiceLane,
     DrainServiceWorkerServiceLane,
@@ -570,6 +579,7 @@ enum RenderRuntimeTurn {
         deadline: Instant,
         loader: ResourceRequestClient,
     },
+    WaitLifecycleNavigation(PendingLifecycleNavigation),
     WaitLivePageSelector {
         token: RendererPageToken,
         selector: String,
@@ -675,6 +685,7 @@ impl RenderRuntimeTurn {
     fn is_page_creation_lifecycle_observer_for(&self, token: RendererPageToken) -> bool {
         match self {
             Self::ContinueAttachedPageCreationLifecycle { pending, .. } => pending.token == token,
+            Self::WaitLifecycleNavigation(wait) => wait.token() == token,
             Self::ContinueLivePageNavigationPostParseLifecycle {
                 token: observer_token,
                 completion: LivePagePendingNavigationCompletion::CompletePageCreation { .. },
@@ -763,13 +774,13 @@ fn live_page_command_requires_materialized_child_realms(command: &RendererPageCo
 
 const fn page_creation_navigation_reply_policy(
     dispatch: RendererTopLevelNavigationDispatch,
-) -> PageCreationNavigationReplyPolicy {
+) -> NavigationReplyPolicy {
     match dispatch {
         RendererTopLevelNavigationDispatch::DelegateToBrowser => {
-            PageCreationNavigationReplyPolicy::ReturnWithPendingNavigation
+            NavigationReplyPolicy::ReturnWithPendingNavigation
         }
         RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter => {
-            PageCreationNavigationReplyPolicy::FollowBeforeReply
+            NavigationReplyPolicy::FollowBeforeReply
         }
     }
 }
@@ -1044,7 +1055,7 @@ impl RendererOwnerHandle {
         response_headers: Vec<(String, String)>,
         page_vm: PageVm,
         pending_download: Option<RendererPendingDownloadActivation>,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_decision: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         self.run_owner_lane_local_task(async move {
             install_page_vm_on_bound_owner_local_store(
@@ -1057,7 +1068,7 @@ impl RendererOwnerHandle {
                 response_headers,
                 page_vm,
                 pending_download,
-                page_creation_lifecycle_target,
+                lifecycle_decision,
             )
         })
         .await
@@ -1073,7 +1084,7 @@ impl RendererOwnerHandle {
         response_status: u16,
         response_headers: Vec<(String, String)>,
         pending_navigation: PageVmPendingPhaseOneNavigation,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_decision: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         self.run_owner_lane_local_task(async move {
             install_phase_one_blocked_page_on_bound_owner_local_store(
@@ -1085,7 +1096,7 @@ impl RendererOwnerHandle {
                 response_status,
                 response_headers,
                 pending_navigation,
-                page_creation_lifecycle_target,
+                lifecycle_decision,
             )
         })
         .await
@@ -1119,7 +1130,7 @@ impl RendererOwnerHandle {
         pending: RendererPendingPageCreation,
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     ) -> Result<RendererPageCreationResolution> {
         self.run_owner_lane_local_task(async move {
             Ok(resolve_pending_page_creation_on_bound_owner_local_store(
@@ -1144,7 +1155,8 @@ impl RendererOwnerHandle {
         page_tasks: Vec<PostParsePageOwnedWork>,
         stage: PageVmInitStage,
         started: Instant,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
     ) -> Result<(RendererPendingPageCreation, DocumentLifecycleTurnOutcome)> {
         let owner_local_context = self.owner_local_context()?;
@@ -1159,13 +1171,10 @@ impl RendererOwnerHandle {
                 response_headers,
                 page_vm,
                 None,
-                matches!(
-                    reply_boundary,
-                    crate::RendererPageCreationReplyBoundary::LifecycleTarget
-                )
-                .then_some(stage),
+                reply_boundary.waits_for_stage().then_some(stage),
             )
             .await?;
+        let pending = pending.with_lifecycle_decider(stage, lifecycle_decider);
         let token = pending.token;
         let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
             Ok(entry) => entry,
@@ -1203,9 +1212,10 @@ impl RendererOwnerHandle {
         response_headers: Vec<(String, String)>,
         pending_navigation: PageVmPendingPhaseOneNavigation,
         stage: PageVmInitStage,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     ) -> RenderRuntimeDispatchOutcome {
         let owner_local_context = match self.owner_local_context() {
             Ok(context) => context,
@@ -1221,17 +1231,14 @@ impl RendererOwnerHandle {
                 response_status,
                 response_headers,
                 pending_navigation,
-                matches!(
-                    reply_boundary,
-                    crate::RendererPageCreationReplyBoundary::LifecycleTarget
-                )
-                .then_some(stage),
+                reply_boundary.waits_for_stage().then_some(stage),
             )
             .await
         {
             Ok(pending) => pending,
             Err(error) => return Err(error).into(),
         };
+        let pending = pending.with_lifecycle_decider(stage, lifecycle_decider);
         let token = pending.token;
         let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
             Ok(entry) => entry,
@@ -1240,10 +1247,7 @@ impl RendererOwnerHandle {
         entry.set_top_level_navigation_dispatch(top_level_navigation_dispatch);
         self.restore_live_page_entry(token, entry);
 
-        if matches!(
-            reply_boundary,
-            crate::RendererPageCreationReplyBoundary::DocumentCommit
-        ) {
+        if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
             self.publish_pending_page_creation_and_continue(
                 pending,
                 RenderRuntimePageCreationContinuation::AfterCommittedDocumentResponse {
@@ -1291,9 +1295,10 @@ impl RendererOwnerHandle {
         response_headers: Vec<(String, String)>,
         page_vm: PageVm,
         stage: PageVmInitStage,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     ) -> RenderRuntimeDispatchOutcome {
         let owner_local_context = match self.owner_local_context() {
             Ok(context) => context,
@@ -1310,11 +1315,7 @@ impl RendererOwnerHandle {
                 response_headers,
                 page_vm,
                 None,
-                matches!(
-                    reply_boundary,
-                    crate::RendererPageCreationReplyBoundary::LifecycleTarget
-                )
-                .then_some(stage),
+                reply_boundary.waits_for_stage().then_some(stage),
             )
             .await
         {
@@ -1322,6 +1323,7 @@ impl RendererOwnerHandle {
             Err(error) => return Err(error).into(),
         };
 
+        let pending = pending.with_lifecycle_decider(stage, lifecycle_decider);
         let token = pending.token;
         let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
             Ok(entry) => entry,
@@ -1334,10 +1336,7 @@ impl RendererOwnerHandle {
             return self.finish_pending_page_creation(pending).await;
         }
 
-        if matches!(
-            reply_boundary,
-            crate::RendererPageCreationReplyBoundary::DocumentCommit
-        ) {
+        if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
             self.restore_live_page_entry(token, entry);
             self.publish_pending_page_creation_and_continue(
                 pending,
@@ -1368,6 +1367,19 @@ impl RendererOwnerHandle {
     }
 
     async fn finish_pending_page_creation(
+        &self,
+        mut pending: RendererPendingPageCreation,
+    ) -> RenderRuntimeDispatchOutcome {
+        if let Some((target_stage, decider)) = pending.take_lifecycle_decider() {
+            return self
+                .apply_lifecycle_decision(pending, target_stage, decider)
+                .await;
+        }
+
+        self.finalize_pending_page_creation_reply(pending).await
+    }
+
+    async fn finalize_pending_page_creation_reply(
         &self,
         pending: RendererPendingPageCreation,
     ) -> RenderRuntimeDispatchOutcome {
@@ -1456,7 +1468,7 @@ impl RendererOwnerHandle {
         pending: RendererPendingPageCreation,
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     ) -> RenderRuntimeDispatchOutcome {
         let token = pending.token;
         let resolution = self
@@ -1498,6 +1510,10 @@ impl RendererOwnerHandle {
                     }),
                     wake_token: token,
                 }
+            }
+            PageCreationResolution::LifecycleDecisionRequired { pending } => {
+                debug_assert!(!retire_page_after_publication);
+                self.finish_pending_page_creation(pending).await
             }
             PageCreationResolution::Retired { failure } => {
                 debug_assert!(retire_page_after_publication);
@@ -1957,6 +1973,8 @@ impl RendererOwnerHandle {
             layout_policy: self.seal_layout_policy_for_page_creation(),
             wpt_extensions_enabled: false,
             stage,
+            reply_boundary: crate::RendererReplyBoundary::Stage,
+            lifecycle_decider: None,
             top_level_navigation_dispatch:
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             reserved_service_worker_client: None,
@@ -2028,10 +2046,11 @@ impl RendererOwnerHandle {
             layout_policy: self.seal_layout_policy_for_page_creation(),
             wpt_extensions_enabled: false,
             stage,
-            reply_boundary: crate::RendererPageCreationReplyBoundary::LifecycleTarget,
+            reply_boundary: crate::RendererReplyBoundary::Stage,
+            lifecycle_decider: None,
             top_level_navigation_dispatch:
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            navigation_reply_policy: PageCreationNavigationReplyPolicy::FollowBeforeReply,
+            navigation_reply_policy: NavigationReplyPolicy::FollowBeforeReply,
             reserved_service_worker_client: None,
         }
     }
@@ -4224,6 +4243,9 @@ impl RendererOwnerHandle {
             RenderRuntimeTurn::ContinueAttachedPageCreationLifecycle { pending, .. } => {
                 remove_page_on_bound_owner_local_store(pending.token);
             }
+            RenderRuntimeTurn::WaitLifecycleNavigation(wait) => {
+                remove_page_on_bound_owner_local_store(wait.token());
+            }
             RenderRuntimeTurn::ContinueLivePageRuntimeCommandLifecycle {
                 token, scope_id, ..
             } => {
@@ -4515,7 +4537,8 @@ impl RendererOwnerHandle {
                 reply,
                 capture_policy,
             } => {
-                let reply = self.merge_pending_download_into_reply(*reply, download);
+                let reply = *reply;
+                let reply = self.merge_pending_download_into_reply(reply, download);
                 self.finish_live_page_entry_with_page_state_and_continuation(
                     token,
                     entry,
@@ -5786,6 +5809,7 @@ impl RendererOwnerHandle {
                 stage,
                 started,
                 reply_boundary,
+                lifecycle_decider,
                 top_level_navigation_dispatch,
                 navigation_reply_policy,
             } => {
@@ -5802,6 +5826,7 @@ impl RendererOwnerHandle {
                         stage,
                         started,
                         reply_boundary,
+                        lifecycle_decider,
                         top_level_navigation_dispatch,
                     )
                     .await
@@ -5815,10 +5840,7 @@ impl RendererOwnerHandle {
                         ..
                     } => {
                         let target_stage = stage;
-                        if matches!(
-                            reply_boundary,
-                            crate::RendererPageCreationReplyBoundary::DocumentCommit
-                        ) {
+                        if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
                             let token = pending.token;
                             self.signal_internal_document_lifecycle_turn(token);
                             self.publish_pending_page_creation_and_continue(
@@ -5858,10 +5880,7 @@ impl RendererOwnerHandle {
                         ..
                     } => {
                         let target_stage = stage;
-                        if matches!(
-                            reply_boundary,
-                            crate::RendererPageCreationReplyBoundary::DocumentCommit
-                        ) {
+                        if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
                             let token = pending.token;
                             self.publish_pending_page_creation_and_continue(
                                 pending,
@@ -5898,10 +5917,7 @@ impl RendererOwnerHandle {
                             DocumentLifecycleTurnAction::RequestedTopLevelNavigation { stage, .. },
                         ..
                     } => {
-                        if matches!(
-                            reply_boundary,
-                            crate::RendererPageCreationReplyBoundary::DocumentCommit
-                        ) {
+                        if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
                             if navigation_reply_policy.returns_with_pending_navigation() {
                                 self.finish_pending_page_creation(pending).await
                             } else {
@@ -6125,6 +6141,9 @@ impl RendererOwnerHandle {
                 self.wait_live_page_dom_stable_turn(token, state, deadline, loader)
                     .await
             }
+            RenderRuntimeTurn::WaitLifecycleNavigation(wait) => {
+                self.wait_lifecycle_navigation_turn(wait).await
+            }
             RenderRuntimeTurn::WaitLivePageSelector {
                 token,
                 selector,
@@ -6260,6 +6279,8 @@ impl RendererOwnerHandle {
             layout_policy,
             wpt_extensions_enabled,
             stage,
+            reply_boundary,
+            lifecycle_decider,
             top_level_navigation_dispatch,
             reserved_service_worker_client,
         } = request;
@@ -6268,6 +6289,18 @@ impl RendererOwnerHandle {
                 "page reservation belongs to renderer owner {}, not {}",
                 page_reservation.local_host_id().as_u64(),
                 self.state.owner_local_host_id.as_u64()
+            ))
+            .into();
+        }
+        if lifecycle_decider.is_some()
+            && (!matches!(reply_boundary, crate::RendererReplyBoundary::Stage)
+                || !matches!(
+                    top_level_navigation_dispatch,
+                    RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter
+                ))
+        {
+            return Err(anyhow!(
+                "a lifecycle decider requires a standalone lifecycle-boundary page creation"
             ))
             .into();
         }
@@ -6419,7 +6452,8 @@ impl RendererOwnerHandle {
                         PageVmFollowedNavigationMetadata::default(),
                     ),
                     stage,
-                    crate::RendererPageCreationReplyBoundary::LifecycleTarget,
+                    reply_boundary,
+                    lifecycle_decider,
                     top_level_navigation_dispatch,
                     page_creation_navigation_reply_policy(top_level_navigation_dispatch),
                 )
@@ -6439,7 +6473,8 @@ impl RendererOwnerHandle {
                     response_headers,
                     page_vm,
                     stage,
-                    crate::RendererPageCreationReplyBoundary::LifecycleTarget,
+                    reply_boundary,
+                    lifecycle_decider,
                     top_level_navigation_dispatch,
                     page_creation_navigation_reply_policy(top_level_navigation_dispatch),
                 )
@@ -6462,7 +6497,8 @@ impl RendererOwnerHandle {
                     page_tasks,
                     stage,
                     started,
-                    reply_boundary: crate::RendererPageCreationReplyBoundary::LifecycleTarget,
+                    reply_boundary,
+                    lifecycle_decider,
                     top_level_navigation_dispatch,
                     navigation_reply_policy: page_creation_navigation_reply_policy(
                         top_level_navigation_dispatch,
@@ -6593,10 +6629,27 @@ impl RendererOwnerHandle {
             wpt_extensions_enabled,
             stage,
             reply_boundary,
+            lifecycle_decider,
             top_level_navigation_dispatch,
             navigation_reply_policy,
             reserved_service_worker_client,
         } = request;
+        if lifecycle_decider.is_some()
+            && (!matches!(reply_boundary, crate::RendererReplyBoundary::Stage)
+                || !matches!(
+                    top_level_navigation_dispatch,
+                    RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter
+                )
+                || !matches!(
+                    navigation_reply_policy,
+                    NavigationReplyPolicy::FollowBeforeReply
+                ))
+        {
+            return Err(anyhow!(
+                "a lifecycle decider requires standalone follow-before-reply page creation"
+            ))
+            .into();
+        }
         let loader = loader_for_new_page(
             &loader,
             &extra_http_headers,
@@ -6749,6 +6802,7 @@ impl RendererOwnerHandle {
                             ),
                             stage,
                             reply_boundary,
+                            lifecycle_decider,
                             top_level_navigation_dispatch,
                             navigation_reply_policy,
                         )
@@ -6765,6 +6819,7 @@ impl RendererOwnerHandle {
                             page_vm,
                             stage,
                             reply_boundary,
+                            lifecycle_decider,
                             top_level_navigation_dispatch,
                             navigation_reply_policy,
                         )
@@ -6788,6 +6843,7 @@ impl RendererOwnerHandle {
                             stage,
                             started,
                             reply_boundary,
+                            lifecycle_decider,
                             top_level_navigation_dispatch,
                             navigation_reply_policy,
                         },

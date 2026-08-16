@@ -13,6 +13,7 @@ const FETCH_INFER_FLAGS: &[&str] = &[
     "--with-base",
     "--with-frames",
     "--wait-until",
+    "--redirect-time",
     "--wait-selector",
     "--wait-script",
     "--wait-script-file",
@@ -44,6 +45,8 @@ const DUMP_MODES: &[&str] = &[
     "semantic_tree",
     "semantic_tree_text",
 ];
+
+pub const DEFAULT_REDIRECT_TIME_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
@@ -96,6 +99,18 @@ pub struct FetchArgs {
 
     #[arg(long, value_enum, default_value = "done")]
     pub wait_until: FetchWaitUntil,
+
+    /// Milliseconds to wait for a client-side replacement navigation after an
+    /// executable 4xx/5xx Document reaches the selected lifecycle stage. A
+    /// value of 0 disables additional waiting but still accepts a navigation
+    /// that is already pending when the stage result is inspected. This only
+    /// applies to `domcontentloaded`, `load`, and `done` waits.
+    #[arg(
+        long,
+        value_name = "MILLISECONDS",
+        default_value_t = DEFAULT_REDIRECT_TIME_MS
+    )]
+    pub redirect_time: u64,
 
     #[arg(long)]
     pub wait_selector: Option<String>,
@@ -469,7 +484,10 @@ fn infer_command(next: Option<&OsString>) -> Option<&'static str> {
         return Some("fetch");
     }
 
-    if FETCH_INFER_FLAGS.contains(&next.as_ref()) {
+    if FETCH_INFER_FLAGS
+        .iter()
+        .any(|flag| next == *flag || next.starts_with(&format!("{flag}=")))
+    {
         return Some("fetch");
     }
 
@@ -522,6 +540,18 @@ mod tests {
 
         match cli.command {
             Commands::Fetch(args) => assert_eq!(args.delay_ms, 250),
+            other => panic!("expected fetch command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn redirect_time_infers_fetch_command() {
+        let args =
+            normalize_args_for_compat(["moli", "--redirect-time=1500", "https://example.test/"]);
+        let cli = Cli::parse_from(args);
+
+        match cli.command {
+            Commands::Fetch(args) => assert_eq!(args.redirect_time, 1_500),
             other => panic!("expected fetch command, got {other:?}"),
         }
     }

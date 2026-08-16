@@ -37,7 +37,7 @@ pub use moli_renderer_v8::{
     RendererStyleSheetHeader, RendererStyleSheetInventoryUpdate, RendererStyleSheetPayload,
 };
 
-pub use moli_renderer_v8::{PageVmInitStage, RendererPageCreationReplyBoundary};
+pub use moli_renderer_v8::{PageVmInitStage, RendererReplyBoundary};
 
 pub(crate) struct MaterializedPageCreatedReply {
     pub(crate) page: Page,

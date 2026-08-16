@@ -250,8 +250,9 @@ pub use runtime::{
     RendererGeometryQuad, RendererInputDispatchOutcome, RendererInspectorProtocolConfiguration,
     RendererInspectorProtocolConfigurationCommand, RendererInspectorSessionRestoreSnapshot,
     RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId, RendererJavaScriptDialogResult,
-    RendererJavaScriptDialogSource, RendererLayoutMetrics, RendererLifecycleEpoch,
-    RendererLifecycleEventStamp, RendererLifecycleStartReason, RendererLifecycleTerminationStamp,
+    RendererJavaScriptDialogSource, RendererLayoutMetrics, RendererLifecycleDecider,
+    RendererLifecycleDecision, RendererLifecycleEpoch, RendererLifecycleEventStamp,
+    RendererLifecycleSnapshot, RendererLifecycleStartReason, RendererLifecycleTerminationStamp,
     RendererMainDocumentCommit, RendererMoliDomMemoryDiagnostics, RendererMoliMemoryDiagnostics,
     RendererMoliMemoryScopeDiagnostics, RendererMoliRuntimeMemoryDiagnostics, RendererOutputCursor,
     RendererOutputFence, RendererOutputFenceLeaseId, RendererOutputItem, RendererOutputPublication,
@@ -317,11 +318,17 @@ pub enum PageVmInitStage {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererPageCreationReplyBoundary {
+pub enum RendererReplyBoundary {
     /// Resolve page creation only after the requested lifecycle milestone.
-    LifecycleTarget,
+    Stage,
     /// Publish the committed Document and continue DCL/load on owner turns.
     DocumentCommit,
+}
+
+impl RendererReplyBoundary {
+    pub(crate) const fn waits_for_stage(self) -> bool {
+        matches!(self, Self::Stage)
+    }
 }
 
 /// Host integration route for cross-document top-level navigation requests.
@@ -344,12 +351,12 @@ pub enum RendererTopLevelNavigationDispatch {
 /// that command observer. It is discarded when the command replies or
 /// detaches and never becomes stable Page or Document lifecycle state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RendererPageCreationNavigationReplyPolicy {
+pub enum RendererNavigationReplyPolicy {
     FollowBeforeReply,
     ReturnWithPendingNavigation,
 }
 
-impl RendererPageCreationNavigationReplyPolicy {
+impl RendererNavigationReplyPolicy {
     pub(crate) const fn returns_with_pending_navigation(self) -> bool {
         matches!(self, Self::ReturnWithPendingNavigation)
     }
@@ -357,8 +364,7 @@ impl RendererPageCreationNavigationReplyPolicy {
 
 pub mod renderer {
     pub use super::{
-        PageVmInitStage, RendererPageCreationNavigationReplyPolicy,
-        RendererPageCreationReplyBoundary, RendererTopLevelNavigationDispatch,
-        is_on_js_local_executor,
+        PageVmInitStage, RendererNavigationReplyPolicy, RendererReplyBoundary,
+        RendererTopLevelNavigationDispatch, is_on_js_local_executor,
     };
 }

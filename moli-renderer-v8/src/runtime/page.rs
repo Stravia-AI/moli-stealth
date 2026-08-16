@@ -670,7 +670,7 @@ impl JsRuntime {
         wpt_extensions_enabled: bool,
         stage: PageVmInitStage,
         top_level_navigation_dispatch: crate::RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: crate::RendererPageCreationNavigationReplyPolicy,
+        navigation_reply_policy: crate::RendererNavigationReplyPolicy,
     ) -> Result<(
         RendererPageHandle,
         Arc<RendererPageState>,
@@ -708,9 +708,10 @@ impl JsRuntime {
             Vec::new(),
             wpt_extensions_enabled,
             stage,
-            crate::RendererPageCreationReplyBoundary::LifecycleTarget,
+            crate::RendererReplyBoundary::Stage,
             top_level_navigation_dispatch,
             navigation_reply_policy,
+            None,
             None,
             None,
             None,
@@ -750,12 +751,13 @@ impl JsRuntime {
         runtime_inspector_session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
         wpt_extensions_enabled: bool,
         stage: PageVmInitStage,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
         top_level_navigation_dispatch: crate::RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: crate::RendererPageCreationNavigationReplyPolicy,
+        navigation_reply_policy: crate::RendererNavigationReplyPolicy,
         root_frame_id: Option<String>,
         reserved_service_worker_client: Option<RendererReservedServiceWorkerClient>,
         main_document_commit: Option<crate::RendererMainDocumentCommit>,
+        lifecycle_decider: Option<crate::RendererLifecycleDecider>,
     ) -> Result<(
         RendererPageHandle,
         Arc<RendererPageState>,
@@ -801,6 +803,7 @@ impl JsRuntime {
                 root_frame_id,
                 reserved_service_worker_client,
                 main_document_commit,
+                lifecycle_decider,
             )
             .await?;
         let permit = prepared.issue_commit_permit();
@@ -842,12 +845,13 @@ impl JsRuntime {
         runtime_inspector_session_restore_snapshots: Vec<RendererInspectorSessionRestoreSnapshot>,
         wpt_extensions_enabled: bool,
         stage: PageVmInitStage,
-        reply_boundary: crate::RendererPageCreationReplyBoundary,
+        reply_boundary: crate::RendererReplyBoundary,
         top_level_navigation_dispatch: crate::RendererTopLevelNavigationDispatch,
-        navigation_reply_policy: crate::RendererPageCreationNavigationReplyPolicy,
+        navigation_reply_policy: crate::RendererNavigationReplyPolicy,
         root_frame_id: Option<String>,
         reserved_service_worker_client: Option<RendererReservedServiceWorkerClient>,
         main_document_commit: Option<crate::RendererMainDocumentCommit>,
+        lifecycle_decider: Option<crate::RendererLifecycleDecider>,
     ) -> Result<PreparedRendererDocument> {
         let mut request = self
             .inner
@@ -889,6 +893,7 @@ impl JsRuntime {
         request.top_level_navigation_dispatch = top_level_navigation_dispatch;
         request.navigation_reply_policy = navigation_reply_policy;
         request.reserved_service_worker_client = reserved_service_worker_client;
+        request.lifecycle_decider = lifecycle_decider;
         let reply = self
             .inner
             .renderer_owner

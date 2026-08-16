@@ -1,8 +1,7 @@
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use tracing::trace;
-
 use super::PageId;
+use tracing::trace;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RendererFrameToken {

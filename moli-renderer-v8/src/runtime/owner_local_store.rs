@@ -7,8 +7,11 @@ use std::rc::Rc;
 #[cfg(debug_assertions)]
 use std::thread::ThreadId;
 
+use anyhow::Context;
+
 use super::access::run_named_owner_local_task;
 use super::document_lifecycle_turn::DocumentLifecycleObserverOutcome;
+use super::lifecycle_decision::PendingLifecycleDecision;
 use super::navigation::{
     PageCreationNavigationFailureObserver, PageCreationNavigationFailurePublication,
     PageCreationNavigationFailurePublisher, PageCreationResolution, PageCreationRetirement,
@@ -40,7 +43,7 @@ use crate::script_vm::{
     RendererDocumentIsolateHandle, RendererDocumentIsolateReservationAccounting,
     RendererPageScriptEnvironment,
 };
-use crate::{RendererPageCreationNavigationReplyPolicy, RendererTopLevelNavigationDispatch};
+use crate::{RendererNavigationReplyPolicy, RendererTopLevelNavigationDispatch};
 use tokio::sync::oneshot;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -223,6 +226,7 @@ pub(super) struct RendererPendingPageCreation {
     navigation_failure_observer: PageCreationNavigationFailureObserver,
     page_context_cancel_tx: RendererPageContextCancelSender,
     pending_download: Option<RendererPendingDownloadActivation>,
+    lifecycle_decider: Option<PendingLifecycleDecision>,
 }
 
 pub(super) struct RendererPageCreationResolution {
@@ -275,23 +279,51 @@ impl RendererPendingPageCreation {
         self.pending_download = Some(download);
         self
     }
+
+    pub(super) fn with_lifecycle_decider(
+        mut self,
+        target_stage: PageVmInitStage,
+        decider: Option<RendererLifecycleDecider>,
+    ) -> Self {
+        self.lifecycle_decider =
+            decider.map(|decider| PendingLifecycleDecision::new(target_stage, decider));
+        self
+    }
+
+    pub(super) fn has_lifecycle_decider(&self) -> bool {
+        self.lifecycle_decider.is_some()
+    }
+
+    pub(super) fn take_lifecycle_decider(
+        &mut self,
+    ) -> Option<(PageVmInitStage, RendererLifecycleDecider)> {
+        self.lifecycle_decider
+            .take()
+            .map(PendingLifecycleDecision::into_parts)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RendererPageCreationLifecycleTargetTurnPolicy {
+enum LifecycleGateTurnPolicy {
     Normal,
-    LifecycleTarget { reconsider_displaced_ordinary: bool },
-    ParkAtReplyBoundary,
+    Drive { reconsider_displaced_ordinary: bool },
+    Park,
 }
 
 #[derive(Debug)]
-struct RendererPageCreationLifecycleTargetGate {
+struct LifecycleGate {
     target_stage: PageVmInitStage,
     parked_admitted_wake: bool,
     reconsider_ordinary_on_next_turn: bool,
 }
 
-impl RendererPageCreationLifecycleTargetGate {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct ReleasedLifecycleGate {
+    pub(super) target_stage: PageVmInitStage,
+    pub(super) resume_parked_page_turn: bool,
+}
+
+impl LifecycleGate {
     fn new(target_stage: PageVmInitStage) -> Self {
         Self {
             target_stage,
@@ -304,10 +336,10 @@ impl RendererPageCreationLifecycleTargetGate {
         &mut self,
         entry: &mut RendererPageLocalEntry,
         has_eligible_ordinary_source: bool,
-    ) -> RendererPageCreationLifecycleTargetTurnPolicy {
+    ) -> LifecycleGateTurnPolicy {
         if entry.page_vm().vm().has_pending_location_navigation() {
             self.reconsider_ordinary_on_next_turn = false;
-            return RendererPageCreationLifecycleTargetTurnPolicy::Normal;
+            return LifecycleGateTurnPolicy::Normal;
         }
         match entry.page_vm().document_lifecycle_wait_outcome(
             renderer_document_lifecycle_milestone_for_stage(self.target_stage),
@@ -315,13 +347,13 @@ impl RendererPageCreationLifecycleTargetGate {
             RendererDocumentLifecycleWaitOutcome::Reached(_)
             | RendererDocumentLifecycleWaitOutcome::Interrupted(_) => {
                 self.parked_admitted_wake = true;
-                RendererPageCreationLifecycleTargetTurnPolicy::ParkAtReplyBoundary
+                LifecycleGateTurnPolicy::Park
             }
             RendererDocumentLifecycleWaitOutcome::Pending
                 if matches!(self.target_stage, PageVmInitStage::Load) =>
             {
                 self.reconsider_ordinary_on_next_turn = false;
-                RendererPageCreationLifecycleTargetTurnPolicy::Normal
+                LifecycleGateTurnPolicy::Normal
             }
             RendererDocumentLifecycleWaitOutcome::Pending
                 if entry.pending_document_lifecycle_identity().is_some() =>
@@ -329,13 +361,13 @@ impl RendererPageCreationLifecycleTargetGate {
                 let reconsider_displaced_ordinary =
                     self.reconsider_ordinary_on_next_turn && has_eligible_ordinary_source;
                 self.reconsider_ordinary_on_next_turn = false;
-                RendererPageCreationLifecycleTargetTurnPolicy::LifecycleTarget {
+                LifecycleGateTurnPolicy::Drive {
                     reconsider_displaced_ordinary,
                 }
             }
             RendererDocumentLifecycleWaitOutcome::Pending => {
                 self.reconsider_ordinary_on_next_turn = false;
-                RendererPageCreationLifecycleTargetTurnPolicy::Normal
+                LifecycleGateTurnPolicy::Normal
             }
         }
     }
@@ -371,16 +403,16 @@ impl RendererPageCreationCommit {
     }
 }
 
-pub(super) type PageCreationNavigationReplyPolicy = RendererPageCreationNavigationReplyPolicy;
+pub(super) type NavigationReplyPolicy = RendererNavigationReplyPolicy;
 
 pub(super) enum LivePagePendingNavigationCompletion {
     Background,
     PublishedPageCreation {
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     },
     CompletePageCreation {
         pending: RendererPendingPageCreation,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     },
     ReplyWithSnapshot {
         reply: Box<RendererPageReply>,
@@ -621,7 +653,7 @@ struct RendererOwnerLocalPageSlot {
     turn_scheduler: PageTurnScheduler<RendererPageLocalEntry>,
     owner_maintenance: RendererPageOwnerMaintenanceResidence,
     task_sources: RendererPageOwnedTaskSources,
-    page_creation_lifecycle_target: Option<RendererPageCreationLifecycleTargetGate>,
+    lifecycle_gate: Option<LifecycleGate>,
     page_creation_navigation_failure_publisher: PageCreationNavigationFailurePublisher,
     script_environment_pin: RendererPageScriptEnvironmentPin,
 }
@@ -631,7 +663,7 @@ impl RendererOwnerLocalPageSlot {
         owner_slot: RendererPageSlotHandle,
         entry: RendererPageLocalEntry,
         task_sources: RendererPageOwnedTaskSources,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
         page_creation_navigation_failure_publisher: PageCreationNavigationFailurePublisher,
         script_environment_pin: RendererPageScriptEnvironmentPin,
     ) -> Self {
@@ -640,8 +672,7 @@ impl RendererOwnerLocalPageSlot {
             turn_scheduler: PageTurnScheduler::new(entry),
             owner_maintenance: RendererPageOwnerMaintenanceResidence::new(std::time::Instant::now()),
             task_sources,
-            page_creation_lifecycle_target: page_creation_lifecycle_target
-                .map(RendererPageCreationLifecycleTargetGate::new),
+            lifecycle_gate: lifecycle_gate.map(LifecycleGate::new),
             page_creation_navigation_failure_publisher,
             script_environment_pin,
         }
@@ -1320,7 +1351,7 @@ pub(super) fn install_page_vm_on_bound_owner_local_store(
     response_headers: Vec<(String, String)>,
     vm: PageVm,
     pending_download: Option<RendererPendingDownloadActivation>,
-    page_creation_lifecycle_target: Option<PageVmInitStage>,
+    lifecycle_gate: Option<PageVmInitStage>,
 ) -> Result<RendererPendingPageCreation> {
     with_bound_render_runtime_owner_local_store_session(|mut session| {
         session.install_page_vm(
@@ -1333,7 +1364,7 @@ pub(super) fn install_page_vm_on_bound_owner_local_store(
             response_headers,
             vm,
             pending_download,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
         )
     })
 }
@@ -1347,7 +1378,7 @@ pub(super) fn install_phase_one_blocked_page_on_bound_owner_local_store(
     response_status: u16,
     response_headers: Vec<(String, String)>,
     pending_navigation: PageVmPendingPhaseOneNavigation,
-    page_creation_lifecycle_target: Option<PageVmInitStage>,
+    lifecycle_gate: Option<PageVmInitStage>,
 ) -> Result<RendererPendingPageCreation> {
     with_bound_render_runtime_owner_local_store_session(|mut session| {
         session.install_phase_one_blocked_page_for_owner(
@@ -1359,7 +1390,7 @@ pub(super) fn install_phase_one_blocked_page_on_bound_owner_local_store(
             response_status,
             response_headers,
             pending_navigation,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
         )
     })
 }
@@ -1376,7 +1407,7 @@ pub(super) fn resolve_pending_page_creation_on_bound_owner_local_store(
     pending: RendererPendingPageCreation,
     document: RendererDocumentLifecycleIdentity,
     target_stage: PageVmInitStage,
-    navigation_reply_policy: PageCreationNavigationReplyPolicy,
+    navigation_reply_policy: NavigationReplyPolicy,
 ) -> RendererPageCreationResolution {
     // This operation runs inside one owner-lane task and contains no await
     // boundary. Before the task starts the entry remains resident; once it is
@@ -1630,11 +1661,19 @@ pub(super) fn restore_entry_after_document_lifecycle_on_bound_owner_local_store(
             .page_hosts
             .get_mut(&token.local_host_id)
             .and_then(|host| host.pages.get_mut(&token.page_id))
-            .and_then(|slot| slot.page_creation_lifecycle_target.as_mut())
+            .and_then(|slot| slot.lifecycle_gate.as_mut())
         {
             gate.settle_lifecycle_turn(reconsider_displaced_ordinary);
         }
     });
+}
+
+pub(super) fn release_lifecycle_gate_on_bound_owner_local_store(
+    token: RendererPageToken,
+) -> Result<ReleasedLifecycleGate> {
+    with_bound_render_runtime_owner_local_store_session(|session| {
+        session.store.release_lifecycle_gate(token)
+    })
 }
 
 pub(super) fn renderer_page_token_for_owner_context(
@@ -2111,7 +2150,7 @@ fn select_page_scheduler_turn(
     scheduler: &mut PageTurnScheduler<RendererPageLocalEntry>,
     entry: &mut RendererPageLocalEntry,
     task_sources: &mut RendererPageOwnedTaskSources,
-    page_creation_lifecycle_target: &mut Option<RendererPageCreationLifecycleTargetGate>,
+    lifecycle_gate: &mut Option<LifecycleGate>,
     trigger: PageTurnTrigger,
 ) -> RendererPageScheduledTurn {
     let snapshot = page_ready_descriptor_snapshot(entry, task_sources);
@@ -2131,22 +2170,22 @@ fn select_page_scheduler_turn(
         document_lifecycle_owner_turn_is_runnable,
         has_ready_main_parser_script_continuation,
     );
-    let target_turn_policy = page_creation_lifecycle_target
+    let gate_policy = lifecycle_gate
         .as_mut()
-        .map(|target| target.turn_policy(entry, !snapshot.eligible.is_empty()))
-        .unwrap_or(RendererPageCreationLifecycleTargetTurnPolicy::Normal);
-    let selected_class = match target_turn_policy {
-        RendererPageCreationLifecycleTargetTurnPolicy::Normal => {
+        .map(|gate| gate.turn_policy(entry, !snapshot.eligible.is_empty()))
+        .unwrap_or(LifecycleGateTurnPolicy::Normal);
+    let selected_class = match gate_policy {
+        LifecycleGateTurnPolicy::Normal => {
             scheduler.select_turn_class(trigger, !snapshot.eligible.is_empty(), document_lifecycle)
         }
-        RendererPageCreationLifecycleTargetTurnPolicy::LifecycleTarget {
+        LifecycleGateTurnPolicy::Drive {
             reconsider_displaced_ordinary,
-        } => scheduler.select_lifecycle_target_turn_class(
+        } => scheduler.select_lifecycle_turn(
             reconsider_displaced_ordinary,
             !snapshot.eligible.is_empty(),
             document_lifecycle,
         ),
-        RendererPageCreationLifecycleTargetTurnPolicy::ParkAtReplyBoundary => {
+        LifecycleGateTurnPolicy::Park => {
             return RendererPageScheduledTurn::SpentWake;
         }
     };
@@ -2320,7 +2359,7 @@ impl RendererOwnerLocalStoreSession<'_> {
         response_headers: Vec<(String, String)>,
         vm: PageVm,
         pending_download: Option<RendererPendingDownloadActivation>,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         self.store.install_page_vm_for_owner(
             owner,
@@ -2332,7 +2371,7 @@ impl RendererOwnerLocalStoreSession<'_> {
             response_headers,
             vm,
             pending_download,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
         )
     }
 
@@ -2346,7 +2385,7 @@ impl RendererOwnerLocalStoreSession<'_> {
         response_status: u16,
         response_headers: Vec<(String, String)>,
         pending_navigation: PageVmPendingPhaseOneNavigation,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         self.store.install_phase_one_blocked_page_for_owner(
             owner,
@@ -2357,7 +2396,7 @@ impl RendererOwnerLocalStoreSession<'_> {
             response_status,
             response_headers,
             pending_navigation,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
         )
     }
 
@@ -2544,7 +2583,7 @@ impl RendererOwnerLocalStore {
         pending: RendererPendingPageCreation,
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
-        navigation_reply_policy: PageCreationNavigationReplyPolicy,
+        navigation_reply_policy: NavigationReplyPolicy,
     ) -> RendererPageCreationResolution {
         // Failure selection and lifecycle entry checkout are one owner-local
         // operation. The creation observer was registered before this Page
@@ -2910,6 +2949,29 @@ impl RendererOwnerLocalStore {
             .is_some_and(|entry| entry.release_document_lifecycle_after_response(document))
     }
 
+    fn release_lifecycle_gate(
+        &mut self,
+        token: RendererPageToken,
+    ) -> Result<ReleasedLifecycleGate> {
+        #[cfg(debug_assertions)]
+        Self::ensure_token_thread(&token)?;
+        let gate = self
+            .page_hosts
+            .get_mut(&token.local_host_id)
+            .and_then(|host| host.pages.get_mut(&token.page_id))
+            .and_then(|slot| slot.lifecycle_gate.take())
+            .with_context(|| {
+                anyhow!(
+                    "renderer page {} has no page-creation lifecycle-target gate",
+                    token.page_id.as_u64()
+                )
+            })?;
+        Ok(ReleasedLifecycleGate {
+            target_stage: gate.target_stage,
+            resume_parked_page_turn: gate.parked_admitted_wake,
+        })
+    }
+
     fn checkout_scheduled_page_turn(
         &mut self,
         token: RendererPageToken,
@@ -2929,7 +2991,7 @@ impl RendererOwnerLocalStore {
                 let RendererOwnerLocalPageSlot {
                     turn_scheduler,
                     task_sources,
-                    page_creation_lifecycle_target,
+                    lifecycle_gate,
                     ..
                 } = page_slot;
                 match turn_scheduler.checkout_scheduled_turn() {
@@ -2938,7 +3000,7 @@ impl RendererOwnerLocalStore {
                             turn_scheduler,
                             &mut entry,
                             task_sources,
-                            page_creation_lifecycle_target,
+                            lifecycle_gate,
                             trigger,
                         );
                         Ok((entry, trigger, scheduled_turn))
@@ -3151,7 +3213,7 @@ impl RendererOwnerLocalStore {
         response_headers: Vec<(String, String)>,
         mut vm: PageVm,
         pending_download: Option<RendererPendingDownloadActivation>,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         debug_assert!(
             is_on_named_owner_execution_lane_for(&owner.owner_state.local_executor),
@@ -3176,7 +3238,7 @@ impl RendererOwnerLocalStore {
             owner,
             slot,
             entry,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
             navigation_failure_publisher,
         )?;
         Ok(self.prepare_pending_page_creation(
@@ -3197,7 +3259,7 @@ impl RendererOwnerLocalStore {
         response_status: u16,
         response_headers: Vec<(String, String)>,
         mut pending_navigation: PageVmPendingPhaseOneNavigation,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
     ) -> Result<RendererPendingPageCreation> {
         debug_assert!(
             is_on_named_owner_execution_lane_for(&owner.owner_state.local_executor),
@@ -3226,7 +3288,7 @@ impl RendererOwnerLocalStore {
             owner,
             slot,
             entry,
-            page_creation_lifecycle_target,
+            lifecycle_gate,
             navigation_failure_publisher,
         )?;
         Ok(self.prepare_pending_page_creation(
@@ -3251,6 +3313,7 @@ impl RendererOwnerLocalStore {
             navigation_failure_observer,
             page_context_cancel_tx,
             pending_download,
+            lifecycle_decider: None,
         }
     }
 
@@ -3291,6 +3354,12 @@ impl RendererOwnerLocalStore {
         pending: RendererPendingPageCreation,
         entry: RendererPageLocalEntry,
     ) -> RendererPageCreationResolution {
+        if pending.has_lifecycle_decider() {
+            self.restore_entry_after_command(pending.token, entry);
+            return RendererPageCreationResolution::without_renderer_output(
+                PageCreationResolution::LifecycleDecisionRequired { pending },
+            );
+        }
         let commit = self.commit_page_creation_reply(pending, entry);
         match commit.finalized {
             Ok(finalized) => RendererPageCreationResolution {
@@ -3329,15 +3398,15 @@ impl RendererOwnerLocalStore {
             navigation_failure_observer: _,
             page_context_cancel_tx,
             pending_download,
+            lifecycle_decider,
         } = pending;
         debug_assert_eq!(entry.slot.page_id(), token.page_id);
-        let resume_parked_page_turn = self
-            .page_hosts
-            .get_mut(&token.local_host_id)
-            .and_then(|host| host.pages.get_mut(&token.page_id))
-            .and_then(|page_slot| page_slot.page_creation_lifecycle_target.take())
-            .is_some_and(|gate| gate.parked_admitted_wake);
         let result = (|| -> Result<_> {
+            ensure!(
+                lifecycle_decider.is_none(),
+                "renderer page {} tried to reply before its lifecycle decider ran",
+                token.page_id.as_u64()
+            );
             if matches!(
                 entry.top_level_navigation_dispatch(),
                 RendererTopLevelNavigationDispatch::DelegateToBrowser
@@ -3366,6 +3435,12 @@ impl RendererOwnerLocalStore {
                 creation_artifacts,
             ))
         })();
+        let lifecycle_gate = self
+            .page_hosts
+            .get_mut(&token.local_host_id)
+            .and_then(|host| host.pages.get_mut(&token.page_id))
+            .and_then(|page_slot| page_slot.lifecycle_gate.take());
+        let resume_parked_page_turn = lifecycle_gate.is_some_and(|gate| gate.parked_admitted_wake);
         let renderer_output = entry.page_vm_mut().settle_renderer_output_publication();
         // Page creation can span several admitted owner turns. Earlier turns
         // may already have settled Runtime/lifecycle observations before the
@@ -3685,7 +3760,7 @@ impl RendererOwnerLocalStore {
         owner: &RendererOwnerLocalContext,
         slot: RendererPageSlotHandle,
         mut entry: RendererPageLocalEntry,
-        page_creation_lifecycle_target: Option<PageVmInitStage>,
+        lifecycle_gate: Option<PageVmInitStage>,
         page_creation_navigation_failure_publisher: PageCreationNavigationFailurePublisher,
     ) -> Result<RendererPageToken> {
         let page_id = slot.page_id();
@@ -3799,7 +3874,7 @@ impl RendererOwnerLocalStore {
                 slot.clone(),
                 entry,
                 task_sources,
-                page_creation_lifecycle_target,
+                lifecycle_gate,
                 page_creation_navigation_failure_publisher,
                 script_environment_pin,
             ),
@@ -4424,8 +4499,7 @@ mod navigation_dispatch_tests {
 
     #[test]
     fn runnable_page_creation_lifecycle_clears_displaced_ordinary_grant() {
-        let mut gate =
-            RendererPageCreationLifecycleTargetGate::new(PageVmInitStage::DomContentLoaded);
+        let mut gate = LifecycleGate::new(PageVmInitStage::DomContentLoaded);
 
         gate.settle_lifecycle_turn(true);
         assert!(gate.reconsider_ordinary_on_next_turn);
@@ -4584,7 +4658,7 @@ mod navigation_dispatch_tests {
     #[test]
     fn published_page_creation_discards_reply_policy_when_observer_detaches() {
         let completion = LivePagePendingNavigationCompletion::PublishedPageCreation {
-            navigation_reply_policy: PageCreationNavigationReplyPolicy::ReturnWithPendingNavigation,
+            navigation_reply_policy: NavigationReplyPolicy::ReturnWithPendingNavigation,
         };
 
         let (completion, detached) = completion.detach_command_observer();
@@ -4607,7 +4681,7 @@ mod navigation_dispatch_tests {
     #[test]
     fn already_published_page_creation_reports_later_navigation_failure_as_background() {
         let completion = LivePagePendingNavigationCompletion::PublishedPageCreation {
-            navigation_reply_policy: PageCreationNavigationReplyPolicy::FollowBeforeReply,
+            navigation_reply_policy: NavigationReplyPolicy::FollowBeforeReply,
         };
 
         assert_eq!(

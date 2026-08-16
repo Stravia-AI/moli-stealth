@@ -1,3 +1,4 @@
+mod lifecycle_fetch;
 mod navigation_engine;
 pub mod storage_partition;
 
@@ -32,10 +33,11 @@ use url::Url;
 
 pub use crate::renderer::ExternalRawDocumentBodyStream;
 pub use crate::renderer::PageVmInitStage;
-pub use crate::renderer::RendererPageCreationReplyBoundary;
+pub use crate::renderer::RendererReplyBoundary;
 pub use moli_renderer_v8::{
     DetachedParserScriptFetchContinuation, RendererBrowserContextRuntime,
     RendererBrowserContextRuntimeOwner, RendererBrowserContextRuntimeOwnerAccess,
+    RendererLifecycleDecider, RendererLifecycleDecision, RendererLifecycleSnapshot,
     RendererPageReservationToken, RendererReservedServiceWorkerClient,
     RendererServiceWorkerMainResourceFetch, RendererSharedWorkerRuntimeDiagnostics,
 };
@@ -47,6 +49,8 @@ pub use navigation_engine::{
 };
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
+
+use self::lifecycle_fetch::FollowTimeout;
 
 fn wait_until_outer_timeout(wait_until: RenderedDomWaitUntil, timeout: Duration) -> Duration {
     match wait_until {
@@ -347,8 +351,13 @@ impl Browser {
         &self,
         request: Request,
     ) -> Result<FetchedDocument> {
-        self.fetch_document_allow_http_error_internal(request, PageVmInitStage::Load, None)
-            .await
+        self.fetch_document_allow_http_error_internal(
+            request,
+            PageVmInitStage::Load,
+            RendererReplyBoundary::Stage,
+            None,
+        )
+        .await
     }
 
     pub async fn fetch_request_allow_http_error_with_wait_until(
@@ -403,6 +412,26 @@ impl Browser {
         wait_until: RenderedDomWaitUntil,
         timeout: Duration,
     ) -> Result<FetchedDocument> {
+        self.fetch_document_with_wait(
+            request,
+            wait_until,
+            timeout,
+            RendererReplyBoundary::Stage,
+            None,
+            None,
+        )
+        .await
+    }
+
+    async fn fetch_document_with_wait(
+        &self,
+        request: Request,
+        wait_until: RenderedDomWaitUntil,
+        timeout: Duration,
+        reply_boundary: RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
+        follow_timeout: Option<FollowTimeout>,
+    ) -> Result<FetchedDocument> {
         let stage = match wait_until {
             RenderedDomWaitUntil::DomContentLoaded => PageVmInitStage::DomContentLoaded,
             RenderedDomWaitUntil::Load => PageVmInitStage::Load,
@@ -424,16 +453,19 @@ impl Browser {
         let requested_url = request.url.clone();
         if is_about_blank_url(&requested_url) {
             return self
-                .fetch_document_wait_timeout(
+                .materialize_with_follow_timeout(
                     &raw_url,
                     wait_until,
                     timeout,
                     stage,
                     outer_timeout,
+                    follow_timeout,
                     self.materialize_static_html_page(
                         &raw_url,
                         requested_url,
                         stage,
+                        reply_boundary,
+                        lifecycle_decider,
                         Some((wait_until, timeout)),
                         String::new(),
                     ),
@@ -478,16 +510,19 @@ impl Browser {
                 .checked_sub(timeout_started.elapsed())
                 .unwrap_or_default();
             return self
-                .fetch_document_wait_timeout(
+                .materialize_with_follow_timeout(
                     &raw_url,
                     wait_until,
                     timeout,
                     stage,
                     remaining_timeout,
+                    follow_timeout,
                     self.materialize_streaming_raw_response_page(
                         &raw_url,
                         requested_url,
                         stage,
+                        reply_boundary,
+                        lifecycle_decider,
                         Some((wait_until, timeout)),
                         streaming_raw_response_from_navigation_response(response)?,
                         document_fetch_context_seed,
@@ -524,16 +559,19 @@ impl Browser {
             .checked_sub(timeout_started.elapsed())
             .unwrap_or_default();
         let document_fetch_context_seed = navigation_loader.commit(response.final_url.clone())?;
-        self.fetch_document_wait_timeout(
+        self.materialize_with_follow_timeout(
             &raw_url,
             wait_until,
             timeout,
             stage,
             remaining_timeout,
+            follow_timeout,
             self.materialize_streaming_raw_response_page(
                 &raw_url,
                 requested_url,
                 stage,
+                reply_boundary,
+                lifecycle_decider,
                 Some((wait_until, timeout)),
                 response,
                 document_fetch_context_seed,
@@ -670,7 +708,15 @@ impl Browser {
         let requested_url = request.url.clone();
         if is_about_blank_url(&requested_url) {
             return self
-                .materialize_static_html_page(&raw_url, requested_url, stage, wait, String::new())
+                .materialize_static_html_page(
+                    &raw_url,
+                    requested_url,
+                    stage,
+                    RendererReplyBoundary::Stage,
+                    None,
+                    wait,
+                    String::new(),
+                )
                 .await;
         }
         let navigation_loader = NavigationResourceLoader::new(
@@ -695,6 +741,8 @@ impl Browser {
                     &raw_url,
                     requested_url,
                     stage,
+                    RendererReplyBoundary::Stage,
+                    None,
                     wait,
                     response,
                     document_fetch_context_seed,
@@ -711,6 +759,8 @@ impl Browser {
                 &raw_url,
                 requested_url,
                 stage,
+                RendererReplyBoundary::Stage,
+                None,
                 wait,
                 response,
                 document_fetch_context_seed,
@@ -731,7 +781,15 @@ impl Browser {
         let requested_url = request.url.clone();
         if is_about_blank_url(&requested_url) {
             return self
-                .materialize_static_html_page(&raw_url, requested_url, stage, wait, String::new())
+                .materialize_static_html_page(
+                    &raw_url,
+                    requested_url,
+                    stage,
+                    RendererReplyBoundary::Stage,
+                    None,
+                    wait,
+                    String::new(),
+                )
                 .await;
         }
         let navigation_loader = NavigationResourceLoader::new(
@@ -755,6 +813,8 @@ impl Browser {
                     &raw_url,
                     requested_url,
                     stage,
+                    RendererReplyBoundary::Stage,
+                    None,
                     wait,
                     streaming_raw_response_from_navigation_response(response)?,
                     document_fetch_context_seed,
@@ -768,6 +828,8 @@ impl Browser {
             &raw_url,
             requested_url,
             stage,
+            RendererReplyBoundary::Stage,
+            None,
             wait,
             response,
             document_fetch_context_seed,
@@ -780,13 +842,22 @@ impl Browser {
         &self,
         request: Request,
         stage: PageVmInitStage,
+        reply_boundary: RendererReplyBoundary,
         wait: Option<(RenderedDomWaitUntil, Duration)>,
     ) -> Result<FetchedDocument> {
         let raw_url = request.url.as_str().to_owned();
         let requested_url = request.url.clone();
         if is_about_blank_url(&requested_url) {
             return self
-                .materialize_static_html_page(&raw_url, requested_url, stage, wait, String::new())
+                .materialize_static_html_page(
+                    &raw_url,
+                    requested_url,
+                    stage,
+                    reply_boundary,
+                    None,
+                    wait,
+                    String::new(),
+                )
                 .await
                 .map(FetchedDocument::Page);
         }
@@ -818,6 +889,8 @@ impl Browser {
                     &raw_url,
                     requested_url,
                     stage,
+                    reply_boundary,
+                    None,
                     wait,
                     streaming_raw_response_from_navigation_response(response)?,
                     document_fetch_context_seed,
@@ -838,6 +911,8 @@ impl Browser {
             &raw_url,
             requested_url,
             stage,
+            reply_boundary,
+            None,
             wait,
             response,
             document_fetch_context_seed,
@@ -873,19 +948,29 @@ impl Browser {
         match tokio::time::timeout(outer_timeout, future).await {
             Ok(result) => result,
             Err(_) => {
-                warn!(
-                    url = %raw_url,
-                    wait_until = ?wait_until,
-                    timeout_ms = timeout.as_millis(),
-                    stage = ?stage,
-                    "fetch_document_allow_http_error_with_wait_until timed out"
-                );
-                Err(anyhow!(
-                    "fetch document allow-http-error wait_until {wait_until:?} timed out after {} ms for `{raw_url}`",
-                    timeout.as_millis()
-                ))
+                Err(self.fetch_document_wait_timeout_error(raw_url, wait_until, timeout, stage))
             }
         }
+    }
+
+    fn fetch_document_wait_timeout_error(
+        &self,
+        raw_url: &str,
+        wait_until: RenderedDomWaitUntil,
+        timeout: Duration,
+        stage: PageVmInitStage,
+    ) -> anyhow::Error {
+        warn!(
+            url = %raw_url,
+            wait_until = ?wait_until,
+            timeout_ms = timeout.as_millis(),
+            stage = ?stage,
+            "fetch_document_allow_http_error_with_wait_until timed out"
+        );
+        anyhow!(
+            "fetch document allow-http-error wait_until {wait_until:?} timed out after {} ms for `{raw_url}`",
+            timeout.as_millis()
+        )
     }
 
     async fn materialize_static_html_page(
@@ -893,6 +978,8 @@ impl Browser {
         raw_url: &str,
         requested_url: Url,
         stage: PageVmInitStage,
+        reply_boundary: RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         wait: Option<(RenderedDomWaitUntil, Duration)>,
         response_body: String,
     ) -> Result<Page> {
@@ -943,6 +1030,8 @@ impl Browser {
             stage,
         );
         create_page_request.wpt_extensions_enabled = self.config.wpt_extensions_enabled();
+        create_page_request.reply_boundary = reply_boundary;
+        create_page_request.lifecycle_decider = lifecycle_decider;
         create_page_request.indexed_db_manager = Some(self.partition.weak_indexed_db_manager());
         create_page_request.storage_bucket_store = Some(self.partition.storage_bucket_store());
         let reply = renderer_owner
@@ -967,6 +1056,8 @@ impl Browser {
         raw_url: &str,
         requested_url: Url,
         stage: PageVmInitStage,
+        reply_boundary: RendererReplyBoundary,
+        lifecycle_decider: Option<RendererLifecycleDecider>,
         wait: Option<(RenderedDomWaitUntil, Duration)>,
         response: StreamingRawResponse,
         document_fetch_context_seed: DocumentFetchContextSeed,
@@ -1052,12 +1143,13 @@ impl Browser {
                 Vec::new(),
                 self.config.wpt_extensions_enabled(),
                 stage,
-                moli_renderer_v8::RendererPageCreationReplyBoundary::LifecycleTarget,
+                reply_boundary,
                 moli_renderer_v8::RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-                moli_renderer_v8::RendererPageCreationNavigationReplyPolicy::FollowBeforeReply,
+                moli_renderer_v8::RendererNavigationReplyPolicy::FollowBeforeReply,
                 None,
                 reserved_service_worker_client,
                 None,
+                lifecycle_decider,
             )
             .await
             .with_context(|| anyhow!("failed to execute scripts for page `{raw_url}`"))?;

@@ -37,6 +37,9 @@ const WAIT_UNTIL_OUTER_HTML_TAMPER_HTML: &str = "<!doctype html><html><body data
 // is around 500 ms; a 50 ms interval leaves enough margin under nextest load.
 const WAIT_UNTIL_INTERVAL_FETCH_HTML: &str = "<!doctype html><html><body data-state=\"init\"><script>window.addEventListener('load', () => { setInterval(() => { fetch('/wait-until-data').then(() => { document.body.setAttribute('data-ping', String((Number(document.body.getAttribute('data-ping') || '0') + 1))); }); }, 50); });</script></body></html>";
 const WAIT_UNTIL_INTERVAL_DOM_MUTATION_HTML: &str = "<!doctype html><html><body data-state=\"init\"><main id=\"mutation-count\">0</main><script>window.addEventListener('load', () => { setInterval(() => { const count = Number(document.body.getAttribute('data-mutation-count') || '0') + 1; document.body.setAttribute('data-mutation-count', String(count)); document.getElementById('mutation-count').textContent = String(count); }, 50); });</script></body></html>";
+const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 75); });</script></body></html>";
+const WAIT_UNTIL_HTTP_ERROR_LATE_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>late 403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=late-challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 1200); });</script></body></html>";
+const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML: &str = "<!doctype html><html><head><title>challenge passed</title></head><body><main id=\"http-error-navigation-target\">http-error-navigation=done</main><script>window.httpErrorNavigationDcl = false; window.httpErrorNavigationLoad = false; document.addEventListener('DOMContentLoaded', () => { window.httpErrorNavigationDcl = true; document.body.setAttribute('data-reached-dcl', 'true'); const script = document.createElement('script'); script.src = '/assets/runtime_owned_in_order_load_very_slow.js'; script.onload = () => { window.httpErrorNavigationSlowScript = true; const tail = document.createElement('main'); tail.id = 'http-error-navigation-load-tail'; tail.textContent = 'http-error-navigation=load-tail'; document.body.appendChild(tail); }; document.head.appendChild(script); }); window.addEventListener('load', () => { window.httpErrorNavigationLoad = true; document.body.setAttribute('data-reached-load', 'true'); });</script></body></html>";
 
 pub(super) fn add_wait_routes(router: Router) -> Router {
     router
@@ -114,6 +117,18 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
             "/wait-until-interval-dom-mutation",
             get(wait_until_interval_dom_mutation_page),
         )
+        .route(
+            "/wait-until-http-error-navigation",
+            get(wait_until_http_error_navigation_page),
+        )
+        .route(
+            "/wait-until-http-error-navigation-to-error",
+            get(wait_until_http_error_navigation_to_error_page),
+        )
+        .route(
+            "/wait-until-http-error-late-navigation",
+            get(wait_until_http_error_late_navigation_page),
+        )
         .route("/wait-until-data", get(wait_until_data_page))
         .route("/wait-until-json-data", get(wait_until_json_data_page))
         .route("/wait-until-cookie-data", get(wait_until_cookie_data_page))
@@ -127,6 +142,46 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
 
 async fn wait_until_lifecycle_page() -> Html<&'static str> {
     Html(WAIT_UNTIL_LIFECYCLE_HTML)
+}
+
+async fn wait_until_http_error_navigation_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-http-error-navigation=passed") {
+        return Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_navigation_to_error_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-http-error-navigation=passed") {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML),
+        )
+            .into_response();
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_late_navigation_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-http-error-navigation=passed") {
+        return Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_LATE_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
 }
 
 async fn wait_until_domcontentloaded_fetch_page() -> Html<&'static str> {
