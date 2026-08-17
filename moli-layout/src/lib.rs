@@ -38,7 +38,10 @@ mod text;
 mod world;
 
 pub use builder::build_layout_world;
-pub use capture::{PaintCaptureRegion, PaintCaptureRequest, PaintCaptureSurface};
+pub use capture::{
+    FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT, PaintCaptureRegion, PaintCaptureRequest,
+    PaintCaptureSurface,
+};
 pub use error::LayoutError;
 pub use layout_tree::{
     FrozenCoordinateSpace, FrozenLayoutBox, FrozenLayoutTree, GeometryProvider, LayoutAnswers,

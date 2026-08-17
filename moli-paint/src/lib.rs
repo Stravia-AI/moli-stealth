@@ -10,6 +10,6 @@ mod raster;
 
 pub use moli_image::RgbaImage as RasterImage;
 pub use raster::{
-    MAX_PAINT_GLYPHS, MAX_PAINT_LAYER_DEPTH, MAX_PAINT_OPERATIONS, MAX_RASTER_PIXELS,
-    MAX_TRANSIENT_RASTER_BYTES, PaintError, raster_snapshot,
+    MAX_PAINT_GLYPHS, MAX_PAINT_LAYER_DEPTH, MAX_PAINT_OPERATIONS, MAX_TRANSIENT_RASTER_BYTES,
+    PaintError, raster_snapshot,
 };

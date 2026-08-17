@@ -34,8 +34,6 @@ use peniko::{
     },
 };
 
-/// Maximum number of pixels admitted to one screenshot/screencast raster.
-pub const MAX_RASTER_PIXELS: u64 = 16 * 1024 * 1024;
 /// Maximum estimated RGBA bytes simultaneously owned by the output and nested
 /// filter surfaces in one raster call.
 pub const MAX_TRANSIENT_RASTER_BYTES: usize = 256 * 1024 * 1024;
@@ -79,13 +77,6 @@ pub enum PaintError {
         width: u32,
         /// Height in device pixels.
         height: u32,
-    },
-    /// The requested surface exceeds the bounded product pixel budget.
-    PixelBudgetExceeded {
-        width: u32,
-        height: u32,
-        pixels: u64,
-        max_pixels: u64,
     },
     /// Nested filters would exceed the transient RGBA budget.
     TransientRasterBudgetExceeded {
@@ -159,15 +150,6 @@ impl fmt::Display for PaintError {
             Self::BufferLengthOverflow { width, height } => write!(
                 formatter,
                 "RGBA byte length overflows the host address space for {width}x{height}"
-            ),
-            Self::PixelBudgetExceeded {
-                width,
-                height,
-                pixels,
-                max_pixels,
-            } => write!(
-                formatter,
-                "raster surface {width}x{height} contains {pixels} pixels, exceeding the {max_pixels}-pixel capture budget"
             ),
             Self::TransientRasterBudgetExceeded {
                 required_bytes,
@@ -419,15 +401,6 @@ fn validate_resource_budget(
     dimensions: RasterDimensions,
     stream: PaintStreamMetrics,
 ) -> Result<(), PaintError> {
-    let pixels = u64::from(dimensions.width) * u64::from(dimensions.height);
-    if pixels > MAX_RASTER_PIXELS {
-        return Err(PaintError::PixelBudgetExceeded {
-            width: dimensions.width,
-            height: dimensions.height,
-            pixels,
-            max_pixels: MAX_RASTER_PIXELS,
-        });
-    }
     // Backend filters may crop allocations to content bounds, whereas the
     // software color-filter fallback uses a complete surface. Charging every
     // nested filter as a complete surface is conservative and backend-neutral.
@@ -2200,15 +2173,17 @@ mod tests {
     }
 
     #[test]
-    fn rejects_surface_over_pixel_budget_before_backend_creation() {
-        assert!(matches!(
-            raster_snapshot(&snapshot(4_097, 4_096, 1.0)),
-            Err(PaintError::PixelBudgetExceeded {
-                width: 4_097,
-                height: 4_096,
-                ..
-            })
-        ));
+    fn resource_budget_is_byte_based_instead_of_using_a_pixel_count_limit() {
+        let dimensions = validate_dimensions(PaintCaptureSurface::new(4_097.0, 4_096.0, 1.0))
+            .expect("dimensions supported by the backend");
+        assert!(
+            u64::from(dimensions.width) * u64::from(dimensions.height) > 16 * 1024 * 1024,
+            "test surface must exceed the removed 16M-pixel limit"
+        );
+        assert_eq!(
+            validate_resource_budget(dimensions, PaintStreamMetrics::default()),
+            Ok(())
+        );
     }
 
     #[test]

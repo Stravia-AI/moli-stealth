@@ -1,5 +1,9 @@
 use crate::{LayoutError, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform2D, LayoutViewport};
 
+/// Exclusive CSS-pixel limit for either side of an automatic full-document
+/// capture, matching Chromium's `Page.captureScreenshot` boundary.
+pub const FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT: f32 = (128 * 1024) as f32;
+
 /// Which CSS-pixel region one paint-enabled layout demand should capture.
 ///
 /// Page clips use document coordinates, matching CDP `Page.Viewport`. They do
@@ -127,7 +131,7 @@ impl PaintCaptureRequest {
                 1.0,
             ),
             PaintCaptureRegion::FullDocument => {
-                validate_extent("document content", content_size.width, content_size.height)?;
+                validate_full_document_extent(content_size.width, content_size.height)?;
                 (
                     LayoutRect::new(
                         -viewport_scroll.x,
@@ -207,6 +211,19 @@ fn validate_clip(rect: LayoutRect, scale: f32) -> Result<(), LayoutError> {
         return Err(invalid_capture(
             "clip scale must be finite and greater than zero",
         ));
+    }
+    Ok(())
+}
+
+fn validate_full_document_extent(width: f32, height: f32) -> Result<(), LayoutError> {
+    validate_extent("document content", width, height)?;
+    if width >= FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT
+        || height >= FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT
+    {
+        return Err(invalid_capture(format!(
+            "document content width and height must each be less than {} CSS pixels, got {width}x{height}",
+            FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT
+        )));
     }
     Ok(())
 }
@@ -291,5 +308,55 @@ mod tests {
             )
             .expect_err("zero-width clip");
         assert!(matches!(error, LayoutError::InvalidPaintCapture { .. }));
+    }
+
+    #[test]
+    fn full_document_capture_uses_an_exclusive_128k_css_dimension_limit() {
+        let below_limit = FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT - 1.0;
+        PaintCaptureRequest::full_document()
+            .resolve(
+                LayoutViewport::new(800, 600, 1.0),
+                LayoutPoint::ZERO,
+                LayoutSize::new(below_limit, below_limit),
+            )
+            .expect("dimensions immediately below 128K CSS pixels");
+
+        for content_size in [
+            LayoutSize::new(FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT, 1.0),
+            LayoutSize::new(1.0, FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT),
+        ] {
+            let error = PaintCaptureRequest::full_document()
+                .resolve(
+                    LayoutViewport::new(800, 600, 1.0),
+                    LayoutPoint::ZERO,
+                    content_size,
+                )
+                .expect_err("128K CSS pixels is outside the exclusive limit");
+            assert!(
+                error.to_string().contains(
+                    "document content width and height must each be less than 131072 CSS pixels"
+                ),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_page_clip_bypasses_the_full_document_dimension_limit() {
+        let clip = PaintCaptureRequest::page_clip(
+            LayoutRect::new(0.0, 0.0, FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT, 1.0),
+            1.0,
+        )
+        .resolve(
+            LayoutViewport::new(800, 600, 1.0),
+            LayoutPoint::ZERO,
+            LayoutSize::new(800.0, 600.0),
+        )
+        .expect("explicit clips are validated by the raster backend");
+
+        assert_eq!(
+            clip.surface.css_width,
+            FULL_DOCUMENT_CAPTURE_CSS_DIMENSION_LIMIT
+        );
     }
 }

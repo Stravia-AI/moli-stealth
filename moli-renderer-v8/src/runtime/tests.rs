@@ -872,23 +872,23 @@ async fn capture_screenshot_clip_and_full_document_keep_the_live_layout_viewport
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn capture_screenshot_rejects_surface_over_the_pixel_budget_before_raster() {
+async fn capture_screenshot_rejects_full_document_at_the_128k_css_boundary() {
     let runtime = initialize_layout_test_runtime();
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
         .expect("default resource request client");
     let url = url::Url::parse("https://example.test/capture-budget").unwrap();
-    let page = create_test_html_page(&runtime, &loader, url, "<!doctype html>").await;
+    let page = create_test_html_page(
+        &runtime,
+        &loader,
+        url,
+        "<!doctype html><style>html,body{margin:0}.page{height:131072px}</style><div class=page></div>",
+    )
+    .await;
     let request = super::RendererCaptureScreenshotRequest {
         purpose: super::RendererScreenshotPurpose::Screenshot,
         format: super::RendererScreenshotFormat::Png,
         quality: 100,
-        region: super::RendererScreenshotRegion::PageClip(super::RendererScreenshotClip {
-            x: 0.0,
-            y: 0.0,
-            width: 5000.0,
-            height: 5000.0,
-            scale: 1.0,
-        }),
+        region: super::RendererScreenshotRegion::FullDocument,
         optimize_for_speed: false,
         max_width: None,
         max_height: None,
@@ -898,11 +898,13 @@ async fn capture_screenshot_rejects_surface_over_the_pixel_budget_before_raster(
         .run_async_command(RendererPageCommand::CaptureScreenshot(request))
         .await
     {
-        Ok(_) => panic!("25M-pixel screenshot must exceed the 16M-pixel budget"),
+        Ok(_) => panic!("full-document screenshot at 128K CSS pixels must be rejected"),
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains("pixel capture budget"),
+        error
+            .to_string()
+            .contains("must each be less than 131072 CSS pixels"),
         "{error:#}"
     );
 }
