@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import shlex
@@ -12,7 +13,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import zipfile
 from pathlib import Path
 from typing import Sequence
@@ -72,15 +72,41 @@ def normalize_version(raw_version: str) -> str:
 
 
 def manifest_version() -> str:
-    with MANIFEST_PATH.open("rb") as manifest_file:
-        manifest = tomllib.load(manifest_file)
+    output = run_checked(
+        [
+            "cargo",
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--manifest-path",
+            str(MANIFEST_PATH),
+        ],
+        capture_output=True,
+    ).stdout
     try:
-        value = manifest["package"]["version"]
-    except (KeyError, TypeError) as error:
-        raise ReleaseError(f"package.version is missing from {MANIFEST_PATH}") from error
-    if not isinstance(value, str):
-        raise ReleaseError(f"package.version in {MANIFEST_PATH} is not a string")
-    return value
+        metadata = json.loads(output)
+    except json.JSONDecodeError as error:
+        raise ReleaseError("cargo metadata returned an invalid package list") from error
+    packages = metadata.get("packages") if isinstance(metadata, dict) else None
+    if not isinstance(packages, list):
+        raise ReleaseError("cargo metadata returned an invalid package list")
+
+    for package in packages:
+        if not isinstance(package, dict):
+            continue
+        if package.get("name") != "moli":
+            continue
+        manifest_path = package.get("manifest_path")
+        version = package.get("version")
+        if (
+            isinstance(manifest_path, str)
+            and Path(manifest_path).resolve() == MANIFEST_PATH
+            and isinstance(version, str)
+        ):
+            return version
+
+    raise ReleaseError(f"package.version is missing from {MANIFEST_PATH}")
 
 
 def rust_host_target() -> str:
