@@ -102,10 +102,11 @@ moli fetch \
   https://example.com
 ```
 
-如果需要视觉输出，可以启用按需布局，直接生成视口 PNG 截图或分页 PDF：
+如果需要视觉输出，可以直接生成截图、长截图或 PDF：
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

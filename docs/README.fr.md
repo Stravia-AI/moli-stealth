@@ -103,10 +103,11 @@ moli fetch \
   https://example.com
 ```
 
-Pour une sortie visuelle, activez la mise en page à la demande afin de générer directement une capture PNG du viewport ou un PDF paginé :
+Pour une sortie visuelle, activez la mise en page à la demande afin de générer une capture PNG du viewport, une capture PNG du document complet ou un PDF paginé :
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

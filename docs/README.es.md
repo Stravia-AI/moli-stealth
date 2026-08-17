@@ -103,10 +103,11 @@ moli fetch \
   https://example.com
 ```
 
-Para obtener una salida visual, activa el layout bajo demanda y genera directamente una captura PNG del viewport o un PDF paginado:
+Para obtener una salida visual, activa el layout bajo demanda y genera una captura PNG del viewport, una captura PNG del documento completo o un PDF paginado:
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

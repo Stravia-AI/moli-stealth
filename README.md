@@ -106,10 +106,11 @@ moli fetch \
   https://example.com
 ```
 
-For visual output, enable on-demand layout and write either a viewport PNG screenshot or a paginated PDF:
+For visual output, enable on-demand layout and write a viewport PNG, a full-document PNG, or a paginated PDF:
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

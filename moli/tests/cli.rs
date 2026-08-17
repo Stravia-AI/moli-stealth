@@ -199,6 +199,7 @@ fn rejects_removed_wpt_dump_mode() {
 fn parses_binary_dump_modes_with_inferred_fetch_command() {
     for (value, expected) in [
         ("screenshot", DumpFormat::Screenshot),
+        ("screenshot_full", DumpFormat::ScreenshotFull),
         ("pdf", DumpFormat::Pdf),
     ] {
         let cli = Cli::try_parse_from(normalize_args_for_compat([

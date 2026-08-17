@@ -804,6 +804,20 @@ fn cli_dump_screenshot_writes_png_bytes() -> Result<()> {
 }
 
 #[test]
+fn cli_dump_full_screenshot_writes_png_bytes() -> Result<()> {
+    let output = run_fetch_cli_with_dump_and_args("about:blank", "screenshot_full", &["--layout"])?;
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout_bytes={}\nstderr={}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(output.stdout.ends_with(b"IEND\xaeB`\x82"));
+    Ok(())
+}
+
+#[test]
 fn cli_dump_pdf_writes_pdf_bytes() -> Result<()> {
     let output = run_fetch_cli_with_dump_and_args("about:blank", "pdf", &["--layout"])?;
     assert!(
@@ -825,7 +839,7 @@ fn cli_dump_pdf_writes_pdf_bytes() -> Result<()> {
 
 #[test]
 fn binary_dump_modes_require_layout() -> Result<()> {
-    for dump in ["screenshot", "pdf"] {
+    for dump in ["screenshot", "screenshot_full", "pdf"] {
         let output = run_fetch_cli_with_dump_and_args("about:blank", dump, &[])?;
         assert!(
             !output.status.success(),

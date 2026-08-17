@@ -45,6 +45,7 @@ const DUMP_MODES: &[&str] = &[
     "html",
     "markdown",
     "screenshot",
+    "screenshot_full",
     "pdf",
     "semantic_tree",
     "semantic_tree_text",
@@ -73,8 +74,9 @@ pub enum Commands {
 
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub struct FetchArgs {
-    /// Select the fetch output format. `screenshot` writes a viewport PNG and
-    /// `pdf` writes a paginated PDF directly to stdout; both require layout.
+    /// Select the fetch output format. `screenshot` writes a viewport PNG,
+    /// `screenshot_full` writes a full-document PNG, and `pdf` writes a
+    /// paginated PDF directly to stdout; all three require layout.
     #[arg(long, value_enum)]
     pub dump: Option<DumpFormat>,
 
@@ -460,6 +462,7 @@ pub enum DumpFormat {
     Html,
     Markdown,
     Screenshot,
+    ScreenshotFull,
     Pdf,
     SemanticTree,
     SemanticTreeText,

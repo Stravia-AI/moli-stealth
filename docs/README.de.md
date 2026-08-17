@@ -103,10 +103,11 @@ moli fetch \
   https://example.com
 ```
 
-Für visuelle Ausgaben aktivierst du das On-Demand-Layout und erzeugst wahlweise einen PNG-Screenshot des Viewports oder direkt ein mehrseitiges PDF:
+Für visuelle Ausgaben aktivierst du das On-Demand-Layout und erzeugst einen PNG-Screenshot des Viewports, einen PNG-Screenshot des vollständigen Dokuments oder ein mehrseitiges PDF:
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

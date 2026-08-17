@@ -102,10 +102,11 @@ moli fetch \
   https://example.com
 ```
 
-画面出力を行う場合は、レイアウト計算を有効にすると、表示領域の PNG 画像（スクリーンショット）や、ページ分割した PDF を直接生成できます。
+画面出力を行う場合は、レイアウト計算を有効にすると、表示領域の PNG 画像、ページ全体の PNG 画像、またはページ分割した PDF を直接生成できます。
 
 ```bash
 moli fetch --layout --dump screenshot https://example.com > page.png
+moli fetch --layout --dump screenshot_full https://example.com > full-page.png
 moli fetch --layout --dump pdf https://example.com > page.pdf
 ```
 

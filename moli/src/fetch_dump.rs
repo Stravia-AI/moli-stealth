@@ -7,7 +7,7 @@ use moli_core::page::{
 };
 use moli_core::runtime::RawDocument;
 #[cfg(test)]
-use moli_core::{runtime::Browser, runtime::BrowserConfig};
+use moli_core::{LayoutPolicy, runtime::Browser, runtime::BrowserConfig};
 use serde_json::{Map, Value, json};
 
 use crate::{
@@ -28,7 +28,18 @@ pub async fn render_page_output_async(
     command: &FetchCommandConfig,
 ) -> Result<Vec<u8>> {
     match command.dump_mode.unwrap_or(DumpFormat::Html) {
-        DumpFormat::Screenshot => render_screenshot_dump_async(page).await,
+        DumpFormat::Screenshot => {
+            render_screenshot_dump_async(page, RendererScreenshotRegion::Viewport, "screenshot")
+                .await
+        }
+        DumpFormat::ScreenshotFull => {
+            render_screenshot_dump_async(
+                page,
+                RendererScreenshotRegion::FullDocument,
+                "screenshot_full",
+            )
+            .await
+        }
         DumpFormat::Pdf => render_pdf_dump_async(page).await,
         _ => render_page_dump_async(page, command)
             .await
@@ -70,6 +81,7 @@ pub fn render_raw_document_dump(
         }
         DumpFormat::Markdown
         | DumpFormat::Screenshot
+        | DumpFormat::ScreenshotFull
         | DumpFormat::Pdf
         | DumpFormat::SemanticTree
         | DumpFormat::SemanticTreeText => {
@@ -128,7 +140,7 @@ async fn render_page_dump_with_trace_config_async(
         }
         DumpFormat::Html => render_html_dump_async(page, strip, with_base, with_frames).await,
         DumpFormat::Markdown => render_markdown_dump_async(page, strip, with_frames).await,
-        DumpFormat::Screenshot | DumpFormat::Pdf => {
+        DumpFormat::Screenshot | DumpFormat::ScreenshotFull | DumpFormat::Pdf => {
             bail!("binary dump formats are only supported by the fetch CLI output path")
         }
         DumpFormat::SemanticTree => render_semantic_tree_dump_async(page).await,
@@ -136,13 +148,14 @@ async fn render_page_dump_with_trace_config_async(
     }
 }
 
-async fn render_screenshot_dump_async(page: &mut Page) -> Result<Vec<u8>> {
-    let image = capture_page_raster(
-        page,
-        RendererCaptureScreenshotRequest::viewport_png(),
-        "screenshot",
-    )
-    .await?;
+async fn render_screenshot_dump_async(
+    page: &mut Page,
+    region: RendererScreenshotRegion,
+    dump_mode: &str,
+) -> Result<Vec<u8>> {
+    let mut request = RendererCaptureScreenshotRequest::viewport_png();
+    request.region = region;
+    let image = capture_page_raster(page, request, dump_mode).await?;
     if image.mime_type != "image/png" {
         bail!(
             "screenshot renderer returned `{}` instead of PNG",
@@ -467,7 +480,14 @@ mod tests {
     use tokio::{net::TcpListener, task::JoinHandle};
 
     async fn load_page(html: &str) -> Result<(Browser, Page, JoinHandle<()>)> {
-        let browser = Browser::new(BrowserConfig::default())?;
+        load_page_with_config(html, BrowserConfig::default()).await
+    }
+
+    async fn load_page_with_config(
+        html: &str,
+        config: BrowserConfig,
+    ) -> Result<(Browser, Page, JoinHandle<()>)> {
+        let browser = Browser::new(config)?;
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         let body = Arc::new(html.to_owned());
@@ -484,6 +504,54 @@ mod tests {
         });
         let page = browser.fetch(&format!("http://{addr}/")).await?;
         Ok((browser, page, http_server))
+    }
+
+    fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        assert_eq!(&bytes[12..16], b"IHDR");
+        (
+            u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
+            u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
+        )
+    }
+
+    #[tokio::test]
+    async fn render_full_page_screenshot_extends_beyond_viewport() -> Result<()> {
+        let config = BrowserConfig::default().with_layout_policy(LayoutPolicy::OnDemand);
+        let (_browser, mut page, http_server) = load_page_with_config(
+            concat!(
+                "<!doctype html><style>html,body{margin:0}",
+                "main{height:1300px;background:linear-gradient(red,blue)}</style>",
+                "<main></main>",
+            ),
+            config,
+        )
+        .await?;
+
+        let viewport = render_page_output_async(
+            &mut page,
+            &FetchCommandConfig {
+                dump_mode: Some(DumpFormat::Screenshot),
+                ..FetchCommandConfig::default()
+            },
+        )
+        .await?;
+        let full_page = render_page_output_async(
+            &mut page,
+            &FetchCommandConfig {
+                dump_mode: Some(DumpFormat::ScreenshotFull),
+                ..FetchCommandConfig::default()
+            },
+        )
+        .await?;
+
+        let viewport_dimensions = png_dimensions(&viewport);
+        let full_page_dimensions = png_dimensions(&full_page);
+        assert_eq!(full_page_dimensions.0, viewport_dimensions.0);
+        assert!(full_page_dimensions.1 > viewport_dimensions.1);
+
+        http_server.abort();
+        Ok(())
     }
 
     #[tokio::test]
