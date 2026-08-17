@@ -21,6 +21,7 @@
 | Inspect exact DOM | `--dump html` | Useful when Markdown loses important structure |
 | Diagnose requests | `--dump json --trace-network` | Adds the `network` object |
 | Capture the viewport | `--layout --dump screenshot` | Writes PNG bytes to stdout |
+| Capture the full document | `--layout --dump screenshot_full` | Writes one full-page PNG to stdout |
 | Capture a paginated document | `--layout --dump pdf` | Writes PDF bytes to stdout |
 
 Raw non-HTML responses support only `html` and `json`.
@@ -88,19 +89,29 @@ silently remove behavior or content.
 
 ## Screenshots and PDFs
 
-Enable real on-demand layout for both binary formats and redirect stdout:
+Enable real on-demand layout for binary output and redirect stdout:
 
 ```bash
 moli fetch \
   --layout \
   --dump screenshot \
-  "https://example.com" > page.png
+  "https://example.com" > viewport.png
+
+moli fetch \
+  --layout \
+  --dump screenshot_full \
+  "https://example.com" > full-page.png
 
 moli fetch \
   --layout \
   --dump pdf \
   "https://example.com" > page.pdf
 ```
+
+Use `screenshot` for the live viewport and `screenshot_full` for one complete
+document raster. A full-document capture does not tile or automatically
+downscale: its CSS width and height must each be less than 131,072 pixels, and
+device-pixel, encoder, memory, or backend limits can fail earlier.
 
 Use `--image --font` when page appearance depends on external images or fonts.
 Use `--resource` only when every optional resource family is needed. Keep stderr
@@ -158,6 +169,8 @@ For a crawl rather than a single lookup:
 - **Missing API data:** use response waits; add `--trace-network` to JSON only
   when request diagnostics are needed. Add `--trace-matched-response-body` only
   when the matched response body itself is required.
+- **Oversized full-page PNG:** use a viewport capture or deliberately tiled CDP
+  clips when one `screenshot_full` raster exceeds a backend or memory boundary.
 - **TLS failure:** fix trust or hostname configuration. Use
   `--insecure-disable-tls-host-verification` only after the user explicitly
   accepts that risk.

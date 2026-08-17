@@ -54,6 +54,28 @@ hard-coding a `/devtools/...` path.
 - Add `--block-private-networks` or `--block-cidrs` for untrusted navigation.
 - Keep loopback binding unless remote clients genuinely require exposure.
 
+## Full-document screenshots
+
+With `--layout`, request an automatic full-document PNG by omitting `clip` and
+setting `captureBeyondViewport`:
+
+```json
+{
+  "method": "Page.captureScreenshot",
+  "params": { "format": "png", "captureBeyondViewport": true }
+}
+```
+
+- Automatic full-document capture requires CSS width and height to each be less
+  than 131,072 pixels; equality is rejected.
+- An explicit page-coordinate `clip` bypasses that whole-document entry check,
+  but must have positive dimensions.
+- Moli renders one complete bitmap. It does not stitch tiles or automatically
+  downscale, so device-pixel, encoder, backend, and memory limits can fail
+  earlier than the CSS boundary.
+- Tile explicit clips in the client when one bitmap cannot fit. Keep each clip
+  within the active raster and encoder limits.
+
 ## Troubleshooting
 
 1. Confirm the Moli process is still running.

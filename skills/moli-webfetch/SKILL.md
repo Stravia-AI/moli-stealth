@@ -1,6 +1,6 @@
 ---
 name: moli-webfetch
-description: Fetch, inspect, crawl, and capture live, JavaScript-rendered websites with Moli. Use when Codex needs current web content, web research, fact lookup, link following, a bounded crawl, client-rendered or response-gated content, network diagnostics, or a standalone HTML, Markdown, JSON, semantic-tree, screenshot, PDF, or WPT artifact—even when Moli is not named.
+description: Fetch, inspect, crawl, and capture live, JavaScript-rendered websites with Moli. Use when Codex needs current web content, web research, fact lookup, link following, a bounded crawl, client-rendered or response-gated content, network diagnostics, or a standalone HTML, Markdown, JSON, semantic-tree, viewport or full-document screenshot, PDF, or WPT artifact—even when Moli is not named.
 ---
 
 # Fetch Websites with Moli
@@ -66,7 +66,8 @@ structure-first; enable layout only when the result needs pixels or pagination.
 6. For a visual or paginated result, enable layout and redirect binary stdout:
 
    ```bash
-   moli fetch --layout --dump screenshot "https://example.com" > page.png
+   moli fetch --layout --dump screenshot "https://example.com" > viewport.png
+   moli fetch --layout --dump screenshot_full "https://example.com" > full-page.png
    moli fetch --layout --dump pdf "https://example.com" > page.pdf
    ```
 
@@ -85,6 +86,7 @@ structure-first; enable layout only when the result needs pixels or pagination.
 - Use `html` to diagnose DOM serialization or preserve exact markup.
 - Use `screenshot` for a viewport PNG when appearance is evidence. It requires
   `--layout`.
+- Use `screenshot_full` for one full-document PNG. It requires `--layout`.
 - Use `pdf` for a paginated PDF capture. It requires `--layout`.
 - Use `--with-frames` only when relevant content lives inside iframes.
 - Enable `--image` and `--font` when visual fidelity depends on them. Use
@@ -121,9 +123,9 @@ unrelated actions.
   to use. Never expose headers, cookies, or tokens in the response.
 - Remember that `-H/--header` applies to the initial navigation, not every
   subresource.
-- Treat stdout as the requested artifact. Redirect screenshot and PDF output to
-  files, verify that they are non-empty and have the expected type, and never
-  print their binary bytes into a text response.
+- Treat stdout as the requested artifact. Redirect screenshot, full-document
+  screenshot, and PDF output to files, verify that they are non-empty and have
+  the expected type, and never print their binary bytes into a text response.
 - Report a fetch failure rather than inventing content. A browser error page,
   login wall, or empty shell is not successful evidence.
 - Run `moli fetch --help` when the installed version may differ from this
