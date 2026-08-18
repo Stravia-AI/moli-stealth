@@ -773,6 +773,8 @@ where
                 local_to_parent: LayoutTransform2D::IDENTITY,
                 local_to_document: LayoutTransform2D::IDENTITY,
                 local_to_viewport: LayoutTransform2D::IDENTITY,
+                local_to_document_ignoring_css_transforms: LayoutTransform2D::IDENTITY,
+                local_to_viewport_ignoring_css_transforms: LayoutTransform2D::IDENTITY,
             },
             paint: PaintSpace::ROOT,
         });
@@ -1274,15 +1276,20 @@ where
     let parent_space = parent_box.map_or(LayoutCoordinateSpaceId::from_index(0), |parent| {
         LayoutCoordinateSpaceId::from_index(parent.index() + 1)
     });
-    let parent_transform = match parent_box {
+    let (parent_transform, parent_transform_ignoring_css_transforms) = match parent_box {
         Some(parent) => spaces
             .get(parent.index() + 1)
             .and_then(Option::as_ref)
-            .map(|space| space.layout.local_to_document)
+            .map(|space| {
+                (
+                    space.layout.local_to_document,
+                    space.layout.local_to_document_ignoring_css_transforms,
+                )
+            })
             .ok_or(LayoutError::InvalidBoxReference {
                 index: parent.index(),
             })?,
-        None => LayoutTransform2D::IDENTITY,
+        None => (LayoutTransform2D::IDENTITY, LayoutTransform2D::IDENTITY),
     };
     let is_viewport_anchored = parent_box.map_or_else(
         || layout_box.style.is_fixed_positioned(),
@@ -1300,11 +1307,23 @@ where
         location.y - applied_parent_scroll.y,
     )
     .concatenate(resolved_transforms[index].transform);
+    let local_to_parent_ignoring_css_transforms = LayoutTransform2D::translation(
+        location.x - applied_parent_scroll.x,
+        location.y - applied_parent_scroll.y,
+    );
     let local_to_document = if parent_box.is_none() && is_viewport_anchored {
         LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y)
             .concatenate(local_to_parent)
     } else {
         parent_transform.concatenate(local_to_parent)
+    };
+    let local_to_document_ignoring_css_transforms = if parent_box.is_none() && is_viewport_anchored
+    {
+        LayoutTransform2D::translation(viewport_scroll.x, viewport_scroll.y)
+            .concatenate(local_to_parent_ignoring_css_transforms)
+    } else {
+        parent_transform_ignoring_css_transforms
+            .concatenate(local_to_parent_ignoring_css_transforms)
     };
     let parent_paint_state = match parent_box {
         Some(parent) => Some(
@@ -1329,6 +1348,9 @@ where
     let exact_local_to_viewport =
         LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y)
             .concatenate(local_to_document);
+    let local_to_viewport_ignoring_css_transforms =
+        LayoutTransform2D::translation(-viewport_scroll.x, -viewport_scroll.y)
+            .concatenate(local_to_document_ignoring_css_transforms);
     spaces[index + 1] = Some(ProjectedCoordinateSpace {
         layout: LayoutCoordinateSpace {
             id: LayoutCoordinateSpaceId::from_index(index + 1),
@@ -1337,6 +1359,8 @@ where
             local_to_parent,
             local_to_document,
             local_to_viewport: exact_local_to_viewport,
+            local_to_document_ignoring_css_transforms,
+            local_to_viewport_ignoring_css_transforms,
         },
         paint,
     });
