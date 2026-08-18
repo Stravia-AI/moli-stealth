@@ -58,6 +58,131 @@ fn response_by_id(messages: &[serde_json::Value], id: u64) -> &serde_json::Value
         .unwrap_or_else(|| panic!("missing response id {id}: {messages:#?}"))
 }
 
+async fn enable_runtime_and_expect_default_context(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    command_id: u64,
+    session_id: Option<&str>,
+    label: &str,
+) -> Vec<serde_json::Value> {
+    let mut messages =
+        send_cdp_command(socket, command_id, "Runtime.enable", session_id, json!({})).await;
+    assert_eq!(response_by_id(&messages, command_id)["result"], json!({}));
+    if !messages.iter().any(|message| {
+        message.get("sessionId").and_then(serde_json::Value::as_str) == session_id
+            && message["method"] == json!("Runtime.executionContextCreated")
+            && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+    }) {
+        messages.extend(
+            send_cdp_command(
+                socket,
+                command_id + 1,
+                "Runtime.evaluate",
+                session_id,
+                json!({ "expression": "void 0" }),
+            )
+            .await,
+        );
+    }
+    assert!(
+        messages.iter().any(|message| {
+            message.get("sessionId").and_then(serde_json::Value::as_str) == session_id
+                && message["method"] == json!("Runtime.executionContextCreated")
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+        }),
+        "{label} did not report the existing default context before the next Runtime response: {messages:#?}"
+    );
+    messages
+}
+
+async fn puppeteer_auto_attach_existing_page(
+    browser: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    command_id: u64,
+    page_target_id: &str,
+) -> String {
+    let tab_target_id = format!("TAB-{page_target_id}");
+    send_cdp_command_without_wait(
+        browser,
+        command_id,
+        "Target.setAutoAttach",
+        None,
+        json!({
+            "autoAttach": true,
+            "waitForDebuggerOnStart": true,
+            "flatten": true,
+            "filter": [
+                { "type": "page", "exclude": true },
+                {}
+            ]
+        }),
+    )
+    .await;
+    let mut saw_root_response = false;
+    let mut saw_tab_attach = false;
+    let root_auto_attach = recv_until_match(browser, |message| {
+        saw_root_response |= message["id"] == json!(command_id);
+        saw_tab_attach |= message["method"] == json!("Target.attachedToTarget")
+            && message["params"]["targetInfo"]["targetId"] == json!(tab_target_id);
+        saw_root_response && saw_tab_attach
+    })
+    .await;
+    assert_eq!(
+        response_by_id(&root_auto_attach, command_id)["result"],
+        json!({})
+    );
+    let tab_session_id = root_auto_attach
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Target.attachedToTarget")
+                && message["params"]["targetInfo"]["targetId"] == json!(tab_target_id)
+        })
+        .and_then(|message| message["params"]["sessionId"].as_str())
+        .expect("auto-attached tab session")
+        .to_owned();
+
+    let child_command_id = command_id + 1;
+    send_cdp_command_without_wait(
+        browser,
+        child_command_id,
+        "Target.setAutoAttach",
+        Some(&tab_session_id),
+        json!({
+            "autoAttach": true,
+            "waitForDebuggerOnStart": false,
+            "flatten": true,
+            "filter": [{}]
+        }),
+    )
+    .await;
+    let mut saw_child_response = false;
+    let mut saw_page_attach = false;
+    let tab_auto_attach = recv_until_match(browser, |message| {
+        saw_child_response |= message["id"] == json!(child_command_id);
+        saw_page_attach |= message["sessionId"] == json!(tab_session_id)
+            && message["method"] == json!("Target.attachedToTarget")
+            && message["params"]["targetInfo"]["targetId"] == json!(page_target_id);
+        saw_child_response && saw_page_attach
+    })
+    .await;
+    assert_eq!(
+        response_by_id(&tab_auto_attach, child_command_id)["result"],
+        json!({})
+    );
+    tab_auto_attach
+        .iter()
+        .find(|message| {
+            message["sessionId"] == json!(tab_session_id)
+                && message["method"] == json!("Target.attachedToTarget")
+                && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
+        })
+        .and_then(|message| message["params"]["sessionId"].as_str())
+        .expect("auto-attached page session")
+        .to_owned()
+}
+
 async fn fetch_server_json(addr: std::net::SocketAddr, path: &str) -> serde_json::Value {
     let (status, body) = fetch_server_response(addr, "GET", path).await;
     assert_eq!(status, 200, "unexpected HTTP status for {path}");
@@ -1695,6 +1820,118 @@ async fn websocket_cdp_shared_owner_survives_idle_browser_reconnect() {
         "idle browser reconnect did not reuse the server-level target control plane"
     );
     assert_eq!(owner_registry.owner_count(), 1);
+
+    abort_test_cdp_server(server).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_cdp_puppeteer_reconnect_replays_existing_runtime_context() {
+    let (addr, server) = spawn_test_protocol_server().await;
+    let (status, body) = fetch_server_response(addr, "PUT", "/json/new?about%3Ablank").await;
+    assert_eq!(status, 200);
+    let created_target: serde_json::Value =
+        serde_json::from_slice(&body).expect("created target descriptor");
+    let created_target_id = created_target["id"]
+        .as_str()
+        .expect("created target id")
+        .to_owned();
+    assert_ne!(created_target_id, DEFAULT_TARGET_ID);
+    // Materializing a second Page parks the old default Page. Puppeteer's
+    // first Page command promotes that existing target back to the active
+    // slot, which is the reconnect lifecycle that regressed.
+    let target_id = DEFAULT_TARGET_ID.to_owned();
+
+    let (mut browser, _) =
+        connect_async(format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"))
+            .await
+            .expect("connect first browser websocket");
+    let page_session_id = puppeteer_auto_attach_existing_page(&mut browser, 1, &target_id).await;
+    let page_enabled = send_cdp_command(
+        &mut browser,
+        3,
+        "Page.enable",
+        Some(&page_session_id),
+        json!({}),
+    )
+    .await;
+    assert_eq!(response_by_id(&page_enabled, 3)["result"], json!({}));
+    let _ = enable_runtime_and_expect_default_context(
+        &mut browser,
+        4,
+        Some(&page_session_id),
+        "first Runtime.enable",
+    )
+    .await;
+    let utility_world = send_cdp_command(
+        &mut browser,
+        6,
+        "Page.createIsolatedWorld",
+        Some(&page_session_id),
+        json!({
+            "frameId": target_id,
+            "worldName": "__puppeteer_utility_world__moli_reconnect",
+            "grantUniveralAccess": true
+        }),
+    )
+    .await;
+    assert!(
+        response_by_id(&utility_world, 6)["result"]["executionContextId"]
+            .as_i64()
+            .is_some(),
+        "failed to create the persistent Puppeteer utility world: {utility_world:#?}"
+    );
+
+    browser
+        .close(None)
+        .await
+        .expect("close first browser frontend");
+    wait_for_websocket_close(&mut browser, "first browser frontend").await;
+
+    let (mut replacement, _) =
+        connect_async(format!("ws://{addr}/devtools/browser/{DEFAULT_BROWSER_ID}"))
+            .await
+            .expect("connect replacement browser websocket");
+    let replacement_page_session_id =
+        puppeteer_auto_attach_existing_page(&mut replacement, 1, &target_id).await;
+    assert_ne!(replacement_page_session_id, page_session_id);
+    let page_enabled = send_cdp_command(
+        &mut replacement,
+        3,
+        "Page.enable",
+        Some(&replacement_page_session_id),
+        json!({}),
+    )
+    .await;
+    assert_eq!(response_by_id(&page_enabled, 3)["result"], json!({}));
+    let replay = enable_runtime_and_expect_default_context(
+        &mut replacement,
+        4,
+        Some(&replacement_page_session_id),
+        "replacement Runtime.enable",
+    )
+    .await;
+    assert!(
+        replay.iter().any(|message| {
+            message["sessionId"] == json!(replacement_page_session_id)
+                && message["method"] == json!("Runtime.executionContextCreated")
+                && message["params"]["context"]["name"]
+                    == json!("__puppeteer_utility_world__moli_reconnect")
+        }),
+        "replacement Runtime.enable did not replay the existing Puppeteer utility world: {replay:#?}"
+    );
+
+    let evaluated = send_cdp_command(
+        &mut replacement,
+        6,
+        "Runtime.evaluate",
+        Some(&replacement_page_session_id),
+        json!({ "expression": "6 * 7", "returnByValue": true }),
+    )
+    .await;
+    assert_eq!(
+        response_by_id(&evaluated, 6)["result"]["result"]["value"],
+        json!(42)
+    );
 
     abort_test_cdp_server(server).await;
 }

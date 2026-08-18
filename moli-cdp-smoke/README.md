@@ -70,6 +70,16 @@ the CDP Network success/failure terminal skeleton. The local Chromium source
 checkout remains useful for locating the WPT assets but is not counted as an
 executable pass while its snapshot and binary are mismatched.
 
+The Puppeteer existing-Page reconnect contract was calibrated on 2026-08-19
+with the pinned puppeteer-core 24.30.0 against Debian `/usr/bin/chromium`
+145.0.7632.116. One complete Puppeteer-group run created a second Page through
+`PUT /json/new`, evaluated in the original Page through one `puppeteer.connect()`
+session, disconnected that session, and evaluated the same target and retained
+main-world marker through a replacement connection. Chromium returned `42` in
+both sessions. The identical probe timed out at the replacement evaluation after
+10,000 ms when Moli's parent-session renderer-inspector detach fix was removed,
+and passed after the fix was restored.
+
 ## Current Coverage
 
 The current suite is a strong core smoke gate, not a complete Playwright compatibility suite.
@@ -129,7 +139,7 @@ Covered well:
   live DOM text; sampled `innerText` is recorded but may remain stale until the
   next layout refresh by design.
 - The focused raw `dom-parser-mutations` group holds a parser-blocking head script after an early head-only `DOM.getDocument` and requires Chromium's exact root-agent sequence: commit `DOM.documentUpdated`, parser-tail BODY `DOM.childNodeInserted`, DCL `DOM.documentUpdated`, then `Page.domContentEventFired`. It also proves that the early frontend node id is stale after the DCL barrier and that a refreshed snapshot contains the complete BODY.
-- Optional Puppeteer over CDP group for `puppeteer.connect()`, browser-target and page-target `CDPSession`, `page.goto()`, `page.reload()`, selector-backed DOM activation navigation, same-document hash and History API navigation, `page.evaluate(fetch)`, keyboard input via `page.type()`, CSS / `$eval` / XPath element selection, and DOM interactions across text input, textarea, label/checkbox, radio, select, details/summary, disabled button, and form submission. It also covers `ElementHandle.boundingBox()` / `evaluate()` / `uploadFile()`, DedicatedWorker `workercreated` / `WebWorker.evaluate()` / exact-once worker-session console routing / explicit terminate / navigation-destroy lifecycle, current-viewport `page.screenshot({captureBeyondViewport:false})`, alert and console events, browser-session download behavior/events/artifact with peer-session event isolation, request interception `respond()` / `continue()`, page-scoped `CDPSession` Network event observation, and layout-backed `page.click()` dispatch.
+- Optional Puppeteer over CDP group for `puppeteer.connect()`, reconnecting an existing parked-then-promoted Page through a fresh browser session, browser-target and page-target `CDPSession`, `page.goto()`, `page.reload()`, selector-backed DOM activation navigation, same-document hash and History API navigation, `page.evaluate(fetch)`, keyboard input via `page.type()`, CSS / `$eval` / XPath element selection, and DOM interactions across text input, textarea, label/checkbox, radio, select, details/summary, disabled button, and form submission. It also covers `ElementHandle.boundingBox()` / `evaluate()` / `uploadFile()`, DedicatedWorker `workercreated` / `WebWorker.evaluate()` / exact-once worker-session console routing / explicit terminate / navigation-destroy lifecycle, current-viewport `page.screenshot({captureBeyondViewport:false})`, alert and console events, browser-session download behavior/events/artifact with peer-session event isolation, request interception `respond()` / `continue()`, page-scoped `CDPSession` Network event observation, and layout-backed `page.click()` dispatch.
 - `browser.new_context()`, `context.new_page()`, multiple pages in one context, target switching, popup-scoped `page.route()` plus `evaluate(fetch)`, popup CDPSession response-stage body / stream / fulfill / fail flows, and held multi-context route / response-stage resume without cross-context Network event bleed.
 - Top-level navigation, redirect final URL/response, reload-like click navigation, and history back/forward.
 - Reload, same-document hash navigation, `history.pushState()` observation, Playwright `add_init_script()` page/context injection, `page.exposeFunction()` / `page.exposeBinding()` plus context-level exposed functions, and basic `domcontentloaded` / `load` / `networkidle` load-state waits with a parser-discovered delayed image.

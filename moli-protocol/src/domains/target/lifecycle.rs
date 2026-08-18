@@ -2458,6 +2458,19 @@ async fn detach_attached_session_for_owner_async(
                 conn.rollback_auto_attached_session_detach_plan_without_event(&detach_plan);
                 return;
             };
+            // A parent-session detach cascade bypasses the direct
+            // Target.detachFromTarget path. Release the renderer inspector
+            // here before resetting protocol state so the replacement primary
+            // session gets a fresh Runtime.enable context inventory.
+            conn.fail_pending_inspector_awaits_for_session_owner_background_events_into(
+                out.background_events_mut(),
+                command_context.protocol_events_mut(),
+                Some(session_id),
+                "Target detached",
+            );
+            let _ = conn
+                .detach_runtime_inspector_session_for_session_owner_async(Some(session_id))
+                .await;
             events::fail_pending_fetch_state_for_target_background_events_async(
                 conn,
                 out.background_events_mut(),

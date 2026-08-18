@@ -54,6 +54,147 @@ async function discoverWebSocket(endpoint) {
   return payload.webSocketDebuggerUrl;
 }
 
+async function listPageTargets(endpoint) {
+  const response = await fetch(`${endpoint.replace(/\/$/, '')}/json/list`);
+  if (!response.ok) {
+    throw new Error(`CDP target discovery failed with HTTP ${response.status}`);
+  }
+  const payload = await response.json();
+  if (!Array.isArray(payload)) {
+    throw new Error(`CDP target discovery returned an invalid payload: ${JSON.stringify(payload)}`);
+  }
+  return payload.filter(target => target?.type === 'page' && typeof target.id === 'string');
+}
+
+async function createPageTarget(endpoint) {
+  const response = await fetch(
+    `${endpoint.replace(/\/$/, '')}/json/new?${encodeURIComponent('about:blank')}`,
+    { method: 'PUT' },
+  );
+  if (!response.ok) {
+    throw new Error(`CDP target creation failed with HTTP ${response.status}`);
+  }
+  const target = await response.json();
+  if (target?.type !== 'page' || typeof target.id !== 'string') {
+    throw new Error(`CDP target creation returned an invalid payload: ${JSON.stringify(target)}`);
+  }
+  return target;
+}
+
+async function closePageTarget(endpoint, targetId) {
+  const response = await fetch(
+    `${endpoint.replace(/\/$/, '')}/json/close/${encodeURIComponent(targetId)}`,
+  );
+  if (!response.ok) {
+    throw new Error(`CDP target ${targetId} cleanup failed with HTTP ${response.status}`);
+  }
+}
+
+async function pageByTargetId(browser, targetId, label) {
+  const target = await withTimeout(
+    `${label} target`,
+    browser.waitForTarget(candidate => {
+      return candidate.type() === 'page' && candidate._targetId === targetId;
+    }, { timeout: 10000 }),
+  );
+  const page = await withTimeout(`${label} page`, target.page());
+  if (!page) {
+    throw new Error(`${label} target ${targetId} did not expose a Page`);
+  }
+  return page;
+}
+
+async function runPuppeteerReconnectSmoke(puppeteer, endpoint, browserWSEndpoint) {
+  let pages = await listPageTargets(endpoint);
+  let originalTargetCreated = false;
+  if (pages.length === 0) {
+    pages = [await createPageTarget(endpoint)];
+    originalTargetCreated = true;
+  }
+  const originalTargetId = pages[0].id;
+  // Materializing a second Page parks the original Page in Moli. Accessing the
+  // original through Puppeteer then promotes it again, which is the lifecycle
+  // required to exercise parent-session detach cleanup on disconnect.
+  const temporaryTarget = await createPageTarget(endpoint);
+  if (temporaryTarget.id === originalTargetId) {
+    throw new Error(`CDP target creation reused the existing target id ${originalTargetId}`);
+  }
+
+  let firstBrowser;
+  let replacementBrowser;
+  let completed = false;
+  try {
+    firstBrowser = await withTimeout(
+      'first Puppeteer reconnect probe connect',
+      puppeteer.connect({ browserWSEndpoint, protocolTimeout: 10000 }),
+    );
+    const originalPage = await pageByTargetId(
+      firstBrowser,
+      originalTargetId,
+      'first Puppeteer reconnect probe',
+    );
+    const firstResult = await withTimeout(
+      'first Puppeteer reconnect probe evaluate',
+      originalPage.evaluate(() => {
+        globalThis.__moliPuppeteerReconnectMarker = 29;
+        return 6 * 7;
+      }),
+    );
+    if (firstResult !== 42) {
+      throw new Error(`unexpected first Puppeteer reconnect probe result: ${firstResult}`);
+    }
+    await firstBrowser.disconnect();
+    firstBrowser = undefined;
+
+    replacementBrowser = await withTimeout(
+      'replacement Puppeteer reconnect probe connect',
+      puppeteer.connect({ browserWSEndpoint, protocolTimeout: 10000 }),
+    );
+    const replacementPage = await pageByTargetId(
+      replacementBrowser,
+      originalTargetId,
+      'replacement Puppeteer reconnect probe',
+    );
+    const replacementResult = await withTimeout(
+      'replacement Puppeteer reconnect probe evaluate',
+      replacementPage.evaluate(() => ({
+        answer: 6 * 7,
+        marker: globalThis.__moliPuppeteerReconnectMarker,
+      })),
+    );
+    if (replacementResult?.answer !== 42 || replacementResult?.marker !== 29) {
+      throw new Error(
+        `unexpected replacement Puppeteer reconnect probe result: ${JSON.stringify(replacementResult)}`,
+      );
+    }
+    completed = true;
+    return {
+      existingTargetReused: true,
+      firstEvaluation: firstResult,
+      replacementEvaluation: replacementResult.answer,
+    };
+  } finally {
+    if (replacementBrowser) {
+      await replacementBrowser.disconnect().catch(() => {});
+    }
+    if (firstBrowser) {
+      await firstBrowser.disconnect().catch(() => {});
+    }
+    await closePageTarget(endpoint, temporaryTarget.id).catch(error => {
+      if (completed) {
+        throw error;
+      }
+    });
+    if (originalTargetCreated) {
+      await closePageTarget(endpoint, originalTargetId).catch(error => {
+        if (completed) {
+          throw error;
+        }
+      });
+    }
+  }
+}
+
 async function createBrowserContext(browser) {
   if (typeof browser.createBrowserContext === 'function') {
     return await browser.createBrowserContext();
@@ -80,13 +221,20 @@ async function main() {
   const browserWSEndpoint = await discoverWebSocket(endpoint);
   const isMoliEndpoint = browserWSEndpoint.endsWith('/devtools/browser/moli-browser');
   trace(`discovered ${browserWSEndpoint}`);
+  const results = [];
+  const record = (name, data = {}) => results.push({ name, ok: true, ...data });
+  const reconnectResult = await runPuppeteerReconnectSmoke(
+    puppeteer,
+    endpoint,
+    browserWSEndpoint,
+  );
+  record('puppeteer_existing_page_reconnect_runtime_context', reconnectResult);
+  trace('reconnected to existing Page with a fresh Puppeteer session');
   const browser = await withTimeout(
     'puppeteer.connect',
     puppeteer.connect({ browserWSEndpoint, protocolTimeout: 10000 }),
   );
   trace('connected');
-  const results = [];
-  const record = (name, data = {}) => results.push({ name, ok: true, ...data });
 
   let context;
   let browserCdp;
