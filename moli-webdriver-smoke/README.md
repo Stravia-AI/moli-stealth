@@ -5,23 +5,23 @@ This is a standalone WebDriver smoke project for moli. It is a peer of
 `moli serve`, and exercises the public WebDriver wire surface from outside
 the Rust test harness.
 
-The default group uses raw WebDriver Classic HTTP. The optional BiDi group uses
-raw WebSocket messages. The optional Selenium group uses Selenium Python's
-`webdriver.Remote` client against the same `moli serve` endpoint, so this
-project now covers both protocol-level wire shape and a real Selenium client
-workflow.
+The default suite runs every Moli group: raw WebDriver Classic HTTP, raw BiDi
+WebSocket messages, Selenium Python's `webdriver.Remote` client, cross-engine
+semantics and navigation contracts, Moli's URL policy, and renderer-IO script
+interruption. This covers both protocol-level wire shape and real Selenium
+client workflows without requiring a group allowlist.
 
-The optional `semantics` group contains isolated cross-engine contracts. It can
+The `semantics` group contains isolated cross-engine contracts. It can
 run against Moli's native WebDriver endpoint or an external ChromeDriver;
 Moli uses standard W3C capabilities without Chrome vendor options.
 
-The optional `url-policy` group is a Moli hosted-product contract. It
+The `url-policy` group is a Moli hosted-product contract. It
 uses isolated Classic and BiDi sessions to verify the exact local-file
 navigation error envelopes, unchanged browsing contexts, and absence of BiDi
 navigation lifecycle events. It is deliberately skipped for desktop Chromium,
 whose browser-granted local-file capability is a different product policy.
 
-The optional `navigation-errors` group is a cross-engine Chromium/WPT contract.
+The `navigation-errors` group is a cross-engine Chromium/WPT contract.
 It runs the same 37-case public-wire matrix against Moli or ChromeDriver:
 ten Classic malformed-body/URL cases, 22 BiDi invalid-argument cases, two
 missing-context cases, and three real address failures. It also checks the W3C
@@ -29,12 +29,12 @@ HTTP and BiDi error envelopes, unchanged Classic URL, and post-failure session
 liveness. The baseline was executed on 2026-08-09 with Debian Chromium
 145.0.7632.116 and matching ChromeDriver 145.0.7632.117.
 
-The script-timeout boundary has two deliberately separate optional groups:
+The script-timeout boundary has two deliberately separate groups:
 
 - `script-timeout-chromium` is the ChromeDriver 147 oracle. A yielding async
   script times out near its deadline, while a bounded non-yielding loop first
   returns to the renderer and only then produces `script timeout`.
-- `script-interrupt` is Moli's renderer-IO extension. It runs actual infinite
+- `script-interrupt` is a default Moli group for the renderer-IO extension. It runs actual infinite
   loops through both Classic sync and async execution, requires timeout-driven
   `Runtime.terminateExecution` near the configured deadline, and repeats
   recovery work in the same window after every termination.
@@ -139,13 +139,15 @@ uv sync
 uv run moli-webdriver-smoke
 ```
 
-CI explicitly runs all six groups with `--continue-on-failure`:
+With no `--group`, both local and CI runs execute all seven Moli groups:
 
 ```text
-classic,bidi,selenium,semantics,url-policy,navigation-errors
+classic,bidi,selenium,semantics,url-policy,navigation-errors,script-interrupt
 ```
 
-The local default remains the smaller Classic-only loop for focused development.
+CI adds `--continue-on-failure` so one failing group does not hide later smoke
+results. The ChromeDriver-only `script-timeout-chromium` oracle remains an
+explicit external-target run.
 
 List available groups:
 
@@ -170,7 +172,6 @@ Collect all subgroup failures in one diagnostic run:
 
 ```bash
 uv run moli-webdriver-smoke \
-  --group classic,bidi,selenium,semantics,url-policy,navigation-errors \
   --continue-on-failure
 ```
 

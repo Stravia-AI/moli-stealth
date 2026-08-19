@@ -129,20 +129,12 @@ jobs:
           python -m unittest discover
           --start-directory moli-webdriver-smoke/tests
 
-      - name: Run default CDP smoke
-        id: cdp_default
+      - name: Run full CDP smoke
+        id: cdp
         continue-on-error: true
         env:
           MOLI_BIN: ${{ github.workspace }}/target/release/moli
         run: uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke
-
-      - name: Run Puppeteer CDP smoke
-        id: cdp_puppeteer
-        if: ${{ !cancelled() && steps.build_moli.outcome == 'success' }}
-        continue-on-error: true
-        env:
-          MOLI_BIN: ${{ github.workspace }}/target/release/moli
-        run: uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke --group puppeteer
 
       - name: Run full WebDriver smoke
         id: webdriver
@@ -153,23 +145,17 @@ jobs:
         run: >-
           uv run --project moli-webdriver-smoke --no-sync
           moli-webdriver-smoke
-          --group classic,bidi,selenium,semantics,url-policy,navigation-errors
           --continue-on-failure
 
       - name: Require all protocol smoke suites
         if: ${{ always() && !cancelled() && steps.build_moli.outcome == 'success' }}
         env:
-          CDP_DEFAULT_OUTCOME: ${{ steps.cdp_default.outcome }}
-          CDP_PUPPETEER_OUTCOME: ${{ steps.cdp_puppeteer.outcome }}
+          CDP_OUTCOME: ${{ steps.cdp.outcome }}
           WEBDRIVER_OUTCOME: ${{ steps.webdriver.outcome }}
         run: |
           failed=0
-          if [ "$CDP_DEFAULT_OUTCOME" != success ]; then
-            echo "default CDP smoke: $CDP_DEFAULT_OUTCOME"
-            failed=1
-          fi
-          if [ "$CDP_PUPPETEER_OUTCOME" != success ]; then
-            echo "Puppeteer CDP smoke: $CDP_PUPPETEER_OUTCOME"
+          if [ "$CDP_OUTCOME" != success ]; then
+            echo "CDP smoke: $CDP_OUTCOME"
             failed=1
           fi
           if [ "$WEBDRIVER_OUTCOME" != success ]; then

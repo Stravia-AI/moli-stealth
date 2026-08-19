@@ -46,7 +46,6 @@ class SmokeGroup:
     name: str
     description: str
     runner: GroupRunner
-    default: bool = True
 
 
 async def _run_classic_group(
@@ -77,7 +76,7 @@ async def _run_bidi_group(
     )
 
 
-ALL_GROUPS: tuple[SmokeGroup, ...] = (
+MOLI_GROUPS: tuple[SmokeGroup, ...] = (
     SmokeGroup(
         "classic",
         "Raw WebDriver Classic HTTP session, navigation, element, script, alert, shadow, cookie, and window state flows.",
@@ -87,46 +86,46 @@ ALL_GROUPS: tuple[SmokeGroup, ...] = (
         "bidi",
         "Raw WebDriver BiDi WebSocket session, browsingContext lifecycle, input actions, element origins, file uploads, network data, user contexts, emulation, explicit screenshot unsupported errors, and storage.",
         _run_bidi_group,
-        default=False,
     ),
     SmokeGroup(
         "selenium",
         "Selenium Python Remote WebDriver session, BiDi facade, navigation, elements, forms/files/actions, explicit screenshot/print unsupported errors, cookies, windows, frame switching, script arguments, shadow roots, and dialogs.",
         run_selenium_group,
-        default=False,
     ),
     SmokeGroup(
         "semantics",
         "Isolated cross-engine WebDriver contracts for capabilities, history, storage, frames, dialogs, and W3C errors.",
         run_semantics_group,
-        default=False,
     ),
     SmokeGroup(
         "url-policy",
         "Hosted file-navigation rejection with exact Classic/BiDi errors, unchanged contexts, and no BiDi lifecycle events.",
         run_url_policy_group,
-        default=False,
     ),
     SmokeGroup(
         "navigation-errors",
         "Chromium/WPT Classic and BiDi navigation argument, missing-context, address-error, envelope, and post-failure liveness matrix.",
         run_navigation_errors_group,
-        default=False,
-    ),
-    SmokeGroup(
-        "script-timeout-chromium",
-        "ChromeDriver Classic script-timeout yield boundary and repeated same-window recovery oracle.",
-        run_chromedriver_script_timeout_group,
-        default=False,
     ),
     SmokeGroup(
         "script-interrupt",
         "Moli Classic script timeout preemption of non-yielding sync/async JavaScript through renderer IO, with repeated same-window recovery.",
         run_moli_script_interrupt_group,
-        default=False,
     ),
 )
-DEFAULT_GROUP_NAMES: tuple[str, ...] = tuple(group.name for group in ALL_GROUPS if group.default)
+
+CHROMEDRIVER_ORACLE_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "script-timeout-chromium",
+        "ChromeDriver Classic script-timeout yield boundary and repeated same-window recovery oracle.",
+        run_chromedriver_script_timeout_group,
+    ),
+)
+
+DEFAULT_GROUPS: tuple[SmokeGroup, ...] = MOLI_GROUPS
+ALL_GROUPS: tuple[SmokeGroup, ...] = DEFAULT_GROUPS + CHROMEDRIVER_ORACLE_GROUPS
+DEFAULT_GROUP_NAMES: tuple[str, ...] = tuple(group.name for group in DEFAULT_GROUPS)
+DEFAULT_GROUP_NAME_SET = frozenset(DEFAULT_GROUP_NAMES)
 GROUPS_BY_NAME: dict[str, SmokeGroup] = {group.name: group for group in ALL_GROUPS}
 
 
@@ -160,7 +159,7 @@ def group_listing() -> list[dict[str, Any]]:
     return [
         {
             "name": group.name,
-            "default": group.default,
+            "default": group.name in DEFAULT_GROUP_NAME_SET,
             "description": group.description,
         }
         for group in ALL_GROUPS
@@ -173,7 +172,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--group",
         action="append",
         default=[],
-        help="Run only the named group. May be repeated or comma-separated. Defaults to the Classic group.",
+        help=(
+            "Run only the named group. May be repeated or comma-separated. "
+            "Defaults to every Moli group."
+        ),
     )
     parser.add_argument(
         "--list-groups",

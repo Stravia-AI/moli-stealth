@@ -220,7 +220,7 @@ Important gaps:
 - Wider network matrix: broader digest/multi-round proxy auth challenge variants, font/preload resource types, parser-discovered resource interception, and broader response-stage coverage beyond the current page/popup fetch/XHR response-stage smoke.
 - Storage/profile depth: cookie delete/clear/domain/path/SameSite, persistent profile writeback, storage partition boundaries, and deeper IndexedDB flows.
 - Worker/frame target depth: module-worker target lifecycle, nested DedicatedWorker targets, broader worker exception/debugger coverage, iframe subresource attribution, and future per-frame realm boundaries remain. DedicatedWorker now has first-layer CDP target/runtime/console/lifecycle coverage; SharedWorker has first-layer target/runtime/log/profiler and page-side reuse smoke, but both still need richer error matrices.
-- Puppeteer parity: the optional group now covers the common connect/navigation/reload/same-document/evaluate/keyboard-input/DOM-selector-activation/coordinate-click/handle/current-viewport-screenshot/alert-dialog/popup-target/interception path and DedicatedWorker lifecycle, but full-page/clip screenshots, drag interception, confirm/prompt modal return semantics, and richer lifecycle waits remain.
+- Puppeteer parity: the default managed-client group covers the common connect/navigation/reload/same-document/evaluate/keyboard-input/DOM-selector-activation/coordinate-click/handle/current-viewport-screenshot/alert-dialog/popup-target/interception path and DedicatedWorker lifecycle, but full-page/clip screenshots, drag interception, confirm/prompt modal return semantics, and richer lifecycle waits remain.
 
 Runner layout:
 
@@ -287,10 +287,11 @@ npm ci
 uv run moli-cdp-smoke
 ```
 
-CI runs the complete default group selection and the pinned Puppeteer group as
-separate gates. The other optional external-client groups remain explicit
-integration runs because their binaries or dependency environments are not
-owned by this project.
+With no `--group`, the runner executes every raw, Playwright page, browser, and
+repository-managed external-client group, including `inspector-routing` and the
+pinned Puppeteer client. CI invokes that same unfiltered default. External-client
+groups whose binaries or dependency environments are not owned by this project
+remain explicit integration runs.
 
 List available scenario groups:
 
@@ -320,8 +321,8 @@ uv run moli-cdp-smoke --group inspector-routing
 MOLI_SMOKE_GROUPS=protocol,websocket uv run moli-cdp-smoke
 ```
 
-The Inspector routing group is part of the default selection. Run one or more
-named contracts while iterating with
+The complete Inspector routing group runs by default. Select one or more named
+contracts while iterating with
 `MOLI_INSPECTOR_ROUTING_SCENARIOS`:
 
 ```bash

@@ -76,7 +76,6 @@ class SmokeGroup:
     description: str
     phase: str
     runner: RawGroupRunner | ExternalGroupRunner | PageGroupRunner | BrowserGroupRunner
-    default: bool = True
 
 
 RAW_GROUPS: tuple[SmokeGroup, ...] = (
@@ -293,46 +292,50 @@ BROWSER_GROUPS: tuple[SmokeGroup, ...] = (
     ),
 )
 
-EXTERNAL_GROUPS: tuple[SmokeGroup, ...] = (
+MANAGED_EXTERNAL_GROUPS: tuple[SmokeGroup, ...] = (
+    SmokeGroup(
+        "puppeteer",
+        "Puppeteer over CDP workflows using the smoke project's pinned puppeteer-core module.",
+        "external",
+        run_puppeteer_group,
+    ),
+)
+
+
+OPTIONAL_EXTERNAL_GROUPS: tuple[SmokeGroup, ...] = (
     SmokeGroup(
         "chrome-remote-interface",
         "Optional chrome-remote-interface browser/page session goal-path workflows.",
         "external",
         run_chrome_remote_interface_group,
-        default=False,
     ),
     SmokeGroup(
         "cdp-use",
         "Optional cdp-use browser/page session goal-path workflows.",
         "external",
         run_cdp_use_group,
-        default=False,
     ),
     SmokeGroup(
         "stagehand",
         "Optional Stagehand deterministic goal-path workflows without LLM operations.",
         "external",
         run_stagehand_group,
-        default=False,
     ),
     SmokeGroup(
         "agent-browser",
         "Optional agent-browser CLI goal-path workflows with an isolated daemon session.",
         "external",
         run_agent_browser_group,
-        default=False,
-    ),
-    SmokeGroup(
-        "puppeteer",
-        "Puppeteer over CDP workflows using the smoke project's pinned puppeteer-core module.",
-        "external",
-        run_puppeteer_group,
-        default=False,
     ),
 )
 
-ALL_GROUPS: tuple[SmokeGroup, ...] = RAW_GROUPS + EXTERNAL_GROUPS + PAGE_GROUPS + BROWSER_GROUPS
-DEFAULT_GROUP_NAMES: tuple[str, ...] = tuple(group.name for group in ALL_GROUPS if group.default)
+
+DEFAULT_GROUPS: tuple[SmokeGroup, ...] = (
+    RAW_GROUPS + PAGE_GROUPS + BROWSER_GROUPS + MANAGED_EXTERNAL_GROUPS
+)
+ALL_GROUPS: tuple[SmokeGroup, ...] = DEFAULT_GROUPS + OPTIONAL_EXTERNAL_GROUPS
+DEFAULT_GROUP_NAMES: tuple[str, ...] = tuple(group.name for group in DEFAULT_GROUPS)
+DEFAULT_GROUP_NAME_SET = frozenset(DEFAULT_GROUP_NAMES)
 GROUPS_BY_NAME: dict[str, SmokeGroup] = {group.name: group for group in ALL_GROUPS}
 
 
@@ -394,7 +397,7 @@ def group_listing() -> list[dict[str, Any]]:
         {
             "name": group.name,
             "phase": group.phase,
-            "default": group.default,
+            "default": group.name in DEFAULT_GROUP_NAME_SET,
             "description": group.description,
         }
         for group in ALL_GROUPS
@@ -503,7 +506,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--group",
         action="append",
         default=[],
-        help="Run only the named group. May be repeated or comma-separated. Defaults to all groups.",
+        help=(
+            "Run only the named group. May be repeated or comma-separated. "
+            "Defaults to every repository-managed group."
+        ),
     )
     parser.add_argument(
         "--list-groups",

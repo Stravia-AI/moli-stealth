@@ -13,7 +13,6 @@ class ActionWindowGroupTests(unittest.TestCase):
         group = GROUPS_BY_NAME["action-window"]
 
         self.assertEqual(group.phase, "raw")
-        self.assertTrue(group.default)
         self.assertIn(group.name, DEFAULT_GROUP_NAMES)
 
 
