@@ -1,4 +1,3 @@
-use moli_page_types::RendererInspectorResponseDelivery;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::{error::Error, fmt};
@@ -232,7 +231,6 @@ pub struct CdpRendererCommandPolicy {
     inspector_task_mode: CdpInspectorTaskMode,
     renderer_replacement: CdpRendererCommandReplacement,
     renderer_replay_dispatch: CdpRendererCommandReplayDispatch,
-    response_delivery: RendererInspectorResponseDelivery,
     executes_page_javascript: bool,
 }
 
@@ -251,10 +249,6 @@ impl CdpRendererCommandPolicy {
 
     pub const fn replay_dispatch(self) -> CdpRendererCommandReplayDispatch {
         self.renderer_replay_dispatch
-    }
-
-    pub const fn response_delivery(self) -> RendererInspectorResponseDelivery {
-        self.response_delivery
     }
 
     pub const fn executes_page_javascript(self) -> bool {
@@ -578,7 +572,6 @@ impl CdpRendererCommandPolicy {
                 inspector_task_mode: CdpInspectorTaskMode::for_method(method),
                 renderer_replacement: CdpRendererCommandReplacement::Replay,
                 renderer_replay_dispatch: CdpRendererCommandReplayDispatch::Direct,
-                response_delivery: RendererInspectorResponseDelivery::CommandReply,
                 executes_page_javascript: false,
             };
         };
@@ -653,21 +646,6 @@ impl CdpRendererCommandPolicy {
                 CdpRendererCommandReplayDispatch::ResolveRuntimeContext
             } else {
                 CdpRendererCommandReplayDispatch::Direct
-            },
-            response_delivery: if domain == CdpMethodDomain::Debugger
-                && matches!(
-                    action,
-                    "getPossibleBreakpoints"
-                        | "getScriptSource"
-                        | "getStackTrace"
-                        | "removeBreakpoint"
-                        | "setBreakpoint"
-                        | "setBreakpointByUrl"
-                        | "setBreakpointsActive"
-                ) {
-                RendererInspectorResponseDelivery::DevToolsSession
-            } else {
-                RendererInspectorResponseDelivery::CommandReply
             },
             executes_page_javascript: runtime_action
                 .is_some_and(RuntimeWireAction::executes_page_javascript)
@@ -826,41 +804,6 @@ mod tests {
             !parse(r#"{"id":18,"method":"Debugger.pause"}"#)
                 .runtime_command_executes_page_javascript()
         );
-    }
-
-    #[test]
-    fn synchronous_interruptible_frontend_v8_responses_use_session_output_as_one_family() {
-        for method in [
-            "Debugger.getPossibleBreakpoints",
-            "Debugger.getScriptSource",
-            "Debugger.getStackTrace",
-            "Debugger.removeBreakpoint",
-            "Debugger.setBreakpoint",
-            "Debugger.setBreakpointByUrl",
-            "Debugger.setBreakpointsActive",
-        ] {
-            assert_eq!(
-                parse(format!(r#"{{"id":18,"method":"{method}"}}"#))
-                    .renderer_policy()
-                    .response_delivery(),
-                RendererInspectorResponseDelivery::DevToolsSession,
-                "{method} must share the same session output path as adjacent synchronous V8 IO commands"
-            );
-        }
-        for method in [
-            "Debugger.enable",
-            "Debugger.pause",
-            "Debugger.resume",
-            "Runtime.getIsolateId",
-        ] {
-            assert_eq!(
-                parse(format!(r#"{{"id":19,"method":"{method}"}}"#))
-                    .renderer_policy()
-                    .response_delivery(),
-                RendererInspectorResponseDelivery::CommandReply,
-                "{method} still requires the command-reply completion path"
-            );
-        }
     }
 
     #[test]

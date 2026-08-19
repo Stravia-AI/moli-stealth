@@ -58,6 +58,12 @@ async def run_inspector_routing_group(
             ),
         ),
         (
+            "raw_cdp_mixed_io_agent_response_order",
+            lambda client, page: _mixed_io_agent_response_order(
+                client, page, results
+            ),
+        ),
+        (
             "raw_cdp_performance_io_during_active_javascript",
             lambda client, page: _performance_io_during_active_javascript(
                 client, page, fixture, results
@@ -1477,6 +1483,133 @@ async def _performance_io_during_active_javascript(
             "messagesBeforeTerminate": len(before_terminate),
             "messagesAfterTerminate": len(after_terminate),
         },
+    )
+
+
+async def _mixed_io_agent_response_order(
+    client: RawCdpClient,
+    page: InspectorRoutingPage,
+    results: list[dict[str, Any]],
+) -> None:
+    source = "globalThis.__mixedIoAgentResponseOrder = 42;"
+    compile_id = await client.send(
+        "Runtime.compileScript",
+        {
+            "expression": source,
+            "sourceURL": "inspector-routing-mixed-io.js",
+            "persistScript": True,
+        },
+        session_id=page.auxiliary_session_id,
+    )
+    compile_response, _ = await client.recv_until_id(compile_id, timeout=5)
+    script_id = compile_response.get("result", {}).get("scriptId")
+    if not isinstance(script_id, str) or not script_id:
+        raise SmokeError(
+            f"Runtime.compileScript returned no mixed-IO scriptId: {compile_response}"
+        )
+
+    performance_enable_id = await client.send(
+        "Performance.enable",
+        session_id=page.auxiliary_session_id,
+    )
+    await client.recv_until_id(performance_enable_id, timeout=5)
+
+    commands: list[tuple[int, str]] = []
+    for _ in range(64):
+        commands.append(
+            (
+                await client.send(
+                    "Performance.getMetrics",
+                    session_id=page.auxiliary_session_id,
+                ),
+                "Performance.getMetrics",
+            )
+        )
+        commands.append(
+            (
+                await client.send(
+                    "Debugger.getScriptSource",
+                    {"scriptId": script_id},
+                    session_id=page.auxiliary_session_id,
+                ),
+                "Debugger.getScriptSource",
+            )
+        )
+        commands.append(
+            (
+                await client.send(
+                    "Emulation.setScriptExecutionDisabled",
+                    {"value": False},
+                    session_id=page.auxiliary_session_id,
+                ),
+                "Emulation.setScriptExecutionDisabled",
+            )
+        )
+        commands.append(
+            (
+                await client.send(
+                    "Debugger.getScriptSource",
+                    {"scriptId": script_id},
+                    session_id=page.auxiliary_session_id,
+                ),
+                "Debugger.getScriptSource",
+            )
+        )
+
+    expected_order = [message_id for message_id, _method in commands]
+    responses, seen = await _recv_responses(client, set(expected_order), timeout=10)
+    response_order = [
+        message["id"] for message in seen if message.get("id") in responses
+    ]
+    assert_equal(
+        response_order,
+        expected_order,
+        "same-session synchronous mixed Page IO agent response order",
+    )
+    for message_id, method in commands:
+        response = responses[message_id]
+        if "error" in response:
+            raise SmokeError(f"{method} failed in mixed Page IO burst: {response}")
+        if method == "Debugger.getScriptSource":
+            assert_equal(
+                response.get("result", {}).get("scriptSource"),
+                source,
+                f"mixed Page IO script source for id {message_id}",
+            )
+        elif method == "Performance.getMetrics":
+            metrics = response.get("result", {}).get("metrics")
+            if not isinstance(metrics, list) or not metrics:
+                raise SmokeError(
+                    f"Performance.getMetrics returned no metrics in mixed burst: {response}"
+                )
+        else:
+            assert_equal(
+                response.get("result"),
+                {},
+                f"mixed Page IO Emulation result for id {message_id}",
+            )
+
+    performance_disable_id = await client.send(
+        "Performance.disable",
+        session_id=page.auxiliary_session_id,
+    )
+    await client.recv_until_id(performance_disable_id, timeout=5)
+    record_contract(
+        results,
+        "raw_cdp_mixed_io_agent_response_order",
+        contract=(
+            "Synchronous V8 Debugger and non-V8 Performance/Emulation commands share one "
+            "Page IO ingress and one session output path, so their responses remain in "
+            "producer order without serializing genuinely asynchronous Inspector replies."
+        ),
+        source="Chromium DevToolsSession mixed V8/non-V8 IO executable probe",
+        commands=[
+            "Performance.getMetrics",
+            "Debugger.getScriptSource",
+            "Emulation.setScriptExecutionDisabled",
+            "Debugger.getScriptSource",
+        ],
+        observed={"iterations": 64, "responseCount": len(response_order)},
     )
 
 

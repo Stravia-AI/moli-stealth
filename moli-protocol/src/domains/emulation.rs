@@ -1,7 +1,7 @@
 use crate::conn::{
     BrowserContext, CdpConnection, CdpSessionRoute, Cmd, CommandOwnerScope, EmulatedDeviceMetrics,
-    EmulatedGeolocationOverrideState, EmulatedViewportSurface,
-    RuntimeInspectorAsyncCompletionReceiver, TargetWindowSurfaceState,
+    EmulatedGeolocationOverrideState, EmulatedViewportSurface, RendererCommandCorrelation,
+    RendererCommandDescriptor, RuntimeInspectorAsyncCompletionReceiver, TargetWindowSurfaceState,
 };
 use crate::devtools_runtime::{
     DevToolsCommand, DevToolsCommandResult, DevToolsDevicePixelRatioSetting, DevToolsError,
@@ -45,12 +45,20 @@ pub(crate) struct CompletedEmulationCommandDispatch {
 
 enum PendingEmulationRendererDispatch {
     Pages(Vec<PendingEmulationPageCommand>),
-    Io(PendingDevToolsIoCommandDispatch),
+    IoCommandReply(PendingDevToolsIoCommandDispatch),
+    IoSessionOutput {
+        pending: PendingDevToolsIoCommandDispatch,
+        correlation: RendererCommandCorrelation,
+    },
 }
 
 enum CompletedEmulationRendererDispatch {
     Pages(Vec<CompletedEmulationPageCommand>),
-    Io(Result<CompletedDevToolsIoCommandDispatch, String>),
+    IoCommandReply(Result<CompletedDevToolsIoCommandDispatch, String>),
+    IoSessionOutput {
+        completed: Result<CompletedDevToolsIoCommandDispatch, String>,
+        correlation: RendererCommandCorrelation,
+    },
 }
 
 struct PendingEmulationPageCommand {
@@ -125,11 +133,18 @@ impl PendingEmulationCommandDispatch {
                 }
                 CompletedEmulationRendererDispatch::Pages(completed)
             }
-            PendingEmulationRendererDispatch::Io(pending) => {
-                CompletedEmulationRendererDispatch::Io(
+            PendingEmulationRendererDispatch::IoCommandReply(pending) => {
+                CompletedEmulationRendererDispatch::IoCommandReply(
                     pending.wait().await.map_err(|error| error.to_string()),
                 )
             }
+            PendingEmulationRendererDispatch::IoSessionOutput {
+                pending,
+                correlation,
+            } => CompletedEmulationRendererDispatch::IoSessionOutput {
+                completed: pending.wait().await.map_err(|error| error.to_string()),
+                correlation,
+            },
         };
         CompletedEmulationCommandDispatch {
             command_id: self.command_id,
@@ -345,14 +360,70 @@ fn start_script_execution_disabled_command(
             "BrowserContextNotLoaded",
         ));
     }
-    let Some(page) = loaded_page_mut_for_session(conn, cmd.session_id) else {
+    let Some(attachment_id) = loaded_page_mut_for_session(conn, cmd.session_id)
+        .and_then(|page| page.renderer_agent_attachment_id())
+    else {
         return EmulationCommandTaskStep::Complete(CommandOutputPlan::result(json!({})));
     };
-    let pending = page.start_set_script_execution_disabled_from_io(params.value);
+    let renderer_inspector_session_id =
+        conn.target_renderer_runtime_inspector_session_id_for_session(cmd.session_id);
+    let Some(command_id) = cmd.id else {
+        let page = loaded_page_mut_for_session(conn, cmd.session_id)
+            .expect("the captured Emulation Page must remain loaded synchronously");
+        let pending = page.start_set_script_execution_disabled_from_io(params.value);
+        return EmulationCommandTaskStep::Pending(PendingEmulationCommandDispatch {
+            command_id: cmd.id,
+            session_id: cmd.session_id.map(str::to_owned),
+            pending: PendingEmulationRendererDispatch::IoCommandReply(pending),
+        });
+    };
+    let descriptor = RendererCommandDescriptor::set_script_execution_disabled(
+        cmd.json.to_owned(),
+        cmd.renderer_policy(),
+        params.value,
+    );
+    let prepared = match conn.try_register_renderer_call_for_session_owner(
+        cmd.session_id,
+        command_id,
+        Some(attachment_id),
+        descriptor,
+    ) {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return EmulationCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error));
+        }
+    };
+    let (correlation, response, response_rx) = prepared.into_parts();
+    drop(response_rx);
+    let pending = loaded_page_mut_for_session(conn, cmd.session_id)
+        .filter(|page| page.renderer_agent_attachment_id() == Some(attachment_id))
+        .ok_or_else(|| "Emulation renderer attachment changed before IO dispatch".to_owned())
+        .and_then(|page| {
+            page.start_set_script_execution_disabled_from_io_with_response(
+                renderer_inspector_session_id,
+                params.value,
+                response,
+            )
+            .map_err(|error| error.to_string())
+        });
+    let pending = match pending {
+        Ok(pending) => pending,
+        Err(error) => {
+            let removed = conn.take_renderer_call_if_correlation_matches_for_session_owner(
+                cmd.session_id,
+                correlation,
+            );
+            debug_assert!(removed);
+            return EmulationCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error));
+        }
+    };
     EmulationCommandTaskStep::Pending(PendingEmulationCommandDispatch {
         command_id: cmd.id,
         session_id: cmd.session_id.map(str::to_owned),
-        pending: PendingEmulationRendererDispatch::Io(pending),
+        pending: PendingEmulationRendererDispatch::IoSessionOutput {
+            pending,
+            correlation,
+        },
     })
 }
 
@@ -2368,9 +2439,10 @@ pub(crate) fn complete_pending_emulation_command(
     conn: &mut CdpConnection,
     completed: CompletedEmulationCommandDispatch,
 ) -> CommandOutputPlan {
+    let session_id = completed.session_id.clone();
     let completed_pages = match completed.completed {
         CompletedEmulationRendererDispatch::Pages(completed_pages) => completed_pages,
-        CompletedEmulationRendererDispatch::Io(completed) => {
+        CompletedEmulationRendererDispatch::IoCommandReply(completed) => {
             return match completed {
                 Ok(CompletedDevToolsIoCommandDispatch::Dispatched) => {
                     CommandOutputPlan::result(json!({}))
@@ -2378,6 +2450,28 @@ pub(crate) fn complete_pending_emulation_command(
                 Ok(CompletedDevToolsIoCommandDispatch::Canceled) => {
                     CommandOutputPlan::error(-32000, "Emulation IO command was canceled")
                 }
+                Err(error) => CommandOutputPlan::error(-32000, error),
+            };
+        }
+        CompletedEmulationRendererDispatch::IoSessionOutput {
+            completed: Ok(CompletedDevToolsIoCommandDispatch::Dispatched),
+            ..
+        } => return CommandOutputPlan::default(),
+        CompletedEmulationRendererDispatch::IoSessionOutput {
+            completed,
+            correlation,
+        } => {
+            if !conn.take_renderer_call_if_correlation_matches_for_session_owner(
+                session_id.as_deref(),
+                correlation,
+            ) {
+                return CommandOutputPlan::default();
+            }
+            return match completed {
+                Ok(CompletedDevToolsIoCommandDispatch::Canceled) => {
+                    CommandOutputPlan::error(-32000, "Emulation IO command was canceled")
+                }
+                Ok(CompletedDevToolsIoCommandDispatch::Dispatched) => unreachable!(),
                 Err(error) => CommandOutputPlan::error(-32000, error),
             };
         }

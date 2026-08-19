@@ -911,6 +911,19 @@ impl CdpConnection {
         .flatten()
     }
 
+    pub(crate) fn take_renderer_call_if_correlation_matches_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        correlation: RendererCommandCorrelation,
+    ) -> bool {
+        self.take_renderer_call_for_frontend_if_matches_for_session_owner(
+            session_id,
+            correlation.frontend_command_id().get(),
+            correlation.renderer_call_id(),
+            correlation.dispatched_attachment_id(),
+        ) == Some(correlation)
+    }
+
     fn take_frontend_command_for_renderer_if_attachment_matches_for_session_owner(
         &mut self,
         session_id: Option<&str>,
@@ -4619,29 +4632,8 @@ impl CdpConnection {
             let frontend_session_id = replay.frontend_session_id().map(str::to_owned);
             let renderer_inspector_session_id =
                 replay.renderer_inspector_session_id().map(str::to_owned);
-            let (correlation, dispatch, response_delivery, frontend_payload, response_sender) =
+            let (correlation, replay, response_delivery, frontend_payload, response_sender) =
                 replay.into_replay().into_parts();
-            let raw_json = match self.rewrite_runtime_inspector_command_for_session_owner(
-                frontend_session_id.as_deref(),
-                &frontend_payload,
-                Some((
-                    correlation.frontend_command_id(),
-                    correlation.renderer_call_id(),
-                )),
-            ) {
-                Ok(raw_json) => raw_json,
-                Err(error) => {
-                    self.settle_renderer_replay_error(
-                        &mut events,
-                        frontend_session_id.as_deref(),
-                        response_delivery,
-                        &response_sender,
-                        correlation,
-                        &error,
-                    );
-                    continue;
-                }
-            };
             let route = match self.runtime_protocol_message_page_route_for_session_owner(
                 frontend_session_id.as_deref(),
             ) {
@@ -4669,6 +4661,123 @@ impl CdpConnection {
                 );
                 continue;
             }
+            let dispatch = match replay {
+                RendererCommandReplay::Inspector(dispatch) => dispatch,
+                RendererCommandReplay::PerformanceGetMetrics => {
+                    debug_assert_eq!(
+                        response_delivery,
+                        RendererInspectorResponseDelivery::DevToolsSession
+                    );
+                    let pending = self
+                        .runtime_session_owner_page_mut(frontend_session_id.as_deref())
+                        .map_err(|error| error.to_string())
+                        .and_then(|page| {
+                            let result = crate::domains::performance::performance_metrics_result(
+                                &page.cached_performance_metric_snapshot(),
+                            );
+                            page.start_performance_get_metrics_from_io_with_response(
+                                renderer_inspector_session_id.clone(),
+                                result,
+                                response_sender.clone(),
+                            )
+                            .map_err(|error| error.to_string())
+                        });
+                    let completion = match pending {
+                        Ok(pending) => pending.wait().await.map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    match completion {
+                        Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Dispatched) => {}
+                        Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Canceled) => {
+                            self.settle_renderer_replay_error(
+                                &mut events,
+                                frontend_session_id.as_deref(),
+                                response_delivery,
+                                &response_sender,
+                                correlation,
+                                "Inspected target navigated or closed",
+                            );
+                        }
+                        Err(error) => {
+                            self.settle_renderer_replay_error(
+                                &mut events,
+                                frontend_session_id.as_deref(),
+                                response_delivery,
+                                &response_sender,
+                                correlation,
+                                &format!("Performance replay dispatch failed: {error}"),
+                            );
+                        }
+                    }
+                    continue;
+                }
+                RendererCommandReplay::SetScriptExecutionDisabled { disabled } => {
+                    debug_assert_eq!(
+                        response_delivery,
+                        RendererInspectorResponseDelivery::DevToolsSession
+                    );
+                    let pending = self
+                        .runtime_session_owner_page_mut(frontend_session_id.as_deref())
+                        .map_err(|error| error.to_string())
+                        .and_then(|page| {
+                            page.start_set_script_execution_disabled_from_io_with_response(
+                                renderer_inspector_session_id.clone(),
+                                disabled,
+                                response_sender.clone(),
+                            )
+                            .map_err(|error| error.to_string())
+                        });
+                    let completion = match pending {
+                        Ok(pending) => pending.wait().await.map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
+                    };
+                    match completion {
+                        Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Dispatched) => {}
+                        Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Canceled) => {
+                            self.settle_renderer_replay_error(
+                                &mut events,
+                                frontend_session_id.as_deref(),
+                                response_delivery,
+                                &response_sender,
+                                correlation,
+                                "Inspected target navigated or closed",
+                            );
+                        }
+                        Err(error) => {
+                            self.settle_renderer_replay_error(
+                                &mut events,
+                                frontend_session_id.as_deref(),
+                                response_delivery,
+                                &response_sender,
+                                correlation,
+                                &format!("Emulation replay dispatch failed: {error}"),
+                            );
+                        }
+                    }
+                    continue;
+                }
+            };
+            let raw_json = match self.rewrite_runtime_inspector_command_for_session_owner(
+                frontend_session_id.as_deref(),
+                &frontend_payload,
+                Some((
+                    correlation.frontend_command_id(),
+                    correlation.renderer_call_id(),
+                )),
+            ) {
+                Ok(raw_json) => raw_json,
+                Err(error) => {
+                    self.settle_renderer_replay_error(
+                        &mut events,
+                        frontend_session_id.as_deref(),
+                        response_delivery,
+                        &response_sender,
+                        correlation,
+                        &error,
+                    );
+                    continue;
+                }
+            };
             let pending = {
                 let page = match self.runtime_session_owner_page_mut(frontend_session_id.as_deref())
                 {
@@ -6034,6 +6143,7 @@ mod tests {
                 RendererCommandDescriptor::from_frontend_policy(
                     frontend.json().to_owned(),
                     frontend.renderer_policy(),
+                    RendererInspectorResponseDelivery::DevToolsSession,
                 ),
             )
             .expect("frontend response correlation should register");

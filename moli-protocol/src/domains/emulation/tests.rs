@@ -194,11 +194,17 @@ async fn script_execution_disabled_completes_through_io_pending_dispatch() {
         "params": { "value": true }
     })
     .to_string();
+    let response_start = ctx.sent.len();
     let pending = ctx
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("the script execution override should use IO pending dispatch");
-    let messages = complete_pending_command_task_for_test(&mut ctx, pending).await;
+    let mut messages = complete_pending_command_task_for_test(&mut ctx, pending).await;
+    if !messages.iter().any(|message| message["id"] == json!(9101)) {
+        ctx.wait_for_test_command_response(9101, response_start)
+            .await;
+        messages.push(ctx.take_response_by_id(9101));
+    }
 
     assert!(messages.iter().any(|message| {
         message["id"] == json!(9101)
@@ -210,6 +216,40 @@ async fn script_execution_disabled_completes_through_io_pending_dispatch() {
             .browser_context
             .as_ref()
             .unwrap()
+            .script_execution_disabled
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn auxiliary_session_first_io_emulation_response_uses_its_session_host() {
+    let mut ctx = TestContext::new();
+    load_session_page_for_pending_emulation_test(&mut ctx).await;
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_mut()
+            .expect("browser context")
+            .assign_auxiliary_session_to_target("TID-1", "SID-aux".to_owned())
+    );
+    ctx.conn
+        .apply_runtime_binding_state_for_session_owner_async(Some("SID-aux"))
+        .await
+        .expect("target attachment should establish the auxiliary renderer session");
+
+    ctx.process_async(json!({
+        "id": 9_111,
+        "sessionId": "SID-aux",
+        "method": "Emulation.setScriptExecutionDisabled",
+        "params": { "value": true }
+    }))
+    .await;
+
+    ctx.expect_result(9_111, json!({}), Some("SID-aux"));
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
             .script_execution_disabled
     );
 }

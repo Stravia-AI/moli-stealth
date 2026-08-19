@@ -22,9 +22,16 @@ use serde_json::Value;
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RendererCommandDescriptor {
     replacement: CdpRendererCommandReplacement,
-    replay_dispatch: CdpRendererCommandReplayDispatch,
+    replay: RendererCommandReplay,
     response_delivery: RendererInspectorResponseDelivery,
     frontend_payload: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum RendererCommandReplay {
+    Inspector(CdpRendererCommandReplayDispatch),
+    PerformanceGetMetrics,
+    SetScriptExecutionDisabled { disabled: bool },
 }
 
 impl RendererCommandDescriptor {
@@ -33,11 +40,37 @@ impl RendererCommandDescriptor {
     pub(crate) fn from_frontend_policy(
         frontend_payload: String,
         policy: CdpRendererCommandPolicy,
+        response_delivery: RendererInspectorResponseDelivery,
     ) -> Self {
         Self {
             replacement: policy.replacement(),
-            replay_dispatch: policy.replay_dispatch(),
-            response_delivery: policy.response_delivery(),
+            replay: RendererCommandReplay::Inspector(policy.replay_dispatch()),
+            response_delivery,
+            frontend_payload,
+        }
+    }
+
+    pub(crate) fn performance_get_metrics(
+        frontend_payload: String,
+        policy: CdpRendererCommandPolicy,
+    ) -> Self {
+        Self {
+            replacement: policy.replacement(),
+            replay: RendererCommandReplay::PerformanceGetMetrics,
+            response_delivery: RendererInspectorResponseDelivery::DevToolsSession,
+            frontend_payload,
+        }
+    }
+
+    pub(crate) fn set_script_execution_disabled(
+        frontend_payload: String,
+        policy: CdpRendererCommandPolicy,
+        disabled: bool,
+    ) -> Self {
+        Self {
+            replacement: policy.replacement(),
+            replay: RendererCommandReplay::SetScriptExecutionDisabled { disabled },
+            response_delivery: RendererInspectorResponseDelivery::DevToolsSession,
             frontend_payload,
         }
     }
@@ -53,7 +86,7 @@ impl RendererCommandDescriptor {
         let policy = command.renderer_policy();
         Ok(Self {
             replacement: policy.replacement(),
-            replay_dispatch: policy.replay_dispatch(),
+            replay: RendererCommandReplay::Inspector(policy.replay_dispatch()),
             // Internal Classic/BiDi adapters own their reply channel. A
             // method being eligible for frontend session output must never
             // redirect a synthesized adapter command implicitly.
@@ -66,8 +99,8 @@ impl RendererCommandDescriptor {
         self.replacement
     }
 
-    pub(crate) const fn replay_dispatch(&self) -> CdpRendererCommandReplayDispatch {
-        self.replay_dispatch
+    pub(crate) fn replay(&self) -> &RendererCommandReplay {
+        &self.replay
     }
 
     pub(crate) const fn response_delivery(&self) -> RendererInspectorResponseDelivery {
@@ -193,7 +226,7 @@ impl PreparedRendererCallDispatch {
 #[derive(Debug)]
 pub(crate) struct PreparedRendererCallReplay {
     correlation: RendererCommandCorrelation,
-    dispatch: CdpRendererCommandReplayDispatch,
+    replay: RendererCommandReplay,
     response_delivery: RendererInspectorResponseDelivery,
     frontend_payload: String,
     response_sender: RendererRuntimeInspectorResponseSender,
@@ -240,14 +273,14 @@ impl PreparedRendererCallReplay {
         self,
     ) -> (
         RendererCommandCorrelation,
-        CdpRendererCommandReplayDispatch,
+        RendererCommandReplay,
         RendererInspectorResponseDelivery,
         String,
         RendererRuntimeInspectorResponseSender,
     ) {
         (
             self.correlation,
-            self.dispatch,
+            self.replay,
             self.response_delivery,
             self.frontend_payload,
             self.response_sender,
@@ -398,7 +431,7 @@ impl<T> PendingRendererCommandRegistry<T> {
                     renderer_call_id,
                     dispatched_attachment_id: Some(new_attachment_id),
                 },
-                dispatch: call.descriptor.replay_dispatch(),
+                replay: call.descriptor.replay().clone(),
                 response_delivery: call.descriptor.response_delivery(),
                 frontend_payload: call.descriptor.frontend_payload().to_owned(),
                 response_sender,
@@ -817,15 +850,17 @@ mod tests {
             CdpRendererCommandReplacement::Replay
         );
         assert_eq!(
-            registered.replay_dispatch(),
-            CdpRendererCommandReplayDispatch::Direct
+            registered.replay(),
+            &RendererCommandReplay::Inspector(CdpRendererCommandReplayDispatch::Direct)
         );
         assert_eq!(registered.frontend_payload(), expected_payload);
 
         let add_binding = descriptor(32, "Runtime.addBinding");
         assert_eq!(
-            add_binding.replay_dispatch(),
-            CdpRendererCommandReplayDispatch::ResolveRuntimeContext
+            add_binding.replay(),
+            &RendererCommandReplay::Inspector(
+                CdpRendererCommandReplayDispatch::ResolveRuntimeContext
+            )
         );
     }
 
@@ -841,38 +876,90 @@ mod tests {
         let descriptor = RendererCommandDescriptor::from_frontend_policy(
             normalized_payload.clone(),
             ingress.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
         );
 
         assert_eq!(descriptor.frontend_payload(), normalized_payload);
         assert_eq!(
-            descriptor.replay_dispatch(),
-            CdpRendererCommandReplayDispatch::ResolveRuntimeContext,
+            descriptor.replay(),
+            &RendererCommandReplay::Inspector(
+                CdpRendererCommandReplayDispatch::ResolveRuntimeContext
+            ),
             "descriptor construction must consume the ingress policy instead of deriving it from the normalized payload"
         );
     }
 
     #[test]
-    fn synthesized_adapter_command_keeps_its_explicit_reply_sink() {
+    fn concrete_target_capability_selects_the_response_sink() {
         let frontend = ParsedCdpCommand::parse_str(
             r#"{"id":33,"method":"Debugger.getScriptSource","params":{"scriptId":"1"}}"#,
         )
         .expect("frontend command must parse at ingress");
-        let frontend_descriptor = RendererCommandDescriptor::from_frontend_policy(
+        let page_descriptor = RendererCommandDescriptor::from_frontend_policy(
             frontend.json().to_owned(),
             frontend.renderer_policy(),
+            RendererInspectorResponseDelivery::DevToolsSession,
+        );
+        let worker_descriptor = RendererCommandDescriptor::from_frontend_policy(
+            frontend.json().to_owned(),
+            frontend.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
         );
         let adapter_descriptor =
             RendererCommandDescriptor::from_synthesized_payload(frontend.json().to_owned())
                 .expect("adapter payload must be valid Inspector JSON");
 
         assert_eq!(
-            frontend_descriptor.response_delivery(),
+            page_descriptor.response_delivery(),
             RendererInspectorResponseDelivery::DevToolsSession
+        );
+        assert_eq!(
+            worker_descriptor.response_delivery(),
+            RendererInspectorResponseDelivery::CommandReply,
+            "the method catalog must not choose a Page-only output capability for Workers"
         );
         assert_eq!(
             adapter_descriptor.response_delivery(),
             RendererInspectorResponseDelivery::CommandReply,
             "method policy must not redirect an internal adapter reply to a frontend session"
+        );
+    }
+
+    #[test]
+    fn non_v8_page_io_descriptors_keep_typed_replay_operations() {
+        let performance = ParsedCdpCommand::parse_str(
+            r#"{"id":34,"method":"Performance.getMetrics","params":{}}"#,
+        )
+        .expect("Performance command must parse at ingress");
+        let performance_descriptor = RendererCommandDescriptor::performance_get_metrics(
+            performance.json().to_owned(),
+            performance.renderer_policy(),
+        );
+        assert_eq!(
+            performance_descriptor.replay(),
+            &RendererCommandReplay::PerformanceGetMetrics
+        );
+        assert_eq!(
+            performance_descriptor.response_delivery(),
+            RendererInspectorResponseDelivery::DevToolsSession
+        );
+
+        let emulation = ParsedCdpCommand::parse_str(
+            r#"{"id":35,"method":"Emulation.setScriptExecutionDisabled","params":{"value":true}}"#,
+        )
+        .expect("Emulation command must parse at ingress");
+        let emulation_descriptor = RendererCommandDescriptor::set_script_execution_disabled(
+            emulation.json().to_owned(),
+            emulation.renderer_policy(),
+            true,
+        );
+        assert_eq!(
+            emulation_descriptor.replay(),
+            &RendererCommandReplay::SetScriptExecutionDisabled { disabled: true }
+        );
+        assert_eq!(
+            emulation_descriptor.response_delivery(),
+            RendererInspectorResponseDelivery::DevToolsSession
         );
     }
 
@@ -898,6 +985,7 @@ mod tests {
                 RendererCommandDescriptor::from_frontend_policy(
                     frontend.json().to_owned(),
                     frontend.renderer_policy(),
+                    RendererInspectorResponseDelivery::DevToolsSession,
                 ),
             )
             .unwrap();

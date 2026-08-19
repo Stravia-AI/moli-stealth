@@ -427,6 +427,9 @@ mod tests {
         let mut messages = Vec::new();
 
         for resume in resumes {
+            let resume_id = resume["id"]
+                .as_u64()
+                .expect("Debugger.resume test command must have a numeric id");
             let resume_session_id = resume.get("sessionId").cloned();
             let paused = ctx
                 .wait_for_scheduler_message("pause preceding Debugger.resume", |message| {
@@ -439,6 +442,7 @@ mod tests {
                 .await;
             messages.push(paused);
 
+            let response_start = ctx.sent.len();
             let resume_step = ctx.conn.start_command_dispatch(&resume.to_string());
             let (mut resume_messages, scheduler_events) = tokio::time::timeout(
                 DOM_DEBUGGER_COMMAND_TIMEOUT,
@@ -447,6 +451,14 @@ mod tests {
             .await
             .expect("Debugger.resume should complete after its matching pause");
             assert!(scheduler_events.is_empty(), "{scheduler_events:?}");
+            if !resume_messages
+                .iter()
+                .any(|message| message["id"] == json!(resume_id))
+            {
+                ctx.wait_for_test_command_response(resume_id, response_start)
+                    .await;
+                resume_messages.push(ctx.take_response_by_id(resume_id));
+            }
             messages.append(&mut resume_messages);
         }
 

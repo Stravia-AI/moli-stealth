@@ -10,6 +10,7 @@ use super::protocol_support::{
 use super::{CompletedPageCommand, Page, PendingDevToolsIoCommandDispatch, PendingPageCommand};
 use crate::renderer::{
     RendererPageCommand, RendererPageCookieFacadeSnapshotReply, RendererPageReply,
+    RendererRuntimeInspectorResponseSender,
 };
 use moli_renderer_v8::network::BrowserResourceRuntime;
 
@@ -249,6 +250,28 @@ impl Page {
                 disabled,
             );
         Self::pending_devtools_io_command_dispatch(route)
+    }
+
+    /// Publishes the terminal Emulation response through the concrete
+    /// renderer DevTools session that owns this Page attachment.
+    pub fn start_set_script_execution_disabled_from_io_with_response(
+        &self,
+        inspector_session_id: Option<String>,
+        disabled: bool,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> Result<PendingDevToolsIoCommandDispatch> {
+        let attachment = self.renderer_agent_attachment_id.ok_or_else(|| {
+            anyhow::anyhow!("Emulation IO response requires a renderer attachment")
+        })?;
+        let route = self
+            .handle
+            .enqueue_set_script_execution_disabled_io_command_with_response(
+                attachment,
+                inspector_session_id,
+                disabled,
+                response,
+            );
+        Ok(Self::pending_devtools_io_command_dispatch(route))
     }
 
     pub async fn set_bypass_content_security_policy_async(&mut self, bypass: bool) -> Result<()> {

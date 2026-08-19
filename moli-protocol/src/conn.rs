@@ -537,7 +537,7 @@ pub(crate) use state::{
     ParkedTargetOwnerState, PendingBidiChannelListener, PendingInspectorAwait,
     PendingRendererCommandKey, PerformanceTimeDomain, PreparedRendererCallDispatch, ProfilerAction,
     ProfilerInspectorCommand, RendererCommandCorrelation, RendererCommandDescriptor,
-    RendererDocumentLifecycleObservation, RendererDocumentLifecycleObserver,
+    RendererCommandReplay, RendererDocumentLifecycleObservation, RendererDocumentLifecycleObserver,
     RendererMainDocumentCommitSeed, RendererPageResidenceIdentity,
     ServiceWorkerRuntimeExceptionSnapshot, ServiceWorkerTargetState, SharedWorkerTargetState,
     SiteDataClearOptions, TargetIdentityState, TargetInitialEmptyDocumentCreator, TargetOwnerState,

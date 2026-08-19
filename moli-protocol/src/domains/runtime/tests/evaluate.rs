@@ -673,13 +673,23 @@ async fn loaded_page_terminate_execution_dispatches_through_v8_runtime_agent() {
         "method": "Runtime.terminateExecution"
     })
     .to_string();
+    let response_start = ctx.sent.len();
     let step = ctx.conn.start_command_dispatch(&raw);
     assert!(
         matches!(&step, CdpCommandTaskStep::Pending(_)),
         "Runtime.terminateExecution should dispatch to V8 Runtime agent instead of failing as UnknownMethod"
     );
 
-    let (messages, scheduler_events) = complete_command_task_step_for_test(&mut ctx, step).await;
+    let (mut messages, scheduler_events) =
+        complete_command_task_step_for_test(&mut ctx, step).await;
+    if !messages
+        .iter()
+        .any(|message| message["id"] == json!(11_009))
+    {
+        ctx.wait_for_test_command_response(11_009, response_start)
+            .await;
+        messages.push(ctx.take_response_by_id(11_009));
+    }
     assert!(
         scheduler_events.is_empty(),
         "Runtime.terminateExecution should not enqueue scheduler work: {scheduler_events:?}"

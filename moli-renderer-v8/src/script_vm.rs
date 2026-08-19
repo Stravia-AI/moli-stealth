@@ -6900,6 +6900,14 @@ impl ScriptVm {
             });
     }
 
+    pub(super) fn ensure_runtime_inspector_session(&mut self, inspector_session_id: Option<&str>) {
+        let renderer_document_isolate = self.renderer_document_isolate.clone();
+        let page_inspector = &self.page_inspector;
+        renderer_document_isolate.with_renderer_document_isolate_and_inspector_mut(|_, backend| {
+            page_inspector.ensure_frontend_session(backend, inspector_session_id);
+        });
+    }
+
     pub(super) fn page_diagnostics_snapshot(&mut self) -> Result<RendererPageDiagnosticsSnapshot> {
         self.sync_runtime_observable_source_events()?;
         let runtime_observable_source = self

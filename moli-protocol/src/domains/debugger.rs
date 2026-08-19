@@ -249,9 +249,11 @@ mod tests {
         .await;
         assert_eq!(timer["result"]["result"]["value"], json!(true));
 
+        let response_start = ctx.sent.len();
         let scheduler_events = ctx
             .process_command_only_async(json!({"id": 22, "method": "Debugger.pause"}))
             .await;
+        ctx.wait_for_test_command_response(22, response_start).await;
         let pause_position = ctx
             .sent
             .iter()

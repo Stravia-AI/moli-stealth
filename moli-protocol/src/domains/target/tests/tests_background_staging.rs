@@ -4104,11 +4104,15 @@ async fn same_context_background_session_can_reenable_its_own_script_execution_b
             .as_ref()
             .expect("active browser context");
         assert!(!active.script_execution_disabled);
+        // A completed renderer call may retain its monotonic correlation
+        // allocator in the parked session; only the effective setting must
+        // collapse back to the default.
         assert!(
             active
                 .parked_page_session_state(&second_target_id)
-                .is_none(),
-            "script execution re-enable should collapse staged parked state back to default"
+                .is_none_or(|state| !state.script_execution_disabled),
+            "script execution re-enable should clear the staged parked setting: {:#?}",
+            active.parked_page_session_state(&second_target_id)
         );
     }
 

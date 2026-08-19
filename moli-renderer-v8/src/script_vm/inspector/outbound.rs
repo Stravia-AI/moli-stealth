@@ -418,7 +418,28 @@ impl InspectorOutbound {
         callback: RendererRuntimeInspectorResponseSender,
         delivery: RendererInspectorResponseDelivery,
     ) {
-        let callback = match delivery {
+        let callback = self.route_frontend_response(callback, delivery);
+        self.register_response_callback(callback);
+    }
+
+    /// Publishes a synchronous non-V8 agent response through this concrete
+    /// frontend session's attachment-scoped output capability.
+    pub(in crate::script_vm) fn publish_devtools_session_response(
+        &self,
+        callback: RendererRuntimeInspectorResponseSender,
+        message: Value,
+    ) {
+        let callback = self
+            .route_frontend_response(callback, RendererInspectorResponseDelivery::DevToolsSession);
+        let _ = callback.send(message);
+    }
+
+    fn route_frontend_response(
+        &self,
+        callback: RendererRuntimeInspectorResponseSender,
+        delivery: RendererInspectorResponseDelivery,
+    ) -> RendererRuntimeInspectorResponseSender {
+        match delivery {
             RendererInspectorResponseDelivery::CommandReply => callback,
             RendererInspectorResponseDelivery::DevToolsSession => {
                 let host = self
@@ -437,8 +458,7 @@ impl InspectorOutbound {
                     .expect("frontend session output requires an attachment-scoped Page journal");
                 callback.route_to_devtools_session_output(host)
             }
-        };
-        self.register_response_callback(callback);
+        }
     }
 
     pub(in crate::script_vm) fn cancel_response_callback(&self, call_id: i32) {

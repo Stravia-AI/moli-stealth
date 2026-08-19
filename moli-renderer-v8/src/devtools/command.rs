@@ -149,10 +149,14 @@ pub struct RendererDevToolsIoCommandEnvelope {
 
 pub(crate) enum RendererDevToolsIoCommandPayload {
     Inspector(RendererInspectorCommandEnvelope),
-    PerformanceGetMetrics,
+    PerformanceGetMetrics {
+        result: Value,
+        response: Option<RendererRuntimeInspectorResponseSender>,
+    },
     SetScriptExecutionDisabled {
         control: RendererScriptExecutionControl,
         disabled: bool,
+        response: Option<RendererRuntimeInspectorResponseSender>,
     },
 }
 
@@ -179,7 +183,24 @@ impl RendererDevToolsIoCommandEnvelope {
     pub(crate) fn performance_get_metrics(ticket: RendererInspectorIngressTicket) -> Self {
         Self::new_agent_command(
             ticket,
-            RendererDevToolsIoCommandPayload::PerformanceGetMetrics,
+            RendererDevToolsIoCommandPayload::PerformanceGetMetrics {
+                result: Value::Null,
+                response: None,
+            },
+        )
+    }
+
+    pub(crate) fn performance_get_metrics_with_response(
+        ticket: RendererInspectorIngressTicket,
+        result: Value,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> Self {
+        Self::new_agent_command(
+            ticket,
+            RendererDevToolsIoCommandPayload::PerformanceGetMetrics {
+                result,
+                response: Some(response),
+            },
         )
     }
 
@@ -190,7 +211,27 @@ impl RendererDevToolsIoCommandEnvelope {
     ) -> Self {
         Self::new_agent_command(
             ticket,
-            RendererDevToolsIoCommandPayload::SetScriptExecutionDisabled { control, disabled },
+            RendererDevToolsIoCommandPayload::SetScriptExecutionDisabled {
+                control,
+                disabled,
+                response: None,
+            },
+        )
+    }
+
+    pub(crate) fn set_script_execution_disabled_with_response(
+        ticket: RendererInspectorIngressTicket,
+        control: RendererScriptExecutionControl,
+        disabled: bool,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> Self {
+        Self::new_agent_command(
+            ticket,
+            RendererDevToolsIoCommandPayload::SetScriptExecutionDisabled {
+                control,
+                disabled,
+                response: Some(response),
+            },
         )
     }
 
@@ -219,7 +260,7 @@ impl RendererDevToolsIoCommandEnvelope {
             RendererDevToolsIoCommandPayload::Inspector(_) => {
                 RendererDevToolsIoCommandKind::Inspector
             }
-            RendererDevToolsIoCommandPayload::PerformanceGetMetrics => {
+            RendererDevToolsIoCommandPayload::PerformanceGetMetrics { .. } => {
                 RendererDevToolsIoCommandKind::Performance
             }
             RendererDevToolsIoCommandPayload::SetScriptExecutionDisabled { .. } => {

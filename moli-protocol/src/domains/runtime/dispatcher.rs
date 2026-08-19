@@ -1871,8 +1871,11 @@ fn start_pending_runtime_io_inspector_dispatch(
     inspector_json: String,
 ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
-        let descriptor =
-            RendererCommandDescriptor::from_frontend_policy(inspector_json, cmd.renderer_policy());
+        let descriptor = RendererCommandDescriptor::from_frontend_policy(
+            inspector_json,
+            cmd.renderer_policy(),
+            RendererInspectorResponseDelivery::DevToolsSession,
+        );
         conn.start_runtime_io_protocol_message_for_session_owner_with_deferred_response(
             cmd.session_id,
             descriptor,
@@ -1890,8 +1893,11 @@ fn start_pending_runtime_context_resolved_inspector_dispatch(
     inspector_json: String,
 ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
-        let descriptor =
-            RendererCommandDescriptor::from_frontend_policy(inspector_json, cmd.renderer_policy());
+        let descriptor = RendererCommandDescriptor::from_frontend_policy(
+            inspector_json,
+            cmd.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
+        );
         conn.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
             cmd.session_id,
             action,
@@ -1913,8 +1919,11 @@ fn start_pending_runtime_inspector_dispatch(
     inspector_json: String,
 ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
-        let descriptor =
-            RendererCommandDescriptor::from_frontend_policy(inspector_json, cmd.renderer_policy());
+        let descriptor = RendererCommandDescriptor::from_frontend_policy(
+            inspector_json,
+            cmd.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
+        );
         conn.start_runtime_protocol_message_for_session_owner_with_deferred_response(
             cmd.session_id,
             descriptor,
@@ -1931,8 +1940,11 @@ fn start_shared_worker_frontend_inspector_dispatch(
     inspector_json: String,
 ) -> Result<PendingSharedWorkerRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
-        let descriptor =
-            RendererCommandDescriptor::from_frontend_policy(inspector_json, cmd.renderer_policy());
+        let descriptor = RendererCommandDescriptor::from_frontend_policy(
+            inspector_json,
+            cmd.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
+        );
         conn.start_shared_worker_runtime_protocol_message_for_session_with_deferred_response(
             cmd.session_id,
             descriptor,
@@ -1952,8 +1964,11 @@ fn start_service_worker_frontend_inspector_dispatch(
     inspector_json: String,
 ) -> Result<PendingServiceWorkerRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
-        let descriptor =
-            RendererCommandDescriptor::from_frontend_policy(inspector_json, cmd.renderer_policy());
+        let descriptor = RendererCommandDescriptor::from_frontend_policy(
+            inspector_json,
+            cmd.renderer_policy(),
+            RendererInspectorResponseDelivery::CommandReply,
+        );
         conn.start_service_worker_runtime_protocol_message_for_session_with_deferred_response(
             cmd.session_id,
             descriptor,
@@ -7615,6 +7630,7 @@ fn start_pending_runtime_binding_inspector_phase(
                 let descriptor = RendererCommandDescriptor::from_frontend_policy(
                     inspector_json,
                     task.renderer_policy,
+                    RendererInspectorResponseDelivery::CommandReply,
                 );
                 conn.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
                     completed.session_id(),
@@ -7635,6 +7651,7 @@ fn start_pending_runtime_binding_inspector_phase(
                 let descriptor = RendererCommandDescriptor::from_frontend_policy(
                     inspector_json,
                     task.renderer_policy,
+                    RendererInspectorResponseDelivery::CommandReply,
                 );
                 conn.start_runtime_protocol_message_for_session_owner_with_deferred_response(
                     completed.session_id(),

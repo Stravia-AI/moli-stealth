@@ -23,7 +23,6 @@ use moli_core::{
     RendererOutputStreamIdentity, RendererOutputTransportMessage, runtime::NavigationRuntimeConfig,
 };
 use moli_fetch::FetchConfig;
-use moli_page_types::RendererInspectorResponseDelivery;
 #[cfg(test)]
 use std::net::SocketAddr;
 #[cfg(test)]
@@ -382,7 +381,22 @@ impl TestContext {
     pub async fn process_async(&mut self, msg: impl serde::Serialize) {
         let command = ParsedCdpCommand::from_serializable(msg)
             .expect("test message must be a valid serialisable CDP command");
+        let command_id = command.request().id();
+        let session_id = command.request().session_id().map(str::to_owned);
+        let response_start = self.sent.len();
         Box::pin(self.process_parsed_command_like_scheduler(&command, true)).await;
+        Box::pin(self.route_ready_test_command_response(command_id, response_start)).await;
+        if self
+            .conn
+            .renderer_runtime_command_cause_for_frontend(session_id.as_deref(), command_id)
+            .is_some()
+            && !self
+                .pending_runtime_deferred_replies
+                .iter()
+                .any(|pending| pending.command_id() == Some(command_id))
+        {
+            Box::pin(self.wait_for_test_command_response(command_id, response_start)).await;
+        }
     }
 
     /// Dispatch one command and keep running the real scheduler inputs until
@@ -393,15 +407,8 @@ impl TestContext {
             .expect("test message must be a valid serialisable CDP command");
         let command_id = command.request().id();
         let response_start = self.sent.len();
-        let response_uses_renderer_publication = command.renderer_policy().response_delivery()
-            == RendererInspectorResponseDelivery::DevToolsSession;
         Box::pin(self.process_parsed_command_like_scheduler(&command, true)).await;
-        Box::pin(self.wait_for_test_command_response(
-            command_id,
-            response_start,
-            response_uses_renderer_publication,
-        ))
-        .await;
+        Box::pin(self.wait_for_test_command_response(command_id, response_start)).await;
     }
 
     #[cfg(test)]
@@ -1224,39 +1231,50 @@ impl TestContext {
         TestSchedulerTurnOutcome::Processed(input_kind)
     }
 
-    async fn wait_for_test_command_response(
+    pub(crate) async fn wait_for_test_command_response(
         &mut self,
         command_id: u64,
         response_start: usize,
-        response_uses_renderer_publication: bool,
     ) {
-        loop {
-            if self
-                .sent
-                .get(response_start..)
-                .unwrap_or_default()
-                .iter()
-                .any(|message| message.get("id").and_then(Value::as_u64) == Some(command_id))
-            {
-                return;
+        let response = tokio::time::timeout(TEST_SCHEDULER_INPUT_TIMEOUT, async {
+            loop {
+                if self
+                    .sent
+                    .get(response_start..)
+                    .unwrap_or_default()
+                    .iter()
+                    .any(|message| message.get("id").and_then(Value::as_u64) == Some(command_id))
+                {
+                    return;
+                }
+                assert!(
+                    matches!(
+                        Box::pin(self.wait_for_one_test_scheduler_turn()).await,
+                        TestSchedulerTurnOutcome::Processed(_)
+                    ),
+                    "CDP command `{command_id}` lost all scheduler input before its response"
+                );
             }
-            assert!(
-                self.background_navigation_scheduler_enabled
-                    || response_uses_renderer_publication
-                    || self
-                        .pending_runtime_deferred_replies
-                        .iter()
-                        .any(|pending| pending.command_id() == Some(command_id)),
-                "CDP command `{command_id}` completed without producing a response or a typed pending reply"
-            );
-            assert!(
-                matches!(
-                    Box::pin(self.wait_for_one_test_scheduler_turn()).await,
-                    TestSchedulerTurnOutcome::Processed(_)
-                ),
-                "CDP command `{command_id}` lost all scheduler input before its response"
-            );
-        }
+        })
+        .await;
+        assert!(
+            response.is_ok(),
+            "timed out waiting for CDP command `{command_id}` response"
+        );
+    }
+
+    async fn route_ready_test_command_response(&mut self, command_id: u64, response_start: usize) {
+        while !self
+            .sent
+            .get(response_start..)
+            .unwrap_or_default()
+            .iter()
+            .any(|message| message.get("id").and_then(Value::as_u64) == Some(command_id))
+            && matches!(
+                Box::pin(self.run_one_ready_test_scheduler_turn()).await,
+                TestSchedulerTurnOutcome::Processed(_)
+            )
+        {}
     }
 
     async fn wait_for_one_test_scheduler_turn(&mut self) -> TestSchedulerTurnOutcome {

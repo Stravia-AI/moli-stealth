@@ -224,15 +224,13 @@ impl RendererInspectorSessionExecutorLocal {
     }
 
     fn dispatch_io_command(&self, context_group_id: i32, command: RendererInspectorIoCommand) {
-        let session = (command.kind() == RendererDevToolsIoCommandKind::Inspector).then(|| {
-            let session_key = command.ticket().session().clone();
-            self.sessions
-                .borrow()
-                .get(&(context_group_id, session_key))
-                .filter(|session| session.agent_token == command.agent_token)
-                .cloned()
-        });
-        let session = session.flatten();
+        let session_key = command.ticket().session().clone();
+        let session = self
+            .sessions
+            .borrow()
+            .get(&(context_group_id, session_key))
+            .filter(|session| session.agent_token == command.agent_token)
+            .cloned();
         self.dispatch_io_command_to_session(command, session);
     }
 
@@ -265,14 +263,12 @@ impl RendererInspectorSessionExecutorLocal {
         let Some(command) = self.target.io_ref().claim_for_interrupt() else {
             return;
         };
-        let session = (command.kind() == RendererDevToolsIoCommandKind::Inspector).then(|| {
-            let session_key = command.ticket().session();
-            self.interrupt_sessions
-                .borrow()
-                .get(&(command.agent_token, session_key.clone()))
-                .cloned()
-        });
-        let session = session.flatten();
+        let session_key = command.ticket().session();
+        let session = self
+            .interrupt_sessions
+            .borrow()
+            .get(&(command.agent_token, session_key.clone()))
+            .cloned();
         self.dispatch_io_command_to_session(command, session);
     }
 
@@ -280,14 +276,12 @@ impl RendererInspectorSessionExecutorLocal {
         let Some(command) = self.target.io_ref().claim_for_owner() else {
             return;
         };
-        let session = (command.kind() == RendererDevToolsIoCommandKind::Inspector).then(|| {
-            let session_key = command.ticket().session();
-            self.interrupt_sessions
-                .borrow()
-                .get(&(command.agent_token, session_key.clone()))
-                .cloned()
-        });
-        let session = session.flatten();
+        let session_key = command.ticket().session();
+        let session = self
+            .interrupt_sessions
+            .borrow()
+            .get(&(command.agent_token, session_key.clone()))
+            .cloned();
         self.dispatch_io_command_to_session(command, session);
     }
 
@@ -337,13 +331,25 @@ impl RendererInspectorSessionExecutorLocal {
         let mut first_dispatch = self.target.io_ref().first_dispatch_guard(&mut command);
         match command.kind() {
             RendererDevToolsIoCommandKind::Performance => {
-                assert!(
-                    matches!(
-                        command.into_payload(),
-                        RendererDevToolsIoCommandPayload::PerformanceGetMetrics
-                    ),
-                    "Performance IO command kind must carry a Performance payload"
-                );
+                let RendererDevToolsIoCommandPayload::PerformanceGetMetrics { result, response } =
+                    command.into_payload()
+                else {
+                    unreachable!("Performance IO command kind must carry a Performance payload")
+                };
+                if let Some(response) = response {
+                    let Some(session) = session else {
+                        send_inspector_dispatch_error(
+                            Some(response),
+                            "Inspector session is not available",
+                        );
+                        return;
+                    };
+                    let call_id = response.call_id();
+                    session.outbound.publish_devtools_session_response(
+                        response,
+                        json!({ "id": call_id, "result": result }),
+                    );
+                }
                 first_dispatch.release();
                 return;
             }
@@ -351,11 +357,26 @@ impl RendererInspectorSessionExecutorLocal {
                 let RendererDevToolsIoCommandPayload::SetScriptExecutionDisabled {
                     control,
                     disabled,
+                    response,
                 } = command.into_payload()
                 else {
                     unreachable!("Emulation IO command kind must carry an Emulation payload")
                 };
+                if response.is_some() && session.is_none() {
+                    send_inspector_dispatch_error(response, "Inspector session is not available");
+                    return;
+                }
                 control.set_disabled(disabled);
+                if let Some(response) = response {
+                    let call_id = response.call_id();
+                    session
+                        .expect("a checked frontend Emulation command must have a session")
+                        .outbound
+                        .publish_devtools_session_response(
+                            response,
+                            json!({ "id": call_id, "result": {} }),
+                        );
+                }
                 first_dispatch.release();
                 return;
             }

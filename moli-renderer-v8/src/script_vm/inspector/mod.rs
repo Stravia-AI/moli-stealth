@@ -171,6 +171,15 @@ impl DocumentInspectorBinding {
         }
     }
 
+    pub(super) fn ensure_frontend_session(
+        &self,
+        backend: &mut RendererInspectorIsolateBackend,
+        inspector_session_id: Option<&str>,
+    ) {
+        self.agent
+            .ensure_frontend(backend, inspector_session_key(inspector_session_id));
+    }
+
     pub(super) fn end_runtime_command_output_for_session(
         &self,
         inspector_session_id: Option<&str>,

@@ -204,6 +204,33 @@ impl RendererPageHandle {
         )
     }
 
+    #[doc(hidden)]
+    pub fn enqueue_performance_get_metrics_io_command_with_response(
+        &self,
+        attachment: RendererAgentAttachmentId,
+        inspector_session_id: Option<String>,
+        result: serde_json::Value,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> RendererRuntimeInspectorIoCommandRoute {
+        debug_assert_eq!(
+            response.renderer_agent_attachment_id(),
+            Some(attachment),
+            "Performance response must belong to the command attachment"
+        );
+        self.devtools_target.io_ref().enqueue_command(
+            self.devtools_agent_token,
+            RendererDevToolsIoCommandEnvelope::performance_get_metrics_with_response(
+                RendererInspectorIngressTicket::new(
+                    Some(attachment),
+                    inspector_session_id,
+                    RendererInspectorCommandRoute::Io,
+                ),
+                result,
+                response,
+            ),
+        )
+    }
+
     pub fn enqueue_runtime_inspector_main_command(
         &self,
         envelope: RendererInspectorCommandEnvelope,
@@ -238,6 +265,34 @@ impl RendererPageHandle {
                 ),
                 self.script_execution_control.clone(),
                 disabled,
+            ),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_set_script_execution_disabled_io_command_with_response(
+        &self,
+        attachment: RendererAgentAttachmentId,
+        inspector_session_id: Option<String>,
+        disabled: bool,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> RendererRuntimeInspectorIoCommandRoute {
+        debug_assert_eq!(
+            response.renderer_agent_attachment_id(),
+            Some(attachment),
+            "Emulation response must belong to the command attachment"
+        );
+        self.devtools_target.io_ref().enqueue_command(
+            self.devtools_agent_token,
+            RendererDevToolsIoCommandEnvelope::set_script_execution_disabled_with_response(
+                RendererInspectorIngressTicket::new(
+                    Some(attachment),
+                    inspector_session_id,
+                    RendererInspectorCommandRoute::Io,
+                ),
+                self.script_execution_control.clone(),
+                disabled,
+                response,
             ),
         )
     }

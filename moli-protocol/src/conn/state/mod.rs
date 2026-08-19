@@ -87,7 +87,7 @@ pub(crate) use javascript_dialog::{
 pub(crate) use pending_renderer_command::{
     DuplicatePendingRendererCommand, PendingRendererCommandKey, PreparedRendererCallDispatch,
     PreparedRendererCallTermination, RegisterRendererCallError, RendererCommandCorrelation,
-    RendererCommandDescriptor,
+    RendererCommandDescriptor, RendererCommandReplay,
 };
 pub(crate) use profiler::{ProfilerAction, ProfilerInspectorCommand};
 pub(crate) use service_worker_lifetime::{

@@ -856,6 +856,28 @@ impl Page {
         )
     }
 
+    /// Publishes the terminal `Performance.getMetrics` response through the
+    /// concrete renderer DevTools session that owns this Page attachment.
+    pub fn start_performance_get_metrics_from_io_with_response(
+        &self,
+        inspector_session_id: Option<String>,
+        result: Value,
+        response: RendererRuntimeInspectorResponseSender,
+    ) -> Result<PendingDevToolsIoCommandDispatch> {
+        let attachment = self
+            .renderer_agent_attachment_id
+            .ok_or_else(|| anyhow!("Performance IO response requires a renderer attachment"))?;
+        let route = self
+            .handle
+            .enqueue_performance_get_metrics_io_command_with_response(
+                attachment,
+                inspector_session_id,
+                result,
+                response,
+            );
+        Ok(Self::pending_devtools_io_command_dispatch(route))
+    }
+
     pub fn cached_performance_metric_snapshot(&self) -> RendererPerformanceMetricSnapshot {
         self.page_state.performance_metric_snapshot().clone()
     }
