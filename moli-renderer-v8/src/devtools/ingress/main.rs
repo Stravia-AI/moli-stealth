@@ -674,8 +674,32 @@ mod tests {
     use super::*;
     use crate::{
         devtools::pause::RendererInspectorPauseBridge,
-        runtime::{RendererInspectorIngressTicket, RendererRuntimeInspectorAsyncCompletion},
+        runtime::{
+            RendererInspectorIngressTicket, RendererPageReply, RendererPageState,
+            RendererPerformanceMetricSnapshot, RendererRuntimeCommandOutput,
+            RendererRuntimeInspectorAsyncCompletion,
+        },
+        types::ScriptExecutionReport,
     };
+
+    fn page_state() -> Arc<RendererPageState> {
+        let url = url::Url::parse("about:blank").expect("test URL");
+        Arc::new(RendererPageState {
+            requested_url: url.clone(),
+            navigation_initiator_url: None,
+            navigation_redirected: false,
+            navigation_redirect_count: 0,
+            final_url: url,
+            document_title: String::new(),
+            status: 200,
+            headers: Vec::new(),
+            script_execution: Arc::new(ScriptExecutionReport::default()),
+            idle_override: None,
+            service_worker_client_id: 0,
+            dedicated_worker_running_worker_isolate_count: 0,
+            performance_metric_snapshot: RendererPerformanceMetricSnapshot::default(),
+        })
+    }
 
     fn ingress() -> RendererInspectorMainIngress {
         let pause_bridge = RendererInspectorPauseBridge::default();
@@ -870,10 +894,24 @@ mod tests {
             "the V8 command must remain behind the Page agent first-dispatch boundary"
         );
 
-        ingress.first_dispatch_guard(&page).release();
+        let output = RendererCommandTurnOutput::new(
+            RendererPageReply::Unit,
+            page_state(),
+            RendererRuntimeCommandOutput::default(),
+            None,
+            None,
+        )
+        .expect("test Page-agent output")
+        .hold_until_protocol_handoff(ingress.first_dispatch_guard(&page));
+        assert!(
+            ingress.claim_for_pause().is_none(),
+            "settled Page output must retain the lane until protocol consumes it"
+        );
+
+        let (_completion, _predecessor) = output.into_completion_and_predecessor();
         let v8 = ingress
             .claim_for_pause()
-            .expect("the V8 command should follow Page first-dispatch");
+            .expect("the V8 command should follow the Page protocol handoff");
         assert_eq!(
             v8.nested_dispatch(),
             RendererDevToolsMainNestedDispatch::InspectorSession

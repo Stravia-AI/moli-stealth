@@ -52,7 +52,7 @@ pub(super) fn bind_active_nested_main_page(entry: &mut LivePageEntry) -> ActiveN
 
 pub(crate) fn dispatch_nested_main_page_command(
     command: RendererPageCommand,
-    mut first_dispatch: RendererInspectorMainFirstDispatchGuard,
+    first_dispatch: RendererInspectorMainFirstDispatchGuard,
 ) -> Result<RendererCommandTurnOutput> {
     let active = ACTIVE_NESTED_MAIN_PAGE
         .try_with(|active| active.borrow().clone())
@@ -60,9 +60,6 @@ pub(crate) fn dispatch_nested_main_page_command(
         .flatten()
         .ok_or_else(|| anyhow!("nested Main receiver has no active Page owner stack"))?;
 
-    // Release the per-session lane at the actual agent dispatch boundary, not
-    // when the pause loop merely claims the queued command.
-    let _post_dispatch_wake = first_dispatch.release_for_dispatch();
     // SAFETY: `bind_active_nested_main_page` installs this pointer immediately
     // around the owner-local Page dispatch that can enter V8. A normal debugger
     // pause synchronously suspends that outer dispatch, and this callback runs
@@ -73,11 +70,18 @@ pub(crate) fn dispatch_nested_main_page_command(
         .ok_or_else(|| anyhow!("nested Main Page pointer was unexpectedly null"))?;
     let reply: RendererPageReply = page_vm.dispatch_renderer_page_command(command)?;
     let page_state = active.entry_slot.active_page_state()?;
-    RendererCommandTurnOutput::new(
+    let output = RendererCommandTurnOutput::new(
         reply,
         page_state,
         RendererRuntimeCommandOutput::default(),
         None,
         None,
-    )
+    )?;
+    // Chromium's synchronous non-V8 agent dispatch sends its response before
+    // returning to the nested Main receiver. Moli decodes the typed reply in
+    // the protocol actor, so retain the receiver slot with the immutable
+    // result. Consuming or abandoning that result releases fail-open; the
+    // actor cannot observe a later renderer publication before it has handled
+    // this handoff.
+    Ok(output.hold_until_protocol_handoff(first_dispatch))
 }

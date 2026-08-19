@@ -1,4 +1,5 @@
 use super::*;
+use crate::devtools::ingress::main::RendererInspectorMainFirstDispatchGuard;
 use crate::native_bridge::{
     PendingRuntimeObservableConsoleSourceEvent, RuntimeObservableContextToken,
 };
@@ -1573,6 +1574,13 @@ impl RendererCommandTurnCompletion {
 pub struct RendererCommandTurnOutput {
     completion: RendererCommandTurnCompletion,
     renderer_output_predecessor: Option<RendererOutputFence>,
+    // A nested synchronous DevTools agent call must keep its per-session Main
+    // receiver slot until the protocol actor owns the settled result. This is
+    // deliberately distinct from a post-response continuation: dropping the
+    // result at the protocol handoff is enough to preserve receiver order,
+    // while waiting for the frontend response would deadlock multi-stage
+    // commands that need to enter the same receiver again.
+    protocol_handoff: Option<Box<RendererInspectorMainFirstDispatchGuard>>,
 }
 
 impl RendererCommandTurnOutput {
@@ -1604,7 +1612,20 @@ impl RendererCommandTurnOutput {
                 post_response_continuation,
             },
             renderer_output_predecessor,
+            protocol_handoff: None,
         })
+    }
+
+    pub(crate) fn hold_until_protocol_handoff(
+        mut self,
+        handoff: RendererInspectorMainFirstDispatchGuard,
+    ) -> Self {
+        debug_assert!(
+            self.protocol_handoff.is_none(),
+            "a renderer command turn may hold only one protocol handoff"
+        );
+        self.protocol_handoff = Some(Box::new(handoff));
+        self
     }
 
     #[doc(hidden)]
@@ -1646,7 +1667,12 @@ impl RendererCommandTurnOutput {
     pub fn into_completion_and_predecessor(
         self,
     ) -> (RendererCommandTurnCompletion, Option<RendererOutputFence>) {
-        (self.completion, self.renderer_output_predecessor)
+        let Self {
+            completion,
+            renderer_output_predecessor,
+            protocol_handoff: _,
+        } = self;
+        (completion, renderer_output_predecessor)
     }
 
     pub fn into_reply_and_state(self) -> (RendererPageReply, Arc<RendererPageState>) {
