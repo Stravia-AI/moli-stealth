@@ -336,7 +336,12 @@ pub struct PendingRuntimeProtocolMessageDispatch {
     route: RuntimeProtocolMessagePageRoute,
     pending: PendingRuntimeProtocolMessageDispatchKind,
     deferred_response_rx: Option<RuntimeInspectorResponseReceiver>,
-    response_delivery: RendererInspectorResponseDelivery,
+    // Main commands that fall back to the Page owner still complete through
+    // the typed per-command reply capability.
+    owner_response_delivery: RendererInspectorResponseDelivery,
+    // A command claimed directly by the nested/IO Inspector receiver may use
+    // the attachment-scoped DevTools session output capability instead.
+    inspector_response_delivery: RendererInspectorResponseDelivery,
 }
 
 enum PendingRuntimeProtocolMessageDispatchKind {
@@ -537,12 +542,20 @@ impl PendingRuntimeProtocolMessageDispatch {
                 .await
                 .map_err(|error| format!("runtime inspector dispatch failed: {error}"))?,
         };
+        let response_delivery = if matches!(
+            completion,
+            moli_core::page::CompletedRuntimeInspectorCommandDispatch::Inspector
+        ) {
+            self.inspector_response_delivery
+        } else {
+            self.owner_response_delivery
+        };
         Ok(CompletedRuntimeProtocolMessageDispatch {
             session_id: self.session_id,
             route: self.route,
             completion,
             deferred_response_rx: self.deferred_response_rx,
-            response_delivery: self.response_delivery,
+            response_delivery,
         })
     }
 }
@@ -859,6 +872,19 @@ impl CdpConnection {
         }
         self.target_devtools_session_state_for_session(session_id)?
             .renderer_call_for_frontend(cdp_request_id)
+    }
+
+    fn renderer_command_descriptor_for_renderer_if_attachment_matches_for_session_owner(
+        &self,
+        session_id: Option<&str>,
+        renderer_call_id: RendererCallId,
+        dispatched_attachment_id: RendererAgentAttachmentId,
+    ) -> Option<RendererCommandDescriptor> {
+        self.target_devtools_session_state_for_session(session_id)?
+            .renderer_command_descriptor_for_renderer_if_attachment_matches(
+                renderer_call_id,
+                Some(dispatched_attachment_id),
+            )
     }
 
     pub(crate) fn renderer_runtime_command_cause_for_frontend(
@@ -2995,6 +3021,18 @@ impl CdpConnection {
             let Some(renderer_call_id) = message.renderer_call_id() else {
                 return true;
             };
+            let result_object_group = self
+                .renderer_command_descriptor_for_renderer_if_attachment_matches_for_session_owner(
+                    session_id,
+                    renderer_call_id,
+                    dispatched_attachment_id,
+                )
+                .and_then(|descriptor| {
+                    self.runtime_result_object_group_for_renderer_command_descriptor(
+                        session_id,
+                        &descriptor,
+                    )
+                });
             let Some(correlation) = self
                 .take_frontend_command_for_renderer_if_attachment_matches_for_session_owner(
                     session_id,
@@ -3011,8 +3049,49 @@ impl CdpConnection {
                 return false;
             };
             message.value_mut()["id"] = json!(correlation.frontend_command_id().get());
+            if message.value().get("result").is_some() {
+                if let Some(object_group) = result_object_group.as_deref() {
+                    self.register_runtime_remote_object_ids_from_value_for_session_owner_with_group(
+                        session_id,
+                        message.value(),
+                        object_group,
+                    );
+                } else {
+                    self.register_runtime_remote_object_ids_from_value_for_session_owner(
+                        session_id,
+                        message.value(),
+                    );
+                }
+            }
             true
         });
+    }
+
+    fn runtime_result_object_group_for_renderer_command_descriptor(
+        &self,
+        session_id: Option<&str>,
+        descriptor: &RendererCommandDescriptor,
+    ) -> Option<String> {
+        let command = serde_json::from_str::<Value>(descriptor.frontend_payload()).ok()?;
+        let method = command.get("method")?.as_str()?;
+        let params = command.get("params")?.as_object()?;
+        match method {
+            "Runtime.evaluate" => params
+                .get("objectGroup")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            "Runtime.callFunctionOn" => params
+                .get("objectGroup")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                .or_else(|| {
+                    self.runtime_remote_object_group_for_session_owner(
+                        session_id,
+                        params.get("objectId")?.as_str()?,
+                    )
+                }),
+            _ => None,
+        }
     }
 
     fn start_or_enqueue_registered_runtime_inspector_response_ready(
@@ -4377,7 +4456,8 @@ impl CdpConnection {
             route,
             pending,
             deferred_response_rx: None,
-            response_delivery: RendererInspectorResponseDelivery::CommandReply,
+            owner_response_delivery: RendererInspectorResponseDelivery::CommandReply,
+            inspector_response_delivery: RendererInspectorResponseDelivery::CommandReply,
         })
     }
 
@@ -4464,7 +4544,8 @@ impl CdpConnection {
             route,
             pending: PendingRuntimeProtocolMessageDispatchKind::Routable(pending),
             deferred_response_rx: Some(response_receiver),
-            response_delivery,
+            owner_response_delivery: response_delivery,
+            inspector_response_delivery: response_delivery,
         })
     }
 
@@ -4492,7 +4573,8 @@ impl CdpConnection {
             route,
             pending: PendingRuntimeProtocolMessageDispatchKind::Page(pending),
             deferred_response_rx: None,
-            response_delivery: RendererInspectorResponseDelivery::CommandReply,
+            owner_response_delivery: RendererInspectorResponseDelivery::CommandReply,
+            inspector_response_delivery: RendererInspectorResponseDelivery::CommandReply,
         })
     }
 
@@ -4502,6 +4584,24 @@ impl CdpConnection {
         action: &str,
         descriptor: RendererCommandDescriptor,
         command_id: u64,
+    ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
+        let inspector_response_delivery = descriptor.response_delivery();
+        self.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response_and_nested_delivery(
+            session_id,
+            action,
+            descriptor,
+            command_id,
+            inspector_response_delivery,
+        )
+    }
+
+    pub(crate) fn start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response_and_nested_delivery(
+        &mut self,
+        session_id: Option<&str>,
+        action: &str,
+        descriptor: RendererCommandDescriptor,
+        command_id: u64,
+        inspector_response_delivery: RendererInspectorResponseDelivery,
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
         let route = self.runtime_protocol_message_page_route_for_session_owner(session_id)?;
         let (correlation, raw_json, response_sender, response_receiver, response_delivery) = self
@@ -4528,7 +4628,7 @@ impl CdpConnection {
             Some(action.to_owned()),
             raw_json,
             response_sender,
-            response_delivery,
+            inspector_response_delivery,
         ) {
             Ok(pending) => pending,
             Err(error) => {
@@ -4543,7 +4643,8 @@ impl CdpConnection {
             route,
             pending: PendingRuntimeProtocolMessageDispatchKind::Routable(pending),
             deferred_response_rx: Some(response_receiver),
-            response_delivery,
+            owner_response_delivery: response_delivery,
+            inspector_response_delivery,
         })
     }
 
@@ -4837,7 +4938,8 @@ impl CdpConnection {
                     route,
                     pending,
                     deferred_response_rx: None,
-                    response_delivery,
+                    owner_response_delivery: response_delivery,
+                    inspector_response_delivery: response_delivery,
                 },
                 Err(error) => {
                     self.settle_renderer_replay_error(
@@ -6132,7 +6234,7 @@ mod tests {
 
         let attachment_id = RendererAgentAttachmentId::allocate();
         let frontend = ParsedCdpCommand::parse_str(
-            r#"{"id":44,"method":"Debugger.getScriptSource","params":{"scriptId":"7"}}"#,
+            r#"{"id":44,"method":"Runtime.evaluate","params":{"expression":"({ answer: 42 })","objectGroup":"nested-main"}}"#,
         )
         .expect("frontend command should parse");
         let prepared = conn
@@ -6156,7 +6258,12 @@ mod tests {
             })),
             RendererRuntimeInspectorMessage::protocol(json!({
                 "id": correlation.renderer_call_id().get(),
-                "result": { "scriptSource": "source" },
+                "result": {
+                    "result": {
+                        "type": "object",
+                        "objectId": "nested-main-object"
+                    }
+                },
             })),
             RendererRuntimeInspectorMessage::protocol(json!({
                 "id": correlation.renderer_call_id().get() + 1,
@@ -6179,6 +6286,14 @@ mod tests {
             panic!("expected a protocol response");
         };
         assert_eq!(response.value()["id"], json!(44));
+        assert_eq!(
+            conn.runtime_remote_object_group_for_session_owner(
+                Some("SID-session-output"),
+                "nested-main-object",
+            ),
+            Some("nested-main".to_owned()),
+            "session output must retain Runtime object ownership metadata",
+        );
         assert!(
             conn.renderer_runtime_command_cause_for_frontend(Some("SID-session-output"), 44,)
                 .is_none(),

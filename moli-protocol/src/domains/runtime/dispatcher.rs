@@ -1892,18 +1892,35 @@ fn start_pending_runtime_context_resolved_inspector_dispatch(
     action: &'static str,
     inspector_json: String,
 ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
+    start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
+        conn,
+        cmd,
+        action,
+        inspector_json,
+        RendererInspectorResponseDelivery::CommandReply,
+    )
+}
+
+fn start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
+    conn: &mut CdpConnection,
+    cmd: &Cmd<'_>,
+    action: &'static str,
+    inspector_json: String,
+    nested_response_delivery: RendererInspectorResponseDelivery,
+) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
     if let Some(command_id) = cmd.id {
         let descriptor = RendererCommandDescriptor::from_frontend_policy(
             inspector_json,
             cmd.renderer_policy(),
             RendererInspectorResponseDelivery::CommandReply,
         );
-        conn.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
-            cmd.session_id,
-            action,
-            descriptor,
-            command_id,
-        )
+        conn.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response_and_nested_delivery(
+                cmd.session_id,
+                action,
+                descriptor,
+                command_id,
+                nested_response_delivery,
+            )
     } else {
         conn.start_runtime_protocol_message_with_context_resolution_for_session_owner(
             cmd.session_id,
@@ -1990,13 +2007,14 @@ fn start_cdp_devtools_script_runtime_command(
     let (browser_context_id, target_id) =
         devtools_runtime_owner_identity_for_session(conn, cmd.session_id);
     let action = command_kind.action();
+    let await_promise = runtime_command_awaits_promise(cmd, action);
     let command = match command_kind {
         RuntimeDevToolsScriptCommand::Evaluate => {
             DevToolsCommand::EvaluateScript(build_cdp_evaluate_script_command(
                 cmd,
                 target_id.as_deref(),
                 browser_context_id.as_deref(),
-                runtime_command_awaits_promise(cmd, action),
+                await_promise,
             ))
         }
         RuntimeDevToolsScriptCommand::CallFunctionOn => {
@@ -2019,7 +2037,12 @@ fn start_cdp_devtools_script_runtime_command(
         cmd,
         command,
         inspector_json,
-        runtime_command_awaits_promise(cmd, action),
+        await_promise,
+        if await_promise {
+            RendererInspectorResponseDelivery::CommandReply
+        } else {
+            RendererInspectorResponseDelivery::DevToolsSession
+        },
     )
 }
 
@@ -2043,6 +2066,7 @@ fn start_devtools_runtime_command(
     command: DevToolsCommand,
     inspector_json: String,
     wait_for_deferred_reply: bool,
+    response_delivery: RendererInspectorResponseDelivery,
 ) -> RuntimeCommandTaskStep {
     let (action, action_label, await_promise) = match &command {
         DevToolsCommand::EvaluateScript(command) => {
@@ -2082,11 +2106,12 @@ fn start_devtools_runtime_command(
             ));
         }
     };
-    let pending = match start_pending_runtime_context_resolved_inspector_dispatch(
+    let pending = match start_pending_runtime_context_resolved_inspector_dispatch_with_delivery(
         conn,
         cmd,
         action_label,
         inspector_json,
+        response_delivery,
     ) {
         Ok(pending) => pending,
         Err(message) => {
@@ -4593,6 +4618,7 @@ async fn start_protocol_neutral_runtime_command(
                     command,
                     inspector_json,
                     runtime_command_awaits_promise(&cmd, RuntimeAction::Evaluate),
+                    RendererInspectorResponseDelivery::CommandReply,
                 ),
                 Err(message) => {
                     RuntimeCommandTaskStep::Complete(runtime_inspector_error_plan(cmd.id, message))
@@ -4649,6 +4675,7 @@ async fn start_protocol_neutral_runtime_command(
                             command,
                             inspector_json,
                             runtime_command_awaits_promise(&cmd, RuntimeAction::CallFunctionOn),
+                            RendererInspectorResponseDelivery::CommandReply,
                         ),
                         Err(message) => RuntimeCommandTaskStep::Complete(
                             runtime_inspector_error_plan(cmd.id, message),
@@ -10249,6 +10276,7 @@ mod protocol_neutral_tests {
     };
     use moli_core::RendererOwnerLocalHostId;
     use moli_core::page::{MAX_INSPECTOR_PROTOCOL_VALUE_DEPTH, RendererSharedWorkerConsoleMessage};
+    use moli_page_types::RendererInspectorResponseDelivery;
     use moli_shared_worker::SharedWorkerInstanceId;
     use serde_json::{Value, json};
 
@@ -11254,6 +11282,7 @@ mod protocol_neutral_tests {
             DevToolsCommand::EvaluateScript(command),
             cmd.json.to_owned(),
             false,
+            RendererInspectorResponseDelivery::CommandReply,
         );
 
         let RuntimeCommandTaskStep::Complete(plan) = step else {
@@ -11297,6 +11326,7 @@ mod protocol_neutral_tests {
             DevToolsCommand::EvaluateScript(command),
             cmd.json.to_owned(),
             true,
+            RendererInspectorResponseDelivery::CommandReply,
         );
 
         let RuntimeCommandTaskStep::Complete(plan) = step else {

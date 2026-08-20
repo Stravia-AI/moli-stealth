@@ -155,6 +155,7 @@ mod tests {
                 None,
                 r#"{"id":1,"method":"Runtime.evaluate"}"#.to_owned(),
                 RendererRuntimeInspectorResponseSender::new(1, response_tx),
+                moli_page_types::RendererInspectorResponseDelivery::CommandReply,
             ),
         );
 

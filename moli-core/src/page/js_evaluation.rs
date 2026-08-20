@@ -521,11 +521,6 @@ impl Page {
     ) -> Result<PendingRuntimeInspectorCommandDispatch> {
         match inspector_route {
             RendererInspectorCommandRoute::MainThread => {
-                debug_assert_eq!(
-                    response_delivery,
-                    RendererInspectorResponseDelivery::CommandReply,
-                    "Main Inspector responses have not migrated to session output"
-                );
                 let route = self.handle.enqueue_runtime_inspector_main_command(
                     RendererInspectorCommandEnvelope::new_main_protocol(
                         RendererInspectorIngressTicket::new(
@@ -536,6 +531,7 @@ impl Page {
                         owner_context_resolution_action,
                         raw_json,
                         deferred_response,
+                        response_delivery,
                     ),
                 );
                 Ok(Self::pending_main_ingress_runtime_inspector_command_dispatch(route))

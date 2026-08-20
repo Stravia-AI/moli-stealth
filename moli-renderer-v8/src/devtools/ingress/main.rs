@@ -95,6 +95,15 @@ impl RendererInspectorMainCommand {
             .pause_effect()
     }
 
+    pub(crate) fn inspector_response_delivery(
+        &self,
+    ) -> moli_page_types::RendererInspectorResponseDelivery {
+        self.envelope
+            .inspector_envelope()
+            .expect("an Inspector response delivery requires an Inspector payload")
+            .inspector_response_delivery()
+    }
+
     pub(crate) fn nested_dispatch(&self) -> RendererDevToolsMainNestedDispatch {
         self.envelope.nested_dispatch()
     }
@@ -706,6 +715,7 @@ mod tests {
                 action.map(str::to_owned),
                 raw_json.to_owned(),
                 RendererRuntimeInspectorResponseSender::new(1, response_tx),
+                moli_page_types::RendererInspectorResponseDelivery::CommandReply,
             ),
         )
     }

@@ -312,8 +312,11 @@ impl RendererInspectorSessionExecutorLocal {
             command.pause_effect(),
             Some(command.response().call_id()),
         );
+        let response_delivery = command.inspector_response_delivery();
         let (_, raw_json, response) = command.into_protocol_parts();
-        session.outbound.register_response_callback(response);
+        session
+            .outbound
+            .register_frontend_response_callback(response, response_delivery);
         let _post_dispatch_wake = first_dispatch.release_for_dispatch();
         v8_session.dispatch_protocol_message(v8::inspector::StringView::from(raw_json.as_bytes()));
         self.target.pause_ref().record_v8_state_update(

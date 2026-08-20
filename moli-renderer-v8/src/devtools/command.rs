@@ -132,6 +132,9 @@ pub struct RendererInspectorCommandEnvelope {
     first_dispatch: RendererInspectorFirstDispatchLifecycle,
     pause_effect: RendererInspectorPauseCommandEffect,
     main_dispatch_boundary: RendererInspectorMainDispatchBoundary,
+    /// Terminal sink when an Inspector session directly claims this command.
+    /// A Main command claimed by the Page owner keeps its typed reply sink.
+    inspector_response_delivery: RendererInspectorResponseDelivery,
     payload: RendererInspectorCommandPayload,
 }
 
@@ -398,7 +401,6 @@ enum RendererInspectorCommandPayload {
     Io {
         raw_json: String,
         response: Option<RendererRuntimeInspectorResponseSender>,
-        response_delivery: RendererInspectorResponseDelivery,
     },
 }
 
@@ -416,6 +418,7 @@ impl RendererInspectorCommandEnvelope {
             first_dispatch: RendererInspectorFirstDispatchLifecycle::OrderedUntilFirstDispatch,
             pause_effect: RendererInspectorPauseCommandEffect::None,
             main_dispatch_boundary: RendererInspectorMainDispatchBoundary::PageOwner,
+            inspector_response_delivery: RendererInspectorResponseDelivery::CommandReply,
             payload: RendererInspectorCommandPayload::MainThread(command),
         }
     }
@@ -426,6 +429,7 @@ impl RendererInspectorCommandEnvelope {
         owner_context_resolution_action: Option<String>,
         raw_json: String,
         response: RendererRuntimeInspectorResponseSender,
+        inspector_response_delivery: RendererInspectorResponseDelivery,
     ) -> Self {
         assert_eq!(
             ticket.route(),
@@ -457,6 +461,7 @@ impl RendererInspectorCommandEnvelope {
             first_dispatch: RendererInspectorFirstDispatchLifecycle::OrderedUntilFirstDispatch,
             pause_effect: RendererInspectorPauseCommandEffect::from_message(message.as_ref()),
             main_dispatch_boundary,
+            inspector_response_delivery,
             payload: RendererInspectorCommandPayload::MainThread(command),
         }
     }
@@ -479,11 +484,8 @@ impl RendererInspectorCommandEnvelope {
             first_dispatch: RendererInspectorFirstDispatchLifecycle::OrderedUntilFirstDispatch,
             pause_effect: RendererInspectorPauseCommandEffect::from_message(message.as_ref()),
             main_dispatch_boundary: RendererInspectorMainDispatchBoundary::InspectorSession,
-            payload: RendererInspectorCommandPayload::Io {
-                raw_json,
-                response,
-                response_delivery,
-            },
+            inspector_response_delivery: response_delivery,
+            payload: RendererInspectorCommandPayload::Io { raw_json, response },
         }
     }
 
@@ -497,6 +499,10 @@ impl RendererInspectorCommandEnvelope {
 
     pub(crate) fn pause_effect(&self) -> RendererInspectorPauseCommandEffect {
         self.pause_effect
+    }
+
+    pub(crate) fn inspector_response_delivery(&self) -> RendererInspectorResponseDelivery {
+        self.inspector_response_delivery
     }
 
     pub(crate) fn can_dispatch_at_nested_inspector_session_boundary(&self) -> bool {
@@ -606,13 +612,10 @@ impl RendererInspectorCommandEnvelope {
     }
 
     pub(crate) fn io_response_delivery(&self) -> RendererInspectorResponseDelivery {
-        let RendererInspectorCommandPayload::Io {
-            response_delivery, ..
-        } = &self.payload
-        else {
+        let RendererInspectorCommandPayload::Io { .. } = &self.payload else {
             panic!("a MainThread Inspector envelope cannot enter IO dispatch");
         };
-        *response_delivery
+        self.inspector_response_delivery
     }
 
     pub(crate) fn take_io_response(&mut self) -> Option<RendererRuntimeInspectorResponseSender> {
