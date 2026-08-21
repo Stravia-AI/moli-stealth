@@ -73,6 +73,7 @@ class TextField:
 @dataclass
 class TuiState:
     fields: dict[str, TextField]
+    title: str = "Moli ChatGPT CDP TUI"
     focus: str = "email"
     logged_in: bool = False
     busy: bool = False
@@ -290,7 +291,7 @@ def draw(stdscr: Any, state: TuiState, colors: dict[str, int]) -> None:
         stdscr.refresh()
         return
 
-    safe_add(stdscr, 0, 2, "Moli ChatGPT CDP TUI", colors["title"])
+    safe_add(stdscr, 0, 2, state.title, colors["title"])
     safe_add(stdscr, 1, 2, state.status[: width - 4], colors["dim"] if not state.busy else 0)
     safe_add(stdscr, 2, 0, "-" * (width - 1))
 
@@ -388,7 +389,7 @@ def submit_current(state: TuiState, backend: Backend) -> None:
             state.status = "email is required"
             add_message(state, "error", state.status)
             return
-        if not password:
+        if not password and bool(getattr(backend, "requires_password", True)):
             state.status = "password is required"
             add_message(state, "error", state.status)
             return
@@ -424,7 +425,8 @@ def run_tui_with_backend(stdscr: Any, args: argparse.Namespace, backend_cls: Any
             "password": TextField("password", "Password", os.environ.get("CHATGPT_PASSWORD", ""), secret=True),
             "auth_code": TextField("auth_code", "Auth Code"),
             "prompt": TextField("prompt", "Prompt", args.prompt),
-        }
+        },
+        title=str(getattr(args, "tui_title", "Moli ChatGPT CDP TUI")),
     )
     backend = backend_cls(args, events)
     try:
