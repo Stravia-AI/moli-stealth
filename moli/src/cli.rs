@@ -39,13 +39,13 @@ pub struct FetchArgs {
     /// Select the fetch output format. `screenshot` writes a viewport PNG,
     /// `screenshot_full` writes a full-document PNG, and `pdf` writes a
     /// paginated PDF directly to stdout; all three require layout.
-    #[arg(short = 'd', long, value_enum)]
+    #[arg(short, long, value_enum)]
     pub dump: Option<DumpFormat>,
 
     #[arg(short = 'H', long = "header", value_name = "HEADER", value_parser = parse_request_header_arg)]
     pub headers: Vec<RequestHeaderArg>,
 
-    #[arg(short = 'n', long)]
+    #[arg(long)]
     pub noscript: bool,
 
     #[arg(long)]
@@ -63,7 +63,7 @@ pub struct FetchArgs {
     #[arg(long, value_enum, value_delimiter = ',')]
     pub strip_mode: Vec<StripModeChoice>,
 
-    #[arg(short = 'w', long, value_enum, default_value = "done")]
+    #[arg(long, value_enum, default_value = "done")]
     pub wait_until: FetchWaitUntil,
 
     /// Milliseconds to wait for a client-side replacement navigation after an
@@ -78,7 +78,7 @@ pub struct FetchArgs {
     )]
     pub redirect_wait_ms: u64,
 
-    #[arg(short = 's', long)]
+    #[arg(long)]
     pub wait_selector: Option<String>,
 
     #[arg(long)]
@@ -103,7 +103,7 @@ pub struct FetchArgs {
     /// replacement navigations, the selected lifecycle stage, response match,
     /// selector, and script waits share one absolute deadline. Network-idle and
     /// DOM-stable return the current page with a warning when it expires.
-    #[arg(short = 't', long, alias = "wait-ms", default_value_t = 25_000)]
+    #[arg(short, long, alias = "wait-ms", default_value_t = 25_000)]
     pub timeout: u64,
 
     #[command(flatten)]
@@ -194,10 +194,10 @@ pub struct ServeArgs {
     #[arg(long, default_value = "127.0.0.1")]
     pub host: String,
 
-    #[arg(short = 'p', long, default_value_t = 9222)]
+    #[arg(short, long, default_value_t = 9222)]
     pub port: u16,
 
-    #[arg(short = 't', long, default_value_t = 10)]
+    #[arg(short, long, default_value_t = 10)]
     pub timeout: u32,
 
     #[arg(long, default_value_t = 16)]
@@ -280,28 +280,28 @@ pub struct CommonArgs {
     #[arg(short = 'P', long)]
     pub profile_dir: Option<String>,
 
-    #[arg(short = 'i', long)]
+    #[arg(long)]
     pub image: bool,
 
-    #[arg(short = 'f', long)]
+    #[arg(long)]
     pub font: bool,
 
-    #[arg(short = 'a', long)]
+    #[arg(long)]
     pub audio: bool,
 
-    #[arg(short = 'v', long)]
+    #[arg(long)]
     pub video: bool,
 
-    #[arg(short = 'm', long)]
+    #[arg(long)]
     pub media: bool,
 
-    #[arg(short = 'T', long)]
+    #[arg(long)]
     pub text_track: bool,
 
     /// Fetch every optional image, font, audio, video, media, and text-track
     /// resource family.
     #[arg(
-        short = 'r',
+        short,
         long,
         env = "MOLI_RESOURCE",
         value_parser = clap::builder::BoolishValueParser::new()
@@ -316,14 +316,14 @@ pub struct CommonArgs {
     /// Without this flag Moli keeps deterministic compatibility
     /// geometry and does not construct layout or paint output.
     #[arg(
-        short = 'l',
+        short,
         long,
         env = "MOLI_LAYOUT",
         value_parser = clap::builder::BoolishValueParser::new()
     )]
     pub layout: bool,
 
-    #[arg(short = 'c', long = "cookie-file")]
+    #[arg(short, long = "cookie-file")]
     pub cookie_file: Vec<String>,
 
     #[arg(long)]
@@ -628,16 +628,16 @@ mod tests {
             "fetch",
             "-d",
             "markdown",
-            "-w",
+            "--wait-until",
             "load",
-            "-s",
+            "--wait-selector",
             "main",
             "-t",
             "5000",
-            "-n",
+            "--noscript",
             "-l",
-            "-i",
-            "-f",
+            "--image",
+            "--font",
             "-c",
             "jar.txt",
             "-P",
@@ -686,20 +686,22 @@ mod tests {
     }
 
     #[test]
-    fn every_optional_resource_family_groups_into_one_cluster() {
-        let grouped = Cli::parse_from(["moli", "fetch", "-ifavmT", "https://example.test/"]);
-
-        match grouped.command {
-            Commands::Fetch(args) => {
-                let common = args.common;
-                assert!(common.image);
-                assert!(common.font);
-                assert!(common.audio);
-                assert!(common.video);
-                assert!(common.media);
-                assert!(common.text_track);
-            }
-            other => panic!("expected fetch command, got {other:?}"),
+    fn removed_short_flags_are_rejected() {
+        for arguments in [
+            ["moli", "fetch", "-n", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-w", "load", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-s", "main", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-i", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-f", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-a", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-v", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-m", "https://example.test/"].as_slice(),
+            ["moli", "fetch", "-T", "https://example.test/"].as_slice(),
+        ] {
+            assert!(
+                Cli::try_parse_from(arguments.iter().copied()).is_err(),
+                "removed short flag parsed successfully: {arguments:?}"
+            );
         }
     }
 
