@@ -22,14 +22,16 @@ impl DocumentRuntime {
         stylesheet_task_sender: crate::page_task_queue::RendererPageStylesheetTaskSender,
         main_parser_continuation_sender: crate::page_task_queue::RendererPageMainParserContinuationSender,
     ) -> Self {
-        Self::from_dom_host_with_incarnation(
+        let mut runtime = Self::from_dom_host_with_incarnation(
             dom_host,
             DocumentRuntimeIncarnationIdentity::MainFrame(main_document_owner),
             page_task_tx,
             page_task_parser_boundary_injection_tx,
             stylesheet_task_sender,
             main_parser_continuation_sender,
-        )
+        );
+        runtime.replace_main_document_task_capabilities(main_document_owner);
+        runtime
     }
 
     pub(crate) fn main_frame_document_task_owner(

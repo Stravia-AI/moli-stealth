@@ -227,6 +227,10 @@ pub(crate) struct RendererPageMainDocumentRuntimeProducer {
 }
 
 impl RendererPageMainDocumentRuntimeProducer {
+    pub(crate) const fn document_owner(&self) -> FrameDocumentTaskOwner {
+        self.document_owner
+    }
+
     fn send_action(
         &self,
         action: RendererPageMainDocumentRuntimeAction,

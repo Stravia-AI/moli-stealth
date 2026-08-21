@@ -1941,14 +1941,10 @@ impl ScriptVmPageRealmBootstrap {
             .borrow_mut()
             .register_main_document_resource_loader(&initial_document_loader);
         document_runtime.set_cookie_store(initial_document_loader.request_client().cookie_store());
-        let main_runtime_route_bound =
-            document_runtime.bind_main_document_runtime_producer(main_document_owner);
-        document_runtime.bind_stylesheet_task_producer(main_document_owner);
-        document_runtime.bind_main_parser_continuation_producer(main_document_owner);
         assert_eq!(
-            main_runtime_route_bound,
+            document_runtime.has_main_document_runtime_route(),
             page_runtime_wake_tx.has_main_document_runtime_route(),
-            "main Document runtime producer binding must match the PageVm route capability"
+            "main Document runtime construction must match the PageVm route capability"
         );
         {
             let context_host = context_host.borrow();

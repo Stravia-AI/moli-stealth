@@ -515,29 +515,18 @@ impl JsContextHost {
             .expect("main document owner must exist before document.open() replacement");
         {
             let runtime: &mut DocumentRuntime = self;
-            runtime.commit_main_document_open(transition.current_owner());
+            let main_runtime_route_bound =
+                runtime.commit_main_document_open(transition.current_owner());
+            assert_eq!(
+                main_runtime_route_bound,
+                runtime.has_main_document_runtime_route(),
+                "document.open() must replace every main Document task capability"
+            );
             runtime.start_root_document_parser_stream();
         }
         self.dom_agent_state
             .reset_for_document_replacement(transition.current_owner().document_id);
         self.replace_main_document_resource_loader(transition);
-        let main_runtime_route_expected = {
-            let runtime: &DocumentRuntime = self;
-            runtime.has_main_document_runtime_route()
-        };
-        let main_runtime_route_bound = {
-            let runtime: &mut DocumentRuntime = self;
-            runtime.bind_main_document_runtime_producer(transition.current_owner())
-        };
-        assert_eq!(
-            main_runtime_route_bound, main_runtime_route_expected,
-            "document.open() must replace the exact main runtime producer with the owner transaction"
-        );
-        {
-            let runtime: &mut DocumentRuntime = self;
-            runtime.bind_stylesheet_task_producer(transition.current_owner());
-            runtime.bind_main_parser_continuation_producer(transition.current_owner());
-        }
         let rebound_meta_refresh = {
             let runtime: &mut DocumentRuntime = self;
             runtime.rebind_top_level_meta_refresh_after_document_open(transition.current_owner())

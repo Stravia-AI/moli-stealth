@@ -54,7 +54,6 @@ pub(crate) struct HostScriptScheduler {
     pending_failed_dynamic_scripts: VecDeque<FailedDynamicScript>,
     page_task_tx: Option<PageTaskSender>,
     main_document_runtime_producer: Option<RendererPageMainDocumentRuntimeProducer>,
-    main_document_runtime_target: Option<crate::frame_owner_model::FrameDocumentTaskOwner>,
     main_document_completion_recheck_turn_queued: bool,
     dynamic_module_job_turn_queued: bool,
     native_module_owner_event_turn_queued: bool,
@@ -301,7 +300,6 @@ impl Default for HostScriptScheduler {
             pending_failed_dynamic_scripts: VecDeque::new(),
             page_task_tx: None,
             main_document_runtime_producer: None,
-            main_document_runtime_target: None,
             main_document_completion_recheck_turn_queued: false,
             dynamic_module_job_turn_queued: false,
             native_module_owner_event_turn_queued: false,
@@ -424,7 +422,6 @@ impl HostScriptScheduler {
             self.pending_failed_dynamic_scripts.clear();
         }
         self.main_document_runtime_producer = None;
-        self.main_document_runtime_target = None;
         self.main_document_completion_recheck_turn_queued = false;
         self.dynamic_module_job_turn_queued = false;
         self.native_module_owner_event_turn_queued = false;
@@ -1227,18 +1224,17 @@ impl HostScriptScheduler {
         &mut self,
         owner: crate::frame_owner_model::FrameDocumentTaskOwner,
     ) -> bool {
-        let next_target = owner;
-        if self.main_document_runtime_target != Some(next_target) {
+        if self
+            .main_document_runtime_producer
+            .as_ref()
+            .is_none_or(|producer| producer.document_owner() != owner)
+        {
             self.main_document_completion_recheck_turn_queued = false;
         }
         self.main_document_runtime_producer = self
             .page_task_tx
             .as_ref()
             .map(|tx| tx.bind_main_document_runtime_producer(owner));
-        self.main_document_runtime_target = self
-            .main_document_runtime_producer
-            .as_ref()
-            .map(|_| next_target);
         self.dynamic_module_job_turn_queued = false;
         self.native_module_owner_event_turn_queued = false;
         self.admit_ready_dynamic_module_job();
@@ -1312,8 +1308,9 @@ impl HostScriptScheduler {
         owner: crate::frame_owner_model::FrameDocumentTaskOwner,
     ) -> bool {
         if self
-            .main_document_runtime_target
-            .is_none_or(|target_owner| target_owner != owner)
+            .main_document_runtime_producer
+            .as_ref()
+            .is_none_or(|producer| producer.document_owner() != owner)
         {
             return false;
         }

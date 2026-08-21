@@ -44,7 +44,7 @@ impl DocumentRuntime {
         self.main_document_script_preloads = store;
     }
 
-    pub(crate) fn bind_main_document_runtime_producer(
+    pub(super) fn bind_main_document_runtime_producer(
         &mut self,
         owner: crate::frame_owner_model::FrameDocumentTaskOwner,
     ) -> bool {
@@ -59,7 +59,7 @@ impl DocumentRuntime {
             .has_main_document_runtime_route()
     }
 
-    pub(crate) fn bind_stylesheet_task_producer(
+    pub(super) fn bind_stylesheet_task_producer(
         &mut self,
         owner: crate::frame_owner_model::FrameDocumentTaskOwner,
     ) {
@@ -72,6 +72,24 @@ impl DocumentRuntime {
                 let _ = completion_producer.send_blocking_completion(completion);
             })));
         self.stylesheet_lifecycle.task_producer = Some(producer);
+    }
+
+    /// Installs every Page task capability for one exact main Document as one
+    /// synchronous owner transaction. Callers cannot publish work while only
+    /// a subset of the runtime, stylesheet, and parser routes has advanced.
+    pub(crate) fn replace_main_document_task_capabilities(
+        &mut self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) -> bool {
+        assert_eq!(
+            self.main_frame_document_task_owner(),
+            Some(owner),
+            "main Document task capabilities must match the runtime incarnation"
+        );
+        let main_runtime_route_bound = self.bind_main_document_runtime_producer(owner);
+        self.bind_stylesheet_task_producer(owner);
+        self.bind_main_parser_continuation_producer(owner);
+        main_runtime_route_bound
     }
 
     pub(crate) fn enqueue_main_document_completion_recheck(
@@ -280,7 +298,7 @@ impl DocumentRuntime {
     }
 
     /// Completes the exact owner transaction started by [`Self::open_document`].
-    pub(crate) fn commit_main_document_open(&mut self, owner: FrameDocumentTaskOwner) {
+    pub(crate) fn commit_main_document_open(&mut self, owner: FrameDocumentTaskOwner) -> bool {
         assert!(
             matches!(
                 self.document_incarnation,
@@ -289,6 +307,7 @@ impl DocumentRuntime {
             "main Document open must invalidate its retired incarnation before commit"
         );
         self.document_incarnation = DocumentRuntimeIncarnationIdentity::MainFrame(owner);
+        self.replace_main_document_task_capabilities(owner)
     }
 
     pub(crate) fn parser_module_scripts(&self) -> &ModuleScriptContinuationStore {

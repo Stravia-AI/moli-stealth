@@ -39,7 +39,7 @@ impl MainParserContinuationState {
 }
 
 impl DocumentRuntime {
-    pub(crate) fn bind_main_parser_continuation_producer(&mut self, owner: FrameDocumentTaskOwner) {
+    pub(super) fn bind_main_parser_continuation_producer(&mut self, owner: FrameDocumentTaskOwner) {
         self.main_parser_continuation.producer =
             Some(self.main_parser_continuation.sender.bind_producer(owner));
         self.main_parser_continuation.admitted = false;
