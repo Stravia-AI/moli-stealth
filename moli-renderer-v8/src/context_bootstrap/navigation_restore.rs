@@ -11,6 +11,9 @@ use super::navigation_projection::set_history_length_from_visible_entries;
 use super::navigation_result::clear_active_cross_document_navigation_if_matches;
 use super::navigation_window::{window_history_for_holder, window_navigation_for_holder};
 use crate::native_bridge::NavigationHistoryEntrySeed;
+use moli_page_types::{
+    NavigationHistoryDocumentId, NavigationHistoryEntryId, NavigationHistoryEntryKey,
+};
 
 pub(crate) fn install_navigation_bootstrap_entry(
     scope: &mut v8::PinScope<'_, '_>,
@@ -57,8 +60,19 @@ pub(crate) fn install_navigation_bootstrap_entry_for_holder<'s>(
     }
     let current_entry = current_entry.unwrap_or_else(|| {
         current_state = Some(v8::null(scope).into());
-        let entry = create_navigation_entry(scope, "about:blank", None, None, None, 0, "", "");
-        let document_id = moli_page_types::NavigationHistoryDocumentId::allocate();
+        let entry_id = NavigationHistoryEntryId::allocate();
+        let entry_key = NavigationHistoryEntryKey::allocate();
+        let entry = create_navigation_entry(
+            scope,
+            "about:blank",
+            None,
+            None,
+            None,
+            0,
+            entry_id.as_str(),
+            entry_key.as_str(),
+        );
+        let document_id = NavigationHistoryDocumentId::allocate();
         set_navigation_entry_document_id(scope, entry, document_id.as_str());
         bind_navigation_entry_runtime_owner(scope, entry, owner);
         entry

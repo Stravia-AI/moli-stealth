@@ -43,7 +43,7 @@ pub(in crate::context_bootstrap) fn update_navigation_current_entry_for_same_doc
         LocationNavigationKind::Assign => {
             if should_replace_initial_child_entry {
                 let key = navigation_entry_key_value(scope, current_entry)
-                    .unwrap_or_else(new_navigation_entry_token);
+                    .unwrap_or_else(|| new_navigation_entry_key().as_str().to_owned());
                 let entry = create_navigation_entry(
                     scope,
                     href,
@@ -51,7 +51,7 @@ pub(in crate::context_bootstrap) fn update_navigation_current_entry_for_same_doc
                     navigation_state_json.as_deref(),
                     None,
                     current_navigation_index,
-                    &new_navigation_entry_token(),
+                    &new_navigation_entry_id(),
                     &key,
                 );
                 copy_navigation_entry_document_id(scope, current_entry, entry);
@@ -71,8 +71,8 @@ pub(in crate::context_bootstrap) fn update_navigation_current_entry_for_same_doc
                     navigation_state_json.as_deref(),
                     None,
                     next_navigation_index,
-                    &new_navigation_entry_token(),
-                    &new_navigation_entry_token(),
+                    &new_navigation_entry_id(),
+                    &new_navigation_entry_key(),
                 );
                 copy_navigation_entry_document_id(scope, current_entry, next_entry);
                 set_child_joint_top_index_for_entry(scope, owner, Some(next_entry));
@@ -92,7 +92,7 @@ pub(in crate::context_bootstrap) fn update_navigation_current_entry_for_same_doc
         }
         LocationNavigationKind::Replace => {
             let key = navigation_entry_key_value(scope, current_entry)
-                .unwrap_or_else(new_navigation_entry_token);
+                .unwrap_or_else(|| new_navigation_entry_key().as_str().to_owned());
             let entry = create_navigation_entry(
                 scope,
                 href,
@@ -100,7 +100,7 @@ pub(in crate::context_bootstrap) fn update_navigation_current_entry_for_same_doc
                 navigation_state_json.as_deref(),
                 None,
                 current_navigation_index,
-                &new_navigation_entry_token(),
+                &new_navigation_entry_id(),
                 &key,
             );
             copy_navigation_entry_document_id(scope, current_entry, entry);
@@ -164,8 +164,8 @@ pub(in crate::context_bootstrap) fn apply_navigation_navigate_same_document<'s>(
                 None,
                 None,
                 next_navigation_index,
-                &new_navigation_entry_token(),
-                &new_navigation_entry_token(),
+                &new_navigation_entry_id(),
+                &new_navigation_entry_key(),
             );
             if let Some(previous_entry) = previous_entry {
                 copy_navigation_entry_document_id(scope, previous_entry, next_entry);
@@ -191,7 +191,7 @@ pub(in crate::context_bootstrap) fn apply_navigation_navigate_same_document<'s>(
         LocationNavigationKind::Replace => {
             let key = previous_entry
                 .and_then(|entry| navigation_entry_key_value(scope, entry))
-                .unwrap_or_else(new_navigation_entry_token);
+                .unwrap_or_else(|| new_navigation_entry_key().as_str().to_owned());
             let entry = create_navigation_entry(
                 scope,
                 href,
@@ -199,7 +199,7 @@ pub(in crate::context_bootstrap) fn apply_navigation_navigate_same_document<'s>(
                 None,
                 None,
                 current_navigation_index,
-                &new_navigation_entry_token(),
+                &new_navigation_entry_id(),
                 &key,
             );
             if let Some(previous_entry) = previous_entry {

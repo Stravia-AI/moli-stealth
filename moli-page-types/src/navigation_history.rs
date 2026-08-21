@@ -2,6 +2,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use url::Url;
 
 static NEXT_NAVIGATION_HISTORY_DOCUMENT_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_NAVIGATION_HISTORY_ENTRY_ID: AtomicU64 = AtomicU64::new(1);
+static NEXT_NAVIGATION_HISTORY_ENTRY_KEY: AtomicU64 = AtomicU64::new(1);
 
 /// Opaque identity shared by session-history entries that belong to the same
 /// `Document`.
@@ -37,6 +39,89 @@ fn allocate_navigation_history_document_id(counter: &AtomicU64) -> NavigationHis
     NavigationHistoryDocumentId(format!("document-{raw}"))
 }
 
+/// Opaque identity for one Navigation API entry incarnation.
+///
+/// A replacement allocates a new id even when it retains the same session
+/// history slot and therefore the same [`NavigationHistoryEntryKey`]. This is
+/// deliberately independent from both the Document identity and history
+/// index.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NavigationHistoryEntryId(String);
+
+impl NavigationHistoryEntryId {
+    pub fn allocate() -> Self {
+        allocate_navigation_history_entry_id(&NEXT_NAVIGATION_HISTORY_ENTRY_ID)
+    }
+
+    pub fn from_serialized(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for NavigationHistoryEntryId {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+fn allocate_navigation_history_entry_id(counter: &AtomicU64) -> NavigationHistoryEntryId {
+    let raw = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("Navigation History entry id allocator exhausted");
+    NavigationHistoryEntryId(format!("entry-{raw}"))
+}
+
+/// Opaque identity for one session-history slot exposed to Navigation API.
+///
+/// Same-origin replacement retains the key; push and cross-origin
+/// replacement allocate a fresh key. The token is never derived from a URL,
+/// history index, or Document id.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct NavigationHistoryEntryKey(String);
+
+impl NavigationHistoryEntryKey {
+    pub fn allocate() -> Self {
+        allocate_navigation_history_entry_key(&NEXT_NAVIGATION_HISTORY_ENTRY_KEY)
+    }
+
+    pub fn from_serialized(token: String) -> Self {
+        Self(token)
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::ops::Deref for NavigationHistoryEntryKey {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        self.as_str()
+    }
+}
+
+fn allocate_navigation_history_entry_key(counter: &AtomicU64) -> NavigationHistoryEntryKey {
+    let raw = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("Navigation History entry key allocator exhausted");
+    NavigationHistoryEntryKey(format!("key-{raw}"))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NavigationHistorySerializedEntry {
     pub url: String,
@@ -46,8 +131,8 @@ pub struct NavigationHistorySerializedEntry {
     pub document_id: NavigationHistoryDocumentId,
     pub history_index: u32,
     pub index: u32,
-    pub id: String,
-    pub key: String,
+    pub id: NavigationHistoryEntryId,
+    pub key: NavigationHistoryEntryKey,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -112,8 +197,8 @@ pub fn initial_navigation_history_seed(
                 0,
                 0,
                 initial_document_id,
-                "entry-0",
-                "key-0",
+                NavigationHistoryEntryId::allocate(),
+                NavigationHistoryEntryKey::allocate(),
                 None,
                 None,
             ),
@@ -122,8 +207,8 @@ pub fn initial_navigation_history_seed(
                 1,
                 0,
                 current_document_id,
-                "entry-1",
-                "key-1",
+                NavigationHistoryEntryId::allocate(),
+                NavigationHistoryEntryKey::allocate(),
                 None,
                 None,
             ),
@@ -143,8 +228,8 @@ pub fn initial_navigation_history_seed(
         0,
         0,
         NavigationHistoryDocumentId::allocate(),
-        "entry-0",
-        "key-0",
+        NavigationHistoryEntryId::allocate(),
+        NavigationHistoryEntryKey::allocate(),
         None,
         None,
     )];
@@ -170,8 +255,8 @@ pub fn child_browsing_context_single_entry_seed(url: Option<&Url>) -> Navigation
                 0,
                 0,
                 NavigationHistoryDocumentId::allocate(),
-                "entry-0",
-                "key-0",
+                NavigationHistoryEntryId::allocate(),
+                NavigationHistoryEntryKey::allocate(),
                 None,
                 None,
             ),
@@ -180,8 +265,8 @@ pub fn child_browsing_context_single_entry_seed(url: Option<&Url>) -> Navigation
                 1,
                 0,
                 NavigationHistoryDocumentId::allocate(),
-                "entry-1",
-                "key-1",
+                NavigationHistoryEntryId::allocate(),
+                NavigationHistoryEntryKey::allocate(),
                 None,
                 None,
             ),
@@ -201,8 +286,8 @@ pub fn child_browsing_context_single_entry_seed(url: Option<&Url>) -> Navigation
         0,
         0,
         NavigationHistoryDocumentId::allocate(),
-        "entry-0",
-        "key-0",
+        NavigationHistoryEntryId::allocate(),
+        NavigationHistoryEntryKey::allocate(),
         None,
         None,
     )];
@@ -233,8 +318,8 @@ pub fn apply_child_browsing_context_navigation_to_entry_seed(
         next_index,
         current_navigation_index + 1,
         NavigationHistoryDocumentId::allocate(),
-        &format!("entry-{next_index}"),
-        &format!("key-{next_index}"),
+        NavigationHistoryEntryId::allocate(),
+        NavigationHistoryEntryKey::allocate(),
         history_state_json,
         navigation_state_json,
     ));
@@ -289,15 +374,14 @@ pub fn replace_child_browsing_context_navigation_in_entry_seed(
         .find(|entry| entry.history_index == current_index)
         .cloned();
     let next_document_id = NavigationHistoryDocumentId::allocate();
-    let next_key = replacement_entry_key(current_index, previous_entry.as_ref(), url);
-    let next_entry_id = next_document_id.as_str().to_owned();
+    let next_key = replacement_entry_key(previous_entry.as_ref(), url);
     let next_entry = navigation_history_entry(
         url.as_str(),
         current_index,
         current_navigation_index,
         next_document_id,
-        &next_entry_id,
-        &next_key,
+        NavigationHistoryEntryId::allocate(),
+        next_key,
         history_state_json,
         navigation_state_json,
     );
@@ -331,8 +415,8 @@ pub fn apply_child_browsing_context_javascript_url_navigation_to_entry_seed(
     };
     let next_document_id = NavigationHistoryDocumentId::allocate();
     let mut next_entry = previous_entry.clone();
-    next_entry.document_id = next_document_id.clone();
-    next_entry.id = next_document_id.as_str().to_owned();
+    next_entry.document_id = next_document_id;
+    next_entry.id = NavigationHistoryEntryId::allocate();
     if let Some(existing) = seed
         .entries
         .iter_mut()
@@ -368,8 +452,8 @@ pub fn cross_document_navigation_seed(
                 next_index,
                 current_navigation_index + 1,
                 NavigationHistoryDocumentId::allocate(),
-                &format!("entry-{next_index}"),
-                &format!("key-{next_index}"),
+                NavigationHistoryEntryId::allocate(),
+                NavigationHistoryEntryKey::allocate(),
                 None,
                 None,
             );
@@ -378,19 +462,14 @@ pub fn cross_document_navigation_seed(
         }
         NavigationHistoryMutation::Replace => {
             let next_document_id = NavigationHistoryDocumentId::allocate();
-            let next_key = replacement_entry_key(
-                current_index,
-                current_entry_snapshot.as_ref(),
-                destination_url,
-            );
-            let next_entry_id = next_document_id.as_str().to_owned();
+            let next_key = replacement_entry_key(current_entry_snapshot.as_ref(), destination_url);
             let entry = navigation_history_entry(
                 destination_url.as_str(),
                 current_index,
                 current_navigation_index,
                 next_document_id,
-                &next_entry_id,
-                &next_key,
+                NavigationHistoryEntryId::allocate(),
+                next_key,
                 None,
                 None,
             );
@@ -475,8 +554,8 @@ fn navigation_history_entry(
     history_index: u32,
     index: u32,
     document_id: NavigationHistoryDocumentId,
-    id: &str,
-    key: &str,
+    id: NavigationHistoryEntryId,
+    key: NavigationHistoryEntryKey,
     history_state_json: Option<String>,
     navigation_state_json: Option<String>,
 ) -> NavigationHistorySerializedEntry {
@@ -488,16 +567,15 @@ fn navigation_history_entry(
         document_id,
         history_index,
         index,
-        id: id.to_owned(),
-        key: key.to_owned(),
+        id,
+        key,
     }
 }
 
 fn replacement_entry_key(
-    history_index: u32,
     previous_entry: Option<&NavigationHistorySerializedEntry>,
     url: &Url,
-) -> String {
+) -> NavigationHistoryEntryKey {
     if previous_entry
         .and_then(|entry| Url::parse(&entry.url).ok())
         .is_some_and(|previous_url| same_origin(&previous_url, url))
@@ -505,9 +583,9 @@ fn replacement_entry_key(
         return previous_entry
             .map(|entry| entry.key.clone())
             .filter(|key| !key.is_empty())
-            .unwrap_or_else(|| format!("key-{history_index}"));
+            .unwrap_or_else(NavigationHistoryEntryKey::allocate);
     }
-    format!("key-{history_index}-{}", url.as_str())
+    NavigationHistoryEntryKey::allocate()
 }
 
 fn same_origin(left: &Url, right: &Url) -> bool {
@@ -522,6 +600,14 @@ mod tests {
 
     fn document_id(token: &str) -> NavigationHistoryDocumentId {
         NavigationHistoryDocumentId::from_serialized(token.to_owned())
+    }
+
+    fn entry_id(token: &str) -> NavigationHistoryEntryId {
+        NavigationHistoryEntryId::from_serialized(token.to_owned())
+    }
+
+    fn entry_key(token: &str) -> NavigationHistoryEntryKey {
+        NavigationHistoryEntryKey::from_serialized(token.to_owned())
     }
 
     #[test]
@@ -592,8 +678,8 @@ mod tests {
             4,
             2,
             document_id("opaque-existing-document"),
-            "entry-4",
-            "key-4",
+            entry_id("entry-4"),
+            entry_key("key-4"),
             None,
             None,
         )];
@@ -631,6 +717,62 @@ mod tests {
 
         assert!(exhausted.is_err());
         assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn entry_identity_allocators_reject_exhaustion_without_wrapping() {
+        let id_counter = AtomicU64::new(u64::MAX);
+        let id_exhausted =
+            std::panic::catch_unwind(|| allocate_navigation_history_entry_id(&id_counter));
+        assert!(id_exhausted.is_err());
+        assert_eq!(id_counter.load(Ordering::Relaxed), u64::MAX);
+
+        let key_counter = AtomicU64::new(u64::MAX);
+        let key_exhausted =
+            std::panic::catch_unwind(|| allocate_navigation_history_entry_key(&key_counter));
+        assert!(key_exhausted.is_err());
+        assert_eq!(key_counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn push_after_back_allocates_fresh_identity_for_reused_history_index() {
+        let first = Url::parse("https://example.test/first").unwrap();
+        let second = Url::parse("https://example.test/second").unwrap();
+        let replacement = Url::parse("https://example.test/replacement").unwrap();
+        let mut seed = child_browsing_context_single_entry_seed(None);
+        apply_child_browsing_context_navigation_to_entry_seed(&mut seed, &first, None, None);
+        apply_child_browsing_context_navigation_to_entry_seed(&mut seed, &second, None, None);
+        let retired_forward_entry = seed.entries[2].clone();
+
+        seed.current_index = 1;
+        apply_child_browsing_context_navigation_to_entry_seed(&mut seed, &replacement, None, None);
+
+        let replacement_entry = &seed.entries[2];
+        assert_eq!(
+            replacement_entry.history_index,
+            retired_forward_entry.history_index
+        );
+        assert_ne!(replacement_entry.id, retired_forward_entry.id);
+        assert_ne!(replacement_entry.key, retired_forward_entry.key);
+        assert_ne!(
+            replacement_entry.id.as_str(),
+            replacement_entry.document_id.as_str(),
+            "entry incarnation identity must not be projected from Document identity"
+        );
+    }
+
+    #[test]
+    fn cross_origin_replace_allocates_a_fresh_entry_key() {
+        let first = Url::parse("https://first.example/page").unwrap();
+        let second = Url::parse("https://second.example/page").unwrap();
+        let mut seed = child_browsing_context_single_entry_seed(Some(&first));
+        let previous = seed.entries[1].clone();
+
+        replace_child_browsing_context_navigation_in_entry_seed(&mut seed, &second, None, None);
+
+        assert_eq!(seed.entries[1].history_index, previous.history_index);
+        assert_ne!(seed.entries[1].id, previous.id);
+        assert_ne!(seed.entries[1].key, previous.key);
     }
 
     #[test]
@@ -712,8 +854,8 @@ mod tests {
                 0,
                 0,
                 document_id("document-0"),
-                "entry-0",
-                "key-0",
+                entry_id("entry-0"),
+                entry_key("key-0"),
                 None,
                 None,
             ),
@@ -722,8 +864,8 @@ mod tests {
                 1,
                 1,
                 document_id("document-1"),
-                "entry-1",
-                "key-1",
+                entry_id("entry-1"),
+                entry_key("key-1"),
                 None,
                 None,
             ),
@@ -732,8 +874,8 @@ mod tests {
                 2,
                 2,
                 document_id("document-2"),
-                "entry-2",
-                "key-2",
+                entry_id("entry-2"),
+                entry_key("key-2"),
                 None,
                 None,
             ),
@@ -768,8 +910,8 @@ mod tests {
             4,
             2,
             document_id("document-4"),
-            "entry-4",
-            "key-4",
+            entry_id("entry-4"),
+            entry_key("key-4"),
             None,
             None,
         )];
@@ -802,8 +944,8 @@ mod tests {
             7,
             3,
             document_id("document-7"),
-            "entry-7",
-            "key-7",
+            entry_id("entry-7"),
+            entry_key("key-7"),
             None,
             None,
         )];
@@ -827,8 +969,8 @@ mod tests {
                 0,
                 0,
                 document_id("document-1"),
-                "entry-0",
-                "key-0",
+                entry_id("entry-0"),
+                entry_key("key-0"),
                 None,
                 None,
             ),
@@ -837,8 +979,8 @@ mod tests {
                 1,
                 1,
                 document_id("document-1"),
-                "entry-1",
-                "key-1",
+                entry_id("entry-1"),
+                entry_key("key-1"),
                 None,
                 None,
             ),
@@ -855,8 +997,8 @@ mod tests {
                 0,
                 0,
                 document_id("document-0"),
-                "entry-0",
-                "key-0",
+                entry_id("entry-0"),
+                entry_key("key-0"),
                 None,
                 None,
             ),
@@ -865,8 +1007,8 @@ mod tests {
                 1,
                 1,
                 document_id("document-1"),
-                "entry-1",
-                "key-1",
+                entry_id("entry-1"),
+                entry_key("key-1"),
                 None,
                 None,
             ),

@@ -35,14 +35,11 @@ pub(crate) fn apply_local_window_location_navigation<'s>(
                 None,
                 None,
                 next_navigation_index,
-                &new_navigation_entry_token(),
-                &new_navigation_entry_token(),
+                &new_navigation_entry_id(),
+                &new_navigation_entry_key(),
             );
-            set_navigation_entry_document_id(
-                scope,
-                next_entry,
-                &format!("document-{next_index}-{}", resolved.as_str()),
-            );
+            let document_id = moli_page_types::NavigationHistoryDocumentId::allocate();
+            set_navigation_entry_document_id(scope, next_entry, document_id.as_str());
             bind_navigation_entry_runtime_owner(scope, next_entry, owner);
             let _ = next_entries.set_index(scope, next_index, next_entry.into());
             set_history_entries(scope, history, next_entries);
@@ -57,7 +54,7 @@ pub(crate) fn apply_local_window_location_navigation<'s>(
             let key = previous_entry
                 .filter(|entry| replacement_keeps_navigation_key(scope, *entry, resolved))
                 .and_then(|entry| navigation_entry_key_value(scope, entry))
-                .unwrap_or_else(new_navigation_entry_token);
+                .unwrap_or_else(|| new_navigation_entry_key().as_str().to_owned());
             let entry = create_navigation_entry(
                 scope,
                 resolved.as_str(),
@@ -65,14 +62,11 @@ pub(crate) fn apply_local_window_location_navigation<'s>(
                 None,
                 None,
                 current_navigation_index,
-                &new_navigation_entry_token(),
+                &new_navigation_entry_id(),
                 &key,
             );
-            set_navigation_entry_document_id(
-                scope,
-                entry,
-                &format!("document-{current_index}-{}", resolved.as_str()),
-            );
+            let document_id = moli_page_types::NavigationHistoryDocumentId::allocate();
+            set_navigation_entry_document_id(scope, entry, document_id.as_str());
             bind_navigation_entry_runtime_owner(scope, entry, owner);
             let _ = entries.set_index(scope, current_index, entry.into());
             set_history_entries(scope, history, entries);

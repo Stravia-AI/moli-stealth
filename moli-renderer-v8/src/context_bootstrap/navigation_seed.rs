@@ -12,6 +12,7 @@ use super::navigation_window::{
 };
 use crate::native_bridge::NavigationHistoryEntrySeed;
 use moli_page_types::{
+    NavigationHistoryDocumentId, NavigationHistoryEntryId, NavigationHistoryEntryKey,
     initial_navigation_history_seed as page_initial_navigation_history_seed,
     reload_navigation_seed, traversal_navigation_seed_candidate,
 };
@@ -63,6 +64,8 @@ pub(super) fn build_current_navigation_entry_from_seed<'s>(
         .find(|entry| entry.history_index == seed.current_index)
     else {
         let fallback_state_json = stringify_history_state(scope, fallback_state);
+        let entry_id = NavigationHistoryEntryId::allocate();
+        let entry_key = NavigationHistoryEntryKey::allocate();
         let entry = create_navigation_entry(
             scope,
             "about:blank",
@@ -70,10 +73,10 @@ pub(super) fn build_current_navigation_entry_from_seed<'s>(
             fallback_state_json.as_deref(),
             None,
             0,
-            "",
-            "",
+            entry_id.as_str(),
+            entry_key.as_str(),
         );
-        let document_id = moli_page_types::NavigationHistoryDocumentId::allocate();
+        let document_id = NavigationHistoryDocumentId::allocate();
         set_navigation_entry_document_id(scope, entry, document_id.as_str());
         bind_navigation_entry_runtime_owner(scope, entry, owner);
         return entry;

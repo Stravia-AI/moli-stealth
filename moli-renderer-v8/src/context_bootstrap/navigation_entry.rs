@@ -14,8 +14,8 @@ use super::navigation_window::{
 };
 use super::*;
 use crate::util::{get_private_value, set_private_value};
+use moli_page_types::{NavigationHistoryEntryId, NavigationHistoryEntryKey};
 use moli_webapi_declare::WebApiObject;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 const NAVIGATION_ENTRY_INITIAL_INDEX_SLOT: &str = "__lmNavigationEntryInitialIndex";
 const NAVIGATION_ENTRY_JOINT_TOP_INDEX_SLOT: &str = "__lmNavigationEntryJointTopIndex";
@@ -25,7 +25,6 @@ const NAVIGATION_ENTRY_ID_SLOT: &str = "__lmNavigationEntryId";
 const NAVIGATION_ENTRY_KEY_SLOT: &str = "__lmNavigationEntryKey";
 const NAVIGATION_ENTRY_SCROLL_X_SLOT: &str = "__lmNavigationEntryScrollX";
 const NAVIGATION_ENTRY_SCROLL_Y_SLOT: &str = "__lmNavigationEntryScrollY";
-static NEXT_NAVIGATION_ENTRY_TOKEN: AtomicU64 = AtomicU64::new(1);
 
 #[derive(WebApiObject)]
 #[webapi(
@@ -211,9 +210,12 @@ pub(super) fn create_navigation_entry<'s>(
     entry
 }
 
-pub(super) fn new_navigation_entry_token() -> String {
-    let sequence = NEXT_NAVIGATION_ENTRY_TOKEN.fetch_add(1, Ordering::Relaxed);
-    navigation_token_uuid_from_seed(&format!("generated-navigation-entry-{sequence}"))
+pub(super) fn new_navigation_entry_id() -> NavigationHistoryEntryId {
+    NavigationHistoryEntryId::allocate()
+}
+
+pub(super) fn new_navigation_entry_key() -> NavigationHistoryEntryKey {
+    NavigationHistoryEntryKey::allocate()
 }
 
 pub(super) fn navigation_entry_key_value<'s>(

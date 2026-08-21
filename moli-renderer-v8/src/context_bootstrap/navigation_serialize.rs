@@ -12,8 +12,8 @@ use super::navigation_window::{
 };
 use super::*;
 use crate::native_bridge::{
-    NavigationActivationSeed, NavigationHistoryDocumentId, NavigationHistoryEntrySeed,
-    NavigationHistorySerializedEntry,
+    NavigationActivationSeed, NavigationHistoryDocumentId, NavigationHistoryEntryId,
+    NavigationHistoryEntryKey, NavigationHistoryEntrySeed, NavigationHistorySerializedEntry,
 };
 use crate::{
     document_runtime::DomHandle, native_bridge::node_runtime_and_handle_from_object,
@@ -94,11 +94,15 @@ pub(super) fn serialize_navigation_entry_object<'s>(
     let id = get_own_static_property(scope, entry, "id")
         .and_then(|value| value.to_string(scope))
         .map(|value| value.to_rust_string_lossy(scope))
-        .unwrap_or_default();
+        .filter(|value| !value.is_empty())
+        .map(NavigationHistoryEntryId::from_serialized)
+        .unwrap_or_else(NavigationHistoryEntryId::allocate);
     let key = get_own_static_property(scope, entry, "key")
         .and_then(|value| value.to_string(scope))
         .map(|value| value.to_rust_string_lossy(scope))
-        .unwrap_or_default();
+        .filter(|value| !value.is_empty())
+        .map(NavigationHistoryEntryKey::from_serialized)
+        .unwrap_or_else(NavigationHistoryEntryKey::allocate);
     if let Some(snapshot) = history_entries
         .iter()
         .find(|snapshot| snapshot.id == id && snapshot.key == key)
@@ -119,13 +123,15 @@ pub(super) fn serialize_navigation_entry_object<'s>(
         .filter(|value| *value >= 0)
         .map(|value| value as u32)
         .unwrap_or(0);
-    let document_id = navigation_entry_document_id(scope, entry).unwrap_or_else(|| id.clone());
+    let document_id = navigation_entry_document_id(scope, entry)
+        .map(NavigationHistoryDocumentId::from_serialized)
+        .unwrap_or_else(NavigationHistoryDocumentId::allocate);
     NavigationHistorySerializedEntry {
         url,
         history_state_json,
         navigation_state_json,
         referrer_policy: navigation_entry_referrer_policy_value(scope, entry),
-        document_id: NavigationHistoryDocumentId::from_serialized(document_id),
+        document_id,
         history_index: entry_index,
         index: entry_index,
         id,
@@ -218,18 +224,24 @@ pub(super) fn serialize_history_entries<'s>(
         let id = get_own_static_property(scope, entry, "id")
             .and_then(|value| value.to_string(scope))
             .map(|value| value.to_rust_string_lossy(scope))
-            .unwrap_or_else(|| format!("entry-{entry_index}"));
+            .filter(|value| !value.is_empty())
+            .map(NavigationHistoryEntryId::from_serialized)
+            .unwrap_or_else(NavigationHistoryEntryId::allocate);
         let key = get_own_static_property(scope, entry, "key")
             .and_then(|value| value.to_string(scope))
             .map(|value| value.to_rust_string_lossy(scope))
-            .unwrap_or_else(|| format!("key-{entry_index}"));
-        let document_id = navigation_entry_document_id(scope, entry).unwrap_or_else(|| id.clone());
+            .filter(|value| !value.is_empty())
+            .map(NavigationHistoryEntryKey::from_serialized)
+            .unwrap_or_else(NavigationHistoryEntryKey::allocate);
+        let document_id = navigation_entry_document_id(scope, entry)
+            .map(NavigationHistoryDocumentId::from_serialized)
+            .unwrap_or_else(NavigationHistoryDocumentId::allocate);
         snapshots.push(NavigationHistorySerializedEntry {
             url,
             history_state_json,
             navigation_state_json,
             referrer_policy: navigation_entry_referrer_policy_value(scope, entry),
-            document_id: NavigationHistoryDocumentId::from_serialized(document_id),
+            document_id,
             history_index: index,
             index: entry_index,
             id,

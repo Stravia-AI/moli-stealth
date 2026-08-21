@@ -1,7 +1,7 @@
 use super::{
     ChildBrowsingContextBootstrap, ChildBrowsingContextSnapshot, ChildFrameAttachmentSnapshot,
-    JsContextHost, NavigationActivationSeed, NavigationHistoryDocumentId,
-    NavigationHistoryEntrySeed, NavigationHistorySerializedEntry,
+    JsContextHost, NavigationActivationSeed, NavigationHistoryDocumentId, NavigationHistoryEntryId,
+    NavigationHistoryEntryKey, NavigationHistoryEntrySeed, NavigationHistorySerializedEntry,
     child_documents::CompletedFrameOwnerResourceTiming,
 };
 use crate::{
@@ -749,8 +749,8 @@ impl ChildBrowsingContextEntry {
                 document_id: NavigationHistoryDocumentId::allocate(),
                 history_index: 1,
                 index: 0,
-                id: "entry-1".to_owned(),
-                key: "key-1".to_owned(),
+                id: NavigationHistoryEntryId::allocate(),
+                key: NavigationHistoryEntryKey::allocate(),
             });
         self.navigation_entry_seed.current_index = 1;
         self.mark_initial_attribute_target_navigation_activation();
