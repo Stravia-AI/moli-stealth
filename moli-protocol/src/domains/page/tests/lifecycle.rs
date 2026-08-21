@@ -2187,16 +2187,13 @@ async fn add_script_run_immediately_installs_matching_bindings_into_new_top_leve
         .find(|message| {
             message["method"] == json!("Runtime.bindingCalled")
                 && message["params"]["name"] == json!("sharedUtilityBinding")
+                && message["params"]["executionContextId"] == json!(top_level_context_id)
         })
         .cloned()
         .expect("matching binding should be installed into the new top-level world");
     assert_eq!(
         binding_called["params"]["payload"],
         json!("top-level-binding")
-    );
-    assert_eq!(
-        binding_called["params"]["executionContextId"],
-        json!(top_level_context_id)
     );
 }
 #[tokio::test(flavor = "multi_thread")]
