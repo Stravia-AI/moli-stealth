@@ -448,6 +448,7 @@ pub enum StripModeChoice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum FetchWaitUntil {
+    #[value(alias = "dcl")]
     DomContentLoaded,
     Load,
     NetworkIdle,

@@ -827,6 +827,26 @@ fn parses_fetch_wait_until_and_timeout() {
 }
 
 #[test]
+fn parses_dcl_fetch_wait_until_alias() {
+    for value in ["domcontentloaded", "dcl"] {
+        let cli = Cli::try_parse_from(normalize_args_for_compat([
+            "moli",
+            "fetch",
+            "--wait-until",
+            value,
+            "https://example.com",
+        ]))
+        .unwrap();
+
+        let Commands::Fetch(args) = cli.command else {
+            panic!("expected fetch command");
+        };
+
+        assert_eq!(args.wait_until, FetchWaitUntil::DomContentLoaded);
+    }
+}
+
+#[test]
 fn parses_fetch_response_wait_flags() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
