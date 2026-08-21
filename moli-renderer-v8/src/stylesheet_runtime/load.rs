@@ -212,9 +212,11 @@ impl ConnectedStyleLoadEventPlan {
 
 /// Lifecycle authority committed for one connected style/link plan.
 ///
-/// Valid `modulepreload` links take the identity-only variant, which captures
-/// the exact Document and element without touching the Document load gate.
-/// All other owners retain the stylesheet load-event lease.
+/// `modulepreload` links take the identity-only variant, which captures the
+/// exact Document and element without touching the Document load gate. This
+/// classification is independent of request validity, so error outcomes also
+/// remain non-load-delaying. All other owners retain the stylesheet
+/// load-event lease.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConnectedStyleLoadEventAdmission {
     LoadDelaying(MainDocumentStyleLoadEventBinding),

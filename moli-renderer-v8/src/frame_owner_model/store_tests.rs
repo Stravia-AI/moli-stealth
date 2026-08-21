@@ -740,12 +740,6 @@ fn main_modulepreload_owner_never_allocates_a_load_event_delay() {
         Some(false),
         "network-phase owner identity must not allocate a load-delay token"
     );
-
-    assert_eq!(
-        store.current_main_document_has_style_load_event_delay(owner),
-        Some(false),
-        "modulepreload terminal events must not touch the Document load gate"
-    );
 }
 
 #[test]

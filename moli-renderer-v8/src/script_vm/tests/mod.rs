@@ -9436,6 +9436,59 @@ async fn spawn_gated_text_track_resource_server(
     )
 }
 
+async fn spawn_gated_module_resource_server() -> (
+    String,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gated module resource server");
+    let addr = listener
+        .local_addr()
+        .expect("gated module resource server addr");
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept gated module resource request");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .await
+                .expect("read gated module resource request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+        let _ = release_rx.await;
+        let body = "export default 1;";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(response.as_bytes()).await;
+    });
+    (
+        format!("http://{addr}/slow-module.mjs"),
+        request_rx,
+        release_tx,
+        server,
+    )
+}
+
 async fn spawn_child_external_parser_module_ready_lane_server() -> (
     String,
     tokio::sync::oneshot::Receiver<String>,
@@ -13419,7 +13472,7 @@ fn new_parsed_test_vm_with_loader_and_resource_completion_queue(
 }
 
 #[test]
-fn connected_modulepreload_admission_never_acquires_a_network_load_delay() {
+fn cached_connected_modulepreload_never_acquires_a_load_delay() {
     let mut vm = new_parsed_test_vm(
         "https://example.test/page.html",
         concat!(
@@ -13467,6 +13520,116 @@ fn connected_modulepreload_admission_never_acquires_a_network_load_delay() {
         Some(false),
         "modulepreload terminal publication must leave the Document load gate untouched"
     );
+}
+
+// Mirrors WPT `preload/avoid-delaying-onload-link-modulepreload.html`: the
+// response stays pending until after Window load has been observed.
+#[tokio::test]
+async fn in_flight_connected_modulepreload_does_not_delay_window_load() {
+    let (module_url, request_rx, release_tx, server) = spawn_gated_module_resource_server().await;
+    let document_url = module_url.replace("/slow-module.mjs", "/page.html");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let markup = format!(
+        concat!(
+            "<!doctype html><html><head>",
+            "<link id='preload' rel='modulepreload' href='{module_url}'>",
+            "</head><body></body></html>",
+        ),
+        module_url = module_url,
+    );
+    let mut vm = new_parsed_page_task_executor_test_vm(&document_url, &markup, &loader);
+    vm.exec(
+        r#"
+        globalThis.__modulepreloadLifecycleEvents = [];
+        document.getElementById("preload").addEventListener("load", () => {
+          __modulepreloadLifecycleEvents.push(`link:${document.readyState}`);
+        });
+        window.addEventListener("load", () => {
+          __modulepreloadLifecycleEvents.push(`window:${document.readyState}`);
+        });
+        "#,
+        None,
+    )
+    .expect("modulepreload lifecycle listeners should install");
+    let owner = vm
+        .current_main_document_task_owner()
+        .expect("modulepreload fixture must retain a current Document owner");
+
+    vm.queue_initial_connected_style_loads_for_current_owner();
+    vm.prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), request_rx)
+        .await
+        .expect("modulepreload request should reach the server")
+        .expect("modulepreload request channel should remain open");
+    assert!(request.starts_with("GET /slow-module.mjs HTTP/1.1"));
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "an in-flight modulepreload request must not hold the Document load gate"
+    );
+
+    let interactive = vm
+        .finish_current_main_document_parsing(owner)
+        .expect("parser EOF should prepare interactive");
+    vm.apply_main_document_interactive_lifecycle_action(interactive)
+        .expect("interactive transition should apply");
+    vm.dispatch_main_document_domcontentloaded_lifecycle(owner);
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .current_main_document_complete_transition_is_ready(owner),
+        Some(true),
+        "window load must become ready while modulepreload remains in flight"
+    );
+    assert!(
+        vm.dispatch_main_document_window_load_lifecycle(owner)
+            .expect("main Window load lifecycle should apply")
+            .is_none()
+    );
+    assert_eq!(
+        vm.eval("__modulepreloadLifecycleEvents.join('|')")
+            .expect("pre-terminal lifecycle event trace"),
+        "window:complete",
+        "window load must run before the pending modulepreload terminal"
+    );
+
+    release_tx.send(()).expect("release modulepreload response");
+    wait_for_one_page_resource_completion_selected_task_executor_test_turn(
+        &mut vm,
+        &loader,
+        "modulepreload network completion",
+    )
+    .await;
+    assert_eq!(
+        vm.eval("__modulepreloadLifecycleEvents.join('|')")
+            .expect("network-terminal lifecycle event trace"),
+        "window:complete",
+        "the network terminal may only queue the later link event"
+    );
+    assert!(
+        vm.has_ready_native_module_owner_actions(),
+        "the module-map terminal must publish its joined link-client notification"
+    );
+    assert!(
+        vm.run_one_oldest_ready_page_task_executor_turn(&loader)
+            .await
+            .expect("modulepreload owner-notification turn"),
+        "the joined link client must be notified in a later selected task"
+    );
+    assert!(
+        vm.run_one_dom_manipulation_task_executor_turn(
+            PageDomManipulationTestFamily::ConnectedStyleEvent,
+            &loader,
+        )
+        .await
+        .expect("modulepreload link-event turn")
+    );
+    assert_eq!(
+        vm.eval("__modulepreloadLifecycleEvents.join('|')")
+            .expect("complete modulepreload lifecycle event trace"),
+        "window:complete|link:complete"
+    );
+    server.await.expect("modulepreload server should finish");
 }
 
 fn new_streamed_parser_test_vm(url: &str, markup: &str) -> StandaloneScriptVmHarness {
@@ -13703,9 +13866,19 @@ async fn connected_modulepreload_invalid_as_dispatches_link_error_event() {
         None,
     )
     .expect("runtime-inserted invalid modulepreload should append");
+    let owner = vm
+        .current_main_document_task_owner()
+        .expect("invalid modulepreload fixture must retain a current Document owner");
+
+    vm.prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "invalid modulepreload admission must retain only event identity before its error task"
+    );
 
     assert!(
-        vm.apply_connected_style_lifecycle_bodies_for_test(),
+        vm.apply_next_connected_style_event_body_for_test(),
         "connected invalid modulepreload should dispatch through its document-owned link lane"
     );
     assert_eq!(

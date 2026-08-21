@@ -500,12 +500,13 @@ impl DocumentRuntime {
                 if !csp_blocked && !kind.uses_connected_load_lifecycle() {
                     return None;
                 }
-                let event_plan =
-                    if !csp_blocked && self.connected_owner_is_non_blocking_modulepreload(handle) {
-                        ConnectedStyleLoadEventPlan::non_blocking_modulepreload(handle)
-                    } else {
-                        ConnectedStyleLoadEventPlan::load_delaying(handle)
-                    };
+                let event_plan = if !csp_blocked
+                    && self.connected_owner_uses_non_blocking_modulepreload_identity(handle)
+                {
+                    ConnectedStyleLoadEventPlan::non_blocking_modulepreload(handle)
+                } else {
+                    ConnectedStyleLoadEventPlan::load_delaying(handle)
+                };
                 Some(PreparedConnectedStyleLoad::new(
                     handle,
                     csp_blocked,
@@ -625,14 +626,27 @@ impl DocumentRuntime {
                 .has_lifecycle_state(handle)
     }
 
-    fn connected_owner_is_non_blocking_modulepreload(&self, handle: DomHandle) -> bool {
+    /// Choose the load-event lifecycle from the link relation, independently
+    /// of whether the current request is valid or fetchable.
+    ///
+    /// HTML requires every `modulepreload` processing outcome to be
+    /// non-load-delaying. Invalid `as`, non-matching media and malformed URLs
+    /// therefore retain only exact Document/element identity for any terminal
+    /// event. A stylesheet relation takes precedence when both tokens occur.
+    fn connected_owner_uses_non_blocking_modulepreload_identity(&self, handle: DomHandle) -> bool {
         let node_id = NodeId::new(handle.index());
         if stylesheet_link_disposition(&self.dom_host, node_id).is_some() {
             return false;
         }
-        connected_preload_like_link_url(&self.dom_host, node_id)
-            .and_then(|url| self.connected_modulepreload_request(handle, &url))
-            .is_some()
+        self.dom_host
+            .node(handle)
+            .and_then(Node::as_element)
+            .is_some_and(|element| {
+                element.is_html_element("link")
+                    && element
+                        .attribute("rel")
+                        .is_some_and(|rel| link_rel_includes_token(rel, "modulepreload"))
+            })
     }
 
     fn settle_connected_style_load_binding(
@@ -836,7 +850,7 @@ impl DocumentRuntime {
         }
         if let Some(admission) = event_admission {
             let expects_modulepreload_identity =
-                self.connected_owner_is_non_blocking_modulepreload(handle);
+                self.connected_owner_uses_non_blocking_modulepreload_identity(handle);
             let admission_matches_current_processing = matches!(
                 (expects_modulepreload_identity, admission),
                 (
