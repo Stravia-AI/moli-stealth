@@ -416,11 +416,7 @@ impl JsContextHost {
             .is_none()
         {
             return self.queue_child_modulepreload_work_awaiting_realm(
-                FrameDocumentModulepreloadWorkAwaitingRealm::link_error(
-                    owner,
-                    expected_realm_id,
-                    client,
-                ),
+                FrameDocumentModulepreloadWorkAwaitingRealm::link_error(expected_realm_id, client),
             );
         }
         let Some(realm_id) = expected_realm_id else {
@@ -433,7 +429,7 @@ impl JsContextHost {
             return false;
         };
         self.route_child_modulepreload_link_error(
-            FrameDocumentModulepreloadTerminalWork::from_link_error_parts(owner, realm_id, client),
+            FrameDocumentModulepreloadTerminalWork::from_link_error_parts(realm_id, client),
         )
     }
 
@@ -469,7 +465,6 @@ impl JsContextHost {
         {
             return self.queue_child_modulepreload_work_awaiting_realm(
                 FrameDocumentModulepreloadWorkAwaitingRealm::fetch_start(
-                    owner,
                     expected_realm_id,
                     client,
                     request,
@@ -488,7 +483,7 @@ impl JsContextHost {
         };
         self.route_child_modulepreload_start(
             FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-                owner, realm_id, client, request,
+                realm_id, client, request,
             ),
         )
     }
@@ -617,7 +612,7 @@ impl JsContextHost {
         &mut self,
         work: FrameDocumentModulepreloadTerminalWork,
     ) -> bool {
-        let Some(action) = self.bind_child_modulepreload_terminal_event(work) else {
+        let Some(action) = self.accept_child_modulepreload_terminal_event(work) else {
             return false;
         };
         self.route_child_modulepreload_event_action(action)

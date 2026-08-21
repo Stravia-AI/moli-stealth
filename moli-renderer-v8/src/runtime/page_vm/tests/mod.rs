@@ -1525,10 +1525,10 @@ fn test_child_modulepreload_start_task_for_target(
     let source_url = Url::parse(&format!("https://{label}.test/modulepreload.js"))
         .expect("modulepreload start URL");
     FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        target.task_owner(),
         target.realm_id(),
         FrameDocumentModulepreloadLinkClient::new(
             target.child_handle(),
+            target.task_owner(),
             crate::dom::native::NativeNodeId::new(997),
         ),
         NativeModuleSingleFetchRequest::new(
@@ -1874,12 +1874,6 @@ async fn drive_child_frame_task_sources_until_resource_completion_ready(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ChildModulepreloadStartupTurn {
     TypedModulepreloadStart,
-    ChildSemanticTurn(ChildFrameSemanticTurnKind),
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ChildModulepreloadSemanticTurn {
-    TypedEventAction,
     ChildSemanticTurn(ChildFrameSemanticTurnKind),
 }
 
@@ -8691,13 +8685,19 @@ parent.__childModuleDependencyFailureEvents.push("root:" + depValue);
 }
 
 #[tokio::test]
-async fn page_vm_child_modulepreload_terminal_event_delays_complete_until_event_turn() {
+async fn page_vm_child_modulepreload_terminal_event_does_not_delay_complete() {
     run_page_vm_async_test(async move {
         let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let page_vm = test_page_vm();
         let local_executor = page_vm.local_executor.clone();
 
-        let turns = local_executor
+        let (
+            lifecycle_turns,
+            events_before_preload_event,
+            ready_state_before_preload_event,
+            events_after_preload_event,
+            ready_state_after_preload_event,
+        ) = local_executor
             .run(async move {
                 let mut page_vm = page_vm;
                 page_vm.vm_mut().eval(
@@ -8723,100 +8723,77 @@ async fn page_vm_child_modulepreload_terminal_event_delays_complete_until_event_
 "#,
                 )?;
 
-                let mut turns = Vec::new();
-                loop {
-                    let turn = if page_vm
+                let mut lifecycle_turns = Vec::new();
+                while let Some(source) = page_vm
+                    .run_next_child_frame_task_source_for_semantic_test()
+                    .await
+                {
+                    lifecycle_turns.push(source);
+                }
+
+                let events_before_preload_event = page_vm
+                    .vm_mut()
+                    .eval("__childModulepreloadTerminalEvents.join('|')")?;
+                let ready_state_before_preload_event = page_vm.vm_mut().eval(
+                    "document.querySelector('iframe').contentDocument?.readyState || 'missing'",
+                )?;
+
+                assert!(
+                    page_vm
                         .run_exact_selected_page_task_for_test(
                             PageSelectedTaskTestSelector::ChildModulepreloadEventAction,
                             &loader,
                         )
-                        .await?
-                    {
-                        ChildModulepreloadSemanticTurn::TypedEventAction
-                    } else if let Some(source) = page_vm
-                        .run_next_child_frame_task_source_for_semantic_test()
-                        .await
-                    {
-                        ChildModulepreloadSemanticTurn::ChildSemanticTurn(source)
-                    } else {
-                        break;
-                    };
-                    let events = page_vm
-                        .vm_mut()
-                        .eval("__childModulepreloadTerminalEvents.join('|')")?;
-                    let ready_state = page_vm.vm_mut().eval(
-                        "document.querySelector('iframe').contentDocument?.readyState || 'missing'",
-                    )?;
-                    turns.push((turn, events, ready_state));
-                }
-                Ok::<_, anyhow::Error>(turns)
+                        .await?,
+                    "the deliberately withheld modulepreload error action must remain queued"
+                );
+                let events_after_preload_event = page_vm
+                    .vm_mut()
+                    .eval("__childModulepreloadTerminalEvents.join('|')")?;
+                let ready_state_after_preload_event = page_vm.vm_mut().eval(
+                    "document.querySelector('iframe').contentDocument?.readyState || 'missing'",
+                )?;
+
+                Ok::<_, anyhow::Error>((
+                    lifecycle_turns,
+                    events_before_preload_event,
+                    ready_state_before_preload_event,
+                    events_after_preload_event,
+                    ready_state_after_preload_event,
+                ))
             })
             .await
             .expect("terminal child modulepreload lifecycle test should run");
 
-        let (event_turn_index, event_turn) = turns
-            .iter()
-            .enumerate()
-            .find(|(_, (_, events, _))| events.contains("preload-error"))
-            .expect("invalid modulepreload should dispatch an error event");
+        assert!(
+            lifecycle_turns
+                .iter()
+                .filter(|source| **source == ChildFrameSemanticTurnKind::DocumentLifecycle)
+                .count()
+                >= 3,
+            "interactive, DOMContentLoaded, and complete must advance while the terminal link event remains queued: {lifecycle_turns:?}"
+        );
+        assert!(
+            lifecycle_turns.contains(&ChildFrameSemanticTurnKind::HostLoad),
+            "iframe load must remain independently runnable while the terminal link event is withheld: {lifecycle_turns:?}"
+        );
         assert_eq!(
-            event_turn.0,
-            ChildModulepreloadSemanticTurn::TypedEventAction
+            events_before_preload_event,
+            "before|after|dcl:interactive|frame-load",
+            "child complete and iframe load must not wait for the queued modulepreload error"
         );
-        assert!(
-            turns[..event_turn_index].iter().all(|(turn, _, _)| {
-                !matches!(
-                    turn,
-                    ChildModulepreloadSemanticTurn::ChildSemanticTurn(
-                        ChildFrameSemanticTurnKind::DocumentLifecycle
-                            | ChildFrameSemanticTurnKind::HostLoad
-                    )
-                )
-            }),
-            "the modulepreload terminal event must settle its load delay before child lifecycle or HostLoad delivery: {turns:?}"
-        );
-        assert!(
-            !event_turn.1.contains("frame-load"),
-            "modulepreload event dispatch must not inline complete or iframe load"
-        );
-
-        let (complete_turn_index, complete_turn) = turns
-            .iter()
-            .enumerate()
-            .skip(event_turn_index + 1)
-            .find(|(_, (_, _, ready_state))| ready_state == "complete")
-            .expect("terminal event release should queue document complete");
-        assert!(complete_turn_index > event_turn_index);
         assert_eq!(
-            complete_turn.0,
-            ChildModulepreloadSemanticTurn::ChildSemanticTurn(
-                ChildFrameSemanticTurnKind::DocumentLifecycle
-            )
+            ready_state_before_preload_event, "complete",
+            "a terminal modulepreload event must not hold the child Document load gate"
         );
-        assert!(
-            !complete_turn.1.contains("frame-load"),
-            "complete transition must not inline iframe load"
-        );
-
-        let (host_load_turn_index, host_load_turn) = turns
-            .iter()
-            .enumerate()
-            .find(|(_, (_, events, _))| events.contains("frame-load"))
-            .expect("completed child document should dispatch iframe load");
-        assert!(host_load_turn_index > complete_turn_index);
         assert_eq!(
-            host_load_turn.0,
-            ChildModulepreloadSemanticTurn::ChildSemanticTurn(ChildFrameSemanticTurnKind::HostLoad)
+            events_after_preload_event,
+            "before|after|dcl:interactive|frame-load|preload-error",
+            "the independently queued modulepreload event must still dispatch afterward"
         );
-        for required in ["before", "after", "dcl:interactive", "preload-error"] {
-            assert!(
-                host_load_turn.1.contains(required),
-                "HostLoad must observe every parser/lifecycle/modulepreload predecessor: {turns:?}"
-            );
-        }
-        assert!(
-            host_load_turn.1.ends_with("frame-load"),
-            "iframe load must remain the final observable delivery regardless of cross-source DCL/modulepreload arbitration: {turns:?}"
+        assert_eq!(
+            ready_state_after_preload_event, "complete",
+            "post-complete modulepreload dispatch must not regress readyState"
         );
     })
     .await;

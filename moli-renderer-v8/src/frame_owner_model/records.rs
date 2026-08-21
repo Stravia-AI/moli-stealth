@@ -1201,7 +1201,6 @@ pub(crate) enum DocumentLoadDelayReason {
     AsyncModuleScript,
     Image,
     Media,
-    Modulepreload,
     StyleLoadEvent,
     Navigation,
 }

@@ -70,53 +70,31 @@ impl JsContextHost {
             .is_ok()
     }
 
-    pub(crate) fn bind_child_modulepreload_terminal_event(
-        &mut self,
+    pub(crate) fn accept_child_modulepreload_terminal_event(
+        &self,
         work: crate::frame_owner_model::FrameDocumentModulepreloadTerminalWork,
     ) -> Option<crate::frame_owner_model::FrameDocumentModulepreloadEventAction> {
-        let Some(binding) = self
+        if !self
             .frame_owner_store
-            .bind_current_child_modulepreload_event(work.owner(), work.client())
-        else {
+            .child_document_task_owner_is_current(work.client().child_handle(), work.owner())
+        {
             tracing::debug!(
                 owner = ?work.owner(),
                 realm_id = ?work.realm_id(),
                 link_handle = ?work.link_handle(),
                 successful = work.successful(),
-                "dropping stale child modulepreload terminal before event binding"
+                "dropping stale child modulepreload terminal before event acceptance"
             );
             return None;
-        };
+        }
         tracing::debug!(
             owner = ?work.owner(),
             realm_id = ?work.realm_id(),
             link_handle = ?work.link_handle(),
-            load_delay_token = ?binding.load_delay_token(),
             successful = work.successful(),
-            "bound child modulepreload terminal to lifecycle-owned event action"
+            "accepted child modulepreload terminal as a non-load-delaying event action"
         );
-        Some(work.into_event_action(binding))
-    }
-
-    pub(crate) fn settle_child_modulepreload_link_event(
-        &mut self,
-        owner: FrameDocumentTaskOwner,
-        binding: crate::frame_owner_model::FrameDocumentModulepreloadEventBinding,
-        queue_lifecycle_followup: bool,
-    ) -> bool {
-        if !self
-            .frame_owner_store
-            .settle_child_modulepreload_event(owner, binding)
-        {
-            return false;
-        }
-        if queue_lifecycle_followup && binding.load_delay_token().is_some() {
-            let _ = self.queue_child_document_complete_lifecycle_if_ready_for_owner(
-                binding.child_handle(),
-                owner,
-            );
-        }
-        true
+        Some(work.into_event_action())
     }
 
     fn queue_current_child_document_image_load_events(

@@ -10,6 +10,7 @@ use crate::module_runtime::{
 };
 use crate::planning::{PreparedScript, ScriptFetchMetadata};
 
+use super::lifecycle_tasks::DocumentLinkEventOwner;
 use super::module_graph::{
     FrameDocumentDynamicImportTerminalPreparedAction, FrameDocumentModuleTerminalQueueFollowup,
 };
@@ -588,7 +589,6 @@ pub(crate) struct FrameDocumentModulepreloadFetchPayload {
 /// discovery time, preserve it as an additional replacement guard.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FrameDocumentModulepreloadWorkAwaitingRealm {
-    owner: FrameDocumentTaskOwner,
     expected_realm_id: Option<FrameRealmId>,
     client: FrameDocumentModulepreloadLinkClient,
     kind: FrameDocumentModulepreloadWorkAwaitingRealmKind,
@@ -608,13 +608,11 @@ pub(crate) enum FrameDocumentModulepreloadMaterializedWork {
 
 impl FrameDocumentModulepreloadWorkAwaitingRealm {
     pub(crate) fn fetch_start(
-        owner: FrameDocumentTaskOwner,
         expected_realm_id: Option<FrameRealmId>,
         client: FrameDocumentModulepreloadLinkClient,
         request: NativeModuleSingleFetchRequest,
     ) -> Self {
         Self {
-            owner,
             expected_realm_id,
             client,
             kind: FrameDocumentModulepreloadWorkAwaitingRealmKind::FetchStart(Box::new(request)),
@@ -622,12 +620,10 @@ impl FrameDocumentModulepreloadWorkAwaitingRealm {
     }
 
     pub(crate) fn link_error(
-        owner: FrameDocumentTaskOwner,
         expected_realm_id: Option<FrameRealmId>,
         client: FrameDocumentModulepreloadLinkClient,
     ) -> Self {
         Self {
-            owner,
             expected_realm_id,
             client,
             kind: FrameDocumentModulepreloadWorkAwaitingRealmKind::LinkError,
@@ -635,7 +631,7 @@ impl FrameDocumentModulepreloadWorkAwaitingRealm {
     }
 
     pub(crate) fn owner(&self) -> FrameDocumentTaskOwner {
-        self.owner
+        self.client.owner()
     }
 
     pub(crate) fn expected_realm_id(&self) -> Option<FrameRealmId> {
@@ -679,7 +675,6 @@ impl FrameDocumentModulepreloadWorkAwaitingRealm {
             FrameDocumentModulepreloadWorkAwaitingRealmKind::FetchStart(request) => {
                 FrameDocumentModulepreloadMaterializedWork::FetchStart(Box::new(
                     FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-                        self.owner,
                         realm_id,
                         self.client,
                         *request,
@@ -689,7 +684,6 @@ impl FrameDocumentModulepreloadWorkAwaitingRealm {
             FrameDocumentModulepreloadWorkAwaitingRealmKind::LinkError => {
                 FrameDocumentModulepreloadMaterializedWork::LinkError(
                     FrameDocumentModulepreloadTerminalWork::from_link_error_parts(
-                        self.owner,
                         realm_id,
                         self.client,
                     ),
@@ -702,14 +696,18 @@ impl FrameDocumentModulepreloadWorkAwaitingRealm {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct FrameDocumentModulepreloadLinkClient {
     child_handle: DomHandle,
-    link_handle: DomHandle,
+    event_owner: DocumentLinkEventOwner,
 }
 
 impl FrameDocumentModulepreloadLinkClient {
-    pub(crate) fn new(child_handle: DomHandle, link_handle: DomHandle) -> Self {
+    pub(crate) fn new(
+        child_handle: DomHandle,
+        owner: FrameDocumentTaskOwner,
+        link_handle: DomHandle,
+    ) -> Self {
         Self {
             child_handle,
-            link_handle,
+            event_owner: DocumentLinkEventOwner::new(owner, link_handle),
         }
     }
 
@@ -717,42 +715,12 @@ impl FrameDocumentModulepreloadLinkClient {
         self.child_handle
     }
 
-    pub(crate) fn link_handle(self) -> DomHandle {
-        self.link_handle
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FrameDocumentModulepreloadEventBinding {
-    client: FrameDocumentModulepreloadLinkClient,
-    load_delay_token: Option<DocumentLoadDelayTokenId>,
-}
-
-impl FrameDocumentModulepreloadEventBinding {
-    pub(crate) fn new(
-        client: FrameDocumentModulepreloadLinkClient,
-        load_delay_token: Option<DocumentLoadDelayTokenId>,
-    ) -> Self {
-        Self {
-            client,
-            load_delay_token,
-        }
-    }
-
-    pub(crate) fn client(self) -> FrameDocumentModulepreloadLinkClient {
-        self.client
-    }
-
-    pub(crate) fn child_handle(self) -> DomHandle {
-        self.client.child_handle()
+    pub(crate) fn owner(self) -> FrameDocumentTaskOwner {
+        self.event_owner.owner()
     }
 
     pub(crate) fn link_handle(self) -> DomHandle {
-        self.client.link_handle()
-    }
-
-    pub(crate) fn load_delay_token(self) -> Option<DocumentLoadDelayTokenId> {
-        self.load_delay_token
+        self.event_owner.element()
     }
 }
 
@@ -947,26 +915,17 @@ pub(crate) struct FrameDocumentModulepreloadEventAction {
     owner: FrameDocumentTaskOwner,
     realm_id: FrameRealmId,
     key: Option<ModuleMapKey>,
-    binding: FrameDocumentModulepreloadEventBinding,
+    client: FrameDocumentModulepreloadLinkClient,
     successful: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FrameDocumentModulepreloadTerminalOutcome {
-    terminal_work_consumed: bool,
     event_dispatched: bool,
     event_dispatch_failed: bool,
-    load_delay_settled: bool,
 }
 
 impl FrameDocumentModulepreloadTerminalOutcome {
-    pub(crate) fn terminal_work_consumed() -> Self {
-        Self {
-            terminal_work_consumed: true,
-            ..Self::default()
-        }
-    }
-
     pub(crate) fn event_dispatched() -> Self {
         Self {
             event_dispatched: true,
@@ -981,20 +940,6 @@ impl FrameDocumentModulepreloadTerminalOutcome {
         }
     }
 
-    pub(crate) fn load_delay_settled() -> Self {
-        Self {
-            load_delay_settled: true,
-            ..Self::default()
-        }
-    }
-
-    pub(crate) fn merge(&mut self, other: Self) {
-        self.terminal_work_consumed |= other.terminal_work_consumed;
-        self.event_dispatched |= other.event_dispatched;
-        self.event_dispatch_failed |= other.event_dispatch_failed;
-        self.load_delay_settled |= other.load_delay_settled;
-    }
-
     pub(crate) fn event_was_dispatched(self) -> bool {
         self.event_dispatched
     }
@@ -1003,23 +948,17 @@ impl FrameDocumentModulepreloadTerminalOutcome {
     pub(crate) fn event_dispatch_was_failed(self) -> bool {
         self.event_dispatch_failed
     }
-
-    #[cfg(test)]
-    pub(crate) fn load_delay_was_settled(self) -> bool {
-        self.load_delay_settled
-    }
 }
 
 impl FrameDocumentModulepreloadTerminalWork {
     pub(crate) fn from_terminal_parts(
-        owner: FrameDocumentTaskOwner,
         realm_id: FrameRealmId,
         key: ModuleMapKey,
         client: FrameDocumentModulepreloadLinkClient,
         successful: bool,
     ) -> Self {
         Self::new(
-            owner,
+            client.owner(),
             realm_id,
             FrameDocumentModulepreloadTerminalPayload {
                 key: Some(key),
@@ -1030,12 +969,11 @@ impl FrameDocumentModulepreloadTerminalWork {
     }
 
     pub(crate) fn from_link_error_parts(
-        owner: FrameDocumentTaskOwner,
         realm_id: FrameRealmId,
         client: FrameDocumentModulepreloadLinkClient,
     ) -> Self {
         Self::new(
-            owner,
+            client.owner(),
             realm_id,
             FrameDocumentModulepreloadTerminalPayload {
                 key: None,
@@ -1081,17 +1019,14 @@ impl FrameDocumentModulepreloadTerminalWork {
         )
     }
 
-    pub(crate) fn into_event_action(
-        self,
-        binding: FrameDocumentModulepreloadEventBinding,
-    ) -> FrameDocumentModulepreloadEventAction {
+    pub(crate) fn into_event_action(self) -> FrameDocumentModulepreloadEventAction {
         let (owner, realm_id, key, client, successful) = self.into_terminal_parts();
-        debug_assert_eq!(binding.client(), client);
+        debug_assert_eq!(owner, client.owner());
         FrameDocumentModulepreloadEventAction {
             owner,
             realm_id,
             key,
-            binding,
+            client,
             successful,
         }
     }
@@ -1111,15 +1046,7 @@ impl FrameDocumentModulepreloadEventAction {
     }
 
     pub(crate) fn link_handle(&self) -> DomHandle {
-        self.binding.link_handle()
-    }
-
-    pub(crate) fn binding(&self) -> FrameDocumentModulepreloadEventBinding {
-        self.binding
-    }
-
-    pub(crate) fn load_delay_token(&self) -> Option<DocumentLoadDelayTokenId> {
-        self.binding.load_delay_token()
+        self.client.link_handle()
     }
 
     pub(crate) fn successful(&self) -> bool {
@@ -1141,11 +1068,6 @@ pub(crate) trait FrameDocumentModulepreloadEventActionHooks {
         action: &FrameDocumentModulepreloadEventAction,
         error: &str,
     );
-
-    fn settle_modulepreload_event(
-        &mut self,
-        action: &FrameDocumentModulepreloadEventAction,
-    ) -> bool;
 }
 
 pub(crate) struct FrameDocumentModulepreloadEventActionRunner<Hooks> {
@@ -1169,26 +1091,19 @@ where
         &mut self,
         action: FrameDocumentModulepreloadEventAction,
     ) -> FrameDocumentModulepreloadTerminalOutcome {
-        let mut outcome = FrameDocumentModulepreloadTerminalOutcome::terminal_work_consumed();
         match self.hooks.dispatch_modulepreload_event(
             action.owner(),
             action.realm_id(),
             action.link_handle(),
             action.successful(),
         ) {
-            Ok(()) => {
-                outcome.merge(FrameDocumentModulepreloadTerminalOutcome::event_dispatched());
-            }
+            Ok(()) => FrameDocumentModulepreloadTerminalOutcome::event_dispatched(),
             Err(error) => {
                 self.hooks
                     .record_modulepreload_event_dispatch_failed(&action, &error);
-                outcome.merge(FrameDocumentModulepreloadTerminalOutcome::event_dispatch_failed());
+                FrameDocumentModulepreloadTerminalOutcome::event_dispatch_failed()
             }
         }
-        if self.hooks.settle_modulepreload_event(&action) {
-            outcome.merge(FrameDocumentModulepreloadTerminalOutcome::load_delay_settled());
-        }
-        outcome
     }
 }
 
@@ -1282,13 +1197,12 @@ impl FrameDocumentDynamicImportTerminalWork {
 
 impl FrameDocumentModulepreloadFetchTask {
     pub(crate) fn from_modulepreload_fetch_parts(
-        owner: FrameDocumentTaskOwner,
         realm_id: FrameRealmId,
         client: FrameDocumentModulepreloadLinkClient,
         request: NativeModuleSingleFetchRequest,
     ) -> Self {
         Self::new(
-            owner,
+            client.owner(),
             realm_id,
             FrameDocumentModulepreloadFetchPayload { client, request },
         )

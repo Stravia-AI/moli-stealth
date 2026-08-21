@@ -348,8 +348,8 @@ impl ScriptVm {
     ) -> FrameDocumentModuleTerminalQueueFollowup {
         let mut promoted = false;
         for work in works {
-            let mut host = self._context_host.borrow_mut();
-            let Some(action) = host.bind_child_modulepreload_terminal_event(work) else {
+            let host = self._context_host.borrow();
+            let Some(action) = host.accept_child_modulepreload_terminal_event(work) else {
                 continue;
             };
             promoted |= host.route_child_modulepreload_event_action(action);

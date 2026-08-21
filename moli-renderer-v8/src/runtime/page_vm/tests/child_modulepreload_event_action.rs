@@ -239,7 +239,7 @@ document
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn replaced_realm_discards_real_modulepreload_event_and_settles_its_exact_document() {
+async fn replaced_realm_discards_real_modulepreload_event_without_lifecycle_side_effects() {
     run_page_vm_async_test(async move {
         let loader =
             crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
@@ -290,9 +290,8 @@ async fn replaced_realm_discards_real_modulepreload_event_and_settles_its_exact_
             outcome.action.target_effect,
             PageChildModulepreloadEventActionTargetEffect::DiscardedStaleOwner {
                 current_owner: None,
-                load_delay_settled: true,
             },
-            "a stale realm must not dispatch, but its still-current Document delay must settle"
+            "a stale realm must discard its identity-only modulepreload event"
         );
         assert!(matches!(
             outcome.action.into_page_task_completion(),
@@ -386,7 +385,6 @@ fn page_vm_replacement_rejects_naturally_colliding_modulepreload_event_owner() {
                         stale.action.target_effect,
                         PageChildModulepreloadEventActionTargetEffect::DiscardedStaleOwner {
                             current_owner: None,
-                            load_delay_settled: false,
                         },
                         "an old root token must prevent all replacement-Document application"
                     );

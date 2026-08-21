@@ -90,7 +90,7 @@ impl JsContextHost {
     }
 
     pub(crate) fn route_child_modulepreload_event_action(
-        &mut self,
+        &self,
         action: FrameDocumentModulepreloadEventAction,
     ) -> bool {
         let sender = self.page_child_modulepreload_event_action_sender().clone();
@@ -98,16 +98,11 @@ impl JsContextHost {
             Ok(()) => true,
             Err(closed) => {
                 let action = closed.into_action();
-                let _ = self.settle_child_modulepreload_link_event(
-                    action.owner(),
-                    action.binding(),
-                    false,
-                );
                 tracing::debug!(
                     owner = ?action.owner(),
                     realm_id = ?action.realm_id(),
                     link_handle = ?action.link_handle(),
-                    "settled child modulepreload event after its stable Page route closed"
+                    "discarded child modulepreload event after its stable Page route closed"
                 );
                 false
             }

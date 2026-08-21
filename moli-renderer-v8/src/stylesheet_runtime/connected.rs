@@ -577,7 +577,7 @@ impl DocumentRuntime {
                 }
                 ConnectedStyleLoadEventPlan::NonBlockingModulepreload { element } => {
                     ConnectedStyleLoadEventAdmission::NonBlockingModulepreload(
-                        crate::frame_owner_model::MainDocumentModulepreloadEventOwner::unowned_for_document_runtime_test(
+                        crate::frame_owner_model::DocumentLinkEventOwner::unowned_for_document_runtime_test(
                             element,
                         ),
                     )

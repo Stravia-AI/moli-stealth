@@ -4464,7 +4464,7 @@ fn child_media_load_delay_is_element_owned_and_cannot_settle_replacement() {
 }
 
 #[test]
-fn child_modulepreload_terminal_event_delay_is_exact_and_replacement_owned() {
+fn child_modulepreload_event_owner_is_exact_and_never_delays_complete() {
     let mut store = FrameOwnerStore::default();
     let child_handle = handle(368);
     store.ensure_child_frame(
@@ -4488,9 +4488,18 @@ fn child_modulepreload_terminal_event_delay_is_exact_and_replacement_owned() {
     let owner = store
         .current_child_document_task_owner(child_handle)
         .expect("child document should expose an owner");
+    let load_delay_before_modulepreload =
+        store.current_child_document_has_load_delay_tokens(child_handle, owner);
     let client = store
         .accept_current_child_modulepreload_link(child_handle, owner, handle(370))
         .expect("modulepreload acceptance should bind the current document");
+    assert_eq!(client.owner(), owner);
+    assert_eq!(client.link_handle(), handle(370));
+    assert_eq!(
+        store.current_child_document_has_load_delay_tokens(child_handle, owner),
+        load_delay_before_modulepreload,
+        "modulepreload admission must retain identity without changing the load gate"
+    );
 
     let interactive = store
         .finish_current_child_document_parsing(child_handle, owner.document_owner())
@@ -4500,46 +4509,20 @@ fn child_modulepreload_terminal_event_delay_is_exact_and_replacement_owned() {
         .prepare_current_child_document_domcontentloaded_transition(child_handle, owner)
         .expect("modulepreload must not block DOMContentLoaded");
     assert!(store.apply_current_child_document_domcontentloaded_transition(domcontentloaded));
-    let preterminal_complete = store
-        .prepare_current_child_document_complete_transition(child_handle, owner)
-        .expect("fetching modulepreload must not block complete");
-    let binding = store
-        .bind_current_child_modulepreload_event(owner, client)
-        .expect("terminal modulepreload event should bind the current document");
-    assert!(
-        binding.load_delay_token().is_some(),
-        "a terminal modulepreload event queued before complete must own a load-delay token"
-    );
-    assert!(
-        !store.apply_current_child_document_complete_transition(preterminal_complete),
-        "binding the terminal event must invalidate a complete action prepared without it"
-    );
-    assert!(
-        store
-            .prepare_current_child_document_complete_transition(child_handle, owner)
-            .is_none(),
-        "the exact terminal-event token must block complete"
-    );
-
-    assert!(store.settle_child_modulepreload_event(owner, binding));
-    assert!(
-        !store.settle_child_modulepreload_event(owner, binding),
-        "modulepreload event dispatch must consume its load-delay token exactly once"
-    );
     let complete = store
         .prepare_current_child_document_complete_transition(child_handle, owner)
-        .expect("modulepreload terminal should unblock complete");
-    assert!(store.apply_current_child_document_complete_transition(complete));
+        .expect("fetching modulepreload must not block complete");
+    assert!(
+        store.apply_current_child_document_complete_transition(complete),
+        "a queued modulepreload terminal event must not invalidate child complete"
+    );
     let post_complete_client = store
         .accept_current_child_modulepreload_link(child_handle, owner, handle(371))
         .expect("a post-complete modulepreload still needs an exact event owner");
-    let post_complete_binding = store
-        .bind_current_child_modulepreload_event(owner, post_complete_client)
-        .expect("a post-complete modulepreload event still needs an exact document binding");
     assert_eq!(
-        post_complete_binding.load_delay_token(),
-        None,
-        "post-complete modulepreload event binding must not regress readyState"
+        post_complete_client.owner(),
+        owner,
+        "post-complete modulepreload processing must retain the same exact Document"
     );
 
     let transition = store
@@ -4557,8 +4540,15 @@ fn child_modulepreload_terminal_event_delay_is_exact_and_replacement_owned() {
         .expect("replacement child document should commit");
     assert_eq!(transition.retired_owner(), Some(owner));
     assert!(
-        !store.settle_child_modulepreload_event(owner, post_complete_binding),
-        "a stale modulepreload event must not settle against the replacement document"
+        !store.child_document_task_owner_is_current(client.child_handle(), client.owner()),
+        "replacement must stale the old modulepreload identity without settlement"
+    );
+    assert!(
+        !store.child_document_task_owner_is_current(
+            post_complete_client.child_handle(),
+            post_complete_client.owner(),
+        ),
+        "post-complete identity must not target the replacement Document"
     );
 }
 

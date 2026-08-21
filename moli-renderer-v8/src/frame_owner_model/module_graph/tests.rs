@@ -30,8 +30,7 @@ use crate::frame_owner_model::{
     FrameDocumentModuleTerminalBatch, FrameDocumentModuleTerminalQueueFollowup,
     FrameDocumentModuleTerminalWarning, FrameDocumentModuleTerminalWarningRecord,
     FrameDocumentModulepreloadEventAction, FrameDocumentModulepreloadEventActionHooks,
-    FrameDocumentModulepreloadEventActionRunner, FrameDocumentModulepreloadEventBinding,
-    FrameDocumentModulepreloadFetchCompletionAction,
+    FrameDocumentModulepreloadEventActionRunner, FrameDocumentModulepreloadFetchCompletionAction,
     FrameDocumentModulepreloadFetchCompletionHooks,
     FrameDocumentModulepreloadFetchCompletionRunner, FrameDocumentModulepreloadFetchFinishResult,
     FrameDocumentModulepreloadFetchTask, FrameDocumentModulepreloadLinkClient,
@@ -71,15 +70,11 @@ fn modulepreload_request(path: &str) -> NativeModuleSingleFetchRequest {
     )
 }
 
-fn modulepreload_link_client(link_handle: DomHandle) -> FrameDocumentModulepreloadLinkClient {
-    FrameDocumentModulepreloadLinkClient::new(DomHandle::new(1), link_handle)
-}
-
-fn modulepreload_event_binding(link_handle: DomHandle) -> FrameDocumentModulepreloadEventBinding {
-    FrameDocumentModulepreloadEventBinding::new(
-        modulepreload_link_client(link_handle),
-        Some(crate::frame_owner_model::DocumentLoadDelayTokenId(91)),
-    )
+fn modulepreload_link_client(
+    owner: FrameDocumentTaskOwner,
+    link_handle: DomHandle,
+) -> FrameDocumentModulepreloadLinkClient {
+    FrameDocumentModulepreloadLinkClient::new(DomHandle::new(1), owner, link_handle)
 }
 
 fn pending_dynamic_module_import() -> PendingDynamicModuleImport {

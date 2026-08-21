@@ -86,7 +86,7 @@ impl MainDocumentScriptLoadDelayLease {
 ///
 /// Stylesheet processing may retain the token across its network load.
 /// `modulepreload` never uses this type; it retains only
-/// [`MainDocumentModulepreloadEventOwner`].
+/// [`DocumentLinkEventOwner`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MainDocumentStyleLoadEventBinding {
     owner: FrameDocumentTaskOwner,
@@ -135,19 +135,19 @@ impl MainDocumentStyleLoadEventBinding {
     }
 }
 
-/// Exact Document and element identity retained while a non-blocking
-/// `modulepreload` fetch is in flight.
+/// Exact Document and element identity for one link event.
 ///
-/// This deliberately carries no load-delay token and remains the complete
-/// lifecycle identity through terminal acceptance and event publication.
+/// This identity deliberately carries no load-delay token. Link types such as
+/// `modulepreload` that do not delay `window.load` retain this value directly;
+/// load-delaying link types must wrap it in a separate lifecycle binding.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct MainDocumentModulepreloadEventOwner {
+pub(crate) struct DocumentLinkEventOwner {
     owner: FrameDocumentTaskOwner,
     element: DomHandle,
 }
 
-impl MainDocumentModulepreloadEventOwner {
-    pub(super) fn new(owner: FrameDocumentTaskOwner, element: DomHandle) -> Self {
+impl DocumentLinkEventOwner {
+    pub(crate) fn new(owner: FrameDocumentTaskOwner, element: DomHandle) -> Self {
         Self { owner, element }
     }
 

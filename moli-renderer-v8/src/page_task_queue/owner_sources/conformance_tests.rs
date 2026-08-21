@@ -17,11 +17,10 @@ use crate::{
         FrameDocumentModuleClientEntryId, FrameDocumentModuleClientId,
         FrameDocumentModuleClientRegistration, FrameDocumentModuleClientReservation,
         FrameDocumentModuleDependencyFetchTask, FrameDocumentModuleFetchDisposition,
-        FrameDocumentModuleScriptTerminalBatchTask, FrameDocumentModulepreloadEventBinding,
-        FrameDocumentModulepreloadFetchTask, FrameDocumentModulepreloadLinkClient,
-        FrameDocumentModulepreloadTerminalWork, FrameDocumentStaticDependencyModuleClient,
-        FrameDocumentTaskOwner, FrameLaneNavigationCommitTask, FrameRealmId, FrameSchedulerLaneId,
-        LocalWindowId,
+        FrameDocumentModuleScriptTerminalBatchTask, FrameDocumentModulepreloadFetchTask,
+        FrameDocumentModulepreloadLinkClient, FrameDocumentModulepreloadTerminalWork,
+        FrameDocumentStaticDependencyModuleClient, FrameDocumentTaskOwner,
+        FrameLaneNavigationCommitTask, FrameRealmId, FrameSchedulerLaneId, LocalWindowId,
     },
     module_runtime::{
         ModuleEntryId, ModuleFetchMetadata, ModuleImportPhase, ModuleKind, ModuleMapKey,
@@ -1651,15 +1650,16 @@ fn window_execution_context(seed: u64) -> WindowExecutionContextIdentity {
 
 fn modulepreload_task(sequence: u64) -> FrameDocumentModulepreloadFetchTask {
     let child_handle = DomHandle::new(sequence as usize + 100);
+    let owner = task_owner(sequence + 10);
     let source_url = Url::parse(&format!(
         "https://page-source-conformance.test/modulepreload-{sequence}.mjs"
     ))
     .expect("modulepreload conformance URL");
     FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        task_owner(sequence + 10),
         FrameRealmId(sequence as i64 + 20),
         FrameDocumentModulepreloadLinkClient::new(
             child_handle,
+            owner,
             DomHandle::new(sequence as usize + 200),
         ),
         NativeModuleSingleFetchRequest::new(
@@ -1741,16 +1741,17 @@ fn module_dependency_fetch_task(
 fn modulepreload_event_action(
     sequence: u64,
 ) -> crate::frame_owner_model::FrameDocumentModulepreloadEventAction {
+    let owner = task_owner(sequence + 60);
     let client = FrameDocumentModulepreloadLinkClient::new(
         DomHandle::new(sequence as usize + 400),
+        owner,
         DomHandle::new(sequence as usize + 500),
     );
     FrameDocumentModulepreloadTerminalWork::from_link_error_parts(
-        task_owner(sequence + 60),
         FrameRealmId(sequence as i64 + 70),
         client,
     )
-    .into_event_action(FrameDocumentModulepreloadEventBinding::new(client, None))
+    .into_event_action()
 }
 
 fn dynamic_import_action(sequence: u64) -> FrameDocumentDynamicImportTerminalPreparedAction {

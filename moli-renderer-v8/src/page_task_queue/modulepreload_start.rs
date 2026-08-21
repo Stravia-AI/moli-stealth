@@ -286,10 +286,10 @@ mod tests {
         ))
         .expect("modulepreload source URL");
         FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-            owner,
             FrameRealmId(realm_id),
             FrameDocumentModulepreloadLinkClient::new(
                 child_handle,
+                owner,
                 DomHandle::new(child_handle_raw + 100),
             ),
             NativeModuleSingleFetchRequest::new(

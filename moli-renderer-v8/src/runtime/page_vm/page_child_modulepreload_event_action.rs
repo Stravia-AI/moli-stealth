@@ -103,23 +103,13 @@ impl PageVm {
                 );
             PageChildModulepreloadEventActionTargetEffect::AppliedToCurrentOwner { outcome }
         } else {
-            let load_delay_settled =
-                if owner.root_document() == self.document_lifecycle.identity().document {
-                    self.vm_mut()
-                        .settle_stale_child_modulepreload_event_action(task.into_action())
-                } else {
-                    false
-                };
+            drop(task);
             tracing::debug!(
                 ?owner,
                 ?current_owner,
-                load_delay_settled,
                 "discarded stale exact-owner child modulepreload event action"
             );
-            PageChildModulepreloadEventActionTargetEffect::DiscardedStaleOwner {
-                current_owner,
-                load_delay_settled,
-            }
+            PageChildModulepreloadEventActionTargetEffect::DiscardedStaleOwner { current_owner }
         };
         let action = PageChildModulepreloadEventActionTurnAction {
             owner,

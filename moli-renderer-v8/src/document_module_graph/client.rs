@@ -2,9 +2,7 @@ use moli_module_script_tree as module_tree;
 use std::sync::Arc;
 
 use crate::dom::native::NativeNodeId;
-use crate::frame_owner_model::{
-    FrameDocumentModulepreloadLinkClient, MainDocumentModulepreloadEventOwner,
-};
+use crate::frame_owner_model::{DocumentLinkEventOwner, FrameDocumentModulepreloadLinkClient};
 
 use super::ModuleMapKey;
 
@@ -16,8 +14,13 @@ use super::ModuleMapKey;
 pub(crate) struct NativeModulepreloadLinkClient {
     owner: NativeNodeId,
     key: ModuleMapKey,
-    main_document_event_owner: Option<MainDocumentModulepreloadEventOwner>,
-    frame_document_client: Option<FrameDocumentModulepreloadLinkClient>,
+    event_owner: Option<NativeModulepreloadEventOwner>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NativeModulepreloadEventOwner {
+    Main(DocumentLinkEventOwner),
+    Child(FrameDocumentModulepreloadLinkClient),
 }
 
 impl NativeModulepreloadLinkClient {
@@ -26,21 +29,21 @@ impl NativeModulepreloadLinkClient {
         Arc::new(Self {
             owner,
             key,
-            main_document_event_owner: None,
-            frame_document_client: None,
+            event_owner: None,
         })
     }
 
     pub(crate) fn new_with_main_document_event_owner(
         owner: NativeNodeId,
         key: ModuleMapKey,
-        main_document_event_owner: MainDocumentModulepreloadEventOwner,
+        main_document_event_owner: DocumentLinkEventOwner,
     ) -> Arc<Self> {
         Arc::new(Self {
             owner,
             key,
-            main_document_event_owner: Some(main_document_event_owner),
-            frame_document_client: None,
+            event_owner: Some(NativeModulepreloadEventOwner::Main(
+                main_document_event_owner,
+            )),
         })
     }
 
@@ -52,8 +55,7 @@ impl NativeModulepreloadLinkClient {
         Arc::new(Self {
             owner,
             key,
-            main_document_event_owner: None,
-            frame_document_client: Some(frame_document_client),
+            event_owner: Some(NativeModulepreloadEventOwner::Child(frame_document_client)),
         })
     }
 
@@ -65,12 +67,18 @@ impl NativeModulepreloadLinkClient {
         &self.key
     }
 
-    pub(crate) fn main_document_event_owner(&self) -> Option<MainDocumentModulepreloadEventOwner> {
-        self.main_document_event_owner
+    pub(crate) fn main_document_event_owner(&self) -> Option<DocumentLinkEventOwner> {
+        match self.event_owner {
+            Some(NativeModulepreloadEventOwner::Main(owner)) => Some(owner),
+            Some(NativeModulepreloadEventOwner::Child(_)) | None => None,
+        }
     }
 
     pub(crate) fn frame_document_client(&self) -> Option<FrameDocumentModulepreloadLinkClient> {
-        self.frame_document_client
+        match self.event_owner {
+            Some(NativeModulepreloadEventOwner::Child(client)) => Some(client),
+            Some(NativeModulepreloadEventOwner::Main(_)) | None => None,
+        }
     }
 
     pub(crate) fn ptr_eq(left: &Arc<Self>, right: &Arc<Self>) -> bool {

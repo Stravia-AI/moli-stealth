@@ -2,20 +2,20 @@ use std::collections::{BTreeMap, HashMap, VecDeque};
 
 use super::ids::FrameOwnerIdAllocator;
 use super::lifecycle_tasks::{
-    ChildDocumentAsyncClassicScriptLoadDelay, FrameDocumentCompleteLifecycleAction,
-    FrameDocumentDomContentLoadedLifecycleAction, FrameDocumentImageLoadEventBinding,
-    FrameDocumentInteractiveLifecycleAction, FrameDocumentLifecycleAction,
-    FrameDocumentMediaLoadDelayBinding, MainDocumentCompleteLifecycleAction,
-    MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
-    MainDocumentInteractiveLifecycleAction, MainDocumentMediaLoadDelayBinding,
-    MainDocumentModulepreloadEventOwner, MainDocumentScriptLoadDelayKind,
+    ChildDocumentAsyncClassicScriptLoadDelay, DocumentLinkEventOwner,
+    FrameDocumentCompleteLifecycleAction, FrameDocumentDomContentLoadedLifecycleAction,
+    FrameDocumentImageLoadEventBinding, FrameDocumentInteractiveLifecycleAction,
+    FrameDocumentLifecycleAction, FrameDocumentMediaLoadDelayBinding,
+    MainDocumentCompleteLifecycleAction, MainDocumentDomContentLoadedLifecycleAction,
+    MainDocumentImageLoadDelayBinding, MainDocumentInteractiveLifecycleAction,
+    MainDocumentMediaLoadDelayBinding, MainDocumentScriptLoadDelayKind,
     MainDocumentScriptLoadDelayLease, MainDocumentScriptLoadDelayRelease,
     MainDocumentStyleLoadEventBinding, StylesheetSubresourceLoadDelayBinding,
 };
 use super::load_event_gate::DocumentLoadGateRelease;
 use super::module_clients::{
     FrameDocumentModuleClientReservation, FrameDocumentModuleFetchClientStart,
-    FrameDocumentModulepreloadEventBinding, FrameDocumentModulepreloadLinkClient,
+    FrameDocumentModulepreloadLinkClient,
 };
 use super::navigation_tasks::{
     FrameLaneNavigationCommitTask, FrameNavigationCommitReservationResult,
@@ -2689,9 +2689,9 @@ impl FrameOwnerStore {
         &self,
         owner: FrameDocumentTaskOwner,
         element: DomHandle,
-    ) -> Option<MainDocumentModulepreloadEventOwner> {
+    ) -> Option<DocumentLinkEventOwner> {
         self.main_document_task_owner_is_current(owner)
-            .then(|| MainDocumentModulepreloadEventOwner::new(owner, element))
+            .then(|| DocumentLinkEventOwner::new(owner, element))
     }
 
     pub(crate) fn main_style_load_event_is_current(
@@ -3058,50 +3058,9 @@ impl FrameOwnerStore {
         }
         Some(FrameDocumentModulepreloadLinkClient::new(
             child_handle,
+            owner,
             link_handle,
         ))
-    }
-
-    pub(crate) fn bind_current_child_modulepreload_event(
-        &mut self,
-        owner: FrameDocumentTaskOwner,
-        client: FrameDocumentModulepreloadLinkClient,
-    ) -> Option<FrameDocumentModulepreloadEventBinding> {
-        if !self.child_document_task_owner_is_current(client.child_handle(), owner) {
-            return None;
-        }
-        let load_delay_token = self.acquire_current_child_document_load_delay(
-            client.child_handle(),
-            owner,
-            DocumentLoadDelayReason::Modulepreload,
-        );
-        if load_delay_token.is_none()
-            && !self
-                .documents
-                .get(&owner.document_id)
-                .filter(|document| document.local_window_id == owner.local_window_id)
-                .is_some_and(|document| document.lifecycle_progress.is_complete())
-        {
-            return None;
-        }
-        Some(FrameDocumentModulepreloadEventBinding::new(
-            client,
-            load_delay_token,
-        ))
-    }
-
-    pub(crate) fn settle_child_modulepreload_event(
-        &mut self,
-        owner: FrameDocumentTaskOwner,
-        binding: FrameDocumentModulepreloadEventBinding,
-    ) -> bool {
-        if !self.child_document_task_owner_is_current(binding.child_handle(), owner) {
-            return false;
-        }
-        let Some(token) = binding.load_delay_token() else {
-            return true;
-        };
-        self.release_document_load_delay(owner, token, DocumentLoadDelayReason::Modulepreload)
     }
 
     fn acquire_current_child_document_load_delay(

@@ -69,14 +69,14 @@ pub(crate) use frame_task_sources::{
     PendingChildJavascriptUrlDocumentScript,
 };
 pub(crate) use lifecycle_tasks::{
-    ChildDocumentAsyncClassicScriptLoadDelay, FrameDocumentCompleteLifecycleAction,
-    FrameDocumentDomContentLoadedLifecycleAction, FrameDocumentImageLoadEventBinding,
-    FrameDocumentInteractiveLifecycleAction, FrameDocumentLifecycleAction,
-    FrameDocumentLifecycleTaskEffect, FrameDocumentMediaLoadDelayBinding,
-    FrameDocumentUnloadLifecycleAction, MainDocumentCompleteLifecycleAction,
-    MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
-    MainDocumentInteractiveLifecycleAction, MainDocumentMediaLoadDelayBinding,
-    MainDocumentModulepreloadEventOwner, MainDocumentScriptLoadDelayKind,
+    ChildDocumentAsyncClassicScriptLoadDelay, DocumentLinkEventOwner,
+    FrameDocumentCompleteLifecycleAction, FrameDocumentDomContentLoadedLifecycleAction,
+    FrameDocumentImageLoadEventBinding, FrameDocumentInteractiveLifecycleAction,
+    FrameDocumentLifecycleAction, FrameDocumentLifecycleTaskEffect,
+    FrameDocumentMediaLoadDelayBinding, FrameDocumentUnloadLifecycleAction,
+    MainDocumentCompleteLifecycleAction, MainDocumentDomContentLoadedLifecycleAction,
+    MainDocumentImageLoadDelayBinding, MainDocumentInteractiveLifecycleAction,
+    MainDocumentMediaLoadDelayBinding, MainDocumentScriptLoadDelayKind,
     MainDocumentScriptLoadDelayLease, MainDocumentScriptLoadDelayRelease,
     MainDocumentStyleLoadEventBinding, StylesheetSubresourceLoadDelayBinding,
 };
@@ -106,7 +106,6 @@ pub(crate) use module_clients::FrameDocumentModuleTerminalWarningRecord;
 pub(crate) use module_clients::FrameDocumentModulepreloadEventAction;
 pub(crate) use module_clients::FrameDocumentModulepreloadEventActionHooks;
 pub(crate) use module_clients::FrameDocumentModulepreloadEventActionRunner;
-pub(crate) use module_clients::FrameDocumentModulepreloadEventBinding;
 pub(crate) use module_clients::FrameDocumentModulepreloadFetchTask;
 pub(crate) use module_clients::FrameDocumentModulepreloadLinkClient;
 pub(crate) use module_clients::FrameDocumentModulepreloadMaterializedWork;

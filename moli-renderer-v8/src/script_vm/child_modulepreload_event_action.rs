@@ -38,15 +38,6 @@ impl ScriptVm {
         .run_event_action(authorization.into_action())
     }
 
-    pub(crate) fn settle_stale_child_modulepreload_event_action(
-        &mut self,
-        action: FrameDocumentModulepreloadEventAction,
-    ) -> bool {
-        self._context_host
-            .borrow_mut()
-            .settle_child_modulepreload_link_event(action.owner(), action.binding(), true)
-    }
-
     #[cfg(test)]
     /// Executes only the typed modulepreload event body.
     ///
@@ -83,8 +74,6 @@ impl ScriptVm {
                     action,
                 ),
             );
-        } else {
-            let _ = self.settle_stale_child_modulepreload_event_action(action);
         }
         true
     }
@@ -123,34 +112,5 @@ impl FrameDocumentModulepreloadEventActionHooks for ScriptVmChildModulepreloadEv
             error,
             "child modulepreload event action dispatch failed"
         );
-    }
-
-    fn settle_modulepreload_event(
-        &mut self,
-        action: &FrameDocumentModulepreloadEventAction,
-    ) -> bool {
-        let settled = self
-            .vm
-            ._context_host
-            .borrow_mut()
-            .settle_child_modulepreload_link_event(action.owner(), action.binding(), true);
-        if settled {
-            tracing::debug!(
-                owner = ?action.owner(),
-                realm_id = ?action.realm_id(),
-                link_handle = ?action.link_handle(),
-                load_delay_token = ?action.load_delay_token(),
-                "settled child modulepreload lifecycle delay after link event terminal"
-            );
-        } else {
-            tracing::debug!(
-                owner = ?action.owner(),
-                realm_id = ?action.realm_id(),
-                link_handle = ?action.link_handle(),
-                load_delay_token = ?action.load_delay_token(),
-                "child modulepreload lifecycle delay was already retired or stale"
-            );
-        }
-        settled
     }
 }

@@ -1,9 +1,9 @@
 use super::JsContextHost;
 use crate::frame_owner_model::{
-    DocumentLoadDelayTokenId, FrameDocumentTaskOwner, MainDocumentCompleteLifecycleAction,
-    MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
-    MainDocumentInteractiveLifecycleAction, MainDocumentLoadCompletionState,
-    MainDocumentMediaLoadDelayBinding, MainDocumentModulepreloadEventOwner,
+    DocumentLinkEventOwner, DocumentLoadDelayTokenId, FrameDocumentTaskOwner,
+    MainDocumentCompleteLifecycleAction, MainDocumentDomContentLoadedLifecycleAction,
+    MainDocumentImageLoadDelayBinding, MainDocumentInteractiveLifecycleAction,
+    MainDocumentLoadCompletionState, MainDocumentMediaLoadDelayBinding,
     MainDocumentScriptLoadDelayKind, MainDocumentScriptLoadDelayLease,
     MainDocumentScriptLoadDelayRelease, MainDocumentStyleLoadEventBinding,
 };
@@ -193,7 +193,7 @@ impl JsContextHost {
     pub(crate) fn accept_current_main_modulepreload_event_owner(
         &self,
         element: crate::document_runtime::DomHandle,
-    ) -> Option<MainDocumentModulepreloadEventOwner> {
+    ) -> Option<DocumentLinkEventOwner> {
         let owner = self.current_main_document_task_owner()?;
         self.frame_owner_store
             .accept_current_main_modulepreload_event_owner(owner, element)

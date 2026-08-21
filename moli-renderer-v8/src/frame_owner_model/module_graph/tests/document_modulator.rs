@@ -12,9 +12,8 @@ fn modulepreload_start_action_reserves_fetch_in_modulator_store() {
     let request = modulepreload_request("modulepreload-start.js");
     let key = request.module_key().clone();
     let task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
         request.clone(),
     );
 
@@ -112,9 +111,8 @@ fn modulepreload_start_action_runner_schedules_fetch() {
     let link_handle = DomHandle::new(77);
     let request = modulepreload_request("modulepreload-runner-start.js");
     let task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
         request,
     );
     let action = store.start_modulepreload_fetch_task(task);
@@ -313,15 +311,13 @@ fn modulepreload_start_action_joins_fetching_entry_in_modulator_store() {
     let request = modulepreload_request("modulepreload-joined.js");
     let key = request.module_key().clone();
     let first_task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(first_link),
+        modulepreload_link_client(owner, first_link),
         request.clone(),
     );
     let joined_task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(joined_link),
+        modulepreload_link_client(owner, joined_link),
         request,
     );
 
@@ -370,9 +366,8 @@ fn modulepreload_start_action_joins_terminal_entry_as_terminal_work() {
         "the terminal entry has no clients before the modulepreload task joins"
     );
     let task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
         request,
     );
 
@@ -420,9 +415,8 @@ fn modulepreload_fetch_completion_settles_source_in_modulator_store() {
     let request = modulepreload_request("modulepreload-complete.js");
     let key = request.module_key().clone();
     let task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
         request.clone(),
     );
     let FrameDocumentModulepreloadStartAction::ScheduleFetch { load_id, .. } =
@@ -472,9 +466,8 @@ fn modulepreload_fetch_completion_marks_failure_in_modulator_store() {
     let request = modulepreload_request("modulepreload-failure.js");
     let key = request.module_key().clone();
     let task = FrameDocumentModulepreloadFetchTask::from_modulepreload_fetch_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
         request,
     );
     let FrameDocumentModulepreloadStartAction::ScheduleFetch { load_id, .. } =
@@ -532,7 +525,7 @@ fn restored_document_modulator_returns_modulepreload_terminal_work() {
     let link_client = crate::module_runtime::NativeModulepreloadLinkClient::new_for_frame_document(
         link_handle,
         key.clone(),
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
     );
     document_modulator.add_modulepreload_link_client(key.clone(), link_client.clone());
     document_modulator.insert_fetched_source(
@@ -631,9 +624,8 @@ fn modulepreload_link_error_event_builds_terminal_work_without_module_key() {
     let link_handle = DomHandle::new(77);
 
     let terminal_work = FrameDocumentModulepreloadTerminalWork::from_link_error_parts(
-        owner,
         realm_id,
-        modulepreload_link_client(link_handle),
+        modulepreload_link_client(owner, link_handle),
     );
 
     assert_eq!(terminal_work.owner(), owner);

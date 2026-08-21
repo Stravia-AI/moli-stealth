@@ -1,8 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use crate::frame_owner_model::{
-    MainDocumentModulepreloadEventOwner, MainDocumentStyleLoadEventBinding,
-};
+use crate::frame_owner_model::{DocumentLinkEventOwner, MainDocumentStyleLoadEventBinding};
 use crate::module_runtime::{NativeModulepreloadFetchStart, NativeModulepreloadLinkClient};
 use crate::style_engine::OwnerStyleSheetSource;
 use crate::stylesheet_blocking::{
@@ -220,7 +218,7 @@ impl ConnectedStyleLoadEventPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ConnectedStyleLoadEventAdmission {
     LoadDelaying(MainDocumentStyleLoadEventBinding),
-    NonBlockingModulepreload(MainDocumentModulepreloadEventOwner),
+    NonBlockingModulepreload(DocumentLinkEventOwner),
 }
 
 impl ConnectedStyleLoadEventAdmission {

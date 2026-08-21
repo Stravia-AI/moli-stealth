@@ -296,7 +296,6 @@ impl ChildDocumentModulatorEntry {
                     "modulepreload terminal client must keep its accepted module key"
                 );
                 FrameDocumentModulepreloadTerminalWork::from_terminal_parts(
-                    owner,
                     self.realm_id,
                     key.clone(),
                     link_client

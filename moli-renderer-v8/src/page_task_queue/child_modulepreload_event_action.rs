@@ -211,7 +211,6 @@ pub(crate) enum PageChildModulepreloadEventActionTargetEffect {
     },
     DiscardedStaleOwner {
         current_owner: Option<RendererPageChildModulepreloadEventActionOwner>,
-        load_delay_settled: bool,
     },
 }
 

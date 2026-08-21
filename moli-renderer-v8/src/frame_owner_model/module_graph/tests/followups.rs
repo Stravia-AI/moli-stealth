@@ -120,9 +120,8 @@ fn module_terminal_batch_keeps_modulepreload_terminals_out_of_event_task_lane() 
 
     batch.push_modulepreload_terminal_work(
         FrameDocumentModulepreloadTerminalWork::from_link_error_parts(
-            task_owner,
             realm_id,
-            modulepreload_link_client(DomHandle::new(12)),
+            modulepreload_link_client(task_owner, DomHandle::new(12)),
         ),
     );
 
@@ -139,11 +138,10 @@ fn modulepreload_event_action() -> FrameDocumentModulepreloadEventAction {
         FrameDocumentTaskOwner::new(FrameSchedulerLaneId(7), LocalWindowId(8), DocumentId(9));
     let realm_id = FrameRealmId(10);
     FrameDocumentModulepreloadTerminalWork::from_link_error_parts(
-        task_owner,
         realm_id,
-        modulepreload_link_client(DomHandle::new(12)),
+        modulepreload_link_client(task_owner, DomHandle::new(12)),
     )
-    .into_event_action(modulepreload_event_binding(DomHandle::new(12)))
+    .into_event_action()
 }
 
 #[derive(Default)]
@@ -151,7 +149,6 @@ struct FakeModulepreloadEventActionHooks {
     fail_dispatch: bool,
     dispatch_calls: usize,
     failed_records: usize,
-    settled_events: usize,
 }
 
 impl FrameDocumentModulepreloadEventActionHooks for FakeModulepreloadEventActionHooks {
@@ -177,14 +174,6 @@ impl FrameDocumentModulepreloadEventActionHooks for FakeModulepreloadEventAction
     ) {
         self.failed_records += 1;
     }
-
-    fn settle_modulepreload_event(
-        &mut self,
-        _action: &FrameDocumentModulepreloadEventAction,
-    ) -> bool {
-        self.settled_events += 1;
-        true
-    }
 }
 
 #[test]
@@ -198,10 +187,8 @@ fn modulepreload_event_action_runner_reports_dispatched_event() {
 
     assert!(outcome.event_was_dispatched());
     assert!(!outcome.event_dispatch_was_failed());
-    assert!(outcome.load_delay_was_settled());
     assert_eq!(hooks.dispatch_calls, 1);
     assert_eq!(hooks.failed_records, 0);
-    assert_eq!(hooks.settled_events, 1);
 }
 
 #[test]
@@ -217,9 +204,7 @@ fn modulepreload_event_action_runner_records_dispatch_failure() {
 
     assert!(outcome.event_dispatch_was_failed());
     assert!(!outcome.event_was_dispatched());
-    assert!(outcome.load_delay_was_settled());
     assert_eq!(hooks.dispatch_calls, 1);
-    assert_eq!(hooks.settled_events, 1);
     assert_eq!(hooks.failed_records, 1);
 }
 
