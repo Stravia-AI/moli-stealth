@@ -1,7 +1,9 @@
 use std::sync::{Arc, OnceLock};
 
-use crate::frame_owner_model::MainDocumentStyleLoadEventBinding;
-use crate::module_runtime::NativeModulepreloadLinkClient;
+use crate::frame_owner_model::{
+    MainDocumentModulepreloadEventOwner, MainDocumentStyleLoadEventBinding,
+};
+use crate::module_runtime::{NativeModulepreloadFetchStart, NativeModulepreloadLinkClient};
 use crate::style_engine::OwnerStyleSheetSource;
 use crate::stylesheet_blocking::{
     StylesheetBlockingOperation, StylesheetFetch, StylesheetFetchOptions, StylesheetFetchTerminal,
@@ -80,7 +82,7 @@ impl ReadyConnectedStyleLoad {
         }
     }
 
-    pub(in crate::document_runtime) fn for_native_modulepreload(
+    fn for_native_modulepreload(
         client: Arc<NativeModulepreloadLinkClient>,
         successful: bool,
     ) -> Self {
@@ -108,9 +110,7 @@ impl ReadyConnectedStyleLoad {
                 operation.load_event_binding()
             }
             ReadyConnectedStyleLoadOperation::StylesheetLink(load) => load.load_event_binding(),
-            ReadyConnectedStyleLoadOperation::NativeModulepreload(client) => {
-                client.load_event_binding()
-            }
+            ReadyConnectedStyleLoadOperation::NativeModulepreload(_) => None,
         }
     }
 
@@ -129,23 +129,150 @@ impl ReadyConnectedStyleLoad {
     }
 }
 
+/// One modulepreload link event accepted by the exact connected-owner state
+/// machine but not yet published to the Page task source.
+///
+/// Consuming this value creates the immutable ready event without touching the
+/// Document load gate. The network client is never mutated during the
+/// transition.
+#[derive(Debug)]
+pub(crate) struct PendingNativeModulepreloadLinkEvent {
+    client: Arc<NativeModulepreloadLinkClient>,
+    successful: bool,
+}
+
+impl PendingNativeModulepreloadLinkEvent {
+    pub(in crate::document_runtime) fn new(
+        client: Arc<NativeModulepreloadLinkClient>,
+        successful: bool,
+    ) -> Self {
+        Self { client, successful }
+    }
+
+    pub(crate) fn client(&self) -> &Arc<NativeModulepreloadLinkClient> {
+        &self.client
+    }
+
+    pub(crate) fn into_ready_event(self) -> ReadyConnectedStyleLoad {
+        ReadyConnectedStyleLoad::for_native_modulepreload(self.client, self.successful)
+    }
+}
+
+/// Result of registering one connected modulepreload link with the module
+/// map. A terminal is present only when the module map was already terminal.
+#[derive(Debug)]
+pub(crate) struct NativeModulepreloadLinkFetchOutcome {
+    fetch_start: NativeModulepreloadFetchStart,
+    pending_event: Option<PendingNativeModulepreloadLinkEvent>,
+}
+
+impl NativeModulepreloadLinkFetchOutcome {
+    pub(in crate::document_runtime) fn new(
+        fetch_start: NativeModulepreloadFetchStart,
+        pending_event: Option<PendingNativeModulepreloadLinkEvent>,
+    ) -> Self {
+        Self {
+            fetch_start,
+            pending_event,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        NativeModulepreloadFetchStart,
+        Option<PendingNativeModulepreloadLinkEvent>,
+    ) {
+        (self.fetch_start, self.pending_event)
+    }
+}
+
+/// Lifecycle work that must be committed outside `DocumentRuntime` before a
+/// connected style/link owner is processed.
+///
+/// Preparing this value only reads the DOM. `ScriptVm` commits it while
+/// safely borrowing `JsContextHost`, then gives the resulting admission back
+/// to `DocumentRuntime` synchronously. No task or event-loop turn may run
+/// between those phases.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectedStyleLoadEventPlan {
+    LoadDelaying { element: DomHandle },
+    NonBlockingModulepreload { element: DomHandle },
+}
+
+impl ConnectedStyleLoadEventPlan {
+    pub(in crate::document_runtime) fn load_delaying(element: DomHandle) -> Self {
+        Self::LoadDelaying { element }
+    }
+
+    pub(in crate::document_runtime) fn non_blocking_modulepreload(element: DomHandle) -> Self {
+        Self::NonBlockingModulepreload { element }
+    }
+}
+
+/// Lifecycle authority committed for one connected style/link plan.
+///
+/// Valid `modulepreload` links take the identity-only variant, which captures
+/// the exact Document and element without touching the Document load gate.
+/// All other owners retain the stylesheet load-event lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConnectedStyleLoadEventAdmission {
+    LoadDelaying(MainDocumentStyleLoadEventBinding),
+    NonBlockingModulepreload(MainDocumentModulepreloadEventOwner),
+}
+
+impl ConnectedStyleLoadEventAdmission {
+    pub(in crate::document_runtime) fn matches_plan(
+        self,
+        plan: ConnectedStyleLoadEventPlan,
+    ) -> bool {
+        match (self, plan) {
+            (
+                Self::LoadDelaying(binding),
+                ConnectedStyleLoadEventPlan::LoadDelaying { element },
+            ) => binding.element() == element,
+            (
+                Self::NonBlockingModulepreload(owner),
+                ConnectedStyleLoadEventPlan::NonBlockingModulepreload { element },
+            ) => owner.element() == element,
+            (
+                Self::LoadDelaying(_),
+                ConnectedStyleLoadEventPlan::NonBlockingModulepreload { .. },
+            )
+            | (
+                Self::NonBlockingModulepreload(_),
+                ConnectedStyleLoadEventPlan::LoadDelaying { .. },
+            ) => false,
+        }
+    }
+
+    pub(in crate::document_runtime) fn load_event_binding(
+        self,
+    ) -> Option<MainDocumentStyleLoadEventBinding> {
+        match self {
+            Self::LoadDelaying(binding) => Some(binding),
+            Self::NonBlockingModulepreload(_) => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(in crate::document_runtime) struct QueuedConnectedStyleLoad {
     owner: DomHandle,
     inline_source: Option<Arc<OwnerStyleSheetSource>>,
-    load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+    event_admission: Option<ConnectedStyleLoadEventAdmission>,
 }
 
 impl QueuedConnectedStyleLoad {
     pub(in crate::document_runtime) fn new(
         owner: DomHandle,
         inline_source: Option<Arc<OwnerStyleSheetSource>>,
-        load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+        event_admission: Option<ConnectedStyleLoadEventAdmission>,
     ) -> Arc<Self> {
         Arc::new(Self {
             owner,
             inline_source,
-            load_event_binding,
+            event_admission,
         })
     }
 
@@ -157,10 +284,10 @@ impl QueuedConnectedStyleLoad {
         self.inline_source.as_ref()
     }
 
-    pub(in crate::document_runtime) fn load_event_binding(
+    pub(in crate::document_runtime) fn event_admission(
         &self,
-    ) -> Option<MainDocumentStyleLoadEventBinding> {
-        self.load_event_binding
+    ) -> Option<ConnectedStyleLoadEventAdmission> {
+        self.event_admission
     }
 }
 

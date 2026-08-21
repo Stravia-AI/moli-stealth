@@ -1808,7 +1808,50 @@ pub(super) fn finish_runtime_mutation_effects(
     }
     runtime.apply_pending_stylesheet_source_css_projections(scope, host_ptr);
     if changed {
-        runtime.apply_stylesheet_owner_runtime_changes(host_ptr, &stylesheet_owner_changes);
+        let prepared_owner_changes =
+            runtime.prepare_stylesheet_owner_runtime_changes(&stylesheet_owner_changes);
+        let (canceled_load_event_bindings, prepared_owner_changes) =
+            prepared_owner_changes.into_parts();
+        for binding in canceled_load_event_bindings {
+            let settled = unsafe { &mut *host_ptr }.settle_main_style_load_event(binding);
+            tracing::debug!(
+                owner = ?binding.owner(),
+                element = ?binding.element(),
+                load_delay_token = ?binding.load_delay_token(),
+                settled,
+                "settled invalidated connected-style lease at mutation commit"
+            );
+        }
+        for prepared_owner_change in prepared_owner_changes {
+            let owner = prepared_owner_change.owner();
+            if let Some(url) = prepared_owner_change.cached_linked_stylesheet_url() {
+                let _ = unsafe { &mut *host_ptr }
+                    .install_cached_linked_stylesheet_for_owner(owner, url);
+            }
+            let inline_source = unsafe { &*host_ptr }.owner_style_sheet_processing_source(owner);
+            let prepared_loads = runtime.prepare_connected_style_loads(owner, false);
+            for prepared_load in prepared_loads {
+                // A native DOM callback already owns this exact live host.
+                // Commit touches only FrameOwnerStore and never dereferences
+                // the runtime pointer; apply resumes after that borrow ends.
+                let event_admission = unsafe { &mut *host_ptr }
+                    .commit_connected_style_load_event_plan(prepared_load.event_plan());
+                let Some(event_admission) = event_admission else {
+                    tracing::debug!(
+                        owner = ?prepared_load.owner(),
+                        "discarded mutation connected-style plan rejected by the current main Document"
+                    );
+                    continue;
+                };
+                debug_assert_eq!(prepared_load.owner(), owner);
+                runtime.apply_prepared_connected_style_load(
+                    prepared_load,
+                    inline_source.clone(),
+                    event_admission,
+                    host_ptr,
+                );
+            }
+        }
         crate::native_bridge::document::apply_stylesheet_owner_css_projections(
             scope,
             unsafe { &*host_ptr },

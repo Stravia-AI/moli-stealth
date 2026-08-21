@@ -710,6 +710,45 @@ fn main_style_load_event_binding_delays_complete_until_event_settlement() {
 }
 
 #[test]
+fn main_modulepreload_owner_never_allocates_a_load_event_delay() {
+    let mut store = FrameOwnerStore::default();
+    store.ensure_main_frame(
+        handle(1),
+        url("https://example.test/"),
+        url("https://example.test/"),
+        "https://example.test".to_owned(),
+        policy_container(),
+        policy_context(),
+        None,
+    );
+    let snapshot = store
+        .current_main_owner_snapshot()
+        .expect("main owner snapshot");
+    let owner = FrameDocumentTaskOwner::new(
+        snapshot.scheduler_lane_id,
+        snapshot.local_window_id,
+        snapshot.document_id,
+    );
+
+    let event_owner = store
+        .accept_current_main_modulepreload_event_owner(owner, handle(10))
+        .expect("current modulepreload should retain exact event ownership");
+    assert_eq!(event_owner.owner(), owner);
+    assert_eq!(event_owner.element(), handle(10));
+    assert_eq!(
+        store.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "network-phase owner identity must not allocate a load-delay token"
+    );
+
+    assert_eq!(
+        store.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "modulepreload terminal events must not touch the Document load gate"
+    );
+}
+
+#[test]
 fn main_style_load_event_binding_cannot_settle_replacement_document() {
     let mut store = FrameOwnerStore::default();
     store.ensure_main_frame(

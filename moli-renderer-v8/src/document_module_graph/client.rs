@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use crate::dom::native::NativeNodeId;
 use crate::frame_owner_model::{
-    FrameDocumentModulepreloadLinkClient, MainDocumentStyleLoadEventBinding,
+    FrameDocumentModulepreloadLinkClient, MainDocumentModulepreloadEventOwner,
 };
 
 use super::ModuleMapKey;
@@ -16,25 +16,30 @@ use super::ModuleMapKey;
 pub(crate) struct NativeModulepreloadLinkClient {
     owner: NativeNodeId,
     key: ModuleMapKey,
-    load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+    main_document_event_owner: Option<MainDocumentModulepreloadEventOwner>,
     frame_document_client: Option<FrameDocumentModulepreloadLinkClient>,
 }
 
 impl NativeModulepreloadLinkClient {
     #[cfg(test)]
     pub(crate) fn new(owner: NativeNodeId, key: ModuleMapKey) -> Arc<Self> {
-        Self::new_with_load_event_binding(owner, key, None)
+        Arc::new(Self {
+            owner,
+            key,
+            main_document_event_owner: None,
+            frame_document_client: None,
+        })
     }
 
-    pub(crate) fn new_with_load_event_binding(
+    pub(crate) fn new_with_main_document_event_owner(
         owner: NativeNodeId,
         key: ModuleMapKey,
-        load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+        main_document_event_owner: MainDocumentModulepreloadEventOwner,
     ) -> Arc<Self> {
         Arc::new(Self {
             owner,
             key,
-            load_event_binding,
+            main_document_event_owner: Some(main_document_event_owner),
             frame_document_client: None,
         })
     }
@@ -47,7 +52,7 @@ impl NativeModulepreloadLinkClient {
         Arc::new(Self {
             owner,
             key,
-            load_event_binding: None,
+            main_document_event_owner: None,
             frame_document_client: Some(frame_document_client),
         })
     }
@@ -60,8 +65,8 @@ impl NativeModulepreloadLinkClient {
         &self.key
     }
 
-    pub(crate) fn load_event_binding(&self) -> Option<MainDocumentStyleLoadEventBinding> {
-        self.load_event_binding
+    pub(crate) fn main_document_event_owner(&self) -> Option<MainDocumentModulepreloadEventOwner> {
+        self.main_document_event_owner
     }
 
     pub(crate) fn frame_document_client(&self) -> Option<FrameDocumentModulepreloadLinkClient> {

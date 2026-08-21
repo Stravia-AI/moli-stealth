@@ -4,12 +4,44 @@ use crate::frame_owner_model::{
 };
 
 impl ScriptVm {
-    #[cfg(test)]
     pub(crate) fn queue_initial_connected_style_loads_for_current_owner(&mut self) {
-        let host_ptr: *mut crate::native_bridge::JsContextHost =
-            self._context_host.as_ref().as_ptr();
-        self.document_runtime
-            .queue_initial_connected_style_loads_for_owner(host_ptr);
+        let prepared = self
+            .document_runtime
+            .prepare_initial_connected_style_loads();
+        self.commit_and_apply_connected_style_loads(prepared);
+    }
+
+    fn commit_and_apply_connected_style_loads(
+        &mut self,
+        prepared_loads: Vec<crate::document_runtime::PreparedConnectedStyleLoad>,
+    ) {
+        // This is a synchronous owner-thread transaction. Preparing reads the
+        // DOM, committing touches only ContextHost's FrameOwnerStore, and
+        // applying starts/queues the resource operation. No V8 callback, task
+        // checkpoint, or event-loop turn runs between those steps.
+        for prepared in prepared_loads {
+            let inline_source = self
+                ._context_host
+                .borrow()
+                .owner_style_sheet_processing_source(prepared.owner());
+            let event_admission = self
+                ._context_host
+                .borrow_mut()
+                .commit_connected_style_load_event_plan(prepared.event_plan());
+            let Some(event_admission) = event_admission else {
+                tracing::debug!(
+                    owner = ?prepared.owner(),
+                    "discarded connected-style plan rejected by the current main Document"
+                );
+                continue;
+            };
+            self.document_runtime.apply_prepared_connected_style_load(
+                prepared,
+                inline_source,
+                event_admission,
+                self._context_host.as_ref().as_ptr(),
+            );
+        }
     }
 
     pub(crate) fn accept_main_document_blocking_stylesheet_inputs(

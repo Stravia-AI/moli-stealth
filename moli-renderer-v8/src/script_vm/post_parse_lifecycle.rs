@@ -909,13 +909,7 @@ impl ScriptVm {
         work: Vec<PostParsePageOwnedWork>,
     ) -> PostParseLifecycleRound {
         let queue_stats = post_parse_lifecycle_queue_stats(&work);
-        let context_host = self._context_host.clone();
-        let host_ptr = context_host.as_ref().as_ptr();
-        let context_host = context_host.borrow();
-        self.document_runtime
-            .queue_initial_connected_style_loads_with_source_lookup(host_ptr, |owner| {
-                context_host.owner_style_sheet_processing_source(owner)
-            });
+        self.queue_initial_connected_style_loads_for_current_owner();
         self.document_runtime.drain_document_processing_wakes();
         self.document_runtime
             .enqueue_post_parse_lifecycle_page_owned_work(page_task_queue, work, report);
@@ -2020,6 +2014,16 @@ impl ScriptVm {
         self._context_host
             .borrow()
             .current_main_document_has_async_script_load_delay(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_main_document_has_style_load_event_delay(
+        &self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) -> Option<bool> {
+        self._context_host
+            .borrow()
+            .current_main_document_has_style_load_event_delay(owner)
     }
 
     fn has_pending_stable_runtime_script_continuation(&mut self) -> bool {

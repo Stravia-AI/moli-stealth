@@ -340,12 +340,6 @@ impl StylesheetOwnerRuntimeStates {
         {
             bindings.push(binding);
         }
-        if let Some(native_modulepreload) = &state.native_modulepreload
-            && native_modulepreload.phase == NativeModulepreloadPhase::Pending
-            && let Some(binding) = native_modulepreload.client.load_event_binding()
-        {
-            bindings.push(binding);
-        }
         if let Some(link) = &state.link_style_state
             && let Some(binding) = link.cancelable_load_event_binding()
         {

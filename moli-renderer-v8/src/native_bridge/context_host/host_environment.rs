@@ -1033,8 +1033,21 @@ impl JsContextHost {
                     unsafe { &*dom_host },
                     owner,
                 );
+            let canceled_load_event_bindings =
+                unsafe { &mut *self.runtime }.invalidate_style_related_state(owner);
+            for binding in canceled_load_event_bindings {
+                let settled = self.settle_main_style_load_event(binding);
+                tracing::debug!(
+                    owner = ?binding.owner(),
+                    element = ?binding.element(),
+                    load_delay_token = ?binding.load_delay_token(),
+                    settled,
+                    "settled invalidated connected-style lease at CSSOM commit"
+                );
+            }
             let host_ptr = self as *mut Self;
-            unsafe { &mut *self.runtime }.apply_inline_cssom_source_change(host_ptr, owner);
+            unsafe { &mut *self.runtime }
+                .apply_inline_cssom_source_change_after_invalidation(host_ptr, owner);
             return true;
         }
         if self.style_engine.refresh_linked_live_stylesheet_with_host(

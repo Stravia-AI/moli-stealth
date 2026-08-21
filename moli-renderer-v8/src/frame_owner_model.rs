@@ -76,9 +76,9 @@ pub(crate) use lifecycle_tasks::{
     FrameDocumentUnloadLifecycleAction, MainDocumentCompleteLifecycleAction,
     MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
     MainDocumentInteractiveLifecycleAction, MainDocumentMediaLoadDelayBinding,
-    MainDocumentScriptLoadDelayKind, MainDocumentScriptLoadDelayLease,
-    MainDocumentScriptLoadDelayRelease, MainDocumentStyleLoadEventBinding,
-    StylesheetSubresourceLoadDelayBinding,
+    MainDocumentModulepreloadEventOwner, MainDocumentScriptLoadDelayKind,
+    MainDocumentScriptLoadDelayLease, MainDocumentScriptLoadDelayRelease,
+    MainDocumentStyleLoadEventBinding, StylesheetSubresourceLoadDelayBinding,
 };
 pub(crate) use load_delivery_tasks::{
     FrameDocumentLoadDeliveryAction, FrameDocumentLoadDeliveryAdmission,

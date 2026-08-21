@@ -8,9 +8,9 @@ use super::lifecycle_tasks::{
     FrameDocumentMediaLoadDelayBinding, MainDocumentCompleteLifecycleAction,
     MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
     MainDocumentInteractiveLifecycleAction, MainDocumentMediaLoadDelayBinding,
-    MainDocumentScriptLoadDelayKind, MainDocumentScriptLoadDelayLease,
-    MainDocumentScriptLoadDelayRelease, MainDocumentStyleLoadEventBinding,
-    StylesheetSubresourceLoadDelayBinding,
+    MainDocumentModulepreloadEventOwner, MainDocumentScriptLoadDelayKind,
+    MainDocumentScriptLoadDelayLease, MainDocumentScriptLoadDelayRelease,
+    MainDocumentStyleLoadEventBinding, StylesheetSubresourceLoadDelayBinding,
 };
 use super::load_event_gate::DocumentLoadGateRelease;
 use super::module_clients::{
@@ -2685,6 +2685,15 @@ impl FrameOwnerStore {
         ))
     }
 
+    pub(crate) fn accept_current_main_modulepreload_event_owner(
+        &self,
+        owner: FrameDocumentTaskOwner,
+        element: DomHandle,
+    ) -> Option<MainDocumentModulepreloadEventOwner> {
+        self.main_document_task_owner_is_current(owner)
+            .then(|| MainDocumentModulepreloadEventOwner::new(owner, element))
+    }
+
     pub(crate) fn main_style_load_event_is_current(
         &self,
         binding: MainDocumentStyleLoadEventBinding,
@@ -2897,6 +2906,21 @@ impl FrameOwnerStore {
                 || document
                     .lifecycle_progress
                     .has_load_delay_reason(DocumentLoadDelayReason::AsyncModuleScript)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_main_document_has_style_load_event_delay(
+        &self,
+        owner: FrameDocumentTaskOwner,
+    ) -> Option<bool> {
+        if !self.main_document_task_owner_is_current(owner) {
+            return None;
+        }
+        self.documents.get(&owner.document_id).map(|document| {
+            document
+                .lifecycle_progress
+                .has_load_delay_reason(DocumentLoadDelayReason::StyleLoadEvent)
         })
     }
 

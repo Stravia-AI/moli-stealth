@@ -460,47 +460,74 @@ impl DocumentRuntime {
         request: NativeModuleSingleFetchRequest,
     ) -> std::result::Result<NativeModulepreloadFetchStart, ModuleLoadError> {
         self.fetch_single_native_module_for_modulepreload_client(request, None)
+            .map(|(fetch_start, _)| fetch_start)
     }
 
     pub(crate) fn fetch_single_native_module_for_modulepreload_link(
         &mut self,
         request: NativeModuleSingleFetchRequest,
         link_client: std::sync::Arc<crate::module_runtime::NativeModulepreloadLinkClient>,
-    ) -> std::result::Result<NativeModulepreloadFetchStart, ModuleLoadError> {
+    ) -> std::result::Result<NativeModulepreloadLinkFetchOutcome, ModuleLoadError> {
         self.fetch_single_native_module_for_modulepreload_client(request, Some(link_client))
+            .map(|(fetch_start, pending_event)| {
+                NativeModulepreloadLinkFetchOutcome::new(fetch_start, pending_event)
+            })
     }
 
     fn fetch_single_native_module_for_modulepreload_client(
         &mut self,
         request: NativeModuleSingleFetchRequest,
         link_client: Option<std::sync::Arc<crate::module_runtime::NativeModulepreloadLinkClient>>,
-    ) -> std::result::Result<NativeModulepreloadFetchStart, ModuleLoadError> {
+    ) -> std::result::Result<
+        (
+            NativeModulepreloadFetchStart,
+            Option<PendingNativeModulepreloadLinkEvent>,
+        ),
+        ModuleLoadError,
+    > {
         let key = request.module_key().clone();
         match self.start_or_join_native_module_fetch(key.clone()) {
             ModuleMapFetchDisposition::StartedFetch(_) => {
                 if let Some(client) = link_client {
                     self.suspend_native_modulepreload_link_clients(key, vec![client]);
                 }
-                Ok(NativeModulepreloadFetchStart::Started(Box::new(request)))
+                Ok((
+                    NativeModulepreloadFetchStart::Started(Box::new(request)),
+                    None,
+                ))
             }
             ModuleMapFetchDisposition::JoinedFetching(_) => {
                 if let Some(client) = link_client {
                     self.suspend_native_modulepreload_link_clients(key, vec![client]);
                 }
-                Ok(NativeModulepreloadFetchStart::Joined)
+                Ok((NativeModulepreloadFetchStart::Joined, None))
             }
             ModuleMapFetchDisposition::AlreadyFetched(_)
             | ModuleMapFetchDisposition::AlreadyCompiled(_) => {
-                if let Some(client) = link_client {
-                    self.complete_native_modulepreload_link_clients(&key, vec![client], true);
-                }
-                Ok(NativeModulepreloadFetchStart::AlreadyComplete)
+                let pending_event = link_client.and_then(|client| {
+                    self.accept_native_modulepreload_link_client_terminals(&key, vec![client], true)
+                        .into_iter()
+                        .next()
+                });
+                Ok((
+                    NativeModulepreloadFetchStart::AlreadyComplete,
+                    pending_event,
+                ))
             }
             ModuleMapFetchDisposition::AlreadyFailed(_) => {
-                if let Some(client) = link_client {
-                    self.complete_native_modulepreload_link_clients(&key, vec![client], false);
-                }
-                Ok(NativeModulepreloadFetchStart::AlreadyComplete)
+                let pending_event = link_client.and_then(|client| {
+                    self.accept_native_modulepreload_link_client_terminals(
+                        &key,
+                        vec![client],
+                        false,
+                    )
+                    .into_iter()
+                    .next()
+                });
+                Ok((
+                    NativeModulepreloadFetchStart::AlreadyComplete,
+                    pending_event,
+                ))
             }
         }
     }

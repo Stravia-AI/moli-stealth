@@ -81,6 +81,93 @@ pub(crate) struct ConnectedStyleLoadPrimeResult {
     runtime_warnings: Vec<String>,
 }
 
+/// One DOM-derived connected-style operation awaiting lifecycle commit.
+///
+/// The plan contains no `ContextHost` state and owns no load-delay token. Its
+/// caller must commit `event_plan` and apply the result synchronously, before
+/// running script or another DOM mutation.
+#[derive(Debug)]
+pub(crate) struct PreparedConnectedStyleLoad {
+    owner: DomHandle,
+    csp_blocked: bool,
+    remember_before_initial_scan: bool,
+    event_plan: ConnectedStyleLoadEventPlan,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedStylesheetOwnerRuntimeChange {
+    owner: DomHandle,
+    cached_linked_stylesheet_url: Option<Url>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedStylesheetOwnerRuntimeChanges {
+    canceled_load_event_bindings: Vec<MainDocumentStyleLoadEventBinding>,
+    owner_changes: Vec<PreparedStylesheetOwnerRuntimeChange>,
+}
+
+impl PreparedStylesheetOwnerRuntimeChanges {
+    fn new(
+        canceled_load_event_bindings: Vec<MainDocumentStyleLoadEventBinding>,
+        owner_changes: Vec<PreparedStylesheetOwnerRuntimeChange>,
+    ) -> Self {
+        Self {
+            canceled_load_event_bindings,
+            owner_changes,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Vec<MainDocumentStyleLoadEventBinding>,
+        Vec<PreparedStylesheetOwnerRuntimeChange>,
+    ) {
+        (self.canceled_load_event_bindings, self.owner_changes)
+    }
+}
+
+impl PreparedStylesheetOwnerRuntimeChange {
+    fn new(owner: DomHandle, cached_linked_stylesheet_url: Option<Url>) -> Self {
+        Self {
+            owner,
+            cached_linked_stylesheet_url,
+        }
+    }
+
+    pub(crate) fn owner(&self) -> DomHandle {
+        self.owner
+    }
+
+    pub(crate) fn cached_linked_stylesheet_url(&self) -> Option<&Url> {
+        self.cached_linked_stylesheet_url.as_ref()
+    }
+}
+
+impl PreparedConnectedStyleLoad {
+    fn new(
+        owner: DomHandle,
+        csp_blocked: bool,
+        remember_before_initial_scan: bool,
+        event_plan: ConnectedStyleLoadEventPlan,
+    ) -> Self {
+        Self {
+            owner,
+            csp_blocked,
+            remember_before_initial_scan,
+            event_plan,
+        }
+    }
+
+    pub(crate) fn owner(&self) -> DomHandle {
+        self.owner
+    }
+
+    pub(crate) fn event_plan(&self) -> ConnectedStyleLoadEventPlan {
+        self.event_plan
+    }
+}
+
 impl ConnectedStyleLoadPrimeResult {
     fn push_modulepreload_start(&mut self, start: ConnectedModulepreloadStart) {
         self.modulepreload_starts.push(start);
@@ -249,54 +336,32 @@ async fn fetch_connected_style_import_graph(
 }
 
 impl DocumentRuntime {
-    pub(crate) fn queue_initial_connected_style_loads_with_source_lookup<F>(
+    pub(crate) fn prepare_initial_connected_style_loads(
         &mut self,
-        host_ptr: *mut JsContextHost,
-        mut source_for: F,
-    ) where
-        F: FnMut(DomHandle) -> Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
-    {
+    ) -> Vec<PreparedConnectedStyleLoad> {
         if self.initial_connected_style_loads_queued {
-            return;
+            return Vec::new();
         }
         self.late_preload_stylesheet_handles =
             self.collect_late_preload_stylesheet_handles_for_initial_scan(self.document_handle());
         self.initial_connected_style_loads_queued = true;
-        self.queue_connected_style_loads_inner(
-            host_ptr,
-            self.document_handle(),
-            true,
-            &mut source_for,
-        );
+        let prepared = self.prepare_connected_style_loads(self.document_handle(), true);
         self.stylesheet_lifecycle
             .pre_initial_scan_processed_owners
             .clear();
+        prepared
     }
 
     #[cfg(test)]
     pub(crate) fn queue_initial_connected_style_loads(&mut self) {
-        self.queue_initial_connected_style_loads_with_source_lookup(std::ptr::null_mut(), |_| None);
-    }
-
-    pub(in crate::document_runtime) fn queue_connected_style_load_with_inline_source(
-        &mut self,
-        host_ptr: *mut JsContextHost,
-        root: DomHandle,
-        inline_source: Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
-    ) {
-        let inline_source = inline_source;
-        self.queue_connected_style_loads_inner(host_ptr, root, false, &mut |handle| {
-            if handle == root {
-                inline_source.clone()
-            } else {
-                None
-            }
-        });
+        let prepared = self.prepare_initial_connected_style_loads();
+        self.commit_prepared_connected_style_loads_for_test(prepared);
     }
 
     #[cfg(test)]
     pub(crate) fn queue_connected_style_loads(&mut self, root: DomHandle) {
-        self.queue_connected_style_load_with_inline_source(std::ptr::null_mut(), root, None);
+        let prepared = self.prepare_connected_style_loads(root, false);
+        self.commit_prepared_connected_style_loads_for_test(prepared);
     }
 
     #[cfg(test)]
@@ -353,17 +418,13 @@ impl DocumentRuntime {
         handles
     }
 
-    fn queue_connected_style_loads_inner<F>(
+    pub(in crate::document_runtime) fn prepare_connected_style_loads(
         &mut self,
-        host_ptr: *mut JsContextHost,
         root: DomHandle,
         skip_existing: bool,
-        source_for: &mut F,
-    ) where
-        F: FnMut(DomHandle) -> Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
-    {
+    ) -> Vec<PreparedConnectedStyleLoad> {
         if !self.dom_host.is_connected(root) {
-            return;
+            return Vec::new();
         }
         let load_handles = if self.dom_host.node(root).is_some_and(Node::is_document)
             || self.dom_host.is_shadow_root(root)
@@ -373,23 +434,14 @@ impl DocumentRuntime {
         } else {
             Arc::new(vec![root])
         };
-        self.queue_connected_style_load_handles_with_source_lookup(
-            host_ptr,
-            &load_handles,
-            skip_existing,
-            source_for,
-        );
+        self.prepare_connected_style_load_handles(&load_handles, skip_existing)
     }
 
-    fn queue_connected_style_load_handles_with_source_lookup<F>(
+    fn prepare_connected_style_load_handles(
         &mut self,
-        host_ptr: *mut JsContextHost,
         handles: &[DomHandle],
         skip_existing: bool,
-        source_for: &mut F,
-    ) where
-        F: FnMut(DomHandle) -> Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
-    {
+    ) -> Vec<PreparedConnectedStyleLoad> {
         let mut owners = handles
             .iter()
             .copied()
@@ -418,61 +470,124 @@ impl DocumentRuntime {
                 }
             });
         }
-        for (handle, kind) in owners {
-            debug!(
-                handle = ?handle,
-                rel = self
-                    .dom_host
-                    .get_attribute(handle, "rel")
-                    .unwrap_or_default(),
-                href = self
-                    .dom_host
-                    .get_attribute(handle, "href")
-                    .unwrap_or_default(),
-                "processing connected style/link owner"
-            );
-            let processed_before_initial_scan = skip_existing
-                && self
-                    .stylesheet_lifecycle
-                    .pre_initial_scan_processed_owners
-                    .contains(&handle);
-            if !skip_existing
-                || (!processed_before_initial_scan && !self.connected_style_load_is_queued(handle))
-            {
+        owners
+            .into_iter()
+            .filter_map(|(handle, kind)| {
+                debug!(
+                    handle = ?handle,
+                    rel = self
+                        .dom_host
+                        .get_attribute(handle, "rel")
+                        .unwrap_or_default(),
+                    href = self
+                        .dom_host
+                        .get_attribute(handle, "href")
+                        .unwrap_or_default(),
+                    "processing connected style/link owner"
+                );
+                let processed_before_initial_scan = skip_existing
+                    && self
+                        .stylesheet_lifecycle
+                        .pre_initial_scan_processed_owners
+                        .contains(&handle);
+                if skip_existing
+                    && (processed_before_initial_scan
+                        || self.connected_style_load_is_queued(handle))
+                {
+                    return None;
+                }
                 let csp_blocked = self.stylesheet_owner_is_csp_blocked(handle);
                 if !csp_blocked && !kind.uses_connected_load_lifecycle() {
-                    continue;
+                    return None;
                 }
-                let Some(load_event_binding) =
-                    self.accept_connected_style_load_binding(host_ptr, handle)
-                else {
-                    continue;
-                };
-                if !skip_existing && !self.initial_connected_style_loads_queued {
-                    self.stylesheet_lifecycle
-                        .pre_initial_scan_processed_owners
-                        .insert(handle);
-                }
-                if csp_blocked {
-                    self.complete_immediate_owner_processing(
-                        handle,
-                        self.connected_style_event_element_kind(handle),
-                        false,
-                        Some(load_event_binding),
-                    );
-                    continue;
-                }
-                let inline_source =
-                    source_for(handle).or_else(|| self.inline_style_source_for_test(handle));
-                let prime_result = self.enqueue_connected_style_load(
+                let event_plan =
+                    if !csp_blocked && self.connected_owner_is_non_blocking_modulepreload(handle) {
+                        ConnectedStyleLoadEventPlan::non_blocking_modulepreload(handle)
+                    } else {
+                        ConnectedStyleLoadEventPlan::load_delaying(handle)
+                    };
+                Some(PreparedConnectedStyleLoad::new(
                     handle,
-                    inline_source,
-                    host_ptr,
-                    Some(load_event_binding),
-                );
-                self.pending_connected_style_load_prime_result
-                    .extend(prime_result);
-            }
+                    csp_blocked,
+                    !skip_existing && !self.initial_connected_style_loads_queued,
+                    event_plan,
+                ))
+            })
+            .collect()
+    }
+
+    /// Apply one already-committed plan without consulting ContextHost for
+    /// lifecycle authority.
+    ///
+    /// `host_ptr` remains only for the pre-existing synchronous live-
+    /// stylesheet reads performed while priming imports. It must never be used
+    /// here to acquire or upgrade a load-event lease.
+    pub(crate) fn apply_prepared_connected_style_load(
+        &mut self,
+        prepared: PreparedConnectedStyleLoad,
+        inline_source: Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
+        event_admission: ConnectedStyleLoadEventAdmission,
+        host_ptr: *mut JsContextHost,
+    ) {
+        assert!(
+            event_admission.matches_plan(prepared.event_plan),
+            "connected-style commit must match its synchronously prepared plan"
+        );
+        let handle = prepared.owner;
+        if prepared.remember_before_initial_scan {
+            self.stylesheet_lifecycle
+                .pre_initial_scan_processed_owners
+                .insert(handle);
+        }
+        if prepared.csp_blocked {
+            self.complete_immediate_owner_processing(
+                handle,
+                self.connected_style_event_element_kind(handle),
+                false,
+                event_admission.load_event_binding(),
+            );
+            return;
+        }
+        let inline_source = inline_source.or_else(|| self.inline_style_source_for_test(handle));
+        let prime_result = self.enqueue_connected_style_load(
+            handle,
+            inline_source,
+            host_ptr,
+            Some(event_admission),
+        );
+        self.pending_connected_style_load_prime_result
+            .extend(prime_result);
+    }
+
+    #[cfg(test)]
+    fn commit_prepared_connected_style_loads_for_test(
+        &mut self,
+        prepared: Vec<PreparedConnectedStyleLoad>,
+    ) {
+        for prepared in prepared {
+            let plan = prepared.event_plan();
+            let admission = match plan {
+                ConnectedStyleLoadEventPlan::LoadDelaying { element } => {
+                    ConnectedStyleLoadEventAdmission::LoadDelaying(
+                        MainDocumentStyleLoadEventBinding::unowned_for_document_runtime_test(
+                            element,
+                        ),
+                    )
+                }
+                ConnectedStyleLoadEventPlan::NonBlockingModulepreload { element } => {
+                    ConnectedStyleLoadEventAdmission::NonBlockingModulepreload(
+                        crate::frame_owner_model::MainDocumentModulepreloadEventOwner::unowned_for_document_runtime_test(
+                            element,
+                        ),
+                    )
+                }
+            };
+            self.apply_prepared_connected_style_load(
+                prepared,
+                None,
+                admission,
+                std::ptr::null_mut(),
+            );
         }
     }
 
@@ -510,25 +625,14 @@ impl DocumentRuntime {
                 .has_lifecycle_state(handle)
     }
 
-    fn accept_connected_style_load_binding(
-        &mut self,
-        host_ptr: *mut JsContextHost,
-        handle: DomHandle,
-    ) -> Option<MainDocumentStyleLoadEventBinding> {
-        #[cfg(test)]
-        if host_ptr.is_null() {
-            return Some(
-                MainDocumentStyleLoadEventBinding::unowned_for_document_runtime_test(handle),
-            );
+    fn connected_owner_is_non_blocking_modulepreload(&self, handle: DomHandle) -> bool {
+        let node_id = NodeId::new(handle.index());
+        if stylesheet_link_disposition(&self.dom_host, node_id).is_some() {
+            return false;
         }
-        let binding = unsafe { &mut *host_ptr }.accept_current_main_style_load_event(handle)?;
-        tracing::debug!(
-            ?handle,
-            owner = ?binding.owner(),
-            load_delay_token = ?binding.load_delay_token(),
-            "accepted exact main connected style load before processing"
-        );
-        Some(binding)
+        connected_preload_like_link_url(&self.dom_host, node_id)
+            .and_then(|url| self.connected_modulepreload_request(handle, &url))
+            .is_some()
     }
 
     fn settle_connected_style_load_binding(
@@ -555,6 +659,25 @@ impl DocumentRuntime {
             "settled main connected style load before event posting"
         );
         settled
+    }
+
+    fn settle_connected_style_load_admission(
+        &mut self,
+        host_ptr: *mut JsContextHost,
+        admission: Option<ConnectedStyleLoadEventAdmission>,
+        reason: &'static str,
+    ) -> bool {
+        self.settle_connected_style_load_binding(
+            host_ptr,
+            admission.and_then(ConnectedStyleLoadEventAdmission::load_event_binding),
+            reason,
+        )
+    }
+
+    fn load_event_binding_for_connected_admission(
+        admission: Option<ConnectedStyleLoadEventAdmission>,
+    ) -> Option<MainDocumentStyleLoadEventBinding> {
+        admission.and_then(ConnectedStyleLoadEventAdmission::load_event_binding)
     }
 
     #[cfg(test)]
@@ -624,20 +747,15 @@ impl DocumentRuntime {
         handle: DomHandle,
         inline_source: Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
         host_ptr: *mut JsContextHost,
-        load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+        event_admission: Option<ConnectedStyleLoadEventAdmission>,
     ) -> ConnectedStyleLoadPrimeResult {
         if self.current_document_resource_loader().is_some()
             && !self.parser_created_style_import_waits_for_blocking_discovery(handle)
         {
-            self.prime_connected_style_load_handle(
-                handle,
-                inline_source,
-                host_ptr,
-                load_event_binding,
-            )
+            self.prime_connected_style_load_handle(handle, inline_source, host_ptr, event_admission)
         } else {
             self.stylesheet_lifecycle.pending_connected_loads.push_back(
-                QueuedConnectedStyleLoad::new(handle, inline_source, load_event_binding),
+                QueuedConnectedStyleLoad::new(handle, inline_source, event_admission),
             );
             ConnectedStyleLoadPrimeResult::default()
         }
@@ -688,7 +806,7 @@ impl DocumentRuntime {
                 queued.owner(),
                 queued.inline_source().cloned(),
                 host_ptr,
-                queued.load_event_binding(),
+                queued.event_admission(),
             ));
         }
         result
@@ -704,21 +822,48 @@ impl DocumentRuntime {
         handle: DomHandle,
         inline_source: Option<Arc<crate::style_engine::OwnerStyleSheetSource>>,
         host_ptr: *mut JsContextHost,
-        load_event_binding: Option<MainDocumentStyleLoadEventBinding>,
+        event_admission: Option<ConnectedStyleLoadEventAdmission>,
     ) -> ConnectedStyleLoadPrimeResult {
         let mut result = ConnectedStyleLoadPrimeResult::default();
         if !self.dom_host.is_connected(handle) {
-            self.settle_connected_style_load_binding(
+            self.settle_connected_style_load_admission(
                 host_ptr,
-                load_event_binding,
+                event_admission,
                 "style owner disconnected before processing",
             );
             self.invalidate_stylesheet_owner_operations(handle);
             return result;
         }
+        if let Some(admission) = event_admission {
+            let expects_modulepreload_identity =
+                self.connected_owner_is_non_blocking_modulepreload(handle);
+            let admission_matches_current_processing = matches!(
+                (expects_modulepreload_identity, admission),
+                (
+                    true,
+                    ConnectedStyleLoadEventAdmission::NonBlockingModulepreload(_)
+                ) | (false, ConnectedStyleLoadEventAdmission::LoadDelaying(_))
+            );
+            if !admission_matches_current_processing {
+                self.settle_connected_style_load_admission(
+                    host_ptr,
+                    Some(admission),
+                    "connected style owner changed after lifecycle commit",
+                );
+                self.invalidate_stylesheet_owner_operations(handle);
+                tracing::debug!(
+                    ?handle,
+                    expects_modulepreload_identity,
+                    "discarded stale connected-style lifecycle commit"
+                );
+                return result;
+            }
+        }
         let element_kind = self.connected_style_event_element_kind(handle);
         let node_id = NodeId::new(handle.index());
         if let Some(disposition) = stylesheet_link_disposition(&self.dom_host, node_id) {
+            let load_event_binding =
+                Self::load_event_binding_for_connected_admission(event_admission);
             let stylesheet_fetcher = self.stylesheet_fetcher();
             let document_url = self
                 .dom_host
@@ -796,12 +941,31 @@ impl DocumentRuntime {
                     .pending_native_modulepreload(handle)
                     .is_some_and(|client| client.key() == &key);
                 if unchanged {
+                    self.settle_connected_style_load_admission(
+                        host_ptr,
+                        event_admission,
+                        "duplicate modulepreload owner admission",
+                    );
                     return result;
                 }
-                let client = NativeModulepreloadLinkClient::new_with_load_event_binding(
+                let main_document_event_owner =
+                    event_admission.and_then(|admission| match admission {
+                        ConnectedStyleLoadEventAdmission::NonBlockingModulepreload(owner) => {
+                            Some(owner)
+                        }
+                        ConnectedStyleLoadEventAdmission::LoadDelaying(_) => None,
+                    });
+                let Some(main_document_event_owner) = main_document_event_owner else {
+                    tracing::debug!(
+                        ?handle,
+                        "discarded main modulepreload without an exact Document event owner"
+                    );
+                    return result;
+                };
+                let client = NativeModulepreloadLinkClient::new_with_main_document_event_owner(
                     handle,
                     key,
-                    load_event_binding,
+                    main_document_event_owner,
                 );
                 self.stylesheet_lifecycle
                     .owner_states
@@ -809,6 +973,8 @@ impl DocumentRuntime {
                 result.push_modulepreload_start(ConnectedModulepreloadStart::new(preload, client));
                 return result;
             }
+            let load_event_binding =
+                Self::load_event_binding_for_connected_admission(event_admission);
             if connected_modulepreload_has_non_matching_media(&self.dom_host, handle) {
                 self.stylesheet_lifecycle
                     .owner_states
@@ -997,6 +1163,7 @@ impl DocumentRuntime {
             });
             return result;
         }
+        let load_event_binding = Self::load_event_binding_for_connected_admission(event_admission);
         if let Some(source) = inline_source
             && source.owner() == handle
         {
@@ -1310,16 +1477,6 @@ impl DocumentRuntime {
     }
 
     #[cfg(test)]
-    pub(crate) fn queue_initial_connected_style_loads_for_owner(
-        &mut self,
-        host_ptr: *mut JsContextHost,
-    ) {
-        self.queue_initial_connected_style_loads_with_source_lookup(host_ptr, |owner| {
-            unsafe { &*host_ptr }.owner_style_sheet_processing_source(owner)
-        });
-    }
-
-    #[cfg(test)]
     pub(crate) fn prime_document_lifecycle_processing(&mut self) -> ConnectedStyleLoadPrimeResult {
         self.prime_document_lifecycle_processing_for_owner(std::ptr::null_mut())
     }
@@ -1373,7 +1530,9 @@ impl DocumentRuntime {
                 QueuedConnectedStyleLoad::new(
                     handle,
                     inline_source,
-                    operation.load_event_binding(),
+                    operation
+                        .load_event_binding()
+                        .map(ConnectedStyleLoadEventAdmission::LoadDelaying),
                 ),
             );
         }
@@ -1474,11 +1633,10 @@ impl DocumentRuntime {
         }
     }
 
-    pub(crate) fn apply_stylesheet_owner_runtime_changes(
+    pub(crate) fn prepare_stylesheet_owner_runtime_changes(
         &mut self,
-        host_ptr: *mut JsContextHost,
         changes: &[crate::dom::native::DomStylesheetOwnerChange],
-    ) {
+    ) -> PreparedStylesheetOwnerRuntimeChanges {
         let mut transitions = Vec::<(DomHandle, bool)>::new();
         for change in changes {
             let should_queue = match change.kind() {
@@ -1520,29 +1678,32 @@ impl DocumentRuntime {
             }
         }
 
+        let mut canceled_load_event_bindings = Vec::new();
+        let mut prepared = Vec::new();
         for (owner, should_queue) in transitions {
-            self.invalidate_style_related_state(host_ptr, owner);
+            canceled_load_event_bindings.extend(self.invalidate_style_related_state(owner));
             if !should_queue {
                 continue;
             }
-            if self.dom_host.is_html_element_named(owner, "link")
-                && let Some(disposition) =
-                    stylesheet_link_disposition(&self.dom_host, NodeId::new(owner.index()))
-            {
-                let _ = unsafe { &mut *host_ptr }
-                    .install_cached_linked_stylesheet_for_owner(owner, disposition.url());
-            }
-            let inline_source = unsafe { &*host_ptr }.owner_style_sheet_processing_source(owner);
-            self.queue_connected_style_load_with_inline_source(host_ptr, owner, inline_source);
+            let cached_linked_stylesheet_url = self
+                .dom_host
+                .is_html_element_named(owner, "link")
+                .then(|| stylesheet_link_disposition(&self.dom_host, NodeId::new(owner.index())))
+                .flatten()
+                .map(|disposition| disposition.url().clone());
+            prepared.push(PreparedStylesheetOwnerRuntimeChange::new(
+                owner,
+                cached_linked_stylesheet_url,
+            ));
         }
+        PreparedStylesheetOwnerRuntimeChanges::new(canceled_load_event_bindings, prepared)
     }
 
-    pub(crate) fn apply_inline_cssom_source_change(
+    pub(crate) fn apply_inline_cssom_source_change_after_invalidation(
         &mut self,
         host_ptr: *mut JsContextHost,
         owner: DomHandle,
     ) {
-        self.invalidate_style_related_state(host_ptr, owner);
         self.queue_stylesheet_source_css_projection(owner);
         if let Some(stylesheet) = unsafe { &*host_ptr }.owner_live_stylesheet(owner) {
             self.prime_live_stylesheet_import_loads(owner, stylesheet, false, host_ptr);
@@ -1587,9 +1748,8 @@ impl DocumentRuntime {
 
     pub(crate) fn invalidate_style_related_state(
         &mut self,
-        host_ptr: *mut JsContextHost,
         handle: DomHandle,
-    ) {
+    ) -> Vec<MainDocumentStyleLoadEventBinding> {
         let node_id = NodeId::new(handle.index());
         self.stylesheet_lifecycle
             .pre_initial_scan_processed_owners
@@ -1601,7 +1761,11 @@ impl DocumentRuntime {
                 if candidate.owner() != handle {
                     return true;
                 }
-                canceled_bindings.extend(candidate.load_event_binding());
+                canceled_bindings.extend(
+                    candidate
+                        .event_admission()
+                        .and_then(ConnectedStyleLoadEventAdmission::load_event_binding),
+                );
                 false
             });
         canceled_bindings.extend(
@@ -1612,13 +1776,7 @@ impl DocumentRuntime {
         self.invalidate_stylesheet_owner_operations(handle);
         self.modulepreload_invalid_as_link_errors.remove(&handle);
         self.stylesheet_lifecycle.fetches.invalidate_node(node_id);
-        for binding in canceled_bindings {
-            self.settle_connected_style_load_binding(
-                host_ptr,
-                Some(binding),
-                "style processing invalidated before event posting",
-            );
-        }
+        canceled_bindings
     }
 
     pub(crate) fn has_pending_ready_connected_style_loads(&mut self) -> bool {
@@ -1789,12 +1947,13 @@ impl DocumentRuntime {
         self.pop_ready_connected_style_load()
     }
 
-    pub(crate) fn complete_native_modulepreload_link_clients(
+    pub(crate) fn accept_native_modulepreload_link_client_terminals(
         &mut self,
         key: &ModuleMapKey,
         clients: Vec<Arc<NativeModulepreloadLinkClient>>,
         successful: bool,
-    ) {
+    ) -> Vec<PendingNativeModulepreloadLinkEvent> {
+        let mut accepted = Vec::new();
         for client in clients {
             if client.key() != key
                 || !self
@@ -1804,10 +1963,20 @@ impl DocumentRuntime {
             {
                 continue;
             }
-            self.push_ready_connected_style_load(
-                ReadyConnectedStyleLoad::for_native_modulepreload(client, successful),
-            );
+            accepted.push(PendingNativeModulepreloadLinkEvent::new(client, successful));
         }
+        accepted
+    }
+
+    pub(crate) fn enqueue_ready_native_modulepreload_link_event(
+        &mut self,
+        ready: ReadyConnectedStyleLoad,
+    ) {
+        debug_assert!(matches!(
+            ready.operation(),
+            ReadyConnectedStyleLoadOperation::NativeModulepreload(_)
+        ));
+        self.push_ready_connected_style_load(ready);
     }
 
     fn connected_modulepreload_request(
@@ -1904,13 +2073,13 @@ impl DocumentRuntime {
     #[cfg(test)]
     pub(crate) fn enqueue_pending_connected_style_load_for_test(&mut self, handle: DomHandle) {
         let load_event_binding =
-            self.accept_connected_style_load_binding(std::ptr::null_mut(), handle);
+            Some(MainDocumentStyleLoadEventBinding::unowned_for_document_runtime_test(handle));
         self.stylesheet_lifecycle
             .pending_connected_loads
             .push_back(QueuedConnectedStyleLoad::new(
                 handle,
                 None,
-                load_event_binding,
+                load_event_binding.map(ConnectedStyleLoadEventAdmission::LoadDelaying),
             ));
     }
 }
@@ -2685,7 +2854,38 @@ mod tests {
                 .all(|client| client.frame_document_client().is_none()),
             "main document modulator received a child modulepreload client"
         );
-        runtime.complete_native_modulepreload_link_clients(&key, link_clients, successful);
+        complete_modulepreload_link_clients(runtime, &key, link_clients, successful);
+    }
+
+    fn complete_modulepreload_link_clients(
+        runtime: &mut DocumentRuntime,
+        key: &ModuleMapKey,
+        clients: Vec<Arc<NativeModulepreloadLinkClient>>,
+        successful: bool,
+    ) {
+        let terminals =
+            runtime.accept_native_modulepreload_link_client_terminals(key, clients, successful);
+        for pending_event in terminals {
+            runtime.enqueue_ready_native_modulepreload_link_event(pending_event.into_ready_event());
+        }
+    }
+
+    #[test]
+    fn pending_modulepreload_event_becomes_ready_without_a_load_event_binding() {
+        let link = DomHandle::new(42);
+        let key = ModuleMapKey::java_script(
+            Url::parse("https://example.test/immutable-client.mjs").unwrap(),
+        );
+        let client = NativeModulepreloadLinkClient::new(link, key);
+        let pending_event = PendingNativeModulepreloadLinkEvent::new(Arc::clone(&client), true);
+        let ready = pending_event.into_ready_event();
+
+        assert_eq!(ready.load_event_binding(), None);
+        assert!(matches!(
+            ready.operation(),
+            ReadyConnectedStyleLoadOperation::NativeModulepreload(ready_client)
+                if NativeModulepreloadLinkClient::ptr_eq(ready_client, &client)
+        ));
     }
 
     #[test]
@@ -2858,13 +3058,13 @@ mod tests {
             .owner_states
             .install_pending_native_modulepreload(Arc::clone(&current));
 
-        runtime.complete_native_modulepreload_link_clients(&key, vec![Arc::clone(&first)], true);
+        complete_modulepreload_link_clients(&mut runtime, &key, vec![Arc::clone(&first)], true);
         assert!(
             runtime.pop_ready_connected_style_load().is_none(),
             "an old same-key client must not acquire the current processing's event authority"
         );
 
-        runtime.complete_native_modulepreload_link_clients(&key, vec![Arc::clone(&current)], true);
+        complete_modulepreload_link_clients(&mut runtime, &key, vec![Arc::clone(&current)], true);
         let ready = runtime
             .pop_ready_connected_style_load()
             .expect("current same-key client event task");
@@ -2892,7 +3092,7 @@ mod tests {
             .stylesheet_lifecycle
             .owner_states
             .install_pending_native_modulepreload(Arc::clone(&accepted));
-        runtime.complete_native_modulepreload_link_clients(&key, vec![Arc::clone(&accepted)], true);
+        complete_modulepreload_link_clients(&mut runtime, &key, vec![Arc::clone(&accepted)], true);
         runtime
             .stylesheet_lifecycle
             .owner_states
@@ -2937,12 +3137,15 @@ mod tests {
             preload.source_url().as_str(),
             "https://example.test/app.mjs"
         );
+        let outcome = runtime
+            .fetch_single_native_module_for_modulepreload_link(preload, link_client)
+            .expect("modulepreload owner registration should succeed");
+        let (fetch_start, terminal) = outcome.into_parts();
         assert!(matches!(
-            runtime
-                .fetch_single_native_module_for_modulepreload_link(preload, link_client)
-                .expect("modulepreload owner registration should succeed"),
+            fetch_start,
             crate::module_runtime::NativeModulepreloadFetchStart::Started(_)
         ));
+        assert!(terminal.is_none());
         assert_eq!(
             runtime
                 .script_lifecycle
@@ -3277,12 +3480,21 @@ mod tests {
             .next()
             .expect("connected JS modulepreload start should be present")
             .into_parts();
+        let outcome = runtime
+            .fetch_single_native_module_for_modulepreload_link(preload, link_client)
+            .expect("modulepreload owner registration should succeed");
+        let (fetch_start, terminal) = outcome.into_parts();
         assert_eq!(
-            runtime
-                .fetch_single_native_module_for_modulepreload_link(preload, link_client)
-                .expect("modulepreload owner registration should succeed"),
+            fetch_start,
             crate::module_runtime::NativeModulepreloadFetchStart::AlreadyComplete
         );
+        assert!(
+            runtime.pop_ready_connected_style_load().is_none(),
+            "an accepted cached terminal must wait for ScriptVm lifecycle binding before enqueue"
+        );
+        let pending_event =
+            terminal.expect("cached modulepreload should return one pending link event");
+        runtime.enqueue_ready_native_modulepreload_link_event(pending_event.into_ready_event());
 
         assert!(
             !runtime.has_inflight_native_modulepreload_fetch(),
@@ -3847,15 +4059,8 @@ mod tests {
         let link = first_link_handle(&document);
         let loader = ResourceRequestClient::new(&FetchConfig::default())?;
         let mut runtime = DocumentRuntime::new_networked(&document, &loader);
-        let load_event_binding =
-            MainDocumentStyleLoadEventBinding::unowned_for_document_runtime_test(link);
 
-        runtime.prime_connected_style_load_handle(
-            link,
-            None,
-            std::ptr::null_mut(),
-            Some(load_event_binding),
-        );
+        runtime.queue_connected_style_loads(link);
         let first_style_client = runtime
             .active_stylesheet_link_client_for_test(link)
             .expect("initial stylesheet preload client");
@@ -3869,7 +4074,7 @@ mod tests {
         );
 
         assert!(runtime.dom_host.set_attribute(link, "rel", "modulepreload"));
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         assert!(
             runtime
                 .stylesheet_lifecycle
@@ -3878,14 +4083,9 @@ mod tests {
                 .is_empty(),
             "stylesheet invalidation must remove its event binding"
         );
-        let (modulepreload_starts, warnings) = runtime
-            .prime_connected_style_load_handle(
-                link,
-                None,
-                std::ptr::null_mut(),
-                Some(load_event_binding),
-            )
-            .into_parts();
+        runtime.queue_connected_style_loads(link);
+        let (modulepreload_starts, warnings) =
+            runtime.prime_pending_connected_style_loads().into_parts();
         assert!(warnings.is_empty(), "runtime warnings: {warnings:?}");
         assert_eq!(modulepreload_starts.len(), 1);
         assert!(
@@ -3893,18 +4093,17 @@ mod tests {
                 .active_stylesheet_link_client_for_test(link)
                 .is_none()
         );
-        assert_eq!(
+        assert!(
             runtime
                 .stylesheet_lifecycle
                 .owner_states
                 .cancelable_load_event_bindings(link)
-                .len(),
-            1,
-            "only the modulepreload processing may retain an event binding"
+                .is_empty(),
+            "an in-flight modulepreload must retain identity without a load-delay binding"
         );
 
         assert!(runtime.dom_host.set_attribute(link, "rel", "preload"));
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         assert!(
             runtime
                 .stylesheet_lifecycle
@@ -3913,12 +4112,7 @@ mod tests {
                 .is_empty(),
             "modulepreload invalidation must remove its event binding"
         );
-        runtime.prime_connected_style_load_handle(
-            link,
-            None,
-            std::ptr::null_mut(),
-            Some(load_event_binding),
-        );
+        runtime.queue_connected_style_loads(link);
         let second_style_client = runtime
             .active_stylesheet_link_client_for_test(link)
             .expect("replacement stylesheet preload client");
@@ -4182,7 +4376,7 @@ mod tests {
             "the exact posted operation must remain the owner fact until event consumption"
         );
 
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         runtime.queue_connected_style_loads(link);
         let ready = prime_pending_data_stylesheet_event(&mut runtime, link).await;
         assert!(

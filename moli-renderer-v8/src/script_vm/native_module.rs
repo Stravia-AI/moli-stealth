@@ -1870,11 +1870,44 @@ impl ScriptVm {
         request: NativeModuleSingleFetchRequest,
         link_client: std::sync::Arc<crate::module_runtime::NativeModulepreloadLinkClient>,
     ) -> std::result::Result<Option<crate::module_runtime::ModulePreloadJobRun>, String> {
-        let start = self
+        let outcome = self
             .document_runtime
             .fetch_single_native_module_for_modulepreload_link(request, link_client)
             .map_err(|error| error.message().to_owned())?;
+        let (start, pending_event) = outcome.into_parts();
+        if let Some(pending_event) = pending_event {
+            self.enqueue_main_modulepreload_link_event(pending_event);
+        }
         self.run_native_modulepreload_fetch_start_for_owner(start)
+    }
+
+    fn enqueue_main_modulepreload_link_event(
+        &mut self,
+        pending_event: crate::document_runtime::PendingNativeModulepreloadLinkEvent,
+    ) {
+        let Some(event_owner) = pending_event.client().main_document_event_owner() else {
+            tracing::debug!(
+                element = ?pending_event.client().owner(),
+                "discarded main modulepreload terminal without an exact Document owner"
+            );
+            return;
+        };
+        debug_assert_eq!(event_owner.element(), pending_event.client().owner());
+        if !self
+            ._context_host
+            .borrow()
+            .main_document_task_owner_is_current(event_owner.owner())
+        {
+            tracing::debug!(
+                owner = ?event_owner.owner(),
+                element = ?event_owner.element(),
+                "discarded modulepreload terminal for a retired main Document"
+            );
+            return;
+        }
+        let ready = pending_event.into_ready_event();
+        self.document_runtime
+            .enqueue_ready_native_modulepreload_link_event(ready);
     }
 
     fn run_native_modulepreload_fetch_start_for_owner(
@@ -2220,12 +2253,16 @@ impl ScriptVm {
                 .iter()
                 .all(|client| client.frame_document_client().is_none())
         );
-        self.document_runtime
-            .complete_native_modulepreload_link_clients(
+        let pending_events = self
+            .document_runtime
+            .accept_native_modulepreload_link_client_terminals(
                 &key,
                 modulepreload_link_clients,
                 successful,
             );
+        for pending_event in pending_events {
+            self.enqueue_main_modulepreload_link_event(pending_event);
+        }
         self.resume_native_document_modulator_fetch_clients(&key, fetch_clients)
     }
 

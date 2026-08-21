@@ -3,12 +3,14 @@ use crate::frame_owner_model::{
     DocumentLoadDelayTokenId, FrameDocumentTaskOwner, MainDocumentCompleteLifecycleAction,
     MainDocumentDomContentLoadedLifecycleAction, MainDocumentImageLoadDelayBinding,
     MainDocumentInteractiveLifecycleAction, MainDocumentLoadCompletionState,
-    MainDocumentMediaLoadDelayBinding, MainDocumentScriptLoadDelayKind,
-    MainDocumentScriptLoadDelayLease, MainDocumentScriptLoadDelayRelease,
-    MainDocumentStyleLoadEventBinding,
+    MainDocumentMediaLoadDelayBinding, MainDocumentModulepreloadEventOwner,
+    MainDocumentScriptLoadDelayKind, MainDocumentScriptLoadDelayLease,
+    MainDocumentScriptLoadDelayRelease, MainDocumentStyleLoadEventBinding,
 };
 use crate::{
-    document_runtime::DocumentRuntime,
+    document_runtime::{
+        ConnectedStyleLoadEventAdmission, ConnectedStyleLoadEventPlan, DocumentRuntime,
+    },
     host::{
         CommittedInlineClassicScript, PreparedRuntimeScriptStartCommit, RuntimeScriptAdmission,
         RuntimeScriptStartPlan,
@@ -163,6 +165,40 @@ impl JsContextHost {
             .accept_current_main_style_load_event(owner, element)
     }
 
+    /// Commit the lifecycle authority for a plan prepared by
+    /// `DocumentRuntime`.
+    ///
+    /// This method deliberately does not dereference `self.runtime`. The
+    /// caller owns the mutable runtime phase, temporarily borrows the context
+    /// host only for this exact FrameOwnerStore transaction, and then applies
+    /// the committed value back to the runtime synchronously.
+    pub(crate) fn commit_connected_style_load_event_plan(
+        &mut self,
+        plan: ConnectedStyleLoadEventPlan,
+    ) -> Option<ConnectedStyleLoadEventAdmission> {
+        match plan {
+            ConnectedStyleLoadEventPlan::LoadDelaying { element } => {
+                let binding = self.accept_current_main_style_load_event(element)?;
+                Some(ConnectedStyleLoadEventAdmission::LoadDelaying(binding))
+            }
+            ConnectedStyleLoadEventPlan::NonBlockingModulepreload { element } => {
+                let owner = self.accept_current_main_modulepreload_event_owner(element)?;
+                Some(ConnectedStyleLoadEventAdmission::NonBlockingModulepreload(
+                    owner,
+                ))
+            }
+        }
+    }
+
+    pub(crate) fn accept_current_main_modulepreload_event_owner(
+        &self,
+        element: crate::document_runtime::DomHandle,
+    ) -> Option<MainDocumentModulepreloadEventOwner> {
+        let owner = self.current_main_document_task_owner()?;
+        self.frame_owner_store
+            .accept_current_main_modulepreload_event_owner(owner, element)
+    }
+
     pub(crate) fn main_style_load_event_is_current(
         &self,
         binding: MainDocumentStyleLoadEventBinding,
@@ -232,6 +268,15 @@ impl JsContextHost {
     ) -> Option<bool> {
         self.frame_owner_store
             .current_main_document_has_async_script_load_delay(owner)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn current_main_document_has_style_load_event_delay(
+        &self,
+        owner: FrameDocumentTaskOwner,
+    ) -> Option<bool> {
+        self.frame_owner_store
+            .current_main_document_has_style_load_event_delay(owner)
     }
 
     #[cfg(test)]

@@ -11263,6 +11263,65 @@ async fn ownerless_stylesheet_terminal_installs_for_a_late_link_client() {
 }
 
 #[test]
+fn connected_stylesheet_plan_commits_its_lease_before_same_turn_apply() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-plan-commit.test/",
+        concat!(
+            "<!doctype html><html><head>",
+            "<style id='sheet'>body { color: black; }</style>",
+            "</head><body></body></html>",
+        ),
+    );
+    let owner = vm
+        .current_main_document_task_owner()
+        .expect("main Document owner");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    vm.replace_document_resource_runtime(&loader);
+    let mut prepared = vm.document_runtime.prepare_initial_connected_style_loads();
+    assert_eq!(prepared.len(), 1);
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "the pure prepare phase must not touch the Document load gate"
+    );
+
+    let prepared = prepared.pop().expect("one prepared style owner");
+    let inline_source = vm
+        ._context_host
+        .borrow()
+        .owner_style_sheet_processing_source(prepared.owner());
+    let admission = vm
+        ._context_host
+        .borrow_mut()
+        .commit_connected_style_load_event_plan(prepared.event_plan())
+        .expect("the current main Document should commit the style lease");
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(true),
+        "commit must acquire the lease synchronously, before runtime apply"
+    );
+
+    let host_ptr = vm._context_host.as_ref().as_ptr();
+    vm.document_runtime.apply_prepared_connected_style_load(
+        prepared,
+        inline_source,
+        admission,
+        host_ptr,
+    );
+    let ready = vm
+        .take_next_connected_style_event_body_for_test()
+        .expect("same-turn apply should publish the inline style event")
+        .into_ready();
+    assert_eq!(
+        ready
+            .load_event_binding()
+            .expect("stylesheet ready event must retain the committed lease")
+            .owner(),
+        owner
+    );
+}
+
+#[test]
 fn main_connected_style_event_delays_complete_until_event_task_settles() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm = new_parsed_test_vm(
@@ -13357,6 +13416,57 @@ fn new_parsed_test_vm_with_loader_and_resource_completion_queue(
         })
         .expect("script vm finish should succeed");
     (vm, resource_completion_queue)
+}
+
+#[test]
+fn connected_modulepreload_admission_never_acquires_a_network_load_delay() {
+    let mut vm = new_parsed_test_vm(
+        "https://example.test/page.html",
+        concat!(
+            "<!doctype html><html><head>",
+            "<link rel='modulepreload' href='/slow-module.mjs'>",
+            "</head><body></body></html>",
+        ),
+    );
+    let owner = vm
+        .current_main_document_task_owner()
+        .expect("modulepreload fixture must retain a current Document owner");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    vm.replace_document_resource_runtime(&loader);
+    vm.document_runtime.insert_native_module_source(
+        crate::module_runtime::ModuleMapKey::java_script(
+            Url::parse("https://example.test/slow-module.mjs").expect("module URL"),
+        ),
+        crate::module_runtime::ModuleSource::text("export {};".to_owned()),
+    );
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false)
+    );
+
+    vm.queue_initial_connected_style_loads_for_current_owner();
+
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "modulepreload network admission must retain only owner identity, not a load-delay token"
+    );
+
+    vm.prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+    let ready = vm
+        .take_next_connected_style_event_body_for_test()
+        .expect("cached modulepreload terminal should publish its link event")
+        .into_ready();
+    assert_eq!(
+        ready.load_event_binding(),
+        None,
+        "a ready modulepreload terminal must not acquire a short-lived stylesheet lease"
+    );
+    assert_eq!(
+        vm.current_main_document_has_style_load_event_delay(owner),
+        Some(false),
+        "modulepreload terminal publication must leave the Document load gate untouched"
+    );
 }
 
 fn new_streamed_parser_test_vm(url: &str, markup: &str) -> StandaloneScriptVmHarness {

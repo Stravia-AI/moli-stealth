@@ -100,8 +100,10 @@ use stylesheet_runtime::{
     StylesheetOwnerCspDisposition, StylesheetOwnerRuntimeStates,
 };
 pub(crate) use stylesheet_runtime::{
-    ConnectedStyleEventElementKind, ConnectedStyleLoadPrimeResult, InstallLinkedStylesheet,
-    OwnerlessStylesheetAdmissionError, PreparedLinkedStylesheetResource, ReadyConnectedStyleLoad,
+    ConnectedStyleEventElementKind, ConnectedStyleLoadEventAdmission, ConnectedStyleLoadEventPlan,
+    ConnectedStyleLoadPrimeResult, InstallLinkedStylesheet, NativeModulepreloadLinkFetchOutcome,
+    OwnerlessStylesheetAdmissionError, PendingNativeModulepreloadLinkEvent,
+    PreparedConnectedStyleLoad, PreparedLinkedStylesheetResource, ReadyConnectedStyleLoad,
     StylesheetLinkClientTerminal,
 };
 
@@ -2613,7 +2615,7 @@ mod tests {
             .parent_node(link)
             .expect("link should have a parent");
         assert!(runtime.dom_host_mut().remove_child(parent, link));
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
 
         runtime
             .stylesheet_lifecycle
@@ -2658,7 +2660,7 @@ mod tests {
             .active_stylesheet_link_client_for_test(link)
             .expect("active stylesheet load");
         assert!(runtime.dom_host_mut().set_attribute(link, "disabled", ""));
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         runtime.queue_connected_style_loads(link);
         runtime.prime_document_lifecycle_processing();
         assert!(
@@ -2710,7 +2712,7 @@ mod tests {
             .active_stylesheet_link_client_for_test(link)
             .expect("first A processing load");
 
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         assert!(runtime.dom_host_mut().set_attribute(link, "href", "/b.css"));
         runtime.queue_connected_style_loads(link);
         runtime.prime_document_lifecycle_processing();
@@ -2718,7 +2720,7 @@ mod tests {
             .active_stylesheet_link_client_for_test(link)
             .expect("B processing load");
 
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         assert!(runtime.dom_host_mut().set_attribute(link, "href", "/a.css"));
         runtime.queue_connected_style_loads(link);
         runtime.prime_document_lifecycle_processing();
@@ -2771,7 +2773,7 @@ mod tests {
             Some("sha256-first")
         );
 
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), link);
+        drop(runtime.invalidate_style_related_state(link));
         assert!(
             runtime
                 .dom_host_mut()
@@ -3521,14 +3523,14 @@ mod tests {
             }],
         });
 
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), owner);
+        drop(runtime.invalidate_style_related_state(owner));
         runtime
             .stylesheet_lifecycle
             .owner_states
             .install_pending_operation(operation_for(
                 "@import url('/middle.css'); /* B */ @import url('/shared.css');",
             ));
-        runtime.invalidate_style_related_state(std::ptr::null_mut(), owner);
+        drop(runtime.invalidate_style_related_state(owner));
         let current_a = operation_for("@import url('/shared.css'); /* current A */");
         runtime
             .stylesheet_lifecycle

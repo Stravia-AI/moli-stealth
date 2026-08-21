@@ -82,8 +82,11 @@ impl MainDocumentScriptLoadDelayLease {
 }
 
 /// Exact main-document ownership for a connected `<style>`/`<link>` load or
-/// error event. The token remains live across network completion and event
-/// dispatch so document `load` cannot overtake the element event.
+/// error event.
+///
+/// Stylesheet processing may retain the token across its network load.
+/// `modulepreload` never uses this type; it retains only
+/// [`MainDocumentModulepreloadEventOwner`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct MainDocumentStyleLoadEventBinding {
     owner: FrameDocumentTaskOwner,
@@ -128,6 +131,45 @@ impl MainDocumentStyleLoadEventBinding {
             ),
             element,
             None,
+        )
+    }
+}
+
+/// Exact Document and element identity retained while a non-blocking
+/// `modulepreload` fetch is in flight.
+///
+/// This deliberately carries no load-delay token and remains the complete
+/// lifecycle identity through terminal acceptance and event publication.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MainDocumentModulepreloadEventOwner {
+    owner: FrameDocumentTaskOwner,
+    element: DomHandle,
+}
+
+impl MainDocumentModulepreloadEventOwner {
+    pub(super) fn new(owner: FrameDocumentTaskOwner, element: DomHandle) -> Self {
+        Self { owner, element }
+    }
+
+    pub(crate) fn owner(self) -> FrameDocumentTaskOwner {
+        self.owner
+    }
+
+    pub(crate) fn element(self) -> DomHandle {
+        self.element
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unowned_for_document_runtime_test(element: DomHandle) -> Self {
+        use super::records::{DocumentId, FrameSchedulerLaneId, LocalWindowId};
+
+        Self::new(
+            FrameDocumentTaskOwner::new(
+                FrameSchedulerLaneId(u64::MAX),
+                LocalWindowId(u64::MAX),
+                DocumentId(u64::MAX),
+            ),
+            element,
         )
     }
 }

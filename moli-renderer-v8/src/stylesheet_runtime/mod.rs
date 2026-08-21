@@ -25,7 +25,10 @@ pub(crate) use attributes::attribute_reprocesses_connected_stylesheet;
 pub(crate) use blocking::OwnerlessStylesheetAdmissionError;
 pub(super) use client_index::StylesheetLinkClientIndex;
 pub(crate) use completion::{ConnectedLoadCompletion, LiveStylesheetImportLoadCompletion};
-pub(crate) use connected::{ConnectedStyleLoadPrimeResult, fetch_complete_stylesheet_import_graph};
+pub(crate) use connected::{
+    ConnectedStyleLoadPrimeResult, PreparedConnectedStyleLoad,
+    fetch_complete_stylesheet_import_graph,
+};
 pub(super) use link_state::LinkStyleState;
 pub(crate) use load::StylesheetLinkClientTerminal;
 pub(super) use load::{
@@ -34,6 +37,8 @@ pub(super) use load::{
     StylesheetLinkClient,
 };
 pub(crate) use load::{ConnectedStyleEventElementKind, ReadyConnectedStyleLoad};
+pub(crate) use load::{ConnectedStyleLoadEventAdmission, ConnectedStyleLoadEventPlan};
+pub(crate) use load::{NativeModulepreloadLinkFetchOutcome, PendingNativeModulepreloadLinkEvent};
 pub(super) use owner_state::{StylesheetOwnerCspDisposition, StylesheetOwnerRuntimeStates};
 pub(crate) use source_install::{InstallLinkedStylesheet, PreparedLinkedStylesheetResource};
 
