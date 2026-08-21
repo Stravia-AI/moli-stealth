@@ -101,14 +101,21 @@ fn global_io_stream_ids_cross_u32_max_without_reuse() {
 }
 
 #[test]
-fn global_io_stream_id_allocator_wraps_at_u64_exhaustion() {
+#[should_panic(expected = "global IO stream id space exhausted")]
+fn global_io_stream_id_allocator_rejects_u64_exhaustion() {
     let mut conn = CdpConnection::new();
     conn.next_global_io_stream_id = u64::MAX;
 
-    let handle = conn.open_global_io_stream(Vec::new());
+    let _ = conn.open_global_io_stream(Vec::new());
+}
 
-    assert_eq!(handle, "BROWSER-STREAM-0");
-    assert!(conn.global_io_streams.contains_key(&handle));
+#[test]
+#[should_panic(expected = "internal Runtime command id space exhausted")]
+fn internal_runtime_command_id_allocator_rejects_u64_exhaustion() {
+    let mut conn = CdpConnection::new();
+    conn.next_internal_runtime_command_id = u64::MAX;
+
+    let _ = conn.next_internal_runtime_command_id();
 }
 
 #[test]

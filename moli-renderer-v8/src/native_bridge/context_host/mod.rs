@@ -876,7 +876,7 @@ pub(crate) struct JsContextHost {
     blocked_url_patterns: Vec<String>,
     service_worker_client_id: ServiceWorkerClientId,
     service_worker_control: Option<ServiceWorkerControlState>,
-    next_service_worker_register_request_id: u64,
+    next_service_worker_request_id: u64,
     pending_service_worker_registers: HashMap<u64, service_workers::PendingServiceWorkerRegister>,
     pending_service_worker_unregisters:
         HashMap<u64, service_workers::PendingServiceWorkerUnregister>,

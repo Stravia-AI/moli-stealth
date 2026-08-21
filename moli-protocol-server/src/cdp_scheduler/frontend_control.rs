@@ -207,10 +207,10 @@ impl CdpFrontendControlState {
     }
 
     fn allocate_frontend_id(&mut self) -> u64 {
-        self.next_frontend_id = self.next_frontend_id.wrapping_add(1);
-        if self.next_frontend_id == 0 {
-            self.next_frontend_id = 1;
-        }
+        self.next_frontend_id = self
+            .next_frontend_id
+            .checked_add(1)
+            .expect("CDP frontend id space exhausted");
         self.next_frontend_id
     }
 }
@@ -225,4 +225,20 @@ fn send_cookie_checkpoint(
     let snapshot =
         CdpCookieSnapshot::from_profile_backed_cookies(scheduler.snapshot_profile_backed_cookies());
     let _ = owner_lifecycle.checkpoint_tx.send(snapshot);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CdpFrontendControlState;
+
+    #[test]
+    #[should_panic(expected = "CDP frontend id space exhausted")]
+    fn frontend_ids_never_wrap() {
+        let mut state = CdpFrontendControlState {
+            next_frontend_id: u64::MAX,
+            ..CdpFrontendControlState::default()
+        };
+
+        let _ = state.allocate_frontend_id();
+    }
 }

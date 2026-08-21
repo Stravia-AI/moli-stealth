@@ -1605,7 +1605,10 @@ impl DynamicScriptOwner {
 
     fn reserve_script_id(&mut self) -> DynamicScriptOwnerId {
         let id = DynamicScriptOwnerId::new(self.next_id);
-        self.next_id += 1;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("dynamic script owner id space exhausted");
         id
     }
 
@@ -2184,6 +2187,17 @@ mod tests {
         types::{ScriptKind, ScriptMode},
     };
     use url::Url;
+
+    #[test]
+    #[should_panic(expected = "dynamic script owner id space exhausted")]
+    fn dynamic_script_owner_ids_never_wrap() {
+        let mut owner = DynamicScriptOwner {
+            next_id: u64::MAX,
+            ..DynamicScriptOwner::default()
+        };
+
+        let _ = owner.reserve_script_id();
+    }
 
     fn prepared_script(position: usize, mode: ScriptMode) -> PreparedScript {
         PreparedScript {

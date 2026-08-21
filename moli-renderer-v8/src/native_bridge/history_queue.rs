@@ -330,7 +330,9 @@ impl JsContextHost {
         kind: &'static str,
     ) -> NavigationAttemptId {
         let raw = self.next_navigation_attempt_id.max(1);
-        self.next_navigation_attempt_id = raw.wrapping_add(1).max(1);
+        self.next_navigation_attempt_id = raw
+            .checked_add(1)
+            .expect("history navigation-attempt id space exhausted");
         self.active_navigation_attempts.insert(raw, kind);
         let attempt_id = NavigationAttemptId(raw);
         self.trace_navigation_lifecycle_attempt(attempt_id, kind, "begin");

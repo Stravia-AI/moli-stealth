@@ -47,7 +47,10 @@ pub(in crate::native_bridge) struct TreeWalkerSnapshot {
 
 impl TraversalStore {
     fn next_id(&mut self) -> u32 {
-        self.next_id = self.next_id.saturating_add(1).max(1);
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .expect("tree traversal id space exhausted");
         self.next_id
     }
 
@@ -309,20 +312,15 @@ mod tests {
     }
 
     #[test]
-    fn next_id_saturates_without_resetting_and_keeps_returning_u32_max() {
-        // Defensive: the counter uses saturating_add, so 2^32-1 is the
-        // terminal id. Subsequent registers all reuse u32::MAX, which means
-        // any new entry overwrites the previous one but the counter itself
-        // never wraps to 0 (avoiding id collisions with already-active
-        // entries).
+    #[should_panic(expected = "tree traversal id space exhausted")]
+    fn next_id_exhaustion_never_reuses_u32_max() {
         let mut store = TraversalStore {
             next_id: u32::MAX - 1,
             ..Default::default()
         };
         let id1 = store.register_node_iterator(handle(0), 0, None);
-        let id2 = store.register_node_iterator(handle(0), 0, None);
         assert_eq!(id1, u32::MAX);
-        assert_eq!(id2, u32::MAX);
+        let _ = store.register_node_iterator(handle(0), 0, None);
     }
 
     #[test]

@@ -53,7 +53,10 @@ struct ResourceTimingBufferRegistry {
 impl ResourceTimingBufferRegistry {
     fn insert(&mut self, size_limit: u32) -> ResourceTimingBufferId {
         loop {
-            self.next_id = self.next_id.wrapping_add(1).max(1);
+            self.next_id = self
+                .next_id
+                .checked_add(1)
+                .expect("resource timing entry id space exhausted");
             let id = ResourceTimingBufferId(self.next_id);
             if let std::collections::hash_map::Entry::Vacant(entry) = self.buffers.entry(id) {
                 entry.insert(ResourceTimingBufferState::new(size_limit));

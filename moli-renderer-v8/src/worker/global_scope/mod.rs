@@ -1601,71 +1601,63 @@ pub(crate) struct WorkerGlobalState {
         HashMap<ServiceWorkerEventId, PendingServiceWorkerPeriodicSyncEvent>,
     /// In-flight Service Worker `clients.get()` / `clients.matchAll()` queries keyed by request id.
     pub(super) pending_service_worker_client_queries: HashMap<u64, PendingServiceWorkerClientQuery>,
-    /// Worker-local Service Worker client query id counter.
-    pub(super) next_service_worker_client_query_id: u64,
     /// In-flight Service Worker `WindowClient.navigate()` requests keyed by request id.
     pub(super) pending_service_worker_client_navigates:
         HashMap<u64, PendingServiceWorkerClientNavigate>,
-    /// Worker-local Service Worker WindowClient navigation request id counter.
-    pub(super) next_service_worker_client_navigate_id: u64,
     /// In-flight Service Worker `WindowClient.focus()` requests keyed by request id.
     pub(super) pending_service_worker_client_focuses: HashMap<u64, PendingServiceWorkerClientFocus>,
-    /// Worker-local Service Worker WindowClient focus request id counter.
-    pub(super) next_service_worker_client_focus_id: u64,
     /// In-flight Service Worker `clients.openWindow()` requests keyed by request id.
     pub(super) pending_service_worker_clients_open_windows:
         HashMap<u64, PendingServiceWorkerClientsOpenWindow>,
-    /// Worker-local Service Worker clients.openWindow request id counter.
-    pub(super) next_service_worker_clients_open_window_id: u64,
     /// In-flight Service Worker `registration.showNotification()` requests keyed by request id.
     pub(super) pending_service_worker_show_notifications:
         HashMap<u64, PendingServiceWorkerShowNotification>,
-    /// Worker-local Service Worker showNotification request id counter.
-    pub(super) next_service_worker_show_notification_id: u64,
     /// In-flight Service Worker `registration.getNotifications()` requests keyed by request id.
     pub(super) pending_service_worker_get_notifications:
         HashMap<u64, PendingServiceWorkerGetNotifications>,
-    /// Worker-local Service Worker getNotifications request id counter.
-    pub(super) next_service_worker_get_notifications_id: u64,
     /// In-flight Service Worker `registration.sync.register()` requests keyed by request id.
     pub(super) pending_service_worker_sync_registrations:
         HashMap<u64, PendingServiceWorkerSyncRegistration>,
-    /// Worker-local Service Worker sync register request id counter.
-    pub(super) next_service_worker_sync_registration_id: u64,
     /// In-flight Service Worker `registration.sync.getTags()` requests keyed by request id.
     pub(super) pending_service_worker_sync_get_tags: HashMap<u64, PendingServiceWorkerSyncGetTags>,
-    /// Worker-local Service Worker sync getTags request id counter.
-    pub(super) next_service_worker_sync_get_tags_id: u64,
     /// In-flight Service Worker `registration.periodicSync.register()` requests keyed by request id.
     pub(super) pending_service_worker_periodic_sync_registrations:
         HashMap<u64, PendingServiceWorkerPeriodicSyncRegistration>,
-    /// Worker-local Service Worker periodic sync register request id counter.
-    pub(super) next_service_worker_periodic_sync_registration_id: u64,
     /// In-flight Service Worker `registration.periodicSync.getTags()` requests keyed by request id.
     pub(super) pending_service_worker_periodic_sync_get_tags:
         HashMap<u64, PendingServiceWorkerPeriodicSyncGetTags>,
-    /// Worker-local Service Worker periodic sync getTags request id counter.
-    pub(super) next_service_worker_periodic_sync_get_tags_id: u64,
     /// In-flight Service Worker `registration.periodicSync.unregister()` requests keyed by request id.
     pub(super) pending_service_worker_periodic_sync_unregistrations:
         HashMap<u64, PendingServiceWorkerPeriodicSyncUnregistration>,
-    /// Worker-local Service Worker periodic sync unregister request id counter.
-    pub(super) next_service_worker_periodic_sync_unregistration_id: u64,
     /// In-flight Service Worker `registration.pushManager.subscribe()` requests keyed by request id.
     pub(super) pending_service_worker_push_subscriptions:
         HashMap<u64, PendingServiceWorkerPushSubscribe>,
-    /// Worker-local Service Worker push subscribe request id counter.
-    pub(super) next_service_worker_push_subscription_id: u64,
     /// In-flight Service Worker `registration.pushManager.getSubscription()` requests keyed by request id.
     pub(super) pending_service_worker_push_get_subscriptions:
         HashMap<u64, PendingServiceWorkerPushGetSubscription>,
-    /// Worker-local Service Worker push getSubscription request id counter.
-    pub(super) next_service_worker_push_get_subscription_id: u64,
     /// In-flight Service Worker `PushSubscription.unsubscribe()` requests keyed by request id.
     pub(super) pending_service_worker_push_unsubscriptions:
         HashMap<u64, PendingServiceWorkerPushUnsubscribe>,
-    /// Worker-local Service Worker push unsubscribe request id counter.
-    pub(super) next_service_worker_push_unsubscription_id: u64,
+    pub(super) service_worker_client_query_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_client_navigate_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_client_focus_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_clients_open_window_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_show_notification_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_get_notifications_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_sync_registration_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_sync_get_tags_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_periodic_sync_registration_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_periodic_sync_get_tags_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_periodic_sync_unregistration_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_push_subscription_request_ids: WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_push_get_subscription_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
+    pub(super) service_worker_push_unsubscription_request_ids:
+        WorkerServiceWorkerRequestIdAllocator,
     /// Count of active Service Worker events that allow window interaction.
     pub(super) service_worker_window_interaction_allowed_count: usize,
     /// Service Worker lifecycle events currently waiting for dispatch and
@@ -1695,6 +1687,44 @@ pub(crate) struct WorkerGlobalState {
     /// `ExtendableEvent.waitUntil()` promises to finish.
     pub(super) pending_service_worker_sync_events:
         HashMap<ServiceWorkerEventId, PendingServiceWorkerSyncEvent>,
+}
+
+/// Checked allocator for one operation-local Service Worker request namespace.
+///
+/// The parent/worker protocol intentionally gives each operation its own
+/// namespace. Keeping that shape avoids coupling unrelated APIs while making
+/// exhaustion fail instead of overwriting a live pending resolver.
+#[derive(Debug)]
+pub(super) struct WorkerServiceWorkerRequestIdAllocator {
+    next: u64,
+}
+
+impl Default for WorkerServiceWorkerRequestIdAllocator {
+    fn default() -> Self {
+        Self { next: 1 }
+    }
+}
+
+impl WorkerServiceWorkerRequestIdAllocator {
+    fn allocate(&mut self) -> u64 {
+        let request_id = self.next;
+        self.next = request_id
+            .checked_add(1)
+            .expect("worker Service Worker request id space exhausted");
+        request_id
+    }
+}
+
+#[cfg(test)]
+mod service_worker_request_id_allocator_tests {
+    use super::WorkerServiceWorkerRequestIdAllocator;
+
+    #[test]
+    #[should_panic(expected = "worker Service Worker request id space exhausted")]
+    fn operation_local_request_ids_never_wrap() {
+        let mut ids = WorkerServiceWorkerRequestIdAllocator { next: u64::MAX };
+        let _ = ids.allocate();
+    }
 }
 
 impl WorkerGlobalState {
@@ -1757,11 +1787,7 @@ impl WorkerGlobalState {
         resolver: v8::Global<v8::PromiseResolver>,
         query_type: PendingServiceWorkerClientQueryType,
     ) -> u64 {
-        let request_id = self.next_service_worker_client_query_id;
-        self.next_service_worker_client_query_id = self
-            .next_service_worker_client_query_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_client_query_request_ids.allocate();
         self.pending_service_worker_client_queries.insert(
             request_id,
             PendingServiceWorkerClientQuery {
@@ -1784,11 +1810,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_client_navigate_id;
-        self.next_service_worker_client_navigate_id = self
-            .next_service_worker_client_navigate_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_client_navigate_request_ids.allocate();
         self.pending_service_worker_client_navigates
             .insert(request_id, PendingServiceWorkerClientNavigate { resolver });
         request_id
@@ -1806,11 +1828,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_client_focus_id;
-        self.next_service_worker_client_focus_id = self
-            .next_service_worker_client_focus_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_client_focus_request_ids.allocate();
         self.pending_service_worker_client_focuses
             .insert(request_id, PendingServiceWorkerClientFocus { resolver });
         request_id
@@ -1828,11 +1846,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_clients_open_window_id;
-        self.next_service_worker_clients_open_window_id = self
-            .next_service_worker_clients_open_window_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_clients_open_window_request_ids
+            .allocate();
         self.pending_service_worker_clients_open_windows.insert(
             request_id,
             PendingServiceWorkerClientsOpenWindow { resolver },
@@ -1852,11 +1868,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_show_notification_id;
-        self.next_service_worker_show_notification_id = self
-            .next_service_worker_show_notification_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_show_notification_request_ids.allocate();
         self.pending_service_worker_show_notifications.insert(
             request_id,
             PendingServiceWorkerShowNotification { resolver },
@@ -1876,11 +1888,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_get_notifications_id;
-        self.next_service_worker_get_notifications_id = self
-            .next_service_worker_get_notifications_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_get_notifications_request_ids.allocate();
         self.pending_service_worker_get_notifications.insert(
             request_id,
             PendingServiceWorkerGetNotifications { resolver },
@@ -1900,11 +1908,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_sync_registration_id;
-        self.next_service_worker_sync_registration_id = self
-            .next_service_worker_sync_registration_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_sync_registration_request_ids.allocate();
         self.pending_service_worker_sync_registrations.insert(
             request_id,
             PendingServiceWorkerSyncRegistration { resolver },
@@ -1924,11 +1928,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_sync_get_tags_id;
-        self.next_service_worker_sync_get_tags_id = self
-            .next_service_worker_sync_get_tags_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_sync_get_tags_request_ids.allocate();
         self.pending_service_worker_sync_get_tags
             .insert(request_id, PendingServiceWorkerSyncGetTags { resolver });
         request_id
@@ -1946,11 +1946,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_periodic_sync_registration_id;
-        self.next_service_worker_periodic_sync_registration_id = self
-            .next_service_worker_periodic_sync_registration_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_periodic_sync_registration_request_ids
+            .allocate();
         self.pending_service_worker_periodic_sync_registrations
             .insert(
                 request_id,
@@ -1971,11 +1969,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_periodic_sync_get_tags_id;
-        self.next_service_worker_periodic_sync_get_tags_id = self
-            .next_service_worker_periodic_sync_get_tags_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_periodic_sync_get_tags_request_ids
+            .allocate();
         self.pending_service_worker_periodic_sync_get_tags.insert(
             request_id,
             PendingServiceWorkerPeriodicSyncGetTags { resolver },
@@ -1995,11 +1991,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_periodic_sync_unregistration_id;
-        self.next_service_worker_periodic_sync_unregistration_id = self
-            .next_service_worker_periodic_sync_unregistration_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_periodic_sync_unregistration_request_ids
+            .allocate();
         self.pending_service_worker_periodic_sync_unregistrations
             .insert(
                 request_id,
@@ -2020,11 +2014,7 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_push_subscription_id;
-        self.next_service_worker_push_subscription_id = self
-            .next_service_worker_push_subscription_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.service_worker_push_subscription_request_ids.allocate();
         self.pending_service_worker_push_subscriptions
             .insert(request_id, PendingServiceWorkerPushSubscribe { resolver });
         request_id
@@ -2042,11 +2032,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_push_get_subscription_id;
-        self.next_service_worker_push_get_subscription_id = self
-            .next_service_worker_push_get_subscription_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_push_get_subscription_request_ids
+            .allocate();
         self.pending_service_worker_push_get_subscriptions.insert(
             request_id,
             PendingServiceWorkerPushGetSubscription { resolver },
@@ -2066,11 +2054,9 @@ impl WorkerGlobalState {
         &mut self,
         resolver: v8::Global<v8::PromiseResolver>,
     ) -> u64 {
-        let request_id = self.next_service_worker_push_unsubscription_id;
-        self.next_service_worker_push_unsubscription_id = self
-            .next_service_worker_push_unsubscription_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self
+            .service_worker_push_unsubscription_request_ids
+            .allocate();
         self.pending_service_worker_push_unsubscriptions
             .insert(request_id, PendingServiceWorkerPushUnsubscribe { resolver });
         request_id
@@ -2841,7 +2827,10 @@ pub(crate) fn reserve_nested_worker_context(
     let mut state = state.borrow_mut();
     let base_url = state.current_script_url.clone()?;
     let worker_id = DedicatedWorkerId::new(state.next_nested_worker_id);
-    state.next_nested_worker_id = state.next_nested_worker_id.saturating_add(1);
+    state.next_nested_worker_id = state
+        .next_nested_worker_id
+        .checked_add(1)
+        .expect("nested worker id space exhausted");
     state
         .nested_worker_wrappers
         .insert(worker_id, v8::Global::new(scope, worker));
@@ -6524,17 +6513,26 @@ pub(super) fn close_worker_owned_broadcast_channels(state: &Rc<RefCell<WorkerGlo
 }
 
 fn next_fetch_id(state: &mut WorkerGlobalState) -> u32 {
-    state.next_fetch_id = state.next_fetch_id.saturating_add(1).max(1);
+    state.next_fetch_id = state
+        .next_fetch_id
+        .checked_add(1)
+        .expect("worker fetch id space exhausted");
     state.next_fetch_id
 }
 
 fn next_xhr_id(state: &mut WorkerGlobalState) -> u32 {
-    state.next_xhr_id = state.next_xhr_id.saturating_add(1).max(1);
+    state.next_xhr_id = state
+        .next_xhr_id
+        .checked_add(1)
+        .expect("worker XHR id space exhausted");
     state.next_xhr_id
 }
 
 fn next_websocket_id(state: &mut WorkerGlobalState) -> u64 {
-    state.next_websocket_id = state.next_websocket_id.saturating_add(1).max(1);
+    state.next_websocket_id = state
+        .next_websocket_id
+        .checked_add(1)
+        .expect("worker WebSocket id space exhausted");
     state.next_websocket_id
 }
 

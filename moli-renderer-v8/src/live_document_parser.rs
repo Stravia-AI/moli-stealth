@@ -293,7 +293,10 @@ impl DocumentParserSessionControlHandle {
             "only a ready live parser session can enter a persistent suspension"
         );
         let suspension_id = ParserSuspensionId(control.next_suspension_id);
-        control.next_suspension_id = control.next_suspension_id.wrapping_add(1).max(1);
+        control.next_suspension_id = control
+            .next_suspension_id
+            .checked_add(1)
+            .expect("live parser suspension id space exhausted");
         let suspension = ParserSuspension {
             id: suspension_id,
             cause,

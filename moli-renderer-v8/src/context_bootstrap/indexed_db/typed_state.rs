@@ -555,7 +555,10 @@ impl IndexedDbRuntimeStateTable {
         state: IndexedDbWrapperState,
     ) -> IndexedDbObjectId {
         let id = id.unwrap_or_else(|| {
-            self.next_id = self.next_id.saturating_add(1).max(1);
+            self.next_id = self
+                .next_id
+                .checked_add(1)
+                .expect("IndexedDB runtime object id space exhausted");
             IndexedDbObjectId(self.next_id)
         });
         self.wrappers.insert(id, state);
@@ -572,7 +575,10 @@ impl IndexedDbRuntimeStateTable {
         state: IndexedDbTaskState,
     ) -> IndexedDbTaskId {
         let id = id.unwrap_or_else(|| {
-            self.next_id = self.next_id.saturating_add(1).max(1);
+            self.next_id = self
+                .next_id
+                .checked_add(1)
+                .expect("IndexedDB runtime task id space exhausted");
             IndexedDbTaskId(self.next_id)
         });
         self.tasks.insert(id, state);
@@ -2001,6 +2007,26 @@ fn set_indexed_db_typed_task_id<'s>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "IndexedDB runtime task id space exhausted")]
+    fn runtime_task_ids_never_saturate() {
+        let mut table = IndexedDbRuntimeStateTable {
+            next_id: u64::MAX,
+            ..IndexedDbRuntimeStateTable::default()
+        };
+
+        let _ = table.upsert_task(
+            None,
+            IndexedDbTaskState::new(
+                IndexedDbTaskKind::OpenBlocked,
+                IndexedDbExecutionOwner::without_execution_context(
+                    crate::native_bridge::OwnerDispatchScope::Top,
+                ),
+                None,
+            ),
+        );
+    }
 
     #[test]
     fn runtime_state_table_updates_existing_wrapper_record() {

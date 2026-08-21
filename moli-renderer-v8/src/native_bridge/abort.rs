@@ -103,12 +103,18 @@ struct AbortSignalObjectDeclaration<'scope> {
 
 impl AbortStore {
     fn alloc_signal_id(&mut self) -> u32 {
-        self.next_signal_id = self.next_signal_id.saturating_add(1).max(1);
+        self.next_signal_id = self
+            .next_signal_id
+            .checked_add(1)
+            .expect("AbortSignal id space exhausted");
         self.next_signal_id
     }
 
     fn alloc_controller_id(&mut self) -> u32 {
-        self.next_controller_id = self.next_controller_id.saturating_add(1).max(1);
+        self.next_controller_id = self
+            .next_controller_id
+            .checked_add(1)
+            .expect("AbortController id space exhausted");
         self.next_controller_id
     }
 

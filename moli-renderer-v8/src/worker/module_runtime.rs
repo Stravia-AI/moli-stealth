@@ -2271,7 +2271,9 @@ fn reserve_worker_module_graph_fetch_id(
         .expect("worker module runtime fetch id slot should be installed");
     let mut next_fetch_id = slot.next_fetch_id.borrow_mut();
     let fetch_id = *next_fetch_id;
-    *next_fetch_id += 1;
+    *next_fetch_id = next_fetch_id
+        .checked_add(1)
+        .expect("worker module graph fetch id space exhausted");
     fetch_id
 }
 

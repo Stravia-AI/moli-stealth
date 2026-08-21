@@ -272,7 +272,7 @@ impl JsContextHost {
             blocked_url_patterns: Vec::new(),
             service_worker_client_id,
             service_worker_control: None,
-            next_service_worker_register_request_id: 1,
+            next_service_worker_request_id: 1,
             pending_service_worker_registers: HashMap::new(),
             pending_service_worker_unregisters: HashMap::new(),
             pending_service_worker_ready: HashMap::new(),
@@ -1499,7 +1499,10 @@ impl JsContextHost {
 
     pub(crate) fn next_image_load_event_id(&mut self) -> super::ImageLoadEventId {
         let id = super::ImageLoadEventId::new(self.next_image_load_event_id);
-        self.next_image_load_event_id = self.next_image_load_event_id.wrapping_add(1).max(1);
+        self.next_image_load_event_id = self
+            .next_image_load_event_id
+            .checked_add(1)
+            .expect("image load-event id space exhausted");
         id
     }
 
@@ -1548,7 +1551,10 @@ impl JsContextHost {
 
     pub(crate) fn next_media_load_sequence_id(&mut self) -> super::MediaLoadSequenceId {
         let id = super::MediaLoadSequenceId::new(self.next_media_load_sequence_id);
-        self.next_media_load_sequence_id = self.next_media_load_sequence_id.wrapping_add(1).max(1);
+        self.next_media_load_sequence_id = self
+            .next_media_load_sequence_id
+            .checked_add(1)
+            .expect("media load-sequence id space exhausted");
         id
     }
 
@@ -1597,8 +1603,10 @@ impl JsContextHost {
 
     pub(crate) fn next_text_track_load_sequence_id(&mut self) -> super::TextTrackLoadSequenceId {
         let id = super::TextTrackLoadSequenceId::new(self.next_text_track_load_sequence_id);
-        self.next_text_track_load_sequence_id =
-            self.next_text_track_load_sequence_id.wrapping_add(1).max(1);
+        self.next_text_track_load_sequence_id = self
+            .next_text_track_load_sequence_id
+            .checked_add(1)
+            .expect("text-track load-sequence id space exhausted");
         id
     }
 

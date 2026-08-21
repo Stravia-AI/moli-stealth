@@ -36,59 +36,95 @@ impl Default for FrameOwnerIdAllocator {
 
 impl FrameOwnerIdAllocator {
     pub(super) fn window_proxy(&mut self) -> WindowProxyId {
-        let id = WindowProxyId(self.next_window_proxy_id);
-        self.next_window_proxy_id += 1;
-        id
+        WindowProxyId(take_next_u64(
+            &mut self.next_window_proxy_id,
+            "WindowProxy id space exhausted",
+        ))
     }
 
     pub(super) fn local_window(&mut self) -> LocalWindowId {
-        let id = LocalWindowId(self.next_local_window_id);
-        self.next_local_window_id += 1;
-        id
+        LocalWindowId(take_next_u64(
+            &mut self.next_local_window_id,
+            "LocalWindow id space exhausted",
+        ))
     }
 
     pub(super) fn document(&mut self) -> DocumentId {
-        let id = DocumentId(self.next_document_id);
-        self.next_document_id += 1;
-        id
+        DocumentId(take_next_u64(
+            &mut self.next_document_id,
+            "Document id space exhausted",
+        ))
     }
 
     pub(super) fn document_load_delay_token(&mut self) -> DocumentLoadDelayTokenId {
-        let id = DocumentLoadDelayTokenId(self.next_document_load_delay_token_id);
-        self.next_document_load_delay_token_id += 1;
-        id
+        DocumentLoadDelayTokenId(take_next_u64(
+            &mut self.next_document_load_delay_token_id,
+            "Document load-delay token id space exhausted",
+        ))
     }
 
     pub(super) fn document_load_delivery_admission(
         &mut self,
     ) -> FrameDocumentLoadDeliveryAdmissionId {
-        let id =
-            FrameDocumentLoadDeliveryAdmissionId(self.next_document_load_delivery_admission_id);
-        self.next_document_load_delivery_admission_id += 1;
-        id
+        FrameDocumentLoadDeliveryAdmissionId(take_next_u64(
+            &mut self.next_document_load_delivery_admission_id,
+            "Document load-delivery admission id space exhausted",
+        ))
     }
 
     pub(super) fn frame_navigation(&mut self) -> FrameNavigationId {
-        let id = FrameNavigationId(self.next_frame_navigation_id);
-        self.next_frame_navigation_id += 1;
-        id
+        FrameNavigationId(take_next_u64(
+            &mut self.next_frame_navigation_id,
+            "frame navigation id space exhausted",
+        ))
     }
 
     pub(super) fn frame_realm(&mut self) -> FrameRealmId {
-        let id = FrameRealmId(self.next_frame_realm_id);
-        self.next_frame_realm_id += 1;
-        id
+        FrameRealmId(take_next_i64(
+            &mut self.next_frame_realm_id,
+            "frame realm id space exhausted",
+        ))
     }
 
     pub(super) fn frame_request(&mut self) -> FrameRequestId {
-        let id = FrameRequestId(self.next_frame_request_id);
-        self.next_frame_request_id += 1;
-        id
+        FrameRequestId(take_next_u64(
+            &mut self.next_frame_request_id,
+            "frame request id space exhausted",
+        ))
     }
 
     pub(super) fn scheduler_lane(&mut self) -> FrameSchedulerLaneId {
-        let id = FrameSchedulerLaneId(self.next_scheduler_lane_id);
-        self.next_scheduler_lane_id += 1;
-        id
+        FrameSchedulerLaneId(take_next_u64(
+            &mut self.next_scheduler_lane_id,
+            "frame scheduler-lane id space exhausted",
+        ))
+    }
+}
+
+fn take_next_u64(next: &mut u64, exhausted: &'static str) -> u64 {
+    let id = *next;
+    *next = next.checked_add(1).expect(exhausted);
+    id
+}
+
+fn take_next_i64(next: &mut i64, exhausted: &'static str) -> i64 {
+    let id = *next;
+    *next = next.checked_add(1).expect(exhausted);
+    id
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FrameOwnerIdAllocator;
+
+    #[test]
+    #[should_panic(expected = "Document id space exhausted")]
+    fn document_ids_never_wrap() {
+        let mut ids = FrameOwnerIdAllocator {
+            next_document_id: u64::MAX,
+            ..FrameOwnerIdAllocator::default()
+        };
+
+        let _ = ids.document();
     }
 }

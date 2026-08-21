@@ -3294,13 +3294,19 @@ impl CdpConnection {
     // ── ID generators ────────────────────────────────────────────────────────
 
     pub fn gen_bc_id(&mut self) -> String {
-        self.next_bc_id += 1;
+        self.next_bc_id = self
+            .next_bc_id
+            .checked_add(1)
+            .expect("browser context id space exhausted");
         format!("BID-{}", self.next_bc_id)
     }
 
     pub fn gen_user_browser_context_id(&mut self) -> String {
         loop {
-            self.next_bc_id += 1;
+            self.next_bc_id = self
+                .next_bc_id
+                .checked_add(1)
+                .expect("browser context id space exhausted");
             let id = format!("user-context-{}", self.next_bc_id);
             if !self.has_browser_context_id(&id) {
                 return id;
@@ -3828,9 +3834,17 @@ impl CdpConnection {
     pub fn gen_target_id(&mut self) -> String {
         loop {
             let id = if let Some(allocator) = self.shared_target_id_allocator.as_ref() {
-                allocator.fetch_add(1, Ordering::Relaxed) + 1
+                allocator
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                        current.checked_add(1)
+                    })
+                    .expect("shared target id space exhausted")
+                    + 1
             } else {
-                self.next_target_id += 1;
+                self.next_target_id = self
+                    .next_target_id
+                    .checked_add(1)
+                    .expect("target id space exhausted");
                 u64::from(self.next_target_id)
             };
             let target_id = format!("TID-{id}");
@@ -3853,7 +3867,10 @@ impl CdpConnection {
 
     pub fn gen_session_id(&mut self) -> String {
         loop {
-            self.next_session_id += 1;
+            self.next_session_id = self
+                .next_session_id
+                .checked_add(1)
+                .expect("DevTools session id space exhausted");
             let session_id = format!("SID-{}", self.next_session_id);
             // Embedded callers and test/protocol bootstrap paths may install a
             // caller-supplied session id without advancing this allocator.
@@ -3870,7 +3887,10 @@ impl CdpConnection {
     }
 
     pub(crate) fn open_global_io_stream(&mut self, bytes: Vec<u8>) -> String {
-        self.next_global_io_stream_id = self.next_global_io_stream_id.wrapping_add(1);
+        self.next_global_io_stream_id = self
+            .next_global_io_stream_id
+            .checked_add(1)
+            .expect("global IO stream id space exhausted");
         let handle = format!("BROWSER-STREAM-{}", self.next_global_io_stream_id);
         self.global_io_streams
             .insert(handle.clone(), IoStreamState::from_bytes(bytes, 0));

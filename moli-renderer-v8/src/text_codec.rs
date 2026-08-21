@@ -135,7 +135,10 @@ impl TextCodecStore {
 
 impl TextCodecStoreState {
     fn alloc_decoder_id(&mut self) -> u32 {
-        self.next_decoder_id = self.next_decoder_id.saturating_add(1).max(1);
+        self.next_decoder_id = self
+            .next_decoder_id
+            .checked_add(1)
+            .expect("TextDecoder id space exhausted");
         self.next_decoder_id
     }
 }

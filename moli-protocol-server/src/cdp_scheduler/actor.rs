@@ -1341,7 +1341,9 @@ fn command_metadata(command: &ParsedCdpCommand) -> InFlightCommandMetadata {
 
 fn take_next_in_flight_command_token(next_token: &mut u64) -> u64 {
     let token = *next_token;
-    *next_token = next_token.wrapping_add(1);
+    *next_token = next_token
+        .checked_add(1)
+        .expect("in-flight CDP command token space exhausted");
     token
 }
 
@@ -2076,6 +2078,13 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    #[should_panic(expected = "in-flight CDP command token space exhausted")]
+    fn in_flight_command_tokens_never_wrap() {
+        let mut next = u64::MAX;
+        let _ = take_next_in_flight_command_token(&mut next);
+    }
 
     #[tokio::test]
     async fn ready_background_events_precede_runtime_response_without_starving_it() {

@@ -172,7 +172,10 @@ impl ObserverCallbackRegistry {
 
     pub(super) fn register(&self, binding: ObserverCallbackBinding) -> ObserverCallbackId {
         let mut state = self.state.borrow_mut();
-        state.next_id = state.next_id.saturating_add(1).max(1);
+        state.next_id = state
+            .next_id
+            .checked_add(1)
+            .expect("observer callback id space exhausted");
         let id = ObserverCallbackId(state.next_id);
         let replaced = state.bindings.insert(id, binding);
         assert!(

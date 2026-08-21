@@ -1201,8 +1201,8 @@ impl CdpConnection {
         let id = self.next_internal_runtime_command_id;
         self.next_internal_runtime_command_id = self
             .next_internal_runtime_command_id
-            .saturating_add(1)
-            .max(902_000_000);
+            .checked_add(1)
+            .expect("internal Runtime command id space exhausted");
         id
     }
 

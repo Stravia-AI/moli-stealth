@@ -448,7 +448,11 @@ impl LiveStylesheetRegistry {
 
     fn allocate_id(&self) -> StylesheetId {
         loop {
-            let id = self.next_id.get().saturating_add(1).max(1);
+            let id = self
+                .next_id
+                .get()
+                .checked_add(1)
+                .expect("live stylesheet id space exhausted");
             self.next_id.set(if id == u64::MAX { 0 } else { id });
             let id = StylesheetId(id);
             if !self.entries.borrow().contains_key(&id) {
@@ -492,7 +496,11 @@ impl LiveStylesheetRegistry {
 
     fn allocate_wrapper_lease_id(&self) -> StylesheetWrapperLeaseId {
         loop {
-            let id = self.next_wrapper_lease_id.get().saturating_add(1).max(1);
+            let id = self
+                .next_wrapper_lease_id
+                .get()
+                .checked_add(1)
+                .expect("live stylesheet wrapper-lease id space exhausted");
             self.next_wrapper_lease_id
                 .set(if id == u64::MAX { 0 } else { id });
             let id = StylesheetWrapperLeaseId(id);

@@ -103,6 +103,14 @@ pub(crate) struct PendingServiceWorkerClientsOpenWindowPopup {
 }
 
 impl JsContextHost {
+    fn allocate_service_worker_request_id(&mut self) -> u64 {
+        let request_id = self.next_service_worker_request_id;
+        self.next_service_worker_request_id = request_id
+            .checked_add(1)
+            .expect("Window Service Worker request id space exhausted");
+        request_id
+    }
+
     fn service_worker_task_sender(
         &self,
     ) -> crate::page_task_queue::RendererPageServiceWorkerTaskSender {
@@ -383,11 +391,7 @@ impl JsContextHost {
         WindowDocumentOwner,
         crate::page_task_queue::RendererPageServiceWorkerTaskSender,
     ) {
-        let request_id = self.next_service_worker_register_request_id;
-        self.next_service_worker_register_request_id = self
-            .next_service_worker_register_request_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.allocate_service_worker_request_id();
         self.pending_service_worker_registers.insert(
             request_id,
             PendingServiceWorkerRegister {
@@ -441,11 +445,7 @@ impl JsContextHost {
         WindowDocumentOwner,
         crate::page_task_queue::RendererPageServiceWorkerTaskSender,
     ) {
-        let request_id = self.next_service_worker_register_request_id;
-        self.next_service_worker_register_request_id = self
-            .next_service_worker_register_request_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.allocate_service_worker_request_id();
         self.pending_service_worker_unregisters.insert(
             request_id,
             PendingServiceWorkerUnregister {
@@ -482,11 +482,7 @@ impl JsContextHost {
         resolver: v8::Local<'_, v8::PromiseResolver>,
         request_context: ServiceWorkerWindowRequestContext,
     ) -> u64 {
-        let request_id = self.next_service_worker_register_request_id;
-        self.next_service_worker_register_request_id = self
-            .next_service_worker_register_request_id
-            .wrapping_add(1)
-            .max(1);
+        let request_id = self.allocate_service_worker_request_id();
         let owner = request_context.owner();
         self.pending_service_worker_ready.insert(
             request_id,

@@ -582,8 +582,13 @@ impl JsContextHost {
         let LightweightPopupLifecycle::Open(open) = lifecycle else {
             return None;
         };
-        record.navigation_id =
-            LightweightPopupNavigationId::new(record.navigation_id.as_u64().wrapping_add(1).max(1));
+        record.navigation_id = LightweightPopupNavigationId::new(
+            record
+                .navigation_id
+                .as_u64()
+                .checked_add(1)
+                .expect("lightweight popup navigation id space exhausted"),
+        );
         record.opener = None;
         Some(LightweightPopupCloseTransition {
             retired_owner: open.document.owner,
@@ -692,7 +697,10 @@ impl JsContextHost {
             .then(|| trackable_lightweight_popup_window_name(target_name))
             .flatten();
         let popup_id = self.next_lightweight_popup_id;
-        self.next_lightweight_popup_id = self.next_lightweight_popup_id.wrapping_add(1).max(1);
+        self.next_lightweight_popup_id = self
+            .next_lightweight_popup_id
+            .checked_add(1)
+            .expect("lightweight popup id space exhausted");
         let window = self
             .bridge
             .bindings
@@ -1979,8 +1987,13 @@ impl JsContextHost {
         let record = self
             .lightweight_popup_record_mut(popup_id)
             .expect("current popup document owner must belong to an open browsing context");
-        record.navigation_id =
-            LightweightPopupNavigationId::new(record.navigation_id.as_u64().wrapping_add(1).max(1));
+        record.navigation_id = LightweightPopupNavigationId::new(
+            record
+                .navigation_id
+                .as_u64()
+                .checked_add(1)
+                .expect("lightweight popup navigation id space exhausted"),
+        );
         record.location_url = target_url;
         Some(LightweightPopupNavigationTaskToken::from_parts(
             document_owner,

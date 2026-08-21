@@ -109,7 +109,10 @@ impl<Work> ParserModuleEvaluationStore<Work> {
 
     pub(crate) fn reserve_pending(&mut self, work: Work, root_entry: ModuleEntryId) -> u64 {
         let reaction_id = self.next_reaction_id;
-        self.next_reaction_id = self.next_reaction_id.wrapping_add(1).max(1);
+        self.next_reaction_id = self
+            .next_reaction_id
+            .checked_add(1)
+            .expect("parser module reaction id space exhausted");
         self.push_pending_with_reaction_id(work, root_entry, reaction_id);
         reaction_id
     }
