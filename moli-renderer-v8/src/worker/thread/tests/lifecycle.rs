@@ -614,7 +614,7 @@ async fn service_worker_install_wait_until_resolution_completes_lifecycle_event(
         ServiceWorkerEventId::from_u64_for_worker(1)
     );
     assert_eq!(
-        completion.version_id,
+        completion.owner.version_id(),
         ServiceWorkerVersionId::from_u64_for_test(1)
     );
     assert_eq!(completion.kind, ServiceWorkerLifecycleEventKind::Install);
@@ -685,8 +685,10 @@ async fn service_worker_fetch_event_preload_response_resolves_network_response()
     request.request_mode = moli_fetch::RequestMode::Navigate;
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request,
         navigation_preload_sent: true,
     });
@@ -694,8 +696,10 @@ async fn service_worker_fetch_event_preload_response_resolves_network_response()
     handle.start_service_worker_navigation_preload_response(
         ServiceWorkerNavigationPreloadResponseStarted {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             request_url,
             request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
@@ -728,8 +732,10 @@ async fn service_worker_fetch_event_preload_response_resolves_network_response()
     handle.finish_service_worker_navigation_preload_stream(
         ServiceWorkerNavigationPreloadStreamFinished {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             body_source_id,
             result: Ok(()),
         },
@@ -793,8 +799,10 @@ async fn service_worker_fetch_event_preload_response_opaqueredirect_exposes_requ
     request.request_mode = moli_fetch::RequestMode::Navigate;
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request,
         navigation_preload_sent: true,
     });
@@ -802,8 +810,10 @@ async fn service_worker_fetch_event_preload_response_opaqueredirect_exposes_requ
     handle.start_service_worker_navigation_preload_response(
         ServiceWorkerNavigationPreloadResponseStarted {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             request_url: request_url.clone(),
             request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
@@ -819,8 +829,10 @@ async fn service_worker_fetch_event_preload_response_opaqueredirect_exposes_requ
     handle.finish_service_worker_navigation_preload_stream(
         ServiceWorkerNavigationPreloadStreamFinished {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             body_source_id,
             result: Ok(()),
         },
@@ -879,15 +891,19 @@ async fn service_worker_fetch_event_preload_response_rejects_before_response() {
     request.request_mode = moli_fetch::RequestMode::Navigate;
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request,
         navigation_preload_sent: true,
     });
     handle.fail_service_worker_navigation_preload(ServiceWorkerNavigationPreloadFailure {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         message: "navigation preload failed".to_owned(),
     });
 
@@ -953,8 +969,10 @@ async fn service_worker_fetch_event_preload_response_body_errors_after_response(
     request.request_mode = moli_fetch::RequestMode::Navigate;
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request,
         navigation_preload_sent: true,
     });
@@ -962,8 +980,10 @@ async fn service_worker_fetch_event_preload_response_body_errors_after_response(
     handle.start_service_worker_navigation_preload_response(
         ServiceWorkerNavigationPreloadResponseStarted {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             request_url,
             request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
@@ -989,8 +1009,10 @@ async fn service_worker_fetch_event_preload_response_body_errors_after_response(
     handle.finish_service_worker_navigation_preload_stream(
         ServiceWorkerNavigationPreloadStreamFinished {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             body_source_id,
             result: Err("navigation preload stream failed".to_owned()),
         },
@@ -1060,8 +1082,10 @@ async fn service_worker_fetch_event_preload_response_body_completes_after_fetch_
     request.request_mode = moli_fetch::RequestMode::Navigate;
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request,
         navigation_preload_sent: true,
     });
@@ -1069,8 +1093,10 @@ async fn service_worker_fetch_event_preload_response_body_completes_after_fetch_
     handle.start_service_worker_navigation_preload_response(
         ServiceWorkerNavigationPreloadResponseStarted {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             request_url,
             request_mode: moli_fetch::RequestMode::Navigate,
             body_source_id,
@@ -1128,8 +1154,10 @@ async fn service_worker_fetch_event_preload_response_body_completes_after_fetch_
     handle.finish_service_worker_navigation_preload_stream(
         ServiceWorkerNavigationPreloadStreamFinished {
             event_id,
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                run.clone(),
+            ),
             body_source_id,
             result: Ok(()),
         },
@@ -1239,8 +1267,10 @@ async fn dispatch_service_worker_lifecycle_event_and_console_for_test(
 ) -> (ServiceWorkerLifecycleCompletion, String) {
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind,
     });
 
@@ -1276,8 +1306,10 @@ async fn dispatch_service_worker_message_event_and_console_for_test(
 ) -> (ServiceWorkerMessageCompletion, String) {
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -1702,7 +1734,7 @@ async fn service_worker_fetch_without_respond_with_falls_back() {
         ServiceWorkerEventId::from_u64_for_worker(7)
     );
     assert_eq!(
-        completion.version_id,
+        completion.owner.version_id(),
         ServiceWorkerVersionId::from_u64_for_test(1)
     );
     assert!(matches!(
@@ -1761,8 +1793,10 @@ async fn dispatch_service_worker_fetch_event_and_handled_console_for_test(
 ) -> (ServiceWorkerFetchCompletion, String) {
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request,
         navigation_preload_sent: false,
     });
@@ -1987,8 +2021,10 @@ async fn service_worker_fetch_handler_throw_without_respond_with_still_falls_bac
     let event_id = ServiceWorkerEventId::from_u64_for_worker(59);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -2129,8 +2165,10 @@ async fn service_worker_fetch_respond_with_readable_stream_body_posts_stream_chu
     let run = crate::runtime::RendererServiceWorkerRunIdentity::fresh();
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: run.clone(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            run.clone(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -2146,10 +2184,10 @@ async fn service_worker_fetch_respond_with_readable_stream_body_posts_stream_chu
             WorkerToParentMessage::ServiceWorkerFetchStreamStarted(started) => {
                 assert_eq!(started.event_id, event_id);
                 assert_eq!(
-                    started.version_id,
+                    started.owner.version_id(),
                     ServiceWorkerVersionId::from_u64_for_test(1)
                 );
-                assert_eq!(started.run, run);
+                assert_eq!(started.owner.run_identity(), &run);
                 assert_eq!(started.response_head.response_type, "default");
                 assert_eq!(started.response_head.status, 202);
                 assert!(
@@ -2244,8 +2282,10 @@ async fn service_worker_fetch_respond_with_readable_stream_error_fails_open_stre
     let event_id = ServiceWorkerEventId::from_u64_for_worker(21);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -2316,8 +2356,10 @@ async fn service_worker_fetch_respond_with_invalid_readable_stream_chunk_fails_o
     let event_id = ServiceWorkerEventId::from_u64_for_worker(22);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -2388,8 +2430,10 @@ async fn service_worker_fetch_stream_cancel_from_parent_notifies_source_and_fail
     let event_id = ServiceWorkerEventId::from_u64_for_worker(20);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -2886,8 +2930,10 @@ async fn service_worker_fetch_event_request_signal_aborts_with_parent_reason() {
     let event_id = ServiceWorkerEventId::from_u64_for_worker(27);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -3098,8 +3144,10 @@ async fn service_worker_fetch_respond_with_keeps_response_when_handler_throws_af
     let event_id = ServiceWorkerEventId::from_u64_for_worker(25);
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id,
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request: service_worker_fetch_request_for_test(),
         navigation_preload_sent: false,
     });
@@ -3286,7 +3334,7 @@ async fn service_worker_message_event_receives_structured_data() {
         ServiceWorkerEventId::from_u64_for_worker(20)
     );
     assert_eq!(
-        completion.version_id,
+        completion.owner.version_id(),
         ServiceWorkerVersionId::from_u64_for_test(1)
     );
     assert_eq!(completion.result, Ok(()));
@@ -3505,8 +3553,10 @@ async fn service_worker_message_event_source_uses_client_snapshot() {
         &mut handle,
         ServiceWorkerMessageEvent {
             event_id: ServiceWorkerEventId::from_u64_for_worker(21),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             source_client_id: Some(source_client_id),
             source_client_url: Some(source_client_url.clone()),
             source_client_snapshot: Some(
@@ -3576,8 +3626,10 @@ async fn service_worker_message_event_source_uses_service_worker_snapshot() {
         &mut handle,
         ServiceWorkerMessageEvent {
             event_id: ServiceWorkerEventId::from_u64_for_worker(22),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             source_client_id: None,
             source_client_url: None,
             source_client_snapshot: None,
@@ -3673,8 +3725,10 @@ async fn service_worker_messageerror_dispatches_when_wasm_module_sender_origin_m
         &mut handle,
         ServiceWorkerMessageEvent {
             event_id: ServiceWorkerEventId::from_u64_for_worker(24),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             source_client_id: None,
             source_client_url: None,
             source_client_snapshot: None,
@@ -3919,8 +3973,10 @@ async fn service_worker_global_scope_handler_attributes_dispatch_functional_even
             event_id: ServiceWorkerEventId::from_u64_for_worker(45),
             kind: ServiceWorkerNotificationEventKind::Click,
             registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             notification_id: 1,
             title: "click-title".to_owned(),
             tag: String::new(),
@@ -3944,8 +4000,10 @@ async fn service_worker_global_scope_handler_attributes_dispatch_functional_even
             event_id: ServiceWorkerEventId::from_u64_for_worker(46),
             kind: ServiceWorkerNotificationEventKind::Close,
             registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             notification_id: 2,
             title: "close-title".to_owned(),
             tag: String::new(),
@@ -4133,8 +4191,10 @@ async fn service_worker_skip_waiting_posts_runtime_request() {
     );
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(5),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind: ServiceWorkerLifecycleEventKind::Install,
     });
 
@@ -4221,8 +4281,10 @@ async fn service_worker_clients_claim_posts_runtime_request() {
     );
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(6),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind: ServiceWorkerLifecycleEventKind::Activate,
     });
 
@@ -4402,8 +4464,10 @@ async fn service_worker_clients_match_all_and_get_resolve_from_parent_query_resu
     );
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(30),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind: ServiceWorkerLifecycleEventKind::Install,
     });
 
@@ -4614,8 +4678,10 @@ async fn service_worker_worker_client_query_builds_base_client_object() {
     );
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(31),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind: ServiceWorkerLifecycleEventKind::Install,
     });
 
@@ -4752,8 +4818,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(31),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -4921,8 +4989,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(32),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5108,8 +5178,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(33),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5269,8 +5341,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(32),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5435,8 +5509,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(32),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5509,8 +5585,10 @@ self.addEventListener("message", event => {
                     );
                     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
                         event_id: ServiceWorkerEventId::from_u64_for_worker(33),
-                        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-                        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+                        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                            ServiceWorkerVersionId::from_u64_for_test(1),
+                            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+                        ),
                         source_client_id: None,
                         source_client_url: None,
                         source_client_snapshot: None,
@@ -5600,8 +5678,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(33),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5685,8 +5765,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(34),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5821,8 +5903,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(35),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -5950,8 +6034,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(36),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -6068,8 +6154,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(136),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: Some(crate::runtime::ServiceWorkerClientId::from_u64_for_test(1)),
         source_client_url: Some(url::Url::parse("https://example.test/app/page.html").unwrap()),
         source_client_snapshot: Some(
@@ -6142,8 +6230,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(137),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: Some(crate::runtime::ServiceWorkerClientId::from_u64_for_test(1)),
         source_client_url: Some(url::Url::parse("https://example.test/app/page.html").unwrap()),
         source_client_snapshot: Some(
@@ -6243,8 +6333,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(39),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -6399,8 +6491,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(38),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -6487,8 +6581,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(40),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -6647,8 +6743,10 @@ self.addEventListener("message", event => {
 
     handle.dispatch_service_worker_message_event(ServiceWorkerMessageEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(37),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         source_client_id: None,
         source_client_url: None,
         source_client_snapshot: None,
@@ -6870,8 +6968,10 @@ self.addEventListener("notificationclick", event => {
         event_id: ServiceWorkerEventId::from_u64_for_worker(32),
         kind: ServiceWorkerNotificationEventKind::Click,
         registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         notification_id: 1,
         title: "hello".to_owned(),
         tag: String::new(),
@@ -7071,8 +7171,10 @@ self.addEventListener("notificationclose", event => {
         event_id: ServiceWorkerEventId::from_u64_for_worker(33),
         kind: ServiceWorkerNotificationEventKind::Close,
         registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         notification_id: 2,
         title: "bye".to_owned(),
         tag: String::new(),

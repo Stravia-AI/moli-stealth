@@ -6,10 +6,7 @@ use url::Url;
 use crate::{
     network::{BrowserResourceRuntimeBinding, ResourceRequestClient},
     page_task_queue::RendererPageServiceWorkerTaskSender,
-    runtime::{
-        RendererBrowserContextRuntime, RendererServiceWorkerRunIdentity,
-        RendererWorkerContextRuntime,
-    },
+    runtime::{RendererBrowserContextRuntime, RendererWorkerContextRuntime},
     types::{ServiceWorkerRegisterCompletion, ServiceWorkerUnregisterCompletion},
     worker::{WorkerNetworkPolicy, WorkerScriptKind},
 };
@@ -18,6 +15,7 @@ use super::{
     errors::ServiceWorkerRegistrationError,
     ids::{ServiceWorkerRegistrationId, ServiceWorkerVersionId},
     registration::ServiceWorkerUpdateViaCache,
+    run_owner::ServiceWorkerRunOwner,
     script_loading::ServiceWorkerScriptUpdateCheckParams,
     snapshots::ServiceWorkerRegistrationSnapshot,
 };
@@ -25,8 +23,7 @@ use super::{
 #[derive(Clone)]
 pub(crate) struct ServiceWorkerLaunchParams {
     pub(super) registration_id: ServiceWorkerRegistrationId,
-    pub(super) version_id: ServiceWorkerVersionId,
-    pub(super) run: RendererServiceWorkerRunIdentity,
+    pub(super) run_owner: ServiceWorkerRunOwner,
     pub(super) script_url: Url,
     pub(super) scope_url: Url,
     pub(super) storage_key: String,
@@ -747,8 +744,7 @@ impl ServiceWorkerVersionLaunchConfig {
     pub(super) fn to_launch_params(
         &self,
         registration_id: ServiceWorkerRegistrationId,
-        version_id: ServiceWorkerVersionId,
-        run: &RendererServiceWorkerRunIdentity,
+        run_owner: &ServiceWorkerRunOwner,
         script_url: Url,
         scope_url: Url,
         storage_key: String,
@@ -756,8 +752,7 @@ impl ServiceWorkerVersionLaunchConfig {
     ) -> ServiceWorkerLaunchParams {
         ServiceWorkerLaunchParams {
             registration_id,
-            version_id,
-            run: run.clone(),
+            run_owner: run_owner.clone(),
             script_url,
             scope_url,
             storage_key,

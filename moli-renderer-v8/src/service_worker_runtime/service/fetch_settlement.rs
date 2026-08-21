@@ -375,7 +375,7 @@ impl ServiceWorkerRuntimeService {
                 .pending_fetch_jobs
                 .get(&started.event_id)
                 .and_then(|job| {
-                    if job.version_id != started.version_id || !job.is_bound_to_run(&started.run) {
+                    if !job.is_bound_to_owner(&started.owner) {
                         return None;
                     }
                     service_worker_fetch_can_forward_stream(job, &started.response_head).err()
@@ -391,7 +391,7 @@ impl ServiceWorkerRuntimeService {
             let Some(job) = state.pending_fetch_jobs.get_mut(&started.event_id) else {
                 return;
             };
-            if job.version_id != started.version_id || !job.is_bound_to_run(&started.run) {
+            if !job.is_bound_to_owner(&started.owner) {
                 return;
             }
             match service_worker_fetch_can_forward_stream(job, &started.response_head) {
@@ -436,48 +436,51 @@ impl ServiceWorkerRuntimeService {
         let rejected = {
             let mut state = self.inner.state.lock();
             {
-                let Some(version) = state.versions.get(&started.version_id) else {
+                let Some(version) = state.versions.get(&started.owner.version_id()) else {
                     return;
                 };
-                if version.run != started.run {
+                if &version.run != started.owner.run_identity() {
                     return;
                 }
             }
             let Some(job) = state.pending_fetch_jobs.remove(&started.event_id) else {
                 return;
             };
-            if job.version_id != started.version_id || !job.is_bound_to_run(&started.run) {
+            if !job.is_bound_to_owner(&started.owner) {
                 return;
             }
-            let stream_cancel = state.versions.get(&job.version_id).and_then(|version| {
-                if !job.is_bound_to_run(&version.run) {
+            let stream_cancel = state.versions.get(&job.version_id()).and_then(|version| {
+                if version.run_owner() != *job.owner() {
                     return None;
                 }
                 let ServiceWorkerVersionRunningState::Running { host } = &version.running_state
                 else {
                     return None;
                 };
-                (host.version_id() == job.version_id && job.is_bound_to_run(&host.run_identity()))
-                    .then_some((host.clone(), started.event_id, started.body_source_id))
+                (host.run_owner() == *job.owner()).then_some((
+                    host.clone(),
+                    started.event_id,
+                    started.body_source_id,
+                ))
             });
-            if let Some(version) = state.versions.get_mut(&started.version_id) {
+            if let Some(version) = state.versions.get_mut(&started.owner.version_id()) {
                 version.in_flight_event_count = version.in_flight_event_count.saturating_sub(1);
             }
             job.cancel_handle.cancel();
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                started.version_id,
+                started.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    started.version_id,
+                    started.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, started.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, started.owner.version_id());
             let mut lifecycle_progress = unregistration_progress;
             lifecycle_progress.extend(activation_progress);
             Some((job, idle_timeout, lifecycle_progress, stream_cancel))
@@ -491,7 +494,11 @@ impl ServiceWorkerRuntimeService {
         let result = ServiceWorkerFetchResult::Failure(message.clone());
         let diagnostic =
             super::event_completion::service_worker_fetch_diagnostic_from_job_result(&job, &result);
-        self.enqueue_target_fetch_diagnostic(started.version_id, started.run, diagnostic);
+        self.enqueue_target_fetch_diagnostic(
+            started.owner.version_id(),
+            started.owner.cloned_run_identity(),
+            diagnostic,
+        );
         for progress in lifecycle_progress {
             self.run_lifecycle_progress(progress);
         }
@@ -1098,7 +1105,6 @@ mod tests {
             ServiceWorkerClient {
                 id: client_id,
                 exposed_id: service_worker_exposed_client_id(client_id),
-                exposed_id_generation: 0,
                 creation_url: document_url.clone(),
                 document_url: document_url.clone(),
                 client_type: ServiceWorkerClientType::Window,
@@ -1146,8 +1152,7 @@ mod tests {
             event_id,
             ServiceWorkerFetchJob {
                 internal_id,
-                version_id,
-                run: Some(run.clone()),
+                owner: Some(ServiceWorkerRunOwner::new(version_id, run.clone())),
                 request_url: request_url.clone(),
                 request_method: "GET".to_owned(),
                 request_headers: vec![("accept".to_owned(), "text/plain".to_owned())],
@@ -1255,8 +1260,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(final_url.clone()),
                 response_type: "default".to_owned(),
@@ -1309,8 +1313,10 @@ mod tests {
 
         service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                version_id,
+                run.clone(),
+            ),
             body_source_id,
             response_head: MaterializedServiceWorkerFetchResponseHead {
                 final_url: Some(final_url.clone()),
@@ -1348,8 +1354,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(final_url),
                 response_type: "default".to_owned(),
@@ -1392,8 +1397,10 @@ mod tests {
 
         service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run: run.clone(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                version_id,
+                run.clone(),
+            ),
             body_source_id,
             response_head: MaterializedServiceWorkerFetchResponseHead {
                 final_url: Some(final_url),
@@ -1426,8 +1433,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Failure(
                 "FetchEvent.respondWith stream aborted".to_owned(),
             ),
@@ -1467,8 +1473,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "opaque".to_owned(),
@@ -1513,8 +1518,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "opaqueredirect".to_owned(),
@@ -1558,8 +1562,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(final_url.clone()),
                 response_type: "default".to_owned(),
@@ -1602,8 +1605,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://example.test/app/manual-final.txt")),
                 response_type: "default".to_owned(),
@@ -1651,8 +1653,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "default".to_owned(),
@@ -1701,8 +1702,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Failure(
                 "FetchEvent.respondWith promise rejected: Error: fetch-boom".to_owned(),
             ),
@@ -1740,8 +1740,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Failure(
                 "service worker fetch dispatch failed: worker is not running".to_owned(),
             ),
@@ -1777,8 +1776,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "default".to_owned(),
@@ -1830,14 +1828,16 @@ mod tests {
             let mut state = service.inner.state.lock();
             let version = state.versions.get_mut(&version_id).unwrap();
             version.running_state = ServiceWorkerVersionRunningState::Starting {
-                host: RendererServiceWorkerHost::new_loading(version_id, &run),
+                host: RendererServiceWorkerHost::new_loading(&ServiceWorkerRunOwner::new(
+                    version_id,
+                    run.clone(),
+                )),
             };
         }
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "default".to_owned(),
@@ -1891,8 +1891,7 @@ mod tests {
         let request_url = url("https://example.test/app/post");
         let mut job = ServiceWorkerFetchJob {
             internal_id: 312,
-            version_id: ServiceWorkerVersionId(1),
-            run: Some(crate::runtime::RendererServiceWorkerRunIdentity::fresh()),
+            owner: Some(ServiceWorkerRunOwner::fresh(ServiceWorkerVersionId(1))),
             request_url: request_url.clone(),
             request_method: "POST".to_owned(),
             request_headers: vec![
@@ -1980,8 +1979,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "default".to_owned(),
@@ -2028,8 +2026,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(response_url.clone()),
                 response_type: "default".to_owned(),
@@ -2093,8 +2090,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "error".to_owned(),
@@ -2141,8 +2137,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cross-origin.test/data.txt")),
                 response_type: "cors".to_owned(),
@@ -2188,8 +2183,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "opaque".to_owned(),
@@ -2248,8 +2242,10 @@ mod tests {
 
             service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
                 event_id,
-                version_id,
-                run: run.clone(),
+                owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                    version_id,
+                    run.clone(),
+                ),
                 result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                     final_url: None,
                     response_type: "opaque".to_owned(),
@@ -2296,8 +2292,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/image.png")),
                 response_type: "default".to_owned(),
@@ -2350,8 +2345,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/image.png")),
                 response_type: "default".to_owned(),
@@ -2414,8 +2408,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2474,8 +2467,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2533,8 +2525,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2592,8 +2583,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2652,8 +2642,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2706,8 +2695,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2765,8 +2753,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2823,8 +2810,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2875,8 +2861,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
                 response_type: "default".to_owned(),
@@ -2934,8 +2919,7 @@ mod tests {
 
         service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             body_source_id,
             response_head: MaterializedServiceWorkerFetchResponseHead {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
@@ -3002,8 +2986,7 @@ mod tests {
 
         service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             body_source_id,
             response_head: MaterializedServiceWorkerFetchResponseHead {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
@@ -3067,8 +3050,7 @@ mod tests {
 
         service.finish_fetch_stream_started(ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             body_source_id,
             response_head: MaterializedServiceWorkerFetchResponseHead {
                 final_url: Some(url("https://cdn.example.test/app/pixel.png")),
@@ -3119,8 +3101,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/data.json")),
                 response_type: "default".to_owned(),
@@ -3166,8 +3147,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: Some(url("https://cdn.example.test/app/data.json")),
                 response_type: "default".to_owned(),
@@ -3211,8 +3191,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Response(ServiceWorkerFetchResponse {
                 final_url: None,
                 response_type: "opaqueredirect".to_owned(),
@@ -3267,8 +3246,7 @@ mod tests {
 
         service.finish_fetch_event_completed(ServiceWorkerFetchCompletion {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             result: ServiceWorkerFetchResult::Fallback,
         });
 

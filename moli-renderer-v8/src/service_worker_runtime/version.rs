@@ -19,13 +19,13 @@ use super::{
     host::SharedRendererServiceWorkerHost,
     ids::{ServiceWorkerRegistrationId, ServiceWorkerVersionId},
     jobs::ServiceWorkerVersionLaunchConfig,
+    run_owner::ServiceWorkerRunOwner,
     script_loading::ServiceWorkerScriptResource,
 };
 
 #[derive(Clone, Debug)]
 pub(super) struct ServiceWorkerIdleTimeout {
-    pub(super) version_id: ServiceWorkerVersionId,
-    pub(super) run: RendererServiceWorkerRunIdentity,
+    pub(super) owner: ServiceWorkerRunOwner,
     pub(super) token: ServiceWorkerIdleTimeoutToken,
 }
 
@@ -70,6 +70,17 @@ pub(super) struct ServiceWorkerVersion {
     pub(super) skip_waiting_requested: bool,
     pub(super) clients_claim_requested: bool,
     pub(super) last_start_error: Option<String>,
+}
+
+impl ServiceWorkerVersion {
+    pub(super) fn run_owner(&self) -> ServiceWorkerRunOwner {
+        ServiceWorkerRunOwner::new(self.id, self.run.clone())
+    }
+
+    pub(super) fn replace_run_owner(&mut self) -> ServiceWorkerRunOwner {
+        self.run = RendererServiceWorkerRunIdentity::fresh();
+        self.run_owner()
+    }
 }
 
 #[derive(Clone, Debug)]

@@ -1,6 +1,10 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use url::Url;
 
 use super::ids::{ServiceWorkerClientId, ServiceWorkerRegistrationId, ServiceWorkerVersionId};
+
+static NEXT_SERVICE_WORKER_EXPOSED_CLIENT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ServiceWorkerClientSnapshot {
@@ -67,27 +71,51 @@ impl ServiceWorkerClientSnapshot {
 }
 
 pub(crate) fn service_worker_exposed_client_id(id: ServiceWorkerClientId) -> String {
-    service_worker_exposed_client_id_for_generation(id, 0)
+    format!("client-{:016x}", id.as_u64())
 }
 
-pub(crate) fn service_worker_exposed_client_id_for_generation(
-    id: ServiceWorkerClientId,
-    generation: u64,
-) -> String {
-    if generation == 0 {
-        return format!("client-{:016x}", id.as_u64());
-    }
-    format!("client-{:016x}-{:016x}", id.as_u64(), generation)
+pub(crate) fn allocate_service_worker_exposed_client_id() -> String {
+    allocate_service_worker_exposed_client_id_from(&NEXT_SERVICE_WORKER_EXPOSED_CLIENT_ID)
 }
 
-pub(crate) fn service_worker_next_exposed_client_id_generation(generation: u64) -> u64 {
-    generation.saturating_add(1)
+fn allocate_service_worker_exposed_client_id_from(counter: &AtomicU64) -> String {
+    let raw = counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            current.checked_add(1)
+        })
+        .expect("ServiceWorker exposed client id allocator exhausted");
+    format!("client-document-{raw:016x}")
 }
 
 pub(crate) fn service_worker_current_url_for_creation_url(creation_url: &Url) -> Url {
     let mut current_url = creation_url.clone();
     current_url.set_fragment(None);
     current_url
+}
+
+#[cfg(test)]
+mod exposed_client_identity_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_ids_are_fresh_and_not_derived_from_internal_client_id() {
+        let client_id = ServiceWorkerClientId::from_u64_for_test(7);
+        let first = allocate_service_worker_exposed_client_id();
+        let second = allocate_service_worker_exposed_client_id();
+
+        assert_ne!(first, second);
+        assert_ne!(first, service_worker_exposed_client_id(client_id));
+    }
+
+    #[test]
+    fn replacement_id_allocator_rejects_exhaustion_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX);
+        let exhausted =
+            std::panic::catch_unwind(|| allocate_service_worker_exposed_client_id_from(&counter));
+
+        assert!(exhausted.is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

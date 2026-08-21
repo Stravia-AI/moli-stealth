@@ -222,8 +222,7 @@ impl ServiceWorkerRuntimeService {
                             let event = ServiceWorkerSyncEvent {
                                 event_id,
                                 registration_id: request.registration_id,
-                                version_id: request.version_id,
-                                run,
+                                owner: ServiceWorkerRunOwner::new(request.version_id, run),
                                 tag: request.tag.clone(),
                                 last_chance: false,
                             };

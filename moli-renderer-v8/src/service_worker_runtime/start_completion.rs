@@ -17,13 +17,14 @@ use super::{
     },
     host::SharedRendererServiceWorkerHost,
     ids::{ServiceWorkerRegistrationId, ServiceWorkerVersionId},
+    run_owner::ServiceWorkerRunOwner,
     script_loading::{ServiceWorkerScriptResource, ServiceWorkerScriptUpdateCheckCompletion},
     state::WeakServiceWorkerRuntimeService,
     version::{
         ServiceWorkerFetchHandlerType, ServiceWorkerIdleTimeout, ServiceWorkerVersionStartFailure,
     },
 };
-use crate::{runtime::RendererServiceWorkerRunIdentity, worker::WorkerScriptResource};
+use crate::worker::WorkerScriptResource;
 
 pub(super) struct ServiceWorkerRuntimeCompletion {
     runtime_service: WeakServiceWorkerRuntimeService,
@@ -32,21 +33,18 @@ pub(super) struct ServiceWorkerRuntimeCompletion {
 
 enum ServiceWorkerRuntimeCompletionKind {
     VersionStartCompleted {
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         final_script_url: String,
         script_resource: ServiceWorkerScriptResource,
         fetch_handler_type: ServiceWorkerFetchHandlerType,
     },
     VersionStartFailed {
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         failure: ServiceWorkerVersionStartFailure,
     },
     ImportedScriptLoaded {
         registration_id: ServiceWorkerRegistrationId,
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         resource: WorkerScriptResource,
     },
     MainScriptUpdateCheckCompleted {
@@ -82,57 +80,47 @@ enum ServiceWorkerRuntimeCompletionKind {
     },
     ShowNotificationRequested {
         request: Box<ServiceWorkerShowNotification>,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     GetNotificationsRequested {
         request: ServiceWorkerGetNotifications,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     SyncRegistrationRequested {
         request: ServiceWorkerSyncRegistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     SyncGetTagsRequested {
         request: ServiceWorkerSyncGetTags,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PeriodicSyncRegistrationRequested {
         request: ServiceWorkerPeriodicSyncRegistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PeriodicSyncGetTagsRequested {
         request: ServiceWorkerPeriodicSyncGetTags,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PeriodicSyncUnregistrationRequested {
         request: ServiceWorkerPeriodicSyncUnregistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PushSubscribeRequested {
         request: ServiceWorkerPushSubscribe,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PushGetSubscriptionRequested {
         request: ServiceWorkerPushGetSubscription,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     PushUnsubscribeRequested {
         request: ServiceWorkerPushUnsubscribe,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     },
     CloseNotificationRequested {
         request: ServiceWorkerCloseNotification,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     },
     ClientMessage {
         message: ServiceWorkerClientMessage,
@@ -142,25 +130,25 @@ enum ServiceWorkerRuntimeCompletionKind {
     },
     ClientQuery {
         query: ServiceWorkerClientQuery,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     },
     ClientNavigate {
         navigate: ServiceWorkerClientNavigate,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     },
     ClientNavigateCompleted {
         completion: crate::types::ServiceWorkerClientNavigateCompletion,
     },
     ClientFocus {
         focus: ServiceWorkerClientFocus,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     },
     ClientFocusCompleted {
         completion: crate::types::ServiceWorkerClientFocusCompletion,
     },
     ClientsOpenWindow {
         open_window: ServiceWorkerClientsOpenWindow,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     },
     ClientsOpenWindowCompleted {
         completion: crate::types::ServiceWorkerClientsOpenWindowCompletion,
@@ -179,8 +167,7 @@ enum ServiceWorkerRuntimeCompletionKind {
 impl ServiceWorkerRuntimeCompletion {
     pub(super) fn version_start_completed(
         runtime_service: WeakServiceWorkerRuntimeService,
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         final_script_url: String,
         script_resource: ServiceWorkerScriptResource,
         fetch_handler_type: ServiceWorkerFetchHandlerType,
@@ -188,8 +175,7 @@ impl ServiceWorkerRuntimeCompletion {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::VersionStartCompleted {
-                version_id,
-                run,
+                owner,
                 final_script_url,
                 script_resource,
                 fetch_handler_type,
@@ -199,33 +185,26 @@ impl ServiceWorkerRuntimeCompletion {
 
     pub(super) fn version_start_failed(
         runtime_service: WeakServiceWorkerRuntimeService,
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         failure: ServiceWorkerVersionStartFailure,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::VersionStartFailed {
-                version_id,
-                run,
-                failure,
-            },
+            kind: ServiceWorkerRuntimeCompletionKind::VersionStartFailed { owner, failure },
         }
     }
 
     pub(super) fn imported_script_loaded(
         runtime_service: WeakServiceWorkerRuntimeService,
         registration_id: ServiceWorkerRegistrationId,
-        version_id: ServiceWorkerVersionId,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
         resource: WorkerScriptResource,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::ImportedScriptLoaded {
                 registration_id,
-                version_id,
-                run,
+                owner,
                 resource,
             },
         }
@@ -338,14 +317,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn show_notification_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerShowNotification,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::ShowNotificationRequested {
                 request: Box::new(request),
-                run,
                 source_host,
             },
         }
@@ -354,14 +331,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn get_notifications_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerGetNotifications,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::GetNotificationsRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -370,14 +345,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn sync_registration_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerSyncRegistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::SyncRegistrationRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -386,14 +359,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn sync_get_tags_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerSyncGetTags,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::SyncGetTagsRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -402,14 +373,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn periodic_sync_registration_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPeriodicSyncRegistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PeriodicSyncRegistrationRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -418,14 +387,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn periodic_sync_get_tags_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPeriodicSyncGetTags,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PeriodicSyncGetTagsRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -434,14 +401,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn periodic_sync_unregistration_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPeriodicSyncUnregistration,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PeriodicSyncUnregistrationRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -450,14 +415,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn push_subscribe_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPushSubscribe,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PushSubscribeRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -466,14 +429,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn push_get_subscription_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPushGetSubscription,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PushGetSubscriptionRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -482,14 +443,12 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn push_unsubscribe_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerPushUnsubscribe,
-        run: RendererServiceWorkerRunIdentity,
         source_host: SharedRendererServiceWorkerHost,
     ) -> Self {
         Self {
             runtime_service,
             kind: ServiceWorkerRuntimeCompletionKind::PushUnsubscribeRequested {
                 request,
-                run,
                 source_host,
             },
         }
@@ -498,11 +457,11 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn close_notification_requested(
         runtime_service: WeakServiceWorkerRuntimeService,
         request: ServiceWorkerCloseNotification,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, run },
+            kind: ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, owner },
         }
     }
 
@@ -529,22 +488,22 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn client_query(
         runtime_service: WeakServiceWorkerRuntimeService,
         query: ServiceWorkerClientQuery,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::ClientQuery { query, run },
+            kind: ServiceWorkerRuntimeCompletionKind::ClientQuery { query, owner },
         }
     }
 
     pub(super) fn client_navigate(
         runtime_service: WeakServiceWorkerRuntimeService,
         navigate: ServiceWorkerClientNavigate,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, run },
+            kind: ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, owner },
         }
     }
 
@@ -561,11 +520,11 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn client_focus(
         runtime_service: WeakServiceWorkerRuntimeService,
         focus: ServiceWorkerClientFocus,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, run },
+            kind: ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, owner },
         }
     }
 
@@ -582,11 +541,11 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn clients_open_window(
         runtime_service: WeakServiceWorkerRuntimeService,
         open_window: ServiceWorkerClientsOpenWindow,
-        run: RendererServiceWorkerRunIdentity,
+        owner: ServiceWorkerRunOwner,
     ) -> Self {
         Self {
             runtime_service,
-            kind: ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, run },
+            kind: ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, owner },
         }
     }
 
@@ -641,36 +600,38 @@ impl ServiceWorkerRuntimeCompletion {
     pub(super) fn complete(self) {
         match self.kind {
             ServiceWorkerRuntimeCompletionKind::VersionStartCompleted {
-                version_id,
-                run,
+                owner,
                 final_script_url,
                 script_resource,
                 fetch_handler_type,
-            } => self.runtime_service.finish_worker_start_completed(
-                version_id,
-                run,
-                final_script_url,
-                Some(script_resource),
-                fetch_handler_type,
-            ),
-            ServiceWorkerRuntimeCompletionKind::VersionStartFailed {
-                version_id,
-                run,
-                failure,
-            } => self
-                .runtime_service
-                .finish_worker_start_failed(version_id, run, failure),
+            } => {
+                let (version_id, run) = owner.into_parts();
+                self.runtime_service.finish_worker_start_completed(
+                    version_id,
+                    run,
+                    final_script_url,
+                    Some(script_resource),
+                    fetch_handler_type,
+                )
+            }
+            ServiceWorkerRuntimeCompletionKind::VersionStartFailed { owner, failure } => {
+                let (version_id, run) = owner.into_parts();
+                self.runtime_service
+                    .finish_worker_start_failed(version_id, run, failure)
+            }
             ServiceWorkerRuntimeCompletionKind::ImportedScriptLoaded {
                 registration_id,
-                version_id,
-                run,
+                owner,
                 resource,
-            } => self.runtime_service.finish_imported_script_loaded(
-                registration_id,
-                version_id,
-                run,
-                resource,
-            ),
+            } => {
+                let (version_id, run) = owner.into_parts();
+                self.runtime_service.finish_imported_script_loaded(
+                    registration_id,
+                    version_id,
+                    run,
+                    resource,
+                )
+            }
             ServiceWorkerRuntimeCompletionKind::MainScriptUpdateCheckCompleted {
                 registration_id,
                 result,
@@ -711,73 +672,73 @@ impl ServiceWorkerRuntimeCompletion {
             }
             ServiceWorkerRuntimeCompletionKind::ShowNotificationRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_show_notification_requested(*request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::GetNotificationsRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_get_notifications_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::SyncRegistrationRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_sync_registration_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::SyncGetTagsRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_sync_get_tags_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncRegistrationRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_periodic_sync_registration_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncGetTagsRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_periodic_sync_get_tags_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncUnregistrationRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_periodic_sync_unregistration_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::PushSubscribeRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_push_subscribe_requested(request, run, source_host);
             }
             ServiceWorkerRuntimeCompletionKind::PushGetSubscriptionRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service.finish_push_get_subscription_requested(
                     request,
                     run,
@@ -786,15 +747,18 @@ impl ServiceWorkerRuntimeCompletion {
             }
             ServiceWorkerRuntimeCompletionKind::PushUnsubscribeRequested {
                 request,
-                run,
                 source_host,
             } => {
+                let run = source_host.run_identity();
                 self.runtime_service
                     .finish_push_unsubscribe_requested(request, run, source_host);
             }
-            ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, run } => {
+            ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, owner } => {
+                if owner.version_id() != request.version_id {
+                    return;
+                }
                 self.runtime_service
-                    .finish_close_notification_requested(request, run);
+                    .finish_close_notification_requested(request, owner.cloned_run_identity());
             }
             ServiceWorkerRuntimeCompletionKind::ClientMessage { message } => {
                 self.runtime_service.finish_client_message(message);
@@ -802,29 +766,41 @@ impl ServiceWorkerRuntimeCompletion {
             ServiceWorkerRuntimeCompletionKind::WorkerMessage { message } => {
                 self.runtime_service.finish_worker_message(message);
             }
-            ServiceWorkerRuntimeCompletionKind::ClientQuery { query, run } => {
+            ServiceWorkerRuntimeCompletionKind::ClientQuery { query, owner } => {
+                if owner.version_id() != query.version_id {
+                    return;
+                }
                 self.runtime_service
-                    .finish_client_query_requested(query, run);
+                    .finish_client_query_requested(query, owner.cloned_run_identity());
             }
-            ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, run } => {
+            ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, owner } => {
+                if owner.version_id() != navigate.source_version_id {
+                    return;
+                }
                 self.runtime_service
-                    .finish_client_navigate_requested(navigate, run);
+                    .finish_client_navigate_requested(navigate, owner.cloned_run_identity());
             }
             ServiceWorkerRuntimeCompletionKind::ClientNavigateCompleted { completion } => {
                 self.runtime_service
                     .finish_client_navigate_completed(completion);
             }
-            ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, run } => {
+            ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, owner } => {
+                if owner.version_id() != focus.source_version_id {
+                    return;
+                }
                 self.runtime_service
-                    .finish_client_focus_requested(focus, run);
+                    .finish_client_focus_requested(focus, owner.cloned_run_identity());
             }
             ServiceWorkerRuntimeCompletionKind::ClientFocusCompleted { completion } => {
                 self.runtime_service
                     .finish_client_focus_completed(completion);
             }
-            ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, run } => {
+            ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, owner } => {
+                if owner.version_id() != open_window.source_version_id {
+                    return;
+                }
                 self.runtime_service
-                    .finish_clients_open_window_requested(open_window, run);
+                    .finish_clients_open_window_requested(open_window, owner.cloned_run_identity());
             }
             ServiceWorkerRuntimeCompletionKind::ClientsOpenWindowCompleted { completion } => {
                 self.runtime_service
@@ -852,30 +828,22 @@ impl ServiceWorkerRuntimeCompletion {
 impl fmt::Debug for ServiceWorkerRuntimeCompletion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            ServiceWorkerRuntimeCompletionKind::VersionStartCompleted {
-                version_id, run, ..
-            } => f
+            ServiceWorkerRuntimeCompletionKind::VersionStartCompleted { owner, .. } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::VersionStartCompleted")
-                .field("version_id", version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::VersionStartFailed {
-                version_id, run, ..
-            } => f
+            ServiceWorkerRuntimeCompletionKind::VersionStartFailed { owner, .. } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::VersionStartFailed")
-                .field("version_id", version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ImportedScriptLoaded {
                 registration_id,
-                version_id,
-                run,
+                owner,
                 ..
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ImportedScriptLoaded")
                 .field("registration_id", registration_id)
-                .field("version_id", version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::MainScriptUpdateCheckCompleted {
                 registration_id,
@@ -888,21 +856,18 @@ impl fmt::Debug for ServiceWorkerRuntimeCompletion {
             ServiceWorkerRuntimeCompletionKind::LifecycleEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::LifecycleEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .field("kind", &completion.kind)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::FetchEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::FetchEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::FetchStreamStarted { started } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::FetchStreamStarted")
                 .field("event_id", &started.event_id)
-                .field("version_id", &started.version_id)
-                .field("run", &started.run)
+                .field("owner", &started.owner)
                 .field("body_source_id", &started.body_source_id)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::FetchStreamChunk { chunk } => f
@@ -914,111 +879,109 @@ impl fmt::Debug for ServiceWorkerRuntimeCompletion {
             ServiceWorkerRuntimeCompletionKind::MessageEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::MessageEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::NotificationEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::NotificationEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PushEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PushEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::SyncEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::SyncEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .field("tag", &completion.tag)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncEventCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PeriodicSyncEventCompleted")
                 .field("event_id", &completion.event_id)
-                .field("version_id", &completion.version_id)
-                .field("run", &completion.run)
+                .field("owner", &completion.owner)
                 .field("tag", &completion.tag)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ShowNotificationRequested {
-                request, run, ..
+                request,
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ShowNotificationRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::GetNotificationsRequested {
-                request, run, ..
+                request,
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::GetNotificationsRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::SyncRegistrationRequested {
-                request, run, ..
+                request,
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::SyncRegistrationRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .field("tag", &request.tag)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::SyncGetTagsRequested { request, run, .. } => f
+            ServiceWorkerRuntimeCompletionKind::SyncGetTagsRequested {
+                request,
+                source_host,
+            } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::SyncGetTagsRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncRegistrationRequested {
                 request,
-                run,
-                ..
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PeriodicSyncRegistrationRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .field("tag", &request.tag)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncGetTagsRequested {
                 request,
-                run,
-                ..
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PeriodicSyncGetTagsRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PeriodicSyncUnregistrationRequested {
                 request,
-                run,
-                ..
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PeriodicSyncUnregistrationRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .field("tag", &request.tag)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, run } => f
+            ServiceWorkerRuntimeCompletionKind::CloseNotificationRequested { request, owner } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::CloseNotificationRequested")
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
                 .field("notification_id", &request.notification_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ClientMessage { message } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientMessage")
@@ -1030,18 +993,18 @@ impl fmt::Debug for ServiceWorkerRuntimeCompletion {
                 .field("source_version_id", &message.source_version_id)
                 .field("target_version_id", &message.target_version_id)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::ClientQuery { query, run } => f
+            ServiceWorkerRuntimeCompletionKind::ClientQuery { query, owner } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientQuery")
                 .field("request_id", &query.request_id)
                 .field("registration_id", &query.registration_id)
                 .field("version_id", &query.version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, run } => f
+            ServiceWorkerRuntimeCompletionKind::ClientNavigate { navigate, owner } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientNavigate")
                 .field("request_id", &navigate.request_id)
                 .field("source_version_id", &navigate.source_version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .field("target_client_id", &navigate.target_client_id)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ClientNavigateCompleted { completion } => f
@@ -1049,11 +1012,11 @@ impl fmt::Debug for ServiceWorkerRuntimeCompletion {
                 .field("request_id", &completion.request_id)
                 .field("source_version_id", &completion.source_version_id)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, run } => f
+            ServiceWorkerRuntimeCompletionKind::ClientFocus { focus, owner } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientFocus")
                 .field("request_id", &focus.request_id)
                 .field("source_version_id", &focus.source_version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .field("target_client_id", &focus.target_client_id)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ClientFocusCompleted { completion } => f
@@ -1061,48 +1024,50 @@ impl fmt::Debug for ServiceWorkerRuntimeCompletion {
                 .field("request_id", &completion.request_id)
                 .field("source_version_id", &completion.source_version_id)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, run } => f
+            ServiceWorkerRuntimeCompletionKind::ClientsOpenWindow { open_window, owner } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientsOpenWindow")
                 .field("request_id", &open_window.request_id)
                 .field("source_version_id", &open_window.source_version_id)
-                .field("run", run)
+                .field("owner", owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::ClientsOpenWindowCompleted { completion } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::ClientsOpenWindowCompleted")
                 .field("request_id", &completion.request_id)
                 .field("source_version_id", &completion.source_version_id)
                 .finish_non_exhaustive(),
-            ServiceWorkerRuntimeCompletionKind::PushSubscribeRequested { request, run, .. } => f
+            ServiceWorkerRuntimeCompletionKind::PushSubscribeRequested {
+                request,
+                source_host,
+            } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PushSubscribeRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PushGetSubscriptionRequested {
                 request,
-                run,
-                ..
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PushGetSubscriptionRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::PushUnsubscribeRequested {
-                request, run, ..
+                request,
+                source_host,
             } => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::PushUnsubscribeRequested")
                 .field("request_id", &request.request_id)
                 .field("registration_id", &request.registration_id)
                 .field("version_id", &request.version_id)
-                .field("run", run)
+                .field("owner", &source_host.run_owner())
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::IdleTimeout(timeout) => f
                 .debug_struct("ServiceWorkerRuntimeCompletion::IdleTimeout")
-                .field("version_id", &timeout.version_id)
-                .field("run", &timeout.run)
+                .field("owner", &timeout.owner)
                 .finish_non_exhaustive(),
             ServiceWorkerRuntimeCompletionKind::SkipWaitingRequested {
                 registration_id,

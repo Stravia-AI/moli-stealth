@@ -4,8 +4,7 @@ use url::Url;
 use crate::types::NetworkBodySourceId;
 use crate::{
     network::ResourceRequestClient, page_task_queue::RendererResourceCompletionSender,
-    runtime::RendererServiceWorkerRunIdentity, structured_clone::V8StructuredClonePayload,
-    types::AsyncSubresourceNetworkContext,
+    structured_clone::V8StructuredClonePayload, types::AsyncSubresourceNetworkContext,
 };
 
 use super::{
@@ -14,6 +13,7 @@ use super::{
         ServiceWorkerClientId, ServiceWorkerEventId, ServiceWorkerRegistrationId,
         ServiceWorkerVersionId,
     },
+    run_owner::ServiceWorkerRunOwner,
     snapshots::ServiceWorkerVersionSnapshot,
 };
 
@@ -35,16 +35,14 @@ impl ServiceWorkerLifecycleEventKind {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerLifecycleEvent {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) kind: ServiceWorkerLifecycleEventKind,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerLifecycleCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) kind: ServiceWorkerLifecycleEventKind,
     pub(crate) result: Result<(), String>,
 }
@@ -52,8 +50,7 @@ pub(crate) struct ServiceWorkerLifecycleCompletion {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerMessageEvent {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) source_client_id: Option<ServiceWorkerClientId>,
     pub(crate) source_client_url: Option<Url>,
     pub(crate) source_client_snapshot: Option<ServiceWorkerClientSnapshot>,
@@ -68,8 +65,7 @@ pub(crate) struct ServiceWorkerNotificationEvent {
     pub(crate) event_id: ServiceWorkerEventId,
     pub(crate) kind: ServiceWorkerNotificationEventKind,
     pub(crate) registration_id: ServiceWorkerRegistrationId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) notification_id: u64,
     pub(crate) title: String,
     pub(crate) tag: String,
@@ -101,24 +97,21 @@ impl ServiceWorkerNotificationEventKind {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerNotificationCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) result: Result<(), String>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerPushEvent {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) data: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerPushCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) result: Result<(), String>,
 }
 
@@ -126,8 +119,7 @@ pub(crate) struct ServiceWorkerPushCompletion {
 pub(crate) struct ServiceWorkerSyncEvent {
     pub(crate) event_id: ServiceWorkerEventId,
     pub(crate) registration_id: ServiceWorkerRegistrationId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) tag: String,
     pub(crate) last_chance: bool,
 }
@@ -136,8 +128,7 @@ pub(crate) struct ServiceWorkerSyncEvent {
 pub(crate) struct ServiceWorkerSyncCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
     pub(crate) registration_id: ServiceWorkerRegistrationId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) tag: String,
     pub(crate) result: Result<(), String>,
 }
@@ -146,8 +137,7 @@ pub(crate) struct ServiceWorkerSyncCompletion {
 pub(crate) struct ServiceWorkerPeriodicSyncEvent {
     pub(crate) event_id: ServiceWorkerEventId,
     pub(crate) registration_id: ServiceWorkerRegistrationId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) tag: String,
 }
 
@@ -155,8 +145,7 @@ pub(crate) struct ServiceWorkerPeriodicSyncEvent {
 pub(crate) struct ServiceWorkerPeriodicSyncCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
     pub(crate) registration_id: ServiceWorkerRegistrationId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) tag: String,
     pub(crate) result: Result<(), String>,
 }
@@ -471,8 +460,7 @@ pub(crate) struct ServiceWorkerClientsOpenWindowResult {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerMessageCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) result: Result<(), String>,
 }
 
@@ -630,8 +618,7 @@ pub(crate) fn service_worker_opaque_response_rejection(
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerFetchEvent {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) request: ServiceWorkerFetchRequest,
     pub(crate) navigation_preload_sent: bool,
 }
@@ -657,8 +644,7 @@ pub(crate) enum ServiceWorkerFetchResult {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerFetchStreamStarted {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) body_source_id: NetworkBodySourceId,
     pub(crate) response_head: MaterializedServiceWorkerFetchResponseHead,
 }
@@ -673,8 +659,7 @@ pub(crate) struct ServiceWorkerFetchStreamChunk {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerNavigationPreloadResponseStarted {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) request_url: Url,
     pub(crate) request_mode: moli_fetch::RequestMode,
     pub(crate) body_source_id: NetworkBodySourceId,
@@ -691,8 +676,7 @@ pub(crate) struct ServiceWorkerNavigationPreloadStreamChunk {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerNavigationPreloadStreamFinished {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) body_source_id: NetworkBodySourceId,
     pub(crate) result: Result<(), String>,
 }
@@ -700,8 +684,7 @@ pub(crate) struct ServiceWorkerNavigationPreloadStreamFinished {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerNavigationPreloadFailure {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) message: String,
 }
 
@@ -730,8 +713,7 @@ pub(crate) struct ServiceWorkerDirectFetchResponse {
 #[derive(Clone, Debug)]
 pub(crate) struct ServiceWorkerFetchCompletion {
     pub(crate) event_id: ServiceWorkerEventId,
-    pub(crate) version_id: ServiceWorkerVersionId,
-    pub(crate) run: RendererServiceWorkerRunIdentity,
+    pub(crate) owner: ServiceWorkerRunOwner,
     pub(crate) result: ServiceWorkerFetchResult,
 }
 

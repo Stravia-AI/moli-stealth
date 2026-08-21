@@ -68,8 +68,7 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerEventId(self.inner.next_event_id.fetch_add(1, Ordering::Relaxed));
             let event = ServiceWorkerMessageEvent {
                 event_id,
-                version_id: message.target_version_id,
-                run: target_version.run.clone(),
+                owner: target_version.run_owner(),
                 source_client_id: None,
                 source_client_url: None,
                 source_client_snapshot: None,

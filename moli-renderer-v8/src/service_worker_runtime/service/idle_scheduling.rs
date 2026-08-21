@@ -30,7 +30,7 @@ impl ServiceWorkerRuntimeService {
         let _ = std::thread::Builder::new()
             .name(format!(
                 "service-worker-idle-{}",
-                timeout.version_id.as_u64()
+                timeout.owner.version_id().as_u64()
             ))
             .spawn(move || {
                 std::thread::sleep(delay);

@@ -23,6 +23,7 @@ use crate::{
 use super::{
     ids::ServiceWorkerVersionId,
     jobs::ServiceWorkerLaunchParams,
+    run_owner::ServiceWorkerRunOwner,
     script_loading::{
         LoadedServiceWorkerScript, ServiceWorkerScriptResource, load_service_worker_script_source,
     },
@@ -33,8 +34,7 @@ use super::{
 pub(super) type SharedRendererServiceWorkerHost = Arc<RendererServiceWorkerHost>;
 
 pub(super) struct RendererServiceWorkerHost {
-    version_id: ServiceWorkerVersionId,
-    run: RendererServiceWorkerRunIdentity,
+    run_owner: ServiceWorkerRunOwner,
     state: Mutex<RendererServiceWorkerHostState>,
 }
 
@@ -47,37 +47,31 @@ enum RendererServiceWorkerHostState {
 
 impl RendererServiceWorkerHost {
     pub(super) fn new_loading(
-        version_id: ServiceWorkerVersionId,
-        run: &RendererServiceWorkerRunIdentity,
+        run_owner: &ServiceWorkerRunOwner,
     ) -> SharedRendererServiceWorkerHost {
         Arc::new(Self {
-            version_id,
-            run: run.clone(),
+            run_owner: run_owner.clone(),
             state: Mutex::new(RendererServiceWorkerHostState::Loading),
         })
     }
 
     #[cfg(test)]
     pub(super) fn new_running_without_handle_for_test(
-        version_id: ServiceWorkerVersionId,
-        run: &RendererServiceWorkerRunIdentity,
+        run_owner: &ServiceWorkerRunOwner,
     ) -> SharedRendererServiceWorkerHost {
         Arc::new(Self {
-            version_id,
-            run: run.clone(),
+            run_owner: run_owner.clone(),
             state: Mutex::new(RendererServiceWorkerHostState::Running { handle: None }),
         })
     }
 
     #[cfg(test)]
     pub(super) fn new_running_with_handle_for_test(
-        version_id: ServiceWorkerVersionId,
-        run: &RendererServiceWorkerRunIdentity,
+        run_owner: &ServiceWorkerRunOwner,
         handle: WorkerHandle,
     ) -> SharedRendererServiceWorkerHost {
         Arc::new(Self {
-            version_id,
-            run: run.clone(),
+            run_owner: run_owner.clone(),
             state: Mutex::new(RendererServiceWorkerHostState::Running {
                 handle: Some(handle),
             }),
@@ -90,14 +84,17 @@ impl RendererServiceWorkerHost {
         params: ServiceWorkerLaunchParams,
         preloaded_script: Option<LoadedServiceWorkerScript>,
     ) {
-        let version_id = params.version_id;
-        let run = params.run.clone();
+        assert_eq!(
+            self.run_owner, params.run_owner,
+            "a ServiceWorker host must start only its bound run owner"
+        );
+        let run_owner = params.run_owner.clone();
         let host_for_task = Arc::clone(self);
         let service_for_task = service.clone();
         let _ = std::thread::Builder::new()
             .name(format!(
                 "service-worker-load-{}",
-                params.version_id.as_u64()
+                params.run_owner.version_id().as_u64()
             ))
             .spawn(move || {
                 let result = match preloaded_script {
@@ -109,8 +106,7 @@ impl RendererServiceWorkerHost {
             .map_err(|error| {
                 self.mark_failed();
                 service.enqueue_worker_start_failed(
-                    version_id,
-                    run,
+                    run_owner,
                     ServiceWorkerVersionStartFailure::HostThreadSpawn {
                         message: error.to_string(),
                     },
@@ -119,12 +115,16 @@ impl RendererServiceWorkerHost {
     }
 
     pub(super) fn version_id(&self) -> ServiceWorkerVersionId {
-        self.version_id
+        self.run_owner.version_id()
     }
 
     /// Exact identity of this concrete V8 worker run.
     pub(super) fn run_identity(&self) -> RendererServiceWorkerRunIdentity {
-        self.run.clone()
+        self.run_owner.cloned_run_identity()
+    }
+
+    pub(super) fn run_owner(&self) -> ServiceWorkerRunOwner {
+        self.run_owner.clone()
     }
 
     pub(super) fn has_running_worker(&self) -> bool {
@@ -636,8 +636,7 @@ impl RendererServiceWorkerHost {
                 );
                 self.mark_failed();
                 service.enqueue_worker_start_failed(
-                    params.version_id,
-                    params.run.clone(),
+                    params.run_owner.clone(),
                     ServiceWorkerVersionStartFailure::ScriptLoad { message: error },
                 );
                 return;
@@ -646,8 +645,8 @@ impl RendererServiceWorkerHost {
         let script_resource = script.resource.clone();
         let final_script_url = script_resource.final_url.to_string();
         if service.finish_worker_start_identical_script_update(
-            params.version_id,
-            params.run.clone(),
+            params.run_owner.version_id(),
+            params.run_owner.cloned_run_identity(),
             &script_resource,
         ) {
             self.mark_failed();
@@ -662,12 +661,7 @@ impl RendererServiceWorkerHost {
             bootstrap_completion_tx,
         );
         if let Some(receiver) = handle.take_receiver() {
-            spawn_parent_message_pump(
-                service.clone(),
-                Arc::clone(self),
-                params.version_id,
-                receiver,
-            );
+            spawn_parent_message_pump(service.clone(), Arc::clone(self), receiver);
         }
         let mut state = self.state.lock();
         if !matches!(*state, RendererServiceWorkerHostState::Loading) {
@@ -679,13 +673,12 @@ impl RendererServiceWorkerHost {
             handle: Some(handle),
         };
         drop(state);
-        if service.take_devtools_evaluation_release_for_version(params.version_id) {
+        if service.take_devtools_evaluation_release_for_version(params.run_owner.version_id()) {
             self.run_if_waiting_for_debugger_for_devtools();
         }
         report_bootstrap_completion(
             service,
-            params.version_id,
-            params.run,
+            params.run_owner,
             final_script_url,
             script_resource,
             bootstrap_completion_rx,
@@ -696,9 +689,9 @@ impl RendererServiceWorkerHost {
 fn spawn_parent_message_pump(
     service: ServiceWorkerRuntimeService,
     source_host: SharedRendererServiceWorkerHost,
-    version_id: ServiceWorkerVersionId,
     mut receiver: mpsc::UnboundedReceiver<WorkerToParentMessage>,
 ) {
+    let version_id = source_host.version_id();
     let source_run = source_host.run_identity();
     let _ = std::thread::Builder::new()
         .name(format!("service-worker-pump-{}", version_id.as_u64()))
@@ -733,77 +726,54 @@ fn spawn_parent_message_pump(
                         service.enqueue_periodic_sync_event_completed(completion);
                     }
                     WorkerToParentMessage::ServiceWorkerShowNotification(request) => {
-                        service.enqueue_show_notification_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service
+                            .enqueue_show_notification_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerGetNotifications(request) => {
-                        service.enqueue_get_notifications_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service
+                            .enqueue_get_notifications_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerSyncRegistration(request) => {
-                        service.enqueue_sync_registration_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service
+                            .enqueue_sync_registration_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerSyncGetTags(request) => {
-                        service.enqueue_sync_get_tags_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service.enqueue_sync_get_tags_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerPeriodicSyncRegistration(request) => {
                         service.enqueue_periodic_sync_registration_requested(
                             request,
-                            source_run.clone(),
                             Arc::clone(&source_host),
                         );
                     }
                     WorkerToParentMessage::ServiceWorkerPeriodicSyncGetTags(request) => {
                         service.enqueue_periodic_sync_get_tags_requested(
                             request,
-                            source_run.clone(),
                             Arc::clone(&source_host),
                         );
                     }
                     WorkerToParentMessage::ServiceWorkerPeriodicSyncUnregistration(request) => {
                         service.enqueue_periodic_sync_unregistration_requested(
                             request,
-                            source_run.clone(),
                             Arc::clone(&source_host),
                         );
                     }
                     WorkerToParentMessage::ServiceWorkerPushSubscribe(request) => {
-                        service.enqueue_push_subscribe_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service.enqueue_push_subscribe_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerPushGetSubscription(request) => {
                         service.enqueue_push_get_subscription_requested(
                             request,
-                            source_run.clone(),
                             Arc::clone(&source_host),
                         );
                     }
                     WorkerToParentMessage::ServiceWorkerPushUnsubscribe(request) => {
-                        service.enqueue_push_unsubscribe_requested(
-                            request,
-                            source_run.clone(),
-                            Arc::clone(&source_host),
-                        );
+                        service
+                            .enqueue_push_unsubscribe_requested(request, Arc::clone(&source_host));
                     }
                     WorkerToParentMessage::ServiceWorkerCloseNotification(request) => {
-                        service.enqueue_close_notification_requested(request, source_run.clone());
+                        service
+                            .enqueue_close_notification_requested(request, source_host.run_owner());
                     }
                     WorkerToParentMessage::ServiceWorkerClientMessage(message) => {
                         service.enqueue_client_message(message);
@@ -812,16 +782,16 @@ fn spawn_parent_message_pump(
                         service.enqueue_worker_message(message);
                     }
                     WorkerToParentMessage::ServiceWorkerClientQuery(query) => {
-                        service.enqueue_client_query(query, source_run.clone());
+                        service.enqueue_client_query(query, source_host.run_owner());
                     }
                     WorkerToParentMessage::ServiceWorkerClientNavigate(navigate) => {
-                        service.enqueue_client_navigate(navigate, source_run.clone());
+                        service.enqueue_client_navigate(navigate, source_host.run_owner());
                     }
                     WorkerToParentMessage::ServiceWorkerClientFocus(focus) => {
-                        service.enqueue_client_focus(focus, source_run.clone());
+                        service.enqueue_client_focus(focus, source_host.run_owner());
                     }
                     WorkerToParentMessage::ServiceWorkerClientsOpenWindow(open_window) => {
-                        service.enqueue_clients_open_window(open_window, source_run.clone());
+                        service.enqueue_clients_open_window(open_window, source_host.run_owner());
                     }
                     WorkerToParentMessage::ServiceWorkerSkipWaiting {
                         registration_id,
@@ -840,10 +810,12 @@ fn spawn_parent_message_pump(
                         version_id,
                         resource,
                     } => {
+                        if version_id != source_host.version_id() {
+                            continue;
+                        }
                         service.enqueue_imported_script_loaded(
                             registration_id,
-                            version_id,
-                            source_run.clone(),
+                            source_host.run_owner(),
                             resource,
                         );
                     }
@@ -899,8 +871,7 @@ fn spawn_parent_message_pump(
 
 fn report_bootstrap_completion(
     service: ServiceWorkerRuntimeService,
-    version_id: ServiceWorkerVersionId,
-    run: RendererServiceWorkerRunIdentity,
+    owner: ServiceWorkerRunOwner,
     final_script_url: String,
     script_resource: ServiceWorkerScriptResource,
     mut receiver: mpsc::UnboundedReceiver<WorkerBootstrapCompletion>,
@@ -910,8 +881,7 @@ fn report_bootstrap_completion(
             result: Ok(success),
         }) => {
             service.enqueue_worker_start_completed(
-                version_id,
-                run,
+                owner,
                 final_script_url,
                 script_resource,
                 service_worker_fetch_handler_type(success),
@@ -921,15 +891,13 @@ fn report_bootstrap_completion(
             result: Err(failure),
         }) => {
             service.enqueue_worker_start_failed(
-                version_id,
-                run,
+                owner,
                 ServiceWorkerVersionStartFailure::Bootstrap { failure },
             );
         }
         None => {
             service.enqueue_worker_start_failed(
-                version_id,
-                run,
+                owner,
                 ServiceWorkerVersionStartFailure::BootstrapChannelClosed,
             );
         }
@@ -980,7 +948,7 @@ fn spawn_service_worker(
         .with_service_worker_runtime(service)
         .with_global_kind(crate::worker::WorkerGlobalKind::Service {
             registration_id: params.registration_id,
-            version_id: params.version_id,
+            version_id: params.run_owner.version_id(),
             scope_url: params.scope_url.clone(),
         })
         .with_api_storage_key(Some(storage_key))
@@ -1017,8 +985,10 @@ mod tests {
         let version_id = ServiceWorkerVersionId(7);
         let first_run = RendererServiceWorkerRunIdentity::fresh();
         let second_run = RendererServiceWorkerRunIdentity::fresh();
-        let first = RendererServiceWorkerHost::new_loading(version_id, &first_run);
-        let second = RendererServiceWorkerHost::new_loading(version_id, &second_run);
+        let first_owner = ServiceWorkerRunOwner::new(version_id, first_run.clone());
+        let second_owner = ServiceWorkerRunOwner::new(version_id, second_run.clone());
+        let first = RendererServiceWorkerHost::new_loading(&first_owner);
+        let second = RendererServiceWorkerHost::new_loading(&second_owner);
 
         assert_eq!(first.run_identity(), first_run);
         assert_eq!(second.run_identity(), second_run);

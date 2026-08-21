@@ -58,6 +58,7 @@ use super::{
     owner_wake::ServiceWorkerOwnerWake,
     registration::ServiceWorkerRegistration,
     resource_store::{ServiceWorkerStoredRegistration, SharedServiceWorkerResourceStore},
+    run_owner::ServiceWorkerRunOwner,
     script_loading::{LoadedServiceWorkerScript, ServiceWorkerScriptUpdateCheckParams},
     service_lane::ServiceWorkerServiceLane,
     snapshots::ServiceWorkerRegistrationSnapshot,
@@ -760,8 +761,7 @@ pub(super) enum ServiceWorkerPeriodicSyncStart {
 
 pub(super) struct ServiceWorkerFetchJob {
     pub(super) internal_id: u64,
-    pub(super) version_id: ServiceWorkerVersionId,
-    pub(super) run: Option<RendererServiceWorkerRunIdentity>,
+    pub(super) owner: Option<ServiceWorkerRunOwner>,
     pub(super) request_url: Url,
     pub(super) request_method: String,
     pub(super) request_headers: Vec<(String, String)>,
@@ -792,18 +792,26 @@ pub(super) struct ServiceWorkerFetchJob {
 }
 
 impl ServiceWorkerFetchJob {
-    pub(super) fn bind_to_run(&mut self, run: RendererServiceWorkerRunIdentity) {
-        self.run = Some(run);
+    pub(super) fn bind_to_owner(&mut self, owner: ServiceWorkerRunOwner) {
+        self.owner = Some(owner);
     }
 
-    pub(super) fn is_bound_to_run(&self, run: &RendererServiceWorkerRunIdentity) -> bool {
-        self.run.as_ref() == Some(run)
+    pub(super) fn owner(&self) -> &ServiceWorkerRunOwner {
+        self.owner
+            .as_ref()
+            .expect("pending ServiceWorker fetch jobs must have an exact run owner")
+    }
+
+    pub(super) fn version_id(&self) -> ServiceWorkerVersionId {
+        self.owner().version_id()
+    }
+
+    pub(super) fn is_bound_to_owner(&self, owner: &ServiceWorkerRunOwner) -> bool {
+        self.owner.as_ref() == Some(owner)
     }
 
     pub(super) fn run_identity(&self) -> &RendererServiceWorkerRunIdentity {
-        self.run
-            .as_ref()
-            .expect("pending ServiceWorker fetch jobs must be bound to an exact run")
+        self.owner().run_identity()
     }
 
     pub(super) fn cancel_pending_navigation_preload(&mut self) {
@@ -952,7 +960,6 @@ impl ServiceWorkerClientEndpoint {
 pub(super) struct ServiceWorkerClient {
     pub(super) id: ServiceWorkerClientId,
     pub(super) exposed_id: String,
-    pub(super) exposed_id_generation: u64,
     pub(super) creation_url: Url,
     pub(super) document_url: Url,
     pub(super) client_type: ServiceWorkerClientType,

@@ -310,8 +310,10 @@ async fn dispatch_service_worker_lifecycle_event_for_test(
 ) -> ServiceWorkerLifecycleCompletion {
     handle.dispatch_service_worker_lifecycle_event(ServiceWorkerLifecycleEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         kind,
     });
     loop {
@@ -405,8 +407,10 @@ async fn dispatch_service_worker_fetch_event_with_request_for_test(
 ) -> ServiceWorkerFetchCompletion {
     handle.dispatch_service_worker_fetch_event(ServiceWorkerFetchEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         request,
         navigation_preload_sent: false,
     });
@@ -475,8 +479,10 @@ async fn dispatch_service_worker_message_event_for_test(
         handle,
         ServiceWorkerMessageEvent {
             event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-            version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-            run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+                ServiceWorkerVersionId::from_u64_for_test(1),
+                crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            ),
             source_client_id: None,
             source_client_url: None,
             source_client_snapshot: None,
@@ -620,8 +626,10 @@ async fn dispatch_service_worker_push_event_for_test(
 ) -> ServiceWorkerPushCompletion {
     handle.dispatch_service_worker_push_event(ServiceWorkerPushEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         data,
     });
     loop {
@@ -688,8 +696,10 @@ async fn dispatch_service_worker_sync_event_for_test(
     handle.dispatch_service_worker_sync_event(ServiceWorkerSyncEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
         registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         tag: tag.to_owned(),
         last_chance: false,
     });
@@ -757,8 +767,10 @@ async fn dispatch_service_worker_periodic_sync_event_for_test(
     handle.dispatch_service_worker_periodic_sync_event(ServiceWorkerPeriodicSyncEvent {
         event_id: ServiceWorkerEventId::from_u64_for_worker(event_id),
         registration_id: ServiceWorkerRegistrationId::from_u64_for_test(1),
-        version_id: ServiceWorkerVersionId::from_u64_for_test(1),
-        run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(
+            ServiceWorkerVersionId::from_u64_for_test(1),
+            crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+        ),
         tag: tag.to_owned(),
     });
     loop {

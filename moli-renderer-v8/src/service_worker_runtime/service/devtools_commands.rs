@@ -318,14 +318,12 @@ impl ServiceWorkerRuntimeService {
                     return Ok(false);
                 }
                 ServiceWorkerVersionRunningState::Stopped => {
-                    version.run = RendererServiceWorkerRunIdentity::fresh();
+                    let owner = version.replace_run_owner();
                     version.last_start_error = None;
-                    let run = version.run.clone();
-                    let host = RendererServiceWorkerHost::new_loading(version_id, &run);
+                    let host = RendererServiceWorkerHost::new_loading(&owner);
                     let params = version.launch_config.to_launch_params(
                         registration_id,
-                        version_id,
-                        &run,
+                        &owner,
                         version.script_url.clone(),
                         registration_scope_url,
                         registration_storage_key,
@@ -532,8 +530,7 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerEventId(self.inner.next_event_id.fetch_add(1, Ordering::Relaxed));
             let event = ServiceWorkerPushEvent {
                 event_id,
-                version_id,
-                run: version.run.clone(),
+                owner: version.run_owner(),
                 data,
             };
             self.start_push_event_locked(&mut state, registration_id, scope_url, storage_key, event)
@@ -577,8 +574,7 @@ impl ServiceWorkerRuntimeService {
             let event = ServiceWorkerSyncEvent {
                 event_id,
                 registration_id,
-                version_id,
-                run: version.run.clone(),
+                owner: version.run_owner(),
                 tag,
                 last_chance,
             };
@@ -622,8 +618,7 @@ impl ServiceWorkerRuntimeService {
             let event = ServiceWorkerPeriodicSyncEvent {
                 event_id,
                 registration_id,
-                version_id,
-                run: version.run.clone(),
+                owner: version.run_owner(),
                 tag,
             };
             self.start_periodic_sync_event_locked(

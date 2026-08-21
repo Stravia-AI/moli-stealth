@@ -111,7 +111,7 @@ fn clear_registration_owner_state_locked(
     let failed_fetch_event_ids = state
         .pending_fetch_jobs
         .iter()
-        .filter(|(_, job)| registration_version_ids.contains(&job.version_id))
+        .filter(|(_, job)| registration_version_ids.contains(&job.version_id()))
         .map(|(event_id, _)| *event_id)
         .collect::<Vec<_>>();
     let progress = failed_fetch_event_ids

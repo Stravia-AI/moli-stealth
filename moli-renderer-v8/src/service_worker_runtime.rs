@@ -12,6 +12,7 @@ mod path_restriction;
 mod pending_clear;
 mod registration;
 mod resource_store;
+mod run_owner;
 mod script_loading;
 mod service;
 mod service_lane;
@@ -78,6 +79,7 @@ pub use resource_store::{
     SharedServiceWorkerResourceStore, new_shared_json_service_worker_resource_store,
     new_shared_service_worker_resource_store,
 };
+pub(crate) use run_owner::ServiceWorkerRunOwner;
 pub(crate) use service::{
     ServiceWorkerRuntimeService,
     new_service_worker_runtime_service_with_resource_store_and_browser_resource_runtime_binding,

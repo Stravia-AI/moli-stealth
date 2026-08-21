@@ -120,7 +120,6 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerClient {
                     id: client_id,
                     exposed_id: service_worker_exposed_client_id(client_id),
-                    exposed_id_generation: 0,
                     creation_url: script_url,
                     document_url: current_script_url.clone(),
                     client_type,
@@ -175,7 +174,6 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerClient {
                     id: client_id,
                     exposed_id: service_worker_exposed_client_id(client_id),
-                    exposed_id_generation: 0,
                     creation_url: script_url,
                     document_url: current_script_url.clone(),
                     client_type,
@@ -259,7 +257,6 @@ impl ServiceWorkerRuntimeService {
             ServiceWorkerClient {
                 id: client_id,
                 exposed_id: service_worker_exposed_client_id(client_id),
-                exposed_id_generation: 0,
                 creation_url: script_url,
                 document_url: parent_document_url,
                 client_type,
@@ -334,7 +331,6 @@ impl ServiceWorkerRuntimeService {
                 ServiceWorkerClient {
                     id: client_id,
                     exposed_id: service_worker_exposed_client_id(client_id),
-                    exposed_id_generation: 0,
                     creation_url: document_url.clone(),
                     document_url: current_document_url.clone(),
                     client_type: ServiceWorkerClientType::Window,
@@ -481,13 +477,7 @@ impl ServiceWorkerRuntimeService {
             );
             if let Some(client) = state.live_clients.get_mut(&client_id) {
                 if !moli_url::same_origin(&client.document_url, &current_document_url) {
-                    client.exposed_id_generation = service_worker_next_exposed_client_id_generation(
-                        client.exposed_id_generation,
-                    );
-                    client.exposed_id = service_worker_exposed_client_id_for_generation(
-                        client.id,
-                        client.exposed_id_generation,
-                    );
+                    client.exposed_id = allocate_service_worker_exposed_client_id();
                 }
                 client.creation_url = document_url.clone();
                 client.document_url = current_document_url.clone();

@@ -1364,8 +1364,7 @@ impl PendingServiceWorkerFetchEvent {
 }
 
 pub(super) struct PendingServiceWorkerNavigationPreload {
-    pub(super) version_id: crate::service_worker_runtime::ServiceWorkerVersionId,
-    pub(super) run: crate::runtime::RendererServiceWorkerRunIdentity,
+    pub(super) owner: crate::service_worker_runtime::ServiceWorkerRunOwner,
     pub(super) _promise: v8::Global<v8::Promise>,
     pub(super) resolver: Option<v8::Global<v8::PromiseResolver>>,
     pub(super) body_source_id: Option<NetworkBodySourceId>,

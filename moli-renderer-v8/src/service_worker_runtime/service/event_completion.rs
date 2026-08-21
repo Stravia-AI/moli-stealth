@@ -23,8 +23,8 @@ impl ServiceWorkerRuntimeService {
                 return false;
             };
             let mut should_update_lifecycle = false;
-            if let Some(version) = state.versions.get_mut(&job.version_id)
-                && job.is_bound_to_run(&version.run)
+            if let Some(version) = state.versions.get_mut(&job.version_id())
+                && version.run_owner() == *job.owner()
             {
                 let activation_len_before = version.pending_activation_fetch_events.len();
                 version
@@ -47,27 +47,29 @@ impl ServiceWorkerRuntimeService {
                 should_update_lifecycle = true;
             }
             let stream_cancel = job.streaming_body_source_id.and_then(|body_source_id| {
-                let version = state.versions.get(&job.version_id)?;
-                if !job.is_bound_to_run(&version.run) {
+                let version = state.versions.get(&job.version_id())?;
+                if version.run_owner() != *job.owner() {
                     return None;
                 }
                 let ServiceWorkerVersionRunningState::Running { host } = &version.running_state
                 else {
                     return None;
                 };
-                (host.version_id() == job.version_id && job.is_bound_to_run(&host.run_identity()))
-                    .then_some((host.clone(), event_id, body_source_id))
+                (host.run_owner() == *job.owner()).then_some((
+                    host.clone(),
+                    event_id,
+                    body_source_id,
+                ))
             });
-            let request_signal_abort = state.versions.get(&job.version_id).and_then(|version| {
-                if !job.is_bound_to_run(&version.run) {
+            let request_signal_abort = state.versions.get(&job.version_id()).and_then(|version| {
+                if version.run_owner() != *job.owner() {
                     return None;
                 }
                 let ServiceWorkerVersionRunningState::Running { host } = &version.running_state
                 else {
                     return None;
                 };
-                (host.version_id() == job.version_id && job.is_bound_to_run(&host.run_identity()))
-                    .then_some((host.clone(), event_id))
+                (host.run_owner() == *job.owner()).then_some((host.clone(), event_id))
             });
             job.cancel_handle.cancel();
             job.cancel_pending_navigation_preload();
@@ -75,22 +77,22 @@ impl ServiceWorkerRuntimeService {
                 let unregistration_progress = self
                     .unregistration_progress_for_version_if_ready_locked(
                         &mut state,
-                        job.version_id,
+                        job.version_id(),
                     );
                 let activation_progress = if unregistration_progress.is_empty() {
                     self.activation_progress_for_active_version_if_ready_locked(
                         &mut state,
-                        job.version_id,
+                        job.version_id(),
                     )
                 } else {
                     Vec::new()
                 };
                 let idle_timeout =
-                    self.maybe_schedule_idle_timeout_locked(&mut state, job.version_id);
+                    self.maybe_schedule_idle_timeout_locked(&mut state, job.version_id());
                 let mut progress = unregistration_progress;
                 progress.extend(activation_progress);
                 Some((
-                    job.version_id,
+                    job.version_id(),
                     job.run_identity().clone(),
                     job,
                     idle_timeout,
@@ -100,7 +102,7 @@ impl ServiceWorkerRuntimeService {
                 ))
             } else {
                 Some((
-                    job.version_id,
+                    job.version_id(),
                     job.run_identity().clone(),
                     job,
                     None,
@@ -142,8 +144,7 @@ impl ServiceWorkerRuntimeService {
     }
 
     pub(super) fn finish_fetch_event_completed(&self, completion: ServiceWorkerFetchCompletion) {
-        let version_id = completion.version_id;
-        let run = completion.run;
+        let (version_id, run) = completion.owner.into_parts();
         let (job, result, idle_timeout, lifecycle_progress) = {
             let mut state = self.inner.state.lock();
             {
@@ -200,10 +201,10 @@ impl ServiceWorkerRuntimeService {
     ) {
         let (idle_timeout, lifecycle_progress) = {
             let mut state = self.inner.state.lock();
-            let Some(version) = state.versions.get_mut(&completion.version_id) else {
+            let Some(version) = state.versions.get_mut(&completion.owner.version_id()) else {
                 return;
             };
-            if version.run != completion.run {
+            if &version.run != completion.owner.run_identity() {
                 return;
             }
             version.in_flight_event_count = version.in_flight_event_count.saturating_sub(1);
@@ -212,18 +213,18 @@ impl ServiceWorkerRuntimeService {
             }
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                completion.version_id,
+                completion.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    completion.version_id,
+                    completion.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, completion.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, completion.owner.version_id());
             let mut progress = unregistration_progress;
             progress.extend(activation_progress);
             (idle_timeout, progress)
@@ -242,10 +243,10 @@ impl ServiceWorkerRuntimeService {
     ) {
         let (idle_timeout, lifecycle_progress) = {
             let mut state = self.inner.state.lock();
-            let Some(version) = state.versions.get_mut(&completion.version_id) else {
+            let Some(version) = state.versions.get_mut(&completion.owner.version_id()) else {
                 return;
             };
-            if version.run != completion.run {
+            if &version.run != completion.owner.run_identity() {
                 return;
             }
             version.in_flight_event_count = version.in_flight_event_count.saturating_sub(1);
@@ -254,18 +255,18 @@ impl ServiceWorkerRuntimeService {
             }
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                completion.version_id,
+                completion.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    completion.version_id,
+                    completion.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, completion.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, completion.owner.version_id());
             let mut progress = unregistration_progress;
             progress.extend(activation_progress);
             (idle_timeout, progress)
@@ -281,10 +282,10 @@ impl ServiceWorkerRuntimeService {
     pub(super) fn finish_push_event_completed(&self, completion: ServiceWorkerPushCompletion) {
         let (idle_timeout, lifecycle_progress) = {
             let mut state = self.inner.state.lock();
-            let Some(version) = state.versions.get_mut(&completion.version_id) else {
+            let Some(version) = state.versions.get_mut(&completion.owner.version_id()) else {
                 return;
             };
-            if version.run != completion.run {
+            if &version.run != completion.owner.run_identity() {
                 return;
             }
             version.in_flight_event_count = version.in_flight_event_count.saturating_sub(1);
@@ -293,18 +294,18 @@ impl ServiceWorkerRuntimeService {
             }
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                completion.version_id,
+                completion.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    completion.version_id,
+                    completion.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, completion.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, completion.owner.version_id());
             let mut progress = unregistration_progress;
             progress.extend(activation_progress);
             (idle_timeout, progress)
@@ -325,10 +326,10 @@ impl ServiceWorkerRuntimeService {
 
         let (idle_timeout, lifecycle_progress, follow_up) = {
             let mut state = self.inner.state.lock();
-            let Some(version) = state.versions.get_mut(&completion.version_id) else {
+            let Some(version) = state.versions.get_mut(&completion.owner.version_id()) else {
                 return;
             };
-            if version.run != completion.run {
+            if &version.run != completion.owner.run_identity() {
                 return;
             }
             version.in_flight_event_count = version.in_flight_event_count.saturating_sub(1);
@@ -398,18 +399,18 @@ impl ServiceWorkerRuntimeService {
             }
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                completion.version_id,
+                completion.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    completion.version_id,
+                    completion.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, completion.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, completion.owner.version_id());
             let mut progress = unregistration_progress;
             progress.extend(activation_progress);
             (idle_timeout, progress, follow_up)
@@ -438,10 +439,10 @@ impl ServiceWorkerRuntimeService {
     ) {
         let (idle_timeout, lifecycle_progress, refire) = {
             let mut state = self.inner.state.lock();
-            let Some(version) = state.versions.get_mut(&completion.version_id) else {
+            let Some(version) = state.versions.get_mut(&completion.owner.version_id()) else {
                 return;
             };
-            if version.run != completion.run
+            if &version.run != completion.owner.run_identity()
                 || version.registration_id != completion.registration_id
             {
                 return;
@@ -467,18 +468,18 @@ impl ServiceWorkerRuntimeService {
                 });
             let unregistration_progress = self.unregistration_progress_for_version_if_ready_locked(
                 &mut state,
-                completion.version_id,
+                completion.owner.version_id(),
             );
             let activation_progress = if unregistration_progress.is_empty() {
                 self.activation_progress_for_active_version_if_ready_locked(
                     &mut state,
-                    completion.version_id,
+                    completion.owner.version_id(),
                 )
             } else {
                 Vec::new()
             };
             let idle_timeout =
-                self.maybe_schedule_idle_timeout_locked(&mut state, completion.version_id);
+                self.maybe_schedule_idle_timeout_locked(&mut state, completion.owner.version_id());
             let mut progress = unregistration_progress;
             progress.extend(activation_progress);
             (idle_timeout, progress, refire)

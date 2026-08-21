@@ -1281,8 +1281,7 @@ fn dispatch_service_worker_lifecycle_event_in_context<'s>(
             PendingServiceWorkerLifecycleEvent {
                 completion: ServiceWorkerLifecycleCompletion {
                     event_id: event.event_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     kind: event.kind,
                     result: Ok(()),
                 },
@@ -1350,8 +1349,7 @@ fn dispatch_service_worker_fetch_event_in_context<'s>(
         let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerFetchCompleted(
             ServiceWorkerFetchCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: ServiceWorkerFetchResult::Failure(
                     "failed to construct service worker FetchEvent request".to_owned(),
                 ),
@@ -1363,8 +1361,7 @@ fn dispatch_service_worker_fetch_event_in_context<'s>(
         let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerFetchCompleted(
             ServiceWorkerFetchCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: ServiceWorkerFetchResult::Failure(
                     "failed to construct service worker FetchEvent.handled promise".to_owned(),
                 ),
@@ -1379,8 +1376,7 @@ fn dispatch_service_worker_fetch_event_in_context<'s>(
         let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerFetchCompleted(
             ServiceWorkerFetchCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: ServiceWorkerFetchResult::Failure(
                     "failed to construct service worker FetchEvent.preloadResponse promise"
                         .to_owned(),
@@ -1398,8 +1394,7 @@ fn dispatch_service_worker_fetch_event_in_context<'s>(
         let mut pending = PendingServiceWorkerFetchEvent::fallback(
             ServiceWorkerFetchCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: ServiceWorkerFetchResult::Fallback,
             },
             event.request.request_mode,
@@ -1410,8 +1405,7 @@ fn dispatch_service_worker_fetch_event_in_context<'s>(
             state.pending_service_worker_navigation_preloads.insert(
                 event.event_id,
                 PendingServiceWorkerNavigationPreload {
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     _promise: v8::Global::new(scope, preload_response),
                     resolver: Some(v8::Global::new(scope, preload_response_resolver)),
                     body_source_id: None,
@@ -1500,8 +1494,7 @@ fn dispatch_service_worker_message_event_in_context<'s>(
             PendingServiceWorkerMessageEvent {
                 completion: ServiceWorkerMessageCompletion {
                     event_id: event.event_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     result: Ok(()),
                 },
                 pending_wait_until_count: 0,
@@ -1571,8 +1564,7 @@ fn dispatch_service_worker_notification_event_in_context<'s>(
         let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerNotificationCompleted(
             ServiceWorkerNotificationCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: Err("failed to construct service worker notification event".to_owned()),
             },
         ));
@@ -1588,8 +1580,7 @@ fn dispatch_service_worker_notification_event_in_context<'s>(
             PendingServiceWorkerNotificationEvent {
                 completion: ServiceWorkerNotificationCompletion {
                     event_id: event.event_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     result: Ok(()),
                 },
                 pending_wait_until_count: 0,
@@ -1660,8 +1651,7 @@ fn dispatch_service_worker_push_event_in_context<'s>(
         let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerPushCompleted(
             ServiceWorkerPushCompletion {
                 event_id: event.event_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 result: Err("failed to construct service worker push event".to_owned()),
             },
         ));
@@ -1676,8 +1666,7 @@ fn dispatch_service_worker_push_event_in_context<'s>(
             PendingServiceWorkerPushEvent {
                 completion: ServiceWorkerPushCompletion {
                     event_id: event.event_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     result: Ok(()),
                 },
                 pending_wait_until_count: 0,
@@ -1738,8 +1727,7 @@ fn dispatch_service_worker_sync_event_in_context<'s>(
             ServiceWorkerSyncCompletion {
                 event_id: event.event_id,
                 registration_id: event.registration_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 tag: event.tag,
                 result: Err("failed to construct service worker sync event".to_owned()),
             },
@@ -1756,8 +1744,7 @@ fn dispatch_service_worker_sync_event_in_context<'s>(
                 completion: ServiceWorkerSyncCompletion {
                     event_id: event.event_id,
                     registration_id: event.registration_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     tag: event.tag.clone(),
                     result: Ok(()),
                 },
@@ -1819,8 +1806,7 @@ fn dispatch_service_worker_periodic_sync_event_in_context<'s>(
             ServiceWorkerPeriodicSyncCompletion {
                 event_id: event.event_id,
                 registration_id: event.registration_id,
-                version_id: event.version_id,
-                run: event.run.clone(),
+                owner: event.owner.clone(),
                 tag: event.tag,
                 result: Err("failed to construct service worker periodic sync event".to_owned()),
             },
@@ -1837,8 +1823,7 @@ fn dispatch_service_worker_periodic_sync_event_in_context<'s>(
                 completion: ServiceWorkerPeriodicSyncCompletion {
                     event_id: event.event_id,
                     registration_id: event.registration_id,
-                    version_id: event.version_id,
-                    run: event.run.clone(),
+                    owner: event.owner.clone(),
                     tag: event.tag.clone(),
                     result: Ok(()),
                 },
@@ -3395,8 +3380,8 @@ fn send_service_worker_fetch_stream_started(
             .map(|pending| {
                 (
                     state.parent_tx.clone(),
-                    pending.completion.version_id,
-                    pending.completion.run.clone(),
+                    pending.completion.owner.version_id(),
+                    pending.completion.owner.cloned_run_identity(),
                 )
             })
     }) else {
@@ -3405,8 +3390,7 @@ fn send_service_worker_fetch_stream_started(
     let _ = parent_tx.send(WorkerToParentMessage::ServiceWorkerFetchStreamStarted(
         ServiceWorkerFetchStreamStarted {
             event_id,
-            version_id,
-            run,
+            owner: crate::service_worker_runtime::ServiceWorkerRunOwner::new(version_id, run),
             body_source_id,
             response_head,
         },
@@ -3552,10 +3536,7 @@ fn start_service_worker_navigation_preload_response_in_context(
         else {
             return;
         };
-        if preload.version_id != started.version_id
-            || preload.run != started.run
-            || preload.body_source_id.is_some()
-        {
+        if preload.owner != started.owner || preload.body_source_id.is_some() {
             return;
         }
         preload.body_source_id = Some(started.body_source_id);
@@ -3666,10 +3647,7 @@ fn service_worker_navigation_preload_finish_matches_pending_event(
     else {
         return false;
     };
-    if preload.version_id != finished.version_id
-        || preload.run != finished.run
-        || preload.body_source_id != Some(finished.body_source_id)
-    {
+    if preload.owner != finished.owner || preload.body_source_id != Some(finished.body_source_id) {
         return false;
     }
     true
@@ -3701,7 +3679,7 @@ fn fail_service_worker_navigation_preload_response_in_context(
         else {
             return;
         };
-        if preload.version_id != failure.version_id || preload.run != failure.run {
+        if preload.owner != failure.owner {
             return;
         }
         preload.resolver.take()
