@@ -35,17 +35,28 @@ For an interactive prompt loop after login:
 uv run --with websockets python chatgpt_cdp_demo.py
 ```
 
-For the full-screen TUI:
+For the legacy raw-CDP TUI:
 
 ```bash
 uv run --with websockets python chatgpt_cdp_tui.py
 ```
 
-The preferred TUI uses Playwright as the CDP client framework:
+The preferred TUI uses Playwright as the CDP client framework and keeps a
+persistent Moli profile:
 
 ```bash
 uv run --with websockets --with playwright python chatgpt_playwright_tui.py
 ```
+
+On a fresh profile, the preferred TUI starts a headful Chromium under Xvfb for
+the OpenAI authentication pages. Chromium submits the credentials and waits for
+MFA; after approval, the TUI imports the resulting cookies and localStorage into
+Moli over CDP. Chromium and its temporary profile are then removed. ChatGPT
+navigation, prompt submission, and responses continue in Moli.
+
+This bridge is necessary because direct automated login can be rejected by the
+authentication challenge even when Moli can use an established session. Pass
+`--auth-backend moli` only when diagnosing the direct login path.
 
 For one-shot Playwright debugging:
 
@@ -80,10 +91,10 @@ uv run --with websockets --with playwright python chatgpt_playwright_demo.py \
   --prompt "今天几号？"
 ```
 
-The Playwright TUI defaults to a longer login timeout and switches device
-approval prompts to email-code verification by default. It shows an `Auth Code`
-input when the code page is reached. Pass `--no-try-email-verification` if you
-want to wait for the mobile device approval prompt instead.
+The Playwright TUI defaults to a longer login timeout and waits for mobile
+device approval. Pass `--try-email-verification` to switch the device-approval
+page to email-code verification. The TUI shows an `Auth Code` input when the
+code page is reached.
 
 TUI keys:
 
@@ -95,7 +106,9 @@ TUI keys:
 Useful options:
 
 - `--moli-bin ../../target/release/moli`
-- `--profile-dir .profile` to persist cookies/localStorage between runs
+- `--profile-dir .profile` to override the persistent cookies/localStorage directory
+- `--auth-chromium-bin /path/to/chromium` to select the Chromium used for login bootstrap
+- `--auth-backend moli` to bypass the Chromium bridge for direct-login diagnostics
 - `--http-proxy http://127.0.0.1:7890` if the Moli runtime needs a proxy
 - `--http-no-proxy 127.0.0.1,localhost` when testing against local URLs
 - `--http-timeout 120000` is the demo default for Moli, because ChatGPT can serve large script bundles slowly through CDN/challenge paths
@@ -109,8 +122,11 @@ Useful options:
 - `--login-timeout 180` to allow time for device approval or email-code entry
 - `--auth-code-stdin` to pipe password and email code as two stdin lines
 
-`--profile-dir` stores login cookies/localStorage. Treat that directory like a
-credential store.
+The Playwright TUI profile defaults to
+`$XDG_DATA_HOME/moli/chatgpt-profile`, or
+`~/.local/share/moli/chatgpt-profile` when `XDG_DATA_HOME` is unset. It stores
+login cookies/localStorage and should be treated like a credential store. Once
+that profile is logged in, the password field may be left empty when reconnecting.
 
 Prompt responses print `answer source: live-dom` when the current page renders
 the assistant text directly. `answer source: persisted-reload` means the demo
