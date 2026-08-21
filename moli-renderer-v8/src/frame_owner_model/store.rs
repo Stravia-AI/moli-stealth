@@ -1347,6 +1347,15 @@ impl FrameOwnerStore {
             .filter(|snapshot| snapshot.kind == FrameKind::Main)
     }
 
+    pub(crate) fn current_main_document_task_owner(&self) -> Option<FrameDocumentTaskOwner> {
+        let snapshot = self.current_main_owner_snapshot()?;
+        Some(FrameDocumentTaskOwner::new(
+            snapshot.scheduler_lane_id,
+            snapshot.local_window_id,
+            snapshot.document_id,
+        ))
+    }
+
     pub(crate) fn main_document_task_owner_is_current(
         &self,
         owner: FrameDocumentTaskOwner,

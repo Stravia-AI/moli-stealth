@@ -9,12 +9,7 @@ use crate::page_task_queue::RendererPageChildModuleDependencyFetchStartEnqueue;
 
 impl JsContextHost {
     pub(crate) fn current_main_document_task_owner(&self) -> Option<FrameDocumentTaskOwner> {
-        let snapshot = self.frame_owner_store.current_main_owner_snapshot()?;
-        Some(FrameDocumentTaskOwner::new(
-            snapshot.scheduler_lane_id,
-            snapshot.local_window_id,
-            snapshot.document_id,
-        ))
+        self.frame_owner_store.current_main_document_task_owner()
     }
 
     pub(crate) fn current_child_document_task_owner(

@@ -201,10 +201,11 @@ impl DocumentRuntime {
     }
 
     pub(crate) fn open_document(&mut self) {
-        // Production runtimes replace this temporary standalone identity with
-        // the exact new Frame owner in the surrounding owner transaction.
-        // Rotating first invalidates parser work from the retired Document
-        // even while that transaction is still being committed.
+        // Production main-frame runtimes finish this transition with
+        // `commit_main_document_open`. Rotating first invalidates parser work
+        // from the retired Document even while the surrounding owner
+        // transaction is still being committed. Standalone runtimes retain
+        // this exact fresh token as their new incarnation.
         self.document_incarnation = DocumentRuntimeIncarnationIdentity::standalone();
         // Blink's Document::ImplicitOpen removes every current child and leaves
         // the Document empty. The parser creates html/head/body only when input
@@ -278,7 +279,15 @@ impl DocumentRuntime {
         self.late_preload_stylesheet_handles.clear();
     }
 
-    pub(crate) fn bind_main_document_task_owner(&mut self, owner: FrameDocumentTaskOwner) {
+    /// Completes the exact owner transaction started by [`Self::open_document`].
+    pub(crate) fn commit_main_document_open(&mut self, owner: FrameDocumentTaskOwner) {
+        assert!(
+            matches!(
+                self.document_incarnation,
+                DocumentRuntimeIncarnationIdentity::Standalone(_)
+            ),
+            "main Document open must invalidate its retired incarnation before commit"
+        );
         self.document_incarnation = DocumentRuntimeIncarnationIdentity::MainFrame(owner);
     }
 

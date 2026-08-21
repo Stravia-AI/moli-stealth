@@ -152,6 +152,14 @@ fn main_frame_identity_uses_reserved_owner_records() {
     );
 
     assert_eq!(realm_id, FrameRealmId(0));
+    assert_eq!(
+        store.current_main_document_task_owner(),
+        Some(FrameDocumentTaskOwner::new(
+            FrameSchedulerLaneId(0),
+            LocalWindowId(0),
+            DocumentId(0),
+        ))
+    );
     let frame_id = FrameId("main".to_owned());
     let frame = store.frames.get(&frame_id).expect("main frame record");
     assert_eq!(frame.kind, FrameKind::Main);

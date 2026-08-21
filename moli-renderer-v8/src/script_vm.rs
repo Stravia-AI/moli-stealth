@@ -14,8 +14,8 @@ use crate::{
         native::{Attribute, DomHost, DomMutationEffects, NativeDom, NativeNodeId, NodeData},
     },
     frame_owner_model::{
-        ChildDocumentModulatorStore, DocumentId, FrameDocumentTaskOwner, FrameRealmId,
-        FrameScriptJob, FrameScriptJobKind,
+        ChildDocumentModulatorStore, DocumentId, FrameDocumentTaskOwner, FrameOwnerStore,
+        FrameRealmId, FrameScriptJob, FrameScriptJobKind,
     },
     inspector_microtasks::with_scoped_inspector_microtasks,
     network::{ResourceRequestClient, context::DocumentResourceLoader},
@@ -1835,6 +1835,28 @@ impl ScriptVmPageRealmBootstrap {
             crate::service_worker_runtime::ServiceWorkerClientId,
         >,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
+        let document_handle = dom_host.document_handle();
+        let document_url = dom_host
+            .dom()
+            .final_url()
+            .expect("parsed native dom must retain a document url")
+            .clone();
+        let document_base_url = dom_host
+            .document_base_url_for_handle(document_handle)
+            .unwrap_or_else(|| document_url.clone());
+        let mut frame_owner_store = FrameOwnerStore::default();
+        frame_owner_store.ensure_main_frame(
+            document_handle,
+            document_url.clone(),
+            document_base_url,
+            moli_url::origin_ascii_serialization(&document_url),
+            crate::document_runtime::DocumentPolicyContainer::default(),
+            crate::types::SubresourcePolicyContext::default(),
+            None,
+        );
+        let main_document_owner = frame_owner_store
+            .current_main_document_task_owner()
+            .expect("main frame admission must produce a Document owner");
         let post_domcontentloaded_page_task_tx = page_task_tx.page_task_sender();
         let page_runtime_wake_tx = page_task_tx.page_runtime_wake_sender();
         let top_level_navigation_handoff_tx = page_task_tx.top_level_navigation_handoff_sender();
@@ -1842,8 +1864,9 @@ impl ScriptVmPageRealmBootstrap {
         let stylesheet_task_sender = page_task_tx.stylesheet_task_sender();
         let main_parser_continuation_sender = page_task_tx.main_parser_continuation_sender();
         let resource_owner_id = crate::resource_owner::ResourceOwnerId::new();
-        let mut document_runtime = Box::new(DocumentRuntime::from_dom_host(
+        let mut document_runtime = Box::new(DocumentRuntime::from_main_frame_dom_host(
             dom_host,
+            main_document_owner,
             Some(post_domcontentloaded_page_task_tx.clone()),
             page_task_parser_boundary_injection_tx,
             stylesheet_task_sender,
@@ -1884,6 +1907,7 @@ impl ScriptVmPageRealmBootstrap {
 
         let context_host = Rc::new(RefCell::new(JsContextHost::new(
             document_runtime.as_mut(),
+            frame_owner_store,
             bridge_bindings,
             backend_node_registry,
             dom_debugger_pause_scheduler,

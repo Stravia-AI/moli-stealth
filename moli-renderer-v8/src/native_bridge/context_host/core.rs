@@ -133,6 +133,7 @@ impl JsContextHost {
 impl JsContextHost {
     pub(crate) fn new(
         runtime: &mut DocumentRuntime,
+        mut frame_owner_store: FrameOwnerStore,
         bindings: NativeBridgeBindings,
         backend_node_registry: SharedRendererBackendNodeRegistry,
         dom_debugger_pause_scheduler: crate::script_vm::RendererDomDebuggerPauseScheduler,
@@ -151,35 +152,15 @@ impl JsContextHost {
             browser_context_runtime.next_shared_worker_client_owner_id();
         let javascript_dialog_handler_enabled =
             browser_context_runtime.javascript_dialog_handler_enabled();
-        let document_handle = runtime.document_handle();
         let document_url = runtime.document_url().clone();
-        let document_base_url = runtime
-            .dom_host()
-            .document_base_url_for_handle(document_handle)
-            .unwrap_or_else(|| document_url.clone());
-        let mut frame_owner_store = FrameOwnerStore::default();
-        frame_owner_store.ensure_main_frame(
-            document_handle,
-            document_url.clone(),
-            document_base_url,
-            moli_url::origin_ascii_serialization(&document_url),
-            runtime.document_policy_container().clone(),
-            crate::types::SubresourcePolicyContext {
-                cross_origin_embedder_policy: runtime.cross_origin_embedder_policy(),
-                document_isolation_policy: runtime.document_isolation_policy(),
-                cross_origin_isolated: runtime.cross_origin_isolated(),
-            },
-            None,
-        );
-        let main_owner_snapshot = frame_owner_store
-            .current_main_owner_snapshot()
+        let main_document_owner = frame_owner_store
+            .current_main_document_task_owner()
             .expect("main frame owner must exist before client projection");
-        let main_document_owner = FrameDocumentTaskOwner::new(
-            main_owner_snapshot.scheduler_lane_id,
-            main_owner_snapshot.local_window_id,
-            main_owner_snapshot.document_id,
+        assert_eq!(
+            runtime.main_frame_document_task_owner(),
+            Some(main_document_owner),
+            "DocumentRuntime and FrameOwnerStore must admit the same main Document"
         );
-        runtime.bind_main_document_task_owner(main_document_owner);
         let service_worker_storage_key = top_level_storage_key
             .as_ref()
             .map(moli_storage_key::MoliStorageKey::serialized_storage_key)
@@ -534,7 +515,7 @@ impl JsContextHost {
             .expect("main document owner must exist before document.open() replacement");
         {
             let runtime: &mut DocumentRuntime = self;
-            runtime.bind_main_document_task_owner(transition.current_owner());
+            runtime.commit_main_document_open(transition.current_owner());
             runtime.start_root_document_parser_stream();
         }
         self.dom_agent_state

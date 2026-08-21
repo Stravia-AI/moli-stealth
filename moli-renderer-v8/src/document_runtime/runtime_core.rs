@@ -10,8 +10,40 @@ use super::*;
 // Splitting them out is mostly about finishing the file-level separation so `document_runtime.rs`
 // stops carrying even a small "misc core methods" tail while the actual behavior remains unchanged.
 impl DocumentRuntime {
-    pub(crate) fn from_dom_host(
+    /// Constructs the runtime for an already-admitted main Document.
+    ///
+    /// The owner is part of the runtime's initial identity; production callers
+    /// must not construct an ownerless runtime and attach it afterward.
+    pub(crate) fn from_main_frame_dom_host(
         dom_host: DomHost,
+        main_document_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+        page_task_tx: Option<crate::page_task_queue::PageTaskSender>,
+        page_task_parser_boundary_injection_tx: tokio::sync::mpsc::UnboundedSender<PageTask>,
+        stylesheet_task_sender: crate::page_task_queue::RendererPageStylesheetTaskSender,
+        main_parser_continuation_sender: crate::page_task_queue::RendererPageMainParserContinuationSender,
+    ) -> Self {
+        Self::from_dom_host_with_incarnation(
+            dom_host,
+            DocumentRuntimeIncarnationIdentity::MainFrame(main_document_owner),
+            page_task_tx,
+            page_task_parser_boundary_injection_tx,
+            stylesheet_task_sender,
+            main_parser_continuation_sender,
+        )
+    }
+
+    pub(crate) fn main_frame_document_task_owner(
+        &self,
+    ) -> Option<crate::frame_owner_model::FrameDocumentTaskOwner> {
+        match &self.document_incarnation {
+            DocumentRuntimeIncarnationIdentity::MainFrame(owner) => Some(*owner),
+            DocumentRuntimeIncarnationIdentity::Standalone(_) => None,
+        }
+    }
+
+    fn from_dom_host_with_incarnation(
+        dom_host: DomHost,
+        document_incarnation: DocumentRuntimeIncarnationIdentity,
         page_task_tx: Option<crate::page_task_queue::PageTaskSender>,
         page_task_parser_boundary_injection_tx: tokio::sync::mpsc::UnboundedSender<PageTask>,
         stylesheet_task_sender: crate::page_task_queue::RendererPageStylesheetTaskSender,
@@ -82,7 +114,7 @@ impl DocumentRuntime {
             custom_element_reaction_depth: 0,
             structural_mutation_depth: 0,
             dom_content_loaded_dispatched: false,
-            document_incarnation: DocumentRuntimeIncarnationIdentity::standalone(),
+            document_incarnation,
             document_input_stream_opened: false,
             next_document_write_external_script_load_id: 0,
             document_write_script_preload_scanner: None,
@@ -115,8 +147,9 @@ impl DocumentRuntime {
         let parser_boundary_lifecycle_tx =
             parser_boundary_lifecycle_source.parser_boundary_sender();
         let owner = test_stylesheet_document_owner();
-        let mut runtime = Self::from_dom_host(
+        let mut runtime = Self::from_dom_host_with_incarnation(
             DomHost::from_dom(document),
+            DocumentRuntimeIncarnationIdentity::standalone(),
             None,
             parser_boundary_lifecycle_tx,
             sender,
