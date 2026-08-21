@@ -91,8 +91,11 @@ CHATGPT_HELPER_JS = r"""
     if (el.disabled) return false;
     if (el.getAttribute?.('disabled') !== null) return false;
     if (el.type === 'hidden') return false;
+    if (String(el.name || '').toLowerCase() === 'hiddenpassword') return false;
     if (el.getAttribute?.('aria-disabled') === 'true') return false;
     if (el.getAttribute?.('hidden') !== null) return false;
+    const style = globalThis.getComputedStyle?.(el);
+    if (style?.display === 'none' || style?.visibility === 'hidden') return false;
     return true;
   }
 
@@ -663,6 +666,9 @@ CHATGPT_HELPER_JS = r"""
       installPasswordSubmitDiagnostics(input);
       setControlValue(input, password);
       const reactSubmit = submitReactForm(input);
+      if (reactSubmit) {
+        return { ok: true, reactSubmit: true, clickedSubmit: false };
+      }
       const submit = findSubmitButton();
       if (submit) {
         clickElement(submit);
