@@ -2,64 +2,6 @@ use std::{ffi::OsString, num::NonZeroU32};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
-const FETCH_INFER_FLAGS: &[&str] = &[
-    "--dump",
-    "-d",
-    "--header",
-    "-H",
-    "--trace-network",
-    "--trace-matched-response-body",
-    "--noscript",
-    "-n",
-    "--strip-mode",
-    "--with-base",
-    "--with-frames",
-    "--wait-until",
-    "-w",
-    "--redirect-wait-ms",
-    "--wait-selector",
-    "-s",
-    "--wait-script",
-    "--wait-script-file",
-    "--delay-ms",
-    "--wait-response-url",
-    "--wait-response-body",
-    "--wait-response-json",
-    "--document-start-script",
-    "--document-start-script-file",
-    "--image",
-    "-i",
-    "--font",
-    "-f",
-    "--audio",
-    "-a",
-    "--video",
-    "-v",
-    "--media",
-    "-m",
-    "--text-track",
-    "-T",
-    "--resource",
-    "-r",
-    "--disable-subframes",
-    "--wait-ms",
-    "--profile-dir",
-    "-P",
-    "--web-bot-auth-key-file",
-    "--web-bot-auth-keyid",
-    "--web-bot-auth-domain",
-    "--web-bot-auth-profile",
-];
-const SERVE_INFER_FLAGS: &[&str] = &[
-    "--host",
-    "--port",
-    "-p",
-    "--timeout",
-    "-t",
-    "--layout",
-    "-l",
-];
-const EXPLICIT_COMMANDS: &[&str] = &["fetch", "serve"];
 const DUMP_MODES: &[&str] = &[
     "json",
     "html",
@@ -538,26 +480,8 @@ fn infer_command(next: Option<&OsString>) -> Option<&'static str> {
     };
     let next = next.to_string_lossy();
 
-    if EXPLICIT_COMMANDS.contains(&next.as_ref()) {
-        return None;
-    }
-
     if next.starts_with("http://") || next.starts_with("https://") {
         return Some("fetch");
-    }
-
-    if FETCH_INFER_FLAGS
-        .iter()
-        .any(|flag| next == *flag || next.starts_with(&format!("{flag}=")))
-    {
-        return Some("fetch");
-    }
-
-    if SERVE_INFER_FLAGS
-        .iter()
-        .any(|flag| next == *flag || next.starts_with(&format!("{flag}=")))
-    {
-        return Some("serve");
     }
 
     None
@@ -595,9 +519,14 @@ mod tests {
     }
 
     #[test]
-    fn delay_ms_infers_fetch_command() {
-        let args =
-            normalize_args_for_compat(["moli", "--delay-ms", "250", "https://example.test/"]);
+    fn parses_delay_ms_with_explicit_fetch_command() {
+        let args = normalize_args_for_compat([
+            "moli",
+            "fetch",
+            "--delay-ms",
+            "250",
+            "https://example.test/",
+        ]);
         let cli = Cli::parse_from(args);
 
         match cli.command {
@@ -607,9 +536,13 @@ mod tests {
     }
 
     #[test]
-    fn redirect_wait_ms_infers_fetch_command() {
-        let args =
-            normalize_args_for_compat(["moli", "--redirect-wait-ms=1500", "https://example.test/"]);
+    fn parses_redirect_wait_ms_with_explicit_fetch_command() {
+        let args = normalize_args_for_compat([
+            "moli",
+            "fetch",
+            "--redirect-wait-ms=1500",
+            "https://example.test/",
+        ]);
         let cli = Cli::parse_from(args);
 
         match cli.command {
@@ -631,8 +564,8 @@ mod tests {
     }
 
     #[test]
-    fn port_equals_infers_serve_command() {
-        let args = normalize_args_for_compat(["moli", "--port=0"]);
+    fn parses_port_equals_with_explicit_serve_command() {
+        let args = normalize_args_for_compat(["moli", "serve", "--port=0"]);
         let cli = Cli::parse_from(args);
 
         match cli.command {
@@ -771,8 +704,8 @@ mod tests {
     }
 
     #[test]
-    fn short_dump_infers_fetch_command_and_defaults_its_value() {
-        let args = normalize_args_for_compat(["moli", "-d", "https://example.test/"]);
+    fn short_dump_defaults_its_value_with_explicit_fetch_command() {
+        let args = normalize_args_for_compat(["moli", "fetch", "-d", "https://example.test/"]);
         let cli = Cli::parse_from(args);
 
         match cli.command {
@@ -783,24 +716,21 @@ mod tests {
     }
 
     #[test]
-    fn short_port_infers_serve_command() {
-        let args = normalize_args_for_compat(["moli", "-p", "0"]);
-        let cli = Cli::parse_from(args);
-
-        match cli.command {
-            Commands::Serve(args) => assert_eq!(args.port, 0),
-            other => panic!("expected serve command, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn layout_infers_serve_command() {
-        let args = normalize_args_for_compat(["moli", "--layout"]);
-        let cli = Cli::parse_from(args);
-
-        match cli.command {
-            Commands::Serve(args) => assert!(args.common.layout),
-            other => panic!("expected serve command, got {other:?}"),
+    fn flags_do_not_infer_subcommands() {
+        for arguments in [
+            ["moli", "--dump", "html", "https://example.test/"].as_slice(),
+            ["moli", "-d", "html", "https://example.test/"].as_slice(),
+            ["moli", "--port=0"].as_slice(),
+            ["moli", "-p", "0"].as_slice(),
+            ["moli", "--layout"].as_slice(),
+        ] {
+            let error = Cli::try_parse_from(normalize_args_for_compat(arguments.iter().copied()))
+                .expect_err("a flag must not infer a subcommand");
+            assert_eq!(
+                error.kind(),
+                clap::error::ErrorKind::UnknownArgument,
+                "unexpected parse result for {arguments:?}"
+            );
         }
     }
 }

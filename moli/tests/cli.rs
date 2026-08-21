@@ -196,7 +196,7 @@ fn rejects_removed_wpt_dump_mode() {
 }
 
 #[test]
-fn parses_binary_dump_modes_with_inferred_fetch_command() {
+fn parses_binary_dump_modes_with_explicit_fetch_command() {
     for (value, expected) in [
         ("screenshot", DumpFormat::Screenshot),
         ("screenshot_full", DumpFormat::ScreenshotFull),
@@ -204,6 +204,7 @@ fn parses_binary_dump_modes_with_inferred_fetch_command() {
     ] {
         let cli = Cli::try_parse_from(normalize_args_for_compat([
             "moli",
+            "fetch",
             "--dump",
             value,
             "https://example.com",
@@ -402,9 +403,10 @@ fn infers_fetch_mode_from_bare_url() {
 }
 
 #[test]
-fn infers_fetch_mode_from_fetch_only_flags_and_defaults_dump_to_html() {
+fn parses_bare_dump_with_explicit_fetch_command_and_defaults_to_html() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
+        "fetch",
         "--dump",
         "https://example.com",
     ]))
@@ -438,9 +440,10 @@ fn infers_fetch_mode_from_fetch_only_flags_and_defaults_dump_to_html() {
 }
 
 #[test]
-fn infers_fetch_mode_from_header_flag() {
+fn parses_header_flag_with_explicit_fetch_command() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
+        "fetch",
         "-H",
         "X-Test: one",
         "https://example.com",
@@ -478,7 +481,7 @@ fn infers_fetch_mode_from_header_flag() {
 }
 
 #[test]
-fn every_optional_resource_flag_infers_fetch_mode() {
+fn every_optional_resource_flag_parses_with_explicit_fetch_command() {
     let cases = [
         ("--image", 0),
         ("--font", 1),
@@ -492,12 +495,13 @@ fn every_optional_resource_flag_infers_fetch_mode() {
     for (flag, enabled_index) in cases {
         let cli = Cli::try_parse_from(normalize_args_for_compat([
             "moli",
+            "fetch",
             flag,
             "https://example.com",
         ]))
-        .unwrap_or_else(|error| panic!("{flag} should infer fetch mode: {error}"));
+        .unwrap_or_else(|error| panic!("{flag} should parse for fetch: {error}"));
         let Commands::Fetch(args) = cli.command else {
-            panic!("{flag} should infer the fetch command");
+            panic!("{flag} should preserve the explicit fetch command");
         };
         let values = [
             args.common.image,
@@ -521,9 +525,10 @@ fn every_optional_resource_flag_infers_fetch_mode() {
 }
 
 #[test]
-fn infers_fetch_mode_from_disable_subframes_flag() {
+fn parses_disable_subframes_with_explicit_fetch_command() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
+        "fetch",
         "--disable-subframes",
         "https://example.com",
     ]))
@@ -555,9 +560,10 @@ fn infers_serve_mode_when_called_without_args() {
 }
 
 #[test]
-fn infers_serve_mode_from_legacy_serve_flags() {
+fn parses_serve_flags_with_explicit_command() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
+        "serve",
         "--host",
         "0.0.0.0",
         "--port",
@@ -792,7 +798,7 @@ fn fetch_strip_options_combine_cli_selections() {
 }
 
 #[test]
-fn does_not_infer_mode_from_top_level_common_flags() {
+fn does_not_infer_subcommand_from_flag() {
     let error =
         Cli::try_parse_from(normalize_args_for_compat(["moli", "--obey-robots"])).unwrap_err();
 
@@ -872,9 +878,10 @@ fn parses_fetch_domstable_wait_until() {
 }
 
 #[test]
-fn infers_fetch_mode_from_wait_flags() {
+fn parses_wait_flags_with_explicit_fetch_command() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
+        "fetch",
         "--wait-selector",
         "#ready",
         "https://example.com",
