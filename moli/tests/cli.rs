@@ -654,6 +654,44 @@ fn app_config_uses_moli_user_agent_defaults() {
 }
 
 #[test]
+fn app_config_makes_fetch_quiet_unless_log_level_is_set() {
+    let quiet_cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--dump",
+        "screenshot",
+        "--layout",
+        "about:blank",
+    ]))
+    .unwrap();
+    let quiet_config = AppConfig::from_cli(&quiet_cli).unwrap();
+    assert_eq!(quiet_config.log_filter, "off");
+
+    let debug_cli = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--dump",
+        "screenshot",
+        "--layout",
+        "--log-level",
+        "debug",
+        "about:blank",
+    ]))
+    .unwrap();
+    let debug_config = AppConfig::from_cli(&debug_cli).unwrap();
+    assert_eq!(debug_config.log_filter, "debug");
+
+    let implicit_html_cli =
+        Cli::try_parse_from(normalize_args_for_compat(["moli", "fetch", "about:blank"])).unwrap();
+    let implicit_html_config = AppConfig::from_cli(&implicit_html_cli).unwrap();
+    assert_eq!(implicit_html_config.log_filter, "off");
+
+    let serve_cli = Cli::try_parse_from(["moli", "serve"]).unwrap();
+    let serve_config = AppConfig::from_cli(&serve_cli).unwrap();
+    assert_eq!(serve_config.log_filter, "info");
+}
+
+#[test]
 fn app_config_loads_and_validates_web_bot_auth_key() {
     let key_file = write_temp_web_bot_auth_key();
     let key_path_arg = key_file.path.to_string_lossy().into_owned();

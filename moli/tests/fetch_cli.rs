@@ -804,6 +804,51 @@ fn cli_dump_screenshot_writes_png_bytes() -> Result<()> {
 }
 
 #[test]
+fn cli_dump_screenshot_is_quiet_by_default() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_moli"))
+        .args(["fetch", "--dump", "screenshot", "--layout", "about:blank"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout_bytes={}\nstderr={}",
+        output.stdout.len(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.starts_with(b"\x89PNG\r\n\x1a\n"));
+    assert!(
+        output.stderr.is_empty(),
+        "--dump should be quiet by default: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_fetch_implicit_html_dump_is_quiet_by_default() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_moli"))
+        .args(["fetch", "about:blank"])
+        .output()?;
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        clean_output(&output.stdout),
+        "<html><head></head><body></body></html>"
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "fetch should be quiet by default: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    Ok(())
+}
+
+#[test]
 fn cli_dump_full_screenshot_writes_png_bytes() -> Result<()> {
     let output = run_fetch_cli_with_dump_and_args("about:blank", "screenshot_full", &["--layout"])?;
     assert!(

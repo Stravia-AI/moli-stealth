@@ -32,6 +32,9 @@ impl AppConfig {
         match &cli.command {
             Commands::Fetch(args) => {
                 apply_common_args(&mut config, &args.common)?;
+                if args.common.log_level.is_none() {
+                    config.log_filter = "off".to_owned();
+                }
                 config.fetch.request_headers = args
                     .headers
                     .iter()
