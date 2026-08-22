@@ -1963,6 +1963,10 @@ impl PageScreencastRegistration {
     }
 }
 
+// This short-lived owner handoff is consumed immediately by the scheduler.
+// Boxing `Pending` would add one allocation to every screencast capture only
+// to shrink the transient result enum on the stack.
+#[allow(clippy::large_enum_variant)]
 pub enum PageScreencastCaptureStart {
     Pending(PendingPageScreencastCapture),
     Retry,
