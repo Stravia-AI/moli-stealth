@@ -165,7 +165,6 @@ pub(super) trait StyleInvalidationCleanupApplicationSink {
 
     fn apply_clear_all_cleanup_application(
         &self,
-        host: &DomHost,
         context: &StyleInvalidationCleanupApplicationContext,
     ) -> bool;
 
@@ -440,7 +439,7 @@ impl StyleInvalidationCleanupApplication {
                 target.apply_noop_cleanup_application()
             }
             StyleInvalidationCleanupApplicationTarget::ClearAll => {
-                target.apply_clear_all_cleanup_application(host, &self.context)
+                target.apply_clear_all_cleanup_application(&self.context)
             }
             StyleInvalidationCleanupApplicationTarget::SubtreeRoots(subtrees) => {
                 target.apply_subtree_roots_cleanup_application(host, subtrees, &self.context)

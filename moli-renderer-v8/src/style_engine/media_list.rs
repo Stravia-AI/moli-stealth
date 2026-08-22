@@ -21,7 +21,7 @@ use style::{
 use style_traits::{CSSPixel, DevicePixel, ParsingMode, ToCss};
 
 use super::{StyleViewport, StyloStyleEnvironment};
-use crate::style_engine::system::{DEFAULT_VIEWPORT_HEIGHT, DEFAULT_VIEWPORT_WIDTH};
+use crate::style_engine::world_key::{DEFAULT_VIEWPORT_HEIGHT, DEFAULT_VIEWPORT_WIDTH};
 
 pub(crate) fn normalize_media_query_list(media_text: &str) -> String {
     with_stylo_media_context(|context| parse_stylo_media_list(context, media_text).to_css_string())

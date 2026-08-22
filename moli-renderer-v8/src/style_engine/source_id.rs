@@ -30,8 +30,8 @@ pub(super) enum StyleScopeId {
 pub(super) enum StyleSourceKind {
     OwnerStyleSheet { owner: DomHandle },
     LinkedStyleSheet { owner: DomHandle },
-    DocumentAdoptedStyleSheet { index: usize },
-    ShadowRootAdoptedStyleSheet { index: usize },
+    DocumentAdoptedStyleSheet { client_id: u64 },
+    ShadowRootAdoptedStyleSheet { client_id: u64 },
 }
 
 impl StyleSourceId {
@@ -49,17 +49,17 @@ impl StyleSourceId {
         })
     }
 
-    pub(crate) fn document_adopted_style_sheet(document: DomHandle, index: usize) -> Self {
+    pub(crate) fn document_adopted_style_sheet(document: DomHandle, client_id: u64) -> Self {
         Self {
             scope_id: StyleScopeId::Document(document),
-            kind: StyleSourceKind::DocumentAdoptedStyleSheet { index },
+            kind: StyleSourceKind::DocumentAdoptedStyleSheet { client_id },
         }
     }
 
-    pub(crate) fn shadow_root_adopted_style_sheet(root: DomHandle, index: usize) -> Self {
+    pub(crate) fn shadow_root_adopted_style_sheet(root: DomHandle, client_id: u64) -> Self {
         Self {
             scope_id: StyleScopeId::ShadowRoot(root),
-            kind: StyleSourceKind::ShadowRootAdoptedStyleSheet { index },
+            kind: StyleSourceKind::ShadowRootAdoptedStyleSheet { client_id },
         }
     }
 }

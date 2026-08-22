@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use indexmap::IndexSet;
 
@@ -51,7 +51,25 @@ impl InstalledAdoptedStylesheetClient {
     }
 
     #[cfg(test)]
-    fn from_source_snapshot(source: StyloStylesheetSource) -> Self {
+    fn from_source_snapshot(mut source: StyloStylesheetSource) -> Self {
+        if source.adopted_client_id().is_none() {
+            let synthetic_client_id =
+                source
+                    .source_id()
+                    .and_then(|source_id| match source_id.kind {
+                        super::super::source_id::StyleSourceKind::DocumentAdoptedStyleSheet {
+                            client_id,
+                        }
+                        | super::super::source_id::StyleSourceKind::ShadowRootAdoptedStyleSheet {
+                            client_id,
+                        } => Some(client_id),
+                        super::super::source_id::StyleSourceKind::OwnerStyleSheet { .. }
+                        | super::super::source_id::StyleSourceKind::LinkedStyleSheet { .. } => None,
+                    });
+            if let Some(client_id) = synthetic_client_id {
+                source = source.with_adopted_client_id(client_id);
+            }
+        }
         Self {
             source,
             _live_stylesheet: None,
@@ -159,6 +177,7 @@ impl AdoptedStyleSheetSources {
             .cloned()
             .unwrap_or_default();
         let mut reused = vec![false; previous.len()];
+        let mut assigned_client_ids = HashSet::new();
         for client in &mut clients {
             let reused_client_id = previous.iter().enumerate().find_map(|(index, candidate)| {
                 (!reused[index]
@@ -171,7 +190,15 @@ impl AdoptedStyleSheetSources {
                 })
                 .flatten()
             });
-            let client_id = reused_client_id.unwrap_or_else(|| self.allocate_client_id());
+            let requested_client_id = client
+                .source()
+                .adopted_client_id()
+                .filter(|client_id| !assigned_client_ids.contains(client_id));
+            let client_id = reused_client_id
+                .or(requested_client_id)
+                .unwrap_or_else(|| self.allocate_client_id_avoiding(&assigned_client_ids));
+            self.next_client_id = self.next_client_id.max(client_id);
+            assigned_client_ids.insert(client_id);
             client.source = client.source.clone().with_adopted_client_id(client_id);
         }
         if self
@@ -192,6 +219,15 @@ impl AdoptedStyleSheetSources {
             .checked_add(1)
             .expect("adopted stylesheet client identity space exhausted");
         self.next_client_id
+    }
+
+    fn allocate_client_id_avoiding(&mut self, assigned_client_ids: &HashSet<u64>) -> u64 {
+        loop {
+            let client_id = self.allocate_client_id();
+            if !assigned_client_ids.contains(&client_id) {
+                return client_id;
+            }
+        }
     }
 
     fn sources(
@@ -233,19 +269,33 @@ impl AdoptedStyleSheetSources {
             .len()
     }
 
-    pub(in crate::style_engine) fn shadow_root_source_count(&self, root: DomHandle) -> usize {
-        self.sources_or_empty(AdoptedStyleSheetOwner::ShadowRoot(root))
-            .len()
+    pub(in crate::style_engine) fn document_source_ids(
+        &self,
+        document: DomHandle,
+    ) -> Vec<StyleSourceId> {
+        self.source_ids(AdoptedStyleSheetOwner::Document(document), |client_id| {
+            StyleSourceId::document_adopted_style_sheet(document, client_id)
+        })
+    }
+
+    pub(in crate::style_engine) fn shadow_root_source_ids(
+        &self,
+        root: DomHandle,
+    ) -> Vec<StyleSourceId> {
+        self.source_ids(AdoptedStyleSheetOwner::ShadowRoot(root), |client_id| {
+            StyleSourceId::shadow_root_adopted_style_sheet(root, client_id)
+        })
     }
 
     fn source(
         &self,
         owner: AdoptedStyleSheetOwner,
-        index: usize,
+        client_id: u64,
     ) -> Option<&StyloStylesheetSource> {
         self.sources_by_owner
             .get(&owner)?
-            .get(index)
+            .iter()
+            .find(|client| client.source().adopted_client_id() == Some(client_id))
             .map(InstalledAdoptedStylesheetClient::source)
     }
 
@@ -253,9 +303,9 @@ impl AdoptedStyleSheetSources {
         &'a self,
         source_id: StyleSourceId,
         owner: AdoptedStyleSheetOwner,
-        index: usize,
+        client_id: u64,
     ) -> Option<RetainedStylesheetSourceRecord<'a>> {
-        let source = self.source(owner, index)?;
+        let source = self.source(owner, client_id)?;
         Some(RetainedStylesheetSourceRecord::registered(
             source_id, source,
         ))
@@ -277,12 +327,16 @@ impl AdoptedStyleSheetSources {
         if !lifecycle_owner.retained_source_records_are_available(host) {
             return;
         }
-        for index in 0..sources.len() {
-            let source_id = StyleSourceId::document_adopted_style_sheet(document, index);
+        for source in sources {
+            let client_id = source
+                .source()
+                .adopted_client_id()
+                .expect("installed adopted stylesheet must have a client id");
+            let source_id = StyleSourceId::document_adopted_style_sheet(document, client_id);
             if let Some(record) = self.retained_source_record(
                 source_id,
                 AdoptedStyleSheetOwner::Document(document),
-                index,
+                client_id,
             ) {
                 callback(record);
             }
@@ -342,12 +396,16 @@ impl AdoptedStyleSheetSources {
             if !lifecycle_owner.retained_source_records_are_available(host) {
                 continue;
             }
-            for index in 0..sources.len() {
-                let source_id = StyleSourceId::shadow_root_adopted_style_sheet(root, index);
+            for source in sources {
+                let client_id = source
+                    .source()
+                    .adopted_client_id()
+                    .expect("installed adopted stylesheet must have a client id");
+                let source_id = StyleSourceId::shadow_root_adopted_style_sheet(root, client_id);
                 if let Some(record) = self.retained_source_record(
                     source_id,
                     AdoptedStyleSheetOwner::ShadowRoot(root),
-                    index,
+                    client_id,
                 ) {
                     callback(record);
                 }
@@ -480,19 +538,19 @@ impl AdoptedStyleSheetSources {
         match (&source_id.scope_id, &source_id.kind) {
             (
                 super::super::source_id::StyleScopeId::Document(document),
-                super::super::source_id::StyleSourceKind::DocumentAdoptedStyleSheet { index },
+                super::super::source_id::StyleSourceKind::DocumentAdoptedStyleSheet { client_id },
             ) => self.retained_source_record(
                 source_id.clone(),
                 AdoptedStyleSheetOwner::Document(*document),
-                *index,
+                *client_id,
             ),
             (
                 super::super::source_id::StyleScopeId::ShadowRoot(root),
-                super::super::source_id::StyleSourceKind::ShadowRootAdoptedStyleSheet { index },
+                super::super::source_id::StyleSourceKind::ShadowRootAdoptedStyleSheet { client_id },
             ) => self.retained_source_record(
                 source_id.clone(),
                 AdoptedStyleSheetOwner::ShadowRoot(*root),
-                *index,
+                *client_id,
             ),
             _ => None,
         }
@@ -519,7 +577,7 @@ impl AdoptedStyleSheetSources {
         Some(lifecycle_owner.tracked_entry(host, || {
             self.tracked_source_ids(
                 AdoptedStyleSheetOwner::Document(document),
-                |index| StyleSourceId::document_adopted_style_sheet(document, index),
+                |client_id| StyleSourceId::document_adopted_style_sheet(document, client_id),
                 StyleSourceLifecycleWithoutSourceReason::EmptyDocumentAdoptedStyleSheets,
             )
         }))
@@ -537,7 +595,7 @@ impl AdoptedStyleSheetSources {
         Some(lifecycle_owner.tracked_entry(host, || {
             self.tracked_source_ids(
                 AdoptedStyleSheetOwner::ShadowRoot(root),
-                |index| StyleSourceId::shadow_root_adopted_style_sheet(root, index),
+                |client_id| StyleSourceId::shadow_root_adopted_style_sheet(root, client_id),
                 StyleSourceLifecycleWithoutSourceReason::EmptyShadowRootAdoptedStyleSheets,
             )
         }))
@@ -546,14 +604,42 @@ impl AdoptedStyleSheetSources {
     fn tracked_source_ids(
         &self,
         owner: AdoptedStyleSheetOwner,
-        make_source_id: impl Fn(usize) -> StyleSourceId,
+        make_source_id: impl Fn(u64) -> StyleSourceId,
         empty_reason: StyleSourceLifecycleWithoutSourceReason,
     ) -> TrackedStyleSourceIds {
         let Some(sources) = self.sources(owner) else {
             return TrackedStyleSourceIds::WithoutSource(empty_reason);
         };
-        let source_ids: Vec<_> = (0..sources.len()).map(make_source_id).collect();
+        let source_ids = sources
+            .iter()
+            .map(|client| {
+                make_source_id(
+                    client
+                        .source()
+                        .adopted_client_id()
+                        .expect("installed adopted stylesheet must have a client id"),
+                )
+            })
+            .collect();
         TrackedStyleSourceIds::retained_or_without_source(source_ids, empty_reason)
+    }
+
+    fn source_ids(
+        &self,
+        owner: AdoptedStyleSheetOwner,
+        make_source_id: impl Fn(u64) -> StyleSourceId,
+    ) -> Vec<StyleSourceId> {
+        self.sources_or_empty(owner)
+            .iter()
+            .map(|client| {
+                make_source_id(
+                    client
+                        .source()
+                        .adopted_client_id()
+                        .expect("installed adopted stylesheet must have a client id"),
+                )
+            })
+            .collect()
     }
 
     fn tracked_shadow_roots_for_document<'a>(
@@ -604,7 +690,10 @@ mod tests {
     };
 
     use super::{AdoptedStyleSheetInstallation, AdoptedStyleSheetSources};
-    use crate::{dom::native::NativeNodeId, live_stylesheet::LiveStylesheetRegistry};
+    use crate::{
+        dom::native::NativeNodeId, live_stylesheet::LiveStylesheetRegistry,
+        style_engine::StyleSourceId,
+    };
 
     fn live_stylesheet(
         registry: &LiveStylesheetRegistry,
@@ -643,6 +732,15 @@ mod tests {
         assert_eq!(initial_ids.len(), 3);
         assert_ne!(initial_ids[0], initial_ids[1]);
         assert_ne!(initial_ids[1], initial_ids[2]);
+        assert_eq!(
+            sources.document_source_ids(document),
+            initial_ids
+                .iter()
+                .map(|client_id| {
+                    StyleSourceId::document_adopted_style_sheet(document, *client_id)
+                })
+                .collect::<Vec<_>>()
+        );
         assert!(ServoArc::ptr_eq(
             &initial[0].parsed_stylesheet().unwrap(),
             &first.stylesheet(),
@@ -667,6 +765,13 @@ mod tests {
                 .map(|source| source.adopted_client_id().unwrap())
                 .collect::<Vec<_>>(),
             vec![initial_ids[2], initial_ids[0], initial_ids[1]],
+        );
+        assert_eq!(
+            sources.document_source_ids(document),
+            [initial_ids[2], initial_ids[0], initial_ids[1]]
+                .into_iter()
+                .map(|client_id| StyleSourceId::document_adopted_style_sheet(document, client_id))
+                .collect::<Vec<_>>()
         );
 
         assert!(sources.set_document_installations(

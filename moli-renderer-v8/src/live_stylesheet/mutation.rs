@@ -36,12 +36,19 @@ impl LiveStylesheet {
         self.reconcile_import_edges();
         #[cfg(test)]
         note_native_top_level_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(mutation) =
+            self.rule_mutation_for_rule(rule.clone(), &[], RuleChangeKind::Insertion)
+        {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(rule)
     }
 
     pub(crate) fn delete_rule(&self, index: usize) -> Result<(), CssRuleInsertError> {
         let removes_namespace = self.top_level_rule_is_namespace(index)?;
+        let removed = self.rule_mutation_at_path(&[index], RuleChangeKind::Removal);
         self.ensure_owned_contents_for_mutation();
         let contents = self.current_contents();
         {
@@ -59,7 +66,11 @@ impl LiveStylesheet {
         self.shift_rule_wrapper_paths_for_top_level_delete(index);
         #[cfg(test)]
         note_native_top_level_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(removed) = removed {
+            self.note_exact_rule_mutations(vec![removed]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(())
     }
 
@@ -70,6 +81,8 @@ impl LiveStylesheet {
     ) -> Result<(), CssRuleInsertError> {
         let replaces_namespace = self.top_level_rule_is_namespace(index)?;
         let rule = self.parse_top_level_rule_for_insert(rule_text, index)?;
+        let removed = self.rule_mutation_at_path(&[index], RuleChangeKind::Removal);
+        let inserted = self.rule_mutation_for_rule(rule.clone(), &[], RuleChangeKind::Insertion);
         let inserts_namespace = matches!(rule, CssRule::Namespace(_));
         self.ensure_owned_contents_for_mutation();
         let contents = self.current_contents();
@@ -88,7 +101,12 @@ impl LiveStylesheet {
         self.replace_rule_wrapper_bindings_at_path(&[index]);
         #[cfg(test)]
         note_native_top_level_mutation_for_test();
-        self.note_contents_mutation();
+        match (removed, inserted) {
+            (Some(removed), Some(inserted)) => {
+                self.note_exact_rule_mutations(vec![removed, inserted]);
+            }
+            _ => self.note_contents_mutation(),
+        }
         Ok(())
     }
 
@@ -145,7 +163,13 @@ impl LiveStylesheet {
         }
         #[cfg(test)]
         note_native_nested_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(mutation) =
+            self.rule_mutation_for_rule(rule.clone(), parent_path, RuleChangeKind::Insertion)
+        {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(rule)
     }
 
@@ -160,6 +184,9 @@ impl LiveStylesheet {
         if index >= rule_count {
             return Err(CssRuleInsertError::IndexSize);
         }
+        let mut removed_path = parent_path.to_vec();
+        removed_path.push(index);
+        let removed = self.rule_mutation_at_path(&removed_path, RuleChangeKind::Removal);
         self.ensure_owned_contents_for_mutation();
         let child_rules = self
             .mutable_child_rules_at_path(parent_path)
@@ -174,7 +201,11 @@ impl LiveStylesheet {
         self.shift_rule_wrapper_paths_for_delete(parent_path, index);
         #[cfg(test)]
         note_native_nested_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(removed) = removed {
+            self.note_exact_rule_mutations(vec![removed]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(())
     }
 
@@ -194,6 +225,11 @@ impl LiveStylesheet {
             parse_relative_rule_type,
             true,
         )?;
+        let mut replaced_path = parent_path.to_vec();
+        replaced_path.push(index);
+        let removed = self.rule_mutation_at_path(&replaced_path, RuleChangeKind::Removal);
+        let inserted =
+            self.rule_mutation_for_rule(rule.clone(), parent_path, RuleChangeKind::Insertion);
         self.ensure_owned_contents_for_mutation();
         let child_rules = self
             .mutable_child_rules_at_path(parent_path)
@@ -206,12 +242,15 @@ impl LiveStylesheet {
             };
             *existing = rule;
         }
-        let mut replaced_path = parent_path.to_vec();
-        replaced_path.push(index);
         self.replace_rule_wrapper_bindings_at_path(&replaced_path);
         #[cfg(test)]
         note_native_nested_mutation_for_test();
-        self.note_contents_mutation();
+        match (removed, inserted) {
+            (Some(removed), Some(inserted)) => {
+                self.note_exact_rule_mutations(vec![removed, inserted]);
+            }
+            _ => self.note_contents_mutation(),
+        }
         Ok(())
     }
 
@@ -256,7 +295,11 @@ impl LiveStylesheet {
         }
         #[cfg(test)]
         note_native_keyframe_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(mutation) = self.rule_mutation_at_path(parent_path, RuleChangeKind::Generic) {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(rule)
     }
 
@@ -285,7 +328,11 @@ impl LiveStylesheet {
         self.shift_rule_wrapper_paths_for_delete(parent_path, index);
         #[cfg(test)]
         note_native_keyframe_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(mutation) = self.rule_mutation_at_path(parent_path, RuleChangeKind::Generic) {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(())
     }
 
@@ -317,7 +364,11 @@ impl LiveStylesheet {
         self.replace_rule_wrapper_bindings_at_path(&replaced_path);
         #[cfg(test)]
         note_native_keyframe_mutation_for_test();
-        self.note_contents_mutation();
+        if let Some(mutation) = self.rule_mutation_at_path(parent_path, RuleChangeKind::Generic) {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
         Ok(())
     }
 
@@ -346,7 +397,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *rule.media_queries.write_with(&mut guard) = media;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -380,7 +431,7 @@ impl LiveStylesheet {
         let mut guard = imported_stylesheet.shared_lock.write();
         *imported_stylesheet.media.write_with(&mut guard) = media;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -546,7 +597,7 @@ impl LiveStylesheet {
         // Locked node. make_mut() can replace that Arc when a V8 lease retains
         // the prior value, so refresh only the wrapper bound to this root.
         self.refresh_rule_wrapper_bindings_at_path(rule_path);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(result)
     }
 
@@ -575,7 +626,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *block.write_with(&mut guard) = declarations;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::StyleRuleDeclarations);
         Ok(())
     }
 
@@ -604,7 +655,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *block.write_with(&mut guard) = declarations;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -634,7 +685,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *block.write_with(&mut guard) = declarations;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(parent_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -661,7 +712,7 @@ impl LiveStylesheet {
         rule.descriptors = parsed.descriptors;
         rule.descriptor_importance = parsed.descriptor_importance;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -690,7 +741,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *block.write_with(&mut guard) = declarations;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -720,7 +771,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         rule.write_with(&mut guard).selectors = selectors;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -745,7 +796,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         *rule.block.write_with(&mut guard) = declarations;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -776,7 +827,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         rule.write_with(&mut guard).selectors = selectors;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -802,7 +853,7 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         rule.write_with(&mut guard).selector = selector;
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(parent_path, RuleChangeKind::Generic);
         Ok(())
     }
 
@@ -826,14 +877,70 @@ impl LiveStylesheet {
         let mut guard = self.stylesheet.shared_lock.write();
         rule.write_with(&mut guard).name = KeyframesName::from_ident(name);
         drop(guard);
-        self.note_rule_value_mutation();
+        self.note_rule_value_mutation_at_path(rule_path, RuleChangeKind::Generic);
         Ok(())
     }
 
-    fn note_rule_value_mutation(&self) {
+    fn note_rule_value_mutation_at_path(&self, rule_path: &[usize], change_kind: RuleChangeKind) {
         #[cfg(test)]
         note_native_rule_value_mutation_for_test();
+        if let Some(mutation) = self.rule_mutation_at_path(rule_path, change_kind) {
+            self.note_exact_rule_mutations(vec![mutation]);
+        } else {
+            self.note_contents_mutation();
+        }
+    }
+
+    fn note_exact_rule_mutations(&self, mutations: Vec<LiveStylesheetRuleMutation>) {
+        debug_assert!(!mutations.is_empty());
         self.note_contents_mutation();
+        let generation = self.cascade_generation();
+        let mut batches = self.cascade_mutations.lock();
+        let batch = batches
+            .last_mut()
+            .expect("a cascade mutation must publish one journal batch");
+        debug_assert_eq!(batch.generation, generation);
+        batch.mutation = LiveStylesheetCascadeMutation::Rules(mutations);
+    }
+
+    fn rule_mutation_at_path(
+        &self,
+        rule_path: &[usize],
+        change_kind: RuleChangeKind,
+    ) -> Option<LiveStylesheetRuleMutation> {
+        let NativeStylesheetRule::Css(rule) = self.native_rule_at_path(rule_path)? else {
+            return None;
+        };
+        let ancestor_path_len = rule_path.len().saturating_sub(1);
+        Some(LiveStylesheetRuleMutation::new(
+            rule,
+            self.css_rule_ancestors_at_path(&rule_path[..ancestor_path_len])?,
+            change_kind,
+        ))
+    }
+
+    fn rule_mutation_for_rule(
+        &self,
+        rule: CssRule,
+        parent_path: &[usize],
+        change_kind: RuleChangeKind,
+    ) -> Option<LiveStylesheetRuleMutation> {
+        Some(LiveStylesheetRuleMutation::new(
+            rule,
+            self.css_rule_ancestors_at_path(parent_path)?,
+            change_kind,
+        ))
+    }
+
+    fn css_rule_ancestors_at_path(&self, path: &[usize]) -> Option<Vec<CssRule>> {
+        let mut ancestors = Vec::with_capacity(path.len());
+        for depth in 1..=path.len() {
+            let NativeStylesheetRule::Css(rule) = self.native_rule_at_path(&path[..depth])? else {
+                return None;
+            };
+            ancestors.push(rule);
+        }
+        Some(ancestors)
     }
 
     fn parse_declaration_block(

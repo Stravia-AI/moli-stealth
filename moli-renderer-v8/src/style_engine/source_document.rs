@@ -8,12 +8,12 @@ use super::{
     StyleSourceId, StyleViewport,
     document_world::DocumentStyleWorld,
     request::RetainedSourceDependencyRequestPlan,
-    retained::moli_user_agent_source_dependency_summary,
     source::adopted::AdoptedStyleSheetSources,
     source::linked::LinkedStylesheetSources,
     source_lifecycle::{StyleSourceDocumentContext, StyleSourceLifecycleReport},
     source_owner_text::OwnerStyleSheetSources,
     source_record::{MatchingStyleDependencySource, RetainedStylesheetSourceRecord},
+    stylesheet::moli_user_agent_source_dependency_summary,
 };
 
 pub(super) struct DocumentStyleSourceStores<'a> {

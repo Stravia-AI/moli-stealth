@@ -7856,9 +7856,9 @@ fn rendered_style_facts_refresh_after_synchronous_mutations() {
 }
 
 #[test]
-fn inner_text_reuses_prepared_style_inputs_within_each_synchronous_read() {
+fn inner_text_reuses_retained_style_world_across_synchronous_reads() {
     let mut vm = new_parsed_test_vm(
-        "https://inner-text-prepared-style-inputs.test/",
+        "https://inner-text-retained-style-world.test/",
         r#"<!doctype html><html><head><style>
           .upper { text-transform: uppercase; }
         </style></head><body><div id="target"></div></body></html>"#,
@@ -7873,30 +7873,30 @@ for (let index = 0; index < 128; index++) {
 }
 "#,
     )
-    .expect("innerText prepared-input fixture should initialize");
+    .expect("innerText retained-style fixture should initialize");
 
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_before = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_before = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_before = vm.layout_pass_observability_for_test();
     let first = vm
         .eval(
             "(() => { const text = target.innerText; return [text.length, text[0], text[127]].join('|'); })()",
         )
         .expect("first innerText read should evaluate");
-    let builds_after_first = vm
+    let update_materializations_after_first = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_first = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_first = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_first = vm.layout_pass_observability_for_test();
 
     let repeated = vm
@@ -7904,14 +7904,14 @@ for (let index = 0; index < 128; index++) {
             "(() => { const text = target.innerText; return [text.length, text[0], text[127]].join('|'); })()",
         )
         .expect("repeated innerText read should evaluate");
-    let builds_after_repeated = vm
+    let update_materializations_after_repeated = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_repeated = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_repeated = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_repeated = vm.layout_pass_observability_for_test();
 
     let second = vm
@@ -7919,14 +7919,14 @@ for (let index = 0; index < 128; index++) {
             "target.className = 'upper'; (() => { const text = target.innerText; return [text.length, text[0], text[127]].join('|'); })()",
         )
         .expect("mutated innerText read should evaluate");
-    let builds_after_second = vm
+    let update_materializations_after_second = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_second = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_second = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_second = vm.layout_pass_observability_for_test();
 
     let stylesheet_mutation = vm
@@ -7934,14 +7934,14 @@ for (let index = 0; index < 128; index++) {
             "document.querySelector('style').textContent = '.upper { text-transform: lowercase; }'; (() => { const text = target.innerText; return [text.length, text[0], text[127]].join('|'); })()",
         )
         .expect("stylesheet-mutated innerText read should evaluate");
-    let builds_after_stylesheet_mutation = vm
+    let update_materializations_after_stylesheet_mutation = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_stylesheet_mutation = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_stylesheet_mutation = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_stylesheet_mutation = vm.layout_pass_observability_for_test();
 
     assert_eq!(first, "128|a|a");
@@ -7960,44 +7960,45 @@ for (let index = 0; index < 128; index++) {
     assert_eq!(layout_after_second.1, layout_after_first.1);
     assert_eq!(layout_after_stylesheet_mutation.1, layout_after_first.1);
     assert_eq!(
-        builds_after_first.saturating_sub(builds_before),
+        update_materializations_after_first.saturating_sub(update_materializations_before),
         1,
-        "one innerText traversal should prepare one document input"
+        "one cold innerText traversal should materialize the initial style world"
     );
     assert_eq!(
-        builds_after_repeated.saturating_sub(builds_after_first),
+        update_materializations_after_repeated.saturating_sub(update_materializations_after_first),
         0,
-        "an unchanged generation should reuse its document input across getters"
+        "an unchanged generation should reuse its retained style world across getters"
     );
     assert_eq!(
-        builds_after_second.saturating_sub(builds_after_repeated),
-        1,
-        "a later innerText read must prepare one fresh input after mutation"
-    );
-    assert_eq!(
-        builds_after_stylesheet_mutation.saturating_sub(builds_after_second),
-        1,
-        "a stylesheet mutation must invalidate the cross-getter document input"
-    );
-    assert_eq!(
-        key_builds_after_first.saturating_sub(key_builds_before),
-        1,
-        "one traversal must hash one retained-system key, not one key per descendant"
-    );
-    assert_eq!(
-        key_builds_after_repeated.saturating_sub(key_builds_after_first),
+        update_materializations_after_second.saturating_sub(update_materializations_after_repeated),
         0,
-        "an unchanged generation should reuse the prepared retained-system key"
+        "an element-only mutation must reuse the retained stylesheet world"
     );
     assert_eq!(
-        key_builds_after_second.saturating_sub(key_builds_after_repeated),
+        update_materializations_after_stylesheet_mutation
+            .saturating_sub(update_materializations_after_second),
         1,
-        "a style mutation must prepare one fresh retained-system key"
+        "a stylesheet mutation should materialize one incremental update"
     );
     assert_eq!(
-        key_builds_after_stylesheet_mutation.saturating_sub(key_builds_after_second),
+        full_snapshots_after_first.saturating_sub(full_snapshots_before),
         1,
-        "a stylesheet mutation must prepare one fresh retained-system key"
+        "one cold traversal should build one full style-world snapshot"
+    );
+    assert_eq!(
+        full_snapshots_after_repeated.saturating_sub(full_snapshots_after_first),
+        0,
+        "an unchanged generation should not rebuild a full style-world snapshot"
+    );
+    assert_eq!(
+        full_snapshots_after_second.saturating_sub(full_snapshots_after_repeated),
+        0,
+        "an element-only mutation must not build a full style-world snapshot"
+    );
+    assert_eq!(
+        full_snapshots_after_stylesheet_mutation.saturating_sub(full_snapshots_after_second),
+        0,
+        "an ordinary stylesheet mutation must stay on the incremental update path"
     );
 }
 
@@ -8045,35 +8046,35 @@ fn inner_text_new_sources_wait_for_a_fresh_paint_layout() {
 }
 
 #[test]
-fn inner_text_document_input_cache_tracks_emulated_media_changes() {
+fn inner_text_updates_device_in_place_without_full_style_world_snapshots() {
     let mut vm = new_parsed_test_vm(
-        "https://inner-text-emulated-media-inputs.test/",
+        "https://inner-text-emulated-media-style-world.test/",
         r#"<!doctype html><html><head><style>
           @media print { #target { text-transform: uppercase; } }
         </style></head><body><div id="target">mixed</div></body></html>"#,
     );
 
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_before = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_before = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     assert_eq!(
         vm.eval("document.getElementById('target').innerText")
             .expect("screen innerText read should evaluate"),
         "mixed"
     );
-    let builds_after_screen = vm
+    let update_materializations_after_screen = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_screen = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_screen = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
         media: Some("print".to_owned()),
@@ -8084,14 +8085,14 @@ fn inner_text_document_input_cache_tracks_emulated_media_changes() {
             .expect("print innerText read should evaluate"),
         "MIXED"
     );
-    let builds_after_print = vm
+    let update_materializations_after_print = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_print = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_print = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
     assert_eq!(
@@ -8099,33 +8100,47 @@ fn inner_text_document_input_cache_tracks_emulated_media_changes() {
             .expect("restored screen innerText read should evaluate"),
         "mixed"
     );
-    let builds_after_restore = vm
+    let update_materializations_after_restore = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_restore = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_restore = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
-    assert_eq!(builds_after_screen.saturating_sub(builds_before), 1);
-    assert_eq!(builds_after_print.saturating_sub(builds_after_screen), 1);
-    assert_eq!(builds_after_restore.saturating_sub(builds_after_print), 1);
-    assert_eq!(key_builds_after_screen.saturating_sub(key_builds_before), 1);
     assert_eq!(
-        key_builds_after_print.saturating_sub(key_builds_after_screen),
+        update_materializations_after_screen.saturating_sub(update_materializations_before),
         1
     );
     assert_eq!(
-        key_builds_after_restore.saturating_sub(key_builds_after_print),
+        update_materializations_after_print.saturating_sub(update_materializations_after_screen),
         1
+    );
+    assert_eq!(
+        update_materializations_after_restore.saturating_sub(update_materializations_after_print),
+        1
+    );
+    assert_eq!(
+        full_snapshots_after_screen.saturating_sub(full_snapshots_before),
+        1
+    );
+    assert_eq!(
+        full_snapshots_after_print.saturating_sub(full_snapshots_after_screen),
+        0,
+        "a device update must preserve the retained style world"
+    );
+    assert_eq!(
+        full_snapshots_after_restore.saturating_sub(full_snapshots_after_print),
+        0,
+        "restoring the device must remain an incremental update"
     );
 }
 
 #[test]
-fn inner_text_document_input_cache_tracks_document_url_changes() {
+fn inner_text_replaces_style_world_after_document_url_change() {
     let mut vm = new_parsed_test_vm(
-        "https://inner-text-document-url-inputs.test/start/index.html",
+        "https://inner-text-document-url-style-world.test/start/index.html",
         r#"<!doctype html><html><head>
           <base href="https://cdn.test/stable-base/">
           <style>#target { text-transform: uppercase; }</style>
@@ -8137,14 +8152,14 @@ fn inner_text_document_input_cache_tracks_document_url_changes() {
             .expect("initial innerText read should evaluate"),
         "MIXED"
     );
-    let builds_after_initial = vm
+    let update_materializations_after_initial = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_initial = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_initial = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     assert_eq!(
         vm.eval(
@@ -8153,44 +8168,46 @@ fn inner_text_document_input_cache_tracks_document_url_changes() {
         .expect("innerText after same-document URL mutation should evaluate"),
         "MIXED"
     );
-    let builds_after_url_change = vm
+    let update_materializations_after_url_change = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_url_change = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_url_change = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     assert_eq!(
         vm.eval("document.getElementById('target').innerText")
             .expect("repeated innerText after URL mutation should evaluate"),
         "MIXED"
     );
-    let builds_after_repeated = vm
+    let update_materializations_after_repeated = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_repeated = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_repeated = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     assert_eq!(
-        builds_after_url_change.saturating_sub(builds_after_initial),
+        update_materializations_after_url_change
+            .saturating_sub(update_materializations_after_initial),
         1
     );
     assert_eq!(
-        key_builds_after_url_change.saturating_sub(key_builds_after_initial),
+        full_snapshots_after_url_change.saturating_sub(full_snapshots_after_initial),
         1,
-        "a path-changing history mutation must not reuse a prepared key for the old document URL"
+        "a path-changing history mutation is an explicit style-world replacement boundary"
     );
     assert_eq!(
-        builds_after_repeated.saturating_sub(builds_after_url_change),
+        update_materializations_after_repeated
+            .saturating_sub(update_materializations_after_url_change),
         0
     );
     assert_eq!(
-        key_builds_after_repeated.saturating_sub(key_builds_after_url_change),
+        full_snapshots_after_repeated.saturating_sub(full_snapshots_after_url_change),
         0
     );
 }
@@ -8198,7 +8215,7 @@ fn inner_text_document_input_cache_tracks_document_url_changes() {
 #[test]
 fn inner_text_reuses_one_document_style_world_across_shadow_scopes() {
     let mut vm = new_parsed_test_vm(
-        "https://inner-text-shadow-style-inputs.test/",
+        "https://inner-text-shadow-style-world.test/",
         r#"<!doctype html><html><body>
           <div id="host"><span>assigned</span><span slot="missing">hidden</span></div>
         </body></html>"#,
@@ -8210,40 +8227,40 @@ host.attachShadow({mode: 'open'}).innerHTML =
   '<style>::slotted(span) { text-transform: uppercase; }</style><slot></slot>';
 "#,
     )
-    .expect("shadow innerText prepared-input fixture should initialize");
-    let builds_before = vm
+    .expect("shadow innerText retained-style fixture should initialize");
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_before = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_before = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_before = vm.layout_pass_observability_for_test();
 
     let first_text = vm
         .eval("host.innerText")
         .expect("shadow innerText read should evaluate");
-    let builds_after_first = vm
+    let update_materializations_after_first = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_first = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_first = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_first = vm.layout_pass_observability_for_test();
     let second_text = vm
         .eval("host.innerText")
         .expect("repeated shadow innerText read should evaluate");
-    let builds_after_second = vm
+    let update_materializations_after_second = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_second = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_second = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
     let layout_after_second = vm.layout_pass_observability_for_test();
 
     assert_eq!(first_text, "ASSIGNED");
@@ -8252,29 +8269,30 @@ host.attachShadow({mode: 'open'}).innerHTML =
     assert_eq!(layout_after_first.1, layout_before.1 + 1);
     assert_eq!(layout_after_second.1, layout_after_first.1);
     assert_eq!(
-        builds_after_first.saturating_sub(builds_before),
+        update_materializations_after_first.saturating_sub(update_materializations_before),
         1,
         "layout and rendered-text collection must share one document TreeScope universe"
     );
     assert_eq!(
-        builds_after_second.saturating_sub(builds_after_first),
+        update_materializations_after_second.saturating_sub(update_materializations_after_first),
         0,
-        "an unchanged document TreeScope universe must reuse its prepared input"
+        "an unchanged document TreeScope universe must reuse its retained style world"
     );
     assert_eq!(
-        key_builds_after_first.saturating_sub(key_builds_before),
+        full_snapshots_after_first.saturating_sub(full_snapshots_before),
         1,
-        "one observation must build one retained-system key for the document"
+        "one cold observation must build one full style-world snapshot"
     );
     assert_eq!(
-        key_builds_after_second.saturating_sub(key_builds_after_first),
+        full_snapshots_after_second.saturating_sub(full_snapshots_after_first),
         0,
-        "the rendered-text collector must reuse the unchanged document key"
+        "the rendered-text collector must reuse the unchanged retained style world"
     );
 }
 
 #[test]
 fn paint_layout_reuses_one_style_world_across_many_empty_shadow_roots() {
+    crate::style_engine::reset_author_source_text_parse_count_for_test();
     let mut vm = new_parsed_test_vm(
         "https://paint-empty-shadow-style-world.test/",
         r#"<!doctype html><html><head><style>
@@ -8303,28 +8321,46 @@ for (let index = 0; index < 64; index += 1) {
 
     let document = vm.document_handle_for_test();
     let rebuilds_before = vm.retained_style_system_rebuild_count_for_document_for_test(document);
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_before = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_before = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
+    let document_scopes_before = vm
+        ._context_host
+        .borrow()
+        .style_world_document_scope_materializations_for_test();
+    let shadow_scopes_before = vm
+        ._context_host
+        .borrow()
+        .style_world_shadow_scope_materializations_for_test();
 
     vm.screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 600, 1.0))
         .expect("first empty shadow-root paint layout should succeed")
         .expect("the fixture should have a layout root");
     let rebuilds_after_first =
         vm.retained_style_system_rebuild_count_for_document_for_test(document);
-    let builds_after_first = vm
+    let update_materializations_after_first = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_after_first = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_after_first = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
+    let document_scopes_after_first = vm
+        ._context_host
+        .borrow()
+        .style_world_document_scope_materializations_for_test();
+    let shadow_scopes_after_first = vm
+        ._context_host
+        .borrow()
+        .style_world_shadow_scope_materializations_for_test();
+    let updates_after_first = vm.retained_style_system_update_count_for_document_for_test(document);
+    let parses_after_first = crate::style_engine::author_source_text_parse_count_for_test();
 
     vm.screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 600, 1.0))
         .expect("second empty shadow-root paint layout should succeed")
@@ -8340,19 +8376,59 @@ for (let index = 0; index < 64; index += 1) {
         rebuilds_after_first,
         "an unchanged fresh paint layout must retain the same document style system",
     );
-    assert_eq!(builds_after_first.saturating_sub(builds_before), 1);
-    assert_eq!(key_builds_after_first.saturating_sub(key_builds_before), 1);
     assert_eq!(
-        vm._context_host
-            .borrow()
-            .stylo_computed_style_input_builds_for_test(),
-        builds_after_first,
+        update_materializations_after_first.saturating_sub(update_materializations_before),
+        1
+    );
+    assert_eq!(
+        full_snapshots_after_first.saturating_sub(full_snapshots_before),
+        1
+    );
+    assert_eq!(
+        document_scopes_after_first.saturating_sub(document_scopes_before),
+        1,
+        "the initial paint should materialize the Document scope once"
+    );
+    assert_eq!(
+        shadow_scopes_after_first.saturating_sub(shadow_scopes_before),
+        72,
+        "64 direct and 8 nested ShadowRoots should each materialize once"
     );
     assert_eq!(
         vm._context_host
             .borrow()
-            .stylo_style_system_key_builds_for_test(),
-        key_builds_after_first,
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_first,
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_full_snapshots_for_test(),
+        full_snapshots_after_first,
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_document_scope_materializations_for_test(),
+        document_scopes_after_first,
+        "a clean screenshot must not recollect Document stylesheets"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_shadow_scope_materializations_for_test(),
+        shadow_scopes_after_first,
+        "a clean screenshot must not recollect ShadowRoot stylesheets"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates_after_first,
+        "a clean screenshot must not flush the retained style world"
+    );
+    assert_eq!(
+        crate::style_engine::author_source_text_parse_count_for_test(),
+        parses_after_first,
+        "a clean screenshot must not parse author stylesheets"
     );
 }
 

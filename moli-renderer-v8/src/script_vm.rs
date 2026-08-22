@@ -2601,32 +2601,49 @@ impl ScriptVm {
         let Some(root) = root else {
             return;
         };
-        if !self
+        let Some(resources) = crate::layout_renderer::current_native_stylesheet_resources(
+            &self._context_host.borrow(),
+            root,
+        ) else {
+            return;
+        };
+        tracing::trace!(
+            stylesheet_import_dependency_count = resources.imports().len(),
+            stylesheet_web_font_dependency_count = resources.web_fonts().len(),
+            "observed typed stylesheet resource manifest"
+        );
+        let generation = resources.generation();
+        if self
             ._context_host
             .borrow()
-            .take_document_web_font_sources_dirty()
+            .document_web_font_resources_are_current(generation)
         {
             return;
         }
-        let resources = crate::layout_renderer::current_native_stylesheet_web_font_resources(
-            &self._context_host.borrow(),
-            root,
-        );
+        let resources = resources.web_fonts().to_vec();
         self._context_host
             .borrow()
             .retain_document_web_font_slots(resources.iter());
         if resources.is_empty() {
+            self._context_host
+                .borrow()
+                .publish_document_web_font_resource_generation(generation);
             return;
         }
+        let resource_count = resources.len();
         let bound = {
             let mut host = self._context_host.borrow_mut();
-            resources
+            let bound = resources
                 .into_iter()
                 .filter_map(|resource| {
                     host.accept_current_main_stylesheet_subresource_load_delay()
                         .map(|binding| (binding, resource))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            if bound.len() == resource_count {
+                host.publish_document_web_font_resource_generation(generation);
+            }
+            bound
         };
         self.start_stylesheet_subresource_fetches(bound);
     }
@@ -2878,6 +2895,26 @@ impl ScriptVm {
         self._context_host
             .borrow()
             .retained_style_system_rebuild_count_for_document_for_test(document)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_style_system_update_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self._context_host
+            .borrow()
+            .retained_style_system_update_count_for_document_for_test(document)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_stylist_identity_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self._context_host
+            .borrow()
+            .retained_stylist_identity_for_document_for_test(document)
     }
 
     #[cfg(test)]

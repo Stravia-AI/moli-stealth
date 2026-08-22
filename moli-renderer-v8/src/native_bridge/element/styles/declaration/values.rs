@@ -1,9 +1,6 @@
 use crate::css_custom_function::custom_css_projection_at_rules;
-use crate::style_engine::link_rel_qualifies_as_stylesheet;
-use crate::stylesheet_blocking::link_rel_includes_token;
 use crate::{
-    context_bootstrap::evaluate_match_media_query_list_with_viewport,
-    dom::native::{DomHost, Node},
+    dom::native::Node,
     {
         css_style::{
             CssStyleEntry as StyleEntry, background_shorthand_color, border_shorthand_color,
@@ -18,23 +15,25 @@ use crate::{
             ClientRect, observable_bounding_client_rect, observable_bounding_client_rects,
         },
         style_engine::{
-            ComputedDisplayKind, ComputedRenderedStyleFacts, StyleSourceId, StyleViewport,
-            StyloAnonymousBoxKind, StyloComputedStyleInputs, StyloComputedStyleSnapshot,
-            StyloDocumentComputedStyleInputCacheKey, StyloPreparedComputedStyleInputs,
-            StyloStyleEnvironment, StyloStylesheetSource, computed_property_is_queryable,
+            ComputedDisplayKind, ComputedRenderedStyleFacts, FullStyleWorldSnapshot, StyleViewport,
+            StylesheetResourceSnapshot, StyloAnonymousBoxKind, StyloComputedStyleSnapshot,
+            StyloStylesheetSource, computed_property_is_queryable,
         },
     },
 };
 use cssparser::{Parser, ParserInput, Token, serialize_identifier, serialize_string};
 use moli_selector::html_directionality;
-use moli_web_mime::is_stylesheet_type_attribute;
-use std::{
-    collections::{HashMap, HashSet},
-    rc::Rc,
-};
+use std::collections::{HashMap, HashSet};
 use style::{properties::ComputedValues, servo_arc::Arc as ServoArc, stylesheets::CssRuleType};
 
 use super::super::super::super::JsContextHost;
+use super::observation::{
+    ComputedStyleRead, RetainedStyleObservation, StyleComputationContext, StyleObservation,
+};
+use super::style_world::{
+    active_stylesheet_handles, style_base_url, stylesheet_source_document_for_handle,
+    stylesheet_text,
+};
 use super::{
     StyleMode, all_shorthand_applies_to, animation_shorthand_longhands, css_wide_keyword,
     font_variant_longhands, inline_state_property_priority_with_pdb,
@@ -44,248 +43,11 @@ use super::{
     text_decoration_shorthand_longhands, transition_shorthand_longhands,
 };
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(in crate::native_bridge::element::styles) struct StyleComputationContext {
-    pub(in crate::native_bridge::element::styles) viewport: StyleViewport,
-    pub(in crate::native_bridge::element::styles) read_document: Option<DomHandle>,
-}
-
-impl StyleComputationContext {
-    pub(in crate::native_bridge::element::styles) const fn new(viewport: StyleViewport) -> Self {
-        Self {
-            viewport,
-            read_document: None,
-        }
-    }
-
-    pub(in crate::native_bridge::element::styles) const fn viewport_width(self) -> Option<f64> {
-        self.viewport.width
-    }
-
-    pub(in crate::native_bridge::element::styles) const fn viewport(self) -> StyleViewport {
-        self.viewport
-    }
-
-    pub(in crate::native_bridge::element::styles) const fn with_read_document(
-        mut self,
-        read_document: Option<DomHandle>,
-    ) -> Self {
-        self.read_document = read_document;
-        self
-    }
-
-    fn resolved_read_document(self, runtime: &JsContextHost, handle: DomHandle) -> DomHandle {
-        self.read_document
-            .or_else(|| runtime.dom_host().owner_document_handle(handle))
-            .unwrap_or_else(|| runtime.document_handle())
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct StyloComputedStyleInputKey {
-    source_document: Option<DomHandle>,
-    tree_scope_roots: Vec<DomHandle>,
-}
-
-#[cfg(debug_assertions)]
-#[derive(Clone, Copy)]
-struct ComputedStyleReadInvariant {
-    dom_version: u64,
-    source_set_generation: u64,
-    retained_style_system_generation: u64,
-}
-
-/// Prepared style inputs shared by one synchronous rendered-state observation.
-///
-/// The scope never crosses a JavaScript callback, so DOM and stylesheet
-/// mutations cannot occur between reads. Each Document receives one immutable
-/// input snapshot containing its complete connected TreeScope universe.
-pub(crate) struct ComputedStyleReadScope<'a> {
-    runtime: &'a JsContextHost,
-    context: StyleComputationContext,
-    drained_document: Option<DomHandle>,
-    additional_drained_documents: Vec<DomHandle>,
-    primary_input: Option<(
-        StyloComputedStyleInputKey,
-        Rc<StyloPreparedComputedStyleInputs>,
-    )>,
-    additional_inputs: Vec<(
-        StyloComputedStyleInputKey,
-        Rc<StyloPreparedComputedStyleInputs>,
-    )>,
-    #[cfg(debug_assertions)]
-    invariants: Vec<(DomHandle, ComputedStyleReadInvariant)>,
-}
-
-impl<'a> ComputedStyleReadScope<'a> {
-    pub(crate) fn new(runtime: &'a JsContextHost) -> Self {
-        Self::new_with_context(
-            runtime,
-            StyleComputationContext::new(runtime.style_viewport()),
-        )
-    }
-
-    /// Creates one synchronous style-observation scope for an exact document
-    /// viewport selected by layout.
-    ///
-    /// Embedded documents cannot derive their used viewport from the iframe's
-    /// authored width/height alone: parent layout may change it through
-    /// box-sizing, padding, constraints, flex/grid sizing, or transforms. The
-    /// scoped context keeps viewport units and media queries aligned with the
-    /// numeric layout demand without mutating retained document state.
-    pub(crate) fn new_for_document_viewport(
-        runtime: &'a JsContextHost,
-        document: DomHandle,
-        viewport: StyleViewport,
-    ) -> Self {
-        Self::new_with_context(
-            runtime,
-            StyleComputationContext::new(viewport).with_read_document(Some(document)),
-        )
-    }
-
-    fn new_with_context(runtime: &'a JsContextHost, context: StyleComputationContext) -> Self {
-        Self {
-            runtime,
-            context,
-            drained_document: None,
-            additional_drained_documents: Vec::new(),
-            primary_input: None,
-            additional_inputs: Vec::new(),
-            #[cfg(debug_assertions)]
-            invariants: Vec::new(),
-        }
-    }
-
-    pub(crate) const fn runtime(&self) -> &'a JsContextHost {
-        self.runtime
-    }
-
-    pub(crate) fn read(&mut self, handle: DomHandle) -> ComputedStyleRead<'a> {
-        let read_document = self.context.resolved_read_document(self.runtime, handle);
-        if self.drained_document != Some(read_document)
-            && !self.additional_drained_documents.contains(&read_document)
-        {
-            if self.drained_document.is_none() {
-                self.drained_document = Some(read_document);
-            } else {
-                self.additional_drained_documents.push(read_document);
-            }
-            self.runtime
-                .drain_pending_style_invalidations_for_computed_style_read_for_document(
-                    read_document,
-                );
-        }
-
-        let source_document = stylesheet_source_document_for_handle(self.runtime, handle);
-        let prepared_inputs = self.prepared_inputs(source_document);
-        let stylo_style = self
-            .runtime
-            .computed_style_snapshot_from_stylo_with_prepared_inputs(
-                handle,
-                prepared_inputs.as_ref(),
-                read_document,
-            );
-        #[cfg(debug_assertions)]
-        self.verify_stable_style_world_after_read(source_document);
-        ComputedStyleRead {
-            runtime: self.runtime,
-            handle,
-            context: self.context,
-            prepared_inputs,
-            stylo_style,
-        }
-    }
-
-    fn prepared_inputs(
-        &mut self,
-        source_document: Option<DomHandle>,
-    ) -> Rc<StyloPreparedComputedStyleInputs> {
-        if let Some((prepared_key, inputs)) = self.primary_input.as_ref()
-            && prepared_key.source_document == source_document
-        {
-            return Rc::clone(inputs);
-        }
-        if let Some((_, inputs)) = self
-            .additional_inputs
-            .iter()
-            .find(|(prepared_key, _)| prepared_key.source_document == source_document)
-        {
-            return Rc::clone(inputs);
-        }
-
-        let input_key = stylo_computed_style_input_key_for_document(self.runtime, source_document);
-        let inputs = stylo_prepared_computed_style_inputs_for_observation_scope(
-            self.runtime,
-            &input_key,
-            self.context,
-        );
-        if self.primary_input.is_none() {
-            self.primary_input = Some((input_key, Rc::clone(&inputs)));
-        } else {
-            self.additional_inputs.push((input_key, Rc::clone(&inputs)));
-        }
-        inputs
-    }
-
-    #[cfg(debug_assertions)]
-    fn verify_stable_style_world_after_read(&mut self, source_document: Option<DomHandle>) {
-        let Some(document) = source_document else {
-            return;
-        };
-        let (dom_version, source_set_generation, retained_style_system_generation) =
-            self.runtime.computed_style_read_invariant_state(document);
-        let current = ComputedStyleReadInvariant {
-            dom_version,
-            source_set_generation,
-            retained_style_system_generation,
-        };
-        let Some((_, previous)) = self
-            .invariants
-            .iter_mut()
-            .find(|(candidate, _)| *candidate == document)
-        else {
-            self.invariants.push((document, current));
-            return;
-        };
-        if previous.dom_version == current.dom_version
-            && previous.source_set_generation == current.source_set_generation
-        {
-            debug_assert_eq!(
-                current.retained_style_system_generation, previous.retained_style_system_generation,
-                "one ComputedStyleReadScope rebuilt the retained style system without a DOM or style-source mutation",
-            );
-        } else {
-            *previous = current;
-        }
-    }
-}
-
-impl Drop for ComputedStyleReadScope<'_> {
-    fn drop(&mut self) {
-        if let Some((key, inputs)) = self.primary_input.as_ref() {
-            cache_stylo_computed_style_inputs_after_observation(
-                self.runtime,
-                key,
-                self.context,
-                inputs,
-            );
-        }
-        for (key, inputs) in &self.additional_inputs {
-            cache_stylo_computed_style_inputs_after_observation(
-                self.runtime,
-                key,
-                self.context,
-                inputs,
-            );
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 struct StyleResolutionContext<'a> {
     computation: StyleComputationContext,
-    inputs: Option<&'a StyloComputedStyleInputs>,
+    inputs: Option<&'a FullStyleWorldSnapshot>,
+    observation: Option<&'a dyn RetainedStyleObservation>,
     retained_style: Option<(DomHandle, &'a StyloComputedStyleSnapshot)>,
 }
 
@@ -294,31 +56,65 @@ impl<'a> StyleResolutionContext<'a> {
         Self {
             computation,
             inputs: None,
+            observation: None,
             retained_style: None,
         }
     }
 
     const fn prepared(
         computation: StyleComputationContext,
-        inputs: &'a StyloComputedStyleInputs,
+        inputs: &'a FullStyleWorldSnapshot,
     ) -> Self {
         Self {
             computation,
             inputs: Some(inputs),
+            observation: None,
             retained_style: None,
         }
     }
 
     const fn retained(
         computation: StyleComputationContext,
-        inputs: &'a StyloComputedStyleInputs,
+        inputs: &'a FullStyleWorldSnapshot,
         handle: DomHandle,
         style: &'a StyloComputedStyleSnapshot,
     ) -> Self {
         Self {
             computation,
             inputs: Some(inputs),
+            observation: None,
             retained_style: Some((handle, style)),
+        }
+    }
+
+    const fn retained_without_inputs(
+        computation: StyleComputationContext,
+        handle: DomHandle,
+        style: &'a StyloComputedStyleSnapshot,
+    ) -> Self {
+        Self {
+            computation,
+            inputs: None,
+            observation: None,
+            retained_style: Some((handle, style)),
+        }
+    }
+
+    const fn observed(
+        computation: StyleComputationContext,
+        inputs: Option<&'a FullStyleWorldSnapshot>,
+        observation: &'a dyn RetainedStyleObservation,
+        handle: DomHandle,
+        style: Option<&'a StyloComputedStyleSnapshot>,
+    ) -> Self {
+        Self {
+            computation,
+            inputs,
+            observation: Some(observation),
+            retained_style: match style {
+                Some(style) => Some((handle, style)),
+                None => None,
+            },
         }
     }
 
@@ -338,6 +134,19 @@ impl<'a> StyleResolutionContext<'a> {
                 self.retained_style
                     .filter(|(retained_handle, _)| *retained_handle == handle)
                     .map(|(_, style)| style),
+            );
+        }
+        if let Some(observation) = self.observation
+            && let Some(style) = observation.style_snapshot(handle)
+        {
+            return computed_style_property_value_after_style_update(
+                runtime,
+                handle,
+                property,
+                self.computation,
+                None,
+                Some(observation),
+                Some(&style),
             );
         }
         style_property_value_with_context(
@@ -364,20 +173,14 @@ impl<'a> StyleResolutionContext<'a> {
                 self.computation,
             );
         }
+        if let Some(observation) = self.observation {
+            return observation
+                .style_snapshot(handle)
+                .and_then(|style| style.property_value(property))
+                .unwrap_or_default();
+        }
         raw_stylo_computed_style_value(runtime, handle, property)
     }
-}
-
-/// One synchronous computed-style read after the pending style lifecycle has
-/// been drained. Chromium updates style once and lets all properties in the
-/// read observe the same retained ComputedStyle; this is the no-layout-engine
-/// equivalent for Moli's immutable Stylo input snapshot.
-pub(crate) struct ComputedStyleRead<'a> {
-    runtime: &'a JsContextHost,
-    handle: DomHandle,
-    context: StyleComputationContext,
-    prepared_inputs: Rc<StyloPreparedComputedStyleInputs>,
-    stylo_style: Option<StyloComputedStyleSnapshot>,
 }
 
 impl<'a> ComputedStyleRead<'a> {
@@ -391,7 +194,7 @@ impl<'a> ComputedStyleRead<'a> {
         handle: DomHandle,
         context: StyleComputationContext,
     ) -> Self {
-        ComputedStyleReadScope::new_with_context(runtime, context).read(handle)
+        StyleObservation::new_with_context(runtime, context).read(handle)
     }
 
     pub(in crate::native_bridge::element) fn property(&self, property: &str) -> String {
@@ -417,39 +220,26 @@ impl<'a> ComputedStyleRead<'a> {
             .map(StyloComputedStyleSnapshot::computed_values)
     }
 
-    /// Returns the exact stylesheet source snapshots used by this read.
-    ///
-    /// Font resource reconciliation consumes the same immutable source set as
-    /// layout style resolution instead of rescanning live DOM owners through a
-    /// second ordering model. The returned text/base pairs own their data and
-    /// do not escape a borrow of Stylo's retained system.
-    pub(crate) fn stylesheet_source_snapshots(&self) -> Vec<(std::sync::Arc<str>, url::Url)> {
-        let inputs = self.prepared_inputs.inputs();
-        inputs
-            .document_stylesheet_sources
-            .iter()
-            .chain(
-                inputs
-                    .shadow_stylesheet_sources
-                    .iter()
-                    .flat_map(|(_, sources)| sources),
-            )
-            .map(|source| (source.serialized_css_text(), source.base_url().clone()))
-            .collect()
+    /// Returns the typed resource manifest published with this read's exact
+    /// retained stylesheet world. No CSS text is serialized or reparsed.
+    pub(crate) fn stylesheet_resource_snapshot(&self) -> Option<StylesheetResourceSnapshot> {
+        let document = self.observation_inputs.source_document()?;
+        self.runtime
+            .stylesheet_resource_snapshot_for_document(document)
     }
 
     pub(crate) fn pseudo_computed_values(
         &self,
         pseudo_element: &str,
     ) -> Option<ServoArc<ComputedValues>> {
+        self.stylo_style.as_ref()?;
         let read_document = self
             .context
             .resolved_read_document(self.runtime, self.handle);
         self.runtime
-            .computed_pseudo_style_snapshot_from_stylo_with_prepared_inputs(
+            .computed_pseudo_style_snapshot_from_current_observation(
                 self.handle,
                 pseudo_element,
-                self.prepared_inputs.as_ref(),
                 read_document,
             )
             .map(|snapshot| snapshot.computed_values())
@@ -460,27 +250,31 @@ impl<'a> ComputedStyleRead<'a> {
         parent_style: &ComputedValues,
         anonymous_kind: StyloAnonymousBoxKind,
     ) -> Option<ServoArc<ComputedValues>> {
+        self.stylo_style.as_ref()?;
         let read_document = self
             .context
             .resolved_read_document(self.runtime, self.handle);
         self.runtime
-            .computed_anonymous_style_snapshot_from_stylo_with_prepared_inputs(
+            .computed_anonymous_style_snapshot_from_current_observation(
                 self.handle,
                 parent_style,
                 anonymous_kind,
-                self.prepared_inputs.as_ref(),
                 read_document,
             )
             .map(|snapshot| snapshot.computed_values())
     }
 
     fn property_in_prepared_scope(&self, property: &str) -> String {
+        let stylesheet_query_snapshot =
+            computed_property_requires_stylesheet_sources(property, self.stylo_style.as_ref())
+                .then(|| self.observation_inputs.stylesheet_query_snapshot());
         computed_style_property_value_after_style_update(
             self.runtime,
             self.handle,
             property,
             self.context,
-            Some(self.prepared_inputs.inputs()),
+            stylesheet_query_snapshot.as_deref(),
+            Some(self.observation_inputs.as_ref()),
             self.stylo_style.as_ref(),
         )
     }
@@ -497,15 +291,20 @@ impl<'a> ComputedStyleRead<'a> {
             .context
             .resolved_read_document(self.runtime, self.handle);
         self.runtime
-            .computed_style_property_value_from_stylo(
+            .computed_pseudo_style_snapshot_from_current_observation(
                 self.handle,
-                &property,
-                Some(pseudo_element),
-                self.prepared_inputs.inputs(),
+                pseudo_element,
                 read_document,
-                self.context.viewport,
             )
+            .and_then(|style| style.resolved_property_value(&property))
             .unwrap_or_default()
+    }
+
+    fn raw_primary_property(&self, property: &str) -> Option<String> {
+        let property = canonical_computed_cssom_query_property_name(property)?;
+        self.stylo_style
+            .as_ref()
+            .and_then(|style| style.property_value(&property))
     }
 
     pub(in crate::native_bridge::element::styles) fn custom_property_names(&self) -> Vec<String> {
@@ -530,160 +329,6 @@ impl<'a> ComputedStyleRead<'a> {
     }
 }
 
-fn style_media_matches(runtime: &JsContextHost, handle: DomHandle) -> bool {
-    let Some(media) = runtime.dom_host().get_attribute(handle, "media") else {
-        return true;
-    };
-    let media = media.trim();
-    media.is_empty()
-        || evaluate_match_media_query_list_with_viewport(
-            media,
-            Some(runtime.emulated_media()),
-            runtime.style_viewport(),
-        )
-}
-
-fn style_is_enabled(runtime: &JsContextHost, handle: DomHandle) -> bool {
-    runtime
-        .dom_host()
-        .get_attribute(handle, "disabled")
-        .is_none()
-}
-
-fn link_stylesheet_is_enabled(runtime: &JsContextHost, handle: DomHandle) -> bool {
-    if runtime
-        .dom_host()
-        .get_attribute(handle, "disabled")
-        .is_some()
-    {
-        return false;
-    }
-    let rel = runtime.dom_host().get_attribute(handle, "rel");
-    let Some(rel) = rel.as_deref() else {
-        return false;
-    };
-    let title = runtime.dom_host().get_attribute(handle, "title");
-    if !link_rel_qualifies_as_stylesheet(Some(rel), title.as_deref()) {
-        return false;
-    }
-    !link_rel_includes_token(rel, "alternate")
-        || runtime
-            .dom_host()
-            .node(handle)
-            .and_then(Node::as_element)
-            .is_some_and(|element| element.link_explicitly_enabled())
-}
-
-fn stylesheet_preferred_title(runtime: &JsContextHost, handle: DomHandle) -> Option<String> {
-    runtime
-        .dom_host()
-        .get_attribute(handle, "title")
-        .filter(|title| !title.is_empty())
-}
-
-fn linked_stylesheet_source(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> Option<StyloStylesheetSource> {
-    runtime.linked_stylesheet_source_for_owner(handle)
-}
-
-fn collect_stylesheet_handles(
-    runtime: &JsContextHost,
-    root: DomHandle,
-    include_detached: bool,
-) -> Vec<DomHandle> {
-    let mut handles = runtime
-        .dom_host()
-        .stylesheet_candidate_handles_for_tree_scope(root)
-        .iter()
-        .copied()
-        .filter(|handle| {
-            let Some(element) = runtime.dom_host().node(*handle).and_then(Node::as_element) else {
-                return false;
-            };
-            let style = element.is_inline_style_element() && style_is_enabled(runtime, *handle);
-            let link =
-                element.is_html_element("link") && link_stylesheet_is_enabled(runtime, *handle);
-            (style || link)
-                && (include_detached
-                    || stylesheet_handle_is_active_in_scope(runtime, root, *handle))
-                && is_stylesheet_type_attribute(
-                    runtime.dom_host().get_attribute(*handle, "type").as_deref(),
-                )
-                && style_media_matches(runtime, *handle)
-        })
-        .collect::<Vec<_>>();
-    let preferred_title = handles
-        .iter()
-        .filter_map(|handle| {
-            stylesheet_preferred_title(runtime, *handle).map(|title| (*handle, title))
-        })
-        .min_by_key(|(handle, _)| handle.index())
-        .map(|(_, title)| title);
-    if let Some(preferred_title) = preferred_title {
-        handles.retain(|handle| {
-            stylesheet_preferred_title(runtime, *handle)
-                .is_none_or(|title| title == preferred_title)
-        });
-    }
-    handles
-}
-
-fn stylesheet_handle_is_active_in_scope(
-    runtime: &JsContextHost,
-    root: DomHandle,
-    handle: DomHandle,
-) -> bool {
-    runtime.dom_host().is_connected(handle)
-        || runtime
-            .child_browsing_context_host_for_document_handle(root)
-            .is_some_and(|frame_handle| runtime.dom_host().is_connected(frame_handle))
-        || (runtime.dom_host().is_shadow_root(root)
-            && runtime
-                .dom_host()
-                .shadow_root_host(root)
-                .is_some_and(|host| runtime.dom_host().is_connected(host)))
-}
-
-fn stylesheet_source_for_handle(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> StyloStylesheetSource {
-    let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
-        return StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle));
-    };
-    if element.is_html_element("link") {
-        return linked_stylesheet_source(runtime, handle)
-            .unwrap_or_else(|| {
-                StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle))
-            })
-            .with_source_id(StyleSourceId::linked_style_sheet(
-                runtime.dom_host(),
-                handle,
-            ));
-    }
-    if element.is_inline_style_element()
-        && let Some(source) = runtime.owner_style_sheet_source(handle)
-    {
-        return source.with_source_id(StyleSourceId::owner_style_sheet(runtime.dom_host(), handle));
-    }
-    StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle))
-}
-
-fn cascade_stylesheet_sources_for_handle(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> Vec<StyloStylesheetSource> {
-    vec![stylesheet_source_for_handle(runtime, handle)]
-}
-
-fn stylesheet_text_for_handle(runtime: &JsContextHost, handle: DomHandle) -> String {
-    stylesheet_source_for_handle(runtime, handle)
-        .serialized_css_text()
-        .to_string()
-}
-
 pub(crate) fn css_animation_start_applies(runtime: &JsContextHost, handle: DomHandle) -> bool {
     // This is a yes/no predicate for queuing animationstart, not a computed-style
     // value read. Resolve active animation names once and scan keyframes for the
@@ -705,8 +350,8 @@ pub(crate) fn css_animation_start_applies(runtime: &JsContextHost, handle: DomHa
     let Some(document) = stylesheet_source_document_for_handle(runtime, handle) else {
         return false;
     };
-    for stylesheet in collect_stylesheet_handles(runtime, document, false) {
-        let css_text = stylesheet_text_for_handle(runtime, stylesheet);
+    for stylesheet in active_stylesheet_handles(runtime, document, false) {
+        let css_text = stylesheet_text(runtime, stylesheet);
         if keyframe_has_supported_animation_values(&css_text, &names) {
             return true;
         }
@@ -831,20 +476,13 @@ fn active_css_animation_property_values_with_resolution(
         return None;
     }
     let document = stylesheet_source_document_for_handle(runtime, handle)?;
-    for stylesheet in collect_stylesheet_handles(runtime, document, false) {
-        let css_text = stylesheet_text_for_handle(runtime, stylesheet);
+    for stylesheet in active_stylesheet_handles(runtime, document, false) {
+        let css_text = stylesheet_text(runtime, stylesheet);
         if let Some(values) = keyframe_property_values(&css_text, &names, property) {
             return Some(values);
         }
     }
     None
-}
-
-fn stylesheet_source_document_for_handle(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> Option<DomHandle> {
-    runtime.dom_host().owner_document_handle(handle)
 }
 
 fn active_css_animation_names(runtime: &JsContextHost, handle: DomHandle) -> Vec<String> {
@@ -1105,237 +743,13 @@ fn transform_translate_x_px(value: &str) -> Option<f64> {
     moli_css_parse::parse_px_length(raw, moli_css_parse::UnitlessLength::ZeroOnly)
 }
 
-fn document_scope_stylesheet_sources(
-    runtime: &JsContextHost,
-    source_document: Option<DomHandle>,
-    context: StyleComputationContext,
-) -> Vec<StyloStylesheetSource> {
-    let mut sources = Vec::new();
-    let Some(document) = source_document else {
-        return sources;
-    };
-    for style_handle in
-        collect_stylesheet_handles(runtime, document, context.read_document.is_some())
-    {
-        sources.extend(cascade_stylesheet_sources_for_handle(runtime, style_handle));
-    }
-    sources.extend(
-        runtime
-            .adopted_style_sheet_sources_for_document(document)
-            .iter()
-            .enumerate()
-            .map(|(index, source)| {
-                source
-                    .clone()
-                    .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
-                        document, index,
-                    )))
-            }),
-    );
-    sources
-}
-
-fn shadow_stylesheet_sources(
-    runtime: &JsContextHost,
-    root: DomHandle,
-    context: StyleComputationContext,
-) -> Vec<StyloStylesheetSource> {
-    let mut sources = Vec::new();
-    for style_handle in collect_stylesheet_handles(runtime, root, context.read_document.is_some()) {
-        sources.extend(cascade_stylesheet_sources_for_handle(runtime, style_handle));
-    }
-    let adopted_sources = runtime.shadow_root_adopted_style_sheet_sources(root);
-    sources.extend(
-        adopted_sources
-            .into_iter()
-            .enumerate()
-            .map(|(index, source)| {
-                source.with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
-                    root, index,
-                )))
-            }),
-    );
-    sources
-}
-
-fn stylo_computed_style_inputs(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-    context: StyleComputationContext,
-) -> Rc<StyloComputedStyleInputs> {
-    let key = stylo_computed_style_input_key(runtime, handle);
-    stylo_computed_style_inputs_for_key(runtime, &key, context)
-}
-
-fn stylo_computed_style_input_key(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> StyloComputedStyleInputKey {
-    stylo_computed_style_input_key_for_document(
-        runtime,
-        stylesheet_source_document_for_handle(runtime, handle),
-    )
-}
-
-fn stylo_computed_style_input_key_for_document(
-    runtime: &JsContextHost,
-    source_document: Option<DomHandle>,
-) -> StyloComputedStyleInputKey {
-    StyloComputedStyleInputKey {
-        source_document,
-        tree_scope_roots: source_document
-            .map(|document| connected_shadow_roots_for_document(runtime.dom_host(), document))
-            .unwrap_or_default(),
-    }
-}
-
-fn stylo_computed_style_inputs_for_key(
-    runtime: &JsContextHost,
-    key: &StyloComputedStyleInputKey,
-    context: StyleComputationContext,
-) -> Rc<StyloComputedStyleInputs> {
-    let source_document = key.source_document;
-    let (script_custom_property_base_url, environment) =
-        stylo_computed_style_input_environment(runtime, source_document);
-    stylo_computed_style_inputs_with_environment(
-        runtime,
-        key,
-        context,
-        script_custom_property_base_url,
-        environment,
-    )
-}
-
-fn stylo_prepared_computed_style_inputs_for_observation_scope(
-    runtime: &JsContextHost,
-    key: &StyloComputedStyleInputKey,
-    context: StyleComputationContext,
-) -> Rc<StyloPreparedComputedStyleInputs> {
-    let source_document = key.source_document;
-    let (script_custom_property_base_url, environment) =
-        stylo_computed_style_input_environment(runtime, source_document);
-    if let Some(document) = source_document {
-        let cache_key = StyloDocumentComputedStyleInputCacheKey::new(
-            context.read_document,
-            &key.tree_scope_roots,
-            runtime.document_url(),
-            context.viewport,
-            environment,
-            &script_custom_property_base_url,
-        );
-        if let Some(inputs) = runtime.cached_document_prepared_style_inputs(document, &cache_key) {
-            return inputs;
-        }
-    }
-    let inputs = stylo_computed_style_inputs_with_environment(
-        runtime,
-        key,
-        context,
-        script_custom_property_base_url,
-        environment,
-    );
-    #[cfg(test)]
-    runtime.note_stylo_style_system_key_build_for_test();
-    Rc::new(StyloPreparedComputedStyleInputs::new(
-        runtime.document_url(),
-        inputs,
-        context.viewport,
-    ))
-}
-
-fn cache_stylo_computed_style_inputs_after_observation(
-    runtime: &JsContextHost,
-    key: &StyloComputedStyleInputKey,
-    context: StyleComputationContext,
-    inputs: &Rc<StyloPreparedComputedStyleInputs>,
-) {
-    let Some(document) = key.source_document else {
-        return;
-    };
-    let cache_key = StyloDocumentComputedStyleInputCacheKey::new(
-        context.read_document,
-        &key.tree_scope_roots,
-        runtime.document_url(),
-        context.viewport,
-        inputs.inputs().environment,
-        &inputs.inputs().script_custom_property_base_url,
-    );
-    runtime.cache_document_prepared_style_inputs(document, cache_key, Rc::clone(inputs));
-}
-
-fn stylo_computed_style_input_environment(
-    runtime: &JsContextHost,
-    source_document: Option<DomHandle>,
-) -> (url::Url, StyloStyleEnvironment) {
-    let script_custom_property_base_url = source_document
-        .map(|document| runtime.document_base_url_for_handle(document))
-        .unwrap_or_else(|| url::Url::parse("about:blank").expect("static about:blank URL parses"));
-    let environment = StyloStyleEnvironment::from_emulated_media(runtime.emulated_media());
-    (script_custom_property_base_url, environment)
-}
-
-fn stylo_computed_style_inputs_with_environment(
-    runtime: &JsContextHost,
-    key: &StyloComputedStyleInputKey,
-    context: StyleComputationContext,
-    script_custom_property_base_url: url::Url,
-    environment: StyloStyleEnvironment,
-) -> Rc<StyloComputedStyleInputs> {
-    let source_document = key.source_document;
-    #[cfg(test)]
-    runtime.note_stylo_computed_style_input_build_for_test();
-    let script_custom_property_registrations = source_document
-        .map(|document| runtime.script_css_custom_property_registrations(document))
-        .unwrap_or_default();
-    let mut inputs = StyloComputedStyleInputs {
-        document_stylesheet_sources: document_scope_stylesheet_sources(
-            runtime,
-            source_document,
-            context,
-        ),
-        shadow_stylesheet_sources: Vec::new(),
-        script_custom_property_registrations,
-        script_custom_property_base_url,
-        environment,
-        quirks_mode: source_document
-            .and_then(|document| runtime.dom_host().node(document))
-            .and_then(crate::dom::native::Node::as_document)
-            .map(|document| document.quirks_mode())
-            .unwrap_or(style::context::QuirksMode::NoQuirks),
-    };
-    for root in key.tree_scope_roots.iter().copied() {
-        let sources = shadow_stylesheet_sources(runtime, root, context);
-        inputs.shadow_stylesheet_sources.push((root, sources));
-    }
-    Rc::new(inputs)
-}
-
-fn connected_shadow_roots_for_document(host: &DomHost, document: DomHandle) -> Vec<DomHandle> {
-    let mut roots = host
-        .snapshot_connected_shadow_roots()
-        .into_iter()
-        .filter(|root| host.owner_document_handle(*root) == Some(document))
-        .collect::<Vec<_>>();
-    roots.sort_by_key(|root| root.index());
-    roots
-}
-
 fn stylo_computed_style_value(
     runtime: &JsContextHost,
     handle: DomHandle,
     property: &str,
     context: StyleComputationContext,
 ) -> Option<String> {
-    let inputs = stylo_computed_style_inputs(runtime, handle, context);
-    let read_document = context.resolved_read_document(runtime, handle);
-    runtime.computed_style_property_value_from_stylo(
-        handle,
-        property,
-        None,
-        &inputs,
-        read_document,
-        context.viewport,
-    )
+    ComputedStyleRead::new_with_context(runtime, handle, context).raw_primary_property(property)
 }
 
 fn stylo_computed_pseudo_style_value(
@@ -1345,16 +759,9 @@ fn stylo_computed_pseudo_style_value(
     property: &str,
     context: StyleComputationContext,
 ) -> Option<String> {
-    let inputs = stylo_computed_style_inputs(runtime, handle, context);
-    let read_document = context.resolved_read_document(runtime, handle);
-    runtime.computed_style_property_value_from_stylo(
-        handle,
-        property,
-        Some(pseudo_element),
-        &inputs,
-        read_document,
-        context.viewport,
-    )
+    let read = ComputedStyleRead::new_with_context(runtime, handle, context);
+    let value = read.raw_pseudo_property(pseudo_element, property);
+    (!value.is_empty()).then_some(value)
 }
 
 fn normalized_stylo_computed_style_value(
@@ -1372,7 +779,7 @@ fn normalized_stylo_computed_style_value_with_inputs(
     handle: DomHandle,
     property: &str,
     context: StyleComputationContext,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
 ) -> Option<String> {
     let read_document = context.resolved_read_document(runtime, handle);
     let value = runtime.computed_style_property_value_from_stylo(
@@ -2079,17 +1486,7 @@ fn inherited_computed_style_value(
 }
 
 fn inherited_style_parent(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {
-    if runtime.dom_host().is_shadow_root(handle) {
-        return runtime.dom_host().shadow_root_host(handle);
-    }
-    let parent = runtime
-        .dom_host()
-        .node(handle)
-        .and_then(Node::parent_node)?;
-    if runtime.dom_host().is_shadow_root(parent) {
-        return runtime.dom_host().shadow_root_host(parent);
-    }
-    Some(parent)
+    flat_tree_element_parent(runtime, handle)
 }
 
 pub(crate) fn style_property_value(
@@ -2900,9 +2297,7 @@ fn computed_style_property_value_with_context(
     property: &str,
     context: StyleComputationContext,
 ) -> String {
-    let read_document = context.resolved_read_document(runtime, handle);
-    runtime.drain_pending_style_invalidations_for_computed_style_read_for_document(read_document);
-    computed_style_property_value_after_style_update(runtime, handle, property, context, None, None)
+    ComputedStyleRead::new_with_context(runtime, handle, context).property(property)
 }
 
 fn computed_style_property_value_after_style_update(
@@ -2910,7 +2305,8 @@ fn computed_style_property_value_after_style_update(
     handle: DomHandle,
     property: &str,
     context: StyleComputationContext,
-    prepared_inputs: Option<&StyloComputedStyleInputs>,
+    prepared_inputs: Option<&FullStyleWorldSnapshot>,
+    observation: Option<&dyn RetainedStyleObservation>,
     prepared_style: Option<&StyloComputedStyleSnapshot>,
 ) -> String {
     if !computed_style_applies(runtime, handle) {
@@ -2919,17 +2315,19 @@ fn computed_style_property_value_after_style_update(
     if property == "display" && element_has_hidden_attribute(runtime, handle) {
         return "none".to_owned();
     }
-    let owned_inputs;
-    let inputs = if let Some(inputs) = prepared_inputs {
-        inputs
-    } else {
-        owned_inputs = stylo_computed_style_inputs(runtime, handle, context);
-        owned_inputs.as_ref()
-    };
-    let resolution = if let Some(style) = prepared_style {
-        StyleResolutionContext::retained(context, inputs, handle, style)
-    } else {
+    let inputs = prepared_inputs;
+    let resolution = if let Some(observation) = observation {
+        StyleResolutionContext::observed(context, inputs, observation, handle, prepared_style)
+    } else if let Some(style) = prepared_style {
+        if let Some(inputs) = inputs {
+            StyleResolutionContext::retained(context, inputs, handle, style)
+        } else {
+            StyleResolutionContext::retained_without_inputs(context, handle, style)
+        }
+    } else if let Some(inputs) = inputs {
         StyleResolutionContext::prepared(context, inputs)
+    } else {
+        StyleResolutionContext::independent(context)
     };
     if property == "direction" {
         return computed_direction_with_resolution(runtime, handle, resolution);
@@ -3027,10 +2425,12 @@ fn computed_style_property_value_after_style_update(
                 runtime, handle, property, &value, resolution,
             )
         })
-    } else {
+    } else if let Some(inputs) = inputs {
         normalized_stylo_computed_style_value_with_inputs(
             runtime, handle, property, context, inputs,
         )
+    } else {
+        None
     }
     .or_else(|| computed_style_property_value_from_moli(runtime, handle, property));
     let value = raw_value
@@ -3045,18 +2445,31 @@ fn computed_style_property_value_after_style_update(
     ) {
         return value;
     }
-    let value =
-        resolve_computed_custom_function_calls(runtime, handle, property, &value, inputs, context);
-    resolve_moli_computed_style_value(
-        runtime, handle, property, &value, inputs, context, resolution,
-    )
+    let value = inputs
+        .map(|inputs| {
+            resolve_computed_custom_function_calls(
+                runtime, handle, property, &value, inputs, context,
+            )
+        })
+        .unwrap_or(value);
+    resolve_moli_computed_style_value(runtime, handle, property, &value, context, resolution)
+}
+
+fn computed_property_requires_stylesheet_sources(
+    property: &str,
+    style: Option<&StyloComputedStyleSnapshot>,
+) -> bool {
+    property.starts_with("--")
+        && style
+            .and_then(|style| style.property_value(property))
+            .is_some_and(|value| !dashed_no_arg_function_calls(&value).is_empty())
 }
 
 fn computed_style_property_value_with_prepared_inputs(
     runtime: &JsContextHost,
     handle: DomHandle,
     property: &str,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     context: StyleComputationContext,
     prepared_style: Option<&StyloComputedStyleSnapshot>,
 ) -> String {
@@ -3066,6 +2479,7 @@ fn computed_style_property_value_with_prepared_inputs(
         property,
         context,
         Some(inputs),
+        None,
         prepared_style,
     )
 }
@@ -3619,21 +3033,6 @@ fn css_numeric_context_with_viewport(
     )
 }
 
-fn css_numeric_context_with_viewport_and_inputs(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-    viewport: StyleViewport,
-    inputs: &StyloComputedStyleInputs,
-    context: StyleComputationContext,
-) -> moli_css_parse::CssNumericContext {
-    css_numeric_context_with_viewport_and_resolution(
-        runtime,
-        handle,
-        viewport,
-        StyleResolutionContext::prepared(context, inputs),
-    )
-}
-
 fn css_numeric_context_with_viewport_and_resolution(
     runtime: &JsContextHost,
     handle: DomHandle,
@@ -3646,7 +3045,12 @@ fn css_numeric_context_with_viewport_and_resolution(
         .unwrap_or(16.0);
     let root_font_size = runtime
         .dom_host()
-        .document_element_handle()
+        .owner_document_handle(handle)
+        .and_then(|document| {
+            runtime
+                .dom_host()
+                .document_element_handle_for_document(document)
+        })
         .and_then(|document_element| {
             inline_font_size_px(runtime, document_element).or_else(|| {
                 computed_font_size_px_with_resolution(runtime, document_element, resolution)
@@ -3686,7 +3090,7 @@ fn nearest_size_container_width(
     handle: DomHandle,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
-    let mut current = flat_tree_parent(runtime, handle);
+    let mut current = flat_tree_element_parent(runtime, handle);
     let mut visited = HashSet::new();
     while let Some(candidate) = current {
         if !visited.insert(candidate) {
@@ -3695,7 +3099,7 @@ fn nearest_size_container_width(
         if element_is_size_container(runtime, candidate, resolution) {
             return inline_width_px_with_resolution(runtime, candidate, resolution);
         }
-        current = flat_tree_parent(runtime, candidate);
+        current = flat_tree_element_parent(runtime, candidate);
     }
     None
 }
@@ -5148,7 +4552,7 @@ fn resolve_computed_custom_function_calls(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     context: StyleComputationContext,
 ) -> String {
     if !property.starts_with("--") || !value.contains("--") || !value.contains("()") {
@@ -5231,7 +4635,7 @@ fn computed_custom_property_source_scope(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     viewport_width: Option<f64>,
 ) -> Option<DomHandle> {
     for (root, sources) in inputs.shadow_stylesheet_sources.iter().rev() {
@@ -5266,15 +4670,14 @@ fn stylesheet_sources_compute_custom_property_value(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     scoped_sources: Option<(DomHandle, &[StyloStylesheetSource])>,
     viewport_width: Option<f64>,
 ) -> bool {
-    let mut scoped_inputs = StyloComputedStyleInputs {
+    let mut scoped_inputs = FullStyleWorldSnapshot {
         document_stylesheet_sources: Vec::new(),
         shadow_stylesheet_sources: Vec::new(),
         script_custom_property_registrations: inputs.script_custom_property_registrations.clone(),
-        script_custom_property_base_url: inputs.script_custom_property_base_url.clone(),
         environment: inputs.environment,
         quirks_mode: inputs.quirks_mode,
     };
@@ -5293,10 +4696,9 @@ fn stylesheet_sources_compute_custom_property_value(
         return false;
     };
     runtime
-        .computed_style_property_value_from_stylo(
+        .computed_style_property_value_from_ephemeral_stylo(
             handle,
             property,
-            None,
             &scoped_inputs,
             read_document,
             viewport,
@@ -5329,7 +4731,7 @@ struct CustomFunctionContainerRuleText {
 
 fn visible_custom_functions_for_scope(
     runtime: &JsContextHost,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     scope: DomHandle,
 ) -> HashMap<String, CustomCssFunction> {
     let mut functions = HashMap::new();
@@ -5535,7 +4937,7 @@ fn named_container_width(
     container_name: &str,
     context: StyleComputationContext,
 ) -> Option<f64> {
-    let mut current = flat_tree_parent(runtime, handle);
+    let mut current = flat_tree_element_parent(runtime, handle);
     let mut visited = HashSet::new();
     while let Some(candidate) = current {
         if !visited.insert(candidate) {
@@ -5544,14 +4946,21 @@ fn named_container_width(
         if element_is_named_size_container(runtime, candidate, container_name, context) {
             return inline_width_px(runtime, candidate);
         }
-        current = flat_tree_parent(runtime, candidate);
+        current = flat_tree_element_parent(runtime, candidate);
     }
     None
 }
 
-fn flat_tree_parent(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {
+fn flat_tree_element_parent(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHandle> {
     if let Some(slot) = runtime.dom_host().assigned_slot_for_node(handle) {
-        return Some(slot);
+        return runtime
+            .dom_host()
+            .node(slot)
+            .is_some_and(Node::is_element)
+            .then_some(slot);
+    }
+    if runtime.dom_host().is_shadow_root(handle) {
+        return runtime.dom_host().shadow_root_host(handle);
     }
     let parent = runtime
         .dom_host()
@@ -5560,7 +4969,11 @@ fn flat_tree_parent(runtime: &JsContextHost, handle: DomHandle) -> Option<DomHan
     if runtime.dom_host().is_shadow_root(parent) {
         return runtime.dom_host().shadow_root_host(parent);
     }
-    Some(parent)
+    runtime
+        .dom_host()
+        .node(parent)
+        .is_some_and(Node::is_element)
+        .then_some(parent)
 }
 
 fn element_is_named_size_container(
@@ -5638,7 +5051,6 @@ fn resolve_moli_computed_style_value(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> String {
@@ -5673,15 +5085,14 @@ fn resolve_moli_computed_style_value(
         return normalize_cssom_font_family_value(value).unwrap_or_else(|| value.to_owned());
     }
     if property == "width"
-        && let Some(width) = resolve_computed_width_with_inline_fallback(
-            runtime, handle, value, inputs, context, resolution,
-        )
+        && let Some(width) =
+            resolve_computed_width_with_inline_fallback(runtime, handle, value, context, resolution)
     {
         return width;
     }
     if property == "height"
         && let Some(height) = resolve_computed_height_with_inline_fallback(
-            runtime, handle, value, inputs, context, resolution,
+            runtime, handle, value, context, resolution,
         )
     {
         return height;
@@ -5693,20 +5104,17 @@ fn resolve_moli_computed_style_value(
         return line_height;
     }
     // Horizontal used-value resolution recursively reads the containing block
-    // and the element's own width. Keep those reads on this exact prepared
-    // context: reconstructing it from only `viewport.width` drops viewport
-    // height and screen dimensions, which makes the retained style key
-    // oscillate and is especially wrong for child-frame viewports.
+    // and the element's own width from this exact retained observation.
     if matches!(property, "margin-left" | "margin-right")
         && let Some(margin) = resolve_computed_horizontal_auto_margin(
-            runtime, handle, property, value, inputs, context,
+            runtime, handle, property, value, context, resolution,
         )
     {
         return margin;
     }
     if matches!(property, "margin-left" | "margin-right")
         && let Some(margin) = resolve_computed_horizontal_margin_with_inline_fallback(
-            runtime, handle, property, value, inputs, context,
+            runtime, handle, property, value, context, resolution,
         )
     {
         return margin;
@@ -6148,7 +5556,7 @@ fn resolve_computed_auto_min_size(
     if !aspect_ratio.is_empty() && aspect_ratio != "auto" {
         return "auto".to_owned();
     }
-    if let Some(parent) = runtime.dom_host().node(handle).and_then(Node::parent_node) {
+    if let Some(parent) = flat_tree_element_parent(runtime, handle) {
         let parent_display = resolution.computed_property(runtime, parent, "display");
         if matches!(
             parent_display.as_str(),
@@ -6170,10 +5578,7 @@ fn display_none_ancestor(
         if resolution.computed_property(runtime, candidate, "display") == "none" {
             return true;
         }
-        current = runtime
-            .dom_host()
-            .node(candidate)
-            .and_then(Node::parent_node);
+        current = flat_tree_element_parent(runtime, candidate);
     }
     false
 }
@@ -6345,7 +5750,7 @@ fn raw_stylo_computed_style_value_with_inputs(
     runtime: &JsContextHost,
     handle: DomHandle,
     property: &str,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     context: StyleComputationContext,
 ) -> String {
     let read_document = context.resolved_read_document(runtime, handle);
@@ -6366,15 +5771,7 @@ fn raw_stylo_computed_style_value_with_context(
     property: &str,
     context: StyleComputationContext,
 ) -> Option<String> {
-    let inputs = stylo_computed_style_inputs(runtime, handle, context);
-    let value = raw_stylo_computed_style_value_with_inputs(
-        runtime,
-        handle,
-        property,
-        inputs.as_ref(),
-        context,
-    );
-    (!value.is_empty()).then_some(value)
+    ComputedStyleRead::new_with_context(runtime, handle, context).raw_primary_property(property)
 }
 
 fn computed_inset_containing_block_size(
@@ -6717,28 +6114,21 @@ fn resolve_computed_horizontal_auto_margin(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
     if !value.eq_ignore_ascii_case("auto") {
         return None;
     }
-    let parent_width = containing_block_width_with_inputs(runtime, handle, inputs, context, 0)?;
-    let own_width = parse_css_px(&computed_style_property_value_with_prepared_inputs(
-        runtime, handle, "width", inputs, context, None,
-    ))?;
+    let parent_width =
+        containing_block_width_with_resolution(runtime, handle, context, resolution, 0)?;
+    let own_width = parse_css_px(&resolution.computed_property(runtime, handle, "width"))?;
     let other_property = if property == "margin-left" {
         "margin-right"
     } else {
         "margin-left"
     };
-    let other = raw_stylo_computed_style_value_with_inputs(
-        runtime,
-        handle,
-        other_property,
-        inputs,
-        context,
-    );
+    let other = resolution.raw_property(runtime, handle, other_property);
     let other_margin = if other.eq_ignore_ascii_case("auto") {
         None
     } else {
@@ -6757,22 +6147,22 @@ fn resolve_computed_horizontal_margin(
     runtime: &JsContextHost,
     handle: DomHandle,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
     if value.eq_ignore_ascii_case("auto") {
         return None;
     }
-    let parent_width = containing_block_width_with_inputs(runtime, handle, inputs, context, 0)?;
+    let parent_width =
+        containing_block_width_with_resolution(runtime, handle, context, resolution, 0)?;
     let resolved = resolve_length_percentage_with_context(
         value,
         parent_width,
-        css_numeric_context_with_viewport_and_inputs(
+        css_numeric_context_with_viewport_and_resolution(
             runtime,
             handle,
             context.viewport(),
-            inputs,
-            context,
+            resolution,
         ),
     )?;
     Some(format_css_px(resolved))
@@ -6783,21 +6173,37 @@ fn resolve_computed_horizontal_margin_with_inline_fallback(
     handle: DomHandle,
     property: &str,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
     if computed_length_percentage_value_needs_moli_context(value) {
         inline_style_entry_for_inline_style(runtime, handle, property)
             .and_then(|entry| {
-                resolve_computed_horizontal_margin(runtime, handle, &entry.value, inputs, context)
+                resolve_computed_horizontal_margin(
+                    runtime,
+                    handle,
+                    &entry.value,
+                    context,
+                    resolution,
+                )
             })
-            .or_else(|| resolve_computed_horizontal_margin(runtime, handle, value, inputs, context))
+            .or_else(|| {
+                resolve_computed_horizontal_margin(runtime, handle, value, context, resolution)
+            })
     } else {
-        resolve_computed_horizontal_margin(runtime, handle, value, inputs, context).or_else(|| {
-            inline_style_entry_for_inline_style(runtime, handle, property).and_then(|entry| {
-                resolve_computed_horizontal_margin(runtime, handle, &entry.value, inputs, context)
-            })
-        })
+        resolve_computed_horizontal_margin(runtime, handle, value, context, resolution).or_else(
+            || {
+                inline_style_entry_for_inline_style(runtime, handle, property).and_then(|entry| {
+                    resolve_computed_horizontal_margin(
+                        runtime,
+                        handle,
+                        &entry.value,
+                        context,
+                        resolution,
+                    )
+                })
+            },
+        )
     }
 }
 
@@ -6885,7 +6291,6 @@ fn resolve_computed_width(
     runtime: &JsContextHost,
     handle: DomHandle,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
@@ -6893,7 +6298,8 @@ fn resolve_computed_width(
         return None;
     }
     let viewport = context.viewport();
-    let parent_width = containing_block_width_with_inputs(runtime, handle, inputs, context, 0)?;
+    let parent_width =
+        containing_block_width_with_resolution(runtime, handle, context, resolution, 0)?;
     let resolved = resolve_length_percentage_with_context(
         value,
         parent_width,
@@ -6906,20 +6312,19 @@ fn resolve_computed_width_with_inline_fallback(
     runtime: &JsContextHost,
     handle: DomHandle,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
     if computed_length_percentage_value_needs_moli_context(value) {
         inline_style_entry_for_inline_style(runtime, handle, "width")
             .and_then(|entry| {
-                resolve_computed_width(runtime, handle, &entry.value, inputs, context, resolution)
+                resolve_computed_width(runtime, handle, &entry.value, context, resolution)
             })
-            .or_else(|| resolve_computed_width(runtime, handle, value, inputs, context, resolution))
+            .or_else(|| resolve_computed_width(runtime, handle, value, context, resolution))
     } else {
-        resolve_computed_width(runtime, handle, value, inputs, context, resolution).or_else(|| {
+        resolve_computed_width(runtime, handle, value, context, resolution).or_else(|| {
             inline_style_entry_for_inline_style(runtime, handle, "width").and_then(|entry| {
-                resolve_computed_width(runtime, handle, &entry.value, inputs, context, resolution)
+                resolve_computed_width(runtime, handle, &entry.value, context, resolution)
             })
         })
     }
@@ -6951,11 +6356,11 @@ fn element_has_no_used_height(
     )
 }
 
-fn containing_block_width_with_inputs(
+fn containing_block_width_with_resolution(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
     depth: usize,
 ) -> Option<f64> {
     if depth > 32 {
@@ -6965,19 +6370,19 @@ fn containing_block_width_with_inputs(
         .dom_host()
         .node(handle)
         .and_then(Node::parent_node)?;
-    if let Some(width) = raw_computed_width_px(runtime, parent, inputs, context) {
+    if let Some(width) = raw_computed_width_px(runtime, parent, resolution) {
         return Some(width);
     }
     let parent_is_viewport_box = runtime.dom_host().node(parent).is_some_and(|node| {
         node.is_html_element_named("body") || node.is_html_element_named("html")
     });
-    if let Some(percent) = raw_computed_width_percent(runtime, parent, inputs, context) {
+    if let Some(percent) = raw_computed_width_percent(runtime, parent, resolution) {
         let viewport_width = context.viewport_width();
         let parent_parent_width = if parent_is_viewport_box {
             viewport_width
                 .unwrap_or(moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_width)
         } else {
-            containing_block_width_with_inputs(runtime, parent, inputs, context, depth + 1)?
+            containing_block_width_with_resolution(runtime, parent, context, resolution, depth + 1)?
         };
         return Some(parent_parent_width * percent / 100.0);
     }
@@ -6988,14 +6393,13 @@ fn containing_block_width_with_inputs(
                 .unwrap_or(moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_width),
         );
     }
-    containing_block_width_with_inputs(runtime, parent, inputs, context, depth + 1)
+    containing_block_width_with_resolution(runtime, parent, context, resolution, depth + 1)
 }
 
 fn resolve_computed_height(
     runtime: &JsContextHost,
     handle: DomHandle,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
@@ -7006,7 +6410,7 @@ fn resolve_computed_height(
         return None;
     }
     let viewport = context.viewport();
-    let parent_height = containing_block_height(runtime, handle, inputs, context, 0)?;
+    let parent_height = containing_block_height(runtime, handle, context, resolution, 0)?;
     let resolved = resolve_length_percentage_with_context(
         value,
         parent_height,
@@ -7019,22 +6423,19 @@ fn resolve_computed_height_with_inline_fallback(
     runtime: &JsContextHost,
     handle: DomHandle,
     value: &str,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
     resolution: StyleResolutionContext<'_>,
 ) -> Option<String> {
     if computed_length_percentage_value_needs_moli_context(value) {
         inline_style_entry_for_inline_style(runtime, handle, "height")
             .and_then(|entry| {
-                resolve_computed_height(runtime, handle, &entry.value, inputs, context, resolution)
+                resolve_computed_height(runtime, handle, &entry.value, context, resolution)
             })
-            .or_else(|| {
-                resolve_computed_height(runtime, handle, value, inputs, context, resolution)
-            })
+            .or_else(|| resolve_computed_height(runtime, handle, value, context, resolution))
     } else {
-        resolve_computed_height(runtime, handle, value, inputs, context, resolution).or_else(|| {
+        resolve_computed_height(runtime, handle, value, context, resolution).or_else(|| {
             inline_style_entry_for_inline_style(runtime, handle, "height").and_then(|entry| {
-                resolve_computed_height(runtime, handle, &entry.value, inputs, context, resolution)
+                resolve_computed_height(runtime, handle, &entry.value, context, resolution)
             })
         })
     }
@@ -7063,8 +6464,8 @@ fn resolve_length_percentage_with_context(
 fn containing_block_height(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
     context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
     depth: usize,
 ) -> Option<f64> {
     if depth > 32 {
@@ -7074,13 +6475,13 @@ fn containing_block_height(
         .dom_host()
         .node(handle)
         .and_then(Node::parent_node)?;
-    if let Some(height) = raw_computed_height_px(runtime, parent, inputs, context) {
+    if let Some(height) = raw_computed_height_px(runtime, parent, resolution) {
         return Some(height);
     }
     let parent_is_viewport_box = runtime.dom_host().node(parent).is_some_and(|node| {
         node.is_html_element_named("body") || node.is_html_element_named("html")
     });
-    if let Some(percent) = raw_computed_height_percent(runtime, parent, inputs, context) {
+    if let Some(percent) = raw_computed_height_percent(runtime, parent, resolution) {
         let viewport_height = context
             .viewport()
             .height
@@ -7088,7 +6489,7 @@ fn containing_block_height(
         let parent_parent_height = if parent_is_viewport_box {
             viewport_height
         } else {
-            containing_block_height(runtime, parent, inputs, context, depth + 1)?
+            containing_block_height(runtime, parent, context, resolution, depth + 1)?
         };
         return Some(parent_parent_height * percent / 100.0);
     }
@@ -7100,51 +6501,39 @@ fn containing_block_height(
                 .unwrap_or(moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_height),
         );
     }
-    containing_block_height(runtime, parent, inputs, context, depth + 1)
+    containing_block_height(runtime, parent, context, resolution, depth + 1)
 }
 
 fn raw_computed_width_px(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
-    context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
-    parse_css_px(&raw_stylo_computed_style_value_with_inputs(
-        runtime, handle, "width", inputs, context,
-    ))
+    parse_css_px(&resolution.raw_property(runtime, handle, "width"))
 }
 
 fn raw_computed_width_percent(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
-    context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
-    parse_css_percent(&raw_stylo_computed_style_value_with_inputs(
-        runtime, handle, "width", inputs, context,
-    ))
+    parse_css_percent(&resolution.raw_property(runtime, handle, "width"))
 }
 
 fn raw_computed_height_px(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
-    context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
-    parse_css_px(&raw_stylo_computed_style_value_with_inputs(
-        runtime, handle, "height", inputs, context,
-    ))
+    parse_css_px(&resolution.raw_property(runtime, handle, "height"))
 }
 
 fn raw_computed_height_percent(
     runtime: &JsContextHost,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
-    context: StyleComputationContext,
+    resolution: StyleResolutionContext<'_>,
 ) -> Option<f64> {
-    parse_css_percent(&raw_stylo_computed_style_value_with_inputs(
-        runtime, handle, "height", inputs, context,
-    ))
+    parse_css_percent(&resolution.raw_property(runtime, handle, "height"))
 }
 
 fn parse_css_px(value: &str) -> Option<f64> {
@@ -7204,41 +6593,6 @@ fn resolve_computed_background_image(
 
 fn resolve_background_image_url(value: &str, base_url: &url::Url) -> String {
     resolve_css_url_function(value, base_url)
-}
-
-pub(in crate::native_bridge::element) fn style_base_url(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-) -> url::Url {
-    let document_handle = if runtime
-        .dom_host()
-        .node(handle)
-        .is_some_and(Node::is_document)
-    {
-        Some(handle)
-    } else {
-        runtime
-            .dom_host()
-            .node(handle)
-            .and_then(Node::owner_document)
-    };
-    document_handle
-        .map(|document_handle| {
-            if document_handle == runtime.dom_host().document_handle() {
-                runtime
-                    .dom_host()
-                    .document_base_url()
-                    .unwrap_or_else(|| runtime.document_url().clone())
-            } else {
-                runtime
-                    .dom_host()
-                    .node(document_handle)
-                    .and_then(Node::as_document)
-                    .map(|document| document.base_url().clone())
-                    .unwrap_or_else(|| runtime.document_url().clone())
-            }
-        })
-        .unwrap_or_else(|| runtime.document_url().clone())
 }
 
 fn compress_box_shorthand_value(value: &str) -> String {
@@ -7694,11 +7048,12 @@ pub(in crate::native_bridge::element::styles) fn computed_style_applies(
 
 #[cfg(test)]
 mod tests {
+    use super::super::style_world::connected_shadow_roots_for_test;
     use super::{
         KEYFRAME_NESTING_DEPTH_LIMIT, animation_shorthand_names, box_shorthand_component,
         collect_custom_functions_from_css, compress_box_shorthand_value,
-        connected_shadow_roots_for_document, custom_function_container_rule_texts,
-        format_css_number, keyframe_has_supported_animation_values, keyframe_property_values,
+        custom_function_container_rule_texts, format_css_number,
+        keyframe_has_supported_animation_values, keyframe_property_values,
         normalize_computed_color_functions, normalize_css_integer_token, normalize_style_value,
         simple_var_function_parts,
     };
@@ -7755,11 +7110,11 @@ mod tests {
         host.mark_subtree_connected_preserving_owner_document(child_document);
 
         assert_eq!(
-            connected_shadow_roots_for_document(&host, document),
+            connected_shadow_roots_for_test(&host, document),
             vec![active_root]
         );
         assert_eq!(
-            connected_shadow_roots_for_document(&host, child_document),
+            connected_shadow_roots_for_test(&host, child_document),
             vec![child_root]
         );
     }

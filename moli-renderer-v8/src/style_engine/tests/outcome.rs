@@ -74,7 +74,7 @@ macro_rules! moli_invalidation_result {
 }
 
 #[test]
-fn stylesheet_invalidation_advances_generation() {
+fn document_stylesheet_dirty_mark_advances_only_the_source_generation() {
     let mut engine = MoliStyleEngine::new();
     let host = test_host();
     let document = host.document_handle();
@@ -83,10 +83,14 @@ fn stylesheet_invalidation_advances_generation() {
         engine.computed_cache_generation_for_document_for_test(document),
         0
     );
-    engine.invalidate_author_stylesheet_set_for_document_with_host(&host, document);
+    engine.mark_document_stylesheet_set_dirty(document);
 
     assert_eq!(
         engine.computed_cache_generation_for_document_for_test(document),
+        0
+    );
+    assert_eq!(
+        engine.source_set_generation_for_document_for_test(document),
         1
     );
 }
@@ -737,7 +741,7 @@ fn mixed_cleanup_clears_shadow_cascade_data_only_for_source_fallback_roots() {
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.shadow_stylesheet_sources.push((
         exact_shadow_root,
         vec![StyloStylesheetSource::new(
@@ -759,7 +763,7 @@ fn mixed_cleanup_clears_shadow_cascade_data_only_for_source_fallback_roots() {
             document_url.clone(),
         )],
     ));
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (exact_cascade_data, fallback_cascade_data, structural_cascade_data) = engine
@@ -1613,7 +1617,7 @@ fn target_query_drain_clear_all_when_retained_fallback_has_no_roots() {
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [active, detached] {
         assert!(
             engine
@@ -1669,7 +1673,10 @@ fn target_query_drain_clear_all_when_retained_fallback_has_no_roots() {
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
         1
     );
-    assert!(!engine.dom_adapter.has_element_data(active));
+    assert!(
+        element_style_is_dirty_for_test(&engine, &host, active),
+        "scoped fallback should retain the last computed values and mark them dirty"
+    );
     assert!(engine.dom_adapter.has_element_data(detached));
     assert!(engine.target_context_epoch_for_document_for_test(document) > target_epoch);
 }
@@ -1747,14 +1754,14 @@ fn subtree_fallback_cleanup_clears_only_affected_shadow_cascade_data() {
         ":host { color: rgb(4, 5, 6); }".into(),
         document_url.clone(),
     );
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .shadow_stylesheet_sources
         .push((first_shadow_root, vec![first_source]));
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine
@@ -1856,7 +1863,7 @@ fn detached_document_rootless_source_fallback_clears_only_source_document_world(
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [active, detached] {
         assert!(
             engine
@@ -1906,7 +1913,10 @@ fn detached_document_rootless_source_fallback_clears_only_source_document_world(
         0
     );
     assert!(engine.dom_adapter.has_element_data(active));
-    assert!(!engine.dom_adapter.has_element_data(detached));
+    assert!(
+        element_style_is_dirty_for_test(&engine, &host, detached),
+        "scoped fallback should retain the last computed values and mark them dirty"
+    );
 }
 
 fn ensure_adapter_element_data(
@@ -1920,4 +1930,17 @@ fn ensure_adapter_element_data(
             let _ = element.ensure_data();
         }
     });
+}
+
+fn element_style_is_dirty_for_test(
+    engine: &MoliStyleEngine,
+    host: &crate::dom::native::DomHost,
+    handle: crate::document_runtime::DomHandle,
+) -> bool {
+    engine.dom_adapter.with_bound_host(host, |adapter| {
+        let element = adapter.element(host, handle).expect("element");
+        element
+            .borrow_data()
+            .is_some_and(|data| !data.hint.is_empty())
+    })
 }

@@ -1078,9 +1078,13 @@ pub(crate) struct JsContextHost {
     #[cfg(test)]
     layout_flow_subtree_node_visits: Cell<u64>,
     #[cfg(test)]
-    stylo_computed_style_input_builds: Cell<u64>,
+    style_world_update_materializations: Cell<u64>,
     #[cfg(test)]
-    stylo_style_system_key_builds: Cell<u64>,
+    style_world_full_snapshots: Cell<u64>,
+    #[cfg(test)]
+    style_world_document_scope_materializations: Cell<u64>,
+    #[cfg(test)]
+    style_world_shadow_scope_materializations: Cell<u64>,
     #[cfg(test)]
     stylo_computed_style_property_reads: Cell<u64>,
 }

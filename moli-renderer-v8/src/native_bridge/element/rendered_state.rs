@@ -16,7 +16,7 @@ use super::{
         node_runtime_and_handle_from_args_or_detached, require_element_method_receiver,
         throw_incompatible_method_receiver,
     },
-    styles::ComputedStyleReadScope,
+    styles::StyleObservation,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,7 +46,7 @@ pub(super) struct ElementRenderedStyle {
 }
 
 impl ElementRenderedStyle {
-    pub(super) fn read_in_scope(scope: &mut ComputedStyleReadScope<'_>, handle: DomHandle) -> Self {
+    pub(super) fn read_in_scope(scope: &mut StyleObservation<'_>, handle: DomHandle) -> Self {
         let runtime = scope.runtime();
         let style = scope.read(handle);
         let content_visibility = inline_content_visibility(runtime, handle);
@@ -204,11 +204,11 @@ pub(super) struct ElementRenderedState {
 
 impl ElementRenderedState {
     pub(super) fn read(runtime: &JsContextHost, handle: DomHandle) -> Self {
-        let mut scope = ComputedStyleReadScope::new(runtime);
+        let mut scope = StyleObservation::new(runtime);
         Self::read_in_scope(&mut scope, handle)
     }
 
-    pub(super) fn read_in_scope(scope: &mut ComputedStyleReadScope<'_>, handle: DomHandle) -> Self {
+    pub(super) fn read_in_scope(scope: &mut StyleObservation<'_>, handle: DomHandle) -> Self {
         let runtime = scope.runtime();
         if super::details_dialog::node_is_hidden_by_closed_details(runtime, handle) {
             return Self {
@@ -315,7 +315,7 @@ impl ElementRenderedState {
 }
 
 pub(super) fn rendered_child_participates_in_flat_tree(
-    scope: &mut ComputedStyleReadScope<'_>,
+    scope: &mut StyleObservation<'_>,
     parent: DomHandle,
     child: DomHandle,
 ) -> bool {

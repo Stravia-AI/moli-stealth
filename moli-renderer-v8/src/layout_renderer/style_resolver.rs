@@ -5,57 +5,46 @@ use moli_layout::{
 
 use crate::{
     document_runtime::DomHandle,
-    native_bridge::{JsContextHost, element::ComputedStyleReadScope},
+    native_bridge::{JsContextHost, element::StyleObservation},
     style_engine::{StyleViewport, StyloAnonymousBoxKind},
 };
 
 pub(super) struct NativeLayoutStyleResolver<'a> {
     runtime: &'a JsContextHost,
-    reads: ComputedStyleReadScope<'a>,
+    reads: StyleObservation<'a>,
     scripting_enabled: bool,
 }
 
 impl<'a> NativeLayoutStyleResolver<'a> {
     pub(super) fn new(
         runtime: &'a JsContextHost,
+        root: DomHandle,
         document: DomHandle,
         viewport: LayoutViewport,
     ) -> Self {
+        let mut reads = layout_style_read_scope(runtime, document, viewport);
+        let _ = reads.read(root).computed_values();
         Self {
             runtime,
-            reads: layout_style_read_scope(runtime, document, viewport),
+            reads,
             scripting_enabled: runtime.document_scripting_enabled(document),
         }
     }
-}
-
-/// Completes pending style work before the synchronous, non-reentrant layout
-/// pass starts. The pass reads one NativeDom/Stylo view and retains every
-/// computed allocation it projects until its pass-local world is dropped.
-pub(super) fn prepare_layout_style_inputs(
-    runtime: &JsContextHost,
-    root: DomHandle,
-    document: DomHandle,
-    viewport: LayoutViewport,
-) {
-    let mut reads = layout_style_read_scope(runtime, document, viewport);
-    let _ = reads.read(root).computed_values();
 }
 
 fn layout_style_read_scope<'a>(
     runtime: &'a JsContextHost,
     document: DomHandle,
     viewport: LayoutViewport,
-) -> ComputedStyleReadScope<'a> {
+) -> StyleObservation<'a> {
     let viewport = layout_style_viewport(runtime, viewport);
     if document == runtime.document_handle() && viewport == runtime.style_viewport() {
-        // Keep the normal main-document observation key so layout and
-        // rendered-text collection can reuse the same prepared Stylo input.
-        // Only an override viewport or an embedded Document needs the explicit
-        // read-document context below.
-        ComputedStyleReadScope::new(runtime)
+        // Keep the normal main-document observation environment so layout and
+        // rendered-text collection read the same persistent style world. Only
+        // an override viewport or embedded Document needs an explicit context.
+        StyleObservation::new(runtime)
     } else {
-        ComputedStyleReadScope::new_for_document_viewport(runtime, document, viewport)
+        StyleObservation::new_for_document_viewport(runtime, document, viewport)
     }
 }
 

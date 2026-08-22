@@ -4081,7 +4081,7 @@ async fn page_vm_failed_child_stylesheet_installs_empty_sheet_before_host_load()
 }
 
 #[tokio::test]
-async fn page_vm_child_stylesheet_subresources_block_complete_until_exact_terminals() {
+async fn page_vm_child_stylesheet_fonts_block_complete_until_the_exact_terminal() {
     run_page_vm_async_test(async move {
         let (base_url, server) = spawn_concurrent_path_response_http_server(vec![
             (
@@ -4093,12 +4093,6 @@ body { background-image: url('/css-image.png'); }
 "#
                 .to_owned(),
                 Duration::from_millis(80),
-            ),
-            (
-                "/css-image.png",
-                "HTTP/1.1 200 OK",
-                "image-body".to_owned(),
-                Duration::from_millis(260),
             ),
             (
                 "/demo.woff2",
@@ -4115,16 +4109,14 @@ body { background-image: url('/css-image.png'); }
                 | crate::protocol_types::OptionalResourceFetchMask::FONT,
         );
         let document_url = Url::parse(&format!("{base_url}/page")).expect("page url");
-        let expected_css_image_url = format!("{base_url}/css-image.png");
         let page_vm = test_page_vm_with_loader_and_document_url(&loader, Vec::new(), document_url);
         let local_executor = page_vm.local_executor.clone();
 
-        let (stylesheet_outcome, lifecycle_readiness_after_terminals, final_events) =
-            local_executor
-                .run(async move {
-                    let mut page_vm = page_vm;
-                    page_vm.vm_mut().eval(&format!(
-                        r#"
+        let (stylesheet_outcome, lifecycle_ready_after_font, final_events) = local_executor
+            .run(async move {
+                let mut page_vm = page_vm;
+                page_vm.vm_mut().eval(&format!(
+                    r#"
 (() => {{
   globalThis.__childCssResourceEvents = [];
   const root = document.documentElement || document.appendChild(document.createElement("html"));
@@ -4135,123 +4127,115 @@ body { background-image: url('/css-image.png'); }
   body.appendChild(frame);
 }})()
 "#
-                    ))?;
+                ))?;
 
-                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
-                        &mut page_vm,
-                        ChildFrameSemanticTurnKind::NavigationCommit,
-                        "CSS-resource child navigation commit",
-                    )
-                    .await;
-                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
-                        &mut page_vm,
-                        ChildFrameSemanticTurnKind::DocumentLifecycle,
-                        "CSS-resource child interactive transition",
-                    )
-                    .await;
-                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
-                        &mut page_vm,
-                        ChildFrameSemanticTurnKind::DocumentLifecycle,
-                        "CSS-resource child DOMContentLoaded transition",
-                    )
-                    .await;
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::NavigationCommit,
+                    "CSS-resource child navigation commit",
+                )
+                .await;
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::DocumentLifecycle,
+                    "CSS-resource child interactive transition",
+                )
+                .await;
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::DocumentLifecycle,
+                    "CSS-resource child DOMContentLoaded transition",
+                )
+                .await;
 
-                    if !page_vm
-                        .page_resource_completion_queue()
-                        .has_ready_completion()
-                    {
-                        tokio::time::timeout(
-                            Duration::from_secs(2),
-                            wait_for_typed_page_resource_completion(&mut page_vm),
+                if !page_vm
+                    .page_resource_completion_queue()
+                    .has_ready_completion()
+                {
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        wait_for_typed_page_resource_completion(&mut page_vm),
+                    )
+                    .await
+                    .expect("stylesheet completion should arrive");
+                }
+                let stylesheet_outcome =
+                    run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                assert!(
+                    !page_vm
+                        .run_exact_selected_page_task_for_test(
+                            PageSelectedTaskTestSelector::ChildHostLoad,
+                            &loader,
                         )
-                        .await
-                        .expect("stylesheet completion should arrive");
-                    }
-                    let stylesheet_outcome =
-                        run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
-                    assert!(
-                        !page_vm
-                            .run_exact_selected_page_task_for_test(
-                                PageSelectedTaskTestSelector::ChildHostLoad,
-                                &loader,
-                            )
-                            .await?,
-                        "HostLoad must remain blocked while stylesheet subresources are pending"
-                    );
+                        .await?,
+                    "HostLoad must remain blocked while stylesheet subresources are pending"
+                );
 
-                    let mut lifecycle_readiness_after_terminals = Vec::new();
-                    for terminal_index in 0..2 {
-                        if !page_vm
-                            .page_resource_completion_queue()
-                            .has_ready_completion()
-                        {
-                            tokio::time::timeout(
-                                Duration::from_secs(2),
-                                wait_for_typed_page_resource_completion(&mut page_vm),
-                            )
-                            .await
-                            .unwrap_or_else(|_| {
-                                panic!("CSS resource terminal {terminal_index} should arrive")
-                            });
-                        }
-                        let outcome =
-                            run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
-                        assert_eq!(
-                            outcome.action.source(),
-                            RendererOwnerResourceActivitySource::AsyncSubresource,
-                            "CSS resource terminal {terminal_index} must use Networking"
-                        );
-                        lifecycle_readiness_after_terminals.push(
-                            page_vm.has_ready_child_frame_semantic_turn_for_test(
-                                ChildFrameSemanticTurnKind::DocumentLifecycle,
-                            ),
-                        );
-                        assert_eq!(
-                            page_vm
-                                .vm_mut()
-                                .eval("__childCssResourceEvents.join('|')")?,
-                            "",
-                            "CSS network completion must not inline-dispatch iframe load"
-                        );
-                    }
-
-                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
-                        &mut page_vm,
+                if !page_vm
+                    .page_resource_completion_queue()
+                    .has_ready_completion()
+                {
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        wait_for_typed_page_resource_completion(&mut page_vm),
+                    )
+                    .await
+                    .expect("stylesheet font terminal should arrive");
+                }
+                let outcome = run_next_resource_completion_as_typed_page_turn(&mut page_vm)?;
+                assert_eq!(
+                    outcome.action.source(),
+                    RendererOwnerResourceActivitySource::AsyncSubresource,
+                    "the stylesheet font terminal must use Networking"
+                );
+                let lifecycle_ready_after_font = page_vm
+                    .has_ready_child_frame_semantic_turn_for_test(
                         ChildFrameSemanticTurnKind::DocumentLifecycle,
-                        "CSS-resource child complete transition",
-                    )
-                    .await;
-                    run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
-                        &mut page_vm,
-                        ChildFrameSemanticTurnKind::HostLoad,
-                        "CSS-resource child iframe load",
-                    )
-                    .await;
-                    let final_events = page_vm
-                        .vm_mut()
-                        .eval("__childCssResourceEvents.join('|')")?;
-                    assert_eq!(
-                        page_vm.vm().css_image_resource_observability_for_test(),
-                        (0, 0, 0, 1, vec![expected_css_image_url]),
-                        "the real HTTP image terminal must settle the exact child Document CSS image slot"
                     );
-                    Ok::<_, anyhow::Error>((
-                        stylesheet_outcome,
-                        lifecycle_readiness_after_terminals,
-                        final_events,
-                    ))
-                })
-                .await
-                .expect("stylesheet subresource lifecycle test should run");
+                assert_eq!(
+                    page_vm
+                        .vm_mut()
+                        .eval("__childCssResourceEvents.join('|')")?,
+                    "",
+                    "the font terminal must not inline-dispatch iframe load"
+                );
+
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::DocumentLifecycle,
+                    "CSS-resource child complete transition",
+                )
+                .await;
+                run_expected_child_frame_task_source_after_realm_prerequisite_for_wait(
+                    &mut page_vm,
+                    ChildFrameSemanticTurnKind::HostLoad,
+                    "CSS-resource child iframe load",
+                )
+                .await;
+                let final_events = page_vm
+                    .vm_mut()
+                    .eval("__childCssResourceEvents.join('|')")?;
+                assert_eq!(
+                    page_vm.vm().css_image_resource_observability_for_test(),
+                    (0, 0, 0, 0, Vec::<String>::new()),
+                    "raw stylesheet text must not eagerly admit CSS image slots before paint layout"
+                );
+                Ok::<_, anyhow::Error>((
+                    stylesheet_outcome,
+                    lifecycle_ready_after_font,
+                    final_events,
+                ))
+            })
+            .await
+            .expect("stylesheet subresource lifecycle test should run");
 
         assert_eq!(
             stylesheet_outcome.action.source(),
             RendererOwnerResourceActivitySource::ChildBlockingStylesheet
         );
-        assert_eq!(
-            lifecycle_readiness_after_terminals,
-            vec![false, true],
-            "only the final exact CSS resource token may make complete runnable"
+        assert!(
+            lifecycle_ready_after_font,
+            "the exact stylesheet font token must make complete runnable"
         );
         assert_eq!(final_events, "load");
         server

@@ -15,8 +15,8 @@ use crate::{
 use self::adopted::AdoptedStyleSheetInstallation;
 use self::store::StyloStylesheetSource;
 use super::{
-    MoliStyleEngine, source_owner::stylesheet_source_base_url,
-    source_scope_plan::StyleSourceScopeCleanupPlan,
+    MoliStyleEngine, source_dirty::StyleSourceDirtyReason, source_id::StyleScopeId,
+    source_owner::stylesheet_source_base_url, source_scope_plan::StyleSourceScopeCleanupPlan,
 };
 
 impl MoliStyleEngine {
@@ -49,6 +49,33 @@ impl MoliStyleEngine {
     }
 
     #[cfg(test)]
+    pub(crate) fn document_adopted_style_sheet_source_ids_for_test(
+        &self,
+        document: DomHandle,
+    ) -> Vec<super::StyleSourceId> {
+        self.world_for_document(document)
+            .adopted_style_sheet_sources
+            .borrow()
+            .document_source_ids(document)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn shadow_root_adopted_style_sheet_source_ids_for_test(
+        &self,
+        host: &DomHost,
+        root: DomHandle,
+    ) -> Vec<super::StyleSourceId> {
+        self.owner_document_world(host, root)
+            .map(|world| {
+                world
+                    .adopted_style_sheet_sources
+                    .borrow()
+                    .shadow_root_source_ids(root)
+            })
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
     pub(crate) fn linked_stylesheet_owner_registry_counts_for_document_for_test(
         &self,
         document: DomHandle,
@@ -60,52 +87,54 @@ impl MoliStyleEngine {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_document_adopted_style_sheet_sources_with_host(
+    pub(crate) fn set_document_adopted_style_sheet_sources(
         &mut self,
-        host: &DomHost,
         document: DomHandle,
         sources: Vec<StyloStylesheetSource>,
     ) {
         let world = self.world_for_document(document);
-        let previous_source_count = world
+        let previous_source_ids = world
             .adopted_style_sheet_sources
             .borrow()
-            .document_source_count(document);
-        let next_source_count = sources.len();
+            .document_source_ids(document);
         if world
             .adopted_style_sheet_sources
             .borrow_mut()
             .set_document_sources(document, sources)
         {
-            self.invalidate_document_stylesheet_set_for_document_with_host(
-                host,
+            let next_source_ids = world
+                .adopted_style_sheet_sources
+                .borrow()
+                .document_source_ids(document);
+            self.invalidate_document_stylesheet_set_for_document(
                 document,
-                previous_source_count.max(next_source_count),
+                previous_source_ids.into_iter().chain(next_source_ids),
             );
         }
     }
 
-    pub(crate) fn set_document_adopted_style_sheet_installations_with_host(
+    pub(crate) fn set_document_adopted_style_sheet_installations(
         &mut self,
-        host: &DomHost,
         document: DomHandle,
         installations: Vec<AdoptedStyleSheetInstallation>,
     ) {
         let world = self.world_for_document(document);
-        let previous_source_count = world
+        let previous_source_ids = world
             .adopted_style_sheet_sources
             .borrow()
-            .document_source_count(document);
-        let next_source_count = installations.len();
+            .document_source_ids(document);
         if world
             .adopted_style_sheet_sources
             .borrow_mut()
             .set_document_installations(document, installations)
         {
-            self.invalidate_document_stylesheet_set_for_document_with_host(
-                host,
+            let next_source_ids = world
+                .adopted_style_sheet_sources
+                .borrow()
+                .document_source_ids(document);
+            self.invalidate_document_stylesheet_set_for_document(
                 document,
-                previous_source_count.max(next_source_count),
+                previous_source_ids.into_iter().chain(next_source_ids),
             );
         }
     }
@@ -177,7 +206,7 @@ impl MoliStyleEngine {
             .replace_processed_source(owner, css_text, parser_base);
         self.invalidate_owner_stylesheet_set_for_owner_with_host(host, owner);
         for previous_document in previous_documents {
-            self.invalidate_author_stylesheet_set_for_document_with_host(host, previous_document);
+            self.mark_document_stylesheet_set_dirty(previous_document);
         }
     }
 
@@ -207,7 +236,7 @@ impl MoliStyleEngine {
             self.invalidate_owner_stylesheet_set_for_owner_with_host(host, owner);
         }
         for previous_document in previous_documents {
-            self.invalidate_author_stylesheet_set_for_document_with_host(host, previous_document);
+            self.mark_document_stylesheet_set_dirty(previous_document);
         }
     }
 
@@ -496,6 +525,7 @@ impl MoliStyleEngine {
                     DomStylesheetOwnerChangeKind::Unregistered
                         | DomStylesheetOwnerChangeKind::TreeConnectionChanged { connected: false }
                 ) {
+                    self.remove_owner_style_sheet_source(owner);
                     let previous_documents = self.linked_stylesheet_owner_documents(owner);
                     self.remove_linked_stylesheet_owner_from_documents(
                         host,
@@ -777,20 +807,23 @@ impl MoliStyleEngine {
         let Some(world) = self.owner_document_world(host, root) else {
             return;
         };
-        let previous_source_count = world
+        let previous_source_ids = world
             .adopted_style_sheet_sources
             .borrow()
-            .shadow_root_source_count(root);
-        let next_source_count = sources.len();
+            .shadow_root_source_ids(root);
         if world
             .adopted_style_sheet_sources
             .borrow_mut()
             .set_shadow_root_sources(root, sources)
         {
+            let next_source_ids = world
+                .adopted_style_sheet_sources
+                .borrow()
+                .shadow_root_source_ids(root);
             self.invalidate_shadow_root_stylesheet_set_for_owner_with_host(
                 host,
                 root,
-                previous_source_count.max(next_source_count),
+                previous_source_ids.into_iter().chain(next_source_ids),
             );
         }
     }
@@ -804,20 +837,23 @@ impl MoliStyleEngine {
         let Some(world) = self.owner_document_world(host, root) else {
             return;
         };
-        let previous_source_count = world
+        let previous_source_ids = world
             .adopted_style_sheet_sources
             .borrow()
-            .shadow_root_source_count(root);
-        let next_source_count = installations.len();
+            .shadow_root_source_ids(root);
         if world
             .adopted_style_sheet_sources
             .borrow_mut()
             .set_shadow_root_installations(root, installations)
         {
+            let next_source_ids = world
+                .adopted_style_sheet_sources
+                .borrow()
+                .shadow_root_source_ids(root);
             self.invalidate_shadow_root_stylesheet_set_for_owner_with_host(
                 host,
                 root,
-                previous_source_count.max(next_source_count),
+                previous_source_ids.into_iter().chain(next_source_ids),
             );
         }
     }
@@ -848,25 +884,24 @@ impl MoliStyleEngine {
             .tracks_shadow_root(root)
     }
 
-    pub(crate) fn invalidate_author_stylesheet_set_for_document_with_host(
-        &mut self,
-        host: &DomHost,
-        document: DomHandle,
-    ) {
+    pub(crate) fn mark_document_stylesheet_set_dirty(&mut self, document: DomHandle) {
         let world = self.world_for_document(document);
         world.document_state.bump_source_set_generation();
-        self.invalidate_author_stylesheet_set_for_world_with_host(host, &world);
+        world.document_state.record_source_dirty_scope(
+            StyleScopeId::Document(document),
+            StyleSourceDirtyReason::DocumentStyleSheets,
+            std::iter::empty(),
+            [document],
+        );
     }
 
-    fn invalidate_document_stylesheet_set_for_document_with_host(
+    fn invalidate_document_stylesheet_set_for_document(
         &mut self,
-        host: &DomHost,
         document: DomHandle,
-        source_count: usize,
+        source_ids: impl IntoIterator<Item = super::StyleSourceId>,
     ) {
-        let plan =
-            StyleSourceScopeCleanupPlan::document_adopted_stylesheets(document, source_count);
-        self.apply_source_scope_cleanup_plan_with_host(host, plan);
+        let plan = StyleSourceScopeCleanupPlan::document_adopted_stylesheets(document, source_ids);
+        self.apply_source_scope_cleanup_plan(plan);
     }
 
     fn invalidate_owner_stylesheet_set_for_owner_with_host(
@@ -875,7 +910,7 @@ impl MoliStyleEngine {
         owner: DomHandle,
     ) {
         let plan = StyleSourceScopeCleanupPlan::owner_stylesheet(host, owner);
-        self.apply_source_scope_cleanup_plan_with_host(host, plan);
+        self.apply_source_scope_cleanup_plan(plan);
     }
 
     fn invalidate_linked_stylesheet_set_for_owner_handles_with_host(
@@ -885,27 +920,23 @@ impl MoliStyleEngine {
     ) {
         let plan =
             StyleSourceScopeCleanupPlan::linked_stylesheet_owners(host, owners.iter().copied());
-        self.apply_source_scope_cleanup_plan_with_host(host, plan);
+        self.apply_source_scope_cleanup_plan(plan);
     }
 
     fn invalidate_shadow_root_stylesheet_set_for_owner_with_host(
         &mut self,
         host: &DomHost,
         root: DomHandle,
-        source_count: usize,
+        source_ids: impl IntoIterator<Item = super::StyleSourceId>,
     ) {
         let plan =
-            StyleSourceScopeCleanupPlan::shadow_root_adopted_stylesheets(host, root, source_count);
-        self.apply_source_scope_cleanup_plan_with_host(host, plan);
+            StyleSourceScopeCleanupPlan::shadow_root_adopted_stylesheets(host, root, source_ids);
+        self.apply_source_scope_cleanup_plan(plan);
     }
 
-    fn apply_source_scope_cleanup_plan_with_host(
-        &mut self,
-        host: &DomHost,
-        plan: StyleSourceScopeCleanupPlan,
-    ) {
+    fn apply_source_scope_cleanup_plan(&mut self, plan: StyleSourceScopeCleanupPlan) {
         for document in plan.full_documents() {
-            self.invalidate_author_stylesheet_set_for_document_with_host(host, document);
+            self.mark_document_stylesheet_set_dirty(document);
         }
         let mut source_set_generation_bumped_documents = HashSet::new();
         for entry in plan.scoped_entries_by_document() {
@@ -915,33 +946,13 @@ impl MoliStyleEngine {
                 world.document_state.bump_source_set_generation();
             }
             let roots = entry.roots().clone();
-            let cache_write_generation = world.computed_style_cache.write_generation();
-            let cache_cleanup_already_applied = world
-                .document_state
-                .source_dirty_scope_snapshot()
-                .cache_cleanup_covers(roots.iter().copied(), cache_write_generation);
-            if !cache_cleanup_already_applied {
-                self.cache_cleanup_for_world(&world)
-                    .clear_for_scoped_retained_style_system_rebuild(host, roots.iter().copied());
-            }
             world.document_state.record_source_dirty_scope(
                 entry.scope_id(),
                 entry.reason(),
                 entry.source_ids(),
                 roots.iter().copied(),
-                cache_write_generation,
             );
         }
-    }
-
-    pub(super) fn invalidate_author_stylesheet_set_for_world_with_host(
-        &self,
-        host: &DomHost,
-        world: &super::document_world::DocumentStyleWorld,
-    ) {
-        world.pending_invalidations.clear();
-        self.cache_cleanup_for_world(world)
-            .clear_for_author_stylesheet_set_change(host);
     }
 
     fn remove_linked_stylesheet_owner_from_document(
@@ -992,6 +1003,24 @@ impl MoliStyleEngine {
             .borrow_mut()
             .insert(owner, document);
         documents
+    }
+
+    fn remove_owner_style_sheet_source(&mut self, owner: DomHandle) {
+        let Some(document) = self
+            .owner_stylesheet_source_documents
+            .borrow_mut()
+            .remove(&owner)
+        else {
+            return;
+        };
+        if self
+            .world_for_document(document)
+            .owner_style_sheet_sources
+            .borrow_mut()
+            .remove_owner(owner)
+        {
+            self.mark_document_stylesheet_set_dirty(document);
+        }
     }
 
     fn migrate_inline_style_metadata_to_current_owner_document_with_host(
@@ -1100,7 +1129,7 @@ impl MoliStyleEngine {
             if Some(document) == scoped_cleanup_document {
                 continue;
             }
-            self.invalidate_author_stylesheet_set_for_document_with_host(host, document);
+            self.mark_document_stylesheet_set_dirty(document);
         }
     }
 }

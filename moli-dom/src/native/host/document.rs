@@ -55,6 +55,7 @@ impl DomHost {
             query_version: Cell::new(0),
             shadow_root_binding_version: Cell::new(0),
             connected_shadow_roots_version: Cell::new(0),
+            document_tree_scope_versions: RefCell::new(HashMap::new()),
             id_index: RefCell::new(None),
             name_index: RefCell::new(None),
             element_query_index: RefCell::new(ElementQueryIndex::default()),
@@ -200,6 +201,28 @@ impl DomHost {
         self.shadow_root_binding_version.get()
     }
 
+    /// Monotonic version of connected-shadow-root membership.
+    ///
+    /// Consumers can compare this together with
+    /// [`Self::shadow_root_binding_version`] before cloning the cached binding
+    /// snapshot. Ordinary DOM mutations that cannot add, remove, connect, or
+    /// disconnect a shadow root leave both versions unchanged.
+    pub fn connected_shadow_roots_version(&self) -> u64 {
+        self.connected_shadow_roots_version.get()
+    }
+
+    /// Monotonic identity of one Document's connected ShadowRoot TreeScopes.
+    ///
+    /// This is deliberately document-local. The page-wide binding counters
+    /// exist only to validate the shared connected-root lookup cache.
+    pub fn document_tree_scope_version(&self, document: DomHandle) -> u64 {
+        self.document_tree_scope_versions
+            .borrow()
+            .get(&document)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub(super) fn record_mutation(&self, scope: MutationScope) {
         self.dom_version
             .set(self.dom_version.get().saturating_add(1));
@@ -220,6 +243,21 @@ impl DomHost {
         self.connected_shadow_roots_version
             .set(self.connected_shadow_roots_version.get().saturating_add(1));
         self.connected_shadow_roots_cache.borrow_mut().take();
+    }
+
+    fn record_document_tree_scope_mutation(&self, document: DomHandle) {
+        let mut versions = self.document_tree_scope_versions.borrow_mut();
+        let version = versions.entry(document).or_default();
+        *version = version.saturating_add(1);
+    }
+
+    fn record_document_tree_scope_mutations(&self, documents: impl IntoIterator<Item = DomHandle>) {
+        let mut seen = HashSet::new();
+        for document in documents {
+            if seen.insert(document) {
+                self.record_document_tree_scope_mutation(document);
+            }
+        }
     }
 
     pub(super) fn record_query_index_candidates_in_subtree(&self, root: DomHandle) {
@@ -318,6 +356,7 @@ impl DomHost {
     pub fn mark_subtree_connected_preserving_owner_document(&mut self, root: DomHandle) {
         self.record_query_index_candidates_in_subtree(root);
         let mut touched_shadow_root = false;
+        let mut touched_documents = HashSet::new();
         let mut stylesheet_owners = Vec::new();
         let mut stack = vec![root];
         while let Some(handle) = stack.pop() {
@@ -326,6 +365,9 @@ impl DomHost {
                 node.set_tree_scope(owner_document, true, true);
             }
             if self.shadow_root_handle(handle).is_some() {
+                if let Some(document) = self.tree_scope_owner_document_for_shadow_host(handle) {
+                    touched_documents.insert(document);
+                }
                 touched_shadow_root |= self.mark_shadow_tree_scope_for_subtree(
                     handle,
                     self.tree_scope_owner_document_for_shadow_host(handle),
@@ -339,12 +381,14 @@ impl DomHost {
         }
         if touched_shadow_root {
             self.record_connected_shadow_roots_mutation();
+            self.record_document_tree_scope_mutations(touched_documents);
         }
         self.record_mutation(MutationScope::QueryState);
     }
 
     pub fn mark_subtree_disconnected_preserving_owner_document(&mut self, root: DomHandle) {
         let mut touched_shadow_root = false;
+        let mut touched_documents = HashSet::new();
         let mut stylesheet_owners = Vec::new();
         let mut stack = vec![root];
         while let Some(handle) = stack.pop() {
@@ -353,6 +397,9 @@ impl DomHost {
                 node.set_tree_scope(owner_document, false, false);
             }
             if self.shadow_root_handle(handle).is_some() {
+                if let Some(document) = self.tree_scope_owner_document_for_shadow_host(handle) {
+                    touched_documents.insert(document);
+                }
                 touched_shadow_root |= self.mark_shadow_tree_scope_for_subtree(
                     handle,
                     self.tree_scope_owner_document_for_shadow_host(handle),
@@ -366,6 +413,7 @@ impl DomHost {
         }
         if touched_shadow_root {
             self.record_connected_shadow_roots_mutation();
+            self.record_document_tree_scope_mutations(touched_documents);
         }
         self.record_mutation(MutationScope::QueryState);
     }
@@ -1479,6 +1527,9 @@ impl DomHost {
         );
         self.shadow_hosts_by_root.borrow_mut().insert(root, host);
         self.record_shadow_root_binding_mutation();
+        if connected && let Some(document) = owner_document {
+            self.record_document_tree_scope_mutation(document);
+        }
         Some(root)
     }
 
@@ -1494,7 +1545,7 @@ impl DomHost {
         inserted_roots: &[DomHandle],
         shadow_hosts: &[DomHandle],
     ) -> Vec<DomStylesheetOwnerChange> {
-        let mut touched_shadow_root = false;
+        let mut membership_documents = HashSet::new();
         let mut stylesheet_owners = Vec::new();
         for &root in inserted_roots {
             let Some(node) = self.node(root) else {
@@ -1507,22 +1558,30 @@ impl DomHost {
                     node.flags().connected(),
                     false,
                 );
-                touched_shadow_root = true;
             }
         }
         for &host in shadow_hosts {
             let Some(node) = self.node(host) else {
                 continue;
             };
-            touched_shadow_root |= self.mark_shadow_tree_scope_for_host(
+            let connected = node.flags().connected();
+            let owner_document = node.owner_document();
+            let touched = self.mark_shadow_tree_scope_for_host(
                 host,
-                node.owner_document(),
-                node.flags().connected(),
+                owner_document,
+                connected,
                 &mut stylesheet_owners,
             );
+            if touched
+                && connected
+                && let Some(document) = owner_document
+            {
+                membership_documents.insert(document);
+            }
         }
-        if touched_shadow_root {
+        if !membership_documents.is_empty() {
             self.record_connected_shadow_roots_mutation();
+            self.record_document_tree_scope_mutations(membership_documents);
         }
         stylesheet_owners
             .into_iter()
@@ -1539,22 +1598,31 @@ impl DomHost {
     pub(super) fn sync_shadow_tree_scopes_for_removed_subtree(
         &mut self,
         shadow_hosts: &[DomHandle],
+        was_connected: bool,
     ) -> Vec<DomStylesheetOwnerChange> {
-        let mut touched_shadow_root = false;
+        let mut membership_documents = HashSet::new();
         let mut stylesheet_owners = Vec::new();
         for &host in shadow_hosts {
             let Some(node) = self.node(host) else {
                 continue;
             };
-            touched_shadow_root |= self.mark_shadow_tree_scope_for_host(
+            let owner_document = node.owner_document();
+            let touched = self.mark_shadow_tree_scope_for_host(
                 host,
-                node.owner_document(),
+                owner_document,
                 node.flags().connected(),
                 &mut stylesheet_owners,
             );
+            if touched
+                && was_connected
+                && let Some(document) = owner_document
+            {
+                membership_documents.insert(document);
+            }
         }
-        if touched_shadow_root {
+        if !membership_documents.is_empty() {
             self.record_connected_shadow_roots_mutation();
+            self.record_document_tree_scope_mutations(membership_documents);
         }
         stylesheet_owners
             .into_iter()
@@ -1995,6 +2063,7 @@ impl DomHost {
 
     pub fn restore_shadow_root_bindings(&mut self, bindings: Vec<ShadowRootBindingSnapshot>) {
         let mut restored = false;
+        let mut membership_documents = HashSet::new();
         for binding in bindings {
             let host = binding.host;
             let root = binding.root;
@@ -2014,10 +2083,16 @@ impl DomHost {
                 },
             );
             self.shadow_hosts_by_root.borrow_mut().insert(root, host);
+            if self.is_connected(host)
+                && let Some(document) = self.owner_document_handle(host)
+            {
+                membership_documents.insert(document);
+            }
             restored = true;
         }
         if restored {
             self.record_shadow_root_binding_mutation();
+            self.record_document_tree_scope_mutations(membership_documents);
         }
     }
 

@@ -321,6 +321,393 @@ fn registered_custom_property_for_document(vm: &ScriptVm, document: DomHandle, n
 }
 
 #[test]
+fn style_observation_reuses_current_world_without_materializing_an_update() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-current-world.test/",
+        "<!doctype html><style>.target { color: rgb(1, 2, 3); }</style><div id=target class=target></div>",
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("initial style should establish the retained world"),
+        "rgb(1, 2, 3)"
+    );
+    let target = element_handle_by_id(&vm, "target");
+    let host = vm._context_host.borrow();
+    let update_materializations = host.style_world_update_materializations_for_test();
+    let full_snapshots = host.style_world_full_snapshots_for_test();
+
+    let mut observation = crate::native_bridge::element::StyleObservation::new(&host);
+    let first = observation
+        .read(target)
+        .computed_values()
+        .expect("connected target should have computed values");
+    let second = observation
+        .read(target)
+        .computed_values()
+        .expect("a repeated read should retain computed values");
+
+    assert!(style::servo_arc::Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        host.style_world_update_materializations_for_test(),
+        update_materializations
+    );
+    assert_eq!(host.style_world_full_snapshots_for_test(), full_snapshots);
+}
+
+#[test]
+fn style_observation_refreshes_dirty_element_without_materializing_a_world_update() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-dirty-element.test/",
+        "<!doctype html><div id=target style='color: rgb(1, 2, 3)'></div>",
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("initial style should establish the retained world"),
+        "rgb(1, 2, 3)"
+    );
+    let target = element_handle_by_id(&vm, "target");
+    let before = {
+        let host = vm._context_host.borrow();
+        let mut observation = crate::native_bridge::element::StyleObservation::new(&host);
+        observation
+            .read(target)
+            .computed_values()
+            .expect("initial computed values")
+    };
+    vm.eval("document.getElementById('target').style.color = 'rgb(4, 5, 6)' ")
+        .expect("inline mutation should complete");
+
+    let host = vm._context_host.borrow();
+    let update_materializations = host.style_world_update_materializations_for_test();
+    let full_snapshots = host.style_world_full_snapshots_for_test();
+    let mut observation = crate::native_bridge::element::StyleObservation::new(&host);
+    let after = observation
+        .read(target)
+        .computed_values()
+        .expect("dirty target should be recomputed");
+
+    assert!(!style::servo_arc::Arc::ptr_eq(&before, &after));
+    assert_eq!(
+        host.style_world_update_materializations_for_test(),
+        update_materializations
+    );
+    assert_eq!(host.style_world_full_snapshots_for_test(), full_snapshots);
+}
+
+#[test]
+fn style_observation_materializes_dirty_scope_once_without_a_full_snapshot() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-dirty-source.test/",
+        "<!doctype html><style id=sheet>.target { color: rgb(1, 2, 3); }</style><div id=target class=target></div>",
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("initial style should establish the retained world"),
+        "rgb(1, 2, 3)"
+    );
+    vm.eval("document.getElementById('sheet').textContent = '.target { color: rgb(4, 5, 6); }'")
+        .expect("stylesheet mutation should complete");
+    let target = element_handle_by_id(&vm, "target");
+    let host = vm._context_host.borrow();
+    let update_materializations = host.style_world_update_materializations_for_test();
+    let full_snapshots = host.style_world_full_snapshots_for_test();
+    let document_scopes = host.style_world_document_scope_materializations_for_test();
+    let shadow_scopes = host.style_world_shadow_scope_materializations_for_test();
+
+    let mut observation = crate::native_bridge::element::StyleObservation::new(&host);
+    let first = observation
+        .read(target)
+        .computed_values()
+        .expect("dirty stylesheet world should be refreshed");
+    let second = observation
+        .read(target)
+        .computed_values()
+        .expect("the refreshed world should be reused");
+
+    assert!(style::servo_arc::Arc::ptr_eq(&first, &second));
+    assert_eq!(
+        host.style_world_update_materializations_for_test()
+            .saturating_sub(update_materializations),
+        1
+    );
+    assert_eq!(
+        host.style_world_full_snapshots_for_test()
+            .saturating_sub(full_snapshots),
+        0,
+        "an incremental scope update must not materialize a full style-world snapshot"
+    );
+    assert_eq!(
+        host.style_world_document_scope_materializations_for_test(),
+        document_scopes + 1
+    );
+    assert_eq!(
+        host.style_world_shadow_scope_materializations_for_test(),
+        shadow_scopes
+    );
+}
+
+#[test]
+fn document_stylesheet_mutation_reprojects_only_the_dirty_source() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-dirty-source-id.test/",
+        r#"<!doctype html>
+          <style id=sheet-a>.a { color: rgb(1, 2, 3); }</style>
+          <style id=sheet-b>.b { color: rgb(4, 5, 6); }</style>
+          <div id=target-a class=a></div><div id=target-b class=b></div>"#,
+    );
+    assert_eq!(
+        vm.eval(
+            r#"JSON.stringify([
+              getComputedStyle(document.getElementById('target-a')).color,
+              getComputedStyle(document.getElementById('target-b')).color,
+            ])"#,
+        )
+        .expect("both stylesheet sources should initialize"),
+        r#"["rgb(1, 2, 3)","rgb(4, 5, 6)"]"#
+    );
+    crate::style_engine::reset_source_cascade_rebuild_count_for_test();
+
+    assert_eq!(
+        vm.eval(
+            r#"
+document.getElementById('sheet-a').textContent = '.a { color: rgb(7, 8, 9); }';
+JSON.stringify([
+  getComputedStyle(document.getElementById('target-a')).color,
+  getComputedStyle(document.getElementById('target-b')).color,
+]);
+"#,
+        )
+        .expect("the dirty stylesheet should update"),
+        r#"["rgb(7, 8, 9)","rgb(4, 5, 6)"]"#
+    );
+    assert_eq!(
+        crate::style_engine::source_cascade_rebuild_count_for_test(),
+        1,
+        "a single source mutation must not rebuild unrelated source cascade data"
+    );
+}
+
+#[test]
+fn style_observation_reconciles_an_empty_shadow_scope_once_per_version_change() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-shadow-version.test/",
+        "<!doctype html><style>#target { color: rgb(1, 2, 3); }</style><div id=shadow-host></div><div id=target></div>",
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("initial style should establish the retained world"),
+        "rgb(1, 2, 3)"
+    );
+    let update_materializations_before_shadow = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+    let document_scopes_before_shadow = vm
+        ._context_host
+        .borrow()
+        .style_world_document_scope_materializations_for_test();
+    let shadow_scopes_before_shadow = vm
+        ._context_host
+        .borrow()
+        .style_world_shadow_scope_materializations_for_test();
+    vm.eval("document.getElementById('shadow-host').attachShadow({ mode: 'open' })")
+        .expect("an empty connected ShadowRoot should attach");
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("the first read after attachment should reconcile TreeScopes"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_before_shadow + 1,
+        "one TreeScope version change must materialize one incremental update batch"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_document_scope_materializations_for_test(),
+        document_scopes_before_shadow,
+        "adding an empty ShadowRoot must not recollect document stylesheets"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_shadow_scope_materializations_for_test(),
+        shadow_scopes_before_shadow + 1,
+        "only the newly connected ShadowRoot should be materialized"
+    );
+    let update_materializations_after_reconciliation = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("a clean read should reuse the reconciled TreeScope universe"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_reconciliation,
+        "a clean observation must compare versions without recollecting TreeScope sources"
+    );
+
+    vm.eval("document.getElementById('shadow-host').remove()")
+        .expect("the ShadowRoot host should disconnect");
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("the first read after disconnection should remove the stale TreeScope"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_reconciliation + 1,
+        "disconnecting a ShadowRoot host must reconcile the TreeScope universe once"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_shadow_scope_materializations_for_test(),
+        shadow_scopes_before_shadow + 1,
+        "removing a scope needs only its retained identity, not a source snapshot"
+    );
+}
+
+#[test]
+fn shadow_stylesheet_mutation_materializes_only_the_dirty_scope() {
+    let mut vm = new_parsed_test_vm(
+        "https://style-observation-dirty-shadow.test/",
+        "<!doctype html><div id=host-a></div><div id=host-b></div>",
+    );
+    assert_eq!(
+        vm.eval(
+            r#"
+const rootA = document.getElementById('host-a').attachShadow({ mode: 'open' });
+rootA.innerHTML = '<style id=sheet>.target { color: rgb(1, 2, 3); }</style><span class=target></span>';
+const rootB = document.getElementById('host-b').attachShadow({ mode: 'open' });
+rootB.innerHTML = '<style>.target { color: rgb(4, 5, 6); }</style><span class=target></span>';
+globalThis.__dirtyScopeRootA = rootA;
+globalThis.__dirtyScopeRootB = rootB;
+JSON.stringify([
+  getComputedStyle(rootA.querySelector('.target')).color,
+  getComputedStyle(rootB.querySelector('.target')).color,
+]);
+"#,
+        )
+        .expect("two ShadowRoot style worlds should initialize"),
+        r#"["rgb(1, 2, 3)","rgb(4, 5, 6)"]"#
+    );
+    let host = vm._context_host.borrow();
+    let document_scopes = host.style_world_document_scope_materializations_for_test();
+    let shadow_scopes = host.style_world_shadow_scope_materializations_for_test();
+    drop(host);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+__dirtyScopeRootA.getElementById('sheet').textContent =
+  '.target { color: rgb(7, 8, 9); }';
+JSON.stringify([
+  getComputedStyle(__dirtyScopeRootA.querySelector('.target')).color,
+  getComputedStyle(__dirtyScopeRootB.querySelector('.target')).color,
+]);
+"#,
+        )
+        .expect("the dirty ShadowRoot should update"),
+        r#"["rgb(7, 8, 9)","rgb(4, 5, 6)"]"#
+    );
+    let host = vm._context_host.borrow();
+    assert_eq!(
+        host.style_world_document_scope_materializations_for_test(),
+        document_scopes,
+        "a ShadowRoot mutation must not recollect document stylesheets"
+    );
+    assert_eq!(
+        host.style_world_shadow_scope_materializations_for_test(),
+        shadow_scopes + 1,
+        "Shadow A must update without materializing Shadow B"
+    );
+}
+
+#[test]
+fn stylesheet_resource_manifest_reuses_current_world_and_tracks_revisions() {
+    let mut vm = new_storage_test_vm("https://style-resource-manifest.test/document.html");
+    vm.eval(
+        r#"
+const style = document.createElement('style');
+style.id = 'resource-sheet';
+style.textContent = '@font-face { font-family: First; src: url(font-a.woff2); }';
+(document.head || document.documentElement || document).appendChild(style);
+"#,
+    )
+    .expect("resource stylesheet fixture should initialize");
+    let root = vm
+        ._context_host
+        .borrow()
+        .dom_host()
+        .document_element_handle()
+        .expect("fixture should retain a document element");
+
+    let first = crate::layout_renderer::current_native_stylesheet_resources(
+        &vm._context_host.borrow(),
+        root,
+    )
+    .expect("the first observation should publish a resource manifest");
+    assert_eq!(first.web_fonts().len(), 1);
+    assert_eq!(
+        first.web_fonts()[0].request_url().as_str(),
+        "https://style-resource-manifest.test/font-a.woff2"
+    );
+    let update_materializations_after_first = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+
+    let clean = crate::layout_renderer::current_native_stylesheet_resources(
+        &vm._context_host.borrow(),
+        root,
+    )
+    .expect("a clean observation should reuse the resource manifest");
+    assert_eq!(clean.generation(), first.generation());
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_first,
+        "a clean resource observation must not materialize a style-world update"
+    );
+
+    vm.eval(
+        "document.getElementById('resource-sheet').textContent = \
+         '@font-face { font-family: Second; src: url(font-b.woff2); }'",
+    )
+    .expect("resource stylesheet should mutate");
+    let revised = crate::layout_renderer::current_native_stylesheet_resources(
+        &vm._context_host.borrow(),
+        root,
+    )
+    .expect("the revised observation should publish a resource manifest");
+    assert_ne!(revised.generation(), first.generation());
+    assert_eq!(revised.web_fonts().len(), 1);
+    assert_eq!(
+        revised.web_fonts()[0].request_url().as_str(),
+        "https://style-resource-manifest.test/font-b.woff2"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_first + 1,
+        "one stylesheet revision should materialize one incremental world update"
+    );
+}
+
+#[test]
 fn disconnected_element_computed_style_returns_empty_without_caching() {
     let mut vm = new_storage_test_vm("https://disconnected-computed-style.test/page.html");
     let document = vm.document_handle_for_test();
@@ -1827,14 +2214,14 @@ fn child_layout_uses_complete_stable_tree_scope_universe() {
     let child_document = child_document_handle_for_frame_id(&vm, "tree-scope-universe-frame");
     let rebuilds_before =
         vm.retained_style_system_rebuild_count_for_document_for_test(child_document);
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
-    let key_builds_before = vm
+        .style_world_update_materializations_for_test();
+    let full_snapshots_before = vm
         ._context_host
         .borrow()
-        .stylo_style_system_key_builds_for_test();
+        .style_world_full_snapshots_for_test();
 
     vm.screenshot_layout_snapshot(moli_layout::PaintViewport::new(800, 600, 1.0))
         .expect("child TreeScope universe paint layout should succeed")
@@ -1849,23 +2236,135 @@ fn child_layout_uses_complete_stable_tree_scope_universe() {
     assert_eq!(
         vm._context_host
             .borrow()
-            .stylo_computed_style_input_builds_for_test()
-            .saturating_sub(builds_before),
+            .style_world_update_materializations_for_test()
+            .saturating_sub(update_materializations_before),
         2,
-        "the paint layout must prepare exactly one input for each document",
+        "the paint layout must materialize exactly one style-world update per document",
     );
     assert_eq!(
         vm._context_host
             .borrow()
-            .stylo_style_system_key_builds_for_test()
-            .saturating_sub(key_builds_before),
+            .style_world_full_snapshots_for_test()
+            .saturating_sub(full_snapshots_before),
         2,
-        "the paint layout must hash exactly one style-system key for each document",
+        "the first paint layout must materialize one full snapshot per document",
     );
 }
 
 #[test]
-fn empty_shadow_root_universe_changes_rebuild_once_per_dom_mutation() {
+fn child_tree_scope_membership_update_does_not_touch_parent_style_world() {
+    let mut vm = new_storage_test_vm("https://tree-scope-document-isolation.test/");
+    assert_eq!(
+        vm.eval(
+            r#"
+const parentStyle = document.createElement('style');
+parentStyle.textContent = '#parent-target { color: rgb(1, 2, 3); }';
+const root = document.documentElement || document.appendChild(document.createElement('html'));
+const head = document.head || root.appendChild(document.createElement('head'));
+const body = document.body || root.appendChild(document.createElement('body'));
+head.appendChild(parentStyle);
+const parentTarget = document.createElement('div');
+parentTarget.id = 'parent-target';
+body.appendChild(parentTarget);
+const frame = document.createElement('iframe');
+frame.id = 'tree-scope-isolation-frame';
+body.appendChild(frame);
+const childDocument = frame.contentDocument;
+childDocument.open();
+childDocument.write('<style>#child-target { color: rgb(4, 5, 6); }</style><body><div id=child-target></div></body>');
+childDocument.close();
+JSON.stringify([
+  getComputedStyle(parentTarget).color,
+  frame.contentWindow.getComputedStyle(childDocument.getElementById('child-target')).color,
+]);
+"#,
+        )
+        .expect("parent and child style worlds should initialize"),
+        r#"["rgb(1, 2, 3)","rgb(4, 5, 6)"]"#
+    );
+
+    let parent_document = vm.document_handle_for_test();
+    let child_document = child_document_handle_for_frame_id(&vm, "tree-scope-isolation-frame");
+    let parent_identity = vm.retained_stylist_identity_for_document_for_test(parent_document);
+    let child_identity = vm.retained_stylist_identity_for_document_for_test(child_document);
+    let parent_updates =
+        vm.retained_style_system_update_count_for_document_for_test(parent_document);
+    let child_updates = vm.retained_style_system_update_count_for_document_for_test(child_document);
+    let shadow_materializations = vm
+        ._context_host
+        .borrow()
+        .style_world_shadow_scope_materializations_for_test();
+
+    assert_eq!(
+        vm.eval(
+            r#"
+const childHost = document.getElementById('tree-scope-isolation-frame')
+  .contentDocument.createElement('section');
+document.getElementById('tree-scope-isolation-frame')
+  .contentDocument.body.appendChild(childHost);
+childHost.attachShadow({ mode: 'open' });
+getComputedStyle(document.getElementById('parent-target')).color;
+"#,
+        )
+        .expect("a parent-only observation should ignore the child TreeScope change"),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(parent_document),
+        parent_updates
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_shadow_scope_materializations_for_test(),
+        shadow_materializations,
+        "the child scope must stay lazy until the child Document is observed"
+    );
+
+    assert_eq!(
+        vm.eval(
+            r#"
+const observedFrame = document.getElementById('tree-scope-isolation-frame');
+observedFrame.contentWindow.getComputedStyle(
+  observedFrame.contentDocument.getElementById('child-target')
+).color;
+"#,
+        )
+        .expect("the child observation should reconcile its own TreeScopes"),
+        "rgb(4, 5, 6)"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(parent_document),
+        parent_updates,
+        "observing the child must leave the parent world untouched"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates + 1
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(parent_document),
+        parent_identity
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(child_document),
+        child_identity,
+        "TreeScope membership changes must update the child Stylist in place"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_shadow_scope_materializations_for_test(),
+        shadow_materializations + 1
+    );
+}
+
+#[test]
+fn empty_shadow_root_universe_updates_once_per_dom_mutation() {
     let mut vm = new_storage_test_vm("https://empty-shadow-universe-mutation.test/");
     let document = vm.document_handle_for_test();
 
@@ -1886,6 +2385,8 @@ fn empty_shadow_root_universe_changes_rebuild_once_per_dom_mutation() {
     assert_eq!(initial, "block");
     let rebuilds_after_initial =
         vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates_after_initial =
+        vm.retained_style_system_update_count_for_document_for_test(document);
 
     let attached = vm
         .eval(
@@ -1912,8 +2413,15 @@ fn empty_shadow_root_universe_changes_rebuild_once_per_dom_mutation() {
         vm.retained_style_system_rebuild_count_for_document_for_test(document);
     assert_eq!(
         rebuilds_after_attach.saturating_sub(rebuilds_after_initial),
+        0,
+        "attaching an empty Shadow Root must preserve the Document Stylist",
+    );
+    let updates_after_attach =
+        vm.retained_style_system_update_count_for_document_for_test(document);
+    assert_eq!(
+        updates_after_attach.saturating_sub(updates_after_initial),
         1,
-        "attaching one empty Shadow Root must replace the document universe exactly once",
+        "attaching one empty Shadow Root must update the retained TreeScope universe exactly once",
     );
 
     let removed = vm
@@ -1931,8 +2439,14 @@ fn empty_shadow_root_universe_changes_rebuild_once_per_dom_mutation() {
     assert_eq!(
         vm.retained_style_system_rebuild_count_for_document_for_test(document)
             .saturating_sub(rebuilds_after_attach),
+        0,
+        "disconnecting an empty Shadow Root must preserve the Document Stylist",
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document)
+            .saturating_sub(updates_after_attach),
         1,
-        "disconnecting one empty Shadow Root must replace the document universe exactly once",
+        "disconnecting one empty Shadow Root must update the retained TreeScope universe exactly once",
     );
 }
 #[test]
@@ -2073,6 +2587,7 @@ fn computed_style_wrapper_reflects_constructed_stylesheet_mutations() {
     assert!(vm.computed_style_cache_entry_count_for_document_for_test(document) > 0);
     let generation_after_setup = vm.computed_style_cache_generation_for_document_for_test(document);
     crate::live_stylesheet::reset_live_stylesheet_css_text_projection_count_for_test();
+    crate::style_engine::reset_live_stylesheet_update_counts_for_test();
 
     let mutated = vm
         .eval(
@@ -2119,6 +2634,16 @@ fn computed_style_wrapper_reflects_constructed_stylesheet_mutations() {
         generation_after_setup
     );
     assert!(vm.computed_style_cache_entry_count_for_document_for_test(document) > 0);
+    assert_eq!(
+        crate::style_engine::exact_rule_change_notification_count_for_test(),
+        2,
+        "insertRule and deleteRule should use exact Stylo rule notifications",
+    );
+    assert_eq!(
+        crate::style_engine::full_cascade_update_fallback_count_for_test(),
+        3,
+        "whole-sheet replacement and disabled toggles should remain explicit full-update fallbacks",
+    );
 }
 
 #[test]
@@ -2165,6 +2690,7 @@ fn one_constructed_stylesheet_mutation_reaches_document_and_all_shadow_adopters(
 
     assert_eq!(initial, "rgb(1, 2, 3)|rgb(1, 2, 3)|rgb(1, 2, 3)");
     crate::live_stylesheet::reset_live_stylesheet_css_text_projection_count_for_test();
+    crate::style_engine::reset_live_stylesheet_update_counts_for_test();
 
     let mutated = vm
         .eval(
@@ -2200,7 +2726,105 @@ fn one_constructed_stylesheet_mutation_reaches_document_and_all_shadow_adopters(
         0,
         "all adopter notifications must stay on the parsed stylesheet path",
     );
+    assert_eq!(
+        crate::style_engine::exact_rule_change_notification_count_for_test(),
+        9,
+        "three exact CSSOM mutations must be delivered independently to the Document and two ShadowRoot installations",
+    );
+    assert_eq!(
+        crate::style_engine::full_cascade_update_fallback_count_for_test(),
+        0,
+        "ordinary rule/declaration mutations must not dirty an entire author scope",
+    );
 }
+
+#[test]
+fn live_stylesheet_rule_journal_batches_multiple_mutations_until_observation() {
+    let mut vm = new_storage_test_vm("https://constructed-sheet-rule-journal.test/");
+
+    assert_eq!(
+        vm.eval(
+            r#"
+const target = document.createElement('div');
+target.className = 'journal-target';
+(document.body || document.documentElement || document).appendChild(target);
+globalThis.__journalSheet = new CSSStyleSheet();
+globalThis.__journalSheet.replaceSync('.journal-target { color: rgb(1, 2, 3); }');
+document.adoptedStyleSheets = [globalThis.__journalSheet];
+getComputedStyle(target).color;
+"#,
+        )
+        .expect("rule journal setup should evaluate"),
+        "rgb(1, 2, 3)"
+    );
+    crate::style_engine::reset_live_stylesheet_update_counts_for_test();
+
+    assert_eq!(
+        vm.eval(
+            r#"
+__journalSheet.cssRules[0].style.color = 'rgb(4, 5, 6)';
+__journalSheet.insertRule('.journal-target { color: rgb(7, 8, 9); }', 1);
+__journalSheet.deleteRule(0);
+getComputedStyle(target).color;
+"#,
+        )
+        .expect("batched rule journal mutations should evaluate"),
+        "rgb(7, 8, 9)"
+    );
+    assert_eq!(
+        crate::style_engine::exact_rule_change_notification_count_for_test(),
+        3,
+        "all generations since the last observation must be replayed in order",
+    );
+    assert_eq!(
+        crate::style_engine::full_cascade_update_fallback_count_for_test(),
+        0,
+    );
+}
+
+#[test]
+fn nested_live_rule_journal_preserves_grouping_rule_ancestors() {
+    let mut vm = new_storage_test_vm("https://nested-live-rule-journal.test/");
+
+    assert_eq!(
+        vm.eval(
+            r#"
+const style = document.createElement('style');
+style.textContent = '@media all { .nested-journal-target { color: rgb(1, 2, 3); } }';
+(document.head || document.documentElement || document).appendChild(style);
+const target = document.createElement('div');
+target.className = 'nested-journal-target';
+(document.body || document.documentElement || document).appendChild(target);
+globalThis.__nestedJournalRule = style.sheet.cssRules[0].cssRules[0];
+getComputedStyle(target).color;
+"#,
+        )
+        .expect("nested rule journal setup should evaluate"),
+        "rgb(1, 2, 3)"
+    );
+    crate::style_engine::reset_live_stylesheet_update_counts_for_test();
+
+    assert_eq!(
+        vm.eval(
+            r#"
+__nestedJournalRule.style.color = 'rgb(4, 5, 6)';
+getComputedStyle(document.querySelector('.nested-journal-target')).color;
+"#,
+        )
+        .expect("nested declaration mutation should evaluate"),
+        "rgb(4, 5, 6)"
+    );
+    assert_eq!(
+        crate::style_engine::exact_rule_change_notification_count_for_test(),
+        1,
+    );
+    assert_eq!(
+        crate::style_engine::full_cascade_update_fallback_count_for_test(),
+        0,
+        "a nested rule with a retained @media ancestor must remain exactly expressible",
+    );
+}
+
 #[test]
 fn computed_style_wrapper_reflects_style_element_media_mutations() {
     let mut vm = new_storage_test_vm("https://style-media-computed-wrapper-refresh.test/");
@@ -2256,6 +2880,73 @@ fn computed_style_wrapper_reflects_style_element_media_mutations() {
     );
     assert!(vm.computed_style_cache_entry_count_for_document_for_test(document) > 0);
 }
+
+#[test]
+fn shadow_style_media_mutations_update_only_the_retained_tree_scope() {
+    let mut vm = new_storage_test_vm("https://shadow-style-media-refresh.test/");
+    let document = vm.document_handle_for_test();
+
+    let initial = vm
+        .eval(
+            r#"
+(() => {
+  const body = document.body || document.documentElement || document;
+  const host = document.createElement('div');
+  body.appendChild(host);
+  const shadow = host.attachShadow({ mode: 'open' });
+  const style = document.createElement('style');
+  style.media = 'print';
+  style.textContent = '.target { color: rgb(4, 5, 6); }';
+  const target = document.createElement('div');
+  target.className = 'target';
+  shadow.append(style, target);
+  globalThis.__shadowMediaStyle = style;
+  globalThis.__shadowMediaComputed = getComputedStyle(target);
+  return __shadowMediaComputed.color;
+})()
+"#,
+        )
+        .expect("shadow style media fixture should evaluate");
+
+    assert_eq!(initial, "rgb(0, 0, 0)");
+    let stylist_identity = vm.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = vm.retained_style_system_update_count_for_document_for_test(document);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  __shadowMediaStyle.media = 'screen';
+  const active = __shadowMediaComputed.color;
+  __shadowMediaStyle.media = 'print';
+  const inactive = __shadowMediaComputed.color;
+  __shadowMediaStyle.removeAttribute('media');
+  const restored = __shadowMediaComputed.color;
+  return [active, inactive, restored].join('|');
+})()
+"#,
+        )
+        .expect("shadow style media mutations should evaluate");
+
+    assert_eq!(result, "rgb(4, 5, 6)|rgb(0, 0, 0)|rgb(4, 5, 6)");
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "ShadowRoot media changes must retain the document Stylist"
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds,
+        "ShadowRoot media changes must not rebuild the style world"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates + 3,
+        "each observed media mutation must update the retained ShadowRoot scope once"
+    );
+}
+
 #[test]
 fn computed_style_wrapper_reflects_emulated_media_changes() {
     let mut vm = new_storage_test_vm("https://emulated-media-computed-style.test/");
@@ -4609,7 +5300,7 @@ fn box_metrics_use_computed_display_and_real_used_sizes() {
 }
 
 #[test]
-fn box_metric_uses_one_computed_style_input_snapshot_for_nested_resolution() {
+fn box_metric_materializes_one_style_world_update_for_nested_resolution() {
     let mut vm = new_storage_test_vm("https://box-metric-style-snapshot.test/");
 
     vm.eval(
@@ -4638,24 +5329,24 @@ fn box_metric_uses_one_computed_style_input_snapshot_for_nested_resolution() {
 "#,
     )
     .expect("nested box-metric fixture should initialize");
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
 
     let result = vm
         .eval("String(document.getElementById('target').offsetWidth)")
         .expect("box metric should resolve a nested percentage width");
 
     assert_eq!(result, "100");
-    let input_builds = vm
+    let update_materializations = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test()
-        .saturating_sub(builds_before);
+        .style_world_update_materializations_for_test()
+        .saturating_sub(update_materializations_before);
     assert_eq!(
-        input_builds, 1,
-        "one synchronous box metric must carry one immutable style input snapshot"
+        update_materializations, 1,
+        "one synchronous box metric must materialize one style-world update"
     );
 }
 
@@ -4674,23 +5365,23 @@ body.appendChild(target);
 "#,
     )
     .expect("inline-style fixture should initialize");
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
 
     let result = vm
         .eval("document.getElementById('target').style.fontSize")
         .expect("missing inline font-size should remain readable");
 
     assert_eq!(result, "");
-    let input_builds = vm
+    let update_materializations = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test()
-        .saturating_sub(builds_before);
+        .style_world_update_materializations_for_test()
+        .saturating_sub(update_materializations_before);
     assert_eq!(
-        input_builds, 0,
+        update_materializations, 0,
         "a non-logical inline property must not resolve writing mode or direction"
     );
 }
@@ -5673,7 +6364,7 @@ fn computed_style_property_names_are_sorted() {
 }
 
 #[test]
-fn computed_style_index_enumeration_does_not_rebuild_inputs_per_standard_property() {
+fn computed_style_index_enumeration_does_not_rematerialize_world_per_standard_property() {
     let mut vm = new_storage_test_vm("https://computed-style-index-cost.test/");
     vm.eval(
         r#"
@@ -5684,10 +6375,10 @@ globalThis.__computedStyleForIndexCost = getComputedStyle(target);
 "#,
     )
     .expect("computed-style fixture should initialize");
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
 
     let length = vm
         .eval("String(__computedStyleForIndexCost.length)")
@@ -5695,46 +6386,49 @@ globalThis.__computedStyleForIndexCost = getComputedStyle(target);
     let after_length = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
     vm.eval("String(__computedStyleForIndexCost[0])")
         .expect("first indexed computed property should be readable");
     let after_index = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
     vm.eval("String(__computedStyleForIndexCost.item(0))")
         .expect("first computed style item should be readable");
     let after_item = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
     vm.eval("String(0 in __computedStyleForIndexCost)")
         .expect("first computed style index should be queryable");
     let after_query = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
     let count = vm
         .eval("String(Array.from(__computedStyleForIndexCost).length)")
         .expect("computed properties should be enumerable")
         .parse::<u64>()
         .expect("computed property count");
 
-    let input_builds = vm
+    let update_materializations = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test()
-        .saturating_sub(builds_before);
+        .style_world_update_materializations_for_test()
+        .saturating_sub(update_materializations_before);
     assert!(count >= 266, "unexpectedly narrow computed style: {count}");
-    assert_eq!(after_length.saturating_sub(builds_before), 1);
+    assert_eq!(
+        after_length.saturating_sub(update_materializations_before),
+        1
+    );
     assert_eq!(after_index.saturating_sub(after_length), 0);
     assert_eq!(after_item.saturating_sub(after_index), 0);
     assert_eq!(after_query.saturating_sub(after_item), 0);
     assert!(
-        input_builds <= 8,
-        "indexed enumeration rebuilt style inputs {input_builds} times for {count} properties; \
+        update_materializations <= 8,
+        "indexed enumeration materialized {update_materializations} style-world updates for {count} properties; \
          length={length}, deltas length/index/item/query={}/{}/{}/{}",
-        after_length.saturating_sub(builds_before),
+        after_length.saturating_sub(update_materializations_before),
         after_index.saturating_sub(after_length),
         after_item.saturating_sub(after_index),
         after_query.saturating_sub(after_item),
@@ -5781,7 +6475,7 @@ fn held_computed_style_count_cache_tracks_custom_property_mutations() {
 }
 
 #[test]
-fn inspector_computed_style_bulk_read_uses_one_input_snapshot() {
+fn inspector_computed_style_bulk_read_prepares_dirty_world_once_and_reuses_clean_world() {
     let mut vm = new_storage_test_vm("https://computed-style-inspector-bulk.test/");
     vm.eval(
         r#"
@@ -5816,10 +6510,10 @@ unrelatedHost.attachShadow({ mode: 'open' }).innerHTML =
     )
     .expect("inspector computed-style fixture should initialize");
     let target = element_handle_by_id(&vm, "target");
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
     let property_reads_before = vm
         ._context_host
         .borrow()
@@ -5829,19 +6523,19 @@ unrelatedHost.attachShadow({ mode: 'open' }).innerHTML =
         .computed_style_properties_for_inspector_handle(target)
         .expect("live element should resolve");
 
-    let input_builds = vm
+    let update_materializations = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test()
-        .saturating_sub(builds_before);
+        .style_world_update_materializations_for_test()
+        .saturating_sub(update_materializations_before);
     let property_reads = vm
         ._context_host
         .borrow()
         .stylo_computed_style_property_reads_for_test()
         .saturating_sub(property_reads_before);
     assert_eq!(
-        input_builds, 1,
-        "one inspector bulk read must carry one immutable style input snapshot"
+        update_materializations, 1,
+        "one inspector bulk read must materialize one style-world update"
     );
     assert!(properties.len() >= 267);
     assert!(
@@ -5872,6 +6566,33 @@ unrelatedHost.attachShadow({ mode: 'open' }).innerHTML =
     ] {
         assert_eq!(properties.get(name).map(String::as_str), Some(expected));
     }
+
+    let clean_update_materializations = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+    let clean_full_snapshots = vm
+        ._context_host
+        .borrow()
+        .style_world_full_snapshots_for_test();
+    let clean_properties = vm
+        .computed_style_properties_for_inspector_handle(target)
+        .expect("a clean retained world should remain readable");
+    assert_eq!(clean_properties.len(), properties.len());
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        clean_update_materializations,
+        "a clean inspector bulk read must not materialize a style-world update"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_full_snapshots_for_test(),
+        clean_full_snapshots,
+        "a clean inspector bulk read must not materialize a full style-world snapshot"
+    );
 }
 
 #[test]
@@ -5933,7 +6654,7 @@ childDocument.close();
 }
 
 #[test]
-fn inspector_computed_style_bulk_read_uses_target_shadow_scope_once() {
+fn inspector_computed_style_bulk_read_reuses_clean_shadow_world() {
     let mut vm = new_storage_test_vm("https://computed-style-inspector-shadow.test/");
     vm.eval(
         r#"
@@ -5952,10 +6673,10 @@ host.attachShadow({ mode: 'open' }).innerHTML = `
     )
     .expect("shadow inspector computed-style fixture should initialize");
     let target = element_handle_by_id(&vm, "inspector-shadow-target");
-    let builds_before = vm
+    let update_materializations_before = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test();
+        .style_world_update_materializations_for_test();
 
     let properties = vm
         .computed_style_properties_for_inspector_handle(target)
@@ -5963,14 +6684,14 @@ host.attachShadow({ mode: 'open' }).innerHTML = `
         .into_iter()
         .collect::<std::collections::HashMap<_, _>>();
 
-    let input_builds = vm
+    let update_materializations = vm
         ._context_host
         .borrow()
-        .stylo_computed_style_input_builds_for_test()
-        .saturating_sub(builds_before);
+        .style_world_update_materializations_for_test()
+        .saturating_sub(update_materializations_before);
     assert_eq!(
-        input_builds, 1,
-        "one shadow-target inspector bulk read must use one input snapshot",
+        update_materializations, 1,
+        "one shadow-target inspector bulk read must materialize one style-world update",
     );
     for (name, expected) in [
         ("color", "rgb(1, 2, 3)"),
@@ -5979,6 +6700,22 @@ host.attachShadow({ mode: 'open' }).innerHTML = `
     ] {
         assert_eq!(properties.get(name).map(String::as_str), Some(expected));
     }
+
+    let clean_update_materializations = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+    let clean_properties = vm
+        .computed_style_properties_for_inspector_handle(target)
+        .expect("clean shadow target should resolve");
+    assert_eq!(clean_properties.len(), properties.len());
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        clean_update_materializations,
+        "a clean ShadowRoot observation must not rebuild TreeScope inputs"
+    );
 }
 
 #[test]
@@ -6384,7 +7121,11 @@ fn isolated_world_css_register_property_uses_root_document_world() {
         .expect("isolated CSS.registerProperty setup should evaluate");
 
     assert_eq!(initial, "rgb(0, 0, 0)");
-    assert!(computed_style_cache_entry_count_for_document(&vm, document) > 0);
+    let cache_entries = computed_style_cache_entry_count_for_document(&vm, document);
+    assert!(cache_entries > 0);
+    let stylist_identity = vm.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = vm.retained_style_system_update_count_for_document_for_test(document);
 
     let context_id = vm
         .create_isolated_world("style-register-property-test", false)
@@ -6409,7 +7150,22 @@ fn isolated_world_css_register_property_uses_root_document_world() {
     assert_eq!(registered, "function");
     assert_eq!(
         computed_style_cache_entry_count_for_document(&vm, document),
-        0
+        cache_entries,
+        "registerProperty must defer invalidation until the next style observation"
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "registerProperty must keep the existing document Stylist"
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates,
+        "registerProperty must only mark the style world dirty"
     );
 
     let resolved = vm
@@ -6422,6 +7178,19 @@ fn isolated_world_css_register_property_uses_root_document_world() {
 
     assert_eq!(resolved, "rgb(10, 20, 30)");
     assert!(computed_style_cache_entry_count_for_document(&vm, document) > 0);
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates + 1,
+        "the first post-registration observation must update the retained Stylist once"
+    );
 }
 
 #[test]
@@ -6472,8 +7241,17 @@ fn popup_css_register_property_uses_popup_document_world() {
     );
     let popup_document = owner_document_handle_for_element_id(&vm, "popup-register-target");
     assert_ne!(popup_document, document);
-    assert!(computed_style_cache_entry_count_for_document(&vm, document) > 0);
-    assert!(computed_style_cache_entry_count_for_document(&vm, popup_document) > 0);
+    let document_cache_entries = computed_style_cache_entry_count_for_document(&vm, document);
+    let popup_cache_entries = computed_style_cache_entry_count_for_document(&vm, popup_document);
+    assert!(document_cache_entries > 0);
+    assert!(popup_cache_entries > 0);
+    let document_stylist_identity = vm.retained_stylist_identity_for_document_for_test(document);
+    let popup_stylist_identity = vm.retained_stylist_identity_for_document_for_test(popup_document);
+    let document_rebuilds = vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let popup_rebuilds =
+        vm.retained_style_system_rebuild_count_for_document_for_test(popup_document);
+    let document_updates = vm.retained_style_system_update_count_for_document_for_test(document);
+    let popup_updates = vm.retained_style_system_update_count_for_document_for_test(popup_document);
     assert!(!registered_custom_property_for_document(
         &vm,
         document,
@@ -6502,10 +7280,39 @@ fn popup_css_register_property_uses_popup_document_world() {
         .expect("popup CSS.registerProperty should evaluate");
 
     assert_eq!(registered, "function");
-    assert!(computed_style_cache_entry_count_for_document(&vm, document) > 0);
+    assert_eq!(
+        computed_style_cache_entry_count_for_document(&vm, document),
+        document_cache_entries
+    );
     assert_eq!(
         computed_style_cache_entry_count_for_document(&vm, popup_document),
-        0
+        popup_cache_entries,
+        "popup registration must defer invalidation until its next observation"
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        document_stylist_identity
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(popup_document),
+        popup_stylist_identity
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        document_rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(popup_document),
+        popup_rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        document_updates
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(popup_document),
+        popup_updates,
+        "registration must only mark the popup style world dirty"
     );
     assert!(!registered_custom_property_for_document(
         &vm,
@@ -6541,6 +7348,32 @@ fn popup_css_register_property_uses_popup_document_world() {
     );
     assert!(computed_style_cache_entry_count_for_document(&vm, document) > 0);
     assert!(computed_style_cache_entry_count_for_document(&vm, popup_document) > 0);
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        document_stylist_identity
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(popup_document),
+        popup_stylist_identity
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        document_rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(popup_document),
+        popup_rebuilds
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        document_updates,
+        "reading the clean opener document must not update its style world"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(popup_document),
+        popup_updates + 1,
+        "the first popup observation must update its retained Stylist once"
+    );
 }
 
 #[test]
@@ -10276,4 +11109,52 @@ fn computed_custom_functions_resolve_shadow_scoped_container_queries() {
         .expect("shadow-scoped custom functions should evaluate");
 
     assert_eq!(result, "5px|5px|5px 5px|5px 5px|--cont|size|--cont|size");
+}
+
+#[test]
+fn custom_function_provenance_probe_preserves_the_retained_style_world() {
+    let mut vm = new_parsed_test_vm(
+        "https://custom-function-retained-world.test/",
+        r#"<!doctype html><style>
+          @function --answer() { result: 42px; }
+          #target { color: rgb(1, 2, 3); --resolved: --answer(); }
+        </style><div id=target></div>"#,
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("ordinary style should establish the retained world"),
+        "rgb(1, 2, 3)"
+    );
+    let document = vm.document_handle_for_test();
+    let stylist_identity = vm.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = vm.retained_style_system_update_count_for_document_for_test(document);
+
+    assert_eq!(
+        vm.eval(
+            "getComputedStyle(document.getElementById('target')).getPropertyValue('--resolved')",
+        )
+        .expect("custom function should resolve through the isolated provenance probe"),
+        "42px"
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "a compatibility probe must not replace the Document Stylist"
+    );
+    assert_eq!(
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds,
+        "a compatibility probe must not rebuild the retained style world"
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates,
+        "a compatibility probe must not flush the retained style world"
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).color")
+            .expect("the retained world should remain readable after the probe"),
+        "rgb(1, 2, 3)"
+    );
 }

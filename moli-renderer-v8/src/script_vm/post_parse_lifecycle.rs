@@ -2560,11 +2560,13 @@ impl ScriptVm {
                 // current document after its exact owner/root authority was
                 // revoked.
                 if has_stylesheet_install_authority && validated_response.is_some() {
-                    for resource in crate::css_resource_urls::stylesheet_load_blocking_resources(
-                        &stylesheet_text,
-                        &stylesheet_base_url,
-                        optional_resource_fetch_mask,
-                    ) {
+                    for resource in
+                        crate::css_resource_urls::stylesheet_load_blocking_font_resources(
+                            &stylesheet_text,
+                            &stylesheet_base_url,
+                            optional_resource_fetch_mask,
+                        )
+                    {
                         let Some(binding) =
                             host.accept_current_main_stylesheet_subresource_load_delay()
                         else {
@@ -2616,11 +2618,13 @@ impl ScriptVm {
                     if !response.successful {
                         continue;
                     }
-                    for resource in crate::css_resource_urls::stylesheet_load_blocking_resources(
-                        &response.css_text,
-                        &response.response_url,
-                        optional_resource_fetch_mask,
-                    ) {
+                    for resource in
+                        crate::css_resource_urls::stylesheet_load_blocking_font_resources(
+                            &response.css_text,
+                            &response.response_url,
+                            optional_resource_fetch_mask,
+                        )
+                    {
                         let Some(binding) =
                             host.accept_current_main_stylesheet_subresource_load_delay()
                         else {
@@ -2758,13 +2762,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stylesheet_image_resources_require_the_image_bit() {
+    fn stylesheet_images_are_not_discovered_from_raw_css_text() {
         let stylesheet_base_url =
             Url::parse("https://example.test/assets/app.css").expect("stylesheet url");
         let stylesheet_text = "#hero { background-image: url(hero.png); }";
 
         assert!(
-            crate::css_resource_urls::stylesheet_load_blocking_resources(
+            crate::css_resource_urls::stylesheet_load_blocking_font_resources(
                 stylesheet_text,
                 &stylesheet_base_url,
                 crate::protocol_types::OptionalResourceFetchMask::NONE,
@@ -2772,21 +2776,13 @@ mod tests {
             .is_empty()
         );
 
-        let resources = crate::css_resource_urls::stylesheet_load_blocking_resources(
+        let resources = crate::css_resource_urls::stylesheet_load_blocking_font_resources(
             stylesheet_text,
             &stylesheet_base_url,
             crate::protocol_types::OptionalResourceFetchMask::IMAGE,
         );
 
-        assert_eq!(resources.len(), 1);
-        assert_eq!(
-            resources[0].request_url().as_str(),
-            "https://example.test/assets/hero.png"
-        );
-        assert_eq!(
-            resources[0].kind(),
-            crate::css_resource_urls::StylesheetLoadBlockingResourceKind::Image
-        );
+        assert!(resources.is_empty());
     }
 
     #[test]
@@ -2803,7 +2799,7 @@ mod tests {
             body { background-image: url(hero.png); }
         "#;
 
-        let resources = crate::css_resource_urls::stylesheet_load_blocking_resources(
+        let resources = crate::css_resource_urls::stylesheet_load_blocking_font_resources(
             stylesheet_text,
             &stylesheet_base_url,
             crate::protocol_types::OptionalResourceFetchMask::FONT,

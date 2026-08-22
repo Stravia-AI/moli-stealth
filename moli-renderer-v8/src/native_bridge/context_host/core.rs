@@ -459,9 +459,13 @@ impl JsContextHost {
             #[cfg(test)]
             layout_flow_subtree_node_visits: Cell::new(0),
             #[cfg(test)]
-            stylo_computed_style_input_builds: Cell::new(0),
+            style_world_update_materializations: Cell::new(0),
             #[cfg(test)]
-            stylo_style_system_key_builds: Cell::new(0),
+            style_world_full_snapshots: Cell::new(0),
+            #[cfg(test)]
+            style_world_document_scope_materializations: Cell::new(0),
+            #[cfg(test)]
+            style_world_shadow_scope_materializations: Cell::new(0),
             #[cfg(test)]
             stylo_computed_style_property_reads: Cell::new(0),
         };

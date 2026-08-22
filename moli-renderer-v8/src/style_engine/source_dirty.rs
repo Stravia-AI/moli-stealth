@@ -18,16 +18,17 @@ pub(super) struct StyleSourceDirtyScopeRecord {
     reason: StyleSourceDirtyReason,
     source_ids: IndexSet<StyleSourceId>,
     scoped_roots: IndexSet<DomHandle>,
-    cache_write_generation_at_cleanup: Option<u64>,
     clear_all_fallback_reasons: IndexSet<StyloSourceInvalidationFallbackReason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum StyleSourceDirtyReason {
+    DocumentStyleSheets,
     DocumentAdoptedStyleSheets,
     OwnerStyleSheet,
     LinkedStyleSheet,
     ShadowRootAdoptedStyleSheets,
+    CustomPropertyRegistration,
     InvalidationClearAllFallback,
 }
 
@@ -43,7 +44,6 @@ impl StyleSourceDirtyScopes {
         reason: StyleSourceDirtyReason,
         source_ids: impl IntoIterator<Item = StyleSourceId>,
         roots: impl IntoIterator<Item = DomHandle>,
-        cache_write_generation_at_cleanup: u64,
     ) {
         let scoped_roots = roots.into_iter().collect::<IndexSet<_>>();
         self.records.borrow_mut().push(StyleSourceDirtyScopeRecord {
@@ -51,7 +51,6 @@ impl StyleSourceDirtyScopes {
             reason,
             source_ids: source_ids.into_iter().collect(),
             scoped_roots,
-            cache_write_generation_at_cleanup: Some(cache_write_generation_at_cleanup),
             clear_all_fallback_reasons: IndexSet::new(),
         });
     }
@@ -68,7 +67,6 @@ impl StyleSourceDirtyScopes {
             reason: StyleSourceDirtyReason::InvalidationClearAllFallback,
             source_ids: IndexSet::new(),
             scoped_roots: IndexSet::new(),
-            cache_write_generation_at_cleanup: None,
             clear_all_fallback_reasons: reasons.into_iter().collect(),
         });
     }
@@ -91,12 +89,8 @@ impl StyleSourceDirtyScopes {
 }
 
 impl StyleSourceDirtyScopeSnapshot {
-    pub(super) fn has_only_scoped_source_records(&self) -> bool {
-        !self.records.is_empty() && self.records.iter().all(|record| record.scope_id.is_some())
-    }
-
-    pub(super) fn contains_document_scope(&self, document: DomHandle) -> bool {
-        self.scope_ids().contains(&StyleScopeId::Document(document))
+    pub(super) fn requires_retained_style_update(&self) -> bool {
+        self.records.iter().any(|record| record.scope_id.is_some())
     }
 
     pub(super) fn scoped_roots_vec(&self) -> Vec<DomHandle> {
@@ -105,6 +99,25 @@ impl StyleSourceDirtyScopeSnapshot {
 
     pub(super) fn source_ids_vec(&self) -> Vec<StyleSourceId> {
         self.source_ids().into_iter().collect()
+    }
+
+    /// Scopes whose mutation did not provide stable source identities. These
+    /// are explicit compatibility fallbacks; ordinary owner/adopted-sheet
+    /// mutations carry exact IDs and avoid a scope-wide source projection.
+    pub(super) fn full_source_projection_scope_ids(&self) -> IndexSet<StyleScopeId> {
+        self.records
+            .iter()
+            .filter(|record| {
+                record.scope_id.is_some()
+                    && record.source_ids.is_empty()
+                    && !matches!(
+                        record.reason,
+                        StyleSourceDirtyReason::CustomPropertyRegistration
+                            | StyleSourceDirtyReason::InvalidationClearAllFallback
+                    )
+            })
+            .filter_map(|record| record.scope_id)
+            .collect()
     }
 
     pub(super) fn scope_ids_vec(&self) -> Vec<StyleScopeId> {
@@ -117,6 +130,34 @@ impl StyleSourceDirtyScopeSnapshot {
 
     pub(super) fn records_vec(&self) -> Vec<StyleSourceDirtyScopeRecord> {
         self.records.clone()
+    }
+
+    pub(super) fn refreshes_document_stylesheets(&self, document: DomHandle) -> bool {
+        self.records.iter().any(|record| {
+            record.scope_id == Some(StyleScopeId::Document(document))
+                && !matches!(
+                    record.reason,
+                    StyleSourceDirtyReason::CustomPropertyRegistration
+                        | StyleSourceDirtyReason::InvalidationClearAllFallback
+                )
+        })
+    }
+
+    pub(super) fn dirty_shadow_roots(&self) -> IndexSet<DomHandle> {
+        self.records
+            .iter()
+            .filter_map(|record| match record.scope_id {
+                Some(StyleScopeId::ShadowRoot(root)) => Some(root),
+                Some(StyleScopeId::Document(_)) | None => None,
+            })
+            .collect()
+    }
+
+    pub(super) fn refreshes_custom_property_registrations(&self, document: DomHandle) -> bool {
+        self.records.iter().any(|record| {
+            record.scope_id == Some(StyleScopeId::Document(document))
+                && record.reason == StyleSourceDirtyReason::CustomPropertyRegistration
+        })
     }
 
     #[cfg(test)]
@@ -133,19 +174,6 @@ impl StyleSourceDirtyScopeSnapshot {
             .iter()
             .flat_map(|record| record.scoped_roots.iter().copied())
             .collect()
-    }
-
-    pub(super) fn cache_cleanup_covers(
-        &self,
-        roots: impl IntoIterator<Item = DomHandle>,
-        current_cache_write_generation: u64,
-    ) -> bool {
-        roots.into_iter().all(|root| {
-            self.records.iter().any(|record| {
-                record.cache_write_generation_at_cleanup == Some(current_cache_write_generation)
-                    && record.scoped_roots.contains(&root)
-            })
-        })
     }
 
     fn source_ids(&self) -> IndexSet<StyleSourceId> {

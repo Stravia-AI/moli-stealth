@@ -1,5 +1,157 @@
 use super::*;
 
+fn assert_only_source_document_is_dirty(
+    engine: &MoliStyleEngine,
+    dirty_document: DomHandle,
+    clean_document: DomHandle,
+) {
+    assert!(
+        !engine
+            .source_dirty_scope_reasons_for_document_for_test(dirty_document)
+            .is_empty(),
+        "the source owner document must carry pending style work"
+    );
+    assert!(
+        engine
+            .source_dirty_scope_reasons_for_document_for_test(clean_document)
+            .is_empty(),
+        "an unrelated document must remain clean"
+    );
+}
+
+#[test]
+fn computed_style_is_published_on_canonical_element_data_and_reused() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let style = host.create_element("style");
+    let target = host.create_element("div");
+    assert!(host.set_attribute(target, "class", "target"));
+    assert!(host.append_child(document, style));
+    assert!(host.append_child(document, target));
+
+    let mut engine = MoliStyleEngine::new();
+    engine.set_owner_style_sheet_text_with_host(
+        &host,
+        style,
+        ".target { color: rgb(1, 2, 3); }".into(),
+    );
+    let document_url = url::Url::parse("https://example.test/").unwrap();
+    let inputs = FullStyleWorldSnapshot::default();
+
+    let first = computed_style_snapshot_for_test(&engine, &host, &document_url, target, &inputs);
+    let retained_first = retained_primary_style_for_test(&engine, &host, target)
+        .expect("the target's computed style must live on canonical ElementData");
+    assert!(ServoArc::ptr_eq(&first.computed_values(), &retained_first));
+    let publication_generation =
+        engine.computed_style_publication_generation_for_document_for_test(document);
+
+    let second = computed_style_snapshot_for_test(&engine, &host, &document_url, target, &inputs);
+    let retained_second = retained_primary_style_for_test(&engine, &host, target)
+        .expect("a clean read must retain canonical ElementData");
+    assert!(ServoArc::ptr_eq(
+        &first.computed_values(),
+        &second.computed_values()
+    ));
+    assert!(ServoArc::ptr_eq(&retained_first, &retained_second));
+    assert_eq!(
+        engine.computed_style_publication_generation_for_document_for_test(document),
+        publication_generation,
+        "reading clean canonical style must not republish a cache entry"
+    );
+}
+
+#[test]
+fn scoped_invalidation_marks_canonical_style_dirty_and_preserves_clean_elements() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let style = host.create_element("style");
+    let parent = host.create_element("section");
+    let target = host.create_element("li");
+    assert!(host.set_attribute(target, "style", "color: rgb(1, 2, 3)"));
+    assert!(host.append_child(document, style));
+    assert!(host.append_child(document, parent));
+    assert!(host.append_child(parent, target));
+
+    let mut engine = MoliStyleEngine::new();
+    engine.set_owner_style_sheet_text_with_host(
+        &host,
+        style,
+        "li { display: list-item; } li::marker { color: rgb(7, 8, 9); }".into(),
+    );
+    let document_url = url::Url::parse("https://example.test/").unwrap();
+    let inputs = FullStyleWorldSnapshot::default();
+    let parent_before =
+        computed_style_snapshot_for_test(&engine, &host, &document_url, parent, &inputs)
+            .computed_values();
+    let target_before =
+        computed_style_snapshot_for_test(&engine, &host, &document_url, target, &inputs)
+            .computed_values();
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    assert!(
+        engine
+            .computed_style_property_value(
+                &host,
+                &document_url,
+                target,
+                "color",
+                Some("marker"),
+                &inputs,
+                None,
+            )
+            .is_some()
+    );
+    assert_eq!(
+        engine.computed_style_cache_entry_count_for_handle_for_document_for_test(document, target),
+        2,
+        "the publication index should contain primary and pseudo entries"
+    );
+
+    assert!(host.set_attribute(target, "style", "color: rgb(4, 5, 6)"));
+    engine.invalidate_inline_style_subtree(&host, target);
+
+    let retained_dirty_target = retained_primary_style_for_test(&engine, &host, target)
+        .expect("dirty ElementData should retain its last published values");
+    assert!(ServoArc::ptr_eq(&target_before, &retained_dirty_target));
+    assert!(element_style_is_dirty_for_test(&engine, &host, target));
+    let retained_parent = retained_primary_style_for_test(&engine, &host, parent)
+        .expect("the unaffected parent must retain its computed style");
+    assert!(ServoArc::ptr_eq(&parent_before, &retained_parent));
+    assert!(!element_style_is_dirty_for_test(&engine, &host, parent));
+    assert_eq!(
+        engine.computed_style_cache_entry_count_for_handle_for_document_for_test(document, target),
+        0,
+        "dirtying an element must evict both its publication marker and pseudo sidecar"
+    );
+
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into())
+    );
+    let target_after = retained_primary_style_for_test(&engine, &host, target)
+        .expect("the recomputed style must be republished on ElementData");
+    assert!(!ServoArc::ptr_eq(&target_before, &target_after));
+    assert!(!element_style_is_dirty_for_test(&engine, &host, target));
+}
+
 #[test]
 fn inherited_ancestor_change_clears_descendant_cache_via_subtree_cleanup() {
     let mut host = test_host();
@@ -20,7 +172,7 @@ fn inherited_ancestor_change_clears_descendant_cache_via_subtree_cleanup() {
         ".theme { color: rgb(1, 2, 3); }".into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [descendant, unrelated] {
         assert!(
             engine
@@ -82,7 +234,7 @@ fn custom_property_ancestor_change_clears_descendant_cache_via_subtree_cleanup()
         ".theme { --accent: rgb(1, 2, 3); } span { color: var(--accent, black); }".into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [descendant, unrelated] {
         assert!(
             engine
@@ -145,7 +297,7 @@ fn non_inherited_exact_change_still_clears_descendant_cache_via_subtree_cleanup(
         ".theme { background-color: rgb(1, 2, 3); }".into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [descendant, unrelated] {
         assert!(
             engine
@@ -211,7 +363,7 @@ fn shadow_host_inherited_change_clears_shadow_descendant_cache_via_subtree_clean
         ".theme { color: rgb(1, 2, 3); }".into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [shadow_child, unrelated] {
         assert!(
             engine
@@ -274,7 +426,7 @@ fn lazy_pseudo_inherited_change_clears_pseudo_cache_via_subtree_cleanup() {
             .into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -369,7 +521,7 @@ fn lazy_pseudo_custom_property_change_clears_pseudo_cache_via_subtree_cleanup() 
             .into(),
     );
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -466,7 +618,7 @@ fn source_local_fallback_roots_preserve_unrelated_document_cache_for_shadow_sour
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [outside, shadow_child, sibling_shadow_child] {
         assert!(
             engine
@@ -538,7 +690,9 @@ fn shadow_adopted_stylesheet_rebuild_uses_scoped_dirty_roots() {
         shadow_root,
         vec![first_source.clone()],
     );
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let first_source_ids =
+        engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, shadow_root);
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![first_source]));
@@ -588,6 +742,8 @@ fn shadow_adopted_stylesheet_rebuild_uses_scoped_dirty_roots() {
         shadow_root,
         vec![second_source.clone()],
     );
+    let second_source_ids =
+        engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, shadow_root);
 
     assert_eq!(
         engine.computed_cache_generation_for_document_for_test(document),
@@ -606,13 +762,15 @@ fn shadow_adopted_stylesheet_rebuild_uses_scoped_dirty_roots() {
         engine.source_set_generation_for_document_for_test(document);
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
     );
 
-    let second_source_id = StyleSourceId::shadow_root_adopted_style_sheet(shadow_root, 0);
     assert_eq!(
         engine.source_dirty_scope_source_ids_for_document_for_test(document),
-        vec![second_source_id]
+        first_source_ids
+            .into_iter()
+            .chain(second_source_ids)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         engine.source_dirty_scope_ids_for_document_for_test(document),
@@ -626,7 +784,7 @@ fn shadow_adopted_stylesheet_rebuild_uses_scoped_dirty_roots() {
         engine.source_dirty_scope_roots_for_document_for_test(document),
         vec![shadow_root, shadow_host]
     );
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![second_source]));
@@ -684,7 +842,7 @@ fn shadow_adopted_stylesheet_addition_rebuild_uses_scoped_dirty_roots() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let first_inputs = StyloComputedStyleInputs::default();
+    let first_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -728,6 +886,7 @@ fn shadow_adopted_stylesheet_addition_rebuild_uses_scoped_dirty_roots() {
         shadow_root,
         vec![source.clone()],
     );
+    let source_ids = engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, shadow_root);
 
     assert_eq!(
         engine.computed_cache_generation_for_document_for_test(document),
@@ -735,13 +894,12 @@ fn shadow_adopted_stylesheet_addition_rebuild_uses_scoped_dirty_roots() {
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
     );
 
-    let source_id = StyleSourceId::shadow_root_adopted_style_sheet(shadow_root, 0);
     assert_eq!(
         engine.source_dirty_scope_source_ids_for_document_for_test(document),
-        vec![source_id]
+        source_ids
     );
     assert_eq!(
         engine.source_dirty_scope_ids_for_document_for_test(document),
@@ -755,7 +913,7 @@ fn shadow_adopted_stylesheet_addition_rebuild_uses_scoped_dirty_roots() {
         engine.source_dirty_scope_roots_for_document_for_test(document),
         vec![shadow_root, shadow_host]
     );
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![source]));
@@ -812,7 +970,8 @@ fn shadow_adopted_stylesheet_removal_rebuild_uses_scoped_dirty_roots() {
         shadow_root,
         vec![source.clone()],
     );
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let source_ids = engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, shadow_root);
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![source]));
@@ -857,13 +1016,12 @@ fn shadow_adopted_stylesheet_removal_rebuild_uses_scoped_dirty_roots() {
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
     );
 
-    let source_id = StyleSourceId::shadow_root_adopted_style_sheet(shadow_root, 0);
     assert_eq!(
         engine.source_dirty_scope_source_ids_for_document_for_test(document),
-        vec![source_id]
+        source_ids
     );
     assert_eq!(
         engine.source_dirty_scope_ids_for_document_for_test(document),
@@ -877,7 +1035,7 @@ fn shadow_adopted_stylesheet_removal_rebuild_uses_scoped_dirty_roots() {
         engine.source_dirty_scope_roots_for_document_for_test(document),
         vec![shadow_root, shadow_host]
     );
-    let second_inputs = StyloComputedStyleInputs::default();
+    let second_inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -940,13 +1098,15 @@ fn shadow_adopted_stylesheet_dirty_scopes_keep_explicit_shadow_roots() {
             document_url,
         )],
     );
+    let expected_source_ids = engine
+        .shadow_root_adopted_style_sheet_source_ids_for_test(&host, first_root)
+        .into_iter()
+        .chain(engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, second_root))
+        .collect::<Vec<_>>();
 
     assert_eq!(
         engine.source_dirty_scope_source_ids_for_document_for_test(document),
-        vec![
-            StyleSourceId::shadow_root_adopted_style_sheet(first_root, 0),
-            StyleSourceId::shadow_root_adopted_style_sheet(second_root, 0),
-        ]
+        expected_source_ids
     );
     assert_eq!(
         engine.source_dirty_scope_ids_for_document_for_test(document),
@@ -966,7 +1126,7 @@ fn shadow_adopted_stylesheet_dirty_scopes_keep_explicit_shadow_roots() {
 }
 
 #[test]
-fn shadow_source_rebuild_full_clears_on_uncovered_shadow_root_order_change() {
+fn shadow_scope_reorder_updates_the_retained_world_in_place() {
     let mut host = test_host();
     let document = host.document_handle();
     let outside = host.create_element("main");
@@ -1006,7 +1166,7 @@ fn shadow_source_rebuild_full_clears_on_uncovered_shadow_root_order_change() {
         second_root,
         vec![second_source.clone()],
     );
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .shadow_stylesheet_sources
         .push((first_root, vec![first_source]));
@@ -1045,6 +1205,8 @@ fn shadow_source_rebuild_full_clears_on_uncovered_shadow_root_order_change() {
     );
     let generation_after_first_build =
         engine.computed_cache_generation_for_document_for_test(document);
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = engine.retained_style_system_rebuild_count_for_document_for_test(document);
 
     let changed_source = StyloStylesheetSource::new(
         "span { color: rgb(7, 8, 9); }".to_owned(),
@@ -1062,10 +1224,10 @@ fn shadow_source_rebuild_full_clears_on_uncovered_shadow_root_order_change() {
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, first_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, first_child)
     );
 
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .shadow_stylesheet_sources
         .push((second_root, vec![second_source]));
@@ -1085,17 +1247,25 @@ fn shadow_source_rebuild_full_clears_on_uncovered_shadow_root_order_change() {
         Some("rgb(7, 8, 9)".into())
     );
 
-    assert!(
-        engine.computed_cache_generation_for_document_for_test(document)
-            > generation_after_first_build,
-        "shadow root list reordering is not proven source-local by dirty roots"
+    assert_eq!(
+        engine.computed_cache_generation_for_document_for_test(document),
+        generation_after_first_build,
+        "TreeScope order is metadata, not a reason to replace the document style world"
     );
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, outside),
-        "full rebuild should clear unrelated computed entries when list reordering is not covered"
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, outside),
+        "a ShadowRoot update must preserve unrelated document styles"
     );
     assert!(
         engine.computed_style_cache_contains_handle_for_document_for_test(document, first_child)
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
     );
 }
 
@@ -1114,12 +1284,9 @@ fn document_adopted_stylesheet_rebuild_uses_scoped_dirty_root() {
         "section { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![first_source.clone()],
-    );
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![first_source.clone()]);
+    let first_source_ids = engine.document_adopted_style_sheet_source_ids_for_test(document);
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs.document_stylesheet_sources.push(first_source);
 
     assert!(
@@ -1158,11 +1325,8 @@ fn document_adopted_stylesheet_rebuild_uses_scoped_dirty_root() {
         "section { color: rgb(4, 5, 6); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![second_source.clone()],
-    );
+    engine.set_document_adopted_style_sheet_sources(document, vec![second_source.clone()]);
+    let second_source_ids = engine.document_adopted_style_sheet_source_ids_for_test(document);
 
     assert_eq!(
         engine.computed_cache_generation_for_document_for_test(document),
@@ -1170,13 +1334,16 @@ fn document_adopted_stylesheet_rebuild_uses_scoped_dirty_root() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        2,
+        "a source mutation must delay invalidation until the next observation"
     );
 
-    let second_source_id = StyleSourceId::document_adopted_style_sheet(document, 0);
     assert_eq!(
         engine.source_dirty_scope_source_ids_for_document_for_test(document),
-        vec![second_source_id]
+        first_source_ids
+            .into_iter()
+            .chain(second_source_ids)
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         engine.source_dirty_scope_ids_for_document_for_test(document),
@@ -1190,7 +1357,7 @@ fn document_adopted_stylesheet_rebuild_uses_scoped_dirty_root() {
         engine.source_dirty_scope_roots_for_document_for_test(document),
         vec![document]
     );
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .document_stylesheet_sources
         .push(second_source);
@@ -1220,7 +1387,7 @@ fn document_adopted_stylesheet_rebuild_uses_scoped_dirty_root() {
 }
 
 #[test]
-fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
+fn document_source_update_preserves_shadow_scope_cascade_data() {
     let mut host = test_host();
     let document = host.document_handle();
     let active_shadow_host = host.create_element("section");
@@ -1250,11 +1417,7 @@ fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
         StyloStylesheetSource::new(":host { display: block; }".to_owned(), document_url.clone());
     let detached_shadow_source =
         StyloStylesheetSource::new(":host { display: flex; }".to_owned(), document_url.clone());
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![first_document_source.clone()],
-    );
+    engine.set_document_adopted_style_sheet_sources(document, vec![first_document_source.clone()]);
     engine.set_shadow_root_adopted_style_sheet_sources_with_host(
         &host,
         active_shadow_root,
@@ -1266,21 +1429,21 @@ fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
         vec![detached_shadow_source.clone()],
     );
 
-    let mut active_inputs = StyloComputedStyleInputs::default();
+    let mut active_inputs = FullStyleWorldSnapshot::default();
     active_inputs
         .document_stylesheet_sources
         .push(first_document_source);
     active_inputs
         .shadow_stylesheet_sources
         .push((active_shadow_root, vec![active_shadow_source]));
-    let active_key = StyleSystemCacheKey::new(&document_url, &active_inputs, None);
+    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
 
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .shadow_stylesheet_sources
         .push((detached_shadow_root, vec![detached_shadow_source]));
-    let detached_key = StyleSystemCacheKey::new(&document_url, &detached_inputs, None);
+    let detached_key = StyleWorldKey::new(&document_url, &detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -1313,7 +1476,7 @@ fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
         .set_shadow_cascade_data_for_document_for_test(
             document,
             active_shadow_root,
-            active_cascade_data,
+            active_cascade_data.clone(),
         );
     engine
         .dom_adapter
@@ -1333,14 +1496,10 @@ fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
             .has_shadow_cascade_data_for_test(detached_shadow_root)
     );
 
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![second_document_source],
-    );
+    engine.set_document_adopted_style_sheet_sources(document, vec![second_document_source.clone()]);
 
     assert!(
-        !engine
+        engine
             .dom_adapter
             .has_shadow_cascade_data_for_test(active_shadow_root)
     );
@@ -1349,10 +1508,31 @@ fn document_source_scoped_rebuild_clears_same_document_shadow_cascade_data() {
             .dom_adapter
             .has_shadow_cascade_data_for_test(detached_shadow_root)
     );
+
+    active_inputs.document_stylesheet_sources.clear();
+    active_inputs
+        .document_stylesheet_sources
+        .push(second_document_source);
+    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
+    engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
+    let active_cascade_data_after =
+        engine.with_retained_style_system_for_document_for_test(document, |retained| {
+            retained
+                .shadow_cascade_data
+                .iter()
+                .find(|(root, _)| *root == active_shadow_root)
+                .expect("active retained system should keep the active shadow root")
+                .1
+                .clone()
+        });
+    assert!(ServoArc::ptr_eq(
+        &active_cascade_data,
+        &active_cascade_data_after
+    ));
 }
 
 #[test]
-fn clear_all_fallback_record_prevents_scoped_retained_rebuild() {
+fn clear_all_fallback_clears_element_styles_without_replacing_the_style_world() {
     let mut host = test_host();
     let document = host.document_handle();
     let outside = host.create_element("main");
@@ -1366,12 +1546,8 @@ fn clear_all_fallback_record_prevents_scoped_retained_rebuild() {
         "section { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![first_source.clone()],
-    );
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![first_source.clone()]);
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs.document_stylesheet_sources.push(first_source);
 
     assert!(
@@ -1401,16 +1577,15 @@ fn clear_all_fallback_record_prevents_scoped_retained_rebuild() {
     );
     let generation_after_first_build =
         engine.computed_cache_generation_for_document_for_test(document);
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = engine.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = engine.retained_style_system_update_count_for_document_for_test(document);
 
     let second_source = StyloStylesheetSource::new(
         "section { color: rgb(4, 5, 6); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![second_source.clone()],
-    );
+    engine.set_document_adopted_style_sheet_sources(document, vec![second_source.clone()]);
     let outcome = StyleInvalidationOutcome::retained_clear_all_for_test([
         StyloSourceInvalidationFallbackReason::FullSelector,
     ]);
@@ -1428,7 +1603,7 @@ fn clear_all_fallback_record_prevents_scoped_retained_rebuild() {
         ]
     );
 
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .document_stylesheet_sources
         .push(second_source);
@@ -1445,10 +1620,22 @@ fn clear_all_fallback_record_prevents_scoped_retained_rebuild() {
         Some("rgb(4, 5, 6)".into())
     );
 
-    assert!(
-        engine.computed_cache_generation_for_document_for_test(document)
-            > generation_after_first_build,
-        "mixed clear-all fallback diagnostics should force full retained rebuild"
+    assert_eq!(
+        engine.computed_cache_generation_for_document_for_test(document),
+        generation_after_first_build,
+        "a clear-all element fallback must not replace the document style world"
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        updates + 1
     );
     assert!(
         engine
@@ -1481,7 +1668,7 @@ fn owner_stylesheet_rebuild_uses_document_dirty_root() {
         .owner_style_sheet_source_with_host(&host, style)
         .expect("document owner stylesheet source")
         .with_source_id(Some(first_source_id));
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs.document_stylesheet_sources.push(first_source);
 
     assert!(
@@ -1528,7 +1715,8 @@ fn owner_stylesheet_rebuild_uses_document_dirty_root() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        2,
+        "an owner stylesheet mutation must wait for the next observation"
     );
 
     let second_source_id = StyleSourceId::owner_style_sheet(&host, style)
@@ -1553,7 +1741,7 @@ fn owner_stylesheet_rebuild_uses_document_dirty_root() {
         .owner_style_sheet_source_with_host(&host, style)
         .expect("document owner stylesheet source")
         .with_source_id(Some(second_source_id));
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .document_stylesheet_sources
         .push(second_source);
@@ -1620,7 +1808,7 @@ fn repeated_owner_stylesheet_changes_reuse_applied_document_cleanup() {
         vec![first_source_id.clone(), second_source_id.clone()]
     );
 
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     for (owner, source_id) in [
         (first_style, first_source_id),
         (second_style, second_source_id),
@@ -1680,7 +1868,7 @@ fn shadow_owner_stylesheet_rebuild_uses_scoped_dirty_roots() {
         .owner_style_sheet_source_with_host(&host, shadow_style)
         .expect("shadow owner stylesheet source")
         .with_source_id(Some(first_source_id));
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![first_source]));
@@ -1729,7 +1917,7 @@ fn shadow_owner_stylesheet_rebuild_uses_scoped_dirty_roots() {
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
     );
 
     let second_source_id = StyleSourceId::owner_style_sheet(&host, shadow_style)
@@ -1754,7 +1942,7 @@ fn shadow_owner_stylesheet_rebuild_uses_scoped_dirty_roots() {
         .owner_style_sheet_source_with_host(&host, shadow_style)
         .expect("shadow owner stylesheet source")
         .with_source_id(Some(second_source_id));
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![second_source]));
@@ -1823,7 +2011,7 @@ fn mixed_document_and_shadow_source_rebuild_uses_document_dirty_root() {
         .owner_style_sheet_source_with_host(&host, shadow_style)
         .expect("shadow owner stylesheet source")
         .with_source_id(Some(first_shadow_source_id));
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .document_stylesheet_sources
         .push(first_document_source);
@@ -1879,7 +2067,8 @@ fn mixed_document_and_shadow_source_rebuild_uses_document_dirty_root() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        2,
+        "batched document and shadow mutations must wait for one observation"
     );
     let second_document_source_id = StyleSourceId::owner_style_sheet(&host, document_style)
         .expect("document owner stylesheet source id");
@@ -1912,7 +2101,7 @@ fn mixed_document_and_shadow_source_rebuild_uses_document_dirty_root() {
         .owner_style_sheet_source_with_host(&host, shadow_style)
         .expect("shadow owner stylesheet source")
         .with_source_id(Some(second_shadow_source_id));
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .document_stylesheet_sources
         .push(second_document_source);
@@ -1967,7 +2156,7 @@ fn inline_style_subtree_invalidation_uses_root_document_world() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [active, detached] {
         assert!(
             engine
@@ -2027,14 +2216,10 @@ fn detached_document_mutation_pending_work_uses_owner_document_world() {
         ".active { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![source.clone()],
-    );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![source.clone()]);
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs.document_stylesheet_sources.push(source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -2141,14 +2326,10 @@ fn detached_document_focus_change_pending_work_uses_owner_document_world() {
         "section:focus { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![source.clone()],
-    );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![source.clone()]);
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs.document_stylesheet_sources.push(source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -2207,14 +2388,10 @@ fn detached_document_target_change_pending_work_uses_owner_document_world() {
         "section:target { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![source.clone()],
-    );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![source.clone()]);
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs.document_stylesheet_sources.push(source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -2302,11 +2479,7 @@ fn detached_document_adopted_stylesheet_change_uses_document_world() {
         ".target { color: rgb(1, 2, 3); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![first_source.clone()],
-    );
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![first_source.clone()]);
     assert_eq!(
         engine.adopted_style_sheet_source_owner_counts_for_document_for_test(document),
         (0, 0)
@@ -2328,11 +2501,11 @@ fn detached_document_adopted_stylesheet_change_uses_document_world() {
             .len(),
         1
     );
-    let mut first_detached_inputs = StyloComputedStyleInputs::default();
+    let mut first_detached_inputs = FullStyleWorldSnapshot::default();
     first_detached_inputs
         .document_stylesheet_sources
         .push(first_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
     assert!(host.set_attribute(detached, "class", "target"));
 
     assert!(
@@ -2373,11 +2546,7 @@ fn detached_document_adopted_stylesheet_change_uses_document_world() {
         ".target { color: rgb(4, 5, 6); }".to_owned(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![second_source.clone()],
-    );
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![second_source.clone()]);
 
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
@@ -2385,17 +2554,19 @@ fn detached_document_adopted_stylesheet_change_uses_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the owner document keeps its published style until observation"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 
-    let mut second_detached_inputs = StyloComputedStyleInputs::default();
+    let mut second_detached_inputs = FullStyleWorldSnapshot::default();
     second_detached_inputs
         .document_stylesheet_sources
         .push(second_source);
@@ -2441,7 +2612,7 @@ fn detached_document_owner_stylesheet_change_uses_owner_document_world() {
         detached_style,
         ".target { color: rgb(1, 2, 3); }".to_owned(),
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     let detached_source = engine
         .owner_style_sheet_source_with_host(&host, detached_style)
         .expect("detached owner style source");
@@ -2452,7 +2623,7 @@ fn detached_document_owner_stylesheet_change_uses_owner_document_world() {
     detached_inputs
         .document_stylesheet_sources
         .push(detached_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -2492,15 +2663,17 @@ fn detached_document_owner_stylesheet_change_uses_owner_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the detached owner document invalidates at observation time"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -2512,7 +2685,7 @@ fn ownerless_owner_stylesheet_change_does_not_use_active_document_world() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -2658,7 +2831,7 @@ fn linked_stylesheet_sources_are_document_world_local() {
 }
 
 #[test]
-fn removed_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
+fn removed_linked_stylesheet_owner_lifecycle_marks_owner_document_dirty() {
     let mut host = test_host();
     let document = host.document_handle();
     let active = host.create_element("main");
@@ -2682,7 +2855,7 @@ fn removed_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
         (1, 1)
     );
 
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2713,7 +2886,8 @@ fn removed_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "removing a stylesheet owner delays style invalidation until observation"
     );
 }
 
@@ -2742,7 +2916,7 @@ fn linked_stylesheet_owner_lifecycle_uses_final_remove_in_same_batch() {
         (1, 1)
     );
 
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2775,12 +2949,13 @@ fn linked_stylesheet_owner_lifecycle_uses_final_remove_in_same_batch() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "the final owner lifecycle state is applied at the observation boundary"
     );
 }
 
 #[test]
-fn inactive_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
+fn inactive_linked_stylesheet_owner_lifecycle_marks_owner_document_dirty() {
     let mut host = test_host();
     let document = host.document_handle();
     let active = host.create_element("main");
@@ -2804,7 +2979,7 @@ fn inactive_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
         (1, 1)
     );
 
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2835,7 +3010,8 @@ fn inactive_linked_stylesheet_owner_lifecycle_clears_owner_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "disabling a stylesheet owner delays style invalidation until observation"
     );
 }
 
@@ -2851,7 +3027,7 @@ fn first_unknown_owner_linked_stylesheet_url_record_preserves_document_worlds() 
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2931,7 +3107,7 @@ fn no_client_linked_stylesheet_url_update_preserves_document_worlds() {
         StyloStylesheetSource::new("main { color: green; }".into(), linked_url.clone()),
     );
 
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2996,7 +3172,7 @@ fn explicit_linked_stylesheet_install_uses_captured_url_not_live_href() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -3029,9 +3205,10 @@ fn explicit_linked_stylesheet_install_uses_captured_url_not_live_href() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "installing an explicit source only marks the owner world dirty"
     );
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
+    assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
 }
 
 #[test]
@@ -3069,11 +3246,11 @@ fn ownerless_dom_link_url_update_does_not_register_owner_document_world() {
         engine.linked_stylesheet_owner_registry_counts_for_document_for_test(detached_document),
         (0, 0)
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(first_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -3142,7 +3319,7 @@ fn ownerless_stylesheet_network_result_does_not_discover_dom_link_owner() {
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let stale_url = url::Url::parse("https://example.test/stale.css").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -3301,11 +3478,11 @@ fn detached_document_linked_stylesheet_install_uses_owner_document_world() {
         ".target { color: rgb(1, 2, 3); }".to_owned(),
         linked_url.clone(),
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(linked_source.clone());
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -3346,15 +3523,17 @@ fn detached_document_linked_stylesheet_install_uses_owner_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the detached owner world invalidates on its next observation"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -3385,11 +3564,11 @@ fn detached_document_linked_stylesheet_source_change_uses_link_owner_document_wo
         first_source.clone(),
         &[detached_link],
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(first_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -3434,15 +3613,17 @@ fn detached_document_linked_stylesheet_source_change_uses_link_owner_document_wo
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the detached linked-source world invalidates at observation time"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -3476,7 +3657,7 @@ fn linked_stylesheet_source_rebuild_uses_document_dirty_root() {
         .stylesheet_source_for_url_for_document_for_test(document, &linked_url)
         .expect("document linked source")
         .with_source_id(Some(first_source_id));
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs.document_stylesheet_sources.push(first_source);
 
     assert!(
@@ -3527,7 +3708,8 @@ fn linked_stylesheet_source_rebuild_uses_document_dirty_root() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        2,
+        "a linked stylesheet revision must wait for the next observation"
     );
 
     let second_source_id =
@@ -3552,7 +3734,7 @@ fn linked_stylesheet_source_rebuild_uses_document_dirty_root() {
         .stylesheet_source_for_url_for_document_for_test(document, &linked_url)
         .expect("document linked source")
         .with_source_id(Some(second_source_id));
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .document_stylesheet_sources
         .push(second_source);
@@ -3617,7 +3799,7 @@ fn shadow_linked_stylesheet_source_rebuild_uses_scoped_dirty_roots() {
         .stylesheet_source_for_url_for_document_for_test(document, &linked_url)
         .expect("shadow linked source")
         .with_source_id(Some(first_source_id));
-    let mut first_inputs = StyloComputedStyleInputs::default();
+    let mut first_inputs = FullStyleWorldSnapshot::default();
     first_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![first_source]));
@@ -3670,7 +3852,7 @@ fn shadow_linked_stylesheet_source_rebuild_uses_scoped_dirty_roots() {
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, outside));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
+        engine.computed_style_cache_contains_handle_for_document_for_test(document, shadow_child)
     );
 
     let second_source_id =
@@ -3695,7 +3877,7 @@ fn shadow_linked_stylesheet_source_rebuild_uses_scoped_dirty_roots() {
         .stylesheet_source_for_url_for_document_for_test(document, &linked_url)
         .expect("shadow linked source")
         .with_source_id(Some(second_source_id));
-    let mut second_inputs = StyloComputedStyleInputs::default();
+    let mut second_inputs = FullStyleWorldSnapshot::default();
     second_inputs
         .shadow_stylesheet_sources
         .push((shadow_root, vec![second_source]));
@@ -3760,9 +3942,9 @@ fn linked_stylesheet_final_url_update_uses_current_owner_document_after_owner_mo
         first_source.clone(),
     );
 
-    let mut active_inputs = StyloComputedStyleInputs::default();
+    let mut active_inputs = FullStyleWorldSnapshot::default();
     active_inputs.document_stylesheet_sources.push(first_source);
-    let detached_inputs = StyloComputedStyleInputs::default();
+    let detached_inputs = FullStyleWorldSnapshot::default();
 
     assert_eq!(
         engine.computed_style_property_value(
@@ -3803,19 +3985,21 @@ fn linked_stylesheet_final_url_update_uses_current_owner_document_after_owner_mo
 
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "the current owner document invalidates at observation time"
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
         1
     );
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
+    assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
         engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, document, detached_document);
 }
 
 #[test]
@@ -3846,11 +4030,11 @@ fn detached_document_url_source_change_uses_explicit_source_owner_document_world
         first_source.clone(),
         &[detached_link],
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(first_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -3895,15 +4079,17 @@ fn detached_document_url_source_change_uses_explicit_source_owner_document_world
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the explicit owner document invalidates at observation time"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -3934,8 +4120,8 @@ fn detached_document_url_source_explicit_owner_change_uses_owner_document_world(
     );
     assert!(host.set_attribute(detached_link, "href", "linked.css"));
 
-    let active_inputs = StyloComputedStyleInputs::default();
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(source.clone());
@@ -3979,15 +4165,17 @@ fn detached_document_url_source_explicit_owner_change_uses_owner_document_world(
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "capturing the explicit owner only marks that world dirty"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -4003,7 +4191,7 @@ fn explicit_linked_source_install_does_not_rederive_missing_live_href() {
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let stale_url = url::Url::parse("https://example.test/stale.css").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -4045,9 +4233,10 @@ fn explicit_linked_source_install_does_not_rederive_missing_live_href() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "the installed source is applied at the next observation"
     );
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, target));
+    assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, target));
 }
 
 #[test]
@@ -4065,7 +4254,7 @@ fn explicit_linked_source_install_is_not_rejected_by_live_disabled_state() {
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let linked_url = url::Url::parse("https://example.test/linked.css").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -4097,9 +4286,10 @@ fn explicit_linked_source_install_is_not_rejected_by_live_disabled_state() {
 
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0
+        1,
+        "the installed disabled source is applied at the next observation"
     );
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, target));
+    assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, target));
 }
 
 #[test]
@@ -4131,11 +4321,11 @@ fn ownerless_final_url_source_update_preserves_document_worlds() {
         first_source.clone(),
         &[detached_link],
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .document_stylesheet_sources
         .push(first_source);
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -4234,7 +4424,7 @@ fn detached_document_inline_style_metadata_uses_owner_document_world() {
             detached,
             "background-image",
             None,
-            &StyloComputedStyleInputs::default(),
+            &FullStyleWorldSnapshot::default(),
             None,
         ),
         Some("url(\"https://detached.test/cssom/icon.png\")".into())
@@ -4290,7 +4480,7 @@ fn inline_style_metadata_moves_to_current_owner_document_world() {
             target,
             "background-image",
             None,
-            &StyloComputedStyleInputs::default(),
+            &FullStyleWorldSnapshot::default(),
             None,
         ),
         Some("url(\"https://example.test/cssom/icon.png\")".into())
@@ -4330,11 +4520,11 @@ fn detached_shadow_adopted_stylesheet_change_uses_owner_document_world() {
         detached_shadow_sources[0].serialized_css_text().as_ref(),
         ".target { color: rgb(1, 2, 3); }"
     );
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .shadow_stylesheet_sources
         .push((detached_shadow_root, detached_shadow_sources));
-    let active_inputs = StyloComputedStyleInputs::default();
+    let active_inputs = FullStyleWorldSnapshot::default();
 
     assert!(
         engine
@@ -4376,15 +4566,17 @@ fn detached_shadow_adopted_stylesheet_change_uses_owner_document_world() {
     );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
-        0
+        1,
+        "the detached shadow world invalidates at observation time"
     );
     assert!(engine.computed_style_cache_contains_handle_for_document_for_test(document, active));
     assert!(
-        !engine.computed_style_cache_contains_handle_for_document_for_test(
+        engine.computed_style_cache_contains_handle_for_document_for_test(
             detached_document,
             detached
         )
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -4431,8 +4623,7 @@ fn matching_dependency_sources_have_explicit_source_and_scope_ids() {
         &[linked_style],
     );
 
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
+    engine.set_document_adopted_style_sheet_sources(
         document,
         vec![
             StyloStylesheetSource::new(
@@ -4481,26 +4672,17 @@ fn matching_dependency_sources_have_explicit_source_and_scope_ids() {
             owner: shadow_style,
         },
     };
-    let document_adopted_a_id = StyleSourceId {
-        scope_id: StyleScopeId::Document(document),
-        kind: StyleSourceKind::DocumentAdoptedStyleSheet { index: 0 },
-    };
-    let document_adopted_b_id = StyleSourceId {
-        scope_id: StyleScopeId::Document(document),
-        kind: StyleSourceKind::DocumentAdoptedStyleSheet { index: 1 },
-    };
-    let shadow_adopted_id = StyleSourceId {
-        scope_id: StyleScopeId::ShadowRoot(shadow_root),
-        kind: StyleSourceKind::ShadowRootAdoptedStyleSheet { index: 0 },
-    };
+    let document_adopted_ids = engine.document_adopted_style_sheet_source_ids_for_test(document);
+    let shadow_adopted_ids =
+        engine.shadow_root_adopted_style_sheet_source_ids_for_test(&host, shadow_root);
 
     for id in [
         document_style_id,
         linked_style_id,
         shadow_style_id.clone(),
-        document_adopted_a_id,
-        document_adopted_b_id,
-        shadow_adopted_id,
+        document_adopted_ids[0].clone(),
+        document_adopted_ids[1].clone(),
+        shadow_adopted_ids[0].clone(),
     ] {
         assert!(
             sources.iter().any(|(source_id, _)| source_id == &id),
@@ -4517,17 +4699,17 @@ fn matching_dependency_sources_have_explicit_source_and_scope_ids() {
     assert!(!shadow_fallback_roots.contains(&document));
 }
 #[test]
-fn style_system_cache_key_ignores_document_fragment() {
+fn style_world_identity_ignores_document_fragment() {
     let old_url = url::Url::parse("https://example.test/page.html#old").unwrap();
     let new_url = url::Url::parse("https://example.test/page.html#new").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
             ".probe { color: green; }".to_owned(),
             old_url.clone(),
         ));
-    let mut next_inputs = StyloComputedStyleInputs::default();
+    let mut next_inputs = FullStyleWorldSnapshot::default();
     next_inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
@@ -4536,37 +4718,37 @@ fn style_system_cache_key_ignores_document_fragment() {
         ));
 
     assert_eq!(
-        StyleSystemCacheKey::new(&old_url, &inputs, None),
-        StyleSystemCacheKey::new(&new_url, &next_inputs, None)
+        StyleWorldKey::new(&old_url, &inputs, None),
+        StyleWorldKey::new(&new_url, &next_inputs, None)
     );
 }
 
 #[test]
-fn style_system_cache_key_changes_when_screen_size_changes() {
+fn style_world_identity_changes_when_screen_size_changes() {
     let document_url = url::Url::parse("https://example.test/page.html").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     let viewport =
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1920.0), Some(1080.0));
     let next_viewport =
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1366.0), Some(768.0));
 
     assert_ne!(
-        StyleSystemCacheKey::new(&document_url, &inputs, viewport),
-        StyleSystemCacheKey::new(&document_url, &inputs, next_viewport)
+        StyleWorldKey::new(&document_url, &inputs, viewport),
+        StyleWorldKey::new(&document_url, &inputs, next_viewport)
     );
 }
 
 #[test]
-fn style_system_cache_key_changes_when_stylesheet_text_changes() {
+fn style_world_identity_does_not_hash_stylesheet_text() {
     let document_url = url::Url::parse("https://example.test/page.html").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
             ".probe { color: green; }".to_owned(),
             document_url.clone(),
         ));
-    let mut next_inputs = StyloComputedStyleInputs::default();
+    let mut next_inputs = FullStyleWorldSnapshot::default();
     next_inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
@@ -4574,24 +4756,24 @@ fn style_system_cache_key_changes_when_stylesheet_text_changes() {
             document_url.clone(),
         ));
 
-    assert_ne!(
-        StyleSystemCacheKey::new(&document_url, &inputs, None),
-        StyleSystemCacheKey::new(&document_url, &next_inputs, None)
+    assert_eq!(
+        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&document_url, &next_inputs, None)
     );
 }
 #[test]
-fn style_system_cache_key_changes_when_stylesheet_base_url_changes() {
+fn style_world_identity_does_not_hash_stylesheet_base_urls() {
     let document_url = url::Url::parse("https://example.test/page.html").unwrap();
     let old_base = url::Url::parse("https://example.test/assets/app.css").unwrap();
     let next_base = url::Url::parse("https://cdn.example.test/assets/app.css").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
             ".probe { background-image: url(icon.png); }".to_owned(),
             old_base,
         ));
-    let mut next_inputs = StyloComputedStyleInputs::default();
+    let mut next_inputs = FullStyleWorldSnapshot::default();
     next_inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
@@ -4599,55 +4781,31 @@ fn style_system_cache_key_changes_when_stylesheet_base_url_changes() {
             next_base,
         ));
 
-    assert_ne!(
-        StyleSystemCacheKey::new(&document_url, &inputs, None),
-        StyleSystemCacheKey::new(&document_url, &next_inputs, None)
+    assert_eq!(
+        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&document_url, &next_inputs, None)
     );
 }
 #[test]
-fn style_system_cache_key_changes_when_document_quirks_mode_changes() {
+fn style_world_identity_changes_when_document_quirks_mode_changes() {
     let document_url = url::Url::parse("https://example.test/page.html").unwrap();
-    let standards_inputs = StyloComputedStyleInputs::default();
-    let quirks_inputs = StyloComputedStyleInputs {
+    let standards_inputs = FullStyleWorldSnapshot::default();
+    let quirks_inputs = FullStyleWorldSnapshot {
         quirks_mode: style::context::QuirksMode::Quirks,
         ..Default::default()
     };
 
     assert_ne!(
-        StyleSystemCacheKey::new(&document_url, &standards_inputs, None),
-        StyleSystemCacheKey::new(&document_url, &quirks_inputs, None)
+        StyleWorldKey::new(&document_url, &standards_inputs, None),
+        StyleWorldKey::new(&document_url, &quirks_inputs, None)
     );
 }
 
 #[test]
-fn style_system_cache_key_mismatch_trace_records_changed_dimensions() {
+fn style_world_identity_mismatch_trace_records_changed_dimensions() {
     let previous_url = url::Url::parse("https://example.test/old.html").unwrap();
     let next_url = url::Url::parse("https://example.test/new.html").unwrap();
-    let shadow_root = NativeNodeId::new(10);
-    let removed_shadow_root = NativeNodeId::new(11);
-    let added_shadow_root = NativeNodeId::new(12);
-
-    let mut previous_inputs = StyloComputedStyleInputs::default();
-    previous_inputs
-        .document_stylesheet_sources
-        .push(StyloStylesheetSource::new(
-            ".probe { color: rgb(1, 2, 3); }".to_owned(),
-            previous_url.clone(),
-        ));
-    previous_inputs.shadow_stylesheet_sources.push((
-        shadow_root,
-        vec![StyloStylesheetSource::new(
-            "#target { color: rgb(4, 5, 6); }".to_owned(),
-            previous_url.clone(),
-        )],
-    ));
-    previous_inputs.shadow_stylesheet_sources.push((
-        removed_shadow_root,
-        vec![StyloStylesheetSource::new(
-            "#removed { color: rgb(7, 8, 9); }".to_owned(),
-            previous_url.clone(),
-        )],
-    ));
+    let previous_inputs = FullStyleWorldSnapshot::default();
 
     let mut next_inputs = previous_inputs.clone();
     next_inputs.environment = StyloStyleEnvironment::from_emulated_media(
@@ -4657,41 +4815,12 @@ fn style_system_cache_key_mismatch_trace_records_changed_dimensions() {
         },
     );
     next_inputs.quirks_mode = style::context::QuirksMode::Quirks;
-    next_inputs
-        .script_custom_property_registrations
-        .push(CssCustomPropertyRegistration {
-            name: "--accent".to_owned(),
-            syntax: "<color>".to_owned(),
-            inherits: false,
-            initial_value: Some("red".to_owned()),
-        });
-    next_inputs.document_stylesheet_sources = vec![StyloStylesheetSource::new(
-        ".probe { color: rgb(10, 11, 12); }".to_owned(),
-        next_url.clone(),
-    )];
-    next_inputs.shadow_stylesheet_sources = vec![
-        (
-            shadow_root,
-            vec![StyloStylesheetSource::new(
-                "#target { color: rgb(13, 14, 15); }".to_owned(),
-                next_url.clone(),
-            )],
-        ),
-        (
-            added_shadow_root,
-            vec![StyloStylesheetSource::new(
-                "#added { color: rgb(16, 17, 18); }".to_owned(),
-                next_url.clone(),
-            )],
-        ),
-    ];
-
-    let previous_key = StyleSystemCacheKey::new(
+    let previous_key = StyleWorldKey::new(
         &previous_url,
         &previous_inputs,
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1920.0), Some(1080.0)),
     );
-    let next_key = StyleSystemCacheKey::new(
+    let next_key = StyleWorldKey::new(
         &next_url,
         &next_inputs,
         StyleViewport::new(Some(1024.0), Some(768.0)).with_screen_size(Some(1366.0), Some(768.0)),
@@ -4706,25 +4835,6 @@ fn style_system_cache_key_mismatch_trace_records_changed_dimensions() {
     assert!(trace.screen_changed);
     assert!(trace.environment_changed);
     assert!(trace.quirks_mode_changed);
-    assert!(trace.custom_property_registrations_changed);
-    assert!(trace.document_stylesheet_sources_changed);
-    assert_eq!(trace.previous_document_stylesheet_sources.len, 1);
-    assert_eq!(trace.next_document_stylesheet_sources.len, 1);
-    assert!(trace.shadow_root_list_changed);
-    assert_eq!(
-        trace.previous_shadow_roots,
-        vec![shadow_root, removed_shadow_root]
-    );
-    assert_eq!(
-        trace.next_shadow_roots,
-        vec![shadow_root, added_shadow_root]
-    );
-    assert_eq!(trace.added_shadow_roots, vec![added_shadow_root]);
-    assert_eq!(trace.removed_shadow_roots, vec![removed_shadow_root]);
-    assert!(trace.shadow_stylesheet_sources_changed);
-    assert_eq!(trace.changed_shadow_source_roots, vec![shadow_root]);
-    assert_eq!(trace.previous_shadow_stylesheet_sources.len(), 2);
-    assert_eq!(trace.next_shadow_stylesheet_sources.len(), 2);
 }
 
 #[test]
@@ -4769,7 +4879,7 @@ fn retained_style_system_source_input_trace_records_source_ids_and_shadow_roots(
     let document_url = url::Url::parse("https://example.test/source-input.html").unwrap();
     let document_source_id = StyleSourceId::document_adopted_style_sheet(document, 0);
     let shadow_source_id = StyleSourceId::shadow_root_adopted_style_sheet(shadow_root, 1);
-    let mut inputs = StyloComputedStyleInputs {
+    let mut inputs = FullStyleWorldSnapshot {
         document_stylesheet_sources: vec![
             StyloStylesheetSource::new(
                 "body { color: rgb(1, 2, 3); }".to_owned(),
@@ -4781,7 +4891,6 @@ fn retained_style_system_source_input_trace_records_source_ids_and_shadow_roots(
                 document_url.clone(),
             ),
         ],
-        script_custom_property_base_url: document_url.clone(),
         ..Default::default()
     };
     inputs.shadow_stylesheet_sources.push((
@@ -4796,14 +4905,17 @@ fn retained_style_system_source_input_trace_records_source_ids_and_shadow_roots(
     ));
     inputs
         .script_custom_property_registrations
-        .push(CssCustomPropertyRegistration {
-            name: "--accent".to_owned(),
-            syntax: "<color>".to_owned(),
-            inherits: true,
-            initial_value: Some("blue".to_owned()),
+        .push(CssCustomPropertyRegistrationRecord {
+            registration: CssCustomPropertyRegistration {
+                name: "--accent".to_owned(),
+                syntax: "<color>".to_owned(),
+                inherits: true,
+                initial_value: Some("blue".to_owned()),
+            },
+            base_url: document_url.clone(),
         });
 
-    let trace = super::super::system::style_source_input_trace_for_test(&inputs);
+    let trace = super::super::world_trace::style_source_input_trace_for_test(&inputs);
 
     assert_eq!(trace.document_stylesheet_source_count, 2);
     assert_eq!(
@@ -4818,7 +4930,7 @@ fn retained_style_system_source_input_trace_records_source_ids_and_shadow_roots(
         vec![Some(shadow_source_id)]
     );
     assert_eq!(trace.script_custom_property_registration_count, 1);
-    assert_eq!(trace.script_custom_property_base_url, document_url);
+    assert_eq!(trace.script_custom_property_base_urls, [document_url]);
 }
 
 #[test]
@@ -4832,7 +4944,7 @@ fn quirks_mode_stylesheet_sources_match_ids_case_insensitively() {
     assert!(host.append_child(document, target));
 
     let document_url = url::Url::parse("https://example.test/page.html").unwrap();
-    let mut standards_inputs = StyloComputedStyleInputs::default();
+    let mut standards_inputs = FullStyleWorldSnapshot::default();
     standards_inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
@@ -4870,27 +4982,101 @@ fn quirks_mode_stylesheet_sources_match_ids_case_insensitively() {
     assert_eq!(quirks_background, "rgb(0, 128, 0)");
 }
 #[test]
-fn stylesheet_invalidation_clears_retained_style_system() {
-    let host = test_host();
+fn document_stylesheet_fallback_updates_the_persistent_world_in_place() {
+    let mut host = test_host();
     let document = host.document_handle();
+    let target = host.create_element("div");
+    assert!(host.set_attribute(target, "class", "target"));
+    assert!(host.append_child(document, target));
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
-
-    engine.ensure_retained_style_system_for_document(
-        &host,
-        host.document_handle(),
-        key.clone(),
-        &inputs,
+    let mut first_inputs = FullStyleWorldSnapshot::default();
+    first_inputs
+        .document_stylesheet_sources
+        .push(StyloStylesheetSource::new(
+            ".target { color: rgb(1, 2, 3); }".into(),
+            document_url.clone(),
+        ));
+    let first_key = StyleWorldKey::new_for_observation(
+        &document_url,
+        &first_inputs,
+        StyleViewport::default(),
+        StyleTreeScopeVersions::current(&host, Some(document)),
     );
 
-    assert!(engine.retained_style_system_matches_for_document_for_test(document, &key));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &first_inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    assert!(engine.retained_style_system_matches_for_document_for_test(document, &first_key));
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = engine.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = engine.retained_style_system_update_count_for_document_for_test(document);
+    let cache_entries = engine.computed_style_cache_entry_count_for_document_for_test(document);
 
-    engine.invalidate_author_stylesheet_set_for_document_with_host(&host, document);
+    engine.mark_document_stylesheet_set_dirty(document);
 
-    assert!(engine.retained_style_system_is_none_for_document_for_test(document));
-    assert!(engine.computed_style_cache_entry_count_for_document_for_test(document) == 0);
+    assert!(engine.retained_style_system_matches_for_document_for_test(document, &first_key));
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "marking a source set dirty must not eagerly replace the Stylist"
+    );
+    assert_eq!(
+        engine.computed_style_cache_entry_count_for_document_for_test(document),
+        cache_entries,
+        "the last published style remains readable until the next observation"
+    );
+    assert_eq!(
+        engine.source_dirty_scope_reasons_for_document_for_test(document),
+        vec![StyleSourceDirtyReason::DocumentStyleSheets]
+    );
+
+    let mut second_inputs = FullStyleWorldSnapshot::default();
+    second_inputs
+        .document_stylesheet_sources
+        .push(StyloStylesheetSource::new(
+            ".target { color: rgb(4, 5, 6); }".into(),
+            document_url.clone(),
+        ));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &second_inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into())
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "a full-document source fallback must still update the Stylist in place"
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        updates + 1
+    );
+    assert!(
+        engine
+            .source_dirty_scope_reasons_for_document_for_test(document)
+            .is_empty()
+    );
 }
 #[test]
 fn style_subtree_invalidation_retains_style_system() {
@@ -4900,8 +5086,8 @@ fn style_subtree_invalidation_retains_style_system() {
     assert!(host.append_child(document, target));
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let inputs = FullStyleWorldSnapshot::default();
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
 
     engine.ensure_retained_style_system_for_document(
         &host,
@@ -4932,14 +5118,14 @@ fn retained_style_system_keeps_cascade_data_for_empty_shadow_scopes() {
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/empty-scopes.html").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .shadow_stylesheet_sources
         .push((open_root, Vec::new()));
     inputs
         .shadow_stylesheet_sources
         .push((closed_root, Vec::new()));
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     engine.with_retained_style_system_for_document_for_test(document, |retained| {
@@ -4950,6 +5136,625 @@ fn retained_style_system_keeps_cascade_data_for_empty_shadow_scopes() {
             .collect::<Vec<_>>();
         assert_eq!(roots, vec![open_root, closed_root]);
     });
+}
+
+#[test]
+fn document_stylesheet_change_updates_the_retained_system_in_place() {
+    reset_author_source_text_parse_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let target = host.create_element("div");
+    let inherited_child = host.create_element("span");
+    let unrelated = host.create_element("p");
+    assert!(host.set_attribute(target, "class", "target"));
+    assert!(host.set_attribute(unrelated, "class", "unrelated"));
+    assert!(host.append_child(target, inherited_child));
+    assert!(host.append_child(document, target));
+    assert!(host.append_child(document, unrelated));
+
+    let engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/incremental.html").unwrap();
+    let source_id = StyleSourceId::document_adopted_style_sheet(document, 41);
+    let unrelated_source_id = StyleSourceId::document_adopted_style_sheet(document, 42);
+    let unrelated_source = StyloStylesheetSource::new(
+        ".unrelated { background-color: rgb(7, 8, 9); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(unrelated_source_id));
+    let mut first_inputs = FullStyleWorldSnapshot::default();
+    first_inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            ".target { color: rgb(1, 2, 3); }".into(),
+            document_url.clone(),
+        )
+        .with_source_id(Some(source_id.clone())),
+    );
+    first_inputs
+        .document_stylesheet_sources
+        .push(unrelated_source.clone());
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &first_inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            unrelated,
+            "background-color",
+            None,
+            &first_inputs,
+            None,
+        ),
+        Some("rgb(7, 8, 9)".into())
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            inherited_child,
+            "color",
+            None,
+            &first_inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    let target_style_before = retained_primary_style_for_test(&engine, &host, target)
+        .expect("target style should be retained");
+    let unrelated_style_before = retained_primary_style_for_test(&engine, &host, unrelated)
+        .expect("unrelated style should be retained");
+    let inherited_style_before = retained_primary_style_for_test(&engine, &host, inherited_child)
+        .expect("inherited child style should be retained");
+    assert_eq!(author_source_text_parse_count_for_test(), 2);
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let stylist_flushes = engine.retained_stylist_flush_count_for_document_for_test(document);
+    let element_resolutions = engine.element_style_resolution_count_for_document_for_test(document);
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        1
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        0
+    );
+
+    let mut second_inputs = FullStyleWorldSnapshot::default();
+    second_inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            ".target { color: rgb(4, 5, 6); }".into(),
+            document_url.clone(),
+        )
+        .with_source_id(Some(source_id)),
+    );
+    second_inputs
+        .document_stylesheet_sources
+        .push(unrelated_source);
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &second_inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into())
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 3);
+    let target_style_after = retained_primary_style_for_test(&engine, &host, target)
+        .expect("target style should be recomputed");
+    let unrelated_style_after = retained_primary_style_for_test(&engine, &host, unrelated)
+        .expect("unrelated style should remain retained");
+    assert!(!ServoArc::ptr_eq(&target_style_before, &target_style_after));
+    assert!(
+        ServoArc::ptr_eq(&unrelated_style_before, &unrelated_style_after),
+        "Stylo stylesheet invalidation must preserve an unrelated source's canonical style"
+    );
+    assert!(element_style_is_dirty_for_test(
+        &engine,
+        &host,
+        inherited_child
+    ));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            inherited_child,
+            "color",
+            None,
+            &second_inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into()),
+        "a matched ancestor invalidation must propagate to demanded inherited descendants"
+    );
+    let inherited_style_after = retained_primary_style_for_test(&engine, &host, inherited_child)
+        .expect("inherited child should be recomputed on demand");
+    assert!(!ServoArc::ptr_eq(
+        &inherited_style_before,
+        &inherited_style_after
+    ));
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "a stylesheet revision must preserve the exact Stylist identity"
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        stylist_flushes + 1,
+        "one stylesheet revision must flush the document Stylist once"
+    );
+    assert!(
+        engine.element_style_resolution_count_for_document_for_test(document) > element_resolutions,
+        "reading the invalidated target must perform a new element style resolution"
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        1,
+        "a stylesheet revision must not replace the document Stylist"
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        1
+    );
+    let flushes_after_revision =
+        engine.retained_stylist_flush_count_for_document_for_test(document);
+    let resolutions_after_revision =
+        engine.element_style_resolution_count_for_document_for_test(document);
+
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &second_inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into())
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 3);
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        1,
+        "a clean read must not flush the retained style world again"
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        flushes_after_revision,
+        "a clean read must not flush Stylo"
+    );
+    assert_eq!(
+        engine.element_style_resolution_count_for_document_for_test(document),
+        resolutions_after_revision,
+        "a clean read must reuse the canonical ElementData style"
+    );
+}
+
+#[test]
+fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
+    reset_author_source_text_parse_count_for_test();
+    reset_stylesheet_resource_manifest_build_count_for_test();
+    let host = test_host();
+    let document = host.document_handle();
+    let mut engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/resources.html").unwrap();
+    let source_id = StyleSourceId::document_adopted_style_sheet(document, 71);
+    let first_source = StyloStylesheetSource::new(
+        "@import url(theme-a.css); @font-face { font-family: First; src: url(font-a.woff2); font-weight: 700; }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(source_id.clone()));
+    engine.set_document_adopted_style_sheet_sources(document, vec![first_source.clone()]);
+    let first_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![first_source],
+        ..Default::default()
+    };
+    let first_key = StyleWorldKey::new(&document_url, &first_inputs, None);
+    engine.ensure_retained_style_system_for_document(&host, document, first_key, &first_inputs);
+
+    let first = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("the retained style world must publish its resource manifest");
+    assert_eq!(first.web_fonts().len(), 1);
+    assert_eq!(
+        first.imports(),
+        [url::Url::parse("https://example.test/theme-a.css").unwrap()]
+    );
+    assert_eq!(
+        first.web_fonts()[0].request_url().as_str(),
+        "https://example.test/font-a.woff2"
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 1);
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 1);
+
+    let clean = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("a clean world must retain its resource manifest");
+    assert_eq!(clean.generation(), first.generation());
+    assert_eq!(author_source_text_parse_count_for_test(), 1);
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 1);
+
+    let viewport = StyleViewport::from_width(Some(640.0));
+    let viewport_key = StyleWorldKey::new(&document_url, &first_inputs, viewport);
+    engine.ensure_retained_style_system_for_document(&host, document, viewport_key, &first_inputs);
+    let after_viewport_change = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("a device update must retain its resource manifest");
+    assert_eq!(
+        after_viewport_change.generation(),
+        first.generation(),
+        "device-only style updates must not advance the resource revision"
+    );
+    assert_eq!(
+        stylesheet_resource_manifest_build_count_for_test(),
+        1,
+        "a device-only update must not rebuild the typed resource projection"
+    );
+
+    let same_resources_source = StyloStylesheetSource::new(
+        "@import url(theme-a.css); @font-face { font-family: First; src: url(font-a.woff2); font-weight: 700; } body { color: green; }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(source_id.clone()));
+    engine.set_document_adopted_style_sheet_sources(document, vec![same_resources_source.clone()]);
+    let same_resources_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![same_resources_source],
+        ..Default::default()
+    };
+    let same_resources_key = StyleWorldKey::new(&document_url, &same_resources_inputs, viewport);
+    engine.ensure_retained_style_system_for_document(
+        &host,
+        document,
+        same_resources_key,
+        &same_resources_inputs,
+    );
+    let after_non_resource_change = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("a non-resource rule update must retain its resource manifest");
+    assert_eq!(
+        after_non_resource_change.generation(),
+        first.generation(),
+        "ordinary declaration changes must not restart resource reconciliation"
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 2);
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 2);
+
+    let second_source = StyloStylesheetSource::new(
+        "@import url(theme-b.css); @font-face { font-family: Second; src: url(font-b.woff2); font-style: italic; }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(source_id));
+    engine.set_document_adopted_style_sheet_sources(document, vec![second_source.clone()]);
+    let second_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![second_source],
+        ..Default::default()
+    };
+    let second_key = StyleWorldKey::new(&document_url, &second_inputs, viewport);
+    engine.ensure_retained_style_system_for_document(&host, document, second_key, &second_inputs);
+
+    let second = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("the revised world must publish its new resource manifest");
+    assert_ne!(second.generation(), first.generation());
+    assert_eq!(second.web_fonts().len(), 1);
+    assert_eq!(
+        second.imports(),
+        [url::Url::parse("https://example.test/theme-b.css").unwrap()]
+    );
+    assert_eq!(
+        second.web_fonts()[0].request_url().as_str(),
+        "https://example.test/font-b.woff2"
+    );
+    assert_eq!(
+        author_source_text_parse_count_for_test(),
+        3,
+        "each stylesheet revision must be parsed once for both cascade and resources"
+    );
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 3);
+}
+
+#[test]
+fn document_stylesheet_append_and_reorder_reuse_parsed_sheets() {
+    reset_author_source_text_parse_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let target = host.create_element("div");
+    assert!(host.set_attribute(target, "class", "target"));
+    assert!(host.append_child(document, target));
+
+    let engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/ordered-sheets.html").unwrap();
+    let first_source = StyloStylesheetSource::new(
+        ".target { color: rgb(1, 2, 3); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
+        document, 61,
+    )));
+    let second_source = StyloStylesheetSource::new(
+        ".target { color: rgb(4, 5, 6); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
+        document, 62,
+    )));
+
+    let mut first_inputs = FullStyleWorldSnapshot::default();
+    first_inputs
+        .document_stylesheet_sources
+        .push(first_source.clone());
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &first_inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 1);
+
+    let appended_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![first_source.clone(), second_source.clone()],
+        ..Default::default()
+    };
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &appended_inputs,
+            None,
+        ),
+        Some("rgb(4, 5, 6)".into())
+    );
+    assert_eq!(
+        author_source_text_parse_count_for_test(),
+        2,
+        "appending one sheet must not reparse the existing sheet"
+    );
+
+    let reordered_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![second_source, first_source],
+        ..Default::default()
+    };
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &reordered_inputs,
+            None,
+        ),
+        Some("rgb(1, 2, 3)".into())
+    );
+    assert_eq!(
+        author_source_text_parse_count_for_test(),
+        2,
+        "reordering sheets must reuse both parsed stylesheet objects"
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        1
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        2
+    );
+}
+
+#[test]
+fn incremental_document_stylesheet_updates_match_a_fresh_style_world_oracle() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let target = host.create_element("section");
+    let child = host.create_element("span");
+    let unrelated = host.create_element("aside");
+    assert!(host.set_attribute(target, "class", "target"));
+    assert!(host.set_attribute(unrelated, "class", "unrelated"));
+    assert!(host.append_child(target, child));
+    assert!(host.append_child(document, target));
+    assert!(host.append_child(document, unrelated));
+
+    let document_url = url::Url::parse("https://example.test/oracle.html").unwrap();
+    let first_id = StyleSourceId::document_adopted_style_sheet(document, 81);
+    let second_id = StyleSourceId::document_adopted_style_sheet(document, 82);
+    let source = |css: &str, id: StyleSourceId| {
+        StyloStylesheetSource::new(css.into(), document_url.clone()).with_source_id(Some(id))
+    };
+    let first = source(
+        ".target { color: rgb(1, 2, 3); background-color: rgb(4, 5, 6); }",
+        first_id.clone(),
+    );
+    let first_revision = source(
+        ".target { color: rgb(7, 8, 9); background-color: rgb(10, 11, 12); }",
+        first_id,
+    );
+    let second = source(
+        ".target { color: rgb(13, 14, 15); } .unrelated { color: rgb(16, 17, 18); }",
+        second_id,
+    );
+    let sequences = [
+        vec![first.clone()],
+        vec![first.clone(), second.clone()],
+        vec![first_revision.clone(), second.clone()],
+        vec![second.clone(), first_revision.clone()],
+        vec![first_revision],
+        Vec::new(),
+    ];
+
+    let mut incremental = MoliStyleEngine::new();
+    for sources in sequences {
+        incremental.set_document_adopted_style_sheet_sources(document, sources.clone());
+        let inputs = FullStyleWorldSnapshot {
+            document_stylesheet_sources: sources,
+            ..Default::default()
+        };
+        let oracle = MoliStyleEngine::new();
+        for (element, property) in [
+            (target, "color"),
+            (target, "background-color"),
+            (child, "color"),
+            (unrelated, "color"),
+        ] {
+            assert_eq!(
+                incremental.computed_style_property_value(
+                    &host,
+                    &document_url,
+                    element,
+                    property,
+                    None,
+                    &inputs,
+                    None,
+                ),
+                oracle.computed_style_property_value(
+                    &host,
+                    &document_url,
+                    element,
+                    property,
+                    None,
+                    &inputs,
+                    None,
+                ),
+                "incremental and fresh worlds diverged for {element:?} {property}"
+            );
+        }
+    }
+
+    assert_eq!(
+        incremental.retained_style_system_rebuild_count_for_document_for_test(document),
+        1,
+        "the oracle sequence must keep one persistent document Stylist"
+    );
+    assert_eq!(
+        incremental.retained_style_system_update_count_for_document_for_test(document),
+        5
+    );
+}
+
+#[test]
+fn one_shadow_stylesheet_change_preserves_the_other_scope_cascade_data() {
+    reset_author_source_text_parse_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let first_host = host.create_element("section");
+    let second_host = host.create_element("article");
+    assert!(host.append_child(document, first_host));
+    assert!(host.append_child(document, second_host));
+    let first_root = host
+        .attach_shadow_root(first_host, "open")
+        .expect("first host should accept a shadow root");
+    let second_root = host
+        .attach_shadow_root(second_host, "open")
+        .expect("second host should accept a shadow root");
+
+    let engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/shadow-incremental.html").unwrap();
+    let first_source_id = StyleSourceId::shadow_root_adopted_style_sheet(first_root, 51);
+    let second_source_id = StyleSourceId::shadow_root_adopted_style_sheet(second_root, 52);
+    let first_source = StyloStylesheetSource::new(
+        ":host { color: rgb(1, 2, 3); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(first_source_id.clone()));
+    let second_source = StyloStylesheetSource::new(
+        ":host { color: rgb(4, 5, 6); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(second_source_id));
+    let mut first_inputs = FullStyleWorldSnapshot::default();
+    first_inputs
+        .shadow_stylesheet_sources
+        .push((first_root, vec![first_source]));
+    first_inputs
+        .shadow_stylesheet_sources
+        .push((second_root, vec![second_source.clone()]));
+    let first_key = StyleWorldKey::new(&document_url, &first_inputs, None);
+    engine.ensure_retained_style_system_for_document(&host, document, first_key, &first_inputs);
+
+    let initial_data =
+        engine.with_retained_style_system_for_document_for_test(document, |retained| {
+            retained
+                .shadow_cascade_data
+                .iter()
+                .map(|(root, data)| (*root, data.clone()))
+                .collect::<Vec<_>>()
+        });
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let first_scope_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, first_root)
+        .expect("first scope should be retained");
+    let second_scope_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, second_root)
+        .expect("second scope should be retained");
+    assert_eq!(author_source_text_parse_count_for_test(), 2);
+
+    let revised_first_source = StyloStylesheetSource::new(
+        ":host { color: rgb(7, 8, 9); }".into(),
+        document_url.clone(),
+    )
+    .with_source_id(Some(first_source_id));
+    let mut second_inputs = FullStyleWorldSnapshot::default();
+    second_inputs
+        .shadow_stylesheet_sources
+        .push((first_root, vec![revised_first_source]));
+    second_inputs
+        .shadow_stylesheet_sources
+        .push((second_root, vec![second_source]));
+    let second_key = StyleWorldKey::new(&document_url, &second_inputs, None);
+    engine.ensure_retained_style_system_for_document(&host, document, second_key, &second_inputs);
+
+    engine.with_retained_style_system_for_document_for_test(document, |retained| {
+        let current_data = retained
+            .shadow_cascade_data
+            .iter()
+            .map(|(root, data)| (*root, data))
+            .collect::<Vec<_>>();
+        assert!(!ServoArc::ptr_eq(&initial_data[0].1, current_data[0].1));
+        assert!(ServoArc::ptr_eq(&initial_data[1].1, current_data[1].1));
+    });
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, first_root),
+        Some(first_scope_flushes + 1),
+        "the dirty ShadowRoot must flush exactly once"
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, second_root),
+        Some(second_scope_flushes),
+        "an unrelated ShadowRoot must not flush"
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 3);
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        1
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        1
+    );
 }
 
 #[test]
@@ -4987,14 +5792,14 @@ fn style_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
         second_shadow_root,
         vec![second_source.clone()],
     );
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .shadow_stylesheet_sources
         .push((first_shadow_root, vec![first_source]));
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine
@@ -5079,14 +5884,14 @@ fn detached_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
         second_shadow_root,
         vec![second_source.clone()],
     );
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .shadow_stylesheet_sources
         .push((first_shadow_root, vec![first_source]));
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine
@@ -5144,7 +5949,7 @@ fn detached_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
 }
 
 #[test]
-fn document_stylesheet_cleanup_preserves_other_document_shadow_cascade_data() {
+fn document_stylesheet_dirty_mark_isolated_to_its_document_world() {
     let mut host = test_host();
     let document = host.document_handle();
     let active_shadow_host = host.create_element("section");
@@ -5181,18 +5986,18 @@ fn document_stylesheet_cleanup_preserves_other_document_shadow_cascade_data() {
         vec![detached_source.clone()],
     );
 
-    let mut active_inputs = StyloComputedStyleInputs::default();
+    let mut active_inputs = FullStyleWorldSnapshot::default();
     active_inputs
         .shadow_stylesheet_sources
         .push((active_shadow_root, vec![active_source]));
-    let active_key = StyleSystemCacheKey::new(&document_url, &active_inputs, None);
+    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
 
-    let mut detached_inputs = StyloComputedStyleInputs::default();
+    let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .shadow_stylesheet_sources
         .push((detached_shadow_root, vec![detached_source]));
-    let detached_key = StyleSystemCacheKey::new(&document_url, &detached_inputs, None);
+    let detached_key = StyleWorldKey::new(&document_url, &detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -5243,7 +6048,7 @@ fn document_stylesheet_cleanup_preserves_other_document_shadow_cascade_data() {
         2
     );
 
-    engine.invalidate_author_stylesheet_set_for_document_with_host(&host, detached_document);
+    engine.mark_document_stylesheet_set_dirty(detached_document);
 
     assert!(
         engine
@@ -5251,16 +6056,17 @@ fn document_stylesheet_cleanup_preserves_other_document_shadow_cascade_data() {
             .has_shadow_cascade_data_for_test(active_shadow_root)
     );
     assert!(
-        !engine
+        engine
             .dom_adapter
             .has_shadow_cascade_data_for_test(detached_shadow_root)
     );
     assert!(engine.dom_adapter.has_element_data(active_shadow_host));
-    assert!(!engine.dom_adapter.has_element_data(detached_shadow_host));
+    assert!(engine.dom_adapter.has_element_data(detached_shadow_host));
     assert_eq!(
         engine.dom_adapter.shadow_cascade_document_count_for_test(),
-        1
+        2
     );
+    assert_only_source_document_is_dirty(&engine, detached_document, document);
 }
 
 #[test]
@@ -5297,7 +6103,7 @@ fn document_replacement_cleanup_preserves_unreplaced_document_world_and_shared_s
         &[active_link, detached_link],
     );
 
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [active, detached] {
         assert!(
             engine
@@ -5332,43 +6138,6 @@ fn document_replacement_cleanup_preserves_unreplaced_document_world_and_shared_s
     );
     assert!(engine.dom_adapter.has_element_data(active));
     assert!(engine.dom_adapter.has_element_data(detached));
-    let input_cache_key = StyloDocumentComputedStyleInputCacheKey::new(
-        None,
-        &[],
-        &document_url,
-        StyleViewport::default(),
-        StyloStyleEnvironment::default(),
-        &document_url,
-    );
-    let prepared_inputs = || {
-        std::rc::Rc::new(StyloPreparedComputedStyleInputs::new(
-            &document_url,
-            std::rc::Rc::new(StyloComputedStyleInputs::default()),
-            StyleViewport::default(),
-        ))
-    };
-    let document_inputs = prepared_inputs();
-    let detached_document_inputs = prepared_inputs();
-    engine.cache_document_prepared_style_inputs(
-        document,
-        input_cache_key.clone(),
-        std::rc::Rc::clone(&document_inputs),
-    );
-    engine.cache_document_prepared_style_inputs(
-        detached_document,
-        input_cache_key.clone(),
-        std::rc::Rc::clone(&detached_document_inputs),
-    );
-    assert!(
-        engine
-            .cached_document_prepared_style_inputs(document, &input_cache_key)
-            .is_some()
-    );
-    assert!(
-        engine
-            .cached_document_prepared_style_inputs(detached_document, &input_cache_key)
-            .is_some()
-    );
     let document_source_set_generation =
         engine.source_set_generation_for_document_for_test(document);
     let detached_source_set_generation =
@@ -5386,19 +6155,6 @@ fn document_replacement_cleanup_preserves_unreplaced_document_world_and_shared_s
         engine.computed_style_cache_entry_count_for_document_for_test(detached_document),
         1
     );
-    assert!(
-        engine
-            .cached_document_prepared_style_inputs(document, &input_cache_key)
-            .is_none(),
-        "document replacement must clear prepared inputs for the replaced document"
-    );
-    let retained_detached_inputs = engine
-        .cached_document_prepared_style_inputs(detached_document, &input_cache_key)
-        .expect("document replacement must preserve other document input caches");
-    assert!(std::rc::Rc::ptr_eq(
-        &retained_detached_inputs,
-        &detached_document_inputs
-    ));
     assert_eq!(
         engine.linked_stylesheet_owner_registry_counts_for_document_for_test(document),
         (0, 0)
@@ -5443,8 +6199,8 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let active_key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let inputs = FullStyleWorldSnapshot::default();
+    let active_key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &inputs);
     ensure_adapter_element_data(&engine, &host, active);
     assert!(engine.dom_adapter.has_element_data(active));
@@ -5453,11 +6209,11 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
         "section { color: rgb(1, 2, 3); }".into(),
         document_url.clone(),
     );
-    let mut first_detached_inputs = StyloComputedStyleInputs::default();
+    let mut first_detached_inputs = FullStyleWorldSnapshot::default();
     first_detached_inputs
         .document_stylesheet_sources
         .push(detached_source);
-    let first_detached_key = StyleSystemCacheKey::new(&document_url, &first_detached_inputs, None);
+    let first_detached_key = StyleWorldKey::new(&document_url, &first_detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -5469,11 +6225,11 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
         "section { color: rgb(4, 5, 6); }".into(),
         document_url.clone(),
     );
-    let mut next_detached_inputs = StyloComputedStyleInputs::default();
+    let mut next_detached_inputs = FullStyleWorldSnapshot::default();
     next_detached_inputs
         .document_stylesheet_sources
         .push(next_detached_source);
-    let next_detached_key = StyleSystemCacheKey::new(&document_url, &next_detached_inputs, None);
+    let next_detached_key = StyleWorldKey::new(&document_url, &next_detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -5498,4 +6254,52 @@ fn ensure_adapter_element_data(
             let _ = element.ensure_data();
         }
     });
+}
+
+fn computed_style_snapshot_for_test(
+    engine: &MoliStyleEngine,
+    host: &crate::dom::native::DomHost,
+    document_url: &url::Url,
+    handle: crate::document_runtime::DomHandle,
+    inputs: &FullStyleWorldSnapshot,
+) -> StyloComputedStyleSnapshot {
+    let document = host
+        .owner_document_handle(handle)
+        .expect("test element should have an owner document");
+    engine
+        .computed_style_snapshot_after_style_update_with_document_context(
+            host,
+            document_url,
+            handle,
+            inputs,
+            StyleSourceDocumentContext::for_root_document(document),
+            document,
+            StyleViewport::default(),
+        )
+        .expect("test element should have computed style")
+}
+
+fn retained_primary_style_for_test(
+    engine: &MoliStyleEngine,
+    host: &crate::dom::native::DomHost,
+    handle: crate::document_runtime::DomHandle,
+) -> Option<ServoArc<style::properties::ComputedValues>> {
+    engine.dom_adapter.with_bound_host(host, |adapter| {
+        let element = adapter.element(host, handle)?;
+        let data = element.borrow_data()?;
+        data.has_styles().then(|| data.styles.primary().clone())
+    })
+}
+
+fn element_style_is_dirty_for_test(
+    engine: &MoliStyleEngine,
+    host: &crate::dom::native::DomHost,
+    handle: crate::document_runtime::DomHandle,
+) -> bool {
+    engine.dom_adapter.with_bound_host(host, |adapter| {
+        let element = adapter.element(host, handle).expect("test element");
+        element
+            .borrow_data()
+            .is_some_and(|data| !data.hint.is_empty())
+    })
 }

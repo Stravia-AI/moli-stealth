@@ -24,7 +24,7 @@ fn lang_selector_does_not_match_more_specific_range() {
     );
     let source_id = StyleSourceId::owner_style_sheet(&host, style).expect("owner source id");
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(
         engine
             .owner_style_sheet_source_with_host(&host, style)
@@ -69,7 +69,7 @@ fn standalone_subtree_context_invalidation_preserves_unrelated_cache_entries() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -137,7 +137,7 @@ fn pending_mutation_invalidations_drain_before_computed_style_read() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -221,7 +221,7 @@ fn pending_mutation_invalidations_keep_separate_work_items_until_drain() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [outside, first_target, second_target] {
         assert!(
             engine
@@ -297,8 +297,8 @@ fn pending_attribute_mutation_invalidations_merge_for_batch_drain() {
         ".first { color: red; } .second { color: blue; }".into(),
     );
     let document_url = host.document_url().expect("test document url").clone();
-    let inputs = StyloComputedStyleInputs::default();
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let inputs = FullStyleWorldSnapshot::default();
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
 
@@ -508,11 +508,7 @@ fn source_metadata_uses_explicitly_installed_linked_stylesheet_owners() {
         url::Url::parse("https://example.test/has.css").unwrap(),
     );
     let detached_document = host.create_detached_html_document();
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        detached_document,
-        vec![has_source],
-    );
+    engine.set_document_adopted_style_sheet_sources(detached_document, vec![has_source]);
 
     let linked_url = url::Url::parse("https://example.test/app.css").unwrap();
     engine.record_stylesheet_source_for_url_for_document_for_test(
@@ -864,8 +860,7 @@ fn source_metadata_matches_detached_document_styles_without_matching_active_disc
         "body:has(.marker) .target { color: green; }".into(),
     );
     let mut adopted_engine = MoliStyleEngine::new();
-    adopted_engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
+    adopted_engine.set_document_adopted_style_sheet_sources(
         detached_document,
         vec![StyloStylesheetSource::new(
             "body:has(.marker) .target { color: green; }".into(),

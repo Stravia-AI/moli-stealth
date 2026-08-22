@@ -1,4 +1,4 @@
-use std::{collections::HashSet, rc::Rc};
+use std::collections::HashSet;
 
 use super::{
     JsContextHost,
@@ -13,10 +13,10 @@ use crate::{
     network::context::DocumentResourceLoader,
     style_engine::{
         AdoptedStyleSheetInstallation, CssCustomPropertyRegistration,
-        CssCustomPropertyRegistrationError, OwnedStyleSourceDocumentContext, StyleAttributeImpact,
-        StyleMutationEffect, StyleViewport, StyloComputedStyleInputs,
-        StyloDocumentComputedStyleInputCacheKey, StyloPreparedComputedStyleInputs,
-        StyloStylesheetSource,
+        CssCustomPropertyRegistrationError, FullStyleWorldSnapshot,
+        OwnedStyleSourceDocumentContext, PreparedStyleWorldUpdate, StyleAttributeImpact,
+        StyleMutationEffect, StyleObservationSnapshot, StyleViewport, StylesheetResourceSnapshot,
+        StyloStyleEnvironment, StyloStylesheetSource,
     },
     {
         RendererWebStorageHandles,
@@ -853,13 +853,8 @@ impl JsContextHost {
         document: DomHandle,
         installations: Vec<AdoptedStyleSheetInstallation>,
     ) {
-        let dom_host = self.dom_host() as *const _;
         self.style_engine
-            .set_document_adopted_style_sheet_installations_with_host(
-                unsafe { &*dom_host },
-                document,
-                installations,
-            );
+            .set_document_adopted_style_sheet_installations(document, installations);
     }
 
     pub(crate) fn adopted_style_sheet_sources_for_document(
@@ -1275,14 +1270,11 @@ impl JsContextHost {
     ) -> Result<(), CssCustomPropertyRegistrationError> {
         self.clear_layout_rect_cache();
         let base_url = self.style_base_url_for_document(document);
-        let dom_host = self.dom_host() as *const _;
-        self.style_engine
-            .register_css_custom_property_for_document_with_host(
-                unsafe { &*dom_host },
-                document,
-                registration,
-                base_url,
-            )
+        self.style_engine.register_css_custom_property_for_document(
+            document,
+            registration,
+            base_url,
+        )
     }
 
     pub(crate) fn validate_css_custom_property_registration_for_document(
@@ -1317,12 +1309,12 @@ impl JsContextHost {
             .registered_css_custom_property_registration_for_document(document, name)
     }
 
-    pub(crate) fn script_css_custom_property_registrations(
+    pub(crate) fn script_css_custom_property_registration_records(
         &self,
         document: DomHandle,
-    ) -> Vec<CssCustomPropertyRegistration> {
+    ) -> Vec<crate::style_engine::CssCustomPropertyRegistrationRecord> {
         self.style_engine
-            .script_css_custom_property_registrations_for_document(document)
+            .script_css_custom_property_registration_records_for_document(document)
     }
 
     pub(crate) fn computed_style_property_value_from_stylo(
@@ -1330,7 +1322,7 @@ impl JsContextHost {
         handle: DomHandle,
         property: &str,
         pseudo_element: Option<&str>,
-        inputs: &StyloComputedStyleInputs,
+        inputs: &FullStyleWorldSnapshot,
         read_document: DomHandle,
         viewport: StyleViewport,
     ) -> Option<String> {
@@ -1349,6 +1341,33 @@ impl JsContextHost {
                 property,
                 pseudo_element,
                 inputs,
+                document_context.as_ref(),
+                read_document,
+                viewport,
+            )
+    }
+
+    /// Runs a compatibility-only provenance probe against an isolated style
+    /// engine. The probe must never replace or flush the page's retained
+    /// Document style world.
+    pub(crate) fn computed_style_property_value_from_ephemeral_stylo(
+        &self,
+        handle: DomHandle,
+        property: &str,
+        inputs: &FullStyleWorldSnapshot,
+        read_document: DomHandle,
+        viewport: StyleViewport,
+    ) -> Option<String> {
+        let document_context = self.style_source_document_context_for_read_document(read_document);
+        let inputs = inputs.independent_style_engine_projection();
+        crate::style_engine::MoliStyleEngine::new()
+            .computed_style_property_value_with_document_context(
+                self.dom_host(),
+                &self.document_url_for_handle(read_document),
+                handle,
+                property,
+                None,
+                &inputs,
                 document_context.as_ref(),
                 read_document,
                 viewport,
@@ -1400,19 +1419,11 @@ impl JsContextHost {
         &self,
         read_document: DomHandle,
     ) {
-        let owner_document = if self
-            .lightweight_popup_id_for_document_handle(read_document)
-            .is_some()
-        {
-            read_document
-        } else {
-            self.document_handle()
-        };
         let document_context = self.style_source_document_context_for_read_document(read_document);
         self.style_engine
             .drain_pending_style_invalidations_for_computed_style_read_with_document_context(
                 self.dom_host(),
-                owner_document,
+                read_document,
                 document_context.as_ref(),
             );
     }
@@ -1445,23 +1456,20 @@ impl JsContextHost {
             .computed_cache_generation_for_document(document)
     }
 
-    pub(crate) fn cached_document_prepared_style_inputs(
+    pub(crate) fn stylesheet_resource_snapshot_for_document(
         &self,
         document: DomHandle,
-        key: &StyloDocumentComputedStyleInputCacheKey,
-    ) -> Option<Rc<StyloPreparedComputedStyleInputs>> {
+    ) -> Option<StylesheetResourceSnapshot> {
         self.style_engine
-            .cached_document_prepared_style_inputs(document, key)
+            .stylesheet_resource_snapshot_for_document(document)
     }
 
-    pub(crate) fn cache_document_prepared_style_inputs(
+    pub(crate) fn retained_stylesheet_query_snapshot_for_document(
         &self,
         document: DomHandle,
-        key: StyloDocumentComputedStyleInputCacheKey,
-        inputs: Rc<StyloPreparedComputedStyleInputs>,
-    ) {
+    ) -> Option<std::rc::Rc<FullStyleWorldSnapshot>> {
         self.style_engine
-            .cache_document_prepared_style_inputs(document, key, inputs);
+            .retained_stylesheet_query_snapshot_for_document(document)
     }
 
     #[cfg(test)]
@@ -1489,28 +1497,56 @@ impl JsContextHost {
     }
 
     #[cfg(test)]
-    pub(crate) fn note_stylo_computed_style_input_build_for_test(&self) {
-        self.stylo_computed_style_input_builds.set(
-            self.stylo_computed_style_input_builds
+    pub(crate) fn note_style_world_update_materialization_for_test(&self) {
+        self.style_world_update_materializations.set(
+            self.style_world_update_materializations
                 .get()
                 .saturating_add(1),
         );
     }
 
     #[cfg(test)]
-    pub(crate) fn stylo_computed_style_input_builds_for_test(&self) -> u64 {
-        self.stylo_computed_style_input_builds.get()
+    pub(crate) fn style_world_update_materializations_for_test(&self) -> u64 {
+        self.style_world_update_materializations.get()
     }
 
     #[cfg(test)]
-    pub(crate) fn note_stylo_style_system_key_build_for_test(&self) {
-        self.stylo_style_system_key_builds
-            .set(self.stylo_style_system_key_builds.get().saturating_add(1));
+    pub(crate) fn note_style_world_full_snapshot_for_test(&self) {
+        self.style_world_full_snapshots
+            .set(self.style_world_full_snapshots.get().saturating_add(1));
     }
 
     #[cfg(test)]
-    pub(crate) fn stylo_style_system_key_builds_for_test(&self) -> u64 {
-        self.stylo_style_system_key_builds.get()
+    pub(crate) fn style_world_full_snapshots_for_test(&self) -> u64 {
+        self.style_world_full_snapshots.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_style_world_document_scope_materialization_for_test(&self) {
+        self.style_world_document_scope_materializations.set(
+            self.style_world_document_scope_materializations
+                .get()
+                .saturating_add(1),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn style_world_document_scope_materializations_for_test(&self) -> u64 {
+        self.style_world_document_scope_materializations.get()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn note_style_world_shadow_scope_materialization_for_test(&self) {
+        self.style_world_shadow_scope_materializations.set(
+            self.style_world_shadow_scope_materializations
+                .get()
+                .saturating_add(1),
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn style_world_shadow_scope_materializations_for_test(&self) -> u64 {
+        self.style_world_shadow_scope_materializations.get()
     }
 
     #[cfg(test)]
@@ -1541,6 +1577,24 @@ impl JsContextHost {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_style_system_update_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.style_engine
+            .retained_style_system_update_count_for_document_for_test(document)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_stylist_identity_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.style_engine
+            .retained_stylist_identity_for_document_for_test(document)
+    }
+
+    #[cfg(test)]
     pub(crate) fn pending_style_invalidation_work_item_count_for_document_for_test(
         &self,
         document: DomHandle,
@@ -1552,7 +1606,7 @@ impl JsContextHost {
     pub(crate) fn computed_style_snapshot_from_stylo_after_style_update(
         &self,
         handle: DomHandle,
-        inputs: &StyloComputedStyleInputs,
+        inputs: &FullStyleWorldSnapshot,
         read_document: DomHandle,
         viewport: StyleViewport,
     ) -> Option<crate::style_engine::StyloComputedStyleSnapshot> {
@@ -1569,15 +1623,36 @@ impl JsContextHost {
             )
     }
 
-    pub(crate) fn computed_style_snapshot_from_stylo_with_prepared_inputs(
+    pub(crate) fn computed_style_snapshot_from_current_observation(
         &self,
         handle: DomHandle,
-        inputs: &StyloPreparedComputedStyleInputs,
+        read_document: DomHandle,
+        viewport: StyleViewport,
+        tree_scope_versions: crate::style_engine::StyleTreeScopeVersions,
+    ) -> StyleObservationSnapshot {
+        let document_context = self.style_source_document_context_for_read_document(read_document);
+        self.style_engine
+            .computed_style_snapshot_from_current_observation(
+                self.dom_host(),
+                self.document_url(),
+                handle,
+                StyloStyleEnvironment::from_emulated_media(self.emulated_media()),
+                document_context.as_ref(),
+                read_document,
+                viewport,
+                tree_scope_versions,
+            )
+    }
+
+    pub(crate) fn computed_style_snapshot_with_world_update(
+        &self,
+        handle: DomHandle,
+        inputs: &PreparedStyleWorldUpdate,
         read_document: DomHandle,
     ) -> Option<crate::style_engine::StyloComputedStyleSnapshot> {
         let document_context = self.style_source_document_context_for_read_document(read_document);
         self.style_engine
-            .computed_style_snapshot_after_style_update_with_prepared_inputs(
+            .computed_style_snapshot_after_world_update(
                 self.dom_host(),
                 self.document_url(),
                 handle,
@@ -1587,43 +1662,39 @@ impl JsContextHost {
             )
     }
 
-    pub(crate) fn computed_pseudo_style_snapshot_from_stylo_with_prepared_inputs(
+    pub(crate) fn computed_pseudo_style_snapshot_from_current_observation(
         &self,
         handle: DomHandle,
         pseudo_element: &str,
-        inputs: &StyloPreparedComputedStyleInputs,
         read_document: DomHandle,
     ) -> Option<crate::style_engine::StyloComputedStyleSnapshot> {
         let document_context = self.style_source_document_context_for_read_document(read_document);
         self.style_engine
-            .computed_pseudo_style_snapshot_after_style_update_with_prepared_inputs(
+            .computed_pseudo_style_snapshot_from_current_observation(
                 self.dom_host(),
                 self.document_url(),
                 handle,
                 pseudo_element,
-                inputs,
                 document_context.as_ref(),
                 read_document,
             )
     }
 
-    pub(crate) fn computed_anonymous_style_snapshot_from_stylo_with_prepared_inputs(
+    pub(crate) fn computed_anonymous_style_snapshot_from_current_observation(
         &self,
         owner: DomHandle,
         parent_style: &style::properties::ComputedValues,
         anonymous_kind: crate::style_engine::StyloAnonymousBoxKind,
-        inputs: &StyloPreparedComputedStyleInputs,
         read_document: DomHandle,
     ) -> Option<crate::style_engine::StyloComputedStyleSnapshot> {
         let document_context = self.style_source_document_context_for_read_document(read_document);
         self.style_engine
-            .computed_anonymous_style_snapshot_after_style_update_with_prepared_inputs(
+            .computed_anonymous_style_snapshot_from_current_observation(
                 self.dom_host(),
                 self.document_url(),
                 owner,
                 parent_style,
                 anonymous_kind,
-                inputs,
                 document_context.as_ref(),
                 read_document,
             )

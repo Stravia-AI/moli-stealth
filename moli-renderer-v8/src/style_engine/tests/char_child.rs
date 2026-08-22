@@ -16,15 +16,14 @@ fn character_data_without_structural_selector_preserves_cache_entries() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
+    engine.set_document_adopted_style_sheet_sources(
         document,
         vec![StyloStylesheetSource::new(
             ".parent + .target { color: red; }".into(),
             document_url.clone(),
         )],
     );
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [parent, target] {
         assert!(
             engine
@@ -76,15 +75,14 @@ fn character_data_structural_sibling_dependency_invalidates_following_siblings()
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
+    engine.set_document_adopted_style_sheet_sources(
         document,
         vec![StyloStylesheetSource::new(
             ".parent:empty + .target { color: red; }".into(),
             document_url.clone(),
         )],
     );
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [parent, target] {
         assert!(
             engine
@@ -137,15 +135,14 @@ fn character_data_has_empty_dependency_invalidates_ancestor_subjects() {
 
     let mut engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
+    engine.set_document_adopted_style_sheet_sources(
         document,
         vec![StyloStylesheetSource::new(
             ".container:has(.child:empty) .target { color: red; }".into(),
             document_url.clone(),
         )],
     );
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [child, target] {
         assert!(
             engine
@@ -198,12 +195,8 @@ fn child_list_has_empty_dependency_invalidates_ancestor_subjects() {
         "#subject { display: block; } #subject:has(:empty) { display: none; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     assert_eq!(
         engine.computed_style_property_value(
@@ -275,12 +268,8 @@ fn child_list_type_sibling_invalidation_clears_next_sibling_without_keyed_depend
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let source =
         StyloStylesheetSource::new("div + .target { color: red; }".into(), document_url.clone());
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -341,12 +330,8 @@ fn child_list_universal_sibling_invalidation_keeps_later_sibling_cache() {
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let source =
         StyloStylesheetSource::new("* + .target { color: red; }".into(), document_url.clone());
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -411,12 +396,8 @@ fn child_list_universal_sibling_removal_keeps_later_sibling_cache() {
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let source =
         StyloStylesheetSource::new("* + .target { color: red; }".into(), document_url.clone());
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -498,12 +479,8 @@ fn retained_stylo_invalidator_uses_batch_snapshot_for_outer_dependency() {
         "div .scope:where(.marker *) .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [scoped_target, loose_target] {
         assert!(
@@ -592,12 +569,8 @@ fn retained_stylo_invalidator_uses_attribute_value_snapshot_for_outer_dependency
         "div .scope:where([data-state=\"old\"] *) .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [scoped_target, loose_target] {
         assert!(
@@ -684,12 +657,8 @@ fn retained_stylo_invalidator_uses_focus_state_snapshot_for_outer_dependency() {
         "div .scope:where(:focus *) .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [scoped_target, loose_target] {
         assert!(
@@ -763,12 +732,8 @@ fn retained_stylo_invalidator_uses_target_state_snapshot_for_outer_dependency() 
         "div .scope:where(:target *) .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [scoped_target, loose_target] {
         assert!(
@@ -832,12 +797,8 @@ fn retained_stylo_child_list_insertion_preserves_broken_next_sibling_target() {
         ".previous + .target { color: red; } .marker ~ .later { color: green; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, later, unrelated] {
         assert!(
@@ -909,12 +870,8 @@ fn retained_stylo_child_list_insertion_uses_element_sibling_relation_across_text
         ".marker + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -982,12 +939,8 @@ fn retained_stylo_child_list_removal_uses_mutation_time_removed_snapshot() {
         ".marker + .target { color: red; } .other + .unrelated { color: blue; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -1054,12 +1007,8 @@ fn retained_stylo_child_list_removal_preserves_new_previous_sibling_match() {
         ".marker + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -1132,12 +1081,8 @@ fn retained_stylo_child_list_removal_uses_element_sibling_relation_across_text()
         ".marker + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -1210,12 +1155,8 @@ fn retained_stylo_child_list_removal_uses_previous_element_sibling_across_text()
         ".marker + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -1286,12 +1227,8 @@ fn retained_stylo_child_list_multi_removal_uses_removed_element_sibling_relation
         ".spacer + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(
@@ -1367,12 +1304,8 @@ fn retained_stylo_child_list_multi_removal_preserves_new_previous_sibling_match(
         ".marker + .target { color: red; }".into(),
         document_url.clone(),
     );
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
     for handle in [target, unrelated] {
         assert!(

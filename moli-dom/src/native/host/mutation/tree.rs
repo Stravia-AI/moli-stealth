@@ -48,6 +48,7 @@ impl DomHost {
     ) -> DomMutationEffects {
         let owner_document = self.owner_document_handle(parent);
         let records_enabled = self.mutation_records_enabled();
+        let removed_tree_was_connected = self.is_connected(child);
         let removal_context = self.subtree_removal_context(child);
         let removed_shadow_slot_assignment_snapshots = self
             .slot_assignment_snapshots_for_removed_shadow_tree_slots(&removal_context.shadow_slots);
@@ -77,7 +78,10 @@ impl DomHost {
             effects.extend_stylesheet_candidate_changes(candidate_changes);
             self.clear_popover_open_states(&removal_context.open_popovers, &mut effects);
             effects.extend_stylesheet_owner_changes(
-                self.sync_shadow_tree_scopes_for_removed_subtree(&removal_context.shadow_hosts),
+                self.sync_shadow_tree_scopes_for_removed_subtree(
+                    &removal_context.shadow_hosts,
+                    removed_tree_was_connected,
+                ),
             );
             self.record_mutation(MutationScope::QueryState);
             if let Some(document) = owner_document {

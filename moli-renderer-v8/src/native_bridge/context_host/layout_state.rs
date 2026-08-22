@@ -7,6 +7,7 @@ use crate::{
     css_resource_urls::{CompletedStylesheetWebFont, StylesheetLoadBlockingResource},
     document_runtime::DomHandle,
     script_vm::web_fonts::{DocumentWebFontCompletion, DocumentWebFontState},
+    style_engine::StylesheetResourceGeneration,
 };
 
 /// Layout-facing state whose lifetime is bounded by exactly one main Document.
@@ -20,11 +21,12 @@ use crate::{
 /// The single snapshot slot records the exact root Document it was built for;
 /// embedded Document member trees remain recursively owned by that same
 /// snapshot instead of becoming separately keyed cache entries.
+#[derive(Default)]
 pub(super) struct DocumentLayoutState {
     services: DocumentLayoutServices,
     embedded_document_services: HashMap<DomHandle, DocumentLayoutServices>,
     web_fonts: DocumentWebFontState,
-    web_font_sources_dirty: bool,
+    web_font_resource_generation: Option<StylesheetResourceGeneration>,
     visual_state_generation: u64,
     latest_layout: LatestLayoutTreeCache,
     /// Last used content viewport published by each live iframe owner's
@@ -34,27 +36,19 @@ pub(super) struct DocumentLayoutState {
     frame_viewports: HashMap<DomHandle, LayoutViewport>,
 }
 
-impl Default for DocumentLayoutState {
-    fn default() -> Self {
-        Self {
-            services: DocumentLayoutServices::default(),
-            embedded_document_services: HashMap::new(),
-            web_fonts: DocumentWebFontState::default(),
-            web_font_sources_dirty: true,
-            visual_state_generation: 0,
-            latest_layout: LatestLayoutTreeCache::default(),
-            frame_viewports: HashMap::new(),
-        }
-    }
-}
-
 impl DocumentLayoutState {
-    pub(super) fn mark_web_font_sources_dirty(&mut self) {
-        self.web_font_sources_dirty = true;
+    pub(super) fn web_font_resources_are_current(
+        &self,
+        generation: StylesheetResourceGeneration,
+    ) -> bool {
+        self.web_font_resource_generation == Some(generation)
     }
 
-    pub(super) fn take_web_font_sources_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.web_font_sources_dirty)
+    pub(super) fn publish_web_font_resource_generation(
+        &mut self,
+        generation: StylesheetResourceGeneration,
+    ) {
+        self.web_font_resource_generation = Some(generation);
     }
 
     pub(super) const fn visual_state_generation(&self) -> u64 {

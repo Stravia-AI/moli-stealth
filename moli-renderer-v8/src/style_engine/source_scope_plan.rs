@@ -22,14 +22,16 @@ pub(super) struct StyleSourceScopeCleanupPlanEntry {
 }
 
 impl StyleSourceScopeCleanupPlan {
-    pub(super) fn document_adopted_stylesheets(document: DomHandle, source_count: usize) -> Self {
+    pub(super) fn document_adopted_stylesheets(
+        document: DomHandle,
+        source_ids: impl IntoIterator<Item = StyleSourceId>,
+    ) -> Self {
         let mut plan = Self::default();
         plan.add_scoped_roots(
             document,
             StyleScopeId::Document(document),
             StyleSourceDirtyReason::DocumentAdoptedStyleSheets,
-            (0..source_count)
-                .map(|index| StyleSourceId::document_adopted_style_sheet(document, index)),
+            source_ids,
             [document],
         );
         plan
@@ -65,7 +67,7 @@ impl StyleSourceScopeCleanupPlan {
     pub(super) fn shadow_root_adopted_stylesheets(
         host: &DomHost,
         root: DomHandle,
-        source_count: usize,
+        source_ids: impl IntoIterator<Item = StyleSourceId>,
     ) -> Self {
         let mut plan = Self::default();
         let Some(document) = owner_document_for_source_owner(host, root) else {
@@ -79,8 +81,7 @@ impl StyleSourceScopeCleanupPlan {
                 document,
                 StyleScopeId::ShadowRoot(root),
                 StyleSourceDirtyReason::ShadowRootAdoptedStyleSheets,
-                (0..source_count)
-                    .map(|index| StyleSourceId::shadow_root_adopted_style_sheet(root, index)),
+                source_ids,
                 roots,
             );
         }

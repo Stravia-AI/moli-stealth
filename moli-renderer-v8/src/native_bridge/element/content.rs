@@ -20,7 +20,7 @@ use super::{
         ElementBoxState, ElementContentVisibility, ElementRenderedState, ElementRenderedStyle,
         rendered_child_participates_in_flat_tree,
     },
-    styles::ComputedStyleReadScope,
+    styles::StyleObservation,
     trusted_types::{TrustedHtmlSink, trusted_html_sink_string},
 };
 
@@ -575,7 +575,7 @@ fn rendered_element_ignores_dom_children(element: &Element) -> bool {
 
 fn append_inner_text(
     runtime: &JsContextHost,
-    style_scope: &mut ComputedStyleReadScope<'_>,
+    style_scope: &mut StyleObservation<'_>,
     root: DomHandle,
     root_style: Option<ElementRenderedStyle>,
     rendered_text_sources: &HashSet<DomHandle>,
@@ -811,7 +811,7 @@ fn node_inner_text(
     } else {
         HashSet::new()
     };
-    let mut style_scope = ComputedStyleReadScope::new(runtime);
+    let mut style_scope = StyleObservation::new(runtime);
     let rendered_state = ElementRenderedState::read_in_scope(&mut style_scope, handle);
     if rendered_state.has_content_visibility_lock() {
         return Ok(String::new());

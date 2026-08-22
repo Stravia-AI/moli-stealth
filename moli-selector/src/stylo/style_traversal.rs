@@ -22,6 +22,7 @@ use style::{
     context::{QuirksMode, SharedStyleContext},
     data::{ElementDataMut, ElementDataRef, ElementDataWrapper},
     dom::{LayoutIterator, NodeInfo, OpaqueNode, TDocument, TElement, TNode, TShadowRoot},
+    invalidation::{element::restyle_hints::RestyleHint, stylesheets::StylesheetInvalidationSet},
     properties::{PropertyDeclarationBlock, longhands::display::computed_value::T as Display},
     selector_parser::{AttrValue as SelectorAttrValue, Lang, PseudoElement, SelectorImpl},
     servo_arc::{Arc, ArcBorrow},
@@ -168,6 +169,12 @@ impl StyloDomStyleAdapter {
         self.state.clear_element_style_values(handle);
     }
 
+    /// Retains the element's last published computed values while marking
+    /// them unavailable for the next style observation.
+    pub fn mark_element_style_dirty(&self, handle: NodeId) -> bool {
+        self.state.mark_element_style_dirty(handle)
+    }
+
     pub fn clear_element_data_for_document(&self, document: NodeId) {
         self.state.clear_element_data_for_document(document);
     }
@@ -192,6 +199,28 @@ impl StyloDomStyleAdapter {
     pub fn element_style_value_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
         self.state
             .element_style_value_handles_for_document(document)
+    }
+
+    pub fn dirty_element_style_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
+        self.state
+            .dirty_element_style_handles_for_document(document)
+    }
+
+    pub fn process_stylesheet_invalidations(
+        &self,
+        host: &DomHost,
+        roots: &[NodeId],
+        invalidations: &StylesheetInvalidationSet,
+    ) -> bool {
+        self.with_bound_host(host, |binding| {
+            let mut changed = false;
+            for root in roots.iter().filter_map(|root| binding.element(host, *root)) {
+                // Every root belongs to an independent Document/ShadowRoot
+                // scope and must be processed even after an earlier match.
+                changed |= invalidations.process_style(root, None);
+            }
+            changed
+        })
     }
 
     pub fn element_selector_flag_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
@@ -326,6 +355,11 @@ impl<'binding> StyleDomHostBinding<'binding> {
     pub fn element_style_value_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
         self.state
             .element_style_value_handles_for_document(document)
+    }
+
+    pub fn dirty_element_style_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
+        self.state
+            .dirty_element_style_handles_for_document(document)
     }
 
     pub fn element_selector_flag_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
@@ -498,6 +532,33 @@ impl StyloElementDataStore {
             bucket.data.remove(&handle);
             bucket.inline_styles.remove(&handle);
         });
+    }
+
+    fn mark_style_dirty(&self, handle: NodeId) -> bool {
+        let data = {
+            let documents = self.documents.borrow();
+            self.document_for_handle(handle)
+                .and_then(|document| documents.get(&document))
+                .and_then(|bucket| bucket.data.get(&handle))
+                .map(|data| &**data as *const ElementDataWrapper)
+                .or_else(|| {
+                    documents
+                        .values()
+                        .find_map(|bucket| bucket.data.get(&handle))
+                        .map(|data| &**data as *const ElementDataWrapper)
+                })
+        };
+        let Some(data) = data else {
+            return false;
+        };
+        // SAFETY: ElementDataWrapper is heap-allocated behind a Box and the
+        // adapter's side-table contract forbids removing this entry while the
+        // returned Stylo borrow is alive.
+        unsafe { &*data }
+            .borrow_mut()
+            .hint
+            .insert(RestyleHint::RESTYLE_SELF | RestyleHint::RESTYLE_PSEUDOS);
+        true
     }
 
     fn clear_data_for_document(&self, document: NodeId) {
@@ -708,6 +769,22 @@ impl StyloElementDataStore {
         handles.extend(bucket.data.keys().copied());
         handles.extend(bucket.inline_styles.keys().copied());
         handles.into_iter().collect()
+    }
+
+    fn dirty_style_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
+        self.documents
+            .borrow()
+            .get(&document)
+            .map(|bucket| {
+                bucket
+                    .data
+                    .iter()
+                    .filter_map(|(handle, data)| {
+                        (!data.borrow().hint.is_empty()).then_some(*handle)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn selector_flag_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
@@ -1267,6 +1344,11 @@ impl StyleDomState {
         self.element_data.clear_style_values(handle);
     }
 
+    fn mark_element_style_dirty(&self, handle: NodeId) -> bool {
+        self.note_owner_document_if_bound(handle);
+        self.element_data.mark_style_dirty(handle)
+    }
+
     fn clear_element_data_for_document(&self, document: NodeId) {
         self.element_data.clear_data_for_document(document);
     }
@@ -1296,6 +1378,10 @@ impl StyleDomState {
 
     fn element_style_value_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
         self.element_data.style_value_handles_for_document(document)
+    }
+
+    fn dirty_element_style_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {
+        self.element_data.dirty_style_handles_for_document(document)
     }
 
     fn element_selector_flag_handles_for_document(&self, document: NodeId) -> Vec<NodeId> {

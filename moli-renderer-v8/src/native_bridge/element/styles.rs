@@ -21,7 +21,7 @@ pub(crate) use accessors::{
     style_css_text_getter_callback, style_css_text_setter_callback, style_length_getter_callback,
 };
 pub(in crate::native_bridge::element) use declaration::style_base_url;
-pub(crate) use declaration::{ComputedStyleRead, ComputedStyleReadScope};
+pub(crate) use declaration::{ComputedStyleRead, StyleObservation};
 use declaration::{
     StyleComputationContext, shorthand_longhands, style_property_count_with_context,
     style_property_value_with_context, style_runtime_and_handle_from_object,

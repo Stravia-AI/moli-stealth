@@ -137,7 +137,7 @@ impl DocumentRuntime {
             if request_url.scheme() != "data" {
                 linked_stylesheet_import_urls.extend(import_urls);
             }
-            for resource in crate::css_resource_urls::stylesheet_load_blocking_resources(
+            for resource in crate::css_resource_urls::stylesheet_load_blocking_font_resources(
                 &stylesheet_text,
                 &stylesheet_base_url,
                 optional_resource_fetch_mask,

@@ -37,19 +37,7 @@ impl<'a> StyleCacheCleanup<'a> {
         }
     }
 
-    pub(super) fn clear_for_author_stylesheet_set_change(&self, _host: &DomHost) {
-        self.document_state
-            .clear_invalidation_clear_all_fallback_reasons();
-        self.clear_shadow_cascade_data_for_document_world();
-        self.clear_document_element_side_tables();
-        self.computed_style_cache.clear();
-        self.document_state.clear_retained_style_system();
-        self.document_state.clear_selector_caches();
-        self.document_state.bump_computed_cache_generation();
-        self.document_state.bump_target_context_epoch();
-    }
-
-    pub(super) fn clear_for_retained_style_system_rebuild(&self, _host: &DomHost) {
+    pub(super) fn clear_for_retained_style_system_rebuild(&self) {
         self.document_state
             .clear_invalidation_clear_all_fallback_reasons();
         self.clear_shadow_cascade_data_for_document_world();
@@ -59,23 +47,17 @@ impl<'a> StyleCacheCleanup<'a> {
         self.document_state.bump_computed_cache_generation();
     }
 
-    pub(super) fn clear_for_scoped_retained_style_system_rebuild(
-        &self,
-        host: &DomHost,
-        roots: impl IntoIterator<Item = DomHandle>,
-    ) -> bool {
-        self.document_state
-            .clear_invalidation_clear_all_fallback_reasons();
-        let roots = self.existing_subtree_roots(host, roots);
-        let cleared = self
-            .invalidate_existing_subtree_roots(host, &roots)
-            .is_some();
-        self.clear_shadow_cascade_data_in_subtrees(host, &roots);
-        cleared
-    }
-
-    pub(super) fn computed_style_cache_write_generation(&self) -> u64 {
-        self.computed_style_cache.write_generation()
+    /// Expands Stylo's matched stylesheet invalidations to already-published
+    /// descendants. Moli resolves demanded elements one at a time, so it does
+    /// not have a later full-tree traversal that would propagate inherited
+    /// style changes from a `RESTYLE_SELF` ancestor.
+    pub(super) fn invalidate_stylesheet_dirty_subtrees(&self, host: &DomHost) {
+        let roots = self.existing_subtree_roots(
+            host,
+            self.dom_adapter
+                .dirty_element_style_handles_for_document(self.document),
+        );
+        self.invalidate_existing_subtree_roots(host, &roots);
     }
 
     pub(super) fn invalidate_detached_subtrees(
@@ -112,7 +94,7 @@ impl<'a> StyleCacheCleanup<'a> {
         }
         let handles = self.cached_handles_in_style_subtrees(host, &roots);
         for &handle in &handles {
-            self.dom_adapter.clear_element_data(handle);
+            self.dom_adapter.mark_element_style_dirty(handle);
         }
         self.dom_adapter.clear_inline_style_attribute(root);
         self.computed_style_cache
@@ -122,7 +104,6 @@ impl<'a> StyleCacheCleanup<'a> {
         true
     }
 
-    #[cfg(test)]
     pub(super) fn invalidate_subtrees(
         &self,
         host: &DomHost,
@@ -304,7 +285,7 @@ impl<'a> StyleCacheCleanup<'a> {
         }
         let handles = self.cached_handles_in_style_subtrees(host, roots);
         for &handle in &handles {
-            self.dom_adapter.clear_element_style_values(handle);
+            self.dom_adapter.mark_element_style_dirty(handle);
         }
         self.computed_style_cache
             .invalidate_handles(handles.iter().copied());
@@ -323,7 +304,6 @@ impl StyleInvalidationCleanupApplicationSink for StyleCacheCleanup<'_> {
 
     fn apply_clear_all_cleanup_application(
         &self,
-        _host: &DomHost,
         context: &StyleInvalidationCleanupApplicationContext,
     ) -> bool {
         self.clear_all_for_invalidation_fallback(context);

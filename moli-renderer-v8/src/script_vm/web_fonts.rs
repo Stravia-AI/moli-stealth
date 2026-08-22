@@ -152,13 +152,13 @@ impl DocumentWebFontState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::css_resource_urls::stylesheet_load_blocking_resources;
+    use crate::css_resource_urls::stylesheet_load_blocking_font_resources;
     use crate::protocol_types::OptionalResourceFetchMask;
 
     const TEST_FONT: &[u8] = include_bytes!("../../../moli-layout/tests/fixtures/moli-ahem.woff2");
 
     fn resource(css: &str) -> StylesheetLoadBlockingResource {
-        stylesheet_load_blocking_resources(
+        stylesheet_load_blocking_font_resources(
             css,
             &Url::parse("https://example.test/style.css").unwrap(),
             OptionalResourceFetchMask::FONT,

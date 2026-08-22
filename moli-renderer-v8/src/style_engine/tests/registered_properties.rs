@@ -6,15 +6,13 @@ fn test_url() -> url::Url {
 
 fn register_custom_property(
     engine: &mut MoliStyleEngine,
-    host: &DomHost,
     document: DomHandle,
     name: &str,
     syntax: &str,
     initial_value: &str,
 ) {
     engine
-        .register_css_custom_property_for_document_with_host(
-            host,
+        .register_css_custom_property_for_document(
             document,
             CssCustomPropertyRegistration {
                 name: name.to_owned(),
@@ -43,7 +41,7 @@ fn computed_value(
     property: &str,
     document_sources: &[StyloStylesheetSource],
 ) -> String {
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .document_stylesheet_sources
         .extend(document_sources.iter().cloned());
@@ -51,8 +49,7 @@ fn computed_value(
         .owner_document_handle(target)
         .unwrap_or_else(|| host.document_handle());
     inputs.script_custom_property_registrations =
-        engine.script_css_custom_property_registrations_for_document(document);
-    inputs.script_custom_property_base_url = test_url();
+        engine.script_css_custom_property_registration_records_for_document(document);
     engine
         .computed_style_property_value(host, &test_url(), target, property, None, &inputs, None)
         .unwrap_or_default()
@@ -60,19 +57,27 @@ fn computed_value(
 
 #[test]
 fn css_register_property_does_not_advance_source_set_generation() {
-    let host = test_host();
+    let mut host = test_host();
     let document = host.document_handle();
+    let target = host.create_element("div");
+    assert!(host.append_child(document, target));
     let mut engine = MoliStyleEngine::new();
+    assert_eq!(
+        computed_value(&engine, &host, target, "display", &[]),
+        "block"
+    );
     let source_set_generation = engine.source_set_generation_for_document_for_test(document);
     let computed_generation = engine.computed_cache_generation_for_document_for_test(document);
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = engine.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = engine.retained_style_system_update_count_for_document_for_test(document);
 
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-color",
         "<color>",
-        "red",
+        "rgb(1, 2, 3)",
     );
 
     assert_eq!(
@@ -80,9 +85,69 @@ fn css_register_property_does_not_advance_source_set_generation() {
         source_set_generation,
         "CSS.registerProperty changes author style semantics but not the stylesheet source set"
     );
+    assert_eq!(
+        engine.computed_cache_generation_for_document_for_test(document),
+        computed_generation,
+        "CSS.registerProperty only marks the document dirty until the next observation"
+    );
+    assert_eq!(
+        engine.source_dirty_scope_reasons_for_document_for_test(document),
+        vec![StyleSourceDirtyReason::CustomPropertyRegistration]
+    );
+
+    assert_eq!(
+        computed_value(&engine, &host, target, "--registered-color", &[]),
+        "rgb(1, 2, 3)"
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "registerProperty must update the existing document Stylist"
+    );
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        updates + 1
+    );
     assert!(
-        engine.computed_cache_generation_for_document_for_test(document) > computed_generation,
-        "CSS.registerProperty still invalidates computed style state"
+        engine
+            .source_dirty_scope_reasons_for_document_for_test(document)
+            .is_empty(),
+        "the observation must consume the registration dirty marker"
+    );
+}
+
+#[test]
+fn registered_custom_properties_keep_their_registration_time_base_urls() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let target = host.create_element("div");
+    assert!(host.append_child(document, target));
+    let mut engine = MoliStyleEngine::new();
+
+    for (name, base_url) in [
+        ("--first-image", "https://example.test/first/"),
+        ("--second-image", "https://example.test/second/"),
+    ] {
+        engine
+            .register_css_custom_property_for_document(
+                document,
+                registration(name, "<image>", "url(icon.svg)"),
+                url::Url::parse(base_url).unwrap(),
+            )
+            .expect("custom property registration should succeed");
+    }
+
+    assert_eq!(
+        computed_value(&engine, &host, target, "--first-image", &[]),
+        r#"url("https://example.test/first/icon.svg")"#
+    );
+    assert_eq!(
+        computed_value(&engine, &host, target, "--second-image", &[]),
+        r#"url("https://example.test/second/icon.svg")"#
     );
 }
 
@@ -97,7 +162,6 @@ fn invalid_registered_property_value_substitutes_registered_initial_value() {
     let mut engine = MoliStyleEngine::new();
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-length",
         "<length>",
@@ -130,16 +194,14 @@ fn custom_property_registry_is_scoped_to_document_world() {
     let mut engine = MoliStyleEngine::new();
 
     engine
-        .register_css_custom_property_for_document_with_host(
-            &host,
+        .register_css_custom_property_for_document(
             active_document,
             registration("--active-only", "<length>", "1px"),
             test_url(),
         )
         .expect("active document registration should succeed");
     engine
-        .register_css_custom_property_for_document_with_host(
-            &host,
+        .register_css_custom_property_for_document(
             detached_document,
             registration("--detached-only", "<color>", "red"),
             test_url(),
@@ -194,7 +256,6 @@ fn registered_invalid_color_value_substitutes_initial_value_into_normal_property
     let mut engine = MoliStyleEngine::new();
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-color",
         "<color>",
@@ -228,14 +289,7 @@ fn registered_length_lh_units_resolve_after_line_height() {
     assert!(host.append_child(document, target));
 
     let mut engine = MoliStyleEngine::new();
-    register_custom_property(
-        &mut engine,
-        &host,
-        document,
-        "--registered-lh",
-        "<length>",
-        "0px",
-    );
+    register_custom_property(&mut engine, document, "--registered-lh", "<length>", "0px");
     let sources = vec![StyloStylesheetSource::new(
         "#target {
             font-size: 10px;
@@ -267,7 +321,6 @@ fn registered_color_values_resolve_currentcolor() {
     let mut engine = MoliStyleEngine::new();
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-color",
         "<color>",
@@ -303,7 +356,6 @@ fn registered_color_functions_resolve_currentcolor() {
     let mut engine = MoliStyleEngine::new();
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-color",
         "<color>",
@@ -337,7 +389,6 @@ fn registered_color_values_resolve_tree_counting_math() {
     let mut engine = MoliStyleEngine::new();
     register_custom_property(
         &mut engine,
-        &host,
         document,
         "--registered-color",
         "<color>",

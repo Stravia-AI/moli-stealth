@@ -3,16 +3,8 @@ use std::sync::Arc as StdArc;
 use std::sync::Once;
 use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
-use dom::ElementState as StyloElementState;
-#[cfg(test)]
-use style::Atom;
-use style::{
-    context::QuirksMode, device::servo::ServoMediaFeaturePreferences, media_queries::MediaType,
-    queries::values::PrefersColorScheme, servo::media_features::PrefersContrast,
-    values::specified::color::ForcedColors,
-};
-
 use crate::{document_runtime::DomHandle, dom::native::DomHost};
+use dom::ElementState as StyloElementState;
 #[cfg(test)]
 use indexmap::IndexSet;
 use moli_selector::StyloDomStyleAdapter;
@@ -26,7 +18,15 @@ use moli_selector::stylo_element_dependency_snapshot as style_element_dependency
 use moli_selector::{
     StyloStylesheetSourceScopeFallbackInput, stylo_stylesheet_source_scope_fallback_roots,
 };
+#[cfg(test)]
+use style::Atom;
 
+mod active_stylesheets;
+#[cfg(test)]
+pub(crate) use active_stylesheets::{
+    exact_rule_change_notification_count_for_test, full_cascade_update_fallback_count_for_test,
+    reset_live_stylesheet_update_counts_for_test,
+};
 mod cache;
 mod cause;
 mod cleanup;
@@ -47,44 +47,56 @@ mod query;
 mod registered_properties;
 mod request;
 mod retained;
-pub(crate) use retained::{
+pub(crate) use stylesheet::{
     NativeStylesheetFontFaceProjection, NativeStylesheetFontFaceRuleProjection,
     StylesheetFontFaceProjection, StylesheetFontFaceRuleProjection,
     native_font_face_projection_for_stylesheet, native_font_face_rules_for_stylesheet,
 };
 #[cfg(test)]
-pub(crate) use retained::{
+pub(crate) use stylesheet::{
     author_source_text_parse_count_for_test, reset_author_source_text_parse_count_for_test,
 };
 mod retained_plan;
 mod runtime_invalidation;
 mod schedule;
 mod scope;
+mod shadow_scopes;
 mod snapshot;
 mod source;
+mod source_cascade;
+#[cfg(test)]
+pub(crate) use source_cascade::{
+    reset_source_cascade_rebuild_count_for_test, source_cascade_rebuild_count_for_test,
+};
 mod source_dirty;
 mod source_document;
 mod source_id;
+mod source_key;
 mod source_lifecycle;
 mod source_owner;
 mod source_owner_text;
 mod source_record;
 mod source_scope_plan;
 mod state;
-mod system;
+mod stylesheet;
+mod stylesheet_resources;
 mod target_plan;
 mod target_queries;
 mod target_result;
 #[cfg(test)]
 mod tests;
 mod ua;
+mod world_environment;
+mod world_key;
+mod world_lifecycle;
+mod world_trace;
+mod world_update;
 
-use cache::ComputedStyleInputCacheGeneration;
 use cleanup::StyleCacheCleanup;
 pub(crate) use computed::{
     ComputedDisplayKind, ComputedRenderedStyleFacts, ComputedTextTransformKind,
-    ComputedTextWrapModeKind, ComputedWhiteSpaceCollapseKind, StyloAnonymousBoxKind,
-    StyloComputedStyleSnapshot,
+    ComputedTextWrapModeKind, ComputedWhiteSpaceCollapseKind, StyleObservationSnapshot,
+    StyloAnonymousBoxKind, StyloComputedStyleSnapshot,
 };
 use document_world::{DocumentStyleWorld, DocumentStyleWorlds};
 pub(in crate::style_engine) use drain::StyleInvalidationDrainBoundary;
@@ -101,6 +113,7 @@ pub(crate) use property_metadata::{
 };
 pub(crate) use registered_properties::{
     CssCustomPropertyRegistration, CssCustomPropertyRegistrationError,
+    CssCustomPropertyRegistrationRecord,
 };
 #[cfg(test)]
 use scope::style_source_scope_for_mutation_effects;
@@ -117,9 +130,23 @@ use source_id::{StyleInvalidationSourceTarget, StyleScopeId};
 pub(crate) use source_lifecycle::OwnedStyleSourceDocumentContext;
 use source_lifecycle::StyleSourceDocumentContext;
 pub(crate) use source_owner::link_rel_qualifies_as_stylesheet;
-use system::StyleSystemCacheKey;
+pub(crate) use stylesheet_resources::{StylesheetResourceGeneration, StylesheetResourceSnapshot};
+#[cfg(test)]
+use stylesheet_resources::{
+    reset_stylesheet_resource_manifest_build_count_for_test,
+    stylesheet_resource_manifest_build_count_for_test,
+};
 #[cfg(test)]
 use target_queries::PendingStyleInvalidationTargetQueries;
+pub(crate) use world_environment::{
+    StyleTreeScopeVersions, StyleViewport, StyleWorldEnvironment, StyloStyleEnvironment,
+};
+#[cfg(test)]
+use world_key::StyleWorldKey;
+pub(crate) use world_update::{
+    FullStyleWorldSnapshot, IncrementalStyleWorldUpdate, PreparedStyleWorldUpdate,
+    StyleWorldUpdate, StyleWorldUpdatePlan,
+};
 
 /// Page-level facade for document-owned style state.
 ///
@@ -133,288 +160,6 @@ pub(crate) struct MoliStyleEngine {
     owner_stylesheet_source_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     linked_stylesheet_owner_documents: RefCell<HashMap<DomHandle, DomHandle>>,
     inline_style_metadata_documents: RefCell<HashMap<DomHandle, DomHandle>>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct StyloComputedStyleInputs {
-    pub(crate) document_stylesheet_sources: Vec<StyloStylesheetSource>,
-    pub(crate) shadow_stylesheet_sources: Vec<(DomHandle, Vec<StyloStylesheetSource>)>,
-    pub(crate) script_custom_property_registrations: Vec<CssCustomPropertyRegistration>,
-    pub(crate) script_custom_property_base_url: url::Url,
-    pub(crate) environment: StyloStyleEnvironment,
-    pub(crate) quirks_mode: QuirksMode,
-}
-
-/// Immutable Stylo inputs paired with the exact retained-system identity they
-/// determine for one document/viewport observation context.
-///
-/// Keeping the key beside the inputs prevents descendant reads from hashing
-/// the same stylesheet source set again. The pair is generation-scoped by the
-/// owning document cache, so callers must not manufacture it across style
-/// lifecycle boundaries.
-#[derive(Debug)]
-pub(crate) struct StyloPreparedComputedStyleInputs {
-    inputs: Rc<StyloComputedStyleInputs>,
-    style_system_key: StyleSystemCacheKey,
-}
-
-impl StyloPreparedComputedStyleInputs {
-    pub(crate) fn new(
-        document_url: &url::Url,
-        inputs: Rc<StyloComputedStyleInputs>,
-        viewport: StyleViewport,
-    ) -> Self {
-        let style_system_key = StyleSystemCacheKey::new(document_url, inputs.as_ref(), viewport);
-        Self {
-            inputs,
-            style_system_key,
-        }
-    }
-
-    pub(crate) fn inputs(&self) -> &StyloComputedStyleInputs {
-        self.inputs.as_ref()
-    }
-
-    pub(in crate::style_engine) fn style_system_key(&self) -> &StyleSystemCacheKey {
-        &self.style_system_key
-    }
-}
-
-impl Default for StyloComputedStyleInputs {
-    fn default() -> Self {
-        Self {
-            document_stylesheet_sources: Vec::new(),
-            shadow_stylesheet_sources: Vec::new(),
-            script_custom_property_registrations: Vec::new(),
-            script_custom_property_base_url: url::Url::parse("about:blank")
-                .expect("static about:blank URL parses"),
-            environment: StyloStyleEnvironment::default(),
-            quirks_mode: QuirksMode::NoQuirks,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub(crate) struct StyleViewport {
-    pub(crate) width: Option<f64>,
-    pub(crate) height: Option<f64>,
-    pub(crate) screen_width: Option<f64>,
-    pub(crate) screen_height: Option<f64>,
-}
-
-impl StyleViewport {
-    pub(crate) const fn new(width: Option<f64>, height: Option<f64>) -> Self {
-        Self {
-            width,
-            height,
-            screen_width: None,
-            screen_height: None,
-        }
-    }
-
-    pub(crate) const fn from_width(width: Option<f64>) -> Self {
-        Self {
-            width,
-            height: None,
-            screen_width: None,
-            screen_height: None,
-        }
-    }
-
-    pub(crate) const fn with_screen_size(
-        self,
-        screen_width: Option<f64>,
-        screen_height: Option<f64>,
-    ) -> Self {
-        Self {
-            screen_width,
-            screen_height,
-            ..self
-        }
-    }
-
-    pub(crate) fn from_viewport_surface(surface: crate::protocol_types::ViewportSurface) -> Self {
-        Self::new(
-            Some(f64::from(surface.inner_width)),
-            Some(f64::from(surface.inner_height)),
-        )
-        .with_screen_size(
-            Some(f64::from(surface.screen_width)),
-            Some(f64::from(surface.screen_height)),
-        )
-    }
-}
-
-impl From<Option<f64>> for StyleViewport {
-    fn from(width: Option<f64>) -> Self {
-        Self::from_width(width)
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-pub(crate) struct StyloStyleEnvironment {
-    media_type: StyloStyleMediaType,
-    color_scheme: StyloStyleColorScheme,
-    reduced_motion: StyloStyleReducedPreference,
-    reduced_data: StyloStyleReducedPreference,
-    reduced_transparency: StyloStyleReducedPreference,
-    contrast: StyloStyleContrastPreference,
-    forced_colors: StyloStyleForcedColors,
-}
-
-/// Non-generation context for one document-owned prepared-input entry.
-///
-/// The source document is implicit in the owning `DocumentStyleWorld`; source
-/// content and tree changes are represented by the cache generation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct StyloDocumentComputedStyleInputCacheKey {
-    read_document: Option<DomHandle>,
-    tree_scope_roots: Vec<DomHandle>,
-    document_url: url::Url,
-    viewport_width_bits: Option<u64>,
-    viewport_height_bits: Option<u64>,
-    screen_width_bits: Option<u64>,
-    screen_height_bits: Option<u64>,
-    environment: StyloStyleEnvironment,
-    script_custom_property_base_url: url::Url,
-}
-
-impl StyloDocumentComputedStyleInputCacheKey {
-    pub(crate) fn new(
-        read_document: Option<DomHandle>,
-        tree_scope_roots: &[DomHandle],
-        document_url: &url::Url,
-        viewport: StyleViewport,
-        environment: StyloStyleEnvironment,
-        script_custom_property_base_url: &url::Url,
-    ) -> Self {
-        let mut document_url = document_url.clone();
-        document_url.set_fragment(None);
-        Self {
-            read_document,
-            tree_scope_roots: tree_scope_roots.to_vec(),
-            document_url,
-            viewport_width_bits: viewport.width.map(f64::to_bits),
-            viewport_height_bits: viewport.height.map(f64::to_bits),
-            screen_width_bits: viewport.screen_width.map(f64::to_bits),
-            screen_height_bits: viewport.screen_height.map(f64::to_bits),
-            environment,
-            script_custom_property_base_url: script_custom_property_base_url.clone(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum StyloStyleMediaType {
-    #[default]
-    Screen,
-    Print,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum StyloStyleColorScheme {
-    #[default]
-    Light,
-    Dark,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum StyloStyleReducedPreference {
-    #[default]
-    NoPreference,
-    Reduce,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum StyloStyleContrastPreference {
-    More,
-    Less,
-    Custom,
-    #[default]
-    NoPreference,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
-enum StyloStyleForcedColors {
-    #[default]
-    None,
-    Active,
-}
-
-impl StyloStyleEnvironment {
-    pub(crate) fn from_emulated_media(
-        overrides: &crate::protocol_types::EmulatedMediaOverrides,
-    ) -> Self {
-        Self {
-            media_type: if overrides.media.as_deref() == Some("print") {
-                StyloStyleMediaType::Print
-            } else {
-                StyloStyleMediaType::Screen
-            },
-            color_scheme: if overrides.color_scheme.as_deref() == Some("dark") {
-                StyloStyleColorScheme::Dark
-            } else {
-                StyloStyleColorScheme::Light
-            },
-            reduced_motion: match overrides.reduced_motion.as_deref() {
-                Some("reduce") => StyloStyleReducedPreference::Reduce,
-                Some("no-preference") | None => StyloStyleReducedPreference::NoPreference,
-                Some(_) => StyloStyleReducedPreference::NoPreference,
-            },
-            reduced_data: StyloStyleReducedPreference::NoPreference,
-            reduced_transparency: StyloStyleReducedPreference::NoPreference,
-            contrast: match overrides.contrast.as_deref() {
-                Some("more") => StyloStyleContrastPreference::More,
-                Some("less") => StyloStyleContrastPreference::Less,
-                Some("custom") => StyloStyleContrastPreference::Custom,
-                Some("no-preference") | None => StyloStyleContrastPreference::NoPreference,
-                Some(_) => StyloStyleContrastPreference::NoPreference,
-            },
-            forced_colors: match overrides.forced_colors.as_deref() {
-                Some("active") => StyloStyleForcedColors::Active,
-                Some("none") | None => StyloStyleForcedColors::None,
-                Some(_) => StyloStyleForcedColors::None,
-            },
-        }
-    }
-
-    fn stylo_media_type(self) -> MediaType {
-        match self.media_type {
-            StyloStyleMediaType::Screen => MediaType::screen(),
-            StyloStyleMediaType::Print => MediaType::print(),
-        }
-    }
-
-    fn stylo_prefers_color_scheme(self) -> PrefersColorScheme {
-        match self.color_scheme {
-            StyloStyleColorScheme::Light => PrefersColorScheme::Light,
-            StyloStyleColorScheme::Dark => PrefersColorScheme::Dark,
-        }
-    }
-
-    fn stylo_media_feature_preferences(self) -> ServoMediaFeaturePreferences {
-        ServoMediaFeaturePreferences {
-            prefers_reduced_motion: self.reduced_motion.prefers_reduced(),
-            prefers_reduced_data: self.reduced_data.prefers_reduced(),
-            prefers_reduced_transparency: self.reduced_transparency.prefers_reduced(),
-            prefers_contrast: match self.contrast {
-                StyloStyleContrastPreference::More => PrefersContrast::More,
-                StyloStyleContrastPreference::Less => PrefersContrast::Less,
-                StyloStyleContrastPreference::Custom => PrefersContrast::Custom,
-                StyloStyleContrastPreference::NoPreference => PrefersContrast::NoPreference,
-            },
-            forced_colors: match self.forced_colors {
-                StyloStyleForcedColors::None => ForcedColors::None,
-                StyloStyleForcedColors::Active => ForcedColors::Active,
-            },
-        }
-    }
-}
-
-impl StyloStyleReducedPreference {
-    fn prefers_reduced(self) -> bool {
-        matches!(self, Self::Reduce)
-    }
 }
 
 impl Default for MoliStyleEngine {
@@ -472,6 +217,59 @@ impl MoliStyleEngine {
         self.document_worlds.observation_generations(documents)
     }
 
+    pub(crate) fn stylesheet_resource_snapshot_for_document(
+        &self,
+        document: DomHandle,
+    ) -> Option<StylesheetResourceSnapshot> {
+        self.world_for_document(document)
+            .document_state
+            .stylesheet_resource_snapshot(document)
+    }
+
+    /// Returns the source projection already installed in the retained world
+    /// for compatibility queries that need stylesheet provenance.
+    ///
+    /// This clones cheap source handles; it does not walk stylesheet owners,
+    /// serialize CSS, parse a sheet, or mutate the style world.
+    pub(crate) fn retained_stylesheet_query_snapshot_for_document(
+        &self,
+        document: DomHandle,
+    ) -> Option<Rc<FullStyleWorldSnapshot>> {
+        let world = self.world_for_document(document);
+        world
+            .document_state
+            .try_with_retained_style_system(|retained| {
+                Rc::new(FullStyleWorldSnapshot {
+                    document_stylesheet_sources: retained
+                        .document_stylesheets
+                        .entries()
+                        .iter()
+                        .map(|entry| entry.source().clone())
+                        .collect(),
+                    shadow_stylesheet_sources: retained
+                        .shadow_scopes
+                        .iter()
+                        .map(|scope| {
+                            (
+                                scope.root(),
+                                scope
+                                    .active_stylesheets()
+                                    .entries()
+                                    .iter()
+                                    .map(|entry| entry.source().clone())
+                                    .collect(),
+                            )
+                        })
+                        .collect(),
+                    script_custom_property_registrations: retained
+                        .script_custom_property_registrations
+                        .clone(),
+                    environment: retained.key.environment,
+                    quirks_mode: retained.key.quirks_mode,
+                })
+            })
+    }
+
     #[cfg(debug_assertions)]
     pub(crate) fn computed_style_read_invariant_state(&self, document: DomHandle) -> (u64, u64) {
         let world = self.world_for_document(document);
@@ -480,42 +278,6 @@ impl MoliStyleEngine {
             generations.source_set_generation,
             generations.retained_style_system_generation,
         )
-    }
-
-    pub(crate) fn cached_document_prepared_style_inputs(
-        &self,
-        document: DomHandle,
-        key: &StyloDocumentComputedStyleInputCacheKey,
-    ) -> Option<Rc<StyloPreparedComputedStyleInputs>> {
-        let world = self.world_for_document(document);
-        let generations = world.document_state.generation_snapshot();
-        world.computed_style_input_cache.get(
-            ComputedStyleInputCacheGeneration {
-                source_set: generations.source_set_generation,
-                computed_values: generations.computed_cache_generation,
-                target_context: generations.target_context_epoch,
-            },
-            key,
-        )
-    }
-
-    pub(crate) fn cache_document_prepared_style_inputs(
-        &self,
-        document: DomHandle,
-        key: StyloDocumentComputedStyleInputCacheKey,
-        inputs: Rc<StyloPreparedComputedStyleInputs>,
-    ) {
-        let world = self.world_for_document(document);
-        let generations = world.document_state.generation_snapshot();
-        world.computed_style_input_cache.insert(
-            ComputedStyleInputCacheGeneration {
-                source_set: generations.source_set_generation,
-                computed_values: generations.computed_cache_generation,
-                target_context: generations.target_context_epoch,
-            },
-            key,
-            inputs,
-        );
     }
 
     #[cfg(test)]
@@ -566,6 +328,16 @@ impl MoliStyleEngine {
         document: DomHandle,
     ) -> usize {
         self.world_for_document(document).computed_style_cache.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn computed_style_publication_generation_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .computed_style_cache
+            .write_generation()
     }
 
     #[cfg(test)]
@@ -662,25 +434,71 @@ impl MoliStyleEngine {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_style_system_update_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .document_state
+            .retained_style_system_update_count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_stylist_identity_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .document_state
+            .with_retained_style_system(|retained| retained.stylist_identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_stylist_flush_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .document_state
+            .with_retained_style_system(|retained| retained.stylist.num_rebuilds() as u64)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_shadow_scope_flush_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+        root: DomHandle,
+    ) -> Option<u64> {
+        self.world_for_document(document)
+            .document_state
+            .with_retained_style_system(|retained| {
+                retained
+                    .shadow_scopes
+                    .iter()
+                    .find(|scope| scope.root() == root)
+                    .map(shadow_scopes::ShadowScopeStyles::flush_count_for_test)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn element_style_resolution_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .document_state
+            .element_style_resolution_count()
+    }
+
+    #[cfg(test)]
     pub(in crate::style_engine) fn retained_style_system_matches_for_document_for_test(
         &self,
         document: DomHandle,
-        key: &StyleSystemCacheKey,
+        key: &StyleWorldKey,
     ) -> bool {
         self.world_for_document(document)
             .document_state
             .retained_style_system_matches(key)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_style_system_is_none_for_document_for_test(
-        &self,
-        document: DomHandle,
-    ) -> bool {
-        self.world_for_document(document)
-            .document_state
-            .try_with_retained_style_system(|_| ())
-            .is_none()
     }
 
     #[cfg(test)]
@@ -774,8 +592,8 @@ impl MoliStyleEngine {
         &self,
         host: &DomHost,
         document: DomHandle,
-        key: StyleSystemCacheKey,
-        inputs: &StyloComputedStyleInputs,
+        key: StyleWorldKey,
+        inputs: &FullStyleWorldSnapshot,
     ) {
         computed::ensure_retained_style_system_for_document_for_test(
             self, host, document, key, inputs,
@@ -989,7 +807,7 @@ impl MoliStyleEngine {
         handle: DomHandle,
         property: &str,
         pseudo_element: Option<&str>,
-        inputs: &StyloComputedStyleInputs,
+        inputs: &FullStyleWorldSnapshot,
         viewport: impl Into<StyleViewport>,
     ) -> Option<String> {
         let owner_document = host.owner_document_handle(handle)?;
@@ -1013,7 +831,7 @@ impl MoliStyleEngine {
         handle: DomHandle,
         property: &str,
         pseudo_element: Option<&str>,
-        inputs: &StyloComputedStyleInputs,
+        inputs: &FullStyleWorldSnapshot,
         document_context: StyleSourceDocumentContext<'_>,
         read_document: DomHandle,
         viewport: StyleViewport,
@@ -1037,7 +855,7 @@ impl MoliStyleEngine {
         host: &DomHost,
         document_url: &url::Url,
         handle: DomHandle,
-        inputs: &StyloComputedStyleInputs,
+        inputs: &FullStyleWorldSnapshot,
         document_context: StyleSourceDocumentContext<'_>,
         read_document: DomHandle,
         viewport: StyleViewport,
@@ -1054,16 +872,40 @@ impl MoliStyleEngine {
         )
     }
 
-    pub(crate) fn computed_style_snapshot_after_style_update_with_prepared_inputs(
+    pub(crate) fn computed_style_snapshot_from_current_observation(
         &self,
         host: &DomHost,
         document_url: &url::Url,
         handle: DomHandle,
-        inputs: &StyloPreparedComputedStyleInputs,
+        environment: StyloStyleEnvironment,
+        document_context: StyleSourceDocumentContext<'_>,
+        read_document: DomHandle,
+        viewport: StyleViewport,
+        tree_scope_versions: StyleTreeScopeVersions,
+    ) -> StyleObservationSnapshot {
+        computed::computed_style_snapshot_from_current_observation(
+            self,
+            host,
+            document_url,
+            handle,
+            environment,
+            document_context,
+            read_document,
+            viewport,
+            tree_scope_versions,
+        )
+    }
+
+    pub(crate) fn computed_style_snapshot_after_world_update(
+        &self,
+        host: &DomHost,
+        document_url: &url::Url,
+        handle: DomHandle,
+        inputs: &PreparedStyleWorldUpdate,
         document_context: StyleSourceDocumentContext<'_>,
         read_document: DomHandle,
     ) -> Option<StyloComputedStyleSnapshot> {
-        computed::computed_style_snapshot_after_style_update_with_prepared_inputs(
+        computed::computed_style_snapshot_after_world_update(
             self,
             host,
             document_url,
@@ -1074,47 +916,43 @@ impl MoliStyleEngine {
         )
     }
 
-    pub(crate) fn computed_pseudo_style_snapshot_after_style_update_with_prepared_inputs(
+    pub(crate) fn computed_pseudo_style_snapshot_from_current_observation(
         &self,
         host: &DomHost,
         document_url: &url::Url,
         handle: DomHandle,
         pseudo_element: &str,
-        inputs: &StyloPreparedComputedStyleInputs,
         document_context: StyleSourceDocumentContext<'_>,
         read_document: DomHandle,
     ) -> Option<StyloComputedStyleSnapshot> {
-        computed::computed_pseudo_style_snapshot_after_style_update_with_prepared_inputs(
+        computed::computed_pseudo_style_snapshot_from_current_observation(
             self,
             host,
             document_url,
             handle,
             pseudo_element,
-            inputs,
             document_context,
             read_document,
         )
     }
 
-    pub(crate) fn computed_anonymous_style_snapshot_after_style_update_with_prepared_inputs(
+    pub(crate) fn computed_anonymous_style_snapshot_from_current_observation(
         &self,
         host: &DomHost,
         document_url: &url::Url,
         owner: DomHandle,
         parent_style: &style::properties::ComputedValues,
         anonymous_kind: StyloAnonymousBoxKind,
-        inputs: &StyloPreparedComputedStyleInputs,
         document_context: StyleSourceDocumentContext<'_>,
         read_document: DomHandle,
     ) -> Option<StyloComputedStyleSnapshot> {
-        computed::computed_anonymous_style_snapshot_after_style_update_with_prepared_inputs(
+        computed::computed_anonymous_style_snapshot_from_current_observation(
             self,
             host,
             document_url,
             owner,
             parent_style,
             anonymous_kind,
-            inputs,
             document_context,
             read_document,
         )
@@ -1155,7 +993,7 @@ fn stylo_source_metadata_for_css_text(
     css_text: &str,
     base_url: &url::Url,
 ) -> source::store::StyleSourceMetadata {
-    retained::style_source_metadata_for_css_text(css_text, base_url)
+    stylesheet::style_source_metadata_for_css_text(css_text, base_url)
 }
 
 fn retain_owner_documents_except_document(

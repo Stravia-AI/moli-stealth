@@ -48,8 +48,9 @@ async fn wait_for_parser_image_fetch_policy_asset_requests(
             return Ok(());
         }
         if Instant::now() >= deadline {
+            let actual_count = support::parser_image_fetch_policy_asset_request_count(token);
             return Err(anyhow!(
-                "timed out waiting for {expected_count} parser image fixture request(s) token `{token}`"
+                "timed out waiting for {expected_count} parser image fixture request(s) token `{token}`; observed {actual_count}"
             ));
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1181,19 +1182,23 @@ async fn fetch_with_load_skips_parser_image_fetch_by_default() -> Result<()> {
 }
 
 #[tokio::test]
-async fn fetch_with_load_observes_dom_and_css_images_when_enabled() -> Result<()> {
+async fn fetch_with_load_defers_css_images_until_a_paint_layout() -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let token = support::next_parser_image_fetch_policy_token();
-    let browser = Browser::new(AppConfig::default().with_image_fetch_enabled(true))?;
+    let browser = Browser::new(
+        AppConfig::default()
+            .with_layout_policy(moli_page_types::LayoutPolicy::OnDemand)
+            .with_image_fetch_enabled(true),
+    )?;
 
-    let page = browser
+    let mut page = browser
         .fetch_with_wait_until(
             &server.url(&format!("/compat/parser-image-fetch-policy?token={token}")),
             RenderedDomWaitUntil::Load,
             Duration::from_secs(5),
         )
         .await?;
-    wait_for_parser_image_fetch_policy_asset_requests(&token, 2).await?;
+    wait_for_parser_image_fetch_policy_asset_requests(&token, 1).await?;
 
     assert!(
         page_started_image_request(
@@ -1205,6 +1210,16 @@ async fn fetch_with_load_observes_dom_and_css_images_when_enabled() -> Result<()
         "parser-discovered HTML image requests must preserve their parser initiator; network output: {:#?}",
         page.script_execution().network_output_items()
     );
+    assert!(
+        !page_started_image_request(&page, &token, "css", SubresourceRequestInitiatorType::Css),
+        "a load-only observation must not scan CSS text or start an unrendered CSS image"
+    );
+
+    let pending = page.start_capture_screenshot()?;
+    let completion = pending.wait().await?;
+    let _ = page.finish_capture_screenshot(completion)?;
+    wait_for_parser_image_fetch_policy_asset_requests(&token, 2).await?;
+
     assert!(page_started_image_request(
         &page,
         &token,

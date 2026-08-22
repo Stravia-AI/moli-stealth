@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use crate::document_runtime::DomHandle;
 
 use super::{
-    cache::{ComputedStyleCache, ComputedStyleInputCache},
+    cache::ComputedStyleCache,
     pending_invalidation::PendingStyleInvalidations,
     pending_mutation::PendingStructuralStyleMutations,
     registered_properties::CssCustomPropertyRegistry,
@@ -22,7 +22,6 @@ pub(super) struct DocumentStyleWorld {
     pub(super) pending_invalidations: PendingStyleInvalidations,
     pub(super) pending_structural_mutations: PendingStructuralStyleMutations,
     pub(super) computed_style_cache: ComputedStyleCache,
-    pub(super) computed_style_input_cache: ComputedStyleInputCache,
     pub(super) owner_style_sheet_sources: RefCell<OwnerStyleSheetSources>,
     pub(super) linked_stylesheet_sources: RefCell<LinkedStylesheetSources>,
     pub(super) adopted_style_sheet_sources: RefCell<AdoptedStyleSheetSources>,
@@ -42,7 +41,6 @@ impl DocumentStyleWorld {
             pending_invalidations: PendingStyleInvalidations::new(),
             pending_structural_mutations: PendingStructuralStyleMutations::new(),
             computed_style_cache: ComputedStyleCache::new(),
-            computed_style_input_cache: ComputedStyleInputCache::new(),
             owner_style_sheet_sources: RefCell::new(OwnerStyleSheetSources::default()),
             linked_stylesheet_sources: RefCell::new(LinkedStylesheetSources::default()),
             adopted_style_sheet_sources: RefCell::new(AdoptedStyleSheetSources::default()),
@@ -55,7 +53,6 @@ impl DocumentStyleWorld {
         self.pending_invalidations.clear();
         self.pending_structural_mutations.clear();
         self.computed_style_cache.clear();
-        self.computed_style_input_cache.clear();
         self.document_state.clear_retained_style_system();
         self.document_state.bump_source_set_generation();
         self.document_state.bump_computed_cache_generation();

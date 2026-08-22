@@ -1,5 +1,3 @@
-use std::collections::HashSet;
-
 use cssparser::{Parser, ParserInput, Token, UnicodeRange};
 use moli_crypto::sha256_hex;
 use moli_css_parse::{
@@ -128,23 +126,21 @@ impl CompletedStylesheetWebFont {
     }
 }
 
-pub(crate) fn stylesheet_load_blocking_resources(
+/// Discovers load-blocking web fonts from a newly completed stylesheet.
+///
+/// CSS images deliberately do not use this text-scanning path. Paint layout
+/// reports the computed image URLs of boxes that actually participate in the
+/// rendered tree, so unmatched rules and `display: none` subtrees never start
+/// image requests merely because their URL appears in stylesheet text.
+pub(crate) fn stylesheet_load_blocking_font_resources(
     css_text: &str,
     base_url: &Url,
     optional_resource_fetch_mask: OptionalResourceFetchMask,
 ) -> Vec<StylesheetLoadBlockingResource> {
-    let mut resources = Vec::new();
-    if optional_resource_fetch_mask.contains(OptionalResourceFetchMask::IMAGE) {
-        resources.extend(
-            stylesheet_image_resource_urls(css_text, base_url)
-                .into_iter()
-                .map(StylesheetLoadBlockingResource::image),
-        );
+    if !optional_resource_fetch_mask.contains(OptionalResourceFetchMask::FONT) {
+        return Vec::new();
     }
-    if optional_resource_fetch_mask.contains(OptionalResourceFetchMask::FONT) {
-        resources.extend(stylesheet_web_font_resources(css_text, base_url));
-    }
-    resources
+    stylesheet_web_font_resources(css_text, base_url)
 }
 
 fn stylesheet_web_font_resources(
@@ -156,30 +152,35 @@ fn stylesheet_web_font_resources(
     collect_font_face_rule_css(&rules, &mut font_face_rules);
     font_face_rules
         .into_iter()
-        .filter_map(|css_text| {
-            let descriptor = parsed_web_font_face(&css_text)?;
-            let request_url = preferred_font_source_url(descriptor.source(), base_url)?;
-            // The slot describes a declaration, not a layout generation. Two
-            // identical declarations may safely share decoded font data, while
-            // a CSSOM replacement gets a different slot even when it occupies
-            // the same rule index. This also avoids collisions between separate
-            // inline/adopted sheets that use the same document base URL.
-            let mut slot_material =
-                Vec::with_capacity(base_url.as_str().len() + css_text.len() + 1);
-            slot_material.extend_from_slice(base_url.as_str().as_bytes());
-            slot_material.push(0);
-            slot_material.extend_from_slice(css_text.as_bytes());
-            let slot = format!("stylesheet-font:{}", sha256_hex(&slot_material));
-            Some(StylesheetLoadBlockingResource::font(
-                request_url,
-                StylesheetWebFont {
-                    slot,
-                    face: descriptor.into_face(),
-                    request_id: None,
-                },
-            ))
-        })
+        .filter_map(|css_text| stylesheet_web_font_resource(&css_text, base_url))
         .collect()
+}
+
+/// Projects one already-parsed and serialized `@font-face` rule into the
+/// typed request metadata retained by the style world.
+pub(crate) fn stylesheet_web_font_resource(
+    css_text: &str,
+    base_url: &Url,
+) -> Option<StylesheetLoadBlockingResource> {
+    let descriptor = parsed_web_font_face(css_text)?;
+    let request_url = preferred_font_source_url(descriptor.source(), base_url)?;
+    // The slot describes a declaration, not a layout generation. Two
+    // identical declarations may safely share decoded font data, while a
+    // CSSOM replacement gets a different slot even when it occupies the same
+    // rule index.
+    let mut slot_material = Vec::with_capacity(base_url.as_str().len() + css_text.len() + 1);
+    slot_material.extend_from_slice(base_url.as_str().as_bytes());
+    slot_material.push(0);
+    slot_material.extend_from_slice(css_text.as_bytes());
+    let slot = format!("stylesheet-font:{}", sha256_hex(&slot_material));
+    Some(StylesheetLoadBlockingResource::font(
+        request_url,
+        StylesheetWebFont {
+            slot,
+            face: descriptor.into_face(),
+            request_id: None,
+        },
+    ))
 }
 
 fn collect_font_face_rule_css(rules: &[moli_css_parse::CssRuleSnapshot], output: &mut Vec<String>) {
@@ -399,95 +400,6 @@ fn resolve_font_source_url(raw_url: &str, base_url: &Url) -> Option<Url> {
     matches!(url.scheme(), "http" | "https" | "data" | "blob").then_some(url)
 }
 
-pub(crate) fn stylesheet_image_resource_urls(css_text: &str, base_url: &Url) -> Vec<Url> {
-    let mut input = ParserInput::new(css_text);
-    let mut parser = Parser::new(&mut input);
-    let mut seen = HashSet::new();
-    let mut urls = Vec::new();
-    collect_css_resource_urls(&mut parser, base_url, &mut seen, &mut urls);
-    urls
-}
-
-fn collect_css_resource_urls<'i, 't>(
-    input: &mut Parser<'i, 't>,
-    base_url: &Url,
-    seen: &mut HashSet<String>,
-    urls: &mut Vec<Url>,
-) {
-    while let Ok(token) = input.next_including_whitespace_and_comments().cloned() {
-        match token {
-            Token::AtKeyword(name) if name.eq_ignore_ascii_case("font-face") => {
-                skip_css_at_rule_body(input);
-            }
-            Token::AtKeyword(name)
-                if name.eq_ignore_ascii_case("import")
-                    || name.eq_ignore_ascii_case("namespace") =>
-            {
-                skip_css_at_rule_body(input);
-            }
-            Token::UnquotedUrl(raw_url) => {
-                push_resolved_css_resource_url(&raw_url, base_url, seen, urls);
-            }
-            Token::Function(name) if name.eq_ignore_ascii_case("url") => {
-                let _ = input.parse_nested_block(|input| {
-                    collect_css_url_function_argument(input, base_url, seen, urls);
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
-                });
-            }
-            Token::Function(_)
-            | Token::ParenthesisBlock
-            | Token::SquareBracketBlock
-            | Token::CurlyBracketBlock => {
-                let _ = input.parse_nested_block(|input| {
-                    collect_css_resource_urls(input, base_url, seen, urls);
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
-fn collect_css_url_function_argument<'i, 't>(
-    input: &mut Parser<'i, 't>,
-    base_url: &Url,
-    seen: &mut HashSet<String>,
-    urls: &mut Vec<Url>,
-) {
-    while let Ok(token) = input.next_including_whitespace_and_comments().cloned() {
-        match token {
-            Token::WhiteSpace(_) | Token::Comment(_) => {}
-            Token::QuotedString(raw_url) | Token::UnquotedUrl(raw_url) => {
-                push_resolved_css_resource_url(&raw_url, base_url, seen, urls);
-                return;
-            }
-            _ => return,
-        }
-    }
-}
-
-fn skip_css_at_rule_body<'i, 't>(input: &mut Parser<'i, 't>) {
-    while let Ok(token) = input.next_including_whitespace_and_comments().cloned() {
-        match token {
-            Token::Semicolon => return,
-            Token::CurlyBracketBlock => {
-                let _ = input.parse_nested_block(|input| {
-                    skip_css_block(input);
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
-                });
-                return;
-            }
-            Token::Function(_) | Token::ParenthesisBlock | Token::SquareBracketBlock => {
-                let _ = input.parse_nested_block(|input| {
-                    skip_css_block(input);
-                    Ok::<(), cssparser::ParseError<'_, ()>>(())
-                });
-            }
-            _ => {}
-        }
-    }
-}
-
 fn skip_css_block<'i, 't>(input: &mut Parser<'i, 't>) {
     while let Ok(token) = input.next_including_whitespace_and_comments().cloned() {
         match token {
@@ -505,27 +417,6 @@ fn skip_css_block<'i, 't>(input: &mut Parser<'i, 't>) {
     }
 }
 
-fn push_resolved_css_resource_url(
-    raw_url: &str,
-    base_url: &Url,
-    seen: &mut HashSet<String>,
-    urls: &mut Vec<Url>,
-) {
-    let raw_url = raw_url.trim();
-    if raw_url.is_empty() {
-        return;
-    }
-    let Ok(url) = base_url.join(raw_url).or_else(|_| Url::parse(raw_url)) else {
-        return;
-    };
-    if !matches!(url.scheme(), "http" | "https") {
-        return;
-    }
-    if seen.insert(url.as_str().to_owned()) {
-        urls.push(url);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,97 +426,8 @@ mod tests {
     }
 
     #[test]
-    fn extracts_stylesheet_url_function_resources() {
-        let urls = stylesheet_image_resource_urls(
-            r#"
-                body { background-image: url("hero.png"); }
-                .icon { mask: url(icons/icon.svg); }
-            "#,
-            &base_url(),
-        );
-        assert_eq!(
-            urls.into_iter()
-                .map(|url| url.to_string())
-                .collect::<Vec<_>>(),
-            vec![
-                "https://example.test/assets/hero.png",
-                "https://example.test/assets/icons/icon.svg",
-            ]
-        );
-    }
-
-    #[test]
-    fn ignores_duplicate_and_non_network_urls() {
-        let urls = stylesheet_image_resource_urls(
-            r#"
-                .a { background: url(shared.png); }
-                .b { background: url("shared.png"); }
-                .c { background: url("data:image/png;base64,aa"); }
-                .d { background: url("about:blank"); }
-            "#,
-            &base_url(),
-        );
-        assert_eq!(
-            urls.into_iter()
-                .map(|url| url.to_string())
-                .collect::<Vec<_>>(),
-            vec!["https://example.test/assets/shared.png"]
-        );
-    }
-
-    #[test]
-    fn keeps_font_face_urls_out_of_stylesheet_image_resources() {
-        let image_urls = stylesheet_image_resource_urls(
-            r#"
-                @font-face {
-                    font-family: Demo;
-                    src: local("Demo"), url(fonts/demo.woff2) format("woff2");
-                }
-                @media screen {
-                    @font-face {
-                        font-family: NestedDemo;
-                        src: url(fonts/nested.woff2);
-                    }
-                }
-                @media screen {
-                    body { background-image: url(hero.png); }
-                }
-            "#,
-            &base_url(),
-        );
-        assert_eq!(
-            image_urls
-                .into_iter()
-                .map(|url| url.to_string())
-                .collect::<Vec<_>>(),
-            vec!["https://example.test/assets/hero.png"]
-        );
-    }
-
-    #[test]
-    fn keeps_non_image_at_rule_urls_out_of_stylesheet_image_resources() {
-        let image_urls = stylesheet_image_resource_urls(
-            r#"
-                @import url(imported.css);
-                @namespace svg url("http://www.w3.org/2000/svg");
-                @media screen {
-                    body { background-image: url(hero.png); }
-                }
-            "#,
-            &base_url(),
-        );
-        assert_eq!(
-            image_urls
-                .into_iter()
-                .map(|url| url.to_string())
-                .collect::<Vec<_>>(),
-            vec!["https://example.test/assets/hero.png"]
-        );
-    }
-
-    #[test]
     fn selects_one_supported_source_per_font_face_and_keeps_descriptors() {
-        let resources = stylesheet_load_blocking_resources(
+        let resources = stylesheet_load_blocking_font_resources(
             r#"
                 @font-face {
                     font-family: Demo;
@@ -693,7 +495,7 @@ mod tests {
 
     #[test]
     fn invalid_unicode_range_falls_back_to_the_full_font_face_range() {
-        let resources = stylesheet_load_blocking_resources(
+        let resources = stylesheet_load_blocking_font_resources(
             r#"
                 @font-face {
                     font-family: Demo;
@@ -716,7 +518,7 @@ mod tests {
     }
 
     #[test]
-    fn load_blocking_resource_selection_obeys_image_and_font_bits_independently() {
+    fn load_blocking_font_selection_ignores_image_and_unrelated_bits() {
         let css = r#"
             @font-face {
                 font-family: Demo;
@@ -725,20 +527,14 @@ mod tests {
             body { background-image: url(images/hero.png); }
         "#;
         let selected = |mask| {
-            stylesheet_load_blocking_resources(css, &base_url(), mask)
+            stylesheet_load_blocking_font_resources(css, &base_url(), mask)
                 .into_iter()
                 .map(|resource| (resource.kind(), resource.request_url().to_string()))
                 .collect::<Vec<_>>()
         };
 
         assert!(selected(OptionalResourceFetchMask::NONE).is_empty());
-        assert_eq!(
-            selected(OptionalResourceFetchMask::IMAGE),
-            vec![(
-                StylesheetLoadBlockingResourceKind::Image,
-                "https://example.test/assets/images/hero.png".to_owned(),
-            )]
-        );
+        assert!(selected(OptionalResourceFetchMask::IMAGE).is_empty());
         assert_eq!(
             selected(OptionalResourceFetchMask::FONT),
             vec![(
@@ -748,16 +544,10 @@ mod tests {
         );
         assert_eq!(
             selected(OptionalResourceFetchMask::IMAGE | OptionalResourceFetchMask::FONT),
-            vec![
-                (
-                    StylesheetLoadBlockingResourceKind::Image,
-                    "https://example.test/assets/images/hero.png".to_owned(),
-                ),
-                (
-                    StylesheetLoadBlockingResourceKind::Font,
-                    "https://example.test/assets/fonts/demo.woff2".to_owned(),
-                ),
-            ]
+            vec![(
+                StylesheetLoadBlockingResourceKind::Font,
+                "https://example.test/assets/fonts/demo.woff2".to_owned(),
+            )]
         );
         for unrelated in [
             OptionalResourceFetchMask::AUDIO,
@@ -767,7 +557,7 @@ mod tests {
         ] {
             assert!(
                 selected(unrelated).is_empty(),
-                "{unrelated:?} must not enable CSS image or font requests"
+                "{unrelated:?} must not enable stylesheet font requests"
             );
         }
     }

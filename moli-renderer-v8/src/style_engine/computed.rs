@@ -42,16 +42,26 @@ use crate::{
 use moli_selector::StyloElement;
 
 use super::{
-    MoliStyleEngine, StyleViewport, StyloComputedStyleInputs, StyloPreparedComputedStyleInputs,
+    FullStyleWorldSnapshot, MoliStyleEngine, PreparedStyleWorldUpdate, StyleViewport,
+    StyleWorldUpdate, StyleWorldUpdatePlan,
     cache::ComputedElementStyleCacheKey,
     document_world::DocumentStyleWorld,
     source_lifecycle::StyleSourceDocumentContext,
-    system::{StyleSystemCacheKey, ensure_retained_style_system},
+    world_key::StyleWorldKey,
+    world_lifecycle::{
+        ensure_retained_style_system, ensure_retained_style_system_incrementally,
+        retained_style_world_update_plan,
+    },
 };
 
 #[derive(Clone)]
 pub(crate) struct StyloComputedStyleSnapshot {
     primary: ServoArc<ComputedValues>,
+}
+
+pub(crate) enum StyleObservationSnapshot {
+    Current(Option<StyloComputedStyleSnapshot>),
+    NeedsStyleWorldUpdate(StyleWorldUpdatePlan),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -274,7 +284,7 @@ pub(super) fn computed_style_property_value(
     handle: DomHandle,
     property: &str,
     pseudo_element: Option<&str>,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
     viewport: StyleViewport,
@@ -298,7 +308,12 @@ pub(super) fn computed_style_property_value(
         Some(pseudo_element) => Some(stylo_pseudo_element_for_computed_style(pseudo_element)?),
         None => None,
     };
-    let style_system_key = StyleSystemCacheKey::new(document_url, inputs, viewport);
+    let style_system_key = StyleWorldKey::new_for_observation(
+        document_url,
+        inputs,
+        viewport,
+        super::StyleTreeScopeVersions::current(host, Some(owner_document)),
+    );
     if property.starts_with("--") {
         if let Some(ref pseudo_element) = pseudo_element
             && pseudo_element.is_lazy()
@@ -315,7 +330,7 @@ pub(super) fn computed_style_property_value(
                 |style| serialize_computed_custom_property(style, property),
             );
         }
-        return with_resolved_styles(
+        return with_resolved_style(
             engine,
             host,
             document_url,
@@ -324,14 +339,7 @@ pub(super) fn computed_style_property_value(
             inputs,
             document_context,
             pseudo_element.as_ref(),
-            |styles| {
-                let style = if let Some(ref pseudo_element) = pseudo_element {
-                    styles.pseudos.get(pseudo_element)?
-                } else {
-                    styles.primary()
-                };
-                serialize_computed_custom_property(style, property)
-            },
+            |style| serialize_computed_custom_property(style, property),
         );
     }
     let property_id = PropertyId::parse_enabled_for_all_content(property).ok()?;
@@ -350,7 +358,7 @@ pub(super) fn computed_style_property_value(
             |style| serialize_resolved_computed_property(style, property_id.clone()),
         );
     }
-    with_resolved_styles(
+    with_resolved_style(
         engine,
         host,
         document_url,
@@ -359,14 +367,7 @@ pub(super) fn computed_style_property_value(
         inputs,
         document_context,
         pseudo_element.as_ref(),
-        |styles| {
-            let style = if let Some(ref pseudo_element) = pseudo_element {
-                styles.pseudos.get(pseudo_element)?
-            } else {
-                styles.primary()
-            };
-            serialize_resolved_computed_property(style, property_id)
-        },
+        |style| serialize_resolved_computed_property(style, property_id),
     )
 }
 
@@ -375,12 +376,18 @@ pub(super) fn computed_style_snapshot_after_style_update(
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
-    inputs: &StyloComputedStyleInputs,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
     viewport: StyleViewport,
 ) -> Option<StyloComputedStyleSnapshot> {
-    let style_system_key = StyleSystemCacheKey::new(document_url, inputs, viewport);
+    let owner_document = owner_document_for_computed_style_read(host, handle)?;
+    let style_system_key = StyleWorldKey::new_for_observation(
+        document_url,
+        inputs,
+        viewport,
+        super::StyleTreeScopeVersions::current(host, Some(owner_document)),
+    );
     computed_style_snapshot_after_style_update_with_key(
         engine,
         host,
@@ -393,34 +400,152 @@ pub(super) fn computed_style_snapshot_after_style_update(
     )
 }
 
-pub(super) fn computed_style_snapshot_after_style_update_with_prepared_inputs(
+pub(super) fn computed_style_snapshot_from_current_observation(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
-    inputs: &StyloPreparedComputedStyleInputs,
+    environment: super::StyloStyleEnvironment,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
-) -> Option<StyloComputedStyleSnapshot> {
-    computed_style_snapshot_after_style_update_with_key(
+    viewport: StyleViewport,
+    tree_scope_versions: super::StyleTreeScopeVersions,
+) -> StyleObservationSnapshot {
+    let Some(owner_document) = owner_document_for_computed_style_read(host, handle) else {
+        return StyleObservationSnapshot::Current(None);
+    };
+    trace_computed_style_read(
+        document_url,
+        handle,
+        owner_document,
+        read_document,
+        "<computed-style-observation>",
+        None,
+        document_context,
+    );
+    let quirks_mode = host
+        .node(owner_document)
+        .and_then(Node::as_document)
+        .map(|document| document.quirks_mode())
+        .unwrap_or(QuirksMode::NoQuirks);
+    let style_document_url = host
+        .document_url_for_handle(owner_document)
+        .unwrap_or(document_url);
+    let world = engine.world_for_document(owner_document);
+    if !world
+        .document_state
+        .retained_style_system_is_current_for_observation(
+            style_document_url,
+            viewport,
+            environment,
+            quirks_mode,
+            tree_scope_versions,
+        )
+    {
+        return StyleObservationSnapshot::NeedsStyleWorldUpdate(retained_style_world_update_plan(
+            host,
+            &world.document_state,
+            owner_document,
+            style_document_url,
+            viewport,
+            environment,
+            quirks_mode,
+            tree_scope_versions,
+        ));
+    }
+    StyleObservationSnapshot::Current(with_resolved_style_in_current_world(
         engine,
         host,
         document_url,
         handle,
-        inputs.style_system_key(),
-        inputs.inputs(),
-        document_context,
-        read_document,
-    )
+        &world,
+        quirks_mode,
+        None,
+        |style| {
+            Some(StyloComputedStyleSnapshot {
+                primary: style.clone(),
+            })
+        },
+    ))
 }
 
-pub(super) fn computed_pseudo_style_snapshot_after_style_update_with_prepared_inputs(
+pub(super) fn computed_style_snapshot_after_world_update(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    handle: DomHandle,
+    update: &PreparedStyleWorldUpdate,
+    document_context: StyleSourceDocumentContext<'_>,
+    read_document: DomHandle,
+) -> Option<StyloComputedStyleSnapshot> {
+    match update.update() {
+        StyleWorldUpdate::Full(inputs) => {
+            let environment = update.environment();
+            let style_system_key = StyleWorldKey::new_for_observation(
+                &environment.document_url,
+                inputs,
+                environment.viewport,
+                environment.tree_scope_versions,
+            );
+            computed_style_snapshot_after_style_update_with_key(
+                engine,
+                host,
+                document_url,
+                handle,
+                &style_system_key,
+                inputs,
+                document_context,
+                read_document,
+            )
+        }
+        StyleWorldUpdate::Incremental(incremental) => {
+            let owner_document = owner_document_for_computed_style_read(host, handle)?;
+            trace_computed_style_read(
+                document_url,
+                handle,
+                owner_document,
+                read_document,
+                "<incremental-computed-style-snapshot>",
+                None,
+                document_context,
+            );
+            let world = engine.world_for_document(owner_document);
+            let source_stores = world.borrow_source_stores();
+            ensure_retained_style_system_incrementally(
+                host,
+                &engine.dom_adapter,
+                &world.document_state,
+                &source_stores,
+                document_context,
+                owner_document,
+                engine.cache_cleanup_for_world(&world),
+                update.environment(),
+                incremental,
+            );
+            with_resolved_style_in_current_world(
+                engine,
+                host,
+                document_url,
+                handle,
+                &world,
+                update.environment().quirks_mode,
+                None,
+                |style| {
+                    Some(StyloComputedStyleSnapshot {
+                        primary: style.clone(),
+                    })
+                },
+            )
+        }
+    }
+}
+
+pub(super) fn computed_pseudo_style_snapshot_from_current_observation(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
     pseudo_element: &str,
-    inputs: &StyloPreparedComputedStyleInputs,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
 ) -> Option<StyloComputedStyleSnapshot> {
@@ -430,20 +555,25 @@ pub(super) fn computed_pseudo_style_snapshot_after_style_update_with_prepared_in
         handle,
         owner_document,
         read_document,
-        "<computed-pseudo-style-snapshot>",
+        "<current-computed-pseudo-style-snapshot>",
         Some(pseudo_element),
         document_context,
     );
     let pseudo_element = stylo_pseudo_element_for_computed_style(pseudo_element)?;
+    let world = engine.world_for_document(owner_document);
+    let quirks_mode = host
+        .node(owner_document)
+        .and_then(Node::as_document)
+        .map(|document| document.quirks_mode())
+        .unwrap_or(QuirksMode::NoQuirks);
     if pseudo_element.is_lazy() {
-        return with_lazily_resolved_pseudo_style(
+        return with_lazily_resolved_pseudo_style_in_current_world(
             engine,
             host,
             document_url,
             handle,
-            inputs.style_system_key(),
-            inputs.inputs(),
-            document_context,
+            &world,
+            quirks_mode,
             &pseudo_element,
             |style| {
                 Some(StyloComputedStyleSnapshot {
@@ -452,31 +582,29 @@ pub(super) fn computed_pseudo_style_snapshot_after_style_update_with_prepared_in
             },
         );
     }
-    with_resolved_styles(
+    with_resolved_style_in_current_world(
         engine,
         host,
         document_url,
         handle,
-        inputs.style_system_key(),
-        inputs.inputs(),
-        document_context,
+        &world,
+        quirks_mode,
         Some(&pseudo_element),
-        |styles| {
+        |style| {
             Some(StyloComputedStyleSnapshot {
-                primary: styles.pseudos.get(&pseudo_element)?.clone(),
+                primary: style.clone(),
             })
         },
     )
 }
 
-pub(super) fn computed_anonymous_style_snapshot_after_style_update_with_prepared_inputs(
+pub(super) fn computed_anonymous_style_snapshot_from_current_observation(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document_url: &url::Url,
     owner: DomHandle,
     parent_style: &ComputedValues,
     anonymous_kind: StyloAnonymousBoxKind,
-    inputs: &StyloPreparedComputedStyleInputs,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
 ) -> Option<StyloComputedStyleSnapshot> {
@@ -486,21 +614,27 @@ pub(super) fn computed_anonymous_style_snapshot_after_style_update_with_prepared
         owner,
         owner_document,
         read_document,
-        "<computed-anonymous-style-snapshot>",
+        "<current-computed-anonymous-style-snapshot>",
         Some(anonymous_kind.trace_name()),
         document_context,
     );
     let world = engine.world_for_document(owner_document);
-    ensure_retained_style_system_for_computed_read(
+    computed_anonymous_style_snapshot_in_current_world(
         engine,
         host,
         &world,
-        owner_document,
-        inputs.style_system_key(),
-        inputs.inputs(),
-        document_context,
-    );
+        parent_style,
+        anonymous_kind,
+    )
+}
 
+fn computed_anonymous_style_snapshot_in_current_world(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    world: &DocumentStyleWorld,
+    parent_style: &ComputedValues,
+    anonymous_kind: StyloAnonymousBoxKind,
+) -> Option<StyloComputedStyleSnapshot> {
     engine.dom_adapter.with_bound_host(host, |dom_adapter| {
         let shared_lock = dom_adapter.shared_lock().clone();
         let guard = shared_lock.read();
@@ -521,8 +655,8 @@ fn computed_style_snapshot_after_style_update_with_key(
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
-    style_system_key: &StyleSystemCacheKey,
-    inputs: &StyloComputedStyleInputs,
+    style_system_key: &StyleWorldKey,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
     read_document: DomHandle,
 ) -> Option<StyloComputedStyleSnapshot> {
@@ -536,7 +670,7 @@ fn computed_style_snapshot_after_style_update_with_key(
         None,
         document_context,
     );
-    with_resolved_styles(
+    with_resolved_style(
         engine,
         host,
         document_url,
@@ -545,9 +679,9 @@ fn computed_style_snapshot_after_style_update_with_key(
         inputs,
         document_context,
         None,
-        |styles| {
+        |style| {
             Some(StyloComputedStyleSnapshot {
-                primary: styles.primary().clone(),
+                primary: style.clone(),
             })
         },
     )
@@ -566,16 +700,16 @@ fn computed_custom_property_names_for_style(style: &ComputedValues) -> Vec<Strin
     names
 }
 
-fn with_resolved_styles<R>(
+fn with_resolved_style<R>(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
-    style_system_key: &StyleSystemCacheKey,
-    inputs: &StyloComputedStyleInputs,
+    style_system_key: &StyleWorldKey,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
     pseudo_element: Option<&PseudoElement>,
-    callback: impl FnOnce(&ElementStyles) -> Option<R>,
+    callback: impl FnOnce(&ServoArc<ComputedValues>) -> Option<R>,
 ) -> Option<R> {
     let owner_document = owner_document_for_computed_style_read(host, handle)?;
     let world = engine.world_for_document(owner_document);
@@ -588,92 +722,177 @@ fn with_resolved_styles<R>(
         inputs,
         document_context,
     );
-    let computed_key = ComputedElementStyleCacheKey {
-        computed_cache_generation: world.document_state.computed_cache_generation(),
+    with_resolved_style_in_current_world(
+        engine,
+        host,
+        document_url,
         handle,
-        pseudo_element: pseudo_element.cloned(),
-    };
-    if let Some(styles) = world.computed_style_cache.get(&computed_key) {
-        return callback(&styles);
+        &world,
+        inputs.quirks_mode,
+        pseudo_element,
+        callback,
+    )
+}
+
+fn with_resolved_style_in_current_world<R>(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    handle: DomHandle,
+    world: &DocumentStyleWorld,
+    quirks_mode: QuirksMode,
+    pseudo_element: Option<&PseudoElement>,
+    callback: impl FnOnce(&ServoArc<ComputedValues>) -> Option<R>,
+) -> Option<R> {
+    let computed_cache_generation = world.document_state.computed_cache_generation();
+    if let Some(pseudo_element) = pseudo_element {
+        let pseudo_key = ComputedElementStyleCacheKey {
+            computed_cache_generation,
+            handle,
+            pseudo_element: Some(pseudo_element.clone()),
+        };
+        if let Some(style) = world.computed_style_cache.get_pseudo(&pseudo_key) {
+            return callback(&style);
+        }
     }
 
     engine.dom_adapter.with_bound_host(host, |dom_adapter| {
         let element = dom_adapter.element(host, handle)?;
-
-        dom_adapter.clear_element_data(handle);
-        populate_inline_style_attributes_for_resolution(
-            engine,
-            host,
-            document_url,
-            handle,
-            inputs.quirks_mode,
-        );
-
-        world
-            .document_state
-            .with_shadow_cascade_data(|shadow_cascade_data| {
-                for (root, cascade_data) in shadow_cascade_data {
-                    dom_adapter.set_shadow_cascade_data(*root, cascade_data.clone());
+        let canonical_styles = element
+            .borrow_data()
+            .filter(|data| data.has_styles() && data.hint.is_empty())
+            .map(|data| data.styles.clone())
+            .unwrap_or_else(|| {
+                populate_inline_style_attributes_for_resolution(
+                    engine,
+                    host,
+                    document_url,
+                    handle,
+                    quirks_mode,
+                );
+                install_shadow_cascade_data_for_resolution(world, dom_adapter);
+                // `resolve_style` is the single-node initial-style API. Keep
+                // dirty values published until this observation begins, then
+                // make only the element being recomputed unstyled.
+                unsafe {
+                    element.ensure_data().styles = ElementStyles::default();
                 }
+                let styles = resolve_element_styles(world, dom_adapter, element, None);
+                unsafe {
+                    let mut data = element.ensure_data();
+                    data.styles = styles.clone();
+                    data.clear_restyle_state();
+                }
+                styles
             });
 
-        let shared_lock = dom_adapter.shared_lock().clone();
-        let guard = shared_lock.read();
-        let guards = StylesheetGuards::same(&guard);
-
-        let snapshot_map = SnapshotMap::new();
-        let empty_painters = EmptyRegisteredSpeculativePainters;
-        let mut retained_selector_caches = world.document_state.take_selector_caches();
-        let styles = {
-            world.document_state.with_retained_style_system(|retained| {
-                let shared = SharedStyleContext {
-                    stylist: &retained.stylist,
-                    visited_styles_enabled: false,
-                    options: StyleSystemOptions::default(),
-                    guards,
-                    current_time_for_animations: 0.0,
-                    traversal_flags: TraversalFlags::empty(),
-                    snapshot_map: &snapshot_map,
-                    animations: DocumentAnimationSet::default(),
-                    registered_speculative_painters: &empty_painters,
-                };
-                let _layout_thread_state = StyloLayoutThreadStateGuard::enter();
-                let mut thread_local = ThreadLocalStyleContext::new();
-                std::mem::swap(
-                    &mut thread_local.selector_caches,
-                    &mut retained_selector_caches,
-                );
-                let mut context = StyleContext {
-                    shared: &shared,
-                    thread_local: &mut thread_local,
-                };
-                materialize_ancestor_styles_for_resolution(&mut context, element);
-                let styles = resolve_style(
-                    &mut context,
-                    element,
-                    RuleInclusion::All,
-                    pseudo_element,
-                    None,
-                );
-                std::mem::swap(
-                    &mut context.thread_local.selector_caches,
-                    &mut retained_selector_caches,
-                );
-                styles
-            })
+        let style = if let Some(pseudo_element) = pseudo_element {
+            let style = canonical_styles
+                .pseudos
+                .get(pseudo_element)
+                .cloned()
+                .or_else(|| {
+                    install_shadow_cascade_data_for_resolution(world, dom_adapter);
+                    resolve_element_styles(world, dom_adapter, element, Some(pseudo_element))
+                        .pseudos
+                        .get(pseudo_element)
+                        .cloned()
+                })?;
+            world.computed_style_cache.insert_pseudo(
+                ComputedElementStyleCacheKey {
+                    computed_cache_generation,
+                    handle,
+                    pseudo_element: Some(pseudo_element.clone()),
+                },
+                style.clone(),
+            );
+            style
+        } else {
+            world
+                .computed_style_cache
+                .record_primary(ComputedElementStyleCacheKey {
+                    computed_cache_generation,
+                    handle,
+                    pseudo_element: None,
+                });
+            canonical_styles.primary().clone()
         };
-        world
-            .document_state
-            .replace_selector_caches(retained_selector_caches);
-
-        world
-            .computed_style_cache
-            .insert(computed_key, styles.clone());
-        callback(&styles)
+        callback(&style)
     })
 }
 
-fn materialize_ancestor_styles_for_resolution<E>(context: &mut StyleContext<E>, element: E)
+fn install_shadow_cascade_data_for_resolution(
+    world: &DocumentStyleWorld,
+    dom_adapter: &moli_selector::StyloDomHostBinding<'_>,
+) {
+    world
+        .document_state
+        .with_shadow_cascade_data(|shadow_cascade_data| {
+            for (root, cascade_data) in shadow_cascade_data {
+                dom_adapter.set_shadow_cascade_data(*root, cascade_data.clone());
+            }
+        });
+}
+
+fn resolve_element_styles(
+    world: &DocumentStyleWorld,
+    dom_adapter: &moli_selector::StyloDomHostBinding<'_>,
+    element: StyloElement<'_>,
+    pseudo_element: Option<&PseudoElement>,
+) -> ElementStyles {
+    let shared_lock = dom_adapter.shared_lock().clone();
+    let guard = shared_lock.read();
+    let guards = StylesheetGuards::same(&guard);
+    let snapshot_map = SnapshotMap::new();
+    let empty_painters = EmptyRegisteredSpeculativePainters;
+    let mut retained_selector_caches = world.document_state.take_selector_caches();
+    let styles = world.document_state.with_retained_style_system(|retained| {
+        let shared = SharedStyleContext {
+            stylist: &retained.stylist,
+            visited_styles_enabled: false,
+            options: StyleSystemOptions::default(),
+            guards,
+            current_time_for_animations: 0.0,
+            traversal_flags: TraversalFlags::empty(),
+            snapshot_map: &snapshot_map,
+            animations: DocumentAnimationSet::default(),
+            registered_speculative_painters: &empty_painters,
+        };
+        let _layout_thread_state = StyloLayoutThreadStateGuard::enter();
+        let mut thread_local = ThreadLocalStyleContext::new();
+        std::mem::swap(
+            &mut thread_local.selector_caches,
+            &mut retained_selector_caches,
+        );
+        let mut context = StyleContext {
+            shared: &shared,
+            thread_local: &mut thread_local,
+        };
+        let ancestor_resolution_count =
+            materialize_ancestor_styles_for_resolution(&mut context, element);
+        let styles = resolve_style(
+            &mut context,
+            element,
+            RuleInclusion::All,
+            pseudo_element,
+            None,
+        );
+        std::mem::swap(
+            &mut context.thread_local.selector_caches,
+            &mut retained_selector_caches,
+        );
+        world
+            .document_state
+            .note_element_style_resolutions(ancestor_resolution_count.saturating_add(1));
+        styles
+    });
+    world
+        .document_state
+        .replace_selector_caches(retained_selector_caches);
+    styles
+}
+
+fn materialize_ancestor_styles_for_resolution<E>(context: &mut StyleContext<E>, element: E) -> u64
 where
     E: TElement,
 {
@@ -684,15 +903,26 @@ where
         current = ancestor.traversal_parent();
     }
 
+    let mut resolution_count = 0_u64;
     for ancestor in ancestors.into_iter().rev() {
-        if ancestor.borrow_data().is_some_and(|data| data.has_styles()) {
+        if ancestor
+            .borrow_data()
+            .is_some_and(|data| data.has_styles() && data.hint.is_empty())
+        {
             continue;
         }
-        let styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
         unsafe {
-            ancestor.ensure_data().styles = styles;
+            ancestor.ensure_data().styles = ElementStyles::default();
+        }
+        let styles = resolve_style(context, ancestor, RuleInclusion::All, None, None);
+        resolution_count = resolution_count.saturating_add(1);
+        unsafe {
+            let mut data = ancestor.ensure_data();
+            data.styles = styles;
+            data.clear_restyle_state();
         }
     }
+    resolution_count
 }
 
 fn with_lazily_resolved_pseudo_style<R>(
@@ -700,8 +930,8 @@ fn with_lazily_resolved_pseudo_style<R>(
     host: &DomHost,
     document_url: &url::Url,
     handle: DomHandle,
-    style_system_key: &StyleSystemCacheKey,
-    inputs: &StyloComputedStyleInputs,
+    style_system_key: &StyleWorldKey,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
     pseudo_element: &PseudoElement,
     callback: impl FnOnce(&ComputedValues) -> Option<R>,
@@ -718,25 +948,47 @@ fn with_lazily_resolved_pseudo_style<R>(
         inputs,
         document_context,
     );
+    with_lazily_resolved_pseudo_style_in_current_world(
+        engine,
+        host,
+        document_url,
+        handle,
+        &world,
+        inputs.quirks_mode,
+        pseudo_element,
+        callback,
+    )
+}
+
+fn with_lazily_resolved_pseudo_style_in_current_world<R>(
+    engine: &MoliStyleEngine,
+    host: &DomHost,
+    document_url: &url::Url,
+    handle: DomHandle,
+    world: &DocumentStyleWorld,
+    quirks_mode: QuirksMode,
+    pseudo_element: &PseudoElement,
+    callback: impl FnOnce(&ComputedValues) -> Option<R>,
+) -> Option<R> {
+    debug_assert!(pseudo_element.is_lazy());
     let computed_key = ComputedElementStyleCacheKey {
         computed_cache_generation: world.document_state.computed_cache_generation(),
         handle,
         pseudo_element: Some(pseudo_element.clone()),
     };
-    if let Some(style) = world.computed_style_cache.get_lazy_pseudo(&computed_key) {
+    if let Some(style) = world.computed_style_cache.get_pseudo(&computed_key) {
         return callback(&style);
     }
 
-    let primary_style = with_resolved_styles(
+    let primary_style = with_resolved_style_in_current_world(
         engine,
         host,
         document_url,
         handle,
-        style_system_key,
-        inputs,
-        document_context,
+        world,
+        quirks_mode,
         None,
-        |styles| Some(styles.primary().clone()),
+        |style| Some(style.clone()),
     )?;
 
     engine.dom_adapter.with_bound_host(host, |dom_adapter| {
@@ -769,7 +1021,7 @@ fn with_lazily_resolved_pseudo_style<R>(
             })?;
         world
             .computed_style_cache
-            .insert_lazy_pseudo(computed_key, style.clone());
+            .insert_pseudo(computed_key, style.clone());
         callback(&style)
     })
 }
@@ -779,8 +1031,8 @@ fn ensure_retained_style_system_for_computed_read(
     host: &DomHost,
     world: &DocumentStyleWorld,
     retained_document: DomHandle,
-    key: &StyleSystemCacheKey,
-    inputs: &StyloComputedStyleInputs,
+    key: &StyleWorldKey,
+    inputs: &FullStyleWorldSnapshot,
     document_context: StyleSourceDocumentContext<'_>,
 ) {
     let source_stores = world.borrow_source_stores();
@@ -894,8 +1146,8 @@ pub(super) fn ensure_retained_style_system_for_document_for_test(
     engine: &MoliStyleEngine,
     host: &DomHost,
     document: DomHandle,
-    key: StyleSystemCacheKey,
-    inputs: &StyloComputedStyleInputs,
+    key: StyleWorldKey,
+    inputs: &FullStyleWorldSnapshot,
 ) {
     let world = engine.world_for_document(document);
     ensure_retained_style_system_for_computed_read(

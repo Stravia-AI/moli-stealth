@@ -114,9 +114,6 @@ impl DocumentCssProjections {
     }
 
     fn apply(self, scope: &mut v8::PinScope<'_, '_>, host: &JsContextHost) {
-        if !self.projections.is_empty() {
-            host.mark_document_web_font_sources_dirty();
-        }
         let mut font_face_documents = Vec::new();
         for projection in self.projections {
             match projection {

@@ -14,6 +14,7 @@ use style::{
     context::QuirksMode,
     custom_properties::AttrTaint,
     font_face::FontFaceRule,
+    invalidation::stylesheets::RuleChangeKind,
     media_queries::MediaList,
     parser::{NestingContext, Parse, ParserContext},
     properties::{PropertyDeclarationBlock, parse_property_declaration_list},
@@ -992,6 +993,7 @@ pub(crate) struct LiveStylesheet {
     cssom_runtime_state: LiveStylesheetCssomRuntimeState,
     contents_revision: Cell<u64>,
     cascade_generation: Cell<u64>,
+    cascade_mutations: StdArc<Mutex<Vec<LiveStylesheetCascadeMutationBatch>>>,
     import_generation: Cell<u64>,
     parent: RefCell<Option<LiveStylesheetParent>>,
     next_import_edge_id: Cell<u64>,
@@ -1012,6 +1014,59 @@ pub(crate) struct LiveStylesheet {
             RcWeak<RefCell<Option<StylesheetRuleWrapperBinding>>>,
         >,
     >,
+}
+
+/// One exact Stylo rule mutation retained until every installation that still
+/// references an older cascade generation can observe it.
+#[derive(Clone, Debug)]
+pub(crate) struct LiveStylesheetRuleMutation {
+    rule: CssRule,
+    ancestors: Vec<CssRule>,
+    change_kind: RuleChangeKind,
+}
+
+impl LiveStylesheetRuleMutation {
+    pub(crate) fn new(rule: CssRule, ancestors: Vec<CssRule>, change_kind: RuleChangeKind) -> Self {
+        Self {
+            rule,
+            ancestors,
+            change_kind,
+        }
+    }
+
+    pub(crate) fn rule(&self) -> &CssRule {
+        &self.rule
+    }
+
+    pub(crate) fn ancestors(&self) -> &[CssRule] {
+        &self.ancestors
+    }
+
+    pub(crate) fn change_kind(&self) -> RuleChangeKind {
+        self.change_kind
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) enum LiveStylesheetCascadeMutation {
+    Full,
+    Rules(Vec<LiveStylesheetRuleMutation>),
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct LiveStylesheetCascadeMutationBatch {
+    generation: u64,
+    mutation: LiveStylesheetCascadeMutation,
+}
+
+impl LiveStylesheetCascadeMutationBatch {
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub(crate) fn mutation(&self) -> &LiveStylesheetCascadeMutation {
+        &self.mutation
+    }
 }
 
 #[derive(Debug)]
@@ -1216,6 +1271,7 @@ impl LiveStylesheet {
             cssom_runtime_state,
             contents_revision: Cell::new(1),
             cascade_generation: Cell::new(1),
+            cascade_mutations: StdArc::new(Mutex::new(Vec::new())),
             import_generation: Cell::new(1),
             parent: RefCell::new(None),
             next_import_edge_id: Cell::new(0),
@@ -1281,6 +1337,12 @@ impl LiveStylesheet {
 
     pub(crate) fn cascade_generation(&self) -> u64 {
         self.cascade_generation.get()
+    }
+
+    pub(crate) fn cascade_mutation_journal(
+        &self,
+    ) -> StdArc<Mutex<Vec<LiveStylesheetCascadeMutationBatch>>> {
+        StdArc::clone(&self.cascade_mutations)
     }
 
     pub(crate) fn import_generation(&self) -> u64 {

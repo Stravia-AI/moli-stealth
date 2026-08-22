@@ -8,7 +8,7 @@ use moli_crypto::Sha256Context;
 use moli_selector::StyloSourceDependencySummary;
 use parking_lot::Mutex;
 
-use super::super::{retained::style_source_metadata_for_css_text, system::StyleSystemSourceKey};
+use super::super::{source_key::StyleSourceKey, stylesheet::style_source_metadata_for_css_text};
 use super::store::{StyleSourceMetadata, StylesheetFontFaceDescriptor};
 
 const RETAINED_BYTES_LIMIT: usize = 64 * 1024;
@@ -36,6 +36,7 @@ struct SharedStyleSourceMetadata {
     css_fingerprint: [u8; 32],
     source_dependency_summary: Arc<StyloSourceDependencySummary>,
     font_faces: Arc<[StylesheetFontFaceDescriptor]>,
+    import_urls: Arc<[url::Url]>,
 }
 
 #[derive(Debug)]
@@ -59,6 +60,7 @@ pub(super) fn shared_style_source_contents(
     let source = Arc::new(SharedStyleSourceContents {
         source_metadata: SharedStyleSourceMetadata::from_metadata(
             &css_text,
+            &base_url,
             key.css_fingerprint,
             metadata,
         ),
@@ -97,6 +99,10 @@ impl SharedStyleSourceContents {
         Arc::clone(&self.source_metadata.font_faces)
     }
 
+    pub(super) fn import_urls(&self) -> Arc<[url::Url]> {
+        Arc::clone(&self.source_metadata.import_urls)
+    }
+
     fn matches_input(&self, css_text: &str, base_url: &url::Url) -> bool {
         self.css_text.as_ref() == css_text && self.base_url.as_ref() == base_url
     }
@@ -105,6 +111,7 @@ impl SharedStyleSourceContents {
 impl SharedStyleSourceMetadata {
     fn from_metadata(
         css_text: &str,
+        base_url: &url::Url,
         css_fingerprint: [u8; 32],
         metadata: StyleSourceMetadata,
     ) -> Self {
@@ -116,6 +123,11 @@ impl SharedStyleSourceMetadata {
                 .map(|face| StylesheetFontFaceDescriptor::new(face.family, face.source))
                 .collect::<Vec<_>>()
                 .into(),
+            import_urls: super::imports::stylesheet_top_level_import_urls(
+                css_text, base_url, false,
+            )
+            .unwrap_or_default()
+            .into(),
         }
     }
 }
@@ -124,7 +136,7 @@ impl SharedStyleSourceCacheKey {
     fn new(css_text: &str, base_url: &url::Url) -> Self {
         let base_url = base_url.as_str();
         Self {
-            css_fingerprint: StyleSystemSourceKey::css_fingerprint(css_text),
+            css_fingerprint: StyleSourceKey::css_fingerprint(css_text),
             css_text_len: css_text.len(),
             base_url_fingerprint: fingerprint(base_url),
             base_url_len: base_url.len(),
@@ -248,6 +260,7 @@ mod tests {
         let source = Arc::new(SharedStyleSourceContents {
             source_metadata: SharedStyleSourceMetadata::from_metadata(
                 &css_text,
+                &base_url,
                 key.css_fingerprint,
                 metadata,
             ),

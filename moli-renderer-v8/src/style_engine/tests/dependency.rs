@@ -162,7 +162,7 @@ fn missing_retained_style_system_reaches_cleanup_application_table() {
     let host = test_host();
     let mut engine = MoliStyleEngine::new();
     let root = host.document_handle();
-    engine.set_document_adopted_style_sheet_sources_with_host(&host, root, Vec::new());
+    engine.set_document_adopted_style_sheet_sources(root, Vec::new());
     let source_id = StyleSourceId::document_adopted_style_sheet(root, 0);
     let mut target_query = PendingStyleInvalidationTargetQueries::retained_source(
         source_id.clone(),
@@ -288,10 +288,10 @@ fn missing_retained_cascade_data_reaches_cleanup_application_table() {
     let host = test_host();
     let mut engine = MoliStyleEngine::new();
     let root = host.document_handle();
-    engine.set_document_adopted_style_sheet_sources_with_host(&host, root, Vec::new());
+    engine.set_document_adopted_style_sheet_sources(root, Vec::new());
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let inputs = FullStyleWorldSnapshot::default();
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, root, key, &inputs);
 
     let source_id = StyleSourceId::document_adopted_style_sheet(root, 0);
@@ -534,7 +534,7 @@ fn media_state_change_without_snapshot_uses_retained_query() {
     .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
         document, 0,
     )));
-    engine.set_document_adopted_style_sheet_sources_with_host(&host, document, vec![source]);
+    engine.set_document_adopted_style_sheet_sources(document, vec![source]);
 
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
     let source_scope = super::scope::source_scope_for_element_state_change(
@@ -1440,14 +1440,10 @@ fn source_dependency_request_translation_preserves_context_fallback_kind_with_re
     let mut engine = MoliStyleEngine::new();
     let source = StyloStylesheetSource::new(style_text.into(), base_url.clone())
         .with_source_id(Some(source_id));
-    engine.set_document_adopted_style_sheet_sources_with_host(
-        &host,
-        document,
-        vec![source.clone()],
-    );
-    let mut inputs = StyloComputedStyleInputs::default();
+    engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
-    let key = StyleSystemCacheKey::new(&base_url, &inputs, None);
+    let key = StyleWorldKey::new(&base_url, &inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let application = engine
@@ -1659,7 +1655,7 @@ fn retained_unavailable_uses_exact_safety_roots_without_broadening_context_fallb
     );
 
     let mut engine = MoliStyleEngine::new();
-    engine.set_document_adopted_style_sheet_sources_with_host(&host, document, Vec::new());
+    engine.set_document_adopted_style_sheet_sources(document, Vec::new());
     let application = retained_source_invalidation_outcome_for_document_for_test(
         &engine,
         &host,
@@ -1831,7 +1827,7 @@ fn user_agent_structural_boundary_fallback_coexists_with_author_source_target() 
     let user_agent_source = super::source_record::MatchingStyleDependencySource::user_agent(
         &host,
         document,
-        super::retained::moli_user_agent_source_dependency_summary(),
+        super::stylesheet::moli_user_agent_source_dependency_summary(),
         &source_scope,
     )
     .expect("document UA source should participate in document scope");
@@ -1899,7 +1895,7 @@ fn user_agent_structural_metadata_skips_unrelated_boundary_type() {
         super::source_record::MatchingStyleDependencySource::user_agent(
             &host,
             document,
-            super::retained::moli_user_agent_source_dependency_summary(),
+            super::stylesheet::moli_user_agent_source_dependency_summary(),
             &source_scope,
         )
         .expect("document UA source should participate in document scope"),
@@ -2449,8 +2445,8 @@ fn retained_style_system_cache_hit_preserves_computed_and_retained_generations()
     let host = test_host();
     let document = host.document_handle();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let key = StyleSystemCacheKey::new(&document_url, &inputs, None);
+    let inputs = FullStyleWorldSnapshot::default();
+    let key = StyleWorldKey::new(&document_url, &inputs, None);
 
     engine.ensure_retained_style_system_for_document(
         &host,
@@ -2477,7 +2473,7 @@ fn retained_style_system_cache_hit_preserves_computed_and_retained_generations()
 }
 
 #[test]
-fn full_retained_rebuild_clears_computed_cache_until_generation_split() {
+fn viewport_change_updates_the_persistent_style_world_in_place() {
     let mut host = test_host();
     let document = host.document_handle();
     let target = host.create_element("main");
@@ -2487,33 +2483,47 @@ fn full_retained_rebuild_clears_computed_cache_until_generation_split() {
 
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
-    let initial_key = StyleSystemCacheKey::new(&document_url, &inputs, None);
-    let viewport_key = StyleSystemCacheKey::new(
-        &document_url,
-        &inputs,
-        StyleViewport::from_width(Some(640.0)),
-    );
+    let inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![StyloStylesheetSource::new(
+            "main { color: rgb(1, 2, 3); }\n\
+             aside { color: rgb(7, 8, 9); }\n\
+             @media (max-width: 700px) { main { color: rgb(4, 5, 6); } }"
+                .to_owned(),
+            document_url.clone(),
+        )],
+        ..Default::default()
+    };
+    let initial_viewport = StyleViewport::from_width(Some(800.0));
+    let next_viewport = StyleViewport::from_width(Some(640.0));
+    let initial_key = StyleWorldKey::new(&document_url, &inputs, initial_viewport);
+    let viewport_key = StyleWorldKey::new(&document_url, &inputs, next_viewport);
     let mismatch = initial_key.mismatch_trace(&viewport_key);
     assert!(mismatch.viewport_changed);
-    assert!(!mismatch.document_stylesheet_sources_changed);
-    assert!(!mismatch.shadow_stylesheet_sources_changed);
 
-    for handle in [target, sibling] {
-        assert!(
-            engine
-                .computed_style_property_value(
-                    &host,
-                    &document_url,
-                    handle,
-                    "display",
-                    None,
-                    &inputs,
-                    None,
-                )
-                .is_some()
-        );
-    }
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &inputs,
+            initial_viewport,
+        ),
+        Some("rgb(1, 2, 3)".to_owned())
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            sibling,
+            "color",
+            None,
+            &inputs,
+            initial_viewport,
+        ),
+        Some("rgb(7, 8, 9)".to_owned())
+    );
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
         2
@@ -2524,31 +2534,56 @@ fn full_retained_rebuild_clears_computed_cache_until_generation_split() {
         engine.source_set_generation_for_document_for_test(document);
     let retained_generation_after_cached_reads =
         engine.retained_style_system_generation_for_document_for_test(document);
+    let retained_identity_after_cached_reads =
+        engine.retained_stylist_identity_for_document_for_test(document);
+    let retained_rebuilds_after_cached_reads =
+        engine.retained_style_system_rebuild_count_for_document_for_test(document);
+    let retained_updates_after_cached_reads =
+        engine.retained_style_system_update_count_for_document_for_test(document);
 
     engine.ensure_retained_style_system_for_document(&host, document, viewport_key, &inputs);
 
     assert_eq!(
         engine.source_set_generation_for_document_for_test(document),
         source_set_generation_after_cached_reads,
-        "non-source retained rebuild must not advance source-set generation"
+        "a device update must not advance source-set generation"
     );
-    assert!(
-        engine.computed_cache_generation_for_document_for_test(document)
-            > computed_generation_after_cached_reads,
-        "non-source key mismatch should keep full rebuild as a generation boundary"
+    assert_eq!(
+        engine.computed_cache_generation_for_document_for_test(document),
+        computed_generation_after_cached_reads,
+        "an in-place device update must not create a full-cache generation boundary"
     );
     assert!(
         engine.retained_style_system_generation_for_document_for_test(document)
             > retained_generation_after_cached_reads,
-        "full retained rebuild should advance retained style-system generation"
+        "the observation generation must record the in-place device update"
     );
     assert_eq!(
-        engine.computed_style_cache_entry_count_for_document_for_test(document),
-        0,
-        "computed entries remain keyed by the old generation until generation splitting exists"
+        engine.retained_stylist_identity_for_document_for_test(document),
+        retained_identity_after_cached_reads,
+        "viewport changes must retain the Document Stylist"
     );
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, target));
-    assert!(!engine.computed_style_cache_contains_handle_for_document_for_test(document, sibling));
+    assert_eq!(
+        engine.retained_style_system_rebuild_count_for_document_for_test(document),
+        retained_rebuilds_after_cached_reads
+    );
+    assert_eq!(
+        engine.retained_style_system_update_count_for_document_for_test(document),
+        retained_updates_after_cached_reads + 1
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            target,
+            "color",
+            None,
+            &inputs,
+            next_viewport,
+        ),
+        Some("rgb(4, 5, 6)".to_owned()),
+        "the retained world must recascade media-query-dependent values"
+    );
 }
 #[test]
 fn stylesheet_source_clones_share_css_text_and_base_url() {
@@ -2572,7 +2607,7 @@ fn source_scope_fallback_roots_preserve_unrelated_document_cache() {
 
     let engine = MoliStyleEngine::new();
     let active_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2642,7 +2677,7 @@ fn source_scope_fallback_roots_preserve_active_document_cache_for_detached_docum
 
     let engine = MoliStyleEngine::new();
     let active_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     assert!(
         engine
             .computed_style_property_value(
@@ -2712,7 +2747,7 @@ fn unsupported_state_change_without_snapshot_uses_source_scope_fallback() {
 
     let mut engine = MoliStyleEngine::new();
     let active_url = url::Url::parse("https://example.test/").unwrap();
-    let inputs = StyloComputedStyleInputs::default();
+    let inputs = FullStyleWorldSnapshot::default();
     for handle in [active, detached] {
         assert!(
             engine
@@ -2809,7 +2844,7 @@ fn cache_key_source_matching_skips_inactive_owner_sources() {
     let disconnected_style_id =
         StyleSourceId::owner_style_sheet(&host, disconnected_style).expect("disconnected style id");
 
-    let mut inputs = StyloComputedStyleInputs::default();
+    let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .document_stylesheet_sources
         .push(StyloStylesheetSource::new(
@@ -2820,7 +2855,7 @@ fn cache_key_source_matching_skips_inactive_owner_sources() {
     engine.ensure_retained_style_system_for_document(
         &host,
         host.document_handle(),
-        StyleSystemCacheKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&document_url, &inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(host.document_handle(), |retained| {

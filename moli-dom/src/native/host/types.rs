@@ -26,6 +26,13 @@ pub struct DomHost {
     pub(super) query_version: Cell<u64>,
     pub(super) shadow_root_binding_version: Cell<u64>,
     pub(super) connected_shadow_roots_version: Cell<u64>,
+    /// Per-Document identity of the connected ShadowRoot TreeScope universe.
+    ///
+    /// The two counters above belong to the page-wide binding snapshot cache.
+    /// Style consumers must not use those global counters: an iframe adding a
+    /// ShadowRoot cannot invalidate the retained style world of its parent or
+    /// a sibling frame.
+    pub(super) document_tree_scope_versions: RefCell<HashMap<DomHandle, u64>>,
     pub(super) id_index: RefCell<Option<NamedElementIndex>>,
     pub(super) name_index: RefCell<Option<NamedElementIndex>>,
     pub(super) element_query_index: RefCell<ElementQueryIndex>,

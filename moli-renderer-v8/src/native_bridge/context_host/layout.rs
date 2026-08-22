@@ -421,16 +421,22 @@ impl JsContextHost {
             .clear_latest_layout();
     }
 
-    pub(crate) fn mark_document_web_font_sources_dirty(&self) {
+    pub(crate) fn document_web_font_resources_are_current(
+        &self,
+        generation: crate::style_engine::StylesheetResourceGeneration,
+    ) -> bool {
         self.document_layout_state
-            .borrow_mut()
-            .mark_web_font_sources_dirty();
+            .borrow()
+            .web_font_resources_are_current(generation)
     }
 
-    pub(crate) fn take_document_web_font_sources_dirty(&self) -> bool {
+    pub(crate) fn publish_document_web_font_resource_generation(
+        &self,
+        generation: crate::style_engine::StylesheetResourceGeneration,
+    ) {
         self.document_layout_state
             .borrow_mut()
-            .take_web_font_sources_dirty()
+            .publish_web_font_resource_generation(generation);
     }
 
     #[cfg(test)]

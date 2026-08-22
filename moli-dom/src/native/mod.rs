@@ -1826,6 +1826,43 @@ mod tests {
     }
 
     #[test]
+    fn tree_scope_versions_are_isolated_per_document() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        let parent_document = host.document_node_id();
+        let child_document = host.create_detached_html_document();
+        let child_host = host.create_parser_element_without_attributes_for_document(
+            child_document,
+            "section".to_owned(),
+            "http://www.w3.org/1999/xhtml".to_owned(),
+            None,
+        );
+        assert!(host.append_child(child_document, child_host));
+        host.attach_shadow_root(child_host, "open")
+            .expect("detached child-document ShadowRoot");
+        assert_eq!(host.document_tree_scope_version(parent_document), 0);
+        assert_eq!(host.document_tree_scope_version(child_document), 0);
+
+        host.mark_subtree_connected_preserving_owner_document(child_document);
+        assert_eq!(
+            host.document_tree_scope_version(child_document),
+            1,
+            "connecting the child Document must advance only its TreeScope universe"
+        );
+        assert_eq!(host.document_tree_scope_version(parent_document), 0);
+
+        let parent_host = host.create_element("article");
+        assert!(host.append_child(parent_document, parent_host));
+        host.attach_shadow_root(parent_host, "open")
+            .expect("connected parent-document ShadowRoot");
+        assert_eq!(host.document_tree_scope_version(parent_document), 1);
+        assert_eq!(
+            host.document_tree_scope_version(child_document),
+            1,
+            "a parent-document binding must not invalidate the child Document"
+        );
+    }
+
+    #[test]
     fn connected_shadow_roots_snapshot_cache_uses_shadow_connection_version() {
         let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
         let document = host.document_node_id();

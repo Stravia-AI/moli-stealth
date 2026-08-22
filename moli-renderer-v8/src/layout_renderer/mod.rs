@@ -11,26 +11,12 @@ use moli_layout::{
 
 use crate::{document_runtime::DomHandle, native_bridge::JsContextHost};
 
-pub(crate) fn current_native_stylesheet_web_font_resources(
+pub(crate) fn current_native_stylesheet_resources(
     runtime: &JsContextHost,
     root: DomHandle,
-) -> Vec<crate::css_resource_urls::StylesheetLoadBlockingResource> {
-    let mut reads = crate::native_bridge::element::ComputedStyleReadScope::new(runtime);
-    let sources = reads.read(root).stylesheet_source_snapshots();
-    let mut resources = std::collections::BTreeMap::new();
-    for (css_text, base_url) in sources {
-        for resource in crate::css_resource_urls::stylesheet_load_blocking_resources(
-            &css_text,
-            &base_url,
-            crate::protocol_types::OptionalResourceFetchMask::FONT,
-        ) {
-            let Some(font) = resource.web_font() else {
-                continue;
-            };
-            resources.entry(font.slot().to_owned()).or_insert(resource);
-        }
-    }
-    resources.into_values().collect()
+) -> Option<crate::style_engine::StylesheetResourceSnapshot> {
+    let mut reads = crate::native_bridge::element::StyleObservation::new(runtime);
+    reads.read(root).stylesheet_resource_snapshot()
 }
 
 pub(crate) fn build_native_layout_pass(
@@ -63,7 +49,6 @@ fn build_native_layout_pass_recursive(
         .dom_host()
         .owner_document_handle(root)
         .unwrap_or_else(|| runtime.document_handle());
-    style_resolver::prepare_layout_style_inputs(runtime, root, document, request.viewport);
     document_stack.push(document);
     let source = source_view::NativeLayoutSourceView::with_paint_resources(
         runtime,
@@ -71,7 +56,7 @@ fn build_native_layout_pass_recursive(
         request.requests_paint(),
     );
     let mut styles =
-        style_resolver::NativeLayoutStyleResolver::new(runtime, document, request.viewport);
+        style_resolver::NativeLayoutStyleResolver::new(runtime, root, document, request.viewport);
     let result = {
         let mut frames = NativeEmbeddedFrameRenderer {
             runtime,
@@ -161,8 +146,8 @@ pub(crate) fn build_normalized_native_box_tree_for_test(
         .owner_document_handle(root)
         .unwrap_or_else(|| runtime.document_handle());
     let viewport = runtime.layout_viewport_for_document(document);
-    style_resolver::prepare_layout_style_inputs(runtime, root, document, viewport);
     let source = source_view::NativeLayoutSourceView::new(runtime, root);
-    let mut styles = style_resolver::NativeLayoutStyleResolver::new(runtime, document, viewport);
+    let mut styles =
+        style_resolver::NativeLayoutStyleResolver::new(runtime, root, document, viewport);
     moli_layout::build_layout_world(&source, &mut styles).map(|world| world.normalized_tree())
 }

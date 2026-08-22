@@ -248,7 +248,7 @@ impl JsContextHost {
                 // cannot admit stylesheet-dependent resource requests.
                 continue;
             };
-            for resource in crate::css_resource_urls::stylesheet_load_blocking_resources(
+            for resource in crate::css_resource_urls::stylesheet_load_blocking_font_resources(
                 response.body_text(),
                 &response.final_url,
                 optional_resource_fetch_mask,

@@ -13,17 +13,32 @@ use style::{
 use crate::document_runtime::DomHandle;
 
 use super::{
+    CssCustomPropertyRegistrationRecord, StyleTreeScopeVersions, StyleViewport,
+    StyloStyleEnvironment,
+    active_stylesheets::ActiveStylesheetCollection,
+    shadow_scopes::ShadowScopeStyles,
     source_dirty::{StyleSourceDirtyReason, StyleSourceDirtyScopeSnapshot, StyleSourceDirtyScopes},
     source_id::{StyleScopeId, StyleSourceId},
-    system::StyleSystemCacheKey,
+    source_key::StyleSourceSetKey,
+    stylesheet_resources::{
+        StylesheetResourceGeneration, StylesheetResourceManifest, StylesheetResourceSnapshot,
+    },
+    world_key::StyleWorldKey,
 };
 
 pub(super) struct RetainedStyleSystem {
-    pub(super) key: StyleSystemCacheKey,
+    pub(super) stylist_identity: u64,
+    pub(super) key: StyleWorldKey,
     pub(super) stylist: Stylist,
+    pub(super) document_stylesheets: ActiveStylesheetCollection,
+    pub(super) shadow_scopes: Vec<ShadowScopeStyles>,
+    pub(super) stylesheet_resources: StylesheetResourceManifest,
+    pub(super) stylesheet_resource_revision: u64,
     pub(super) user_agent_cascade_data: ServoArc<CascadeData>,
     pub(super) shadow_cascade_data: Vec<(DomHandle, ServoArc<CascadeData>)>,
     pub(super) source_cascade_data: HashMap<StyleSourceId, ServoArc<CascadeData>>,
+    pub(super) source_cascade_keys: HashMap<StyleSourceId, StyleSourceSetKey>,
+    pub(super) script_custom_property_registrations: Vec<CssCustomPropertyRegistrationRecord>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +59,10 @@ pub(super) struct StyleDocumentState {
     target_context_epoch: Cell<u64>,
     #[cfg(test)]
     retained_style_system_rebuilds: Cell<u64>,
+    #[cfg(test)]
+    retained_style_system_updates: Cell<u64>,
+    #[cfg(test)]
+    element_style_resolutions: Cell<u64>,
 }
 
 impl StyleDocumentState {
@@ -58,6 +77,10 @@ impl StyleDocumentState {
             target_context_epoch: Cell::new(0),
             #[cfg(test)]
             retained_style_system_rebuilds: Cell::new(0),
+            #[cfg(test)]
+            retained_style_system_updates: Cell::new(0),
+            #[cfg(test)]
+            element_style_resolutions: Cell::new(0),
         }
     }
 
@@ -127,15 +150,9 @@ impl StyleDocumentState {
         reason: StyleSourceDirtyReason,
         source_ids: impl IntoIterator<Item = StyleSourceId>,
         roots: impl IntoIterator<Item = DomHandle>,
-        cache_write_generation_at_cleanup: u64,
     ) {
-        self.source_dirty_scopes.record_scope(
-            scope_id,
-            reason,
-            source_ids,
-            roots,
-            cache_write_generation_at_cleanup,
-        );
+        self.source_dirty_scopes
+            .record_scope(scope_id, reason, source_ids, roots);
     }
 
     pub(super) fn source_dirty_scope_snapshot(&self) -> StyleSourceDirtyScopeSnapshot {
@@ -167,14 +184,51 @@ impl StyleDocumentState {
             .invalidation_clear_all_fallback_reasons_vec()
     }
 
-    pub(super) fn retained_style_system_matches(&self, key: &StyleSystemCacheKey) -> bool {
+    #[cfg(test)]
+    pub(super) fn retained_style_system_matches(&self, key: &StyleWorldKey) -> bool {
         self.retained_style_system
             .borrow()
             .as_ref()
             .is_some_and(|retained| retained.key == *key)
     }
 
-    pub(super) fn set_retained_style_system(&self, retained: RetainedStyleSystem) {
+    pub(super) fn retained_style_system_is_current_for_observation(
+        &self,
+        document_url: &url::Url,
+        viewport: StyleViewport,
+        environment: StyloStyleEnvironment,
+        quirks_mode: style::context::QuirksMode,
+        tree_scope_versions: StyleTreeScopeVersions,
+    ) -> bool {
+        if self
+            .source_dirty_scope_snapshot()
+            .requires_retained_style_update()
+        {
+            return false;
+        }
+        self.retained_style_system
+            .borrow()
+            .as_ref()
+            .is_some_and(|retained| {
+                retained.key.matches_observation_environment(
+                    document_url,
+                    viewport,
+                    environment,
+                    quirks_mode,
+                    tree_scope_versions,
+                )
+            })
+    }
+
+    pub(super) fn set_retained_style_system(&self, mut retained: RetainedStyleSystem) {
+        let mut retained_slot = self.retained_style_system.borrow_mut();
+        retained.stylesheet_resource_revision = retained_slot.as_ref().map_or(1, |previous| {
+            if previous.stylesheet_resources == retained.stylesheet_resources {
+                previous.stylesheet_resource_revision
+            } else {
+                previous.stylesheet_resource_revision.saturating_add(1)
+            }
+        });
         self.retained_style_system_generation.set(
             self.retained_style_system_generation
                 .get()
@@ -183,12 +237,53 @@ impl StyleDocumentState {
         #[cfg(test)]
         self.retained_style_system_rebuilds
             .set(self.retained_style_system_rebuild_count().saturating_add(1));
-        *self.retained_style_system.borrow_mut() = Some(retained);
+        *retained_slot = Some(retained);
+    }
+
+    pub(super) fn update_retained_style_system_with_result<R>(
+        &self,
+        update: impl FnOnce(&mut RetainedStyleSystem) -> R,
+    ) -> R {
+        let result = {
+            let mut retained = self.retained_style_system.borrow_mut();
+            let retained = retained
+                .as_mut()
+                .expect("retained style system should exist before an incremental update");
+            update(retained)
+        };
+        self.retained_style_system_generation.set(
+            self.retained_style_system_generation
+                .get()
+                .saturating_add(1),
+        );
+        #[cfg(test)]
+        self.retained_style_system_updates
+            .set(self.retained_style_system_update_count().saturating_add(1));
+        result
     }
 
     #[cfg(test)]
     pub(super) fn retained_style_system_rebuild_count(&self) -> u64 {
         self.retained_style_system_rebuilds.get()
+    }
+
+    #[cfg(test)]
+    pub(super) fn retained_style_system_update_count(&self) -> u64 {
+        self.retained_style_system_updates.get()
+    }
+
+    #[cfg(test)]
+    pub(super) fn note_element_style_resolutions(&self, count: u64) {
+        self.element_style_resolutions
+            .set(self.element_style_resolutions.get().saturating_add(count));
+    }
+
+    #[cfg(not(test))]
+    pub(super) fn note_element_style_resolutions(&self, _count: u64) {}
+
+    #[cfg(test)]
+    pub(super) fn element_style_resolution_count(&self) -> u64 {
+        self.element_style_resolutions.get()
     }
 
     pub(super) fn with_shadow_cascade_data<R>(
@@ -215,5 +310,19 @@ impl StyleDocumentState {
             .as_ref()
             .expect("retained style system should be prepared before resolving styles");
         callback(retained)
+    }
+
+    pub(super) fn stylesheet_resource_snapshot(
+        &self,
+        document: DomHandle,
+    ) -> Option<StylesheetResourceSnapshot> {
+        self.try_with_retained_style_system(|retained| {
+            retained
+                .stylesheet_resources
+                .snapshot(StylesheetResourceGeneration::new(
+                    document,
+                    retained.stylesheet_resource_revision,
+                ))
+        })
     }
 }
