@@ -1,3 +1,4 @@
+use super::navigation_follow::CommittedNavigationBootstrapCompletion;
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -86,20 +87,6 @@ pub(in crate::runtime) struct CommittedNavigationEntry {
     navigation: Box<PageVmCommittedNavigationBootstrap>,
 }
 
-pub(in crate::runtime) enum CommittedNavigationBootstrapCompletion {
-    ContinuePostParseLifecycle {
-        page_tasks: Vec<crate::page_task_queue::PostParsePageOwnedWork>,
-        stage: PageVmInitStage,
-        started: Instant,
-    },
-    PendingPhaseOne {
-        wake_token: RendererPageToken,
-    },
-    TriggeredNavigation {
-        stage: PageVmInitStage,
-    },
-}
-
 /// A checked-out Page entry whose final active `PageVm` has been consumed by
 /// teardown and which can therefore only return through the retiring
 /// residence boundary.
@@ -123,13 +110,13 @@ impl CommittedNavigationEntry {
         }
     }
 
-    pub(in crate::runtime) async fn bootstrap_replacement(
+    pub(super) async fn bootstrap_replacement(
         &mut self,
     ) -> Result<PageVmFollowedNavigationBuildOutcome> {
         self.navigation.bootstrap().await
     }
 
-    pub(in crate::runtime) fn install_bootstrap_outcome(
+    pub(super) fn install_bootstrap_outcome(
         &mut self,
         outcome: PageVmFollowedNavigationBuildOutcome,
     ) -> Result<CommittedNavigationBootstrapCompletion> {
@@ -166,7 +153,7 @@ impl CommittedNavigationEntry {
         }
     }
 
-    pub(in crate::runtime) fn into_live(self) -> LivePageEntry {
+    pub(super) fn into_live(self) -> LivePageEntry {
         assert!(
             self.entry
                 .active_page_vm()

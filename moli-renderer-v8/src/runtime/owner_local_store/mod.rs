@@ -48,6 +48,7 @@ use tokio::sync::oneshot;
 
 mod bound;
 mod entry;
+mod navigation_follow;
 mod phase_one;
 #[cfg(test)]
 mod tests;
@@ -56,8 +57,12 @@ pub(in crate::runtime) use bound::*;
 #[cfg(test)]
 use entry::StandaloneNavigationFollowState;
 pub(in crate::runtime) use entry::{
-    CommittedNavigationBootstrapCompletion, CommittedNavigationEntry, LivePageEntry,
-    PublishedReplacementDocument, RetiringPageEntry,
+    CommittedNavigationEntry, LivePageEntry, PublishedReplacementDocument, RetiringPageEntry,
+};
+pub(in crate::runtime) use navigation_follow::{
+    LivePageNavigationFollowEntryAdvance, LivePageNavigationFollowOutcome,
+    LivePageNavigationFollowTurn,
+    follow_pending_location_navigation_one_turn_on_entry_via_local_task,
 };
 pub(in crate::runtime) use phase_one::{
     LivePagePendingNavigationPhaseOneAdvance, PendingPhaseOneEntryAdvance,
@@ -409,43 +414,6 @@ impl LivePagePendingNavigationCompletion {
             | Self::ContinueSubresourceResponse { .. } => (Self::Background, true),
         }
     }
-}
-
-pub(super) enum LivePageNavigationFollowOutcome {
-    Completed,
-    PostParseLifecycle {
-        target_stage: PageVmInitStage,
-        outcome: DocumentLifecycleTurnOutcome,
-    },
-    Download(RendererPendingDownloadActivation),
-    /// Navigation yielded during phase one. The caller must first restore the
-    /// returned entry, then reconcile the resident continuation against its
-    /// stable producer source.
-    PendingPhaseOne {
-        wake_token: RendererPageToken,
-    },
-    TriggeredNavigation {
-        stage: PageVmInitStage,
-    },
-}
-
-pub(super) struct LivePageNavigationFollowTurn {
-    pub(super) outcome: LivePageNavigationFollowOutcome,
-    pub(super) document_commit: Option<PublishedReplacementDocument>,
-}
-
-/// Typed result of one checked-out navigation task. A task that ends before
-/// commit returns a live entry; a task that fails, panics, or is cancelled
-/// during replacement bootstrap returns the committed state explicitly.
-pub(super) enum LivePageNavigationFollowEntryAdvance {
-    Live {
-        entry: LivePageEntry,
-        result: Result<LivePageNavigationFollowTurn>,
-    },
-    Committed {
-        entry: CommittedNavigationEntry,
-        error: anyhow::Error,
-    },
 }
 
 pub(super) struct RendererOwnerLocalContext {

@@ -597,8 +597,6 @@ pub(in crate::runtime) enum PageVmFollowNavigationTurnOutcome {
         outcome: page_vm::DocumentLifecycleTurnOutcome,
     },
     Download(RendererPendingDownloadActivation),
-    #[cfg(test)]
-    PendingPhaseOne(PageVmPendingPhaseOneNavigation),
     TriggeredNavigation {
         stage: PageVmInitStage,
     },
@@ -662,7 +660,7 @@ pub(in crate::runtime) struct PageVmFollowedNavigationMetadata {
 impl PageVmFollowedNavigationMetadata {
     fn attach_committed_response(&mut self, page_vm: &mut PageVm) {
         if let Some((url, status, headers)) = self.followed_navigation_response.take() {
-            page::attach_navigation_response_to_page_vm(page_vm, url, status, headers);
+            page_vm::attach_navigation_response_to_page_vm(page_vm, url, status, headers);
         }
     }
 
