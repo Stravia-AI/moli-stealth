@@ -168,9 +168,13 @@ async fn emitted_isolated_world_unique_context_id_selects_that_realm() {
 #[tokio::test]
 async fn emitted_child_frame_unique_context_id_selects_that_realm() {
     let mut ctx = TestContext::new();
-    with_loaded_document_async(
-        &mut ctx,
-        r#"<html><body>parent<iframe srcdoc="<body>child realm</body>"></iframe></body></html>"#,
+    let mut browser_context = BrowserContext::new("BID-1".into());
+    browser_context.set_active_target_id("TID-1".to_owned());
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.enable_page_events_for_test(None);
+    ctx.install_navigation_fixture_for_session_owner(
+        r#"data:text/html,<html><body>parent<iframe srcdoc="<body>child realm</body>"></iframe></body></html>"#,
+        None,
     )
     .await;
 
@@ -181,6 +185,7 @@ async fn emitted_child_frame_unique_context_id_selects_that_realm() {
         .as_str()
         .map(str::to_owned)
         .expect("loaded iframe should appear in Page.getFrameTree");
+    crate::testing::wait_until_frame_stopped_loading(&mut ctx, &child_frame_id).await;
     ctx.process_async(json!({
         "id": 21,
         "method": "Page.createIsolatedWorld",
