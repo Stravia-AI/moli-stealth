@@ -17,7 +17,7 @@ use tokio::{
 
 use super::{
     CdpScheduler, CdpSchedulerEventReceivers, CdpSchedulerInterleavedInput,
-    DevToolsCommandExecution, ProtocolOutputSequence, RendererOutputTransportFailure,
+    CdpSchedulerProgressFailure, DevToolsCommandExecution, ProtocolOutputSequence,
 };
 
 pub(crate) struct PendingDevToolsRuntimeDeferredReplyExecution {
@@ -55,7 +55,7 @@ impl CdpScheduler {
         response: RuntimeInspectorResponseReady,
     ) -> bool {
         pending
-            .route_scheduler_deferred_inspector_response(&mut self.conn, response)
+            .route_scheduler_deferred_inspector_response(&mut self.host_adapter, response)
             .await
     }
 
@@ -92,7 +92,7 @@ impl CdpScheduler {
     ) -> DevToolsCommandExecution {
         let mut protocol_output = ProtocolOutputSequence::empty();
         let mut step = self
-            .conn
+            .host_adapter
             .start_devtools_runtime_command_dispatch(command)
             .await;
         loop {
@@ -158,7 +158,7 @@ impl CdpScheduler {
                         }
                     };
                     step = self
-                        .conn
+                        .host_adapter
                         .complete_devtools_runtime_command_dispatch(completed)
                         .await;
                 }
@@ -174,7 +174,7 @@ impl CdpScheduler {
     ) -> DevToolsRuntimeCommandProgress {
         let protocol_output = ProtocolOutputSequence::empty();
         let step = self
-            .conn
+            .host_adapter
             .start_devtools_runtime_command_dispatch(command)
             .await;
         self.continue_devtools_runtime_command_until_deferred_reply_or_complete(
@@ -230,7 +230,7 @@ impl CdpScheduler {
         let pending = *pending;
         pending
             .pending
-            .forget_scheduler_deferred_inspector_reply(&mut self.conn);
+            .forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
     }
 
     async fn continue_devtools_runtime_command_until_deferred_reply_or_complete(
@@ -352,7 +352,7 @@ impl CdpScheduler {
                         }
                     };
                     step = self
-                        .conn
+                        .host_adapter
                         .complete_devtools_runtime_command_dispatch(completed)
                         .await;
                 }
@@ -364,7 +364,7 @@ impl CdpScheduler {
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
         input: CdpSchedulerInterleavedInput,
-    ) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
+    ) -> Result<ProtocolOutputSequence, CdpSchedulerProgressFailure> {
         match input {
             // A deferred Runtime reply owns command-correlated background
             // events directly. Preserve that routing while sharing the same
@@ -410,6 +410,7 @@ impl CdpScheduler {
                 protocol_output.append(ready_output);
                 continue;
             }
+            let navigation_gate_open = self.has_inflight_background_navigation();
             tokio::select! {
                 biased;
                 mut completed = &mut pending_completion => {
@@ -419,7 +420,7 @@ impl CdpScheduler {
                 _ = wait_until_runtime_deadline(deadline) => {
                     return Err(runtime_command_timeout_error());
                 }
-                maybe_input = receivers.recv_interleaved_input() => {
+                maybe_input = receivers.recv_interleaved_input(navigation_gate_open) => {
                     let Some(input) = maybe_input else {
                         return Ok(None);
                     };
@@ -462,7 +463,7 @@ impl CdpScheduler {
             match pending.take_scheduler_deferred_inspector_reply_receiver() {
                 Some(response_rx) => response_rx,
                 None => {
-                    pending.forget_scheduler_deferred_inspector_reply(&mut self.conn);
+                    pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
                     return Err(DevToolsError::new(
                         DevToolsErrorKind::Internal,
                         "RuntimeDeferredInspectorResponseMissing",
@@ -477,7 +478,7 @@ impl CdpScheduler {
                 .await;
             let mut command_events = ready_output.take_protocol_events_with_id(command_id);
             if !command_events.is_empty() {
-                pending.forget_scheduler_deferred_inspector_reply(&mut self.conn);
+                pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
                 return Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "RuntimeDeferredReplyLooseProtocolResponse",
@@ -487,6 +488,7 @@ impl CdpScheduler {
             if !ready_output.is_empty() {
                 protocol_output.append(ready_output);
             }
+            let navigation_gate_open = self.has_inflight_background_navigation();
             tokio::select! {
                 biased;
                 renderer_response = &mut renderer_response_rx, if !renderer_response_done => {
@@ -502,7 +504,7 @@ impl CdpScheduler {
                         .await
                     {
                         let mut completed =
-                            pending.complete_scheduler_deferred_inspector_reply(&mut self.conn);
+                            pending.complete_scheduler_deferred_inspector_reply(&mut self.host_adapter);
                         completed
                             .append_interleaved_protocol_events(interleaved_command_events);
                         return Ok(Some(completed));
@@ -510,10 +512,10 @@ impl CdpScheduler {
                     continue;
                 }
                 _ = wait_until_runtime_deadline(deadline) => {
-                    pending.forget_scheduler_deferred_inspector_reply(&mut self.conn);
+                    pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
                     return Err(runtime_command_timeout_error());
                 }
-                maybe_input = receivers.recv_interleaved_input() => {
+                maybe_input = receivers.recv_interleaved_input(navigation_gate_open) => {
                     let Some(input) = maybe_input else {
                         return Ok(None);
                     };
@@ -530,7 +532,7 @@ impl CdpScheduler {
                     };
                     let mut command_events = output.take_protocol_events_with_id(command_id);
                     if !command_events.is_empty() {
-                        pending.forget_scheduler_deferred_inspector_reply(&mut self.conn);
+                        pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
                         return Err(DevToolsError::new(
                             DevToolsErrorKind::Internal,
                             "RuntimeDeferredReplyLooseProtocolResponse",
@@ -583,10 +585,11 @@ impl CdpScheduler {
             response_wait_handle,
         } = pending;
         drop(response_wait_handle);
-        let mut completed = pending.complete_scheduler_deferred_inspector_reply(&mut self.conn);
+        let mut completed =
+            pending.complete_scheduler_deferred_inspector_reply(&mut self.host_adapter);
         completed.append_interleaved_protocol_events(interleaved_command_events);
         let step = self
-            .conn
+            .host_adapter
             .complete_devtools_runtime_command_dispatch(completed)
             .await;
         self.continue_devtools_runtime_command_until_deferred_reply_or_complete(

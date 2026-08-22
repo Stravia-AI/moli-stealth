@@ -628,7 +628,7 @@ async fn runtime_disable_clears_background_child_default_context_emission_cursor
     browser_context.set_active_target_id("TID-active".to_owned());
     browser_context.attach_active_session("SID-active".to_owned());
     browser_context.background_targets.push(background_target);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
     ctx.install_navigation_fixture_for_session_owner(
         &format!("data:text/html,{html}"),
         Some("SID-background"),

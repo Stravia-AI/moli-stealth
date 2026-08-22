@@ -2121,6 +2121,14 @@ impl TargetFetchOwner {
     }
 
     #[cfg(test)]
+    pub(crate) fn pending_fetch_navigation_for_test(
+        &self,
+        request_id: &str,
+    ) -> Option<&PendingFetchNavigation> {
+        self.pending.pending_fetch_navigations.get(request_id)
+    }
+
+    #[cfg(test)]
     pub(crate) fn has_pending_fetch_request_id_for_test(&self, request_id: &str) -> bool {
         self.pending.pending_fetch_request_ids.contains(request_id)
     }
@@ -2135,6 +2143,14 @@ impl TargetFetchOwner {
         self.pending
             .pending_fetch_auth_navigations
             .contains_key(request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_fetch_auth_navigation_for_test(
+        &self,
+        request_id: &str,
+    ) -> Option<&PendingFetchAuthNavigation> {
+        self.pending.pending_fetch_auth_navigations.get(request_id)
     }
 
     #[cfg(test)]
@@ -2237,7 +2253,7 @@ mod tests {
     }
 
     fn test_page_owner() -> crate::conn::TargetPageResidenceIdentity {
-        crate::conn::TargetPageResidenceIdentity::new_for_test(
+        crate::conn::TargetPageResidenceIdentity::new(
             "BID-fetch-state".to_owned(),
             Some("TID-fetch-state".to_owned()),
             1,

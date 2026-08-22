@@ -133,7 +133,7 @@ async fn query_selector_command_in_session(
                 .backend_node_id
         }
     };
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let pending = page
         .start_child_frame_document_query_selector_for_backend_node_id(
@@ -170,13 +170,14 @@ async fn resolve_frontend_node_reference(
     let pending = page
         .start_document_frontend_node_binding(renderer_inspector_session_id, frontend_node_id)
         .map_err(PendingDomCommandStartError::renderer_error)?;
+    drop(page);
     let completion = pending
         .wait()
         .await
         .map_err(PendingDomCommandStartError::renderer_error)?;
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    frontend_binding::finish_reference(page, completion).map_err(|message| {
+    frontend_binding::finish_reference(&mut page, completion).map_err(|message| {
         PendingDomCommandStartError {
             code: -32000,
             message,
@@ -196,11 +197,12 @@ async fn child_frame_document_root_node_reference(
     let pending = page
         .start_child_frame_document_root_node_reference(frame_id, renderer_inspector_session_id)
         .map_err(PendingDomCommandStartError::renderer_error)?;
+    drop(page);
     let completion = pending
         .wait()
         .await
         .map_err(PendingDomCommandStartError::renderer_error)?;
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     page.finish_document_node_reference(completion)
         .map_err(PendingDomCommandStartError::renderer_error)?
@@ -218,9 +220,9 @@ async fn attributes_command(
     let mut route_scope = conn.scoped_none_session_owner_route_override(route);
     let conn = route_scope.conn_mut();
     let reference = resolve_frontend_node_reference(conn, None, reference).await?;
-    let page = loaded_page_mut_for_session(conn, None)
+    let mut page = loaded_page_mut_for_session(conn, None)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_attributes_for_reference(page, reference)?;
+    let pending = start_document_node_attributes_for_reference(&page, reference)?;
     let completion = pending
         .wait()
         .await
@@ -250,9 +252,9 @@ async fn text_command(
     let mut route_scope = conn.scoped_none_session_owner_route_override(route);
     let conn = route_scope.conn_mut();
     let reference = resolve_frontend_node_reference(conn, None, reference).await?;
-    let page = loaded_page_mut_for_session(conn, None)
+    let mut page = loaded_page_mut_for_session(conn, None)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_text_for_reference(page, reference)?;
+    let pending = start_document_node_text_for_reference(&page, reference)?;
     let completion = pending
         .wait()
         .await
@@ -283,9 +285,9 @@ async fn property_command(
     let mut route_scope = conn.scoped_none_session_owner_route_override(route);
     let conn = route_scope.conn_mut();
     let reference = resolve_frontend_node_reference(conn, None, reference).await?;
-    let page = loaded_page_mut_for_session(conn, None)
+    let mut page = loaded_page_mut_for_session(conn, None)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_property_for_reference(page, reference, name)?;
+    let pending = start_document_node_property_for_reference(&page, reference, name)?;
     let completion = pending
         .wait()
         .await
@@ -347,7 +349,7 @@ async fn outer_html_command_in_session(
                 .backend_node_id
         }
     };
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let pending = page
         .start_outer_html_for_backend_node_id(backend_node_id, include_shadow_dom)
@@ -383,7 +385,7 @@ async fn resolve_node_command_in_session(
     let renderer_inspector_session_id =
         conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
     let remote_object = {
-        let page = loaded_page_mut_for_session(conn, session_id)
+        let mut page = loaded_page_mut_for_session(conn, session_id)
             .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
         let backend_node_id = required_child_frame_backend_node_id(&reference)?;
         let pending = page
@@ -495,7 +497,7 @@ async fn node_snapshot_for_reference_in_session(
     let renderer_inspector_session_id =
         conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
     let include_whitespace = dom_agent_includes_whitespace_for_session(conn, session_id);
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let backend_node_id = required_child_frame_backend_node_id(&reference)?;
     let pending = page
@@ -535,7 +537,7 @@ async fn child_frame_root_node_snapshot(
     let renderer_inspector_session_id =
         conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
     let include_whitespace = dom_agent_includes_whitespace_for_session(conn, session_id);
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let pending = page
         .start_document_node_snapshot_for_backend_node_id_in_inspector_session(
@@ -610,7 +612,7 @@ async fn document_geometry_for_reference_in_session(
     reference: DevToolsDomNodeReference,
 ) -> Result<RendererDocumentNodeGeometry, PendingDomCommandStartError> {
     let reference = resolve_frontend_node_reference(conn, session_id, reference).await?;
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let backend_node_id = required_child_frame_backend_node_id(&reference)?;
     let pending = page

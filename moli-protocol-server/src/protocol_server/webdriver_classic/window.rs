@@ -1,3 +1,9 @@
+use super::super::{AppState, flush_storage_partition_profile};
+use super::{
+    classic_error_into_response, classic_json_body, classic_session_binding,
+    classic_success_into_response, classic_top_level_browsing_context_binding,
+    classic_top_level_browsing_context_binding_without_prompt_handling,
+};
 use axum::{
     body::Bytes,
     extract::{Path, State},
@@ -14,14 +20,6 @@ use moli_protocol_webdriver_classic::{
     window_handles_from_targets,
 };
 use serde_json::json;
-use tracing::warn;
-
-use super::super::AppState;
-use super::{
-    classic_error_into_response, classic_json_body, classic_session_binding,
-    classic_success_into_response, classic_top_level_browsing_context_binding,
-    classic_top_level_browsing_context_binding_without_prompt_handling,
-};
 
 pub(in crate::protocol_server) async fn webdriver_classic_get_window(
     Path(session_id): Path<String>,
@@ -280,10 +278,9 @@ pub(in crate::protocol_server) async fn webdriver_classic_close_window(
             .lock()
             .release_session(&session_id);
         if let Some(runtime) = runtime {
-            let cookie_commit = runtime.shutdown().await;
-            if let Err(error) = state.cookie_profile.commit_and_save(cookie_commit) {
-                warn!(?error, "failed to persist Classic cookie profile");
-            }
+            runtime.shutdown().await;
+            flush_storage_partition_profile(state.storage_partition.clone(), "webdriver-classic")
+                .await;
         }
     }
 

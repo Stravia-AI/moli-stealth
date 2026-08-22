@@ -1025,7 +1025,8 @@ fn start_page_input_command(
     };
     let page = loaded_page_mut(conn, command_session_id)
         .ok_or_else(PendingInputCommandStartError::no_document_loaded)?;
-    let pending = start(page).map_err(PendingInputCommandStartError::renderer_error)?;
+    let pending = start(&page).map_err(PendingInputCommandStartError::renderer_error)?;
+    drop(page);
     Ok(Some(PendingInputCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -1508,10 +1509,10 @@ fn completed_page_command_result(
     }
 }
 
-pub(super) fn loaded_page_mut<'a>(
-    conn: &'a mut CdpConnection,
+pub(super) fn loaded_page_mut(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
-) -> Option<&'a mut Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.loaded_page_mut_for_protocol_access(session_id).ok()
 }
 
@@ -2073,11 +2074,8 @@ mod producer_tests {
     #[test]
     fn input_prepared_slot_keeps_download_and_file_chooser_payloads_separate() {
         let source_document = renderer_document_identity_for_test(1, 1);
-        let owner = TargetPageResidenceIdentity::new_for_test(
-            "BID-slot".to_owned(),
-            Some("TID-slot".to_owned()),
-            1,
-        );
+        let owner =
+            TargetPageResidenceIdentity::new("BID-slot".to_owned(), Some("TID-slot".to_owned()), 1);
         let mut slot = super::InputPreparedOutputSlot::from_outputs(super::InputPreparedOutputs {
             download_activations: vec![RendererPendingDownloadActivation {
                 url: "https://example.test/download".to_owned(),
@@ -2197,11 +2195,12 @@ mod producer_tests {
     async fn file_chooser_opened_preserves_typed_automation_sidecar() {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new("BID-typed".into());
+        bc.set_active_target_id("ROOT-typed");
         bc.attach_active_session("SID-typed");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-typed", "ROOT-typed", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-typed");
@@ -2253,7 +2252,7 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-root-capture".into());
         bc.set_active_target_id("TID-root-capture");
         bc.attach_active_session("SID-root-capture");
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2281,10 +2280,10 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-document-collision".into());
         bc.set_active_target_id("TID-document-collision");
         bc.attach_active_session("SID-document-collision");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2351,10 +2350,10 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-page-replacement".into());
         bc.set_active_target_id("TID-page-replacement");
         bc.attach_active_session("SID-page-replacement");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2372,7 +2371,7 @@ mod producer_tests {
         .expect("source file chooser should prepare");
         conn.runtime_session_owner_slot_mut(Some("SID-page-replacement"))
             .expect("test runtime slot should exist")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(owner.loaded_page_generation() + 1);
         let replacement_document = renderer_document_identity_for_test(2, 2);
         bind_renderer_document_for_test(
             &mut conn,
@@ -2417,9 +2416,14 @@ mod producer_tests {
         let mut bc = BrowserContext::new("BID-download".into());
         bc.set_active_target_id("FRAME-download");
         bc.attach_active_session("SID-download");
-        conn.browser_context = Some(bc);
-        conn.download_behavior
-            .set_global("deny".to_owned(), None, true);
+        conn.insert_browser_context(bc);
+        conn.apply_browser_download_policy_update(
+            moli_core::browser_host::BrowserDownloadPolicyUpdate::SetGlobal {
+                behavior: moli_core::browser_host::BrowserDownloadBehavior::Deny,
+                download_path: None,
+            },
+        );
+        conn.set_automation_download_events_enabled_for_browser_context(None, true);
         let mut out: Vec<BackgroundProtocolEvent> = Vec::new();
         let mut command_context = CommandDispatchContext::default();
         let mut prepared =
@@ -2464,11 +2468,12 @@ mod producer_tests {
     async fn file_chooser_drain_consumes_prepared_activations_without_page_readback() {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new("BID-1".into());
+        bc.set_active_target_id("ROOT-1");
         bc.attach_active_session("SID-1");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-1", "ROOT-1", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-1");
@@ -2511,11 +2516,12 @@ mod producer_tests {
     async fn file_chooser_activity_background_events_keep_typed_sidecar() {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new("BID-context".into());
+        bc.set_active_target_id("ROOT-context");
         bc.attach_active_session("SID-context");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let source_document = renderer_document_identity_for_test(1, 1);
         bind_renderer_document_for_test(&mut conn, "SID-context", "ROOT-context", source_document);
         let owner = page_residence_identity_for_test(&conn, "SID-context");

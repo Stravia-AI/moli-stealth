@@ -933,12 +933,18 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
         active.http_proxy_override = Some("http://proxy-a.test:8080".into());
         active.http_no_proxy_override = Some("localhost,127.0.0.1".into());
     }
-    ctx.conn.invalidate_resource_runtime_async().await;
+    ctx.conn.invalidate_resource_runtime();
     ctx.conn
         .ensure_resource_request_client()
         .expect("loader for target A");
-    assert_eq!(ctx.conn.http_proxy(), Some("http://proxy-a.test:8080"));
-    assert_eq!(ctx.conn.http_no_proxy(), Some("localhost,127.0.0.1"));
+    assert_eq!(
+        ctx.conn.http_proxy().as_deref(),
+        Some("http://proxy-a.test:8080")
+    );
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("localhost,127.0.0.1")
+    );
 
     ctx.process_async(json!({
         "id": 1041770,
@@ -1001,12 +1007,18 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
         active.http_proxy_override = Some("http://proxy-b.test:8080".into());
         active.http_no_proxy_override = Some("::1,.example.com".into());
     }
-    ctx.conn.invalidate_resource_runtime_async().await;
+    ctx.conn.invalidate_resource_runtime();
     ctx.conn
         .ensure_resource_request_client()
         .expect("loader for target B");
-    assert_eq!(ctx.conn.http_proxy(), Some("http://proxy-b.test:8080"));
-    assert_eq!(ctx.conn.http_no_proxy(), Some("::1,.example.com"));
+    assert_eq!(
+        ctx.conn.http_proxy().as_deref(),
+        Some("http://proxy-b.test:8080")
+    );
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("::1,.example.com")
+    );
 
     ctx.process_async(json!({
         "id": 1041773,
@@ -1035,8 +1047,14 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_swi
     ctx.conn
         .ensure_resource_request_client()
         .expect("restored loader for target A");
-    assert_eq!(ctx.conn.http_proxy(), Some("http://proxy-a.test:8080"));
-    assert_eq!(ctx.conn.http_no_proxy(), Some("localhost,127.0.0.1"));
+    assert_eq!(
+        ctx.conn.http_proxy().as_deref(),
+        Some("http://proxy-a.test:8080")
+    );
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("localhost,127.0.0.1")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1189,15 +1207,18 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
         active.http_proxy_override = Some("http://proxy-close-a.test:8080".into());
         active.http_no_proxy_override = Some("localhost,127.0.0.1".into());
     }
-    ctx.conn.invalidate_resource_runtime_async().await;
+    ctx.conn.invalidate_resource_runtime();
     ctx.conn
         .ensure_resource_request_client()
         .expect("loader for target A");
     assert_eq!(
-        ctx.conn.http_proxy(),
+        ctx.conn.http_proxy().as_deref(),
         Some("http://proxy-close-a.test:8080")
     );
-    assert_eq!(ctx.conn.http_no_proxy(), Some("localhost,127.0.0.1"));
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("localhost,127.0.0.1")
+    );
 
     ctx.process_async(json!({
         "id": 1041860,
@@ -1259,15 +1280,18 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
         active.http_proxy_override = Some("http://proxy-close-b.test:8080".into());
         active.http_no_proxy_override = Some("::1,.example.com".into());
     }
-    ctx.conn.invalidate_resource_runtime_async().await;
+    ctx.conn.invalidate_resource_runtime();
     ctx.conn
         .ensure_resource_request_client()
         .expect("loader for target B");
     assert_eq!(
-        ctx.conn.http_proxy(),
+        ctx.conn.http_proxy().as_deref(),
         Some("http://proxy-close-b.test:8080")
     );
-    assert_eq!(ctx.conn.http_no_proxy(), Some("::1,.example.com"));
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("::1,.example.com")
+    );
 
     ctx.process_async(json!({
         "id": 1041863,
@@ -1298,8 +1322,11 @@ async fn same_context_targets_restore_their_own_proxy_loader_overrides_after_clo
         .ensure_resource_request_client()
         .expect("restored loader after close promotion");
     assert_eq!(
-        ctx.conn.http_proxy(),
+        ctx.conn.http_proxy().as_deref(),
         Some("http://proxy-close-a.test:8080")
     );
-    assert_eq!(ctx.conn.http_no_proxy(), Some("localhost,127.0.0.1"));
+    assert_eq!(
+        ctx.conn.http_no_proxy().as_deref(),
+        Some("localhost,127.0.0.1")
+    );
 }

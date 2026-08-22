@@ -33,10 +33,30 @@ async fn complete_command_task_for_test(
 }
 
 async fn load_page_async(ctx: &mut TestContext, html: &str) {
-    let mut bc = BrowserContext::new("BID-1".into());
-    bc.set_active_target_id("TID-1");
+    if ctx.conn.browser_context.is_none() {
+        let mut bc = BrowserContext::new("BID-1".into());
+        bc.set_active_target_id("TID-1");
+        ctx.conn.insert_browser_context(bc);
+    } else if !ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .is_some_and(BrowserContext::has_active_target)
+    {
+        ctx.conn
+            .register_active_target_projection(
+                "TID-1",
+                |browser_context, target_handle, page_residence, session_storage_access| {
+                    browser_context.bind_new_active_target_registration(
+                        target_handle,
+                        page_residence,
+                        session_storage_access,
+                    );
+                },
+            )
+            .expect("active Target projection should register");
+    }
     let data_url = format!("data:text/html,{html}");
-    ctx.conn.browser_context = Some(bc);
     ctx.enable_page_events_for_test(None);
     ctx.install_navigation_fixture_for_session_owner(&data_url, None)
         .await;
@@ -156,8 +176,8 @@ async fn accessibility_get_full_tree_rejects_while_main_document_navigation_is_p
         .as_mut()
         .expect("browser context should exist");
     browser_context.attach_active_session("SID-1".to_owned());
-    browser_context
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+    ctx.conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
     ctx.sent.clear();
 
@@ -225,7 +245,7 @@ async fn get_full_ax_tree_reads_live_renderer_dom_when_page_snapshot_is_stale() 
             .any(|node| node["name"]["value"] == json!("old"))
     );
 
-    let page = ctx
+    let mut page = ctx
         .conn
         .browser_context
         .as_mut()
@@ -427,6 +447,7 @@ async fn accessibility_loaded_page_methods_target_background_owner_without_promo
         Some("SID-background"),
     )
     .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 201,
@@ -545,6 +566,7 @@ async fn accessibility_loaded_page_methods_target_inactive_owner_without_activat
         Some("SID-inactive"),
     )
     .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 211,
@@ -588,7 +610,8 @@ async fn get_full_ax_tree_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_full_ax_tree_requires_loaded_page() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({"id": 2, "method": "Accessibility.getFullAXTree"}))
         .await;
     ctx.expect_error(2, -32000, "NoDocumentLoaded");
@@ -905,7 +928,8 @@ async fn get_root_ax_node_rejects_foreign_frame() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_root_ax_node_requires_loaded_page() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 350,
@@ -1096,7 +1120,8 @@ async fn get_child_ax_nodes_validates_ax_id_and_frame() {
 #[tokio::test(flavor = "multi_thread")]
 async fn get_child_ax_nodes_requires_loaded_page() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 390,
@@ -2046,7 +2071,8 @@ async fn get_ax_node_and_ancestors_requires_context_loaded_page_and_bound_node()
     .await;
     ctx.expect_error(530, -31998, "BrowserContextNotLoaded");
 
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({
         "id": 531,
         "method": "Accessibility.getAXNodeAndAncestors",
@@ -2533,7 +2559,8 @@ async fn query_ax_tree_requires_context_loaded_page_and_bound_node() {
     .await;
     ctx.expect_error(580, -31998, "BrowserContextNotLoaded");
 
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({
         "id": 581,
         "method": "Accessibility.queryAXTree",

@@ -221,7 +221,7 @@ async fn patchright_over_cdp_switching_back_to_first_context_keeps_older_page_ru
     );
     assert!(
         first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -687,7 +687,7 @@ async fn patchright_over_cdp_utility_world_init_persists_across_detach_and_reatt
     );
     assert!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -880,7 +880,7 @@ async fn patchright_over_cdp_utility_world_init_persists_when_auto_attach_reatta
     );
     assert!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {

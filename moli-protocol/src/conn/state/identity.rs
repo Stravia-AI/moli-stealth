@@ -1,10 +1,10 @@
 use moli_core::{PageId, RendererOutputResidenceIdentity, RendererOwnerLocalHostId, page::Page};
 
-use super::TargetPageAttachmentId;
+pub(crate) use moli_core::browser_host::PageResidenceIdentity as TargetPageResidenceIdentity;
 
 pub const URL_BASE: &str = "chrome://newtab/";
 
-/// Exact renderer Page residence captured with one deferred-load owner action.
+/// Exact renderer Page residence captured with one deferred-load fact projection.
 ///
 /// A protocol session can survive a Page replacement, so session identity is
 /// not precise enough to decide whether a later renderer publication is a
@@ -67,67 +67,10 @@ impl RendererPageResidenceIdentity {
     }
 }
 
-/// Identifies one current or reserved Page attachment within a protocol target.
-///
-/// This identity deliberately does not include the renderer Document. A
-/// `document.open()` replacement keeps the same Page residence, while taking,
-/// replacing, or retiring the Page changes `page_attachment_id`. Deferred
-/// protocol work that belongs to a Page should therefore use this identity for
-/// authorization and may carry a renderer Document identity separately as
-/// causal metadata. The attachment id is allocated when the Page is reserved,
-/// so work emitted before installation and work emitted after commit retain the
-/// same identity without predicting a numeric generation. A target without a
-/// current or reserved Page has no Page residence identity.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Ord, PartialOrd)]
-pub struct TargetPageResidenceIdentity {
-    browser_context_id: String,
-    target_id: Option<String>,
-    page_attachment_id: TargetPageAttachmentId,
-}
-
-impl TargetPageResidenceIdentity {
-    pub(crate) fn new(
-        browser_context_id: String,
-        target_id: Option<String>,
-        page_attachment_id: TargetPageAttachmentId,
-    ) -> Self {
-        Self {
-            browser_context_id,
-            target_id,
-            page_attachment_id,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test(
-        browser_context_id: String,
-        target_id: Option<String>,
-        page_attachment_id: u64,
-    ) -> Self {
-        Self::new(
-            browser_context_id,
-            target_id,
-            TargetPageAttachmentId::from_raw_for_test(page_attachment_id),
-        )
-    }
-
-    pub(crate) fn browser_context_id(&self) -> &str {
-        &self.browser_context_id
-    }
-
-    pub(crate) fn target_id(&self) -> Option<&str> {
-        self.target_id.as_deref()
-    }
-
-    pub(crate) fn page_attachment_id(&self) -> TargetPageAttachmentId {
-        self.page_attachment_id
-    }
-}
-
-/// Identifies one protocol attachment to one target Page residence.
+/// Identifies one protocol attachment to one Browser Core-owned target Page.
 ///
 /// A Page residence can be observed by more than one CDP session over its
-/// lifetime. Deferred output must therefore retain both the Page attachment
+/// lifetime. Deferred output must therefore retain both the Page generation
 /// and the exact session that captured it. Explicit session ids are allocated
 /// monotonically by one `CdpConnection` and are never reused. `None` denotes
 /// the connection's implicit Page attachment; the embedded Page identity keeps

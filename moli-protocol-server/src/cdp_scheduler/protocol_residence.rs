@@ -12,7 +12,7 @@ use super::ProtocolOutputSequence;
 ///
 /// This is deliberately not a generic source signal. Every renderer
 /// publication has already been frozen before this decision is made, and
-/// the queue contains only frozen output or an exact browser-owner action.
+/// the queue contains only frozen output or an exact protocol continuation.
 /// The adapter may therefore either wait, satisfy the explicit client-turn
 /// predecessor, or complete one ready residence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,12 +40,12 @@ pub(super) enum ProtocolSchedulerResidence {
     /// are its client-turn boundary and, when present, exact main-document
     /// load observations.
     RendererOutputPublication(RendererOutputPublicationWork),
-    /// A concrete browser-owner action or protocol continuation.
+    /// A concrete Browser-fact projection or explicit protocol continuation.
     ///
     /// The payload already owns its exact route and lifetime identity. The
     /// client-turn predecessor controls only when the scheduler may select it.
     ProtocolWork {
-        work: ProtocolSchedulerWork,
+        work: Box<ProtocolSchedulerWork>,
         client_turn_predecessor: ClientTurnPredecessor,
         /// Exact Page/Document scope in which a load action published by the
         /// still-pending command turn may replace the provisional
@@ -108,14 +108,7 @@ pub(super) enum ClientTurnPredecessor {
 }
 
 impl ProtocolSchedulerResidence {
-    pub(super) fn bypasses_inflight_navigation_gate(&self) -> bool {
-        matches!(
-            self,
-            Self::ProtocolWork { work, .. } if work.bypasses_inflight_navigation_gate()
-        )
-    }
-
-    pub(super) fn should_yield_to_client_turn(&self) -> bool {
+    fn should_yield_to_client_turn(&self) -> bool {
         matches!(
             self,
             Self::RendererOutputPublication(RendererOutputPublicationWork {
@@ -205,17 +198,15 @@ impl ProtocolSchedulerResidence {
 
 #[derive(Debug)]
 pub(super) struct SchedulerQueues {
-    /// Concrete protocol output and owner work in scheduler admission order.
+    /// Concrete protocol output and owner work in scheduler selection order.
     ///
     /// Renderer source publications are concrete before admission. A projected
     /// event batch may briefly accept the load observation still being
     /// published by the current command turn; once exact, concrete owner work
     /// from the same ingress turn inherits that predecessor as well. Publication
     /// stream cursor remains the admission invariant, while an exact
-    /// predecessor may deliberately insert its load owner action before work
-    /// that was admitted earlier. Selection normally follows this order; a
-    /// target-local navigation gate may let an unrelated target advance while
-    /// preserving order within each target lane.
+    /// predecessor may deliberately insert its load fact projection before work
+    /// that was admitted earlier.
     pub(super) protocol_residences: VecDeque<ProtocolSchedulerResidence>,
     next_protocol_work_publish_sequence: u64,
 }
@@ -300,7 +291,7 @@ impl SchedulerQueues {
         self.protocol_residences.insert(
             insertion_index,
             ProtocolSchedulerResidence::ProtocolWork {
-                work,
+                work: Box::new(work),
                 client_turn_predecessor: ClientTurnPredecessor::Pending,
                 load_predecessors,
                 future_load_predecessor: if load_observation_id.is_none() {
@@ -372,21 +363,6 @@ impl SchedulerQueues {
 
     pub(super) fn pop_next_protocol_residence(&mut self) -> Option<ProtocolSchedulerResidence> {
         self.protocol_residences.pop_front()
-    }
-
-    pub(super) fn satisfy_client_turn_predecessor_at(&mut self, index: usize) {
-        self.close_future_load_predecessor_window();
-        self.protocol_residences
-            .get_mut(index)
-            .expect("selected protocol residence must still exist")
-            .mark_client_turn_yielded();
-    }
-
-    pub(super) fn take_protocol_residence_at(
-        &mut self,
-        index: usize,
-    ) -> Option<ProtocolSchedulerResidence> {
-        self.protocol_residences.remove(index)
     }
 
     fn take_snapshot(
@@ -518,7 +494,6 @@ fn protocol_residence_is_external_load_wait_activity(
             if future_load_predecessor.is_none()
                 && load_predecessors.is_empty()
                 && (work.is_root_frame_stopped_loading()
-                || work.kind() == ProtocolSchedulerWorkKind::MainDocumentLoadOwnerAction
-                || work.is_top_level_location_navigation_owner_action())
+                || work.kind() == ProtocolSchedulerWorkKind::MainDocumentLoadFactProjection)
     )
 }

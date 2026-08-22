@@ -1,8 +1,8 @@
 use moli_core::RendererOutputTransportMessage;
 use moli_protocol::{
     CompletedDeferredMainDocumentLoadCompletion, DeferredMainDocumentLoadCompletionOutputAction,
-    DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadObservationId,
-    PendingDeferredMainDocumentLoadCompletion,
+    DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadCompletionReadiness,
+    DeferredMainDocumentLoadObservationId, PendingDeferredMainDocumentLoadCompletion,
 };
 use tokio::sync::mpsc;
 
@@ -10,9 +10,9 @@ use super::{CdpScheduler, ProtocolOutputSequence, protocol_residence::ProtocolSc
 
 /// Connection-local scheduling state shared by CDP, BiDi and Classic adapters.
 ///
-/// The protocol scheduler owns concrete output and browser-owner work. This
-/// driver owns only the asynchronous adapter boundary needed to select that
-/// work in a later client turn:
+/// The protocol scheduler owns concrete protocol output; the separate Browser
+/// Owner queue owns browser actions. This driver owns only the asynchronous
+/// adapter boundary needed to select protocol work in a later client turn:
 ///
 /// - one coalesced self-turn signal;
 /// - at most one exact main-document load observation;
@@ -21,7 +21,7 @@ use super::{CdpScheduler, ProtocolOutputSequence, protocol_residence::ProtocolSc
 ///
 /// It never stores a renderer publication, Page task capability or protocol
 /// transport route. Switching a Classic connection to BiDi therefore keeps
-/// this value alive instead of recreating scheduler or load-observer state.
+/// this value alive instead of recreating scheduler or fact-wait state.
 pub(crate) struct ProtocolAdapterScheduler<A> {
     turn_tx: mpsc::UnboundedSender<()>,
     turn_rx: mpsc::UnboundedReceiver<()>,
@@ -34,6 +34,7 @@ pub(crate) struct ProtocolAdapterScheduler<A> {
 struct PendingAdapterLoadObservation<A> {
     observation_id: DeferredMainDocumentLoadObservationId,
     output_interest: DeferredMainDocumentLoadCompletionOutputInterest,
+    readiness: DeferredMainDocumentLoadCompletionReadiness,
     attachment: A,
 }
 
@@ -44,7 +45,7 @@ pub(crate) enum ProtocolAdapterSchedulerInput {
 
 /// Result of consuming one shared adapter-scheduler input.
 ///
-/// `DeferredLoadStarted` deliberately does not expose the pending observer or
+/// `DeferredLoadStarted` deliberately does not expose the pending fact ticket or
 /// its wake interest. The exact identity and adapter attachment remain owned
 /// by `ProtocolAdapterScheduler` until `DeferredLoadCompleted`.
 pub(crate) enum ProtocolAdapterSchedulerAdvance<A> {
@@ -82,6 +83,47 @@ impl<A> Default for ProtocolAdapterScheduler<A> {
 impl<A> ProtocolAdapterScheduler<A> {
     pub(crate) fn has_pending_load(&self) -> bool {
         self.pending_load.is_some()
+    }
+
+    /// Reports an exact load terminal that is already an authoritative fact.
+    ///
+    /// Application actor loops use this only to order a ready lifecycle
+    /// projection before a queued replacement. A still-pending fact wait never
+    /// blocks Browser Owner progress, because that replacement may be the
+    /// operation that settles it.
+    pub(crate) fn has_ready_deferred_load_completion(&self) -> bool {
+        self.pending_load
+            .as_ref()
+            .is_some_and(|pending| pending.readiness.is_terminal())
+    }
+
+    pub(crate) fn load_projection_precedes_browser_owner(&self, scheduler: &CdpScheduler) -> bool {
+        self.has_ready_deferred_load_completion()
+            || (!self.has_pending_load()
+                && scheduler.has_causally_ready_main_document_load_residence())
+    }
+
+    /// Receives the one exact adapter input needed to advance a causally ready
+    /// load projection before Browser Owner selection.
+    ///
+    /// A terminal wait bypasses an unrelated queued self turn. A ready load
+    /// residence that has not yet attached its fact ticket uses the existing
+    /// coalesced self-turn channel, preserving the producer-turn boundary
+    /// without a scheduler yield or sleep.
+    pub(crate) async fn recv_load_projection_predecessor_input(
+        &mut self,
+        scheduler: &CdpScheduler,
+    ) -> Option<ProtocolAdapterSchedulerInput> {
+        if !self.load_projection_precedes_browser_owner(scheduler) {
+            return None;
+        }
+        if self.has_ready_deferred_load_completion() {
+            return self.load_completion_rx.recv().await.map(|completion| {
+                ProtocolAdapterSchedulerInput::DeferredLoadCompletion(Box::new(completion))
+            });
+        }
+        self.schedule_turn_if_needed(scheduler, false);
+        Some(self.recv_input().await)
     }
 
     pub(crate) fn pending_load_attachment_mut(&mut self) -> Option<&mut A> {
@@ -219,9 +261,11 @@ impl<A> ProtocolAdapterScheduler<A> {
                     .expect("ready load residence must produce an exact pending observation");
                 let observation_id = pending.observation_id();
                 let output_interest = pending.output_interest();
+                let readiness = pending.readiness();
                 self.pending_load = Some(PendingAdapterLoadObservation {
                     observation_id,
                     output_interest,
+                    readiness,
                     attachment: make_load_attachment(),
                 });
                 self.spawn_load_wait(pending);
@@ -241,8 +285,9 @@ impl<A> ProtocolAdapterScheduler<A> {
     /// An in-flight exact load observation reserves this driver's one load
     /// attachment slot; it does not precede unrelated scheduler work.
     /// `CdpScheduler` already makes exact `load_predecessors` authoritative.
-    /// Keeping no-predecessor owner actions runnable is required because a
-    /// replacement or termination action may itself settle the observation.
+    /// Keeping unrelated ready residences runnable is required because the
+    /// separately selected Browser Owner may publish the replacement or
+    /// termination fact that settles this ticket.
     fn next_scheduler_step(&self, scheduler: &CdpScheduler) -> ProtocolSchedulerStep {
         let step = scheduler.next_protocol_scheduler_step();
         self.enforce_load_attachment_capacity(
@@ -329,7 +374,8 @@ mod tests {
         CdpConnection, CdpSchedulerEvent, ProtocolSchedulerWork,
         test_support::{
             deferred_main_document_load_observation_id,
-            deferred_main_document_load_output_interest, root_frame_stopped_loading_work,
+            deferred_main_document_load_output_interest,
+            reached_deferred_main_document_load_readiness, root_frame_stopped_loading_work,
         },
     };
     use tokio::task::LocalSet;
@@ -359,7 +405,8 @@ mod tests {
     #[test]
     fn pending_exact_load_observation_allows_independent_protocol_residence() {
         let observation_id = deferred_main_document_load_observation_id(1);
-        let mut scheduler = CdpScheduler::new(CdpConnection::new());
+        let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+            CdpScheduler::new(CdpConnection::new());
         scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
             work: protocol_observation(1),
         }]);
@@ -370,6 +417,7 @@ mod tests {
                     page_residence(),
                     None,
                 ),
+                readiness: reached_deferred_main_document_load_readiness(),
                 attachment: (),
             }),
             ..Default::default()
@@ -402,6 +450,7 @@ mod tests {
                     page_residence(),
                     None,
                 ),
+                readiness: reached_deferred_main_document_load_readiness(),
                 attachment: (),
             }),
             ..Default::default()
@@ -441,7 +490,8 @@ mod tests {
     async fn self_turn_is_coalesced_and_preserves_the_client_turn_boundary() {
         LocalSet::new()
             .run_until(async {
-                let mut scheduler = CdpScheduler::new(CdpConnection::new());
+                let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+                    CdpScheduler::new(CdpConnection::new());
                 scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
                     work: protocol_observation(1),
                 }]);
@@ -496,6 +546,7 @@ mod tests {
                     page_residence(),
                     None,
                 ),
+                readiness: reached_deferred_main_document_load_readiness(),
                 attachment: AdapterMode::Classic,
             }),
             ..Default::default()

@@ -59,19 +59,32 @@ pub struct DevToolsCommandDispatchOutcome {
     result: Result<DevToolsCommandResult, DevToolsError>,
     scheduler_events: Vec<CdpSchedulerEvent>,
     protocol_events: Vec<BackgroundProtocolEvent>,
+    post_renderer_output_events: Vec<BackgroundProtocolEvent>,
+    renderer_output_boundary: Option<moli_core::RendererOutputFence>,
+    post_response_events: Vec<BackgroundProtocolEvent>,
     renderer_output_predecessor: Option<moli_core::RendererOutputFence>,
 }
 
 impl DevToolsCommandDispatchOutcome {
-    pub(crate) fn new_with_protocol_events(
+    pub(crate) fn new_with_renderer_fenced_protocol_events(
         result: Result<DevToolsCommandResult, DevToolsError>,
         scheduler_events: Vec<CdpSchedulerEvent>,
         protocol_events: Vec<BackgroundProtocolEvent>,
+        renderer_output_boundary: Option<moli_core::RendererOutputFence>,
+        post_renderer_output_events: Vec<BackgroundProtocolEvent>,
+        post_response_events: Vec<BackgroundProtocolEvent>,
     ) -> Self {
+        debug_assert!(
+            renderer_output_boundary.is_some() || post_renderer_output_events.is_empty(),
+            "post-renderer DevTools output requires an exact insertion boundary"
+        );
         Self {
             result,
             scheduler_events,
             protocol_events,
+            post_renderer_output_events,
+            renderer_output_boundary,
+            post_response_events,
             renderer_output_predecessor: None,
         }
     }
@@ -106,6 +119,12 @@ impl DevToolsCommandDispatchOutcome {
             "command output with protocol events requires complete consumption"
         );
         assert!(
+            self.renderer_output_boundary.is_none()
+                && self.post_renderer_output_events.is_empty()
+                && self.post_response_events.is_empty(),
+            "command output with ordered protocol segments requires complete consumption"
+        );
+        assert!(
             self.renderer_output_predecessor.is_none(),
             "command output with a renderer cursor requires complete consumption"
         );
@@ -126,6 +145,12 @@ impl DevToolsCommandDispatchOutcome {
             self.renderer_output_predecessor.is_none(),
             "command output with a renderer cursor requires complete consumption"
         );
+        assert!(
+            self.renderer_output_boundary.is_none()
+                && self.post_renderer_output_events.is_empty()
+                && self.post_response_events.is_empty(),
+            "command output with ordered protocol segments requires complete consumption"
+        );
         (self.result, self.scheduler_events, self.protocol_events)
     }
 
@@ -139,10 +164,40 @@ impl DevToolsCommandDispatchOutcome {
         Vec<BackgroundProtocolEvent>,
         Option<moli_core::RendererOutputFence>,
     ) {
+        assert!(
+            self.renderer_output_boundary.is_none()
+                && self.post_renderer_output_events.is_empty()
+                && self.post_response_events.is_empty(),
+            "renderer-fenced command output requires fenced complete consumption"
+        );
         (
             self.result,
             self.scheduler_events,
             self.protocol_events,
+            self.renderer_output_predecessor,
+        )
+    }
+
+    /// Consumes the full typed command transaction without flattening an
+    /// independently transported renderer insertion boundary.
+    pub fn into_fenced_complete_parts(
+        self,
+    ) -> (
+        Result<DevToolsCommandResult, DevToolsError>,
+        Vec<CdpSchedulerEvent>,
+        Vec<BackgroundProtocolEvent>,
+        Option<moli_core::RendererOutputFence>,
+        Vec<BackgroundProtocolEvent>,
+        Vec<BackgroundProtocolEvent>,
+        Option<moli_core::RendererOutputFence>,
+    ) {
+        (
+            self.result,
+            self.scheduler_events,
+            self.protocol_events,
+            self.renderer_output_boundary,
+            self.post_renderer_output_events,
+            self.post_response_events,
             self.renderer_output_predecessor,
         )
     }
@@ -356,22 +411,55 @@ impl CdpConnection {
         &mut self,
         command_context: DevToolsCommandContext,
         result: Result<DevToolsCommandResult, DevToolsError>,
-        mut protocol_events: Vec<BackgroundProtocolEvent>,
+        protocol_events: Vec<BackgroundProtocolEvent>,
         renderer_output_predecessor: Option<moli_core::RendererOutputFence>,
     ) -> DevToolsCommandDispatchOutcome {
         let mut dispatch_context = CommandDispatchContext::default();
+        dispatch_context
+            .protocol_events_mut()
+            .extend(protocol_events);
+        if let Some(predecessor) = renderer_output_predecessor {
+            dispatch_context.set_renderer_output_predecessor(predecessor);
+        }
+        self.finish_devtools_command_dispatch_with_projection_context(
+            command_context,
+            result,
+            dispatch_context,
+        )
+        .await
+    }
+
+    pub(crate) async fn finish_devtools_command_dispatch_with_projection_context(
+        &mut self,
+        command_context: DevToolsCommandContext,
+        result: Result<DevToolsCommandResult, DevToolsError>,
+        mut dispatch_context: CommandDispatchContext,
+    ) -> DevToolsCommandDispatchOutcome {
+        let mut local_context = CommandDispatchContext::default();
+        let mut local_events = Vec::new();
         Box::pin(self.project_protocol_local_outputs_for_direct_command(
             &command_context,
-            &mut dispatch_context,
-            &mut protocol_events,
+            &mut local_context,
+            &mut local_events,
         ))
         .await;
-        protocol_events.extend(dispatch_context.take_post_response_events());
+        dispatch_context.protocol_events_mut().extend(local_events);
+        dispatch_context.extend_post_response_events(local_context.take_post_response_events());
+        if let Some(predecessor) = local_context.take_renderer_output_predecessor() {
+            dispatch_context.set_renderer_output_predecessor(predecessor);
+        }
+        let (protocol_events, renderer_output_boundary, post_renderer_output_events) =
+            dispatch_context.take_renderer_fenced_protocol_events();
+        let post_response_events = dispatch_context.take_post_response_events();
+        let renderer_output_predecessor = dispatch_context.take_renderer_output_predecessor();
         let scheduler_events = self.take_scheduler_events();
-        DevToolsCommandDispatchOutcome::new_with_protocol_events(
+        DevToolsCommandDispatchOutcome::new_with_renderer_fenced_protocol_events(
             result,
             scheduler_events,
             protocol_events,
+            renderer_output_boundary,
+            post_renderer_output_events,
+            post_response_events,
         )
         .with_renderer_output_predecessor(renderer_output_predecessor)
     }

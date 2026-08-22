@@ -182,10 +182,10 @@ pub(crate) fn dom_agent_includes_whitespace_for_session(
         })
 }
 
-fn loaded_page_mut_for_session<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_session(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
-) -> Option<&'a mut Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.loaded_page_mut_for_protocol_access(session_id).ok()
 }
 

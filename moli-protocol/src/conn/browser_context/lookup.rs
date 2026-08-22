@@ -74,8 +74,15 @@ impl CdpConnection {
     }
 
     pub fn has_browser_context_id(&self, browser_context_id: &str) -> bool {
-        self.browser_contexts()
-            .any(|bc| bc.id == browser_context_id)
+        self.browser_host_state
+            .navigation_owner()
+            .has_browser_context(browser_context_id)
+    }
+
+    pub(crate) fn registered_browser_context_count(&self) -> usize {
+        self.browser_host_state
+            .navigation_owner()
+            .browser_context_count()
     }
 
     pub(crate) fn browser_context_id_for_target(&self, target_id: &str) -> Option<&str> {

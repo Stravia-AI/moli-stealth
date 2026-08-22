@@ -822,7 +822,7 @@ async fn same_context_targets_remove_only_their_own_utility_binding_definition_a
             .expect("active browser context");
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_bindings
                 .iter()
                 .any(|binding| {
@@ -834,8 +834,8 @@ async fn same_context_targets_remove_only_their_own_utility_binding_definition_a
             .background_target("TID-000000000UB")
             .expect("first target should remain staged");
         let staged_bindings = active
-            .parked_page_session_state(staged.target_id())
-            .map(|state| state.devtools_session_state.runtime_bindings.as_slice())
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .map(|state| state.runtime_bindings.as_slice())
             .unwrap_or(&[]);
         assert!(!staged_bindings.iter().any(|binding| {
             binding.name == "sharedUtilityBinding"
@@ -1012,7 +1012,7 @@ async fn same_context_targets_remove_only_their_own_main_world_binding_definitio
             .expect("active browser context");
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_bindings
                 .iter()
                 .any(|binding| {
@@ -1023,8 +1023,8 @@ async fn same_context_targets_remove_only_their_own_main_world_binding_definitio
             .background_target("TID-000000000MB")
             .expect("first target should remain staged");
         let staged_bindings = active
-            .parked_page_session_state(staged.target_id())
-            .map(|state| state.devtools_session_state.runtime_bindings.as_slice())
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .map(|state| state.runtime_bindings.as_slice())
             .unwrap_or(&[]);
         assert!(!staged_bindings.iter().any(|binding| {
             binding.name == "sharedMainBinding" && binding.execution_context_name.is_none()
@@ -1233,7 +1233,7 @@ async fn same_context_targets_remove_only_their_own_dual_world_binding_definitio
             .expect("active browser context");
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
 
                 .runtime_bindings
                 .iter()
@@ -1243,8 +1243,8 @@ async fn same_context_targets_remove_only_their_own_dual_world_binding_definitio
             .background_target("TID-000000000DB")
             .expect("first target should remain staged");
         let staged_bindings = active
-            .parked_page_session_state(staged.target_id())
-            .map(|state| state.devtools_session_state.runtime_bindings.as_slice())
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .map(|state| state.runtime_bindings.as_slice())
             .unwrap_or(&[]);
         assert_eq!(
             staged_bindings
@@ -2659,29 +2659,8 @@ async fn same_context_targets_restore_only_their_own_utility_pre_document_bindin
  {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#second".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-0000000010".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#third".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#second", None);
+    push_background_target(&mut ctx, "TID-0000000010", "about:blank#third", None);
 
     ctx.process_async(json!({
         "id": 10456,

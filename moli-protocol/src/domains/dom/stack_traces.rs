@@ -71,7 +71,7 @@ pub(super) fn complete_set_node_stack_traces_enabled_command(
     completion: CompletedPageCommand,
     out: &mut DomCommandOutput,
 ) -> DomCommandTaskStep {
-    let Some(page) = super::loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = super::loaded_page_mut_for_session(conn, session_id) else {
         out.push_error(-32000, "NoDocumentLoaded");
         return DomCommandTaskStep::Complete;
     };
@@ -93,7 +93,7 @@ pub(super) fn complete_get_node_stack_traces_command(
     out: &mut DomCommandOutput,
 ) -> DomCommandTaskStep {
     let resolution = {
-        let Some(page) = super::loaded_page_mut_for_session(conn, session_id) else {
+        let Some(mut page) = super::loaded_page_mut_for_session(conn, session_id) else {
             out.push_error(-32000, "NoDocumentLoaded");
             return DomCommandTaskStep::Complete;
         };

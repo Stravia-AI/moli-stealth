@@ -29,6 +29,8 @@ use tokio::time::{sleep, timeout};
 use tokio_tungstenite::{connect_async, tungstenite::Message as WsMessage};
 use tower::util::ServiceExt;
 
+use crate::cookie_cache;
+
 struct DedicatedFixtureServer {
     shutdown_tx: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,

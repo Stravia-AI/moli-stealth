@@ -108,6 +108,18 @@ impl SessionRendererCallTermination {
 }
 
 impl SessionRendererCallReplay {
+    pub(crate) fn new(
+        frontend_session_id: Option<String>,
+        renderer_inspector_session_id: Option<String>,
+        replay: PreparedRendererCallReplay,
+    ) -> Self {
+        Self {
+            frontend_session_id,
+            renderer_inspector_session_id,
+            replay,
+        }
+    }
+
     pub(crate) fn frontend_session_id(&self) -> Option<&str> {
         self.frontend_session_id.as_deref()
     }
@@ -558,17 +570,6 @@ pub(crate) fn devtools_sessions_have_pending_inspector_awaits(
             .any(DevToolsSessionState::has_pending_inspector_awaits)
 }
 
-pub(crate) fn devtools_sessions_pending_inspector_await_count(
-    primary: &DevToolsSessionState,
-    auxiliary: &HashMap<String, DevToolsSessionState>,
-) -> usize {
-    primary.pending_inspector_await_count()
-        + auxiliary
-            .values()
-            .map(DevToolsSessionState::pending_inspector_await_count)
-            .sum::<usize>()
-}
-
 pub(crate) fn drain_pending_inspector_awaits_for_devtools_sessions(
     primary: &mut DevToolsSessionState,
     auxiliary: &mut HashMap<String, DevToolsSessionState>,
@@ -591,10 +592,8 @@ pub(crate) fn prepare_renderer_call_replays_for_devtools_sessions(
     let mut replays = primary
         .prepare_renderer_call_replays(old_attachment_id, new_attachment_id)?
         .into_iter()
-        .map(|replay| SessionRendererCallReplay {
-            frontend_session_id: primary_session_id.map(str::to_owned),
-            renderer_inspector_session_id: None,
-            replay,
+        .map(|replay| {
+            SessionRendererCallReplay::new(primary_session_id.map(str::to_owned), None, replay)
         })
         .collect::<Vec<_>>();
     let mut auxiliary_session_ids = auxiliary.keys().cloned().collect::<Vec<_>>();
@@ -607,10 +606,12 @@ pub(crate) fn prepare_renderer_call_replays_for_devtools_sessions(
             state
                 .prepare_renderer_call_replays(old_attachment_id, new_attachment_id)?
                 .into_iter()
-                .map(|replay| SessionRendererCallReplay {
-                    frontend_session_id: Some(session_id.clone()),
-                    renderer_inspector_session_id: Some(session_id.clone()),
-                    replay,
+                .map(|replay| {
+                    SessionRendererCallReplay::new(
+                        Some(session_id.clone()),
+                        Some(session_id.clone()),
+                        replay,
+                    )
                 }),
         );
     }

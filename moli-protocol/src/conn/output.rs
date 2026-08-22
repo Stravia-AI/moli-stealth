@@ -9,10 +9,11 @@ use crate::devtools_runtime::{
 };
 use moli_core::{
     RendererRuntimeInspectorAsyncCompletion,
+    browser_host::BrowserNavigateCommandOutcome,
     page::{
-        RendererAgentAttachmentId, RendererDocumentToken, RendererLifecycleEpoch,
-        RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage, WebSocketFrameDirection,
-        WebSocketFrameOpcode,
+        RendererAgentAttachmentId, RendererDocumentLifecycleMilestone, RendererDocumentToken,
+        RendererLifecycleEpoch, RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
+        WebSocketFrameDirection, WebSocketFrameOpcode,
     },
 };
 use moli_page_types::{
@@ -21,15 +22,10 @@ use moli_page_types::{
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::{
-    CdpConnection, DevToolsDocumentLifecycleWaitKey,
-    state::{BrowserContext, DocumentNavigationToken},
-};
+use super::{CdpConnection, DevToolsDocumentLifecycleWaitKey, state::DocumentNavigationToken};
 
 mod delivery_route;
 use delivery_route::ProtocolDeliveryRoute;
-
-pub type BackgroundEventSender = UnboundedSender<BackgroundProtocolEvent>;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct RuntimeInspectorResponseReady {
@@ -563,6 +559,7 @@ pub struct BackgroundCommandResponseEvent {
     command_id: Option<u64>,
     session_id: Option<String>,
     response: BackgroundCommandResponse,
+    browser_navigate_outcome: Option<Box<BrowserNavigateCommandOutcome>>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -834,6 +831,7 @@ pub struct BackgroundTargetInfoChangedEvent {
 pub struct BackgroundTargetCreatedEvent {
     session_id: Option<String>,
     event: TargetLifecycleEvent,
+    automation_sidecar: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -850,6 +848,7 @@ pub struct BackgroundTargetDetachedEvent {
 pub struct BackgroundTargetDestroyedEvent {
     session_id: Option<String>,
     event: TargetLifecycleEvent,
+    automation_sidecar: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -878,61 +877,6 @@ impl ProtocolDeliveryEnvelope {
     #[doc(hidden)]
     pub fn protocol_session_id(&self) -> Option<&str> {
         self.route.wire_session_id()
-    }
-
-    pub(crate) fn navigation_gate_target_id(&self) -> Option<&str> {
-        if let Some(target_id) = self.route.navigation_gate_target_id() {
-            return Some(target_id);
-        }
-        let BackgroundProtocolEventPayload::Protocol(event) = &self.payload else {
-            return None;
-        };
-        match event.automation_event.as_deref()? {
-            AutomationEvent::NetworkBeforeRequestSent(event)
-            | AutomationEvent::NetworkResponseStarted(event)
-            | AutomationEvent::NetworkResponseCompleted(event)
-            | AutomationEvent::NetworkFetchError(event)
-            | AutomationEvent::NetworkAuthRequired(event)
-            | AutomationEvent::RequestPaused(event) => Some(event.target_id.as_str()),
-            AutomationEvent::TargetCreated(event) | AutomationEvent::TargetDestroyed(event) => {
-                Some(event.target_id.as_str())
-            }
-            AutomationEvent::TargetAttached(event) => Some(event.target_id.as_str()),
-            AutomationEvent::TargetDetached(event) => Some(event.target_id.as_str()),
-            AutomationEvent::NavigationFrame(event) => Some(event.target_id.as_str()),
-            AutomationEvent::NavigationStarted(event)
-            | AutomationEvent::DomContentLoaded(event)
-            | AutomationEvent::Load(event) => Some(event.target_id.as_str()),
-            AutomationEvent::PageLifecycle(event) => Some(event.target_id.as_str()),
-            AutomationEvent::SameDocumentNavigation(event) => Some(event.target_id.as_str()),
-            AutomationEvent::UserPromptClosed(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::LogEntryAdded(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::RuntimeConsoleApiCalled(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::RuntimeExecutionContextCreated(event)
-            | AutomationEvent::RuntimeExecutionContextDestroyed(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::RuntimeExecutionContextsCleared(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::ScriptMessage(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::ScriptException(event) => {
-                event.target_id.as_ref().map(|target_id| target_id.as_str())
-            }
-            AutomationEvent::PageJavaScriptDialogOpening(_)
-            | AutomationEvent::PageFileChooserOpened(_)
-            | AutomationEvent::BrowserDownloadWillBegin(_)
-            | AutomationEvent::BrowserDownloadProgress(_)
-            | AutomationEvent::DomSetChildNodes(_) => None,
-        }
     }
 
     pub fn route_is_current(&self, conn: &CdpConnection) -> bool {
@@ -1089,6 +1033,7 @@ impl ProtocolDeliveryEnvelope {
             command_id,
             session_id: session_id.map(str::to_owned),
             response: BackgroundCommandResponse::Success { result },
+            browser_navigate_outcome: None,
         }))
     }
 
@@ -1107,7 +1052,43 @@ impl ProtocolDeliveryEnvelope {
                 message,
                 data,
             },
+            browser_navigate_outcome: None,
         }))
+    }
+
+    /// Retains the protocol-neutral Browser navigation result beside its wire
+    /// response. Frontends may consume this sidecar, but it is deliberately
+    /// absent from JSON serialization and cannot affect Browser progress.
+    pub(crate) fn bind_browser_navigate_command_outcome(
+        mut self,
+        outcome: BrowserNavigateCommandOutcome,
+    ) -> Self {
+        if !self.attach_browser_navigate_command_outcome(outcome) {
+            tracing::error!(
+                "Browser navigation outcome cannot bind to a non-response protocol event"
+            );
+        }
+        self
+    }
+
+    pub(crate) fn attach_browser_navigate_command_outcome(
+        &mut self,
+        outcome: BrowserNavigateCommandOutcome,
+    ) -> bool {
+        let BackgroundProtocolEventPayload::CommandResponse(event) = &mut self.payload else {
+            return false;
+        };
+        event.browser_navigate_outcome = Some(Box::new(outcome));
+        true
+    }
+
+    pub fn browser_navigate_command_outcome(
+        &self,
+    ) -> Option<(Option<u64>, &BrowserNavigateCommandOutcome)> {
+        let BackgroundProtocolEventPayload::CommandResponse(event) = &self.payload else {
+            return None;
+        };
+        Some((event.command_id, event.browser_navigate_outcome.as_deref()?))
     }
 
     pub(crate) fn command_response_payload_ref(
@@ -1512,15 +1493,17 @@ impl ProtocolDeliveryEnvelope {
         }))
     }
 
-    pub(crate) fn page_dom_content_loaded(
+    pub(crate) fn page_dom_content_loaded_for_renderer_document(
         session_id: Option<&str>,
         event: NavigationLifecycleEvent,
+        renderer_document: RendererDocumentToken,
+        renderer_epoch: RendererLifecycleEpoch,
     ) -> Self {
         Self::wrap_page_dom_content_loaded(Box::new(BackgroundNavigationLifecycleEvent {
             session_id: session_id.map(str::to_owned),
             event,
-            renderer_document: None,
-            renderer_epoch: None,
+            renderer_document: Some(renderer_document),
+            renderer_epoch: Some(renderer_epoch),
         }))
     }
 
@@ -1828,6 +1811,7 @@ impl ProtocolDeliveryEnvelope {
         Self::wrap_target_created_event(Box::new(BackgroundTargetCreatedEvent {
             session_id: session_id.map(str::to_owned),
             event,
+            automation_sidecar: true,
         }))
     }
 
@@ -1843,7 +1827,24 @@ impl ProtocolDeliveryEnvelope {
         Self::wrap_target_destroyed_event(Box::new(BackgroundTargetDestroyedEvent {
             session_id: session_id.map(str::to_owned),
             event,
+            automation_sidecar: true,
         }))
+    }
+
+    /// Keeps a concrete CDP Target notification on its frozen delivery route
+    /// while reserving the protocol-neutral lifecycle occurrence for one
+    /// separate exact Browser-fact sidecar.
+    pub(crate) fn without_target_lifecycle_automation_sidecar(mut self) -> Self {
+        match &mut self.payload {
+            BackgroundProtocolEventPayload::TargetCreated(event) => {
+                event.automation_sidecar = false;
+            }
+            BackgroundProtocolEventPayload::TargetDestroyed(event) => {
+                event.automation_sidecar = false;
+            }
+            _ => {}
+        }
+        self
     }
 
     pub(crate) fn target_crashed(
@@ -2745,9 +2746,20 @@ impl ProtocolDeliveryEnvelope {
         }
     }
 
-    pub fn matches_document_load_wait_key(&self, key: &DevToolsDocumentLifecycleWaitKey) -> bool {
-        let BackgroundProtocolEventPayload::PageLoad(event) = &self.payload else {
-            return false;
+    pub fn matches_document_lifecycle_wait_key(
+        &self,
+        key: &DevToolsDocumentLifecycleWaitKey,
+    ) -> bool {
+        let event = match (key.milestone, &self.payload) {
+            (
+                RendererDocumentLifecycleMilestone::DomContentLoaded,
+                BackgroundProtocolEventPayload::PageDomContentLoaded(event),
+            )
+            | (
+                RendererDocumentLifecycleMilestone::Load,
+                BackgroundProtocolEventPayload::PageLoad(event),
+            ) => event,
+            _ => return false,
         };
         event.renderer_document == Some(key.renderer_document)
             && event.renderer_epoch == Some(key.renderer_epoch)
@@ -3936,7 +3948,9 @@ impl BackgroundTargetInfoChangedEvent {
 
 impl BackgroundTargetCreatedEvent {
     fn into_protocol_message(self) -> Value {
-        let Self { session_id, event } = self;
+        let Self {
+            session_id, event, ..
+        } = self;
         let target_info = event.target_info.unwrap_or_else(|| DevToolsTargetInfo {
             target_id: Some(event.target_id),
             kind: event.kind,
@@ -3958,7 +3972,10 @@ impl BackgroundTargetCreatedEvent {
 
     fn into_parts(self) -> (Value, Option<AutomationEvent>) {
         let message = self.clone().into_protocol_message();
-        (message, Some(AutomationEvent::TargetCreated(self.event)))
+        let automation_event = self
+            .automation_sidecar
+            .then(|| AutomationEvent::TargetCreated(self.event));
+        (message, automation_event)
     }
 }
 
@@ -4016,7 +4033,10 @@ impl BackgroundTargetDestroyedEvent {
 
     fn into_parts(self) -> (Value, Option<AutomationEvent>) {
         let message = self.clone().into_protocol_message();
-        (message, Some(AutomationEvent::TargetDestroyed(self.event)))
+        let automation_event = self
+            .automation_sidecar
+            .then(|| AutomationEvent::TargetDestroyed(self.event));
+        (message, automation_event)
     }
 }
 
@@ -4299,13 +4319,14 @@ impl NavigationBackgroundEvent {
         Self { token, event }
     }
 
-    pub(crate) fn into_background_protocol_event_if_current<'a>(
+    pub(crate) fn token(&self) -> &DocumentNavigationToken {
+        &self.token
+    }
+
+    pub(crate) fn into_background_protocol_event_if_current(
         self,
-        browser_contexts: impl IntoIterator<Item = &'a BrowserContext>,
+        is_current: bool,
     ) -> Option<BackgroundProtocolEvent> {
-        let is_current = browser_contexts.into_iter().any(|browser_context| {
-            browser_context.accepts_pending_document_navigation_event(&self.token)
-        });
         if !is_current {
             return None;
         }
@@ -4313,11 +4334,8 @@ impl NavigationBackgroundEvent {
     }
 
     #[cfg(test)]
-    pub(crate) fn into_protocol_message_if_current<'a>(
-        self,
-        browser_contexts: impl IntoIterator<Item = &'a BrowserContext>,
-    ) -> Option<Value> {
-        self.into_background_protocol_event_if_current(browser_contexts)
+    pub(crate) fn into_protocol_message_if_current(self, is_current: bool) -> Option<Value> {
+        self.into_background_protocol_event_if_current(is_current)
             .map(BackgroundProtocolEvent::into_protocol_message)
     }
 }
@@ -4442,9 +4460,8 @@ mod tests {
     #[test]
     fn browser_download_route_guard_rejects_detached_and_reenabled_subscription() {
         let mut conn = CdpConnection::new();
-        conn.download_behavior
-            .set_browser_events_enabled_for_session(Some("SID-browser"), true);
-        let first_generation = conn.download_behavior.browser_event_observers()[0].1;
+        conn.set_browser_download_events_enabled_for_session(Some("SID-browser"), true);
+        let first_generation = conn.download_event_subscriptions.browser_event_observers()[0].1;
         let event = BackgroundProtocolEvent::browser_download_progress(
             Some("SID-browser"),
             Some(first_generation),
@@ -4456,13 +4473,11 @@ mod tests {
         );
         assert!(event.route_is_current(&conn));
 
-        conn.download_behavior
-            .set_browser_events_enabled_for_session(Some("SID-browser"), false);
+        conn.set_browser_download_events_enabled_for_session(Some("SID-browser"), false);
         assert!(!event.route_is_current(&conn));
 
-        conn.download_behavior
-            .set_browser_events_enabled_for_session(Some("SID-browser"), true);
-        let second_generation = conn.download_behavior.browser_event_observers()[0].1;
+        conn.set_browser_download_events_enabled_for_session(Some("SID-browser"), true);
+        let second_generation = conn.download_event_subscriptions.browser_event_observers()[0].1;
         assert_ne!(second_generation, first_generation);
         assert!(
             !event.route_is_current(&conn),
@@ -4481,7 +4496,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_page_load_matches_wait_key_by_document_and_epoch() {
+    fn renderer_document_lifecycle_matches_wait_key_by_milestone_document_and_epoch() {
         let page_id = PageId::new_for_testing(902);
         let document = RendererDocumentToken::new_for_testing(page_id, 3);
         let event = NavigationLifecycleEvent {
@@ -4494,25 +4509,51 @@ mod tests {
         };
         let output = BackgroundProtocolEvent::page_load_for_renderer_document(
             None,
+            event.clone(),
+            document,
+            RendererLifecycleEpoch(4),
+        );
+        let matching = DevToolsDocumentLifecycleWaitKey::resolved_for_event_match_test(
+            document,
+            RendererLifecycleEpoch(4),
+            RendererDocumentLifecycleMilestone::Load,
+            "FRAME",
+            "LOADER",
+        );
+        let restarted_epoch = DevToolsDocumentLifecycleWaitKey::resolved_for_event_match_test(
+            document,
+            RendererLifecycleEpoch(5),
+            RendererDocumentLifecycleMilestone::Load,
+            "FRAME",
+            "LOADER",
+        );
+
+        assert!(output.matches_document_lifecycle_wait_key(&matching));
+        assert!(!output.matches_document_lifecycle_wait_key(&restarted_epoch));
+
+        let dcl_key = DevToolsDocumentLifecycleWaitKey::resolved_for_event_match_test(
+            document,
+            RendererLifecycleEpoch(4),
+            RendererDocumentLifecycleMilestone::DomContentLoaded,
+            "FRAME",
+            "LOADER",
+        );
+        let dcl_restarted_epoch = DevToolsDocumentLifecycleWaitKey::resolved_for_event_match_test(
+            document,
+            RendererLifecycleEpoch(5),
+            RendererDocumentLifecycleMilestone::DomContentLoaded,
+            "FRAME",
+            "LOADER",
+        );
+        let dcl = BackgroundProtocolEvent::page_dom_content_loaded_for_renderer_document(
+            None,
             event,
             document,
             RendererLifecycleEpoch(4),
         );
-        let matching = DevToolsDocumentLifecycleWaitKey {
-            registration_id: crate::conn::state::RendererDocumentLifecycleWaiterId::new_for_test(1),
-            renderer_document: document,
-            renderer_epoch: RendererLifecycleEpoch(4),
-            milestone: RendererDocumentLifecycleMilestone::Load,
-            frame_id: "FRAME".to_owned(),
-            loader_id: "LOADER".to_owned(),
-        };
-        let restarted_epoch = DevToolsDocumentLifecycleWaitKey {
-            renderer_epoch: RendererLifecycleEpoch(5),
-            ..matching.clone()
-        };
-
-        assert!(output.matches_document_load_wait_key(&matching));
-        assert!(!output.matches_document_load_wait_key(&restarted_epoch));
+        assert!(dcl.matches_document_lifecycle_wait_key(&dcl_key));
+        assert!(!dcl.matches_document_lifecycle_wait_key(&dcl_restarted_epoch));
+        assert!(!output.matches_document_lifecycle_wait_key(&dcl_key));
     }
 
     #[test]
@@ -4520,8 +4561,12 @@ mod tests {
         let mut browser_context = BrowserContext::new("CTX-nav".to_owned());
         browser_context.set_active_target_id("TID-nav");
         browser_context.attach_active_session("SID-nav");
-        let token = browser_context
-            .start_document_navigation_for_active_target("LOADER-1".to_owned())
+        let mut conn = CdpConnection {
+            browser_context: Some(browser_context),
+            ..Default::default()
+        };
+        let token = conn
+            .start_document_navigation_for_session_owner(Some("SID-nav"), "LOADER-1".to_owned())
             .expect("active target should produce navigation token");
         let message = build_event(
             "Page.frameStartedLoading",
@@ -4530,9 +4575,10 @@ mod tests {
         );
 
         let event = NavigationBackgroundEvent::protocol_message(token, message.clone());
+        let is_current = conn.accepts_pending_document_navigation_token(event.token());
 
         assert_eq!(
-            event.into_protocol_message_if_current(std::iter::once(&browser_context)),
+            event.into_protocol_message_if_current(is_current),
             Some(message)
         );
     }
@@ -4542,8 +4588,12 @@ mod tests {
         let mut browser_context = BrowserContext::new("CTX-nav".to_owned());
         browser_context.set_active_target_id("TID-nav");
         browser_context.attach_active_session("SID-nav");
-        let token = browser_context
-            .start_document_navigation_for_active_target("LOADER-1".to_owned())
+        let mut conn = CdpConnection {
+            browser_context: Some(browser_context),
+            ..Default::default()
+        };
+        let token = conn
+            .start_document_navigation_for_session_owner(Some("SID-nav"), "LOADER-1".to_owned())
             .expect("active target should produce navigation token");
         let message = build_event(
             "Page.frameStartedNavigating",
@@ -4574,8 +4624,9 @@ mod tests {
                 automation_event.clone(),
             ),
         );
+        let is_current = conn.accepts_pending_document_navigation_token(event.token());
         let background_event = event
-            .into_background_protocol_event_if_current(std::iter::once(&browser_context))
+            .into_background_protocol_event_if_current(is_current)
             .expect("current navigation event should materialize");
         let (actual_message, actual_automation_event) = background_event.into_parts();
 
@@ -5624,11 +5675,15 @@ mod tests {
     fn navigation_background_event_drops_stale_token() {
         let mut browser_context = BrowserContext::new("CTX-nav".to_owned());
         browser_context.set_active_target_id("TID-nav");
-        let stale = browser_context
-            .start_document_navigation_for_active_target("LOADER-1".to_owned())
+        let mut conn = CdpConnection {
+            browser_context: Some(browser_context),
+            ..Default::default()
+        };
+        let stale = conn
+            .start_document_navigation_for_session_owner(None, "LOADER-1".to_owned())
             .expect("active target should produce stale token");
-        let current = browser_context
-            .start_document_navigation_for_active_target("LOADER-2".to_owned())
+        let current = conn
+            .start_document_navigation_for_session_owner(None, "LOADER-2".to_owned())
             .expect("active target should produce current token");
         let message = build_event(
             "Page.frameStoppedLoading",
@@ -5638,13 +5693,16 @@ mod tests {
 
         let stale_event = NavigationBackgroundEvent::protocol_message(stale, message.clone());
         let current_event = NavigationBackgroundEvent::protocol_message(current, message.clone());
+        let stale_is_current = conn.accepts_pending_document_navigation_token(stale_event.token());
+        let current_is_current =
+            conn.accepts_pending_document_navigation_token(current_event.token());
 
         assert_eq!(
-            stale_event.into_protocol_message_if_current(std::iter::once(&browser_context)),
+            stale_event.into_protocol_message_if_current(stale_is_current),
             None
         );
         assert_eq!(
-            current_event.into_protocol_message_if_current(std::iter::once(&browser_context)),
+            current_event.into_protocol_message_if_current(current_is_current),
             Some(message)
         );
     }

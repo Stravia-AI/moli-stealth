@@ -4,13 +4,9 @@ use crate::conn::BrowserContext;
 use crate::testing::TestContext;
 
 pub(super) async fn with_loaded_document_async(ctx: &mut TestContext, html: &str) {
-    ctx.conn
-        .insert_browser_context(BrowserContext::new("BID-1".into()));
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should be installed before loading test page")
-        .set_active_target_id("TID-1".to_owned());
+    let mut browser_context = BrowserContext::new("BID-1".into());
+    browser_context.set_active_target_id("TID-1".to_owned());
+    ctx.conn.insert_browser_context(browser_context);
     let data_url = format!("data:text/html,{html}");
     ctx.install_navigation_fixture_for_session_owner(&data_url, None)
         .await;
@@ -22,17 +18,10 @@ pub(super) async fn with_loaded_document_for_active_target_async(
     session_id: &str,
     target_id: &str,
 ) {
-    ctx.conn
-        .insert_browser_context(BrowserContext::new("BID-1".into()));
-    {
-        let bc = ctx
-            .conn
-            .browser_context
-            .as_mut()
-            .expect("browser context should be installed before loading test page");
-        bc.set_active_target_id(target_id.to_owned());
-        bc.attach_active_session(session_id.to_owned());
-    }
+    let mut browser_context = BrowserContext::new("BID-1".into());
+    browser_context.set_active_target_id(target_id.to_owned());
+    browser_context.attach_active_session(session_id.to_owned());
+    ctx.conn.insert_browser_context(browser_context);
     let data_url = format!("data:text/html,{html}");
     ctx.install_navigation_fixture_for_session_owner(&data_url, Some(session_id))
         .await;
@@ -44,17 +33,10 @@ pub(super) async fn with_loaded_http_document_async(
     session_id: &str,
     target_id: &str,
 ) {
-    ctx.conn
-        .insert_browser_context(BrowserContext::new("BID-1".into()));
-    {
-        let bc = ctx
-            .conn
-            .browser_context
-            .as_mut()
-            .expect("browser context should be installed before loading test page");
-        bc.set_active_target_id(target_id.to_owned());
-        bc.attach_active_session(session_id.to_owned());
-    }
+    let mut browser_context = BrowserContext::new("BID-1".into());
+    browser_context.set_active_target_id(target_id.to_owned());
+    browser_context.attach_active_session(session_id.to_owned());
+    ctx.conn.insert_browser_context(browser_context);
     ctx.install_navigation_fixture_for_session_owner(url, Some(session_id))
         .await;
     let bc = ctx

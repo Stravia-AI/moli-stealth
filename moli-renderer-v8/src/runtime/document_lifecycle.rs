@@ -62,6 +62,11 @@ impl RendererDocumentToken {
     pub const fn successor_for_testing(self) -> Self {
         Self::with_id(self.page_id, self.lifecycle_document_id.successor())
     }
+
+    #[doc(hidden)]
+    pub const fn lifecycle_document_id_for_diagnostics(self) -> u64 {
+        self.lifecycle_document_id.0
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -1113,11 +1118,155 @@ fn trace_lifecycle_transition(event: &RendererDocumentLifecycleEvent) {
         kind = ?event.kind,
         "renderer document lifecycle transition"
     );
+    if moli_trace::browser_owner_trace_enabled() {
+        let identity = RendererDocumentLifecycleIdentity {
+            frame: event.frame,
+            document: event.document,
+            epoch: event.epoch,
+        };
+        let (kind, reason, last_reached) = machine_trace_lifecycle_kind(event.kind);
+        moli_trace::emit_browser_owner_trace_record(
+            &moli_trace::BrowserOwnerTraceRecord::new(
+                "renderer_lifecycle_reached",
+                "lifecycle",
+                "renderer-document",
+                "renderer-output",
+            )
+            .with_document_lifecycle_identity(Some(machine_trace_document(identity)))
+            .with_renderer_lifecycle(
+                Some(event.sequence),
+                Some(kind),
+                reason,
+                last_reached,
+            ),
+        );
+        if moli_trace::browser_owner_human_trace_enabled() {
+            trace_lifecycle_transition_human(event, identity);
+        }
+    }
+}
+
+fn trace_lifecycle_transition_human(
+    event: &RendererDocumentLifecycleEvent,
+    identity: RendererDocumentLifecycleIdentity,
+) {
+    tracing::info!(
+        target: "moli_browser_owner",
+        browser_instance_id = ?Option::<u64>::None,
+        browser_context_id = ?Option::<&str>::None,
+        target_id = ?Option::<&str>::None,
+        page_residence_generation = ?Option::<u64>::None,
+        navigation_request_id = ?Option::<u64>::None,
+        renderer_agent_attachment_id = ?Option::<u64>::None,
+        document_lifecycle_identity = ?Some(identity),
+        browser_action_id = ?Option::<u64>::None,
+        browser_fact_sequence = ?Option::<u64>::None,
+        source = "lifecycle",
+        navigation_origin = ?Option::<&str>::None,
+        owner_state_before = "renderer-document",
+        owner_state_after = "renderer-output",
+        frontend_projection_sequence = ?Option::<u64>::None,
+        renderer_lifecycle_sequence = event.sequence,
+        stage = "renderer_lifecycle_reached",
+        kind = ?event.kind,
+        "browser navigation owner trace"
+    );
+}
+
+pub(super) fn machine_trace_document(
+    identity: RendererDocumentLifecycleIdentity,
+) -> moli_trace::BrowserOwnerTraceDocument {
+    moli_trace::BrowserOwnerTraceDocument::new(
+        identity.document.page_id.as_u64(),
+        identity.document.lifecycle_document_id.0,
+        identity.epoch.0,
+    )
+}
+
+fn machine_trace_lifecycle_kind(
+    kind: RendererDocumentLifecycleEventKind,
+) -> (&'static str, Option<&'static str>, Option<&'static str>) {
+    match kind {
+        RendererDocumentLifecycleEventKind::Started { reason } => {
+            ("started", Some(machine_trace_start_reason(reason)), None)
+        }
+        RendererDocumentLifecycleEventKind::Milestone(milestone) => {
+            (machine_trace_milestone(milestone), None, None)
+        }
+        RendererDocumentLifecycleEventKind::Terminated {
+            last_reached,
+            reason,
+        } => (
+            "terminated",
+            Some(machine_trace_termination_reason(reason)),
+            last_reached.map(machine_trace_milestone),
+        ),
+    }
+}
+
+fn machine_trace_start_reason(reason: RendererLifecycleStartReason) -> &'static str {
+    match reason {
+        RendererLifecycleStartReason::InitialDocument => "initial-document",
+        RendererLifecycleStartReason::CrossDocumentCommit => "cross-document-commit",
+        RendererLifecycleStartReason::ExplicitDocumentOpen => "explicit-document-open",
+        RendererLifecycleStartReason::JavascriptDocumentReplacement => {
+            "javascript-document-replacement"
+        }
+    }
+}
+
+fn machine_trace_termination_reason(reason: RendererDocumentTerminationReason) -> &'static str {
+    match reason {
+        RendererDocumentTerminationReason::SupersededByCrossDocumentNavigation => {
+            "superseded-by-cross-document-navigation"
+        }
+        RendererDocumentTerminationReason::RestartedByDocumentOpen => "restarted-by-document-open",
+        RendererDocumentTerminationReason::ReplacedByJavascriptResult => {
+            "replaced-by-javascript-result"
+        }
+        RendererDocumentTerminationReason::MainResourceLoadFailed => "main-resource-load-failed",
+        RendererDocumentTerminationReason::Stopped => "stopped",
+        RendererDocumentTerminationReason::Detached => "detached",
+    }
+}
+
+fn machine_trace_milestone(milestone: RendererDocumentLifecycleMilestone) -> &'static str {
+    match milestone {
+        RendererDocumentLifecycleMilestone::DomContentLoaded => "dom-content-loaded",
+        RendererDocumentLifecycleMilestone::Load => "load",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_trace_lifecycle_labels_are_stable() {
+        assert_eq!(
+            machine_trace_lifecycle_kind(RendererDocumentLifecycleEventKind::Started {
+                reason: RendererLifecycleStartReason::CrossDocumentCommit,
+            }),
+            ("started", Some("cross-document-commit"), None)
+        );
+        assert_eq!(
+            machine_trace_lifecycle_kind(RendererDocumentLifecycleEventKind::Milestone(
+                RendererDocumentLifecycleMilestone::DomContentLoaded,
+            )),
+            ("dom-content-loaded", None, None)
+        );
+        assert_eq!(
+            machine_trace_lifecycle_kind(RendererDocumentLifecycleEventKind::Terminated {
+                last_reached: Some(RendererDocumentLifecycleMilestone::Load),
+                reason: RendererDocumentTerminationReason::SupersededByCrossDocumentNavigation,
+            }),
+            (
+                "terminated",
+                Some("superseded-by-cross-document-navigation"),
+                Some("load"),
+            )
+        );
+    }
 
     fn journal() -> RendererDocumentLifecycleJournal {
         RendererDocumentLifecycleJournal::new_initial_at(PageId::new_for_testing(7), 10)

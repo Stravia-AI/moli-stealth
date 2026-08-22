@@ -1,6 +1,7 @@
 use crate::conn::{
-    BackgroundNavigationBodyCompletionSink, CapturedBody, CdpConnection, Cmd, DEFAULT_LOADER_ID,
-    PendingStreamingDocumentResponseNavigation, monotonic_timestamp_seconds,
+    BrowserOwnerPausedNavigationSidecar, CapturedBody, CdpConnection, Cmd, CommandDispatchContext,
+    DEFAULT_LOADER_ID, PendingFetchNavigation, TargetPageResidenceIdentity,
+    monotonic_timestamp_seconds,
 };
 use crate::devtools_runtime::{
     DevToolsAuthChallengeAction, DevToolsCommand, DevToolsContinueInterceptedRequestCommand,
@@ -10,6 +11,7 @@ use crate::devtools_runtime::{
 };
 use crate::domains::command_output::CommandOutputPlan;
 use crate::domains::{activity, network, page};
+use moli_core::browser_host::BrowserPausedNavigationDecision;
 use moli_core::page::{
     CompletedPageCommand, RendererSyntheticResponseBody, SubresourceResourceType,
 };
@@ -24,6 +26,7 @@ use super::navigation::{
     complete_tokened_materialized_navigation_as_background_events_async,
     load_or_pause_navigation_for_auth_as_background_events_async,
 };
+use super::navigation_resume::continue_streaming_document_response_in_background;
 use super::params::{
     CloseWebSocketParams, ContinueRequestParams, ContinueResponseParams,
     DispatchWebSocketMessageParams, FailRequestParams, FulfillRequestParams,
@@ -36,8 +39,8 @@ use super::state::{
     take_pending_subresource_response_request_for_action_session,
 };
 use super::{
-    FetchCommandOutput, FetchCommandTaskStep, PendingFetchCommandDispatch, PendingFetchCommandKind,
-    PendingFetchCommandOperation,
+    CompletedFetchCommandOperation, FetchCommandOutput, FetchCommandTaskStep,
+    PendingFetchCommandDispatch, PendingFetchCommandKind, PendingFetchCommandOperation,
 };
 
 const BLOCKED_BY_CLIENT_ERROR_TEXT: &str = "net::ERR_BLOCKED_BY_CLIENT";
@@ -55,6 +58,7 @@ pub(super) fn start_devtools_fetch_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: DevToolsCommand,
+    admit_main_document_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     match command {
         DevToolsCommand::ContinueInterceptedRequest(command) => {
@@ -63,6 +67,7 @@ pub(super) fn start_devtools_fetch_command(
                 command_id,
                 command_session_id,
                 &command,
+                admit_main_document_to_browser_owner,
             )
         }
         DevToolsCommand::ContinueInterceptedResponse(command) => {
@@ -71,6 +76,7 @@ pub(super) fn start_devtools_fetch_command(
                 command_id,
                 command_session_id,
                 &command,
+                admit_main_document_to_browser_owner,
             )
         }
         DevToolsCommand::ContinueWithAuth(command) => {
@@ -79,6 +85,7 @@ pub(super) fn start_devtools_fetch_command(
                 command_id,
                 command_session_id,
                 &command,
+                admit_main_document_to_browser_owner,
             )
         }
         DevToolsCommand::FailInterceptedRequest(command) => {
@@ -87,6 +94,7 @@ pub(super) fn start_devtools_fetch_command(
                 command_id,
                 command_session_id,
                 command,
+                admit_main_document_to_browser_owner,
             )
         }
         DevToolsCommand::FulfillInterceptedRequest(command) => {
@@ -95,6 +103,7 @@ pub(super) fn start_devtools_fetch_command(
                 command_id,
                 command_session_id,
                 command,
+                admit_main_document_to_browser_owner,
             )
         }
         _ => FetchCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -128,11 +137,12 @@ fn parse_continue_request_url(raw_url: &str) -> Result<Url, ()> {
 }
 
 pub(super) enum PendingContinueRequestState {
+    BrowserOwnerNavigationDecision,
+    CompatibilityNavigation {
+        pending: Box<crate::conn::PendingFetchNavigation>,
+    },
     SubresourceFetch {
         correlation: PreparedSubresourceCorrelation,
-    },
-    Navigation {
-        pending: Box<crate::conn::PendingFetchNavigation>,
     },
 }
 
@@ -158,11 +168,12 @@ pub(super) fn start_continue_request_command(
             ));
         }
     };
-    start_devtools_fetch_command(
+    start_devtools_continue_intercepted_request_command(
         conn,
         cmd.id,
         cmd.session_id,
-        DevToolsCommand::ContinueInterceptedRequest(command),
+        &command,
+        true,
     )
 }
 
@@ -214,6 +225,7 @@ fn start_devtools_continue_intercepted_request_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: &DevToolsContinueInterceptedRequestCommand,
+    admit_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     let parsed_url = match parsed_continue_request_url(command) {
         Ok(parsed_url) => parsed_url,
@@ -355,45 +367,96 @@ fn start_devtools_continue_intercepted_request_command(
             PendingFetchCommandOperation::Page(pending_page),
         ));
     }
-    if let Some(mut pending) =
+    if let Some(pending) =
         take_pending_navigation(conn, command_session_id, action_session_id, &request_id)
     {
-        if command.intercept_response {
-            pending.intercept_response = true;
-            pending.response_stage_url_match_policy =
-                crate::conn::ResponseStageUrlMatchPolicy::AlreadyMatched;
+        if !admit_to_browser_owner {
+            let mut pending = pending;
+            apply_continue_request_to_pending_navigation(conn, &mut pending, parsed_url, command);
+            return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::ContinueRequest {
+                    state: Box::new(PendingContinueRequestState::CompatibilityNavigation {
+                        pending: Box::new(pending),
+                    }),
+                },
+                PendingFetchCommandOperation::Ready,
+            ));
         }
-        if let Some(parsed) = parsed_url {
-            pending.navigation.requested_url = parsed;
-        }
-        if let Some(method) = command.method.clone() {
-            pending.navigation.request_method = method;
-        }
-        if let Some(body) = command.post_data.clone() {
-            pending.navigation.set_request_body_text(body);
-        }
-        if let Some(headers) = command.headers.clone() {
-            pending.navigation.request_headers = headers;
-        }
-        pending.request_cookie_report = page::navigation_cookie_access_report(
-            conn,
-            &pending.navigation.requested_url,
-            &pending.navigation.request_method,
-            None,
-            pending.navigation.request_load_policy,
-            None,
+        let Some(page_owner) = page_owner_for_pending_navigation(conn, &pending) else {
+            let pending_request_id = pending.fetch_request_id.clone();
+            if conn
+                .register_pending_fetch_navigation_request_for_session_owner(
+                    command_session_id,
+                    pending,
+                )
+                .is_none()
+            {
+                tracing::error!(
+                    request_id = %pending_request_id,
+                    "failed to restore paused navigation after Page owner capture failure"
+                );
+            }
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+            ));
+        };
+        let decision = BrowserPausedNavigationDecision::continue_request(
+            parsed_url,
+            command.method.clone(),
+            command.post_data.clone(),
+            command.headers.clone(),
+            command.intercept_response,
         );
-        return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-            conn,
-            command_id,
-            command_session_id,
-            PendingFetchCommandKind::ContinueRequest {
-                state: Box::new(PendingContinueRequestState::Navigation {
-                    pending: Box::new(pending),
-                }),
-            },
-            PendingFetchCommandOperation::Ready,
-        ));
+        let publication = conn.publish_browser_owner_paused_navigation_decision(
+            page_owner.clone(),
+            pending,
+            decision,
+            CommandDispatchContext::default(),
+        );
+        return match publication {
+            Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::ContinueRequest {
+                    state: Box::new(PendingContinueRequestState::BrowserOwnerNavigationDecision),
+                },
+                PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+            )),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                if let Some(pending) = pending {
+                    match pending {
+                        BrowserOwnerPausedNavigationSidecar::Request(pending) => {
+                            restore_pending_navigation_after_owner_publication_failure(
+                                conn,
+                                &page_owner,
+                                command_session_id,
+                                pending,
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                            tracing::error!(
+                                "continueRequest publication returned an auth-navigation sidecar"
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Response(_) => {
+                            tracing::error!(
+                                "continueRequest publication returned a response-navigation sidecar"
+                            );
+                        }
+                    }
+                }
+                FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                ))
+            }
+        };
     }
     pending_request_action_output_plan(
         conn,
@@ -409,12 +472,23 @@ fn start_devtools_continue_intercepted_request_command(
 pub(super) async fn complete_continue_request_command_async(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    completed: Option<Result<CompletedPageCommand, String>>,
+    completed: CompletedFetchCommandOperation,
     state: PendingContinueRequestState,
     out: &mut FetchCommandOutput,
 ) {
     match state {
+        PendingContinueRequestState::BrowserOwnerNavigationDecision => {
+            let Some(completed) = completed.into_browser_owner_paused_navigation_decision() else {
+                out.push_error(-32000, "Missing Browser Owner completion");
+                return;
+            };
+            match completed {
+                Ok(completed) => out.extend_browser_owner_projection_as_command_response(completed),
+                Err(error) => out.push_error(-32000, error),
+            }
+        }
         PendingContinueRequestState::SubresourceFetch { correlation } => {
+            let completed = completed.into_page_completion();
             if let Err(error) = finish_continue_subresource_request(conn, session_id, completed) {
                 correlation.rollback(conn, session_id);
                 out.push_error(-32000, error);
@@ -422,7 +496,7 @@ pub(super) async fn complete_continue_request_command_async(
             }
             emit_devtools_empty_success(out);
         }
-        PendingContinueRequestState::Navigation { pending } => {
+        PendingContinueRequestState::CompatibilityNavigation { pending } => {
             emit_devtools_empty_success(out);
             load_or_pause_navigation_for_auth_as_background_events_async(
                 conn, out, *pending, None, None,
@@ -432,20 +506,54 @@ pub(super) async fn complete_continue_request_command_async(
     }
 }
 
+fn apply_continue_request_to_pending_navigation(
+    conn: &mut CdpConnection,
+    pending: &mut PendingFetchNavigation,
+    parsed_url: Option<Url>,
+    command: &DevToolsContinueInterceptedRequestCommand,
+) {
+    if command.intercept_response {
+        pending.intercept_response = true;
+        pending.response_stage_url_match_policy =
+            crate::conn::ResponseStageUrlMatchPolicy::AlreadyMatched;
+    }
+    if let Some(parsed) = parsed_url {
+        pending.navigation.requested_url = parsed;
+    }
+    if let Some(method) = command.method.clone() {
+        pending.navigation.request_method = method;
+    }
+    if let Some(body) = command.post_data.clone() {
+        pending.navigation.set_request_body_text(body);
+    }
+    if let Some(headers) = command.headers.clone() {
+        pending.navigation.request_headers = headers;
+    }
+    pending.request_cookie_report = page::navigation_cookie_access_report(
+        conn,
+        &pending.navigation.requested_url,
+        &pending.navigation.request_method,
+        None,
+        pending.navigation.request_load_policy,
+        None,
+    );
+}
+
 fn finish_continue_subresource_request(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
     completed: Option<Result<CompletedPageCommand, String>>,
 ) -> Result<(), String> {
     let completion = completed.ok_or_else(|| "Missing renderer completion".to_owned())??;
-    let page = conn.loaded_page_mut_for_protocol_access(session_id)?;
+    let mut page = conn.loaded_page_mut_for_protocol_access(session_id)?;
     page.finish_continue_pending_subresource_fetch(completion)
         .map(|_| ())
         .map_err(|error| format!("subresource fetch continue failed: {error}"))
 }
 
 pub(super) enum PendingFailRequestState {
-    Navigation {
+    BrowserOwnerNavigationDecision,
+    CompatibilityNavigation {
         pending: Box<crate::conn::PendingFetchNavigation>,
         error_text: String,
     },
@@ -477,12 +585,7 @@ pub(super) fn start_fail_request_command(
     let error_text = navigation_fail_request_error_text(params.error_reason);
     let command =
         build_cdp_fail_intercepted_request_command(conn, cmd, params.request_id, error_text);
-    start_devtools_fetch_command(
-        conn,
-        cmd.id,
-        cmd.session_id,
-        DevToolsCommand::FailInterceptedRequest(command),
-    )
+    start_devtools_fail_intercepted_request_command(conn, cmd.id, cmd.session_id, command, true)
 }
 
 fn build_cdp_fail_intercepted_request_command(
@@ -505,6 +608,7 @@ fn start_devtools_fail_intercepted_request_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: DevToolsFailInterceptedRequestCommand,
+    admit_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     let validate_request_id = command.context.protocol == DevToolsProtocol::Cdp;
     let request_id = command.request_id.into_string();
@@ -518,18 +622,91 @@ fn start_devtools_fail_intercepted_request_command(
     if let Some(pending) =
         take_pending_navigation(conn, command_session_id, action_session_id, &request_id)
     {
-        return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-            conn,
-            command_id,
-            command_session_id,
-            PendingFetchCommandKind::FailRequest {
-                state: Box::new(PendingFailRequestState::Navigation {
-                    pending: Box::new(pending),
-                    error_text,
-                }),
-            },
-            PendingFetchCommandOperation::Ready,
-        ));
+        if !admit_to_browser_owner {
+            // Direct typed DevTools commands still execute inside one borrowed
+            // CdpConnection future. Until that frontend exposes its own
+            // scheduler-visible task step, publishing and awaiting a Browser
+            // Host reply here would prevent the Host from borrowing the
+            // physical executor. Raw/nested CDP uses the owner path below,
+            // including id-less notifications.
+            return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FailRequest {
+                    state: Box::new(PendingFailRequestState::CompatibilityNavigation {
+                        pending: Box::new(pending),
+                        error_text,
+                    }),
+                },
+                PendingFetchCommandOperation::Ready,
+            ));
+        }
+        let Some(page_owner) = page_owner_for_pending_navigation(conn, &pending) else {
+            let pending_request_id = pending.fetch_request_id.clone();
+            if conn
+                .register_pending_fetch_navigation_request_for_session_owner(
+                    command_session_id,
+                    pending,
+                )
+                .is_none()
+            {
+                tracing::error!(
+                    request_id = %pending_request_id,
+                    "failed to restore paused navigation after Page owner capture failure"
+                );
+            }
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+            ));
+        };
+        let publication = conn.publish_browser_owner_paused_navigation_decision(
+            page_owner.clone(),
+            pending,
+            BrowserPausedNavigationDecision::fail(error_text),
+            CommandDispatchContext::default(),
+        );
+        return match publication {
+            Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FailRequest {
+                    state: Box::new(PendingFailRequestState::BrowserOwnerNavigationDecision),
+                },
+                PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+            )),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                if let Some(pending) = pending {
+                    match pending {
+                        BrowserOwnerPausedNavigationSidecar::Request(pending) => {
+                            restore_pending_navigation_after_owner_publication_failure(
+                                conn,
+                                &page_owner,
+                                command_session_id,
+                                pending,
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                            tracing::error!(
+                                "failRequest publication returned an auth-navigation sidecar"
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Response(_) => {
+                            tracing::error!(
+                                "failRequest publication returned a response-navigation sidecar"
+                            );
+                        }
+                    }
+                }
+                FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                ))
+            }
+        };
     }
 
     if let Some(pending) = take_pending_subresource_fetch_request_for_action_session(
@@ -648,18 +825,82 @@ fn start_devtools_fail_intercepted_request_command(
             &request_id,
         )
     {
-        return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-            conn,
-            command_id,
-            command_session_id,
-            PendingFetchCommandKind::FailRequest {
-                state: Box::new(PendingFailRequestState::ResponseTransfer {
-                    transfer: Box::new(transfer),
-                    error_text,
-                }),
-            },
-            PendingFetchCommandOperation::Ready,
-        ));
+        if !admit_to_browser_owner {
+            return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FailRequest {
+                    state: Box::new(PendingFailRequestState::ResponseTransfer {
+                        transfer: Box::new(transfer),
+                        error_text,
+                    }),
+                },
+                PendingFetchCommandOperation::Ready,
+            ));
+        }
+        let Some(page_owner) = page_owner_for_navigation_state(conn, transfer.navigation()) else {
+            let restored = conn.register_pending_fetch_response_transfer_for_session_owner(
+                command_session_id,
+                request_id,
+                transfer,
+            );
+            if !restored {
+                tracing::error!(
+                    "failed to restore failed response navigation after Page owner capture failure"
+                );
+            }
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+            ));
+        };
+        let publication = conn.publish_browser_owner_paused_navigation_response_decision(
+            page_owner.clone(),
+            transfer,
+            BrowserPausedNavigationDecision::fail(error_text),
+            CommandDispatchContext::default(),
+        );
+        return match publication {
+            Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FailRequest {
+                    state: Box::new(PendingFailRequestState::BrowserOwnerNavigationDecision),
+                },
+                PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+            )),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                if let Some(pending) = pending {
+                    match pending {
+                        BrowserOwnerPausedNavigationSidecar::Response(transfer) => {
+                            restore_pending_response_transfer_after_owner_publication_failure(
+                                conn,
+                                &page_owner,
+                                command_session_id,
+                                *transfer,
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Request(_) => {
+                            tracing::error!(
+                                "failRequest publication returned a request-navigation sidecar"
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                            tracing::error!(
+                                "failRequest publication returned an auth-navigation sidecar"
+                            );
+                        }
+                    }
+                }
+                FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                ))
+            }
+        };
     }
 
     pending_request_action_output_plan(conn, command_session_id, &request_id, validate_request_id)
@@ -671,12 +912,22 @@ fn start_devtools_fail_intercepted_request_command(
 pub(super) async fn complete_fail_request_command_async(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    completed: Option<Result<CompletedPageCommand, String>>,
+    completed: CompletedFetchCommandOperation,
     state: PendingFailRequestState,
     out: &mut FetchCommandOutput,
 ) {
     match state {
-        PendingFailRequestState::Navigation {
+        PendingFailRequestState::BrowserOwnerNavigationDecision => {
+            let Some(completed) = completed.into_browser_owner_paused_navigation_decision() else {
+                out.push_error(-32000, "Missing Browser Owner completion");
+                return;
+            };
+            match completed {
+                Ok(completed) => out.extend_browser_owner_projection_as_command_response(completed),
+                Err(error) => out.push_error(-32000, error),
+            }
+        }
+        PendingFailRequestState::CompatibilityNavigation {
             pending,
             error_text,
         } => {
@@ -699,7 +950,7 @@ pub(super) async fn complete_fail_request_command_async(
             .await;
         }
         PendingFailRequestState::SubresourceFetch { pending } => {
-            let Some(completed) = completed else {
+            let Some(completed) = completed.into_page_completion() else {
                 out.push_error(-32000, "Missing renderer completion");
                 return;
             };
@@ -711,7 +962,7 @@ pub(super) async fn complete_fail_request_command_async(
                 }
             };
             match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) = page.finish_fail_pending_subresource_fetch(completion) {
                         out.push_error(-32000, format!("subresource fetch fail failed: {error}"));
                         return;
@@ -738,7 +989,7 @@ pub(super) async fn complete_fail_request_command_async(
             out.extend_background_events(events);
         }
         PendingFailRequestState::SubresourceResponse { pending } => {
-            let Some(completed) = completed else {
+            let Some(completed) = completed.into_page_completion() else {
                 out.push_error(-32000, "Missing renderer completion");
                 return;
             };
@@ -750,7 +1001,7 @@ pub(super) async fn complete_fail_request_command_async(
                 }
             };
             match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) = page.finish_fail_pending_subresource_response(completion) {
                         out.push_error(
                             -32000,
@@ -800,7 +1051,80 @@ pub(super) async fn complete_fail_request_command_async(
     }
 }
 
+fn page_owner_for_pending_navigation(
+    conn: &mut CdpConnection,
+    pending: &PendingFetchNavigation,
+) -> Option<TargetPageResidenceIdentity> {
+    page_owner_for_navigation_state(conn, &pending.navigation)
+}
+
+fn page_owner_for_navigation_state(
+    conn: &mut CdpConnection,
+    navigation: &crate::conn::NavigationDispatchState,
+) -> Option<TargetPageResidenceIdentity> {
+    let route = conn
+        .target_session_route_for_target_id(&navigation.frame_id)
+        .or_else(|| conn.session_route(navigation.navigate_session_id.as_deref()))?;
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(route);
+    owner_scope
+        .conn_mut()
+        .target_page_residence_identity_for_session(None)
+}
+
+fn restore_pending_navigation_after_owner_publication_failure(
+    conn: &mut CdpConnection,
+    page_owner: &TargetPageResidenceIdentity,
+    fallback_session_id: Option<&str>,
+    pending: PendingFetchNavigation,
+) {
+    let restored = if let Some(route) = conn.target_page_owner_route_if_current(page_owner) {
+        let mut owner_scope = conn.scoped_none_session_owner_route_override(route);
+        owner_scope
+            .conn_mut()
+            .register_pending_fetch_navigation_request_for_session_owner(None, pending)
+    } else {
+        conn.register_pending_fetch_navigation_request_for_session_owner(
+            fallback_session_id,
+            pending,
+        )
+    };
+    if restored.is_none() {
+        tracing::error!(
+            target_id = page_owner.target_id(),
+            "failed to restore paused navigation after Browser Host publication failure"
+        );
+    }
+}
+
+fn restore_pending_response_transfer_after_owner_publication_failure(
+    conn: &mut CdpConnection,
+    page_owner: &TargetPageResidenceIdentity,
+    fallback_session_id: Option<&str>,
+    transfer: crate::conn::PausedDocumentTransfer,
+) {
+    let request_id = transfer.fetch_request_id().to_owned();
+    let restored = if let Some(route) = conn.target_page_owner_route_if_current(page_owner) {
+        let mut owner_scope = conn.scoped_none_session_owner_route_override(route);
+        owner_scope
+            .conn_mut()
+            .register_pending_fetch_response_transfer_for_session_owner(None, request_id, transfer)
+    } else {
+        conn.register_pending_fetch_response_transfer_for_session_owner(
+            fallback_session_id,
+            request_id,
+            transfer,
+        )
+    };
+    if !restored {
+        tracing::error!(
+            target_id = page_owner.target_id(),
+            "failed to restore response-paused navigation after Browser Host publication failure"
+        );
+    }
+}
+
 pub(super) enum PendingFulfillRequestState {
+    BrowserOwnerNavigationDecision,
     SubresourceFetch {
         pending: Box<crate::conn::PendingSubresourceFetchRequest>,
         request_id: String,
@@ -877,12 +1201,7 @@ pub(super) fn start_fulfill_request_command(
         body,
         params.response_phrase,
     );
-    start_devtools_fetch_command(
-        conn,
-        cmd.id,
-        cmd.session_id,
-        DevToolsCommand::FulfillInterceptedRequest(command),
-    )
+    start_devtools_fulfill_intercepted_request_command(conn, cmd.id, cmd.session_id, command, true)
 }
 
 fn build_cdp_fulfill_intercepted_request_command(
@@ -911,12 +1230,13 @@ fn start_devtools_fulfill_intercepted_request_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: DevToolsFulfillInterceptedRequestCommand,
+    admit_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     let validate_request_id = command.context.protocol == DevToolsProtocol::Cdp;
     let request_id = command.request_id.into_string();
     let response_code = command.response_code;
     let response_headers = command.response_headers;
-    let decoded_body = command.body.map(RendererSyntheticResponseBody::from_bytes);
+    let response_body = command.body;
     let _ = command.response_phrase;
 
     let action_session_id = action_session_id_for_devtools_context(
@@ -931,6 +1251,7 @@ fn start_devtools_fulfill_intercepted_request_command(
         &request_id,
     ) {
         let pending = pending;
+        let decoded_body = response_body.map(RendererSyntheticResponseBody::from_bytes);
         if let Some(continuation) = pending.detached_parser_script_fetch_continuation() {
             let body = decoded_body
                 .unwrap_or_else(RendererSyntheticResponseBody::empty)
@@ -996,6 +1317,7 @@ fn start_devtools_fulfill_intercepted_request_command(
         action_session_id,
         &request_id,
     ) {
+        let decoded_body = response_body.map(RendererSyntheticResponseBody::from_bytes);
         let page = match conn.loaded_page_mut_for_protocol_access(command_session_id) {
             Ok(page) => page,
             Err(message) if message == "NoDocumentLoaded" => {
@@ -1038,20 +1360,91 @@ fn start_devtools_fulfill_intercepted_request_command(
     if let Some(pending) =
         take_pending_navigation(conn, command_session_id, action_session_id, &request_id)
     {
-        return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-            conn,
-            command_id,
-            command_session_id,
-            PendingFetchCommandKind::FulfillRequest {
-                state: Box::new(PendingFulfillRequestState::Navigation {
-                    pending: Box::new(pending),
-                    response_code,
-                    response_headers: response_headers.clone(),
-                    decoded_body,
-                }),
-            },
-            PendingFetchCommandOperation::Ready,
-        ));
+        if !admit_to_browser_owner {
+            return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FulfillRequest {
+                    state: Box::new(PendingFulfillRequestState::Navigation {
+                        pending: Box::new(pending),
+                        response_code,
+                        response_headers,
+                        decoded_body: response_body.map(RendererSyntheticResponseBody::from_bytes),
+                    }),
+                },
+                PendingFetchCommandOperation::Ready,
+            ));
+        }
+        let Some(page_owner) = page_owner_for_pending_navigation(conn, &pending) else {
+            let pending_request_id = pending.fetch_request_id.clone();
+            if conn
+                .register_pending_fetch_navigation_request_for_session_owner(
+                    command_session_id,
+                    pending,
+                )
+                .is_none()
+            {
+                tracing::error!(
+                    request_id = %pending_request_id,
+                    "failed to restore fulfilled navigation after Page owner capture failure"
+                );
+            }
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+            ));
+        };
+        let publication = conn.publish_browser_owner_paused_navigation_decision(
+            page_owner.clone(),
+            pending,
+            BrowserPausedNavigationDecision::fulfill(
+                response_code,
+                response_headers,
+                response_body,
+            ),
+            CommandDispatchContext::default(),
+        );
+        return match publication {
+            Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FulfillRequest {
+                    state: Box::new(PendingFulfillRequestState::BrowserOwnerNavigationDecision),
+                },
+                PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+            )),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                if let Some(pending) = pending {
+                    match pending {
+                        BrowserOwnerPausedNavigationSidecar::Request(pending) => {
+                            restore_pending_navigation_after_owner_publication_failure(
+                                conn,
+                                &page_owner,
+                                command_session_id,
+                                pending,
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Response(_) => {
+                            tracing::error!(
+                                "fulfillRequest publication returned a response-navigation sidecar"
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                            tracing::error!(
+                                "fulfillRequest publication returned an auth-navigation sidecar"
+                            );
+                        }
+                    }
+                }
+                FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                ))
+            }
+        };
     }
 
     if let Some(transfer) = conn
@@ -1060,20 +1453,88 @@ fn start_devtools_fulfill_intercepted_request_command(
             &request_id,
         )
     {
-        return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-            conn,
-            command_id,
-            command_session_id,
-            PendingFetchCommandKind::FulfillRequest {
-                state: Box::new(PendingFulfillRequestState::ResponseTransfer {
-                    transfer: Box::new(transfer),
-                    response_code,
-                    response_headers,
-                    decoded_body,
-                }),
-            },
-            PendingFetchCommandOperation::Ready,
-        ));
+        if !admit_to_browser_owner {
+            return FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FulfillRequest {
+                    state: Box::new(PendingFulfillRequestState::ResponseTransfer {
+                        transfer: Box::new(transfer),
+                        response_code,
+                        response_headers,
+                        decoded_body: response_body.map(RendererSyntheticResponseBody::from_bytes),
+                    }),
+                },
+                PendingFetchCommandOperation::Ready,
+            ));
+        }
+        let Some(page_owner) = page_owner_for_navigation_state(conn, transfer.navigation()) else {
+            let restored = conn.register_pending_fetch_response_transfer_for_session_owner(
+                command_session_id,
+                request_id,
+                transfer,
+            );
+            if !restored {
+                tracing::error!(
+                    "failed to restore fulfilled response navigation after Page owner capture failure"
+                );
+            }
+            return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+            ));
+        };
+        let publication = conn.publish_browser_owner_paused_navigation_response_decision(
+            page_owner.clone(),
+            transfer,
+            BrowserPausedNavigationDecision::fulfill(
+                response_code,
+                response_headers,
+                response_body,
+            ),
+            CommandDispatchContext::default(),
+        );
+        return match publication {
+            Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                conn,
+                command_id,
+                command_session_id,
+                PendingFetchCommandKind::FulfillRequest {
+                    state: Box::new(PendingFulfillRequestState::BrowserOwnerNavigationDecision),
+                },
+                PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+            )),
+            Err(failure) => {
+                let (error, pending) = failure.into_parts();
+                if let Some(pending) = pending {
+                    match pending {
+                        BrowserOwnerPausedNavigationSidecar::Response(transfer) => {
+                            restore_pending_response_transfer_after_owner_publication_failure(
+                                conn,
+                                &page_owner,
+                                command_session_id,
+                                *transfer,
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Request(_) => {
+                            tracing::error!(
+                                "fulfillRequest publication returned a request-navigation sidecar"
+                            );
+                        }
+                        BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                            tracing::error!(
+                                "fulfillRequest publication returned an auth-navigation sidecar"
+                            );
+                        }
+                    }
+                }
+                FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                ))
+            }
+        };
     }
 
     pending_request_action_output_plan(conn, command_session_id, &request_id, validate_request_id)
@@ -1085,11 +1546,21 @@ fn start_devtools_fulfill_intercepted_request_command(
 pub(super) async fn complete_fulfill_request_command_async(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    completed: Option<Result<CompletedPageCommand, String>>,
+    completed: CompletedFetchCommandOperation,
     state: PendingFulfillRequestState,
     out: &mut FetchCommandOutput,
 ) {
     match state {
+        PendingFulfillRequestState::BrowserOwnerNavigationDecision => {
+            let Some(completed) = completed.into_browser_owner_paused_navigation_decision() else {
+                out.push_error(-32000, "Missing Browser Owner completion");
+                return;
+            };
+            match completed {
+                Ok(completed) => out.extend_browser_owner_projection_as_command_response(completed),
+                Err(error) => out.push_error(-32000, error),
+            }
+        }
         PendingFulfillRequestState::SubresourceFetch {
             pending,
             request_id,
@@ -1097,6 +1568,7 @@ pub(super) async fn complete_fulfill_request_command_async(
             websocket_socket_id,
             register_synthetic_websocket,
         } => {
+            let completed = completed.into_page_completion();
             let Some(completed) = completed else {
                 out.push_error(-32000, "Missing renderer completion");
                 return;
@@ -1109,7 +1581,7 @@ pub(super) async fn complete_fulfill_request_command_async(
                 }
             };
             match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) = page.finish_fulfill_pending_subresource_fetch(completion) {
                         out.push_error(
                             -32000,
@@ -1147,6 +1619,7 @@ pub(super) async fn complete_fulfill_request_command_async(
             out.extend_background_events(events);
         }
         PendingFulfillRequestState::SubresourceResponse { pending } => {
+            let completed = completed.into_page_completion();
             let Some(completed) = completed else {
                 out.push_error(-32000, "Missing renderer completion");
                 return;
@@ -1159,7 +1632,7 @@ pub(super) async fn complete_fulfill_request_command_async(
                 }
             };
             match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) = page.finish_fulfill_pending_subresource_response(completion)
                     {
                         out.push_error(
@@ -1415,7 +1888,7 @@ pub(super) fn complete_websocket_page_command(
         }
     };
     let result = match conn.loaded_page_mut_for_protocol_access(session_id) {
-        Ok(page) => match operation {
+        Ok(mut page) => match operation {
             PendingWebSocketCommandOperation::DispatchText => {
                 page.finish_receive_synthetic_websocket_text(completion)
             }
@@ -1442,6 +1915,7 @@ pub(super) fn complete_websocket_page_command(
 }
 
 pub(super) enum PendingContinueResponseState {
+    BrowserOwnerNavigationDecision,
     ResponseTransfer {
         request_id: String,
         transfer: Box<crate::conn::PausedDocumentTransfer>,
@@ -1495,11 +1969,12 @@ pub(super) fn start_continue_response_command(
         response_headers,
         params.response_phrase,
     );
-    start_devtools_fetch_command(
+    start_devtools_continue_intercepted_response_command(
         conn,
         cmd.id,
         cmd.session_id,
-        DevToolsCommand::ContinueInterceptedResponse(command),
+        &command,
+        true,
     )
 }
 
@@ -1537,6 +2012,7 @@ fn start_devtools_continue_intercepted_response_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: &DevToolsContinueInterceptedResponseCommand,
+    admit_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     let request_id = command.request_id.as_str().to_owned();
     let response_code = command.response_code;
@@ -1554,6 +2030,77 @@ fn start_devtools_continue_intercepted_response_command(
     {
         let _ = &command.response_phrase;
         let transfer_response_headers = response_headers.clone().unwrap_or_default();
+        if admit_to_browser_owner {
+            let Some(page_owner) = page_owner_for_navigation_state(conn, transfer.navigation())
+            else {
+                let restored = conn.register_pending_fetch_response_transfer_for_session_owner(
+                    command_session_id,
+                    request_id,
+                    transfer,
+                );
+                if !restored {
+                    tracing::error!(
+                        "failed to restore paused response navigation after Page owner capture failure"
+                    );
+                }
+                return FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+                ));
+            };
+            let decision = BrowserPausedNavigationDecision::continue_response(
+                response_code,
+                transfer_response_headers.clone(),
+            );
+            let publication = conn.publish_browser_owner_paused_navigation_response_decision(
+                page_owner.clone(),
+                transfer,
+                decision,
+                CommandDispatchContext::default(),
+            );
+            return match publication {
+                Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                    conn,
+                    command_id,
+                    command_session_id,
+                    PendingFetchCommandKind::ContinueResponse {
+                        state: Box::new(
+                            PendingContinueResponseState::BrowserOwnerNavigationDecision,
+                        ),
+                    },
+                    PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+                )),
+                Err(failure) => {
+                    let (error, pending) = failure.into_parts();
+                    if let Some(pending) = pending {
+                        match pending {
+                            BrowserOwnerPausedNavigationSidecar::Response(transfer) => {
+                                restore_pending_response_transfer_after_owner_publication_failure(
+                                    conn,
+                                    &page_owner,
+                                    command_session_id,
+                                    *transfer,
+                                );
+                            }
+                            BrowserOwnerPausedNavigationSidecar::Request(_) => {
+                                tracing::error!(
+                                    "continueResponse publication returned a request-navigation sidecar"
+                                );
+                            }
+                            BrowserOwnerPausedNavigationSidecar::Auth(_) => {
+                                tracing::error!(
+                                    "continueResponse publication returned an auth-navigation sidecar"
+                                );
+                            }
+                        }
+                    }
+                    FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
+                    ))
+                }
+            };
+        }
         if let Some(sender) =
             conn.background_navigation_completion_sender_for_session_owner(command_session_id)
         {
@@ -1731,6 +2278,7 @@ fn start_devtools_continue_intercepted_response_command(
         command_id,
         command_session_id,
         &continue_response_auth_command(command),
+        false,
     ) {
         return step;
     }
@@ -1805,11 +2353,21 @@ async fn continue_response_transfer_inline(
 pub(super) async fn complete_continue_response_command_async(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    completed: Option<Result<CompletedPageCommand, String>>,
+    completed: CompletedFetchCommandOperation,
     state: PendingContinueResponseState,
     out: &mut FetchCommandOutput,
 ) {
     match state {
+        PendingContinueResponseState::BrowserOwnerNavigationDecision => {
+            let Some(completed) = completed.into_browser_owner_paused_navigation_decision() else {
+                out.push_error(-32000, "Missing Browser Owner completion");
+                return;
+            };
+            match completed {
+                Ok(completed) => out.extend_browser_owner_projection_as_command_response(completed),
+                Err(error) => out.push_error(-32000, error),
+            }
+        }
         PendingContinueResponseState::ResponseTransfer {
             request_id,
             transfer,
@@ -1829,6 +2387,7 @@ pub(super) async fn complete_continue_response_command_async(
         }
         PendingContinueResponseState::SubresourceResponse { pending } => {
             let pending = *pending;
+            let completed = completed.into_page_completion();
             let Some(completed) = completed else {
                 out.push_error(-32000, "Missing renderer completion");
                 return;
@@ -1841,7 +2400,7 @@ pub(super) async fn complete_continue_response_command_async(
                 }
             };
             match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) =
                         page.finish_continue_pending_subresource_response(completion)
                     {
@@ -1873,78 +2432,6 @@ pub(super) async fn complete_continue_response_command_async(
             out.extend_background_events(events);
         }
     }
-}
-
-fn continue_streaming_document_response_in_background(
-    conn: &mut CdpConnection,
-    sender: tokio::sync::mpsc::UnboundedSender<page::BackgroundNavigationCompletion>,
-    pending: PendingStreamingDocumentResponseNavigation,
-    response_code: Option<u16>,
-    response_headers: Vec<(String, String)>,
-) {
-    let PendingStreamingDocumentResponseNavigation {
-        document_navigation_token,
-        navigation,
-        response,
-        network_observation_journal,
-        body_progress_source,
-        prepared_document,
-    } = pending;
-    let session_id = navigation.navigate_session_id.clone();
-    let none_session_owner_route = session_id
-        .is_none()
-        .then(|| conn.none_session_owner_route_override())
-        .flatten();
-    let cancellation = response.cancellation_handle();
-    if response_code.is_none()
-        && response_headers.is_empty()
-        && let Some(prepared_document) = prepared_document
-    {
-        conn.arm_background_navigation_completion(&document_navigation_token, Some(cancellation));
-        tokio::task::spawn_local(async move {
-            let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(
-                sender.clone(),
-                document_navigation_token.clone(),
-                navigation.clone(),
-                none_session_owner_route.clone(),
-            );
-            let (engine, navigation_result) =
-                prepared_document.resume_streaming(response, Some(body_completion_sink));
-            let _ = sender.send(page::BackgroundNavigationCompletion::new(
-                document_navigation_token,
-                navigation,
-                none_session_owner_route,
-                engine,
-                Ok(navigation_result),
-            ));
-        });
-        return;
-    }
-    let job = conn.background_streaming_response_navigation_load_job_for_navigation(
-        &navigation,
-        response,
-        network_observation_journal,
-        response_code,
-        response_headers,
-        body_progress_source,
-    );
-    conn.arm_background_navigation_completion(&document_navigation_token, Some(cancellation));
-    tokio::task::spawn_local(async move {
-        let body_completion_sink = BackgroundNavigationBodyCompletionSink::new(
-            sender.clone(),
-            document_navigation_token.clone(),
-            navigation.clone(),
-            none_session_owner_route.clone(),
-        );
-        let (engine, navigation_result) = job.run(Some(body_completion_sink)).await;
-        let _ = sender.send(page::BackgroundNavigationCompletion::new(
-            document_navigation_token,
-            navigation,
-            none_session_owner_route,
-            engine,
-            navigation_result,
-        ));
-    });
 }
 
 #[cfg(test)]
@@ -2078,6 +2565,7 @@ mod protocol_neutral_tests {
             cmd.id,
             cmd.session_id,
             DevToolsCommand::ContinueInterceptedRequest(command),
+            false,
         );
 
         let super::super::FetchCommandTaskStep::Complete(plan) = step else {
@@ -2098,11 +2586,7 @@ mod protocol_neutral_tests {
         assert!(
             browser_context.assign_auxiliary_session_to_target("TID-chain", "SID-aux".to_owned())
         );
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-primary"))
@@ -2167,6 +2651,7 @@ mod protocol_neutral_tests {
             cmd.id,
             cmd.session_id,
             DevToolsCommand::ContinueInterceptedRequest(command),
+            false,
         );
 
         let super::super::FetchCommandTaskStep::Complete(plan) = step else {
@@ -2239,11 +2724,7 @@ mod protocol_neutral_tests {
             browser_context
                 .assign_auxiliary_session_to_target("TID-response-chain", "SID-aux".to_owned())
         );
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-primary"))
@@ -2313,6 +2794,7 @@ mod protocol_neutral_tests {
             cmd.id,
             cmd.session_id,
             DevToolsCommand::ContinueInterceptedResponse(command),
+            false,
         );
 
         let super::super::FetchCommandTaskStep::Complete(plan) = step else {
@@ -2375,11 +2857,7 @@ mod protocol_neutral_tests {
         let mut browser_context = BrowserContext::new("BID-chain-bidi".to_owned());
         browser_context.set_active_target_id("TID-chain-bidi".to_owned());
         browser_context.attach_active_session("SID-primary".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-primary"))
@@ -2441,6 +2919,7 @@ mod protocol_neutral_tests {
             cmd.id,
             cmd.session_id,
             DevToolsCommand::ContinueInterceptedRequest(command),
+            false,
         );
 
         let super::super::FetchCommandTaskStep::Complete(plan) = step else {

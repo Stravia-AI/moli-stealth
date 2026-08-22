@@ -62,6 +62,42 @@ pub(in crate::domains) async fn project_main_document_commit_async(
             continue;
         }
 
+        if let Some(binding) = conn
+            .committed_renderer_document_binding_for_session_owner(context.session_id)
+            .cloned()
+            && let Some(navigation) = binding.navigation.as_ref()
+        {
+            let Some(page) = conn.target_page_residence_identity_for_session(context.session_id)
+            else {
+                tracing::error!(
+                    frame_id = commit.frame_id,
+                    loader_id = commit.loader_id,
+                    "refusing to project a renderer commit without a current Browser Page"
+                );
+                continue;
+            };
+            match conn.take_navigation_commit_facts(navigation, &page) {
+                Ok(projection) => {
+                    tracing::trace!(
+                        browser_navigation_fact_sequence = projection.committed_sequence().get(),
+                        browser_replacement_fact_sequence = projection.replacement_sequence().get(),
+                        frame_id = commit.frame_id,
+                        loader_id = commit.loader_id,
+                        "projecting renderer commit from exact Browser facts"
+                    );
+                }
+                Err(error) => {
+                    tracing::error!(
+                        %error,
+                        frame_id = commit.frame_id,
+                        loader_id = commit.loader_id,
+                        "refusing to project a renderer commit without exact Browser facts"
+                    );
+                    continue;
+                }
+            }
+        }
+
         let session_ids = conn.page_event_session_ids_for_session_owner(context.session_id);
         let mut events = Vec::new();
         for session_id in session_ids {

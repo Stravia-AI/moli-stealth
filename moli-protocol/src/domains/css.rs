@@ -5,7 +5,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::css::{
     GetStyleSheetTextParams as StyleSheetIdParams, SetStyleSheetTextParams,
 };
 use moli_core::page::{
-    CompletedPageCommand, Page, PendingPageCommand, RendererDocumentNodeAttributesResolution,
+    CompletedPageCommand, PendingPageCommand, RendererDocumentNodeAttributesResolution,
 };
 use moli_css_parse::{DeclarationParseOptions, parse_declaration_list};
 use serde::Deserialize;
@@ -383,7 +383,7 @@ pub(crate) fn complete_pending_css_command(
 ) -> CssCommandDispatchStep {
     let command_id = completed.command_id;
     let session_id = completed.session_id.as_deref();
-    let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
         return CssCommandDispatchStep::Complete(CommandOutputPlan::error(
             -32000,
             "NoDocumentLoaded",
@@ -661,10 +661,10 @@ fn add_empty_matched_style_scaffolding(result: &mut Value) {
     result_object.insert("cssKeyframesRules".to_owned(), json!([]));
 }
 
-fn loaded_page_mut_for_session<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_session(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
-) -> Option<&'a mut Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.loaded_page_mut_for_protocol_access(session_id).ok()
 }
 
@@ -737,7 +737,7 @@ mod tests {
     use crate::domains::page::LOADER_ID;
     use crate::testing::{TestContext, wait_until_renderer_document_load};
     use moli_core::page::{
-        CompletedPageCommand, Page, RENDERER_BACKEND_NODE_ID_START, is_renderer_backend_node_id,
+        CompletedPageCommand, RENDERER_BACKEND_NODE_ID_START, is_renderer_backend_node_id,
     };
     use serde_json::Value;
     use serde_json::json;
@@ -767,13 +767,15 @@ mod tests {
     async fn with_loaded_document_async(ctx: &mut TestContext, html: &str) {
         let mut bc = crate::conn::BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
         ctx.install_navigation_fixture_for_session_owner(&format!("data:text/html,{html}"), None)
             .await;
         wait_until_renderer_document_load(ctx, None, "TID-1", LOADER_ID).await;
     }
 
-    fn loaded_page_mut_for_test(ctx: &mut TestContext) -> &mut Page {
+    fn loaded_page_mut_for_test(
+        ctx: &mut TestContext,
+    ) -> moli_core::browser_host::BrowserPageRuntimeLease {
         ctx.conn
             .browser_context
             .as_mut()
@@ -828,8 +830,8 @@ mod tests {
             .as_mut()
             .expect("browser context should exist");
         browser_context.attach_active_session("SID-1".to_owned());
-        browser_context
-            .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+        ctx.conn
+            .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
             .expect("active navigation should start");
         ctx.sent.clear();
     }
@@ -1599,39 +1601,26 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn pending_css_command_keeps_background_owner_route_across_completion() {
         let mut ctx = TestContext::new();
-        let active_page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><style>body { color: red; }</style></head><body></body></html>",
-            )
-            .await
-            .expect("active page should load");
-        let background_page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><style>body { color: green; }</style></head><body></body></html>",
-            )
-            .await
-            .expect("background page should load");
+        let active_url = "data:text/html,<html><head><style>body { color: red; }</style></head><body></body></html>";
+        let background_url = "data:text/html,<html><head><style>body { color: green; }</style></head><body></body></html>";
 
         let mut browser_context = BrowserContext::new("BID-css-owner-route".to_owned());
         browser_context.set_active_target_id("TID-css-active".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_loaded_page_for_test(active_page);
         browser_context.stage_background_target(
             "TID-css-background".to_owned(),
-            None,
-            "data:text/html,<title>background css</title>".to_owned(),
+            Some("SID-css-background".to_owned()),
+            "about:blank".to_owned(),
             None,
             None,
         );
-        browser_context
-            .background_target_mut("TID-css-background")
-            .expect("background target")
-            .replace_loaded_page(Some(background_page));
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(active_url, None)
+            .await;
+        ctx.install_navigation_fixture_for_session_owner(
+            background_url,
+            Some("SID-css-background"),
+        )
+        .await;
 
         let background_route = ctx
             .conn
@@ -1887,7 +1876,7 @@ mod tests {
             })
         );
 
-        let page = loaded_page_mut_for_test(&mut ctx);
+        let mut page = loaded_page_mut_for_test(&mut ctx);
         let _ = page
             .finish_runtime_protocol_message(mutation_completion)
             .expect("runtime mutation completion should finish");
@@ -2007,7 +1996,7 @@ mod tests {
             })
         );
 
-        let page = loaded_page_mut_for_test(&mut ctx);
+        let mut page = loaded_page_mut_for_test(&mut ctx);
         let _ = page
             .finish_runtime_protocol_message(mutation_completion)
             .expect("runtime mutation completion should finish");

@@ -311,7 +311,7 @@ impl PreparedProtocolOutputs {
             }
             RendererOwnerAction::TopLevelHistoryTraversal(traversal) => {
                 crate::domains::page::PagePreparedOutputs::
-                    from_renderer_top_level_history_traversal(traversal)
+                    from_renderer_top_level_history_traversal(conn, session_id, traversal)
                     .append_to_top_level_history_traversal_output_sink(&mut prepared);
             }
             RendererOwnerAction::SubresourceFetchPause {

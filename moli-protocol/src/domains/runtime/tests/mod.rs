@@ -43,13 +43,13 @@ fn load_shared_worker_target(ctx: &mut TestContext, session_id: &str) {
     );
     target.attach_session(session_id.to_owned());
     bc.insert_shared_worker_target(target);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 }
 fn load_dedicated_worker_target(ctx: &mut TestContext, session_id: &str) {
     let browser_context_id = "BID-dedicated".to_owned();
     let mut bc = BrowserContext::new(browser_context_id.clone());
     let mut target = crate::conn::DedicatedWorkerTargetState::new(
-        crate::conn::TargetPageResidenceIdentity::new_for_test(browser_context_id, None, 1),
+        crate::conn::TargetPageResidenceIdentity::new(browser_context_id, None, 0),
         moli_core::RendererOwnerLocalHostId::new_for_testing(1),
         82,
         "TID-dedicated-worker".to_owned(),
@@ -140,23 +140,19 @@ async fn push_loaded_runtime_frontend_enabled_background_context_async(
     session_id: &str,
     html: &str,
 ) {
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async(&format!("data:text/html,{html}"))
-        .await
-        .expect("test background page should load");
     let mut background_context = crate::conn::BrowserContext::new(browser_context_id.to_owned());
-    let _ = background_context
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
     background_context.set_active_target_id(target_id.to_owned());
     background_context.attach_active_session(session_id.to_owned());
     background_context
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    ctx.conn.inactive_browser_contexts.push(background_context);
+    ctx.conn.insert_browser_context(background_context);
+    ctx.install_navigation_fixture_for_session_owner(
+        &format!("data:text/html,{html}"),
+        Some(session_id),
+    )
+    .await;
 }
 async fn with_loaded_runtime_frontend_enabled_background_target_async(
     ctx: &mut TestContext,
@@ -176,13 +172,13 @@ async fn with_loaded_runtime_frontend_enabled_background_target_async(
     browser_context.set_active_target_id(active_target_id.to_owned());
     browser_context.attach_active_session(active_session_id.to_owned());
     browser_context.background_targets.push(background_target);
-    browser_context.mutate_parked_page_session_state(background_target_id, |state| {
-        state
-            .devtools_session_state
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-    });
-    ctx.conn.browser_context = Some(browser_context);
+    browser_context.adopt_background_target_fixture_attachments();
+    browser_context
+        .primary_devtools_session_state_for_target_mut(background_target_id)
+        .expect("background Target frontend state")
+        .runtime_session_state
+        .runtime_frontend_enabled = true;
+    ctx.conn.insert_browser_context(browser_context);
     ctx.install_navigation_fixture_for_session_owner(
         &format!("data:text/html,{html}"),
         Some(background_session_id),

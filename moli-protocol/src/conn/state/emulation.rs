@@ -9,21 +9,6 @@ pub struct EmulatedDeviceMetrics {
     pub screen_height: u32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct EmulatedNetworkConditions {
-    offline: bool,
-}
-
-impl EmulatedNetworkConditions {
-    pub(crate) fn offline() -> Self {
-        Self { offline: true }
-    }
-
-    pub(crate) fn navigator_online(&self) -> bool {
-        !self.offline
-    }
-}
-
 const DEFAULT_VIEWPORT_WIDTH: u32 = 1920;
 const DEFAULT_VIEWPORT_HEIGHT: u32 = 1080;
 const DEFAULT_SCREEN_WIDTH: u32 = 1920;
@@ -213,32 +198,6 @@ pub(crate) fn viewport_surface_install_script(
         surface = surface.as_json_string(),
         descriptor_setup = descriptor_setup,
     )
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct EmulatedGeolocationOverride {
-    pub latitude: f64,
-    pub longitude: f64,
-    pub accuracy: f64,
-    pub altitude: Option<f64>,
-    pub altitude_accuracy: Option<f64>,
-    pub heading: Option<f64>,
-    pub speed: Option<f64>,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum EmulatedGeolocationOverrideState {
-    Position(EmulatedGeolocationOverride),
-    PositionUnavailable,
-}
-
-impl EmulatedGeolocationOverrideState {
-    pub(crate) fn position(&self) -> Option<&EmulatedGeolocationOverride> {
-        match self {
-            Self::Position(position) => Some(position),
-            Self::PositionUnavailable => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

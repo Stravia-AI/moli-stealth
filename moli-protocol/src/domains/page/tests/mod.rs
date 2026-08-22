@@ -3,12 +3,14 @@ use crate::conn::DocumentStartScript;
 use crate::conn::{
     BackgroundTarget, BrowserContext, CdpCommandTaskStep, CdpSchedulerEvent, EmulatedDeviceMetrics,
     FetchInterceptionPattern, FetchRequestStage, NETWORK_ERROR_PAGE_URL, PendingCdpCommandDispatch,
-    ServiceWorkerTargetState, URL_BASE,
+    PendingSubresourceFetchOwnerKind, PendingSubresourceFetchRequest, ServiceWorkerTargetState,
+    URL_BASE,
 };
 use crate::devtools_runtime::{
     AutomationEvent, DevToolsCommand, DevToolsCommandContext, DevToolsCommandResult,
-    DevToolsGetFrameTreeCommand, DevToolsGetFrameTreesCommand, DevToolsProtocol, DevToolsTargetId,
-    NavigationFrameEventKind,
+    DevToolsGetFrameTreeCommand, DevToolsGetFrameTreesCommand, DevToolsHistoryTraversalDestination,
+    DevToolsNavigateCommand, DevToolsNavigationWait, DevToolsProtocol, DevToolsReloadCommand,
+    DevToolsTargetId, DevToolsTraverseHistoryCommand, NavigationFrameEventKind,
 };
 use crate::testing::{
     TestContext, wait_until_frame_stopped_loading, wait_until_message, wait_until_messages,
@@ -20,6 +22,7 @@ use moli_core::page::{
     RendererDocumentLifecycleMilestone, RendererDocumentToken, RendererFrameToken,
     RendererJavaScriptDialogCompletion, RendererJavaScriptDialogId, RendererJavaScriptDialogSource,
     RendererLifecycleEpoch, RendererPendingJavaScriptDialog, RendererServiceWorkerVersionStatus,
+    SubresourceResourceType,
 };
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -163,7 +166,7 @@ fn load_bc_with_target(ctx: &mut TestContext, bc_id: &str, target_id: &str, url:
     let mut bc = BrowserContext::new(bc_id.into());
     bc.set_active_target_id(target_id);
     bc.set_target_url(url.into());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 }
 fn load_bc_with_session(
     ctx: &mut TestContext,
@@ -184,7 +187,62 @@ fn load_bc_with_session(
         url.to_owned(),
         Some(url.to_owned()),
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
+    let owner = moli_core::browser_host::BrowserPageOwnerKey::new(bc_id, target_id);
+    ctx.conn
+        .register_target_initial_empty_document_for_test(
+            &owner,
+            moli_core::browser_host::BrowserInitialEmptyDocumentSeed::new(url),
+        )
+        .expect("registered Target should accept test metadata");
+}
+fn register_background_target(ctx: &mut TestContext, target: BackgroundTarget) {
+    let browser_context_id = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("selected BrowserContext")
+        .id
+        .clone();
+    let target_id = target.target_id().to_owned();
+    let mut target = target;
+    let primary_session_id = target.take_fixture_primary_session_id();
+    ctx.conn
+        .register_background_target_projection(
+            &browser_context_id,
+            &target_id,
+            move |browser_context, target_handle, page_residence, session_storage_access| {
+                target.replace_target_handle(target_handle.clone());
+                target.replace_page_residence_handle(page_residence);
+                target.bind_session_storage_access(session_storage_access);
+                browser_context
+                    .register_top_level_target_attachment(target_handle, primary_session_id);
+                browser_context.background_targets.push(target);
+            },
+        )
+        .expect("background Target projection should register");
+}
+
+fn pending_subresource_fetch_for_page(
+    page_owner: crate::conn::TargetPageResidenceIdentity,
+    session_id: &str,
+    request_id: &str,
+    internal_id: u64,
+) -> PendingSubresourceFetchRequest {
+    PendingSubresourceFetchRequest {
+        residence: crate::conn::PendingSubresourceFetchResidence::InstalledPage(page_owner),
+        owner_session_id: Some(session_id.to_owned()),
+        action_session_id: Some(session_id.to_owned()),
+        owner_kind: PendingSubresourceFetchOwnerKind::Fetch,
+        internal_id,
+        network_request_id: format!("NETWORK-{request_id}"),
+        network_request_handle: None,
+        frame_id: "FRAME-STOP-LOADING".to_owned(),
+        document_url: url::Url::parse("https://example.test/stop-loading").unwrap(),
+        resource_type: SubresourceResourceType::Fetch,
+        websocket_socket_id: None,
+        request_stage_chain: None,
+    }
 }
 fn load_bc_with_service_worker_target(ctx: &mut TestContext) {
     let mut bc = BrowserContext::new("BID-service-worker-frame-tree".to_owned());

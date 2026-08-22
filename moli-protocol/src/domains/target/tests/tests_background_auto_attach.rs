@@ -15,16 +15,27 @@ async fn set_auto_attach_true_ensures_existing_background_initial_document_befor
         .as_mut()
         .unwrap()
         .attach_active_session("SID-active");
-    {
-        let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-        bc.stage_background_target(
-            "TID-background-pending".to_owned(),
-            None,
-            "about:blank#background".to_owned(),
-            None,
-            None,
-        );
-    }
+    ctx.conn
+        .register_background_target_with_creation_metadata_projection(
+            "BID-9",
+            "TID-background-pending",
+            moli_core::browser_host::BrowserTargetCreationMetadata::with_initial_empty_document(
+                moli_core::browser_host::BrowserInitialEmptyDocumentSeed::new(
+                    "about:blank#background",
+                ),
+            ),
+            |bc, target_handle, page_residence, session_storage_access| {
+                bc.stage_background_target_with_browser_handles(
+                    target_handle,
+                    page_residence,
+                    session_storage_access,
+                    None,
+                    "about:blank#background".to_owned(),
+                    None,
+                );
+            },
+        )
+        .expect("background Target projection should register");
     assert_eq!(
         ctx.conn
             .browser_context
@@ -100,20 +111,12 @@ async fn set_auto_attach_true_still_reports_transient_no_page_target_like_chromi
         .as_mut()
         .unwrap()
         .attach_active_session("SID-active");
-    {
-        let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-background-in-transit".to_owned(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "https://example.test/in-transit".to_owned(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-    }
+    push_background_target(
+        &mut ctx,
+        "TID-background-in-transit",
+        "https://example.test/in-transit",
+        None,
+    );
 
     ctx.process_async(json!({
         "id": 10332,
@@ -198,8 +201,7 @@ async fn runtime_add_binding_on_auto_attached_background_target_session_routes_w
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
     assert!(

@@ -1,10 +1,11 @@
 use super::super::{
-    BackgroundTarget, BrowserContext, ConnectionNetworkRequestIdAllocator, PausedDocumentTransfer,
-    PendingFetchAuthNavigation, PendingFetchNavigation, PendingSubresourceFetchAuthRequest,
-    PendingSubresourceFetchRequest, PendingSubresourceFetchResponseRequest,
+    BackgroundTarget, BrowserContext, PausedDocumentTransfer, PendingFetchAuthNavigation,
+    PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
+    PendingSubresourceFetchResponseRequest,
 };
 #[cfg(test)]
 use super::super::{DocumentBodySource, DocumentNavigationToken, NavigationDispatchState};
+use moli_core::browser_host::BrowserNetworkArtifactStore as ConnectionNetworkRequestIdAllocator;
 
 fn document_navigation_loader_id(sequence: u64) -> String {
     format!("LID-{sequence:010}")
@@ -109,14 +110,6 @@ impl BrowserContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn allocate_subresource_network_request_id(&mut self) -> String {
-        self.active_target
-            .runtime_slot
-            .request_id_allocator()
-            .allocate_network_request_id()
-    }
-
-    #[cfg(test)]
     pub(crate) fn record_captured_response_body(
         &mut self,
         request_id: String,
@@ -155,7 +148,7 @@ impl BrowserContext {
     pub(crate) fn captured_response_body(
         &self,
         request_id: &str,
-    ) -> Option<&crate::domains::network::CapturedResponseBody> {
+    ) -> Option<crate::domains::network::CapturedResponseBody> {
         self.active_target
             .runtime_slot
             .captured_response_body(request_id)
@@ -262,20 +255,6 @@ impl BrowserContext {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_next_network_request_sequence_for_test(&mut self, sequence: u64) {
-        self.active_target
-            .runtime_slot
-            .set_next_network_request_sequence_for_test(sequence);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_network_request_sequence_for_test(&self) -> u64 {
-        self.active_target
-            .runtime_slot
-            .next_network_request_sequence_for_test()
-    }
-
-    #[cfg(test)]
     pub(crate) fn io_streams_empty_for_test(&self) -> bool {
         self.active_target.runtime_slot.io_streams_empty_for_test()
     }
@@ -320,7 +299,7 @@ impl BrowserContext {
         }
         let mut allocator = self.active_target.runtime_slot.request_id_allocator();
         let document_loader_id =
-            document_navigation_loader_id(network_request_id_allocator.allocate_sequence());
+            document_navigation_loader_id(network_request_id_allocator.allocate_request_sequence());
         let document_request_id = observes_document_request.then(|| document_loader_id.clone());
         let fetch_navigation_request_id = needs_fetch_navigation_request_id
             .then(|| allocator.allocate_fetch_navigation_request_id());
@@ -345,7 +324,7 @@ impl BackgroundTarget {
         }
         let mut allocator = self.runtime_slot.request_id_allocator();
         let document_loader_id =
-            document_navigation_loader_id(network_request_id_allocator.allocate_sequence());
+            document_navigation_loader_id(network_request_id_allocator.allocate_request_sequence());
         let document_request_id = observes_document_request.then(|| document_loader_id.clone());
         let fetch_navigation_request_id = needs_fetch_navigation_request_id
             .then(|| allocator.allocate_fetch_navigation_request_id());
@@ -369,10 +348,10 @@ mod tests {
     fn pending_subresource_fetch(internal_id: u64) -> PendingSubresourceFetchRequest {
         PendingSubresourceFetchRequest {
             residence: crate::conn::PendingSubresourceFetchResidence::InstalledPage(
-                crate::conn::TargetPageResidenceIdentity::new_for_test(
+                crate::conn::TargetPageResidenceIdentity::new(
                     "BID-fetch-state".to_owned(),
                     Some("TID-1".to_owned()),
-                    1,
+                    0,
                 ),
             ),
             owner_session_id: None,
@@ -547,15 +526,8 @@ mod tests {
     }
 
     #[test]
-    fn network_and_io_stream_ids_cross_u32_max_without_reuse() {
+    fn io_stream_ids_cross_u32_max_without_reuse() {
         let mut bc = BrowserContext::new("BID-1".to_owned());
-
-        bc.set_next_network_request_sequence_for_test(u32::MAX as u64);
-        assert_eq!(
-            bc.allocate_subresource_network_request_id(),
-            "REQ-4294967296"
-        );
-        assert_eq!(bc.next_network_request_sequence_for_test(), 4_294_967_296);
 
         bc.set_next_io_stream_sequence_for_test(u32::MAX as u64);
         assert_eq!(bc.allocate_io_stream_handle(), "STREAM-4294967296");
@@ -563,17 +535,7 @@ mod tests {
     }
 
     #[test]
-    fn network_and_io_stream_id_allocators_fail_at_u64_exhaustion() {
-        let mut bc = BrowserContext::new("BID-1".to_owned());
-        bc.set_next_network_request_sequence_for_test(u64::MAX);
-        assert!(
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                let _ = bc.allocate_subresource_network_request_id();
-            }))
-            .is_err(),
-            "network request ids must not silently wrap after u64::MAX"
-        );
-
+    fn io_stream_id_allocator_fails_at_u64_exhaustion() {
         let mut bc = BrowserContext::new("BID-2".to_owned());
         bc.set_next_io_stream_sequence_for_test(u64::MAX);
         assert!(

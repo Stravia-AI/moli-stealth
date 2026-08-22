@@ -51,8 +51,7 @@ async fn activate_target_promotes_background_target_when_active_target_has_no_lo
     assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
     assert_eq!(bc.target_url(), "about:blank#second");
     assert_eq!(
-        bc.background_target("TID-000000000A")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000A"),
         Some("SID-active")
     );
 }
@@ -639,7 +638,7 @@ async fn get_target_info_for_inactive_target_keeps_previously_active_context() {
     load_bc_with_target(&mut ctx, "BID-A", "TID-A");
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 111,
@@ -670,24 +669,33 @@ async fn get_target_info_for_inactive_target_keeps_previously_active_context() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_to_target_error_restores_previously_active_context() {
+async fn send_message_to_target_nested_error_restores_previously_active_context() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-A", "TID-A");
     let mut inactive = BrowserContext::new("BID-B".into());
+    inactive.set_active_target_id("TID-B");
     inactive.attach_active_session("SID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 1501,
         "method": "Target.sendMessageToTarget",
         "params": {
-            "message": "{\"id\":1,\"method\":\"Target.getTargetInfo\"}",
+            "message": "{\"id\":1,\"method\":\"Runtime.evaluate\",\"params\":{\"expression\":\"1\"}}",
             "sessionId": "SID-B"
         }
     }))
     .await;
 
-    ctx.expect_error(1501, -31998, "TargetNotLoaded");
+    ctx.expect_result(1501, json!({}), None);
+    let event = ctx.take_one();
+    assert_eq!(event["method"], "Target.receivedMessageFromTarget");
+    assert_eq!(event["params"]["sessionId"], "SID-B");
+    let nested: serde_json::Value =
+        serde_json::from_str(event["params"]["message"].as_str().expect("nested message"))
+            .expect("nested error should be valid JSON");
+    assert_eq!(nested["error"]["code"], json!(-32000));
+    assert_eq!(nested["error"]["message"], json!("NoDocumentLoaded"));
     assert_eq!(
         ctx.conn.browser_context.as_ref().map(|bc| bc.id.as_str()),
         Some("BID-A"),
@@ -702,7 +710,7 @@ async fn detach_from_target_error_restores_previously_active_context() {
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B");
     inactive.attach_active_session("SID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 1502,
@@ -1084,21 +1092,7 @@ async fn production_default_target_is_the_initial_browser_page_target() {
 async fn set_auto_attach_true_attaches_existing_background_targets() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#bg".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#bg", None);
 
     ctx.process_async(json!({
         "id": 1701,
@@ -1129,11 +1123,7 @@ async fn set_auto_attach_true_attaches_existing_background_targets() {
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(bc.active_target_id(), Some("TID-000000000F"));
     assert!(bc.has_active_session());
-    assert!(
-        bc.background_target("TID-000000000E")
-            .and_then(|target| target.session_id())
-            .is_some()
-    );
+    assert!(bc.primary_session_id_for_target("TID-000000000E").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1141,21 +1131,7 @@ async fn set_auto_attach_promotes_existing_background_target_when_active_target_
 {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#bg".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#bg", None);
 
     ctx.process_async(json!({
         "id": 17015,
@@ -1185,8 +1161,7 @@ async fn set_auto_attach_promotes_existing_background_target_when_active_target_
     assert_eq!(bc.active_target_id(), Some("TID-000000000F"));
     assert_eq!(bc.active_session_id(), Some(session_id.as_str()));
     assert_eq!(
-        bc.background_target("TID-000000000E")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000E"),
         Some("SID-1"),
         "the old active target should be demoted into the background with its newly attached session",
     );
@@ -1229,29 +1204,8 @@ async fn set_auto_attach_promotes_existing_background_target_when_active_target_
 async fn set_auto_attach_sweep_chain_promotes_multiple_existing_background_targets_into_runtime() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#second".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-0000000010".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#third".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#second", None);
+    push_background_target(&mut ctx, "TID-0000000010", "about:blank#third", None);
 
     ctx.process_async(json!({
         "id": 17018,
@@ -1362,41 +1316,19 @@ async fn set_auto_attach_sweep_chain_promotes_multiple_existing_background_targe
 async fn set_auto_attach_prefers_existing_background_target_with_parked_loaded_runtime() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    {
-        let bc = ctx.conn.browser_context.as_mut().unwrap();
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-000000000F".into(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "about:blank#metadata-only".into(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-        bc.stage_active_target_demoting_current(
-            "TID-0000000010".into(),
-            None,
-            "about:blank#parked".into(),
-            Some("about:blank".into()),
-        );
-    }
-    ctx.install_navigation_fixture_for_session_owner(
-        "data:text/html,<title>parked</title><div id='ok'>parked runtime</div>",
+    push_background_target(
+        &mut ctx,
+        "TID-000000000F",
+        "about:blank#metadata-only",
         None,
+    );
+    push_background_target(&mut ctx, "TID-0000000010", "about:blank#parked", None);
+    install_navigation_for_target_without_session(
+        &mut ctx,
+        "TID-0000000010",
+        "data:text/html,<title>parked</title><div id='ok'>parked runtime</div>",
     )
     .await;
-    assert!(
-        ctx.conn
-            .browser_context
-            .as_mut()
-            .unwrap()
-            .promote_background_target_to_active_slot_async("TID-000000000E")
-            .await
-            .expect("restoring the original active target should succeed"),
-        "the original active target should remain parked during fixture setup"
-    );
 
     ctx.process_async(json!({
         "id": 17023,
@@ -1437,13 +1369,11 @@ async fn set_auto_attach_prefers_existing_background_target_with_parked_loaded_r
     assert_eq!(bc.active_target_id(), Some("TID-0000000010"));
     assert_eq!(bc.active_session_id(), Some(parked_session_id.as_str()));
     assert_eq!(
-        bc.background_target("TID-000000000F")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000F"),
         Some(metadata_session_id.as_str())
     );
     assert_eq!(
-        bc.background_target("TID-000000000E")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000E"),
         Some("SID-1")
     );
 
@@ -1469,21 +1399,7 @@ async fn set_auto_attach_prefers_existing_background_target_with_parked_loaded_r
 async fn activate_target_promotes_set_auto_attach_background_session_into_page_runtime() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            None,
-            crate::conn::TargetIdentityState::new(
-                "about:blank#bg".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#bg", None);
 
     ctx.process_async(json!({
         "id": 17011,
@@ -1553,30 +1469,23 @@ async fn activate_target_chain_switches_between_multiple_attached_background_tar
  {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000E");
-    let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.attach_active_session("SID-active");
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            Some("SID-second".into()),
-            crate::conn::TargetIdentityState::new(
-                "about:blank#second".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-0000000010".into(),
-            Some("SID-third".into()),
-            crate::conn::TargetIdentityState::new(
-                "about:blank#third".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .attach_active_session("SID-active");
+    push_background_target(
+        &mut ctx,
+        "TID-000000000F",
+        "about:blank#second",
+        Some("SID-second"),
+    );
+    push_background_target(
+        &mut ctx,
+        "TID-0000000010",
+        "about:blank#third",
+        Some("SID-third"),
+    );
 
     ctx.process_async(json!({
         "id": 17030,
@@ -1590,8 +1499,7 @@ async fn activate_target_chain_switches_between_multiple_attached_background_tar
     assert_eq!(bc.active_target_id(), Some("TID-000000000F"));
     assert_eq!(bc.active_session_id(), Some("SID-second"));
     assert_eq!(
-        bc.background_target("TID-000000000E")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000E"),
         Some("SID-active"),
     );
 
@@ -1607,8 +1515,7 @@ async fn activate_target_chain_switches_between_multiple_attached_background_tar
     assert_eq!(bc.active_target_id(), Some("TID-0000000010"));
     assert_eq!(bc.active_session_id(), Some("SID-third"));
     assert_eq!(
-        bc.background_target("TID-000000000F")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000F"),
         Some("SID-second"),
     );
 
@@ -1652,21 +1559,7 @@ async fn set_auto_attach_false_detaches_existing_background_targets() {
         .as_mut()
         .unwrap()
         .attach_active_session("SID-1");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            Some("SID-bg".into()),
-            crate::conn::TargetIdentityState::new(
-                "about:blank#bg".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#bg", Some("SID-bg"));
     ctx.conn.auto_attach = true;
 
     ctx.process_async(json!({
@@ -1697,11 +1590,7 @@ async fn set_auto_attach_false_detaches_existing_background_targets() {
     );
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert!(!bc.has_active_session());
-    assert_eq!(
-        bc.background_target("TID-000000000F")
-            .and_then(|target| target.session_id()),
-        None
-    );
+    assert_eq!(bc.primary_session_id_for_target("TID-000000000F"), None);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1710,7 +1599,7 @@ async fn set_auto_attach_restores_previously_active_context_after_sweeping_conte
     load_bc_with_target(&mut ctx, "BID-A", "TID-A");
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 181,

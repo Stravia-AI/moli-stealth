@@ -40,7 +40,7 @@ async fn get_response_body_respects_recorded_session_visibility() {
         "aux-only body".to_owned(),
         [Some("SID-aux".to_owned())],
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_280,
@@ -79,7 +79,7 @@ async fn get_response_body_requires_calling_session_network_listener() {
         "shared body".to_owned(),
         [Some("SID-primary".to_owned()), Some("SID-aux".to_owned())],
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_282,
@@ -120,7 +120,7 @@ async fn get_response_body_reports_pending_body_as_existing_without_data() {
         .runtime_slot
         .enable_primary_network_events();
     bc.record_pending_response_body("REQ-pending".to_owned(), [None::<String>]);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_281,
@@ -147,7 +147,7 @@ async fn get_response_body_ready_body_replaces_pending_body() {
         "ready body".to_owned(),
         [None::<String>],
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_282,
@@ -172,7 +172,7 @@ async fn get_response_body_rejects_bodies_over_materialization_limit() {
         .runtime_slot
         .enable_primary_network_events();
     bc.record_captured_response_body("REQ-large".to_owned(), "hello".to_owned(), [None::<String>]);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_282,
@@ -226,7 +226,7 @@ async fn get_response_body_base64_encodes_non_utf8_captured_bytes() {
         CapturedBody::from_bytes(vec![0x00, 0xff, b'a']),
         [None::<String>],
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_283,
@@ -269,7 +269,7 @@ async fn get_request_post_data_matches_chromium_errors_and_binary_encoding() {
             std::iter::empty::<String>(),
             false,
         );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_284,
@@ -334,7 +334,7 @@ async fn get_response_body_returns_partial_body_after_staged_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let handle = SubresourceNetworkRequestHandle::new(41);
     let document_url = Url::parse("https://example.test/page").unwrap();
@@ -465,7 +465,7 @@ async fn get_request_post_data_respects_recorded_session_visibility() {
             std::iter::empty::<String>(),
             false,
         );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_288,
@@ -659,7 +659,7 @@ async fn get_network_data_returns_bidi_response_body_bytes() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let (result, _) = ctx
         .conn
@@ -998,7 +998,7 @@ async fn network_data_collectors_gate_get_data_disown_and_remove() {
         "pre collector body".to_owned(),
         [Some("bidi-session-1".to_owned())],
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     for (collector, max_encoded_data_size) in [
         ("collector-ok", 1000),
@@ -1309,7 +1309,7 @@ async fn network_data_collector_body_persists_after_target_artifact_cleanup() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1".to_owned());
     bc.attach_active_session("bidi-session-1".to_owned());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let collector_id =
         crate::devtools_runtime::DevToolsNetworkDataCollectorId::from("collector-persist");
@@ -1464,7 +1464,7 @@ async fn network_data_explicit_collector_prefers_collected_body_over_stale_targe
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1".to_owned());
     bc.attach_active_session("bidi-session-1".to_owned());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let collector_id =
         crate::devtools_runtime::DevToolsNetworkDataCollectorId::from("collector-shadow");
@@ -1546,7 +1546,7 @@ async fn network_data_explicit_collector_rejects_unconfigured_data_type() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1".to_owned());
     bc.attach_active_session("bidi-session-1".to_owned());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let collector_id =
         crate::devtools_runtime::DevToolsNetworkDataCollectorId::from("collector-request-only");
@@ -1610,7 +1610,7 @@ async fn network_data_without_collector_requires_matching_collected_data_type() 
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1".to_owned());
     bc.attach_active_session("bidi-session-1".to_owned());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let (result, _) = ctx
         .conn
@@ -1687,7 +1687,7 @@ async fn network_data_collector_membership_uses_recorded_target_scope() {
         None,
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     for (collector, target_id) in [
         ("collector-active", "TID-active"),
@@ -1810,7 +1810,7 @@ async fn network_data_collector_gated_body_without_match_is_not_readable() {
         None,
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let (result, _) = ctx
         .conn
@@ -1889,7 +1889,7 @@ async fn get_network_data_reports_unimplemented_or_missing_data_with_bidi_errors
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".into());
     bc.record_pending_response_body("REQ-pending".to_owned(), [None::<String>]);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     for (request_id, data_type, collector, expected_kind) in [
         (
@@ -1945,7 +1945,8 @@ async fn get_network_data_reports_unimplemented_or_missing_data_with_bidi_errors
 #[tokio::test(flavor = "multi_thread")]
 async fn get_response_body_rejects_invalid_params() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 3,
@@ -1988,7 +1989,7 @@ async fn main_document_navigation_get_response_body_preserves_binary_bytes() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_284,
@@ -2078,7 +2079,7 @@ fetch('/binary')
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 7_287,
@@ -2205,7 +2206,7 @@ fetch("/upload", {method: "POST", body: formData})
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let (result, _) = ctx
         .conn

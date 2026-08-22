@@ -503,14 +503,8 @@ mod tests {
             page_id,
         );
         RendererPublicationOwner::PageTarget {
-            browser_context_id: "BID-test".to_owned(),
-            target_id: Some("TID-test".to_owned()),
+            page_owner: moli_core::browser_host::BrowserPageOwnerKey::new("BID-test", "TID-test"),
             renderer_page,
-            page_owner: crate::conn::TargetPageResidenceIdentity::new_for_test(
-                "BID-test".to_owned(),
-                Some("TID-test".to_owned()),
-                1,
-            ),
         }
     }
 

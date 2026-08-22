@@ -235,7 +235,7 @@ fn complete_resolve_blob_command(
 ) -> CommandOutputPlan {
     let uuid = completed.and_then(|completed| {
         conn.loaded_page_mut_for_protocol_access(session_id)
-            .and_then(|page| {
+            .and_then(|mut page| {
                 page.finish_resolve_blob_object(completed)
                     .map_err(|error| error.to_string())
             })
@@ -257,7 +257,7 @@ fn complete_read_blob_command(
     let bytes = completed
         .and_then(|completed| {
             conn.loaded_page_mut_for_protocol_access(session_id)
-                .and_then(|page| {
+                .and_then(|mut page| {
                     page.finish_blob_bytes_for_uuid(completed)
                         .map_err(|error| error.to_string())
                 })
@@ -548,6 +548,7 @@ mod tests {
             "about:blank#background".to_owned(),
         ));
         ctx.conn.browser_context = Some(bc);
+        ctx.conn.adopt_direct_browser_context_fixture_attachments();
 
         let handle = ctx
             .conn

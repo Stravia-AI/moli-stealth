@@ -16497,7 +16497,6 @@ document.addEventListener("DOMContentLoaded", () => {
     // lifecycle/action tail may already be queued here. Keep that concrete
     // FIFO intact; the page and record filters below ignore creation output
     // that is unrelated to this witness.
-
     let observed = tokio::time::timeout(Duration::from_secs(2), async {
         let mut observed = Vec::new();
         while observed.len() < 2 {

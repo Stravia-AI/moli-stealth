@@ -1864,7 +1864,8 @@ async fn runtime_owned_external_async_does_not_block_domcontentloaded() -> Resul
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn runtime_owned_external_async_fast_does_not_overtake_domcontentloaded() -> Result<()> {
+async fn runtime_owned_external_async_fast_can_run_on_either_side_of_domcontentloaded() -> Result<()>
+{
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
@@ -1875,25 +1876,28 @@ async fn runtime_owned_external_async_fast_does_not_overtake_domcontentloaded() 
             ))
             .await?;
 
-    assert_eq!(
-        diagnostic_global(&page, "runtimeOwnedAsyncFastDclOrder"),
-        Some(&JsValueSnapshot::String(
-            "after-append:async=true,dcl:interactive".to_owned()
-        ))
-    );
+    let dcl_order =
+        diagnostic_global(&page, "runtimeOwnedAsyncFastDclOrder").and_then(JsValueSnapshot::as_str);
+    let (expected_load_order, expected_final_order) = match dcl_order {
+        Some("after-append:async=true,dcl:interactive") => (
+            "after-append:async=true,dcl:interactive,external-script:interactive,load:interactive",
+            "after-append:async=true,dcl:interactive,external-script:interactive,load:interactive,window-load:complete",
+        ),
+        Some(
+            "after-append:async=true,external-script:interactive,load:interactive,dcl:interactive",
+        ) => (
+            "after-append:async=true,external-script:interactive,load:interactive",
+            "after-append:async=true,external-script:interactive,load:interactive,dcl:interactive,window-load:complete",
+        ),
+        other => panic!("runtime-owned async classic produced an invalid DCL order: {other:?}"),
+    };
     assert_eq!(
         diagnostic_global(&page, "runtimeOwnedAsyncFastLoadOrder"),
-        Some(&JsValueSnapshot::String(
-            "after-append:async=true,dcl:interactive,external-script:interactive,load:interactive"
-                .to_owned()
-        ))
+        Some(&JsValueSnapshot::String(expected_load_order.to_owned()))
     );
     assert_eq!(
         diagnostic_global(&page, "runtimeOwnedAsyncFastFinalOrder"),
-        Some(&JsValueSnapshot::String(
-            "after-append:async=true,dcl:interactive,external-script:interactive,load:interactive,window-load:complete"
-                .to_owned()
-        ))
+        Some(&JsValueSnapshot::String(expected_final_order.to_owned()))
     );
 
     server.shutdown().await;

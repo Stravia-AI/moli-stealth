@@ -5,8 +5,8 @@ use crate::conn::{
 use crate::domains::actions::PerformanceAction;
 use crate::domains::command_output::CommandOutputPlan;
 use moli_core::page::{
-    CompletedDevToolsIoCommandDispatch, CompletedPageCommand, Page,
-    PendingDevToolsIoCommandDispatch, PendingPageCommand, RendererPerformanceMetricSnapshot,
+    CompletedDevToolsIoCommandDispatch, CompletedPageCommand, PendingDevToolsIoCommandDispatch,
+    PendingPageCommand, RendererPerformanceMetricSnapshot,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -115,11 +115,11 @@ impl CompletedPerformanceCommandDispatch {
     }
 }
 
-fn loaded_page_mut_for_renderer_access<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_renderer_access(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
     renderer_access: CdpRendererCommandAccess,
-) -> Result<&'a mut Page, String> {
+) -> Result<moli_core::browser_host::BrowserPageRuntimeLease, String> {
     match renderer_access {
         CdpRendererCommandAccess::MainThread => {
             conn.loaded_page_mut_for_protocol_access(session_id)
@@ -249,7 +249,7 @@ pub(crate) fn try_start_performance_command_dispatch(
                     }
                 };
             (
-                crate::conn::RendererPageResidenceIdentity::from_page(page),
+                crate::conn::RendererPageResidenceIdentity::from_page(&page),
                 page.renderer_agent_attachment_id(),
                 page.cached_performance_metric_snapshot(),
             )
@@ -351,7 +351,7 @@ pub(crate) fn try_start_performance_command_dispatch(
             return PerformanceCommandTaskStep::Complete(default_metrics_command_output_plan());
         }
     };
-    let renderer_page = crate::conn::RendererPageResidenceIdentity::from_page(page);
+    let renderer_page = crate::conn::RendererPageResidenceIdentity::from_page(&page);
     let pending = match page.start_performance_metric_snapshot() {
         Ok(pending) => pending,
         Err(_) => {
@@ -409,7 +409,7 @@ pub(crate) async fn complete_pending_performance_command(
             .filter(|page| {
                 crate::conn::RendererPageResidenceIdentity::from_page(page) == renderer_page
             })
-            .and_then(|page| page.finish_performance_metric_snapshot(completed_page).ok())
+            .and_then(|mut page| page.finish_performance_metric_snapshot(completed_page).ok())
             .unwrap_or_default()
         }
         Ok(CompletedPerformanceRendererCommand::IoCommandReply(snapshot)) => {
@@ -420,7 +420,7 @@ pub(crate) async fn complete_pending_performance_command(
             )
             .ok()
             .is_some_and(|page| {
-                crate::conn::RendererPageResidenceIdentity::from_page(page) == renderer_page
+                crate::conn::RendererPageResidenceIdentity::from_page(&page) == renderer_page
             });
             if remains_current {
                 snapshot
@@ -564,7 +564,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .performance;
         assert!(performance.enabled());
@@ -643,7 +643,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .performance;
         assert_eq!(performance.time_domain(), PerformanceTimeDomain::TimeTicks);
@@ -691,7 +691,7 @@ mod tests {
         bc.set_target_url("data:text/html,performance-test".to_owned());
         bc.set_active_target_id("TID-1".to_owned());
         bc.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),
@@ -878,13 +878,13 @@ mod tests {
         let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
             !browser_context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .performance
                 .enabled()
         );
         let auxiliary = browser_context
-            .auxiliary_devtools_session_states
+            .auxiliary_devtools_session_states()
             .get("SID-aux")
             .expect("auxiliary session state")
             .page_session_state
@@ -1111,19 +1111,15 @@ mod tests {
         let active = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .performance
                 .enabled()
         );
         assert!(
             active
-                .parked_page_session_state("TID-background")
-                .is_some_and(|state| state
-                    .devtools_session_state
-                    .page_session_state
-                    .performance
-                    .enabled()),
+                .primary_devtools_session_state_for_target("TID-background")
+                .is_some_and(|state| state.page_session_state.performance.enabled()),
             "background target should stage Performance.enable"
         );
     }

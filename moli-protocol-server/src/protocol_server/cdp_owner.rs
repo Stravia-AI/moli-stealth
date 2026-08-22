@@ -1,10 +1,13 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak, atomic::AtomicU64},
+    sync::{Arc, Weak},
 };
 
 use anyhow::{Context, Result, bail};
-use moli_core::runtime::{NavigationRuntimeConfig, storage_partition::StoragePartitionState};
+use moli_core::{
+    browser_host::BrowserTargetIdAllocator,
+    runtime::{NavigationRuntimeConfig, storage_partition::StoragePartitionState},
+};
 use moli_protocol::CdpInitialStoragePartition;
 use parking_lot::Mutex;
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -13,14 +16,12 @@ use crate::{
     cdp_frontend::{CdpFrontendEndpoint, CdpFrontendReceivers, cdp_frontend_channel},
     cdp_frontend_router::CdpFrontendRouter,
     cdp_scheduler::{
-        CdpCookieSnapshot, CdpOwnerActorLifecycle, CdpScheduler, CdpTargetHostIntegration,
-        spawn_cdp_scheduler_actor,
+        CdpOwnerActorLifecycle, CdpScheduler, CdpTargetHostIntegration, spawn_cdp_scheduler_actor,
     },
 };
 
 use super::{
-    CookieProfileCommit, SharedCookieProfile, cdp_agent_host::SharedCdpAgentHostDirectory,
-    protocol_local_executor::spawn_protocol_local_task,
+    cdp_agent_host::SharedCdpAgentHostDirectory, protocol_local_executor::spawn_protocol_local_task,
 };
 
 use self::checkpoint::spawn_checkpoint_worker;
@@ -52,9 +53,7 @@ struct CdpOwnerRecord {
 #[derive(Clone)]
 struct CdpOwnerRuntimeConfig {
     directory: SharedCdpAgentHostDirectory,
-    target_id_allocator: Arc<AtomicU64>,
-    tab_target_id_allocator: Arc<AtomicU64>,
-    cookie_profile: SharedCookieProfile,
+    target_id_allocator: BrowserTargetIdAllocator,
     storage_partition: Arc<StoragePartitionState>,
     navigation_runtime_config: NavigationRuntimeConfig,
 }
@@ -62,9 +61,7 @@ struct CdpOwnerRuntimeConfig {
 impl SharedCdpOwnerRegistry {
     pub(super) fn new(
         directory: SharedCdpAgentHostDirectory,
-        target_id_allocator: Arc<AtomicU64>,
-        tab_target_id_allocator: Arc<AtomicU64>,
-        cookie_profile: SharedCookieProfile,
+        target_id_allocator: BrowserTargetIdAllocator,
         storage_partition: Arc<StoragePartitionState>,
         navigation_runtime_config: NavigationRuntimeConfig,
     ) -> Self {
@@ -73,8 +70,6 @@ impl SharedCdpOwnerRegistry {
                 config: CdpOwnerRuntimeConfig {
                     directory,
                     target_id_allocator,
-                    tab_target_id_allocator,
-                    cookie_profile,
                     storage_partition,
                     navigation_runtime_config,
                 },
@@ -118,16 +113,13 @@ impl SharedCdpOwnerRegistry {
             );
         }
 
-        let initial_cookies = self.inner.config.cookie_profile.snapshot();
         let initial_storage_partition = CdpInitialStoragePartition::from_storage_partition(
-            initial_cookies.clone(),
             self.inner.config.storage_partition.as_ref(),
         );
-        let (checkpoint_tx, checkpoint_rx) = mpsc::unbounded_channel();
+        let (profile_flush_tx, profile_flush_rx) = mpsc::unbounded_channel();
         let checkpoint_worker = spawn_checkpoint_worker(
-            self.inner.config.cookie_profile.clone(),
-            initial_cookies,
-            checkpoint_rx,
+            self.inner.config.storage_partition.clone(),
+            profile_flush_rx,
         );
         let owner_finished_rx = spawn_owner_task(
             receivers,
@@ -139,9 +131,9 @@ impl SharedCdpOwnerRegistry {
                 lifecycle_observer,
             )),
             Some(CdpOwnerActorLifecycle {
-                checkpoint_tx: checkpoint_tx.clone(),
+                profile_flush_tx: profile_flush_tx.clone(),
             }),
-            checkpoint_tx,
+            profile_flush_tx,
         );
         let weak_registry = Arc::downgrade(&self.inner);
         let directory = self.inner.config.directory.clone();
@@ -202,7 +194,7 @@ fn spawn_owner_task(
     navigation_runtime_config: NavigationRuntimeConfig,
     target_host_integration: Option<CdpTargetHostIntegration>,
     owner_lifecycle: Option<CdpOwnerActorLifecycle>,
-    checkpoint_tx: mpsc::UnboundedSender<CdpCookieSnapshot>,
+    profile_flush_tx: mpsc::UnboundedSender<()>,
 ) -> oneshot::Receiver<()> {
     spawn_protocol_local_task("cdp-owner", move || async move {
         let (scheduler, scheduler_receivers) =
@@ -218,8 +210,8 @@ fn spawn_owner_task(
             receivers,
             owner_lifecycle,
         );
-        let snapshot = actor.await.unwrap_or_default();
-        let _ = checkpoint_tx.send(snapshot);
+        let _ = actor.await;
+        let _ = profile_flush_tx.send(());
     })
 }
 

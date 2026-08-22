@@ -164,7 +164,7 @@ async fn runtime_xhr_subresource_pauses_until_continue_request_then_loads_respon
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();
@@ -468,7 +468,7 @@ async fn runtime_xhr_subresource_request_animation_frame_pauses_until_continue_r
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();
@@ -629,7 +629,7 @@ async fn runtime_xhr_subresource_queue_microtask_pauses_until_continue_request_t
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();

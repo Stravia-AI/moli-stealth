@@ -40,7 +40,9 @@ async fn renderer_backend_node_for_live_expression(
     take_response_by_id(ctx, describe_id)["result"]["node"].clone()
 }
 
-fn loaded_page_mut_for_test(ctx: &mut TestContext) -> &mut moli_core::page::Page {
+fn loaded_page_mut_for_test(
+    ctx: &mut TestContext,
+) -> moli_core::browser_host::BrowserPageRuntimeLease {
     ctx.conn
         .browser_context
         .as_mut()
@@ -68,7 +70,7 @@ async fn renderer_frontend_binding_for_test(
             .await
             .expect("renderer frontend node binding lookup should complete")
     };
-    let page = loaded_page_mut_for_test(ctx);
+    let mut page = loaded_page_mut_for_test(ctx);
     page.finish_document_frontend_node_binding(completion)
         .expect("renderer frontend node binding lookup should finish")
 }
@@ -2250,7 +2252,76 @@ async fn set_file_input_files_validates_node_before_reading_files() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn file_chooser_backend_node_id_resolves_detached_source_after_document_open() {
+async fn file_chooser_opened_registers_renderer_shared_id_in_current_document() {
+    let mut ctx = TestContext::new();
+    load_bc(&mut ctx, "BID-A");
+    navigate_to_data_html_async(
+        &mut ctx,
+        1,
+        "<!doctype html><html><body><input id='picker' type='file' multiple></body></html>",
+    )
+    .await;
+
+    let _ = enable_runtime_and_take_execution_context_id_async(&mut ctx, 10).await;
+    let _ = ctx.take_all();
+    ctx.process_async(json!({
+        "id": 2,
+        "method": "Page.setInterceptFileChooserDialog",
+        "params": { "enabled": true }
+    }))
+    .await;
+    ctx.expect_result(2, json!({}), None);
+    let _ = ctx.take_all();
+
+    ctx.process_async(json!({
+        "id": 3,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "document.getElementById('picker').click(); 'clicked'",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 3)["result"]["result"]["value"],
+        json!("clicked")
+    );
+    let file_chooser = ctx
+        .sent
+        .iter()
+        .find(|message| message["method"] == json!("Page.fileChooserOpened"))
+        .cloned()
+        .unwrap_or_else(|| panic!("Page.fileChooserOpened should be emitted: {:?}", ctx.sent));
+    let backend_node_id = file_chooser["params"]["backendNodeId"]
+        .as_u64()
+        .and_then(|id| u32::try_from(id).ok())
+        .expect("file chooser event should include u32 backendNodeId");
+
+    let renderer_shared_id = ctx
+        .conn
+        .document_bidi_node_shared_id_for_backend_node_id_for_session_owner_async(
+            None,
+            backend_node_id,
+        )
+        .await
+        .expect("renderer shared-id reverse lookup should run");
+    let moli_core::page::RendererDomBidiNodeSharedIdResolution::SharedId(renderer_shared_id) =
+        renderer_shared_id
+    else {
+        panic!("current-Document file chooser should register renderer shared id");
+    };
+    assert!(
+        crate::devtools_runtime::is_webdriver_bidi_node_shared_id(&renderer_shared_id),
+        "file chooser renderer shared id should use the BiDi node shared id shape: {renderer_shared_id}"
+    );
+    assert!(
+        !renderer_shared_id.contains("moli:bidi-node:"),
+        "file chooser renderer shared id must not encode a legacy storage node index: {renderer_shared_id}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement() {
     let mut ctx = TestContext::new();
     load_bc(&mut ctx, "BID-A");
     navigate_to_data_html_async(
@@ -2931,7 +3002,7 @@ async fn push_nodes_by_renderer_backend_ids_binds_fresh_live_dom() {
     assert_eq!(attrs.get("id").map(String::as_str), Some("fresh-push"));
     assert_eq!(attrs.get("data-state").map(String::as_str), Some("live"));
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -2964,7 +3035,7 @@ async fn get_attributes_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3204,7 +3275,7 @@ async fn set_file_input_files_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3244,7 +3315,7 @@ async fn set_file_input_files_low_backend_id_misses_without_backend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3277,7 +3348,7 @@ async fn resolve_node_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3310,7 +3381,7 @@ async fn resolve_node_low_backend_id_misses_without_backend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3343,7 +3414,7 @@ async fn describe_node_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3376,7 +3447,7 @@ async fn get_outer_html_low_backend_id_misses_without_backend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3409,7 +3480,7 @@ async fn get_box_model_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3442,7 +3513,7 @@ async fn get_content_quads_low_backend_id_misses_without_backend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3475,7 +3546,7 @@ async fn scroll_into_view_low_backend_id_misses_without_backend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3508,7 +3579,7 @@ async fn query_selector_low_root_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3541,7 +3612,7 @@ async fn query_selector_all_low_root_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3574,7 +3645,7 @@ async fn request_child_nodes_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");
@@ -3607,7 +3678,7 @@ async fn remove_node_low_node_id_misses_without_frontend_binding() {
         })]
     );
 
-    let page = loaded_page_mut_for_test(&mut ctx);
+    let mut page = loaded_page_mut_for_test(&mut ctx);
     let _ = page
         .finish_runtime_protocol_message(mutation_completion)
         .expect("runtime mutation completion should finish");

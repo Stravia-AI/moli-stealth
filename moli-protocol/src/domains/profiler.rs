@@ -31,13 +31,9 @@ mod tests {
     use crate::testing::{TestContext, wait_until_messages, wait_until_scheduler_message};
 
     async fn with_loaded_document_async(ctx: &mut TestContext, html: &str) {
-        ctx.conn
-            .insert_browser_context(BrowserContext::new("BID-profiler".into()));
-        ctx.conn
-            .browser_context
-            .as_mut()
-            .expect("browser context should exist")
-            .set_active_target_id("TID-profiler");
+        let mut browser_context = BrowserContext::new("BID-profiler".into());
+        browser_context.set_active_target_id("TID-profiler");
+        ctx.conn.insert_browser_context(browser_context);
         let page = ctx
             .conn
             .load_page_via_runtime_async(&format!("data:text/html,{html}"))
@@ -101,11 +97,15 @@ mod tests {
 
     async fn complete_pending_command_task_for_test(
         ctx: &mut TestContext,
-        pending: PendingCdpCommandDispatch,
+        mut pending: PendingCdpCommandDispatch,
     ) -> Vec<serde_json::Value> {
-        ctx.complete_command_task_step_for_test(CdpCommandTaskStep::Pending(Box::new(pending)))
-            .await
-            .0
+        loop {
+            let completed = pending.wait().await;
+            match ctx.conn.complete_pending_command_dispatch(completed).await {
+                CdpCommandTaskStep::Pending(next) => pending = *next,
+                CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
+            }
+        }
     }
 
     async fn process_and_take_response(
@@ -561,10 +561,14 @@ mod tests {
     #[tokio::test]
     async fn profiler_state_is_isolated_per_attached_target_session() {
         let mut ctx = TestContext::new();
-        with_loaded_document_async(&mut ctx, "<!doctype html><body></body>").await;
+        with_loaded_target_document_async(
+            &mut ctx,
+            "TID-profiler-isolation",
+            "<!doctype html><body></body>",
+        )
+        .await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            browser_context.set_active_target_id("TID-profiler-isolation");
             browser_context.attach_active_session("SID-profiler-primary");
             assert!(browser_context.assign_auxiliary_session_to_target(
                 "TID-profiler-isolation",
@@ -667,10 +671,14 @@ mod tests {
     #[tokio::test]
     async fn profiler_sampling_interval_and_coverage_are_isolated_per_attached_session() {
         let mut ctx = TestContext::new();
-        with_loaded_document_async(&mut ctx, "<!doctype html><body></body>").await;
+        with_loaded_target_document_async(
+            &mut ctx,
+            "TID-profiler-coverage-isolation",
+            "<!doctype html><body></body>",
+        )
+        .await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            browser_context.set_active_target_id("TID-profiler-coverage-isolation");
             browser_context.attach_active_session("SID-profiler-primary");
             assert!(browser_context.assign_auxiliary_session_to_target(
                 "TID-profiler-coverage-isolation",
@@ -806,10 +814,14 @@ mod tests {
     #[tokio::test]
     async fn profiler_state_is_cleared_when_attached_target_session_detaches() {
         let mut ctx = TestContext::new();
-        with_loaded_document_async(&mut ctx, "<!doctype html><body></body>").await;
+        with_loaded_target_document_async(
+            &mut ctx,
+            "TID-profiler-detach",
+            "<!doctype html><body></body>",
+        )
+        .await;
         {
             let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-            browser_context.set_active_target_id("TID-profiler-detach");
             browser_context.attach_active_session("SID-profiler-old");
             assert!(browser_context.assign_auxiliary_session_to_target(
                 "TID-profiler-detach",
@@ -864,7 +876,9 @@ mod tests {
             let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
             assert_eq!(browser_context.active_session_id(), None);
             assert!(
-                browser_context.auxiliary_devtools_session_states.is_empty(),
+                browser_context
+                    .auxiliary_devtools_session_states()
+                    .is_empty(),
                 "detaching the primary target session must drop active auxiliary inspector session state"
             );
         }
@@ -1574,7 +1588,7 @@ mod tests {
             .browser_context
             .as_ref()
             .expect("browser context")
-            .devtools_session_state
+            .devtools_session_state()
             .inspector_session_state;
         assert!(
             inspector_state.v8_state.is_some(),
@@ -1970,13 +1984,9 @@ mod tests {
     async fn active_profiler_recording_survives_http_page_navigation_and_disable() {
         let (fixture, _server) = spawn_profiler_navigation_server().await;
         let mut ctx = TestContext::new();
-        ctx.conn
-            .insert_browser_context(BrowserContext::new("BID-profiler-http".into()));
-        ctx.conn
-            .browser_context
-            .as_mut()
-            .expect("browser context should exist")
-            .set_active_target_id("TID-profiler-http");
+        let mut browser_context = BrowserContext::new("BID-profiler-http".into());
+        browser_context.set_active_target_id("TID-profiler-http");
+        ctx.conn.insert_browser_context(browser_context);
         let page = ctx
             .conn
             .load_page_via_runtime_async(&format!("{fixture}/plain?phase=before"))
@@ -2167,14 +2177,18 @@ mod tests {
             ctx.sent
         );
 
-        {
-            let browser_context = ctx
-                .conn
-                .browser_context
-                .as_mut()
-                .expect("browser context should survive target close");
-            browser_context.set_active_target_id(target_id);
-        }
+        ctx.conn
+            .register_active_target_projection(
+                target_id,
+                |browser_context, target_handle, page_residence, session_storage_access| {
+                    browser_context.bind_new_active_target_registration(
+                        target_handle,
+                        page_residence,
+                        session_storage_access,
+                    );
+                },
+            )
+            .expect("active Target projection should register");
         let page = ctx
             .conn
             .load_page_via_runtime_async(

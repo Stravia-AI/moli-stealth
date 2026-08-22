@@ -5,7 +5,8 @@ impl CdpConnection {
         &self,
         browser_context_id: &str,
     ) -> Vec<moli_core::page::PermissionOverrideRegistration> {
-        self.permission_overrides
+        self.browser_host_policy_snapshot()
+            .permission_overrides()
             .iter()
             .filter(|entry| {
                 entry.browser_context_id.is_none()

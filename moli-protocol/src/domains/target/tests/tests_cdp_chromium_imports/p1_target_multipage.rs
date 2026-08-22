@@ -719,6 +719,7 @@ async fn rust_cdp_chromium_target_window_open_auto_attached_popup_materializes_i
                 })
                 .expect("window.open lifecycle should have loaded the popup document");
             assert_eq!(popup_page.final_url().as_str(), popup_url);
+            drop(popup_page);
 
             ctx.process_async(json!({
                 "id": 260_212,
@@ -853,24 +854,31 @@ async fn rust_cdp_chromium_target_window_open_waiting_popup_routes_initial_docum
     ctx.expect_result(260_218, json!({}), Some(popup_session_id));
     ctx.sent.clear();
 
-    ctx.process_async(json!({
-        "id": 260_219,
-        "method": "Runtime.runIfWaitingForDebugger",
-        "sessionId": popup_session_id
-    }))
-    .await;
+    let scheduler_events = ctx
+        .process_command_only_async(json!({
+            "id": 260_219,
+            "method": "Runtime.runIfWaitingForDebugger",
+            "sessionId": popup_session_id
+        }))
+        .await;
+    assert!(
+        scheduler_events.is_empty(),
+        "debugger resume must not publish Protocol navigation work: {scheduler_events:?}"
+    );
     take_response_by_id(&mut ctx, 260_219);
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert!(
+        ctx.sent
+            .iter()
+            .all(|message| message["method"] != json!("Fetch.requestPaused")),
+        "frontend completion must not execute the initial Target navigation"
+    );
     let paused = ctx
-        .sent
-        .iter()
-        .find(|message| message["method"] == json!("Fetch.requestPaused"))
-        .cloned()
-        .unwrap_or_else(|| {
-            panic!(
-                "Runtime.runIfWaitingForDebugger should start the popup document navigation: {:?}",
-                ctx.sent
-            )
-        });
+        .wait_for_scheduler_message(
+            "Runtime.runIfWaitingForDebugger initial Target Fetch pause",
+            |message| message["method"] == json!("Fetch.requestPaused"),
+        )
+        .await;
     assert!(
         ctx.sent.iter().any(|message| {
             message["method"] == json!("Network.requestWillBeSent")
@@ -1072,6 +1080,14 @@ async fn rust_cdp_chromium_target_window_open_self_does_not_create_popup_target(
         "window.open('data:text/html,<main>self</main>', '_self') === null",
     )
     .await;
+    ctx.wait_until_scheduler_state("window.open _self Browser Owner navigation", |conn| {
+        conn.browser_context
+            .as_ref()
+            .is_some_and(|browser_context| {
+                browser_context.target_url() == "data:text/html,<main>self</main>"
+            })
+    })
+    .await;
 
     assert!(
         !messages
@@ -1109,12 +1125,24 @@ async fn rust_cdp_chromium_target_window_open_named_target_reuses_existing_targe
         .expect("named target id")
         .to_owned();
 
-    let second = open_popup_from_runtime(
+    let mut second = open_popup_from_runtime(
         &mut ctx,
         260_027,
         "window.open('https://example.com/two', 'named') !== null",
     )
     .await;
+    if !second.iter().any(|message| {
+        message["method"] == json!("Target.targetInfoChanged")
+            && message["params"]["targetInfo"]["url"] == json!("https://example.com/two")
+    }) {
+        second.push(
+            ctx.wait_for_scheduler_message("named popup successor targetInfoChanged", |message| {
+                message["method"] == json!("Target.targetInfoChanged")
+                    && message["params"]["targetInfo"]["url"] == json!("https://example.com/two")
+            })
+            .await,
+        );
+    }
 
     assert!(
         !second
@@ -1122,7 +1150,13 @@ async fn rust_cdp_chromium_target_window_open_named_target_reuses_existing_targe
             .any(|message| message["method"] == "Target.targetCreated"),
         "{second:?}"
     );
-    let changed = event(&second, "Target.targetInfoChanged");
+    let changed = second
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["url"] == json!("https://example.com/two")
+        })
+        .expect("named popup successor targetInfoChanged");
     assert_eq!(changed["params"]["targetInfo"]["targetId"], target_id);
     assert_eq!(
         changed["params"]["targetInfo"]["url"],
@@ -1149,17 +1183,29 @@ async fn rust_cdp_chromium_target_info_changed_is_emitted_for_named_popup_reuse(
         "window.open('https://example.com/first', 'reuse') !== null",
     )
     .await;
-    let second = open_popup_from_runtime(
+    let mut second = open_popup_from_runtime(
         &mut ctx,
         260_029,
         "window.open('https://example.com/second', 'reuse') !== null",
     )
     .await;
+    if !second.iter().any(|message| {
+        message["method"] == json!("Target.targetInfoChanged")
+            && message["params"]["targetInfo"]["url"] == json!("https://example.com/second")
+    }) {
+        second.push(
+            ctx.wait_for_scheduler_message("reused popup successor targetInfoChanged", |message| {
+                message["method"] == json!("Target.targetInfoChanged")
+                    && message["params"]["targetInfo"]["url"] == json!("https://example.com/second")
+            })
+            .await,
+        );
+    }
 
-    assert_eq!(
-        event(&second, "Target.targetInfoChanged")["params"]["targetInfo"]["url"],
-        "https://example.com/second"
-    );
+    assert!(second.iter().any(|message| {
+        message["method"] == json!("Target.targetInfoChanged")
+            && message["params"]["targetInfo"]["url"] == json!("https://example.com/second")
+    }));
 }
 
 // Chromium source:

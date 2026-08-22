@@ -1,28 +1,30 @@
-use moli_cookie_jar::StoredCookie;
+use std::sync::Arc;
+
+use moli_core::runtime::storage_partition::StoragePartitionState;
 use tokio::sync::mpsc;
 
-use super::{CdpCookieSnapshot, CookieProfileCommit, SharedCookieProfile};
-
+/// Flushes the application-owned profile after Browser Host checkpoints.
+///
+/// Cookie mutations already live in `StoragePartitionState`; a checkpoint is
+/// therefore only a persistence request. It never carries a frontend snapshot
+/// and cannot merge stale connection state back into the Browser profile.
 pub(super) fn spawn_checkpoint_worker(
-    cookie_profile: SharedCookieProfile,
-    mut checkpoint_baseline: Vec<StoredCookie>,
-    mut checkpoint_rx: mpsc::UnboundedReceiver<CdpCookieSnapshot>,
+    storage_partition: Arc<StoragePartitionState>,
+    mut checkpoint_rx: mpsc::UnboundedReceiver<()>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        while let Some(snapshot) = checkpoint_rx.recv().await {
-            let Some(checkpoint_cookies) = snapshot.into_profile_backed_cookies() else {
-                continue;
-            };
-            let commit =
-                CookieProfileCommit::new(checkpoint_baseline.clone(), checkpoint_cookies.clone());
-            let profile = cookie_profile.clone();
-            match tokio::task::spawn_blocking(move || profile.commit_and_save(commit)).await {
-                Ok(Ok(())) => checkpoint_baseline = checkpoint_cookies,
+        while checkpoint_rx.recv().await.is_some() {
+            // Coalesce a burst of detach/Target lifecycle checkpoints before
+            // entering the blocking filesystem boundary.
+            while checkpoint_rx.try_recv().is_ok() {}
+            let partition = storage_partition.clone();
+            match tokio::task::spawn_blocking(move || partition.flush()).await {
+                Ok(Ok(())) => {}
                 Ok(Err(error)) => {
-                    tracing::warn!(?error, "failed to persist CDP owner cookie checkpoint");
+                    tracing::warn!(?error, "failed to flush CDP owner profile checkpoint");
                 }
                 Err(error) => {
-                    tracing::warn!(?error, "CDP owner cookie checkpoint worker panicked");
+                    tracing::warn!(?error, "CDP owner profile checkpoint worker panicked");
                 }
             }
         }
@@ -31,9 +33,41 @@ pub(super) fn spawn_checkpoint_worker(
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use moli_browser_profile::BrowserProfilePaths;
     use moli_cookie_jar::{StoredCookie, StoredCookieSameSite, StoredCookieSourceScheme};
 
     use super::*;
+
+    struct TempProfile {
+        path: PathBuf,
+    }
+
+    impl TempProfile {
+        fn new() -> Self {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "moli-cdp-profile-flush-{}-{nonce}",
+                    std::process::id()
+                )),
+            }
+        }
+    }
+
+    impl Drop for TempProfile {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.path);
+        }
+    }
 
     fn stored_cookie(name: &str, value: &str) -> StoredCookie {
         StoredCookie {
@@ -56,27 +90,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn checkpoint_worker_advances_cookie_delta_baseline() {
-        let cookie_profile = SharedCookieProfile::new(Vec::new(), Vec::new());
+    async fn checkpoint_flushes_live_browser_owned_cookie_store() {
+        let profile = TempProfile::new();
+        let partition =
+            Arc::new(StoragePartitionState::open(Some(&profile.path)).expect("open test profile"));
+        partition
+            .import_cookies([stored_cookie("sid", "live")])
+            .expect("import live cookie");
         let (checkpoint_tx, checkpoint_rx) = mpsc::unbounded_channel();
-        let worker = spawn_checkpoint_worker(cookie_profile.clone(), Vec::new(), checkpoint_rx);
+        let worker = spawn_checkpoint_worker(partition, checkpoint_rx);
 
-        checkpoint_tx
-            .send(CdpCookieSnapshot::from_profile_backed_cookies(Some(vec![
-                stored_cookie("sid", "first"),
-            ])))
-            .expect("send added-cookie checkpoint");
-        checkpoint_tx
-            .send(CdpCookieSnapshot::from_profile_backed_cookies(Some(
-                Vec::new(),
-            )))
-            .expect("send deleted-cookie checkpoint");
+        checkpoint_tx.send(()).expect("send profile flush");
         drop(checkpoint_tx);
         worker.await.expect("checkpoint worker");
 
-        assert!(
-            cookie_profile.snapshot().is_empty(),
-            "the second checkpoint must remove a cookie created by the first checkpoint"
-        );
+        let paths = BrowserProfilePaths::new(&profile.path);
+        let persisted = crate::cookie_cache::load_cookie_cache(&paths.cookies_path)
+            .expect("read persisted cookie cache");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].name, "sid");
+        assert_eq!(persisted[0].value, "live");
     }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use moli_core::browser_host::BrowserPageOwnerKey;
 
 fn stored_cookie(name: &str, value: &str) -> moli_cookie_jar::StoredCookie {
     moli_cookie_jar::StoredCookie {
@@ -287,7 +288,32 @@ async fn set_discover_targets_catchall_reports_tab_and_page() {
         .as_str()
         .expect("created target id")
         .to_owned();
-    let tab_target_id = tab_id_for_page(&ctx, &page_target_id);
+    let tab_target_id = crate::conn::CdpConnection::derived_tab_target_id(&page_target_id);
+    assert!(
+        !ctx.sent
+            .iter()
+            .any(|message| message["method"] == json!("Target.targetCreated")),
+        "a live occurrence must not bypass the disabled discovery subscription"
+    );
+    let creation_sequence = ctx
+        .conn
+        .browser_fact_snapshot_for_test()
+        .into_iter()
+        .find(|fact| {
+            fact.target_id().as_str() == page_target_id
+                && matches!(
+                    fact.fact(),
+                    moli_core::browser_host::BrowserFact::TargetCreated
+                )
+        })
+        .expect("created Target should have one retained Browser occurrence")
+        .sequence()
+        .get();
+    let projected_before_discovery = ctx
+        .conn
+        .last_projected_browser_fact_sequence_for_test()
+        .expect("Target registration should claim its occurrence without discovery");
+    assert!(projected_before_discovery >= creation_sequence);
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -311,6 +337,11 @@ async fn set_discover_targets_catchall_reports_tab_and_page() {
             && message["params"]["targetInfo"]["targetId"] == json!(page_target_id)
     });
     assert_eq!(page_created["params"]["targetInfo"]["type"], json!("page"));
+    assert_eq!(
+        ctx.conn.last_projected_browser_fact_sequence_for_test(),
+        Some(projected_before_discovery),
+        "Target.setDiscoverTargets is a current-state resnapshot, not a second occurrence claim"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1074,7 +1105,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
     enable_root_target_discovery_for_test(&mut ctx);
     let mut browser_context = ctx.conn.new_browser_context("BID-popup-storage".to_owned());
     browser_context.set_active_target_id("TID-popup-storage-opener");
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
     let opener_url = format!("http://{addr}/opener");
     let page = ctx
         .conn
@@ -1254,11 +1285,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
     ctx.sent.clear();
 
     ctx.wait_until_scheduler_state("cross-origin popup navigation starts", |conn| {
-        conn.browser_context_by_id("BID-popup-storage")
-            .is_some_and(|browser_context| {
-                browser_context
-                    .has_pending_document_navigation_for_target(Some(&cross_origin_target_id))
-            })
+        conn.has_pending_document_navigation_for_target_id(&cross_origin_target_id)
     })
     .await;
     let request_started = tokio::time::timeout(
@@ -1286,9 +1313,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         .to_owned();
     assert!(
         ctx.conn
-            .browser_context_by_id("BID-popup-storage")
-            .is_some_and(|browser_context| browser_context
-                .has_pending_document_navigation_for_target(Some(&cross_origin_target_id))),
+            .has_pending_document_navigation_for_target_id(&cross_origin_target_id),
         "attaching a DevTools session must not replace the target-owned navigation"
     );
     ctx.sent.clear();
@@ -1519,10 +1544,12 @@ async fn popup_initial_empty_document_record_captures_creator_identity() {
         .as_str()
         .expect("popup target id");
 
-    let browser_context = ctx.conn.browser_context.as_ref().unwrap();
-    let initial = browser_context
-        .parked_target_owner_state(popup_target_id)
-        .and_then(|owner_state| owner_state.initial_empty_document_state())
+    let initial = ctx
+        .conn
+        .target_initial_empty_document_for_owner(&BrowserPageOwnerKey::new(
+            "BID-popup-creator",
+            popup_target_id,
+        ))
         .expect("popup target should record initial empty document");
     let creator = initial
         .creator()
@@ -1603,10 +1630,12 @@ async fn popup_initial_empty_document_frame_tree_inherits_opener_origin() {
     assert_eq!(frame["securityOrigin"], json!("https://opener.example"));
     assert_eq!(frame["secureContextType"], json!("Secure"));
 
-    let browser_context = ctx.conn.browser_context.as_ref().unwrap();
-    let initial = browser_context
-        .parked_target_owner_state(&popup_target_id)
-        .and_then(|owner_state| owner_state.initial_empty_document_state())
+    let initial = ctx
+        .conn
+        .target_initial_empty_document_for_owner(&BrowserPageOwnerKey::new(
+            "BID-popup-about-blank-origin",
+            &popup_target_id,
+        ))
         .expect("popup target should still record initial empty document");
     assert!(initial.is_on_initial_empty_document());
 }
@@ -1629,6 +1658,14 @@ async fn window_open_self_navigates_current_target_without_popup_target() {
             "expression": "window.open('data:text/html,<main>self target</main>', '_self') !== null"
         }
     }))
+    .await;
+    ctx.wait_until_scheduler_state("window.open _self Browser Owner navigation", |conn| {
+        conn.browser_context
+            .as_ref()
+            .is_some_and(|browser_context| {
+                browser_context.target_url() == "data:text/html,<main>self target</main>"
+            })
+    })
     .await;
 
     let sent = ctx.take_all();
@@ -1690,6 +1727,17 @@ async fn call_function_on_window_open_self_navigates_current_target_without_popu
             "returnByValue": true
         }
     }))
+    .await;
+    ctx.wait_until_scheduler_state(
+        "Runtime.callFunctionOn window.open _self Browser Owner navigation",
+        |conn| {
+            conn.browser_context
+                .as_ref()
+                .is_some_and(|browser_context| {
+                    browser_context.target_url() == "data:text/html,<main>call self target</main>"
+                })
+        },
+    )
     .await;
 
     let sent = ctx.take_all();
@@ -1977,6 +2025,65 @@ async fn named_popup_reuse_with_catchall_discovery_only_changes_the_page_target_
     .await;
 
     let second_sent = ctx.take_all();
+    let response_position = second_sent
+        .iter()
+        .position(|message| message["id"] == json!(153))
+        .unwrap_or_else(|| panic!("missing second window.open response: {second_sent:?}"));
+    let first_second_url_change_position = second_sent
+        .iter()
+        .position(|message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["url"]
+                    == json!("https://example.com/second-popup")
+        })
+        .unwrap_or_else(|| panic!("missing committed popup metadata change: {second_sent:?}"));
+    assert!(
+        response_position < first_second_url_change_position,
+        "Chromium returns window.open before the named Target's successor Document commits: {second_sent:?}",
+    );
+    let second_url_changes = second_sent
+        .iter()
+        .filter(|message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["url"]
+                    == json!("https://example.com/second-popup")
+                && (message["params"]["targetInfo"]["targetId"] == json!(tab_target_id)
+                    || message["params"]["targetInfo"]["targetId"] == json!(page_target_id))
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        second_url_changes.len(),
+        2,
+        "one committed Document metadata occurrence should fan out to tab/page: {second_sent:?}",
+    );
+    let second_url_facts = ctx
+        .conn
+        .browser_fact_snapshot_for_test()
+        .into_iter()
+        .filter(|envelope| {
+            envelope.target_id().as_str() == page_target_id
+                && matches!(
+                    envelope.fact(),
+                    moli_core::browser_host::BrowserFact::TargetMetadataChanged {
+                        transition,
+                    } if transition.url() == "https://example.com/second-popup"
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        second_url_facts.len(),
+        1,
+        "named reuse only queues navigation; the successor Document commit owns the metadata fact",
+    );
+    let metadata_transition = match second_url_facts[0].fact() {
+        moli_core::browser_host::BrowserFact::TargetMetadataChanged { transition } => transition,
+        _ => unreachable!("filtered Target metadata fact"),
+    };
+    assert_eq!(
+        metadata_transition.url(),
+        "https://example.com/second-popup"
+    );
+    assert_eq!(metadata_transition.navigation().target_id(), page_target_id);
     assert!(
         second_sent.iter().all(|message| {
             message["method"] != json!("Target.targetInfoChanged")
@@ -3033,15 +3140,27 @@ async fn incomplete_popup_rollback_clears_tab_page_sessions_and_target_graph() {
 
     let page_target_id = "TID-popup-rollback";
     let tab_target_id = ctx.conn.register_top_level_page_target(page_target_id);
+    ctx.conn
+        .register_background_target_with_creation_metadata_projection(
+            "BID-popup-rollback",
+            page_target_id,
+            moli_core::browser_host::BrowserTargetCreationMetadata::with_initial_empty_document(
+                moli_core::browser_host::BrowserInitialEmptyDocumentSeed::new("about:blank"),
+            ),
+            |browser_context, target_handle, page_residence, session_storage_access| {
+                browser_context.stage_background_target_with_browser_handles(
+                    target_handle,
+                    page_residence,
+                    session_storage_access,
+                    Some("SID-popup-page-primary".to_owned()),
+                    "about:blank".to_owned(),
+                    None,
+                );
+            },
+        )
+        .expect("background Target projection should register");
     {
         let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-        browser_context.stage_background_target(
-            page_target_id.to_owned(),
-            Some("SID-popup-page-primary".to_owned()),
-            "about:blank".to_owned(),
-            Some("about:blank".to_owned()),
-            None,
-        );
         assert!(browser_context.assign_auto_attached_session_to_target(
             page_target_id,
             "SID-popup-page-aux".to_owned()
@@ -3060,6 +3179,18 @@ async fn incomplete_popup_rollback_clears_tab_page_sessions_and_target_graph() {
         .register_auto_attached_session("SID-popup-page-primary".to_owned(), None);
     ctx.conn
         .register_auto_attached_session("SID-popup-page-aux".to_owned(), None);
+
+    assert!(
+        lifecycle::ensure_popup_initial_document_page_async(&mut ctx.conn, page_target_id).await,
+        "rollback regression requires a committed renderer Page owner"
+    );
+    let page_owner = BrowserPageOwnerKey::new("BID-popup-rollback", page_target_id);
+    let renderer_page_id = ctx
+        .conn
+        .browser_host_state()
+        .navigation_owner()
+        .renderer_page_id_for_owner(&page_owner)
+        .expect("popup initial Document must transfer its renderer Page into Core");
 
     assert!(ctx.conn.session_route(Some("SID-popup-tab")).is_some());
     assert!(
@@ -3081,7 +3212,16 @@ async fn incomplete_popup_rollback_clears_tab_page_sessions_and_target_graph() {
     assert_eq!(ctx.conn.session_route(Some("SID-popup-page-primary")), None);
     assert_eq!(ctx.conn.session_route(Some("SID-popup-page-aux")), None);
     assert!(ctx.conn.auto_attached_sessions_for_owner(None).is_empty());
-    assert_eq!(ctx.conn.tab_target_count(), 0);
+    assert_eq!(ctx.conn.top_level_target_graph_len(), 0);
+    assert_eq!(
+        ctx.conn
+            .browser_host_state()
+            .navigation_owner()
+            .renderer_page_id_for_owner(&page_owner),
+        None,
+        "popup rollback must retire the exact Core-owned renderer Page"
+    );
+    assert_ne!(renderer_page_id, 0);
     assert!(
         ctx.conn
             .browser_context
@@ -3098,51 +3238,10 @@ async fn incomplete_popup_rollback_clears_tab_page_sessions_and_target_graph() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn incomplete_active_popup_rollback_clears_active_slot_sessions_and_target_graph() {
+async fn incomplete_popup_rollback_rejects_active_target() {
     let mut ctx = TestContext::new_with_target_discovery(false);
-    load_bc(&mut ctx, "BID-active-popup-rollback");
-
     let page_target_id = "TID-active-popup-rollback";
-    let tab_target_id = ctx.conn.register_top_level_page_target(page_target_id);
-    {
-        let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-        browser_context.set_active_target_id(page_target_id);
-        browser_context.set_target_url("about:blank".to_owned());
-        browser_context.begin_active_target_initial_empty_document("about:blank".to_owned());
-        browser_context.attach_active_session("SID-active-popup-page-primary");
-        assert!(browser_context.assign_auto_attached_session_to_target(
-            page_target_id,
-            "SID-active-popup-page-aux".to_owned()
-        ));
-    }
-    assert!(ctx.conn.assign_session_to_tab_target(
-        &tab_target_id,
-        "SID-active-popup-tab".to_owned(),
-        false
-    ));
-    ctx.conn
-        .register_auto_attached_session("SID-active-popup-tab".to_owned(), None);
-    ctx.conn
-        .register_auto_attached_session("SID-active-popup-page-primary".to_owned(), None);
-    ctx.conn
-        .register_auto_attached_session("SID-active-popup-page-aux".to_owned(), None);
-
-    assert!(
-        ctx.conn
-            .session_route(Some("SID-active-popup-tab"))
-            .is_some()
-    );
-    assert!(
-        ctx.conn
-            .session_route(Some("SID-active-popup-page-primary"))
-            .is_some()
-    );
-    assert!(
-        ctx.conn
-            .session_route(Some("SID-active-popup-page-aux"))
-            .is_some()
-    );
-    assert_eq!(ctx.conn.tab_target_count(), 1);
+    load_bc_with_target(&mut ctx, "BID-active-popup-rollback", page_target_id);
 
     popup::rollback_incomplete_popup_target_async(
         &mut ctx.conn,
@@ -3151,30 +3250,24 @@ async fn incomplete_active_popup_rollback_clears_active_slot_sessions_and_target
     )
     .await;
 
-    assert_eq!(ctx.conn.session_route(Some("SID-active-popup-tab")), None);
-    assert_eq!(
-        ctx.conn
-            .session_route(Some("SID-active-popup-page-primary")),
-        None
-    );
-    assert_eq!(
-        ctx.conn.session_route(Some("SID-active-popup-page-aux")),
-        None
-    );
-    assert!(ctx.conn.auto_attached_sessions_for_owner(None).is_empty());
-    assert_eq!(ctx.conn.tab_target_count(), 0);
     assert_eq!(
         ctx.conn
             .browser_context
             .as_ref()
-            .expect("browser context")
-            .active_target_id(),
-        None
+            .and_then(BrowserContext::active_target_id),
+        Some(page_target_id)
     );
     assert!(
         ctx.conn
-            .primary_page_target_id_for_tab_target_id(&tab_target_id)
-            .is_none()
+            .browser_context
+            .as_ref()
+            .and_then(BrowserContext::active_target_handle)
+            .is_some_and(moli_core::browser_host::BrowserTargetHandle::is_live)
+    );
+    assert!(
+        ctx.conn
+            .target_session_route_for_target_id(page_target_id)
+            .is_some()
     );
 }
 
@@ -3225,7 +3318,7 @@ async fn unannounced_page_session_cleanup_clears_route_and_auto_attached_owner_i
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn create_target_without_debugger_wait_starts_requested_url_navigation() {
+async fn create_target_without_debugger_wait_publishes_requested_url_to_browser_owner() {
     let mut ctx = TestContext::new();
     ctx.process_async(json!({
         "id": 9008,
@@ -3238,16 +3331,21 @@ async fn create_target_without_debugger_wait_starts_requested_url_navigation() {
     .await;
     ctx.take_all();
 
-    ctx.process_async(json!({
-        "id": 9009,
-        "method": "Target.createTarget",
-        "params": {
-            "url": "data:text/html,<title>created-target-ready</title>"
-        }
-    }))
-    .await;
+    let scheduler_events = ctx
+        .process_command_only_async(json!({
+            "id": 9009,
+            "method": "Target.createTarget",
+            "params": {
+                "url": "data:text/html,<title>created-target-ready</title>"
+            }
+        }))
+        .await;
+    assert!(
+        scheduler_events.is_empty(),
+        "Target.createTarget must not recreate Protocol navigation work: {scheduler_events:?}"
+    );
 
-    let messages = ctx.take_all();
+    let messages = ctx.sent.clone();
     let attached = messages
         .iter()
         .find(|message| message["method"] == "Target.attachedToTarget")
@@ -3265,6 +3363,25 @@ async fn create_target_without_debugger_wait_starts_requested_url_navigation() {
         }),
         "Target.createTarget response should retain the created target id: {messages:?}"
     );
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert!(
+        ctx.conn
+            .runtime_session_owner_slot(Some(session_id))
+            .ok()
+            .and_then(|slot| slot.loaded_page())
+            .is_some_and(|page| moli_url::is_about_blank(page.final_url())),
+        "frontend completion must leave the requested URL for a later Browser Host turn"
+    );
+
+    let requested_url = "data:text/html,<title>created-target-ready</title>";
+    ctx.wait_until_scheduler_state("created Target requested URL commit", |conn| {
+        conn.runtime_session_owner_slot(Some(session_id))
+            .ok()
+            .and_then(|slot| slot.loaded_page())
+            .is_some_and(|page| page.final_url().as_str() == requested_url)
+    })
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 9010,

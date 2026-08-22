@@ -1182,7 +1182,7 @@ fn start_cdp_dom_focus_command(
     }
     let page = loaded_page_mut_for_session(conn, cmd.session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_focus_document_node_for_reference(page, reference)?;
+    let pending = start_focus_document_node_for_reference(&page, reference)?;
     Ok(PendingDomCommandDispatch {
         command_id: cmd.id,
         session_id: cmd.session_id.map(str::to_owned),
@@ -1346,7 +1346,7 @@ fn start_devtools_remove_node_command(
     }
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_remove_document_node_for_reference(page, command.reference)?;
+    let pending = start_remove_document_node_for_reference(&page, command.reference)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -1401,7 +1401,7 @@ fn start_devtools_dom_geometry_command(
     let reference = command.reference;
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let (pending, kind) = start_client_rect_for_reference(page, reference, command.operation)?;
+    let (pending, kind) = start_client_rect_for_reference(&page, reference, command.operation)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -1467,7 +1467,7 @@ fn start_devtools_describe_node_command(
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let pending = start_inspector_document_node_snapshot_for_reference(
-        page,
+        &page,
         renderer_inspector_session_id,
         include_whitespace,
         reference,
@@ -1551,7 +1551,7 @@ fn start_devtools_request_child_nodes_command(
             let page = loaded_page_mut_for_session(conn, command_session_id)
                 .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
             let (pending, kind) = start_request_child_nodes_for_reference(
-                page,
+                &page,
                 renderer_inspector_session_id,
                 include_whitespace,
                 DevToolsDomNodeReference::BackendNodeId(backend_node_id),
@@ -2167,7 +2167,7 @@ fn start_devtools_resolve_node_command(
     }
     let object_group = command.object_group;
     let resolution = start_resolve_runtime_object_for_reference(
-        page,
+        &page,
         renderer_inspector_session_id,
         reference,
         None,
@@ -2483,7 +2483,7 @@ fn start_devtools_get_outer_html_command(
     }
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let (pending, kind) = start_outer_html_for_reference(page, reference, include_shadow_dom)?;
+    let (pending, kind) = start_outer_html_for_reference(&page, reference, include_shadow_dom)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -2728,7 +2728,7 @@ fn complete_pending_dom_command(
         }
         kind => kind,
     };
-    let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
         out.push_error(-32000, "NoDocumentLoaded");
         return DomCommandTaskStep::Complete;
     };
@@ -2753,7 +2753,7 @@ fn complete_pending_dom_command(
             append,
         } => {
             return set_file_input::complete_preflight(
-                page, command_id, session_id, completion, reference, file_paths, append, out,
+                &mut page, command_id, session_id, completion, reference, file_paths, append, out,
             );
         }
         PendingDomCommandKind::Focus {
@@ -2834,25 +2834,27 @@ fn complete_pending_dom_command(
             }
         }
         PendingDomCommandKind::SetFileInputFiles => {
-            return set_file_input::complete_set_file_input_files(page, completion, out);
+            return set_file_input::complete_set_file_input_files(&mut page, completion, out);
         }
         PendingDomCommandKind::SetFileInputFilesObjectReference => {
             return set_file_input::complete_set_file_input_files_object_reference(
-                page, completion, out,
+                &mut page, completion, out,
             );
         }
         PendingDomCommandKind::RendererBackendNodeClientRect { operation } => {
-            return complete_renderer_backend_node_client_rect(operation, page, completion, out);
+            return complete_renderer_backend_node_client_rect(
+                operation, &mut page, completion, out,
+            );
         }
         PendingDomCommandKind::GetNodeForLocation { top_frame_id } => {
-            match finish_document_hit_test(page, completion, top_frame_id) {
+            match finish_document_hit_test(&mut page, completion, top_frame_id) {
                 Ok(result) => out.push_result(get_node_for_location_result_value(&result)),
                 Err(error) => out.push_error(-32000, error.message),
             }
         }
         PendingDomCommandKind::RendererBackendNodeScrollIntoViewIfNeeded => {
             return complete_renderer_backend_node_scroll_into_view_if_needed(
-                page, completion, out,
+                &mut page, completion, out,
             );
         }
         PendingDomCommandKind::PushNodesByBackendIdsToFrontend {
@@ -2861,7 +2863,7 @@ fn complete_pending_dom_command(
             renderer_backend_positions,
         } => {
             return complete_push_nodes_by_backend_ids_to_frontend(
-                page,
+                &mut page,
                 completion,
                 session_id,
                 backend_node_ids,
@@ -2887,38 +2889,40 @@ fn complete_pending_dom_command(
             }
         }
         PendingDomCommandKind::QuerySelectorLive { multiple } => {
-            return complete_query_selector_live(page, completion, multiple, out);
+            return complete_query_selector_live(&mut page, completion, multiple, out);
         }
         PendingDomCommandKind::GetAttributesLive => {
-            return complete_get_attributes_live(page, completion, out);
+            return complete_get_attributes_live(&mut page, completion, out);
         }
         PendingDomCommandKind::GetTextLive => {
-            return complete_get_text_live(page, completion, out);
+            return complete_get_text_live(&mut page, completion, out);
         }
         PendingDomCommandKind::GetPropertyLive => {
-            return complete_get_property_live(page, completion, out);
+            return complete_get_property_live(&mut page, completion, out);
         }
         PendingDomCommandKind::RequestNodeObjectReference => {
-            return complete_request_node_object_reference(session_id, page, completion, out);
+            return complete_request_node_object_reference(session_id, &mut page, completion, out);
         }
         PendingDomCommandKind::GetOuterHtmlDocument => {
-            return complete_get_outer_html_document(page, completion, out);
+            return complete_get_outer_html_document(&mut page, completion, out);
         }
         PendingDomCommandKind::GetOuterHtmlObjectReference => {
-            return complete_get_outer_html_object_reference(page, completion, out);
+            return complete_get_outer_html_object_reference(&mut page, completion, out);
         }
         PendingDomCommandKind::GetOuterHtmlBackendNodeReference => {
-            return complete_get_outer_html_backend_node_reference(page, completion, out);
+            return complete_get_outer_html_backend_node_reference(&mut page, completion, out);
         }
         PendingDomCommandKind::ScrollIntoViewIfNeededObjectReference => {
-            return complete_scroll_into_view_if_needed_object_reference(page, completion, out);
+            return complete_scroll_into_view_if_needed_object_reference(
+                &mut page, completion, out,
+            );
         }
         PendingDomCommandKind::DescribeNodeObjectReference {
             cached_object_node,
             top_frame_id,
         } => {
             return complete_describe_node_object_reference(
-                page,
+                &mut page,
                 completion,
                 cached_object_node,
                 top_frame_id,
@@ -2926,13 +2930,15 @@ fn complete_pending_dom_command(
             );
         }
         PendingDomCommandKind::ObjectReferenceLiveClientRect { operation } => {
-            return complete_object_reference_live_client_rect(operation, page, completion, out);
+            return complete_object_reference_live_client_rect(
+                operation, &mut page, completion, out,
+            );
         }
         PendingDomCommandKind::DocumentSnapshot {
             operation,
             top_frame_id,
         } => {
-            return complete_document_snapshot(operation, page, completion, top_frame_id, out);
+            return complete_document_snapshot(operation, &mut page, completion, top_frame_id, out);
         }
         PendingDomCommandKind::SetChildNodesSnapshotForBackendNode {
             after,
@@ -2941,7 +2947,7 @@ fn complete_pending_dom_command(
         } => {
             return complete_set_child_nodes_snapshot_for_backend_node(
                 session_id,
-                page,
+                &mut page,
                 completion,
                 after,
                 top_frame_id,
@@ -2955,7 +2961,7 @@ fn complete_pending_dom_command(
         } => {
             return complete_query_selector_set_child_nodes_live(
                 session_id,
-                page,
+                &mut page,
                 completion,
                 multiple,
                 top_frame_id,
@@ -3097,7 +3103,7 @@ fn complete_pending_dom_command(
                 return DomCommandTaskStep::Complete;
             }
             return match start_resolve_runtime_object_for_reference(
-                page,
+                &page,
                 renderer_inspector_session_id.clone(),
                 reference,
                 Some(execution_context_id),
@@ -3359,37 +3365,39 @@ fn complete_pending_dom_command_result(
             );
         }
         PendingDomCommandKind::SetFileInputFiles => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            set_file_input::complete_set_file_input_files_result(page, completion)
+            set_file_input::complete_set_file_input_files_result(&mut page, completion)
                 .map(|()| DevToolsCommandResult::Empty)
         }
         PendingDomCommandKind::SetFileInputFilesObjectReference => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            set_file_input::complete_set_file_input_files_object_reference_result(page, completion)
-                .map(|()| DevToolsCommandResult::Empty)
+            set_file_input::complete_set_file_input_files_object_reference_result(
+                &mut page, completion,
+            )
+            .map(|()| DevToolsCommandResult::Empty)
         }
         PendingDomCommandKind::GetNodeForLocation { top_frame_id } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            finish_document_hit_test(page, completion, top_frame_id)
+            finish_document_hit_test(&mut page, completion, top_frame_id)
                 .map(DevToolsCommandResult::GetNodeForLocation)
         }
         PendingDomCommandKind::RendererBackendNodeClientRect { operation } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
@@ -3403,13 +3411,13 @@ fn complete_pending_dom_command_result(
             .map(DevToolsCommandResult::DomGeometry)
         }
         PendingDomCommandKind::RendererBackendNodeScrollIntoViewIfNeeded => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_renderer_backend_node_scroll_into_view_if_needed_result(page, completion)
+            complete_renderer_backend_node_scroll_into_view_if_needed_result(&mut page, completion)
                 .map(|()| DevToolsCommandResult::Empty)
         }
         PendingDomCommandKind::PushNodesByBackendIdsToFrontend {
@@ -3417,14 +3425,14 @@ fn complete_pending_dom_command_result(
             node_ids,
             renderer_backend_positions,
         } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
             match complete_push_nodes_by_backend_ids_to_frontend_result(
-                page,
+                &mut page,
                 completion,
                 backend_node_ids,
                 node_ids,
@@ -3435,62 +3443,62 @@ fn complete_pending_dom_command_result(
             }
         }
         PendingDomCommandKind::GetFrameOwner { frame_id } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_frame_owner_result(page, completion, &frame_id)
+            complete_get_frame_owner_result(&mut page, completion, &frame_id)
                 .map(DevToolsCommandResult::GetFrameOwner)
         }
         PendingDomCommandKind::QuerySelectorLive { multiple } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_query_selector_live_result(page, completion, multiple)
+            complete_query_selector_live_result(&mut page, completion, multiple)
                 .map(DevToolsCommandResult::QuerySelector)
         }
         PendingDomCommandKind::QuerySelectorSetChildNodesLive { multiple, .. } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_query_selector_set_child_nodes_live_result(page, completion, multiple)
+            complete_query_selector_set_child_nodes_live_result(&mut page, completion, multiple)
                 .map(DevToolsCommandResult::QuerySelector)
         }
         PendingDomCommandKind::GetAttributesLive => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_attributes_live_result(page, completion)
+            complete_get_attributes_live_result(&mut page, completion)
                 .map(DevToolsCommandResult::GetAttributes)
         }
         PendingDomCommandKind::GetTextLive => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_text_live_result(page, completion).map(DevToolsCommandResult::GetText)
+            complete_get_text_live_result(&mut page, completion).map(DevToolsCommandResult::GetText)
         }
         PendingDomCommandKind::GetPropertyLive => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_property_live_result(page, completion)
+            complete_get_property_live_result(&mut page, completion)
                 .map(DevToolsCommandResult::GetProperty)
         }
         PendingDomCommandKind::ResolveNode {
@@ -3498,13 +3506,13 @@ fn complete_pending_dom_command_result(
             cache_top_frame_id,
         } => {
             let remote_object = {
-                let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+                let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                     return devtools_dom_command_task_complete(Err(DevToolsError::new(
                         DevToolsErrorKind::Internal,
                         "NoDocumentLoaded",
                     )));
                 };
-                match complete_resolve_node_page_result(page, completion) {
+                match complete_resolve_node_page_result(&mut page, completion) {
                     Ok(result) => result,
                     Err(error) => return devtools_dom_command_task_complete(Err(error)),
                 }
@@ -3558,7 +3566,7 @@ fn complete_pending_dom_command_result(
             top_frame_id,
         } => {
             {
-                let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+                let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                     return devtools_dom_command_task_complete(Err(DevToolsError::new(
                         DevToolsErrorKind::Internal,
                         "NoDocumentLoaded",
@@ -3591,7 +3599,7 @@ fn complete_pending_dom_command_result(
             object_group,
             top_frame_id,
         } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
@@ -3600,7 +3608,7 @@ fn complete_pending_dom_command_result(
             return complete_resolve_node_execution_context_frame_result(
                 session_id,
                 renderer_inspector_session_id.clone(),
-                page,
+                &mut page,
                 completion,
                 reference,
                 execution_context_id,
@@ -3613,67 +3621,67 @@ fn complete_pending_dom_command_result(
             "UnsupportedDevToolsCommand",
         )),
         PendingDomCommandKind::ObjectReferenceLiveClientRect { operation } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_object_reference_live_client_rect_result(page, completion, operation)
+            complete_object_reference_live_client_rect_result(&mut page, completion, operation)
                 .map(DevToolsCommandResult::DomGeometry)
         }
         PendingDomCommandKind::GetOuterHtmlObjectReference => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_outer_html_object_reference_result(page, completion)
+            complete_get_outer_html_object_reference_result(&mut page, completion)
                 .map(DevToolsCommandResult::GetOuterHtml)
         }
         PendingDomCommandKind::GetOuterHtmlDocument => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_outer_html_document_result(page, completion)
+            complete_get_outer_html_document_result(&mut page, completion)
                 .map(DevToolsCommandResult::GetOuterHtml)
         }
         PendingDomCommandKind::GetOuterHtmlBackendNodeReference => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_get_outer_html_backend_node_reference_result(page, completion)
+            complete_get_outer_html_backend_node_reference_result(&mut page, completion)
                 .map(DevToolsCommandResult::GetOuterHtml)
         }
         PendingDomCommandKind::ScrollIntoViewIfNeededObjectReference => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
-            complete_scroll_into_view_if_needed_object_reference_result(page, completion)
+            complete_scroll_into_view_if_needed_object_reference_result(&mut page, completion)
                 .map(|()| DevToolsCommandResult::Empty)
         }
         PendingDomCommandKind::DescribeNodeObjectReference {
             cached_object_node,
             top_frame_id,
         } => {
-            let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+            let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
                 return devtools_dom_command_task_complete(Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "NoDocumentLoaded",
                 )));
             };
             complete_describe_node_object_reference_result(
-                page,
+                &mut page,
                 completion,
                 cached_object_node,
                 top_frame_id,
@@ -3920,11 +3928,11 @@ fn complete_frontend_node_binding_reference(
     completion: CompletedPageCommand,
     out: &mut DomCommandOutput,
 ) -> Result<DevToolsDomNodeReference, DomCommandTaskStep> {
-    let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
         out.push_error(-32000, "NoDocumentLoaded");
         return Err(DomCommandTaskStep::Complete);
     };
-    match super::frontend_binding::finish_reference(page, completion) {
+    match super::frontend_binding::finish_reference(&mut page, completion) {
         Ok(reference) => Ok(reference),
         Err(message) => {
             out.push_error(-32000, message);
@@ -3938,13 +3946,13 @@ fn complete_frontend_node_binding_reference_result(
     session_id: Option<&str>,
     completion: CompletedPageCommand,
 ) -> Result<DevToolsDomNodeReference, DevToolsDomCommandTaskStep> {
-    let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
         return Err(devtools_dom_command_task_complete(Err(DevToolsError::new(
             DevToolsErrorKind::Internal,
             "NoDocumentLoaded",
         ))));
     };
-    super::frontend_binding::finish_reference(page, completion).map_err(|message| {
+    super::frontend_binding::finish_reference(&mut page, completion).map_err(|message| {
         let kind = if message == "Could not find node with given id" {
             DevToolsErrorKind::NoSuchNode
         } else {
@@ -3978,7 +3986,7 @@ where
         out.push_error(-32000, "NoDocumentLoaded");
         return DomCommandTaskStep::Complete;
     };
-    match start(page, reference) {
+    match start(&page, reference) {
         Ok((pending, kind)) => DomCommandTaskStep::Pending(Box::new(PendingDomCommandDispatch {
             command_id,
             session_id: session_id.map(str::to_owned),
@@ -4017,7 +4025,7 @@ where
             "NoDocumentLoaded",
         )));
     };
-    match start(page, reference) {
+    match start(&page, reference) {
         Ok((pending, kind)) => {
             DevToolsDomCommandTaskStep::Pending(Box::new(PendingDomCommandDispatch {
                 command_id,
@@ -5659,7 +5667,7 @@ fn start_devtools_get_attributes_command(
     let reference = command.reference;
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_attributes_for_reference(page, reference)?;
+    let pending = start_document_node_attributes_for_reference(&page, reference)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -5717,7 +5725,7 @@ fn start_devtools_get_text_command(
     let reference = command.reference;
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_text_for_reference(page, reference)?;
+    let pending = start_document_node_text_for_reference(&page, reference)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -5747,7 +5755,7 @@ fn start_devtools_get_property_command(
     let reference = command.reference;
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let pending = start_document_node_property_for_reference(page, reference, &command.name)?;
+    let pending = start_document_node_property_for_reference(&page, reference, &command.name)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),
@@ -6198,7 +6206,7 @@ fn start_devtools_scroll_into_view_if_needed_command(
     }
     let page = loaded_page_mut_for_session(conn, command_session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    let (pending, kind) = start_scroll_into_view_for_reference(page, reference, command.rect)?;
+    let (pending, kind) = start_scroll_into_view_for_reference(&page, reference, command.rect)?;
     Ok(Some(PendingDomCommandDispatch {
         command_id,
         session_id: command_session_id.map(str::to_owned),

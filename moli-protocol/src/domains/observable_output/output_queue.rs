@@ -324,8 +324,8 @@ impl ObservableSessionAuditsPreparedRange {
         conn: &CdpConnection,
     ) -> Option<Self> {
         let session_id = self.session_id();
-        let runtime_slot = conn.runtime_session_owner_slot(session_id).ok()?;
-        let document_binding = runtime_slot.committed_renderer_document_binding()?;
+        let document_binding =
+            conn.committed_renderer_document_binding_for_session_owner(session_id)?;
         let owner_state = conn.target_owner_state_for_session(session_id)?;
         let session_state = conn.target_page_session_state_for_session(session_id)?;
         if document_binding.renderer_document_identity() != self.source_document
@@ -1037,7 +1037,7 @@ mod tests {
             TargetPageResidenceIdentity::new(
                 "BID-observable-output".to_owned(),
                 Some("TID-observable-output".to_owned()),
-                page_attachment_id(raw),
+                raw,
             ),
             session_id.map(str::to_owned),
         )
@@ -1606,10 +1606,12 @@ mod tests {
     fn observable_backlog_queue_reports_console_and_log_ranges_from_owner_cursors() {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_target_url("http://example.test/observable".to_owned());
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_session_state.page_session_state.log_enabled = true;
+        bc.devtools_session_state_mut()
+            .page_session_state
+            .log_enabled = true;
         let queue = TargetObservableOutputQueue {
             observable_output_items: vec![
                 ScriptObservableOutputItem::ConsoleMessage("warn: observable".to_owned()),
@@ -1622,13 +1624,13 @@ mod tests {
         let mut prepared = queue.console_log_backlog_ranges(
             bc.target_url(),
             page_attachment_id(1),
-            bc.devtools_session_state
+            bc.devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
-            bc.devtools_session_state.page_session_state.log_enabled,
+            bc.devtools_session_state().page_session_state.log_enabled,
             true,
             &bc.active_target.owner_state,
-            &bc.devtools_session_state.console_output_session_state,
+            &bc.devtools_session_state().console_output_session_state,
             None,
         );
         let console = prepared
@@ -1672,7 +1674,7 @@ mod tests {
     fn observable_backlog_queue_filters_single_raw_queue_by_kind_cursor() {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_target_url("http://example.test/observable".to_owned());
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
         bc.active_target
@@ -1692,13 +1694,13 @@ mod tests {
         let mut prepared = queue.console_log_backlog_ranges(
             bc.target_url(),
             page_attachment_id(1),
-            bc.devtools_session_state
+            bc.devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
-            bc.devtools_session_state.page_session_state.log_enabled,
+            bc.devtools_session_state().page_session_state.log_enabled,
             true,
             &bc.active_target.owner_state,
-            &bc.devtools_session_state.console_output_session_state,
+            &bc.devtools_session_state().console_output_session_state,
             None,
         );
         let console = prepared

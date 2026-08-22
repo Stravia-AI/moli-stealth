@@ -18,7 +18,8 @@ async fn get_all_cookies_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_get_all_cookies_returns_unfiltered_browser_context_cookies() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-GAC".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-GAC".into()));
 
     ctx.process_async(json!({
         "id": 2_2,
@@ -64,7 +65,8 @@ async fn network_get_all_cookies_returns_unfiltered_browser_context_cookies() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_extra_http_headers_replaces_previous_headers() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("NID-A".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("NID-A".into()));
 
     ctx.process_async(json!({"id": 3, "method": "Network.setExtraHTTPHeaders", "params": { "headers": { "foo": "bar" }}}))
         .await;
@@ -115,7 +117,7 @@ async fn set_user_agent_override_applies_to_subsequent_navigation_requests() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 30,
@@ -173,16 +175,7 @@ async fn background_target_user_agent_override_reaches_replacement_document() {
     let mut ctx = TestContext::new();
     let mut browser_context = BrowserContext::new("BID-default".to_owned());
     browser_context.set_active_target_id("TID-initial");
-    let renderer_runtime = browser_context.renderer_runtime_owner_access();
-    let engine = NavigationEngine::new_with_fetch_config_and_browser_context_access(
-        ctx.conn.fetch_config().clone(),
-        renderer_runtime,
-        OptionalResourceFetchMask::NONE,
-        true,
-    )
-    .expect("new BrowserContext owner should be live");
-    ctx.conn.replace_navigation_engine(engine);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({
         "id": 35,
@@ -318,7 +311,7 @@ async fn set_user_agent_override_applies_to_current_page_fetch_requests() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<body>ok</body>",
         Some("SID-1"),
@@ -377,9 +370,97 @@ async fn set_user_agent_override_rejects_invalid_params() {
     ctx.expect_error(32, -32602, "InvalidParams");
 }
 #[tokio::test(flavor = "multi_thread")]
+async fn network_cookie_flow_matches_lightpanda_subset() {
+    let mut ctx = TestContext::new();
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-S".into()));
+
+    ctx.process_async(json!({
+        "id": 3,
+        "method": "Network.getCookies",
+        "params": { "urls": ["https://example.com/pancakes"] }
+    }))
+    .await;
+    ctx.expect_result(3, json!({ "cookies": [] }), None);
+
+    ctx.process_async(json!({
+            "id": 4,
+            "method": "Network.setCookie",
+            "params": { "name": "test3", "value": "valuenot3", "url": "https://car.example.com/defnotpancakes" }
+        }))
+    .await;
+    ctx.expect_result(4, json!({}), None);
+
+    ctx.process_async(json!({
+        "id": 5,
+        "method": "Network.setCookies",
+        "params": {
+            "cookies": [
+                { "name": "test3", "value": "value3", "url": "https://car.example.com/pan/cakes" },
+                { "name": "test4", "value": "value4", "domain": "example.com", "path": "/mango" }
+            ]
+        }
+    }))
+    .await;
+    ctx.expect_result(5, json!({}), None);
+
+    ctx.process_async(json!({
+        "id": 6,
+        "method": "Network.getCookies",
+        "params": { "urls": ["https://car.example.com/pan/cakes"] }
+    }))
+    .await;
+    ctx.expect_result(
+            6,
+            json!({
+                "cookies": [
+                    { "name": "test3", "value": "value3", "domain": "car.example.com", "path": "/", "size": 11, "secure": true }
+                ]
+            }),
+            None,
+        );
+
+    ctx.process_async(json!({
+        "id": 7,
+        "method": "Network.deleteCookies",
+        "params": { "name": "test3", "domain": "car.example.com" }
+    }))
+    .await;
+    ctx.expect_result(7, json!({}), None);
+
+    ctx.process_async(json!({
+        "id": 8,
+        "method": "Storage.getCookies",
+        "params": { "browserContextId": "BID-S" }
+    }))
+    .await;
+    ctx.expect_result(
+            8,
+            json!({
+                "cookies": [
+                    { "name": "test4", "value": "value4", "domain": ".example.com", "path": "/mango", "size": 11 }
+                ]
+            }),
+            None,
+        );
+
+    ctx.process_async(json!({ "id": 9, "method": "Network.clearBrowserCookies" }))
+        .await;
+    ctx.expect_result(9, json!({}), None);
+
+    ctx.process_async(json!({
+        "id": 10,
+        "method": "Storage.getCookies",
+        "params": { "browserContextId": "BID-S" }
+    }))
+    .await;
+    ctx.expect_result(10, json!({ "cookies": [] }), None);
+}
+#[tokio::test(flavor = "multi_thread")]
 async fn network_get_cookies_omits_same_site_for_unspecified_cookie() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N-U".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N-U".into()));
 
     ctx.process_async(json!({
         "id": 101,
@@ -409,7 +490,8 @@ async fn network_get_cookies_omits_same_site_for_unspecified_cookie() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_returns_success_and_cookie_report() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N1".into()));
 
     ctx.process_async(json!({
         "id": 40,
@@ -439,7 +521,8 @@ async fn network_set_cookie_returns_success_and_cookie_report() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_reports_secure_access_warning_for_localhost_http() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N1W".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N1W".into()));
 
     ctx.process_async(json!({
         "id": 42,
@@ -468,7 +551,8 @@ async fn network_set_cookie_reports_secure_access_warning_for_localhost_http() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_returns_rejected_cookie_report_without_protocol_error() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N2".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N2".into()));
 
     ctx.process_async(json!({
         "id": 41,
@@ -501,7 +585,8 @@ async fn network_set_cookie_returns_rejected_cookie_report_without_protocol_erro
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_reports_structured_facade_rejections_without_protocol_error() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N3".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N3".into()));
 
     ctx.process_async(json!({
         "id": 43,
@@ -535,7 +620,8 @@ async fn network_set_cookie_reports_structured_facade_rejections_without_protoco
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_accepts_leading_dot_domain() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N3-DOT".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N3-DOT".into()));
 
     ctx.process_async(json!({
         "id": 431,
@@ -569,7 +655,8 @@ async fn network_set_cookie_accepts_leading_dot_domain() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_reports_invalid_url_as_cookie_rejection() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N4".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N4".into()));
 
     ctx.process_async(json!({
         "id": 44,
@@ -601,7 +688,8 @@ async fn network_set_cookie_reports_invalid_url_as_cookie_rejection() {
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_reports_structured_name_value_rejections_without_protocol_error() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N5".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N5".into()));
 
     ctx.process_async(json!({
         "id": 45,
@@ -635,7 +723,7 @@ async fn network_set_cookie_uses_browser_context_default_cookie_url_when_missing
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-N6".into());
     bc.set_target_url("https://example.com/path".into());
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 46,
@@ -684,7 +772,8 @@ async fn network_set_cookie_uses_browser_context_default_cookie_url_when_missing
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_reports_missing_cookie_url_when_no_default_scope_exists() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N7".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N7".into()));
 
     ctx.process_async(json!({
         "id": 48,
@@ -715,7 +804,8 @@ async fn network_set_cookie_reports_missing_cookie_url_when_no_default_scope_exi
 #[tokio::test(flavor = "multi_thread")]
 async fn network_set_cookie_keeps_cookie_store_available_after_lock_holder_panic() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-N-store-panic".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-N-store-panic".into()));
     let cookie_store = ctx
         .conn
         .browser_context

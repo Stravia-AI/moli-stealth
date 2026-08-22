@@ -6,13 +6,12 @@ edition = "2024"
 build = "build.rs"
 
 [features]
-test-support = []
+test-support = ["moli-core/test-support"]
 
 [dependencies]
 anyhow = "1.0.100"
 base64 = "0.22"
 indexmap = "2.6"
-moli-bounded-buffer = { path = "../moli-bounded-buffer" }
 moli-core = { path = "../moli-core" }
 moli-header-field = { path = "../moli-header-field" }
 moli-page-types = { path = "../moli-page-types" }
@@ -49,6 +48,7 @@ sanitize-filename = "=0.6.0"
 
 [dev-dependencies]
 axum = { version = "0.8.6", features = ["ws"] }
+moli-core = { path = "../moli-core", features = ["test-support"] }
 moli-cookie-jar = { path = "../moli-cookie-jar", features = ["test-support"] }
 moli-image = { path = "../moli-image" }
 moli-storage-service = { path = "../moli-storage-service" }

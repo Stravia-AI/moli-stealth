@@ -109,6 +109,67 @@ async fn evaluate_string_through_renderer_fence_for_test(
         .to_owned()
 }
 
+async fn evaluate_owned_object_handle_for_test(
+    ctx: &mut crate::testing::TestContext,
+    context: DevToolsCommandContext,
+    expression: &str,
+) -> DevToolsRemoteHandleId {
+    let result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        ctx,
+        DevToolsCommand::EvaluateScript(DevToolsEvaluateScriptCommand {
+            context,
+            realm_id: None,
+            world_name: None,
+            expression: expression.to_owned(),
+            await_promise: false,
+            user_gesture: false,
+            webdriver_bidi_file_prompt_handler: None,
+            result_ownership: DevToolsResultOwnership::Root,
+            preserve_remote_metadata: false,
+            materialize_bidi_script_result: false,
+            serialization_options: None,
+        }),
+    )
+    .await;
+    expect_script_value_result(
+        result.expect("owned object evaluation should succeed"),
+        "expected owned object result",
+    )
+    .handle
+    .expect("root-owned object result should expose a handle")
+}
+
+async fn create_active_bidi_target_context_for_test(
+    ctx: &mut crate::testing::TestContext,
+    session_id: &str,
+) -> DevToolsCommandContext {
+    let context = DevToolsCommandContext {
+        protocol: DevToolsProtocol::WebDriverBidi,
+        session_id: Some(DevToolsSessionId::from(session_id)),
+        target_id: None,
+        browser_context_id: None,
+    };
+    let create_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        ctx,
+        DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
+            context: context.clone(),
+            url: "about:blank".to_owned(),
+            browser_context_id: None,
+            activate: true,
+        }),
+    )
+    .await;
+    let DevToolsCommandResult::CreateTarget(create_result) =
+        create_result.expect("create target should succeed")
+    else {
+        panic!("expected create target result");
+    };
+    DevToolsCommandContext {
+        target_id: Some(create_result.target_id),
+        ..context
+    }
+}
+
 async fn create_target_in_browser_context_through_renderer_fence_for_test(
     ctx: &mut crate::testing::TestContext,
     context: &DevToolsCommandContext,
@@ -385,10 +446,11 @@ async fn devtools_browser_context_create_uses_ephemeral_storage_partition() {
         "profile-key",
         "profile-value"
     ));
-    let initial_storage_partition = CdpInitialStoragePartition::from_storage_partition(
-        vec![stored_cookie_for_dispatch_test("sid", "seeded")],
-        &initial_storage_owner,
-    );
+    initial_storage_owner
+        .import_cookies([stored_cookie_for_dispatch_test("sid", "seeded")])
+        .expect("seed Browser-owned cookies");
+    let initial_storage_partition =
+        CdpInitialStoragePartition::from_storage_partition(&initial_storage_owner);
     let mut conn = CdpConnection::new_with_initial_storage_partition(initial_storage_partition);
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -431,7 +493,6 @@ async fn devtools_browser_context_create_uses_ephemeral_storage_partition() {
             .get_item("https://example.com", "profile-key"),
         None
     );
-    assert!(conn.snapshot_profile_backed_cookies().is_none());
 }
 
 #[tokio::test]
@@ -618,7 +679,7 @@ async fn devtools_script_navigation_exact_cursor_rejects_replaced_page_owner_act
             .conn_mut()
             .runtime_session_owner_slot_mut(None)
             .expect("created target runtime slot")
-            .replace_page_attachment_id_for_test();
+            .clear_loaded_page_for_test_fixture();
     }
 
     let sent_start = ctx.sent.len();
@@ -694,6 +755,7 @@ async fn bidi_fetch_control_resolves_background_request_owner() {
             "https://example.test/background".to_owned(),
         ));
     conn.browser_context = Some(browser_context);
+    conn.adopt_direct_browser_context_fixture_attachments();
 
     conn.register_pending_fetch_navigation_request_for_session_owner(
         Some("SID-background"),
@@ -1172,19 +1234,12 @@ async fn devtools_runtime_call_function_popup_activity_drains_from_protocol_neut
     let mut browser_context = BrowserContext::new("BID-neutral-popup".to_owned());
     browser_context.set_active_target_id("TID-neutral-popup-opener".to_owned());
     browser_context.attach_active_session("SID-neutral-popup-opener");
-    ctx.conn.browser_context = Some(browser_context);
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<p>neutral popup opener</p>")
-        .await
-        .expect("page should load");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .active_target
-        .runtime_slot
-        .set_loaded_page_for_test(page);
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<p>neutral popup opener</p>",
+        Some("SID-neutral-popup-opener"),
+    )
+    .await;
 
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -1320,6 +1375,7 @@ async fn devtools_create_target_rejects_unknown_reference_target() {
 #[tokio::test]
 async fn devtools_command_preserves_target_create_typed_sidecar() {
     let mut conn = CdpConnection::new();
+    conn.enable_webdriver_bidi_target_lifecycle_projection();
     conn.set_root_target_discovery_enabled(true);
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -1328,7 +1384,7 @@ async fn devtools_command_preserves_target_create_typed_sidecar() {
         browser_context_id: None,
     };
 
-    let (result, scheduler_events, mut protocol_events) = conn
+    let (result, scheduler_events, protocol_events) = conn
         .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
             context: context.clone(),
             url: "about:blank".to_owned(),
@@ -1340,12 +1396,77 @@ async fn devtools_command_preserves_target_create_typed_sidecar() {
 
     assert!(scheduler_events.is_empty());
     result.expect("create target should succeed");
-    assert_eq!(protocol_events.len(), 1);
-    let (_message, automation_event) = protocol_events.remove(0).into_parts();
-    let Some(AutomationEvent::TargetCreated(event)) = automation_event else {
-        panic!("expected targetCreated typed sidecar");
+    let parts = protocol_events
+        .into_iter()
+        .map(BackgroundProtocolEvent::into_parts)
+        .collect::<Vec<_>>();
+    let target_created_messages = parts
+        .iter()
+        .filter(|(message, _)| message["method"] == json!("Target.targetCreated"))
+        .collect::<Vec<_>>();
+    assert_eq!(target_created_messages.len(), 1);
+    assert!(
+        target_created_messages[0].1.is_none(),
+        "CDP discovery notification must not duplicate the neutral lifecycle sidecar"
+    );
+    let created = parts
+        .into_iter()
+        .filter_map(|(_, automation_event)| {
+            let Some(AutomationEvent::TargetCreated(event)) = automation_event else {
+                return None;
+            };
+            Some(event)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].target_id.as_str(), "TID-1");
+}
+
+#[tokio::test]
+async fn devtools_command_preserves_target_create_typed_sidecar_without_discovery() {
+    let mut conn = CdpConnection::new();
+    conn.enable_webdriver_bidi_target_lifecycle_projection();
+    conn.insert_browser_context(BrowserContext::new("user-context-exact".to_owned()));
+    let context = DevToolsCommandContext {
+        protocol: DevToolsProtocol::WebDriverBidi,
+        session_id: Some(DevToolsSessionId::from("bidi-session-1")),
+        target_id: None,
+        browser_context_id: None,
     };
-    assert_eq!(event.target_id.as_str(), "TID-1");
+
+    let (result, scheduler_events, protocol_events) = conn
+        .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
+            context,
+            url: "about:blank".to_owned(),
+            browser_context_id: Some(DevToolsBrowserContextId::from("user-context-exact")),
+            activate: false,
+        }))
+        .await
+        .into_parts_with_protocol_events();
+
+    assert!(scheduler_events.is_empty());
+    result.expect("create target should succeed");
+    let created = protocol_events
+        .into_iter()
+        .filter_map(|event| {
+            let (_message, automation_event) = event.into_parts();
+            let Some(AutomationEvent::TargetCreated(event)) = automation_event else {
+                return None;
+            };
+            Some(event)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(created.len(), 1, "one exact TargetCreated fact is required");
+    assert_eq!(created[0].target_id.as_str(), "TID-1");
+    assert_eq!(created[0].url, "about:blank");
+    assert_eq!(
+        created[0].browser_context_id.as_ref().map(|id| id.as_str()),
+        Some("user-context-exact")
+    );
+    assert!(
+        created[0].target_info.is_some(),
+        "created lifecycle must carry the committed Target snapshot"
+    );
 }
 
 #[tokio::test]
@@ -1353,8 +1474,11 @@ async fn devtools_command_preserves_target_close_detached_typed_sidecar() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-close-sidecar".to_owned());
     browser_context.set_active_target_id("TID-close-sidecar".to_owned());
+    browser_context.set_target_url("https://example.test/exact-close".to_owned());
     browser_context.attach_active_session("SID-close-sidecar".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
+    conn.enable_webdriver_bidi_target_lifecycle_projection();
+    let mut ctx = crate::testing::TestContext::from_conn(conn);
 
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
@@ -1362,7 +1486,8 @@ async fn devtools_command_preserves_target_close_detached_typed_sidecar() {
         target_id: Some(DevToolsTargetId::from("TID-close-sidecar")),
         browser_context_id: None,
     };
-    let (result, scheduler_events, protocol_events) = conn
+    let (result, scheduler_events, mut protocol_events) = ctx
+        .conn
         .execute_devtools_command_with_protocol_events(DevToolsCommand::CloseTarget(
             DevToolsCloseTargetCommand {
                 context,
@@ -1379,9 +1504,20 @@ async fn devtools_command_preserves_target_close_detached_typed_sidecar() {
             success: true,
         })
     );
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (owner_events, owner_scheduler_events, predecessor) = outcome.into_protocol_event_parts();
+    assert!(owner_scheduler_events.is_empty());
+    assert!(predecessor.is_none());
+    protocol_events.extend(owner_events);
     let mut saw_detached = false;
+    let mut destroyed = Vec::new();
     for event in protocol_events {
         let (message, automation_event) = event.into_parts();
+        if let Some(AutomationEvent::TargetDestroyed(event)) = automation_event.as_ref() {
+            destroyed.push(event.clone());
+        }
         if message["method"] != json!("Target.detachedFromTarget") {
             continue;
         }
@@ -1396,6 +1532,62 @@ async fn devtools_command_preserves_target_close_detached_typed_sidecar() {
     assert!(
         saw_detached,
         "close target should emit TargetDetached sidecar"
+    );
+    assert_eq!(
+        destroyed.len(),
+        1,
+        "one exact TargetDestroyed fact is required"
+    );
+    assert_eq!(destroyed[0].target_id.as_str(), "TID-close-sidecar");
+    assert_eq!(
+        destroyed[0]
+            .browser_context_id
+            .as_ref()
+            .map(|id| id.as_str()),
+        Some("BID-close-sidecar")
+    );
+    assert_eq!(destroyed[0].url, "https://example.test/exact-close");
+    assert!(
+        destroyed[0].target_info.is_some(),
+        "destroyed lifecycle must retain the pre-close Target snapshot"
+    );
+}
+
+#[tokio::test]
+async fn devtools_target_close_rejects_when_browser_host_is_not_installed() {
+    let mut conn = CdpConnection::new();
+    let mut browser_context = BrowserContext::new("BID-close-no-host".to_owned());
+    browser_context.set_active_target_id("TID-close-no-host".to_owned());
+    conn.insert_browser_context(browser_context);
+    let context = DevToolsCommandContext {
+        protocol: DevToolsProtocol::WebDriverBidi,
+        session_id: Some(DevToolsSessionId::from("bidi-session-no-host")),
+        target_id: Some(DevToolsTargetId::from("TID-close-no-host")),
+        browser_context_id: None,
+    };
+
+    let (result, scheduler_events) = conn
+        .execute_devtools_command(DevToolsCommand::CloseTarget(DevToolsCloseTargetCommand {
+            context,
+            target_id: DevToolsTargetId::from("TID-close-no-host"),
+        }))
+        .await
+        .into_parts();
+
+    let error = result.expect_err("Target.closeTarget requires a live Browser Host");
+    assert_eq!(error.kind, DevToolsErrorKind::Internal);
+    assert!(
+        error
+            .message
+            .contains("BrowserHostTargetCloseAdmissionFailed")
+    );
+    assert!(scheduler_events.is_empty());
+    assert_eq!(
+        conn.browser_context
+            .as_ref()
+            .and_then(BrowserContext::active_target_id),
+        Some("TID-close-no-host"),
+        "rejected admission must leave the Target live"
     );
 }
 
@@ -1450,7 +1642,7 @@ async fn devtools_command_preserves_remove_browser_context_detached_typed_sideca
 
 #[tokio::test]
 async fn devtools_command_executes_target_pending_activate_and_close() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
         session_id: Some(DevToolsSessionId::from("bidi-session-1")),
@@ -1458,7 +1650,8 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         browser_context_id: None,
     };
     for _ in 0..2 {
-        let (result, _) = conn
+        let (result, _) = ctx
+            .conn
             .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
                 context: context.clone(),
                 url: "about:blank".to_owned(),
@@ -1470,7 +1663,8 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         result.expect("create target should succeed");
     }
 
-    let (activate_result, _) = conn
+    let (activate_result, _) = ctx
+        .conn
         .execute_devtools_command(DevToolsCommand::ActivateTarget(
             DevToolsActivateTargetCommand {
                 context: context.clone(),
@@ -1484,7 +1678,8 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         DevToolsCommandResult::Empty
     );
 
-    let (close_result, _) = conn
+    let (close_result, _) = ctx
+        .conn
         .execute_devtools_command(DevToolsCommand::CloseTarget(DevToolsCloseTargetCommand {
             context: context.clone(),
             target_id: DevToolsTargetId::from("TID-2"),
@@ -1497,8 +1692,15 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         panic!("expected close target result");
     };
     assert!(close_result.success);
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (_, scheduler_events, predecessor) = outcome.into_protocol_event_parts();
+    assert!(scheduler_events.is_empty());
+    assert!(predecessor.is_none());
 
-    let (remaining_result, _) = conn
+    let (remaining_result, _) = ctx
+        .conn
         .execute_devtools_command(DevToolsCommand::GetTargets(DevToolsGetTargetsCommand {
             context,
             root: Some(DevToolsTargetId::from("TID-2")),
@@ -2272,6 +2474,28 @@ async fn initial_document_page_ensure_completion_uses_captured_owner() {
         .expect("completion should install on captured owner");
     conn.replace_none_session_owner_route_override(previous_route);
 
+    let background_dcl_facts = conn
+        .browser_fact_snapshot_for_test()
+        .into_iter()
+        .filter(|envelope| {
+            envelope.target_id().as_str() == second_target_id.as_str()
+                && envelope.page_residence().target_id() == Some(second_target_id.as_str())
+                && matches!(
+                    envelope.fact(),
+                    moli_core::browser_host::BrowserFact::DocumentLifecycleReached {
+                        milestone:
+                            moli_core::page::RendererDocumentLifecycleMilestone::DomContentLoaded,
+                        ..
+                    }
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        background_dcl_facts.len(),
+        1,
+        "initial background Page projection must publish its exact DCL fact without an ambient session route"
+    );
+
     let browser_context = conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
         browser_context.active_target_id(),
@@ -2323,6 +2547,9 @@ async fn target_lifecycle_ensure_installs_initial_about_blank_page_for_active_ta
             .has_loaded_page(),
         "immediate target create path should still only stage owner metadata before lifecycle ensure"
     );
+    let pending_page = conn
+        .target_page_residence_identity_for_session(None)
+        .expect("staged Target should expose its Core-owned Page residence");
 
     let pending = conn
         .start_initial_document_page_ensure_for_session_owner(None)
@@ -2352,6 +2579,19 @@ async fn target_lifecycle_ensure_installs_initial_about_blank_page_for_active_ta
             .expect("browser context")
             .has_loaded_page(),
         "ensure should install loaded page on active target"
+    );
+    let materialized_page = conn
+        .target_page_residence_identity_for_session(None)
+        .expect("materialized initial Page should expose its successor residence");
+    assert_eq!(
+        materialized_page.loaded_page_generation(),
+        pending_page.loaded_page_generation() + 1,
+        "Core must advance the initial Page generation exactly once"
+    );
+    assert!(
+        conn.target_page_owner_route_if_current(&pending_page)
+            .is_none(),
+        "initial Page materialization must invalidate work captured from the vacant generation"
     );
 
     assert!(
@@ -2398,15 +2638,6 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         .load_page_via_runtime_async(real_page_url)
         .await
         .expect("real navigation page should build");
-    conn.commit_loaded_navigation_page_for_session_owner_async(
-        None,
-        real_page,
-        crate::conn::LoadedNavigationRendererAttachmentCommit::Prepare(None),
-        &parsed_real_page_url,
-    )
-    .await
-    .expect("real navigation page owner should exist")
-    .expect("real navigation page Inspector binding should activate");
     let real_page_commit = moli_core::page::RendererMainDocumentCommit {
         frame_id: "TID-1".to_owned(),
         loader_id: "LOADER-real-page".to_owned(),
@@ -2416,13 +2647,21 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         secure_context_type: "InsecureScheme".to_owned(),
         timestamp: 0.0,
     };
-    conn.commit_loaded_navigation_target_identity_for_session_owner(
+    let navigation = conn
+        .start_document_navigation_for_session_owner(None, "LOADER-real-page".to_owned())
+        .expect("real navigation should start");
+    conn.commit_loaded_page_replacement_for_session_owner_async(
         None,
-        &real_page_commit,
+        &navigation,
+        real_page,
         &parsed_real_page_url,
+        &real_page_commit,
+        crate::conn::LoadedNavigationRendererAttachmentCommit::Prepare(None),
     )
-    .expect("real navigation identity should commit");
-    let attachment_after_real_page = conn
+    .await
+    .expect("real navigation page owner should exist")
+    .expect("real navigation page Inspector binding should activate");
+    let generation_after_real_page = conn
         .browser_context
         .as_ref()
         .expect("browser context")
@@ -2482,7 +2721,7 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         .browser_context
         .as_ref()
         .and_then(|context| context.loaded_page())
-        .and_then(moli_core::page::Page::renderer_agent_attachment_id)
+        .and_then(|page| page.renderer_agent_attachment_id())
         .expect("loaded page should have a renderer attachment");
     let stale_attachment_id = moli_core::page::RendererAgentAttachmentId::allocate();
     let attachment_test_frontend_id = 8_101;
@@ -2555,7 +2794,7 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
     let browser_context = conn.browser_context.as_ref().expect("browser context");
     assert_eq!(
         browser_context.page_attachment_id(),
-        attachment_after_real_page,
+        generation_after_real_page,
         "discarding stale initial document build must not replace the current page"
     );
     assert_eq!(
@@ -2567,10 +2806,8 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         parsed_real_page_url.as_str(),
         "current page should remain the committed navigation page"
     );
-    let initial = browser_context
-        .active_target
-        .owner_state
-        .initial_empty_document_state()
+    let initial = conn
+        .target_initial_empty_document_for_session_owner(None)
         .expect("initial empty document state should remain recorded");
     assert!(
         initial.exited(),
@@ -2770,7 +3007,7 @@ async fn devtools_get_realms_succeeds_when_page_loaded_before_session_attach() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-late-realms".to_owned());
     browser_context.set_active_target_id("TID-late-realms".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let page = conn
         .load_page_via_runtime_async("data:text/html,<title>late-realms</title>")
@@ -5366,7 +5603,7 @@ async fn devtools_command_low_backend_node_refs_miss_without_backend_binding() {
     assert_eq!(error.kind, DevToolsErrorKind::NoSuchNode);
     assert_eq!(error.message, "Could not find node with given id");
 
-    let page = conn
+    let mut page = conn
         .browser_context
         .as_mut()
         .expect("browser context")
@@ -5534,12 +5771,12 @@ async fn devtools_command_executes_input_key_command_without_cdp_sidecar() {
     ctx.route_direct_command_output_for_test(Vec::new(), scheduler_events)
         .await;
     ctx.wait_for_direct_command_work_completion_for_test(
-        "protocol-neutral navigation load owner action",
+        "protocol-neutral navigation load fact projection",
     )
     .await;
     ctx.sent.clear();
 
-    let (key_result, _scheduler_events, protocol_events) = ctx
+    let (key_result, scheduler_events, protocol_events) = ctx
         .conn
         .execute_devtools_command(DevToolsCommand::DispatchKeyEvent(
             DevToolsDispatchKeyEventCommand {
@@ -5562,6 +5799,10 @@ async fn devtools_command_executes_input_key_command_without_cdp_sidecar() {
     assert!(
         protocol_events.is_empty(),
         "direct input key dispatch must not emit CDP-shaped sidecar messages: {protocol_events:?}"
+    );
+    assert!(
+        scheduler_events.is_empty(),
+        "direct input key dispatch must not publish scheduler sidecar work: {scheduler_events:?}"
     );
 
     let value_result = ctx
@@ -5716,6 +5957,108 @@ async fn devtools_command_executes_storage_cookie_commands_for_webdriver_context
         panic!("expected get cookies result");
     };
     assert!(after_delete.cookies.is_empty());
+}
+
+#[tokio::test]
+async fn profile_cookie_commands_are_live_across_frontend_connections() {
+    let storage_partition = StoragePartitionState::open(None).expect("memory partition");
+    let mut writer = CdpConnection::new_with_initial_storage_partition(
+        CdpInitialStoragePartition::from_storage_partition(&storage_partition),
+    );
+    let mut reader = CdpConnection::new_with_initial_storage_partition(
+        CdpInitialStoragePartition::from_storage_partition(&storage_partition),
+    );
+    writer.install_default_browser_target();
+    reader.install_default_browser_target();
+    let context = DevToolsCommandContext {
+        protocol: DevToolsProtocol::WebDriverBidi,
+        session_id: Some(DevToolsSessionId::from("shared-profile-frontend")),
+        target_id: None,
+        browser_context_id: None,
+    };
+    let cookie_url = "https://shared.example/path".to_owned();
+
+    let (set_result, _) = writer
+        .execute_devtools_command(DevToolsCommand::SetCookies(DevToolsSetCookiesCommand {
+            context: context.clone(),
+            browser_context_id: None,
+            cookies: vec![DevToolsCookieParam {
+                name: "sid".to_owned(),
+                value: "live".to_owned(),
+                url: Some(cookie_url.clone()),
+                domain: None,
+                path: Some("/".to_owned()),
+                secure: Some(true),
+                http_only: false,
+                same_site: Some("Lax".to_owned()),
+                priority: None,
+                source_scheme: None,
+                source_port: None,
+                partition_key: None,
+                partition_key_opaque: None,
+                expires: None,
+            }],
+        }))
+        .await
+        .into_parts();
+    assert!(matches!(
+        set_result.expect("writer should set shared cookie"),
+        DevToolsCommandResult::SetCookies(_)
+    ));
+
+    let (reader_result, _) = reader
+        .execute_devtools_command(DevToolsCommand::GetCookies(DevToolsGetCookiesCommand {
+            context: context.clone(),
+            browser_context_id: None,
+            urls: Some(vec![cookie_url.clone()]),
+            filter: None,
+        }))
+        .await
+        .into_parts();
+    let DevToolsCommandResult::GetCookies(reader_result) =
+        reader_result.expect("reader should observe live shared cookie")
+    else {
+        panic!("expected get cookies result");
+    };
+    assert_eq!(reader_result.cookies.len(), 1);
+    assert_eq!(reader_result.cookies[0]["name"], json!("sid"));
+    assert_eq!(reader_result.cookies[0]["value"], json!("live"));
+
+    let (delete_result, _) = reader
+        .execute_devtools_command(DevToolsCommand::DeleteCookies(
+            DevToolsDeleteCookiesCommand {
+                context: context.clone(),
+                browser_context_id: None,
+                name: Some("sid".to_owned()),
+                url: Some(cookie_url.clone()),
+                domain: None,
+                path: None,
+                partition_key: None,
+                filter: None,
+            },
+        ))
+        .await
+        .into_parts();
+    assert!(matches!(
+        delete_result.expect("reader should delete shared cookie"),
+        DevToolsCommandResult::DeleteCookies(_)
+    ));
+
+    let (writer_result, _) = writer
+        .execute_devtools_command(DevToolsCommand::GetCookies(DevToolsGetCookiesCommand {
+            context,
+            browser_context_id: None,
+            urls: Some(vec![cookie_url]),
+            filter: None,
+        }))
+        .await
+        .into_parts();
+    let DevToolsCommandResult::GetCookies(writer_result) =
+        writer_result.expect("writer should observe live shared deletion")
+    else {
+        panic!("expected get cookies result");
+    };
+    assert!(writer_result.cookies.is_empty());
 }
 
 #[tokio::test]
@@ -6451,6 +6794,243 @@ async fn devtools_runtime_call_function_channel_does_not_emit_direct_script_mess
 }
 
 #[tokio::test]
+async fn devtools_release_objects_exposes_each_known_handle_as_an_owned_participant() {
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+    let target_context =
+        create_active_bidi_target_context_for_test(&mut ctx, "bidi-release-participants").await;
+    let target_id = target_context
+        .target_id
+        .clone()
+        .expect("created target context id");
+    let first_handle = evaluate_owned_object_handle_for_test(
+        &mut ctx,
+        target_context.clone(),
+        "({owner: 'first'})",
+    )
+    .await;
+    let second_handle = evaluate_owned_object_handle_for_test(
+        &mut ctx,
+        target_context.clone(),
+        "({owner: 'second'})",
+    )
+    .await;
+
+    let step = ctx
+        .conn
+        .start_devtools_runtime_command_dispatch(DevToolsCommand::ReleaseObjects(
+            DevToolsReleaseObjectsCommand {
+                context: target_context,
+                realm_id: None,
+                world_name: None,
+                handles: vec![
+                    DevToolsRemoteHandleId::from("unknown-release-handle"),
+                    first_handle.clone(),
+                    second_handle.clone(),
+                    first_handle.clone(),
+                ],
+            },
+        ))
+        .await;
+    let first_pending = match step {
+        DevToolsRuntimeCommandTaskStep::Pending(pending) => *pending,
+        DevToolsRuntimeCommandTaskStep::Complete(_) => {
+            panic!("the first known handle must become an owned Runtime participant")
+        }
+    };
+    assert!(first_pending.owns_release_objects_sequence_for_test());
+    let first_command_id = first_pending.internal_command_id();
+
+    let step = ctx
+        .conn
+        .complete_devtools_runtime_command_dispatch(first_pending.wait().await)
+        .await;
+    let second_pending = match step {
+        DevToolsRuntimeCommandTaskStep::Pending(pending) => *pending,
+        DevToolsRuntimeCommandTaskStep::Complete(_) => {
+            panic!("the second known handle must remain a separate Runtime participant")
+        }
+    };
+    assert!(second_pending.owns_release_objects_sequence_for_test());
+    assert_ne!(first_command_id, second_pending.internal_command_id());
+
+    let step = ctx
+        .conn
+        .complete_devtools_runtime_command_dispatch(second_pending.wait().await)
+        .await;
+    let outcome = match step {
+        DevToolsRuntimeCommandTaskStep::Complete(outcome) => *outcome,
+        DevToolsRuntimeCommandTaskStep::Pending(_) => {
+            panic!("duplicate and unknown handles must not create extra participants")
+        }
+    };
+    let (result, scheduler_events, protocol_events, renderer_output_predecessor) =
+        outcome.into_complete_parts();
+    if let Some(predecessor) = renderer_output_predecessor {
+        ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
+            .await;
+    }
+    ctx.route_direct_command_output_for_test(protocol_events, scheduler_events)
+        .await;
+    assert_eq!(
+        result.expect("releaseObjects should succeed"),
+        DevToolsCommandResult::Empty
+    );
+
+    let route = ctx
+        .conn
+        .target_session_route_for_target_id(target_id.as_str())
+        .expect("created target route");
+    let mut route_scope = ctx.conn.scoped_none_session_owner_route_override(route);
+    assert!(
+        !route_scope
+            .conn_mut()
+            .runtime_remote_object_id_known_for_session_owner(None, first_handle.as_str())
+    );
+    assert!(
+        !route_scope
+            .conn_mut()
+            .runtime_remote_object_id_known_for_session_owner(None, second_handle.as_str())
+    );
+}
+
+#[tokio::test]
+async fn stale_release_objects_participant_does_not_enter_replacement_page() {
+    let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
+    let target_context =
+        create_active_bidi_target_context_for_test(&mut ctx, "bidi-release-stale").await;
+    let target_id = target_context
+        .target_id
+        .clone()
+        .expect("created target context id");
+    let first_handle = evaluate_owned_object_handle_for_test(
+        &mut ctx,
+        target_context.clone(),
+        "({owner: 'old-first'})",
+    )
+    .await;
+    let second_handle = evaluate_owned_object_handle_for_test(
+        &mut ctx,
+        target_context.clone(),
+        "({owner: 'old-second'})",
+    )
+    .await;
+    let route = ctx
+        .conn
+        .target_session_route_for_target_id(target_id.as_str())
+        .expect("created target route");
+    let (old_attachment, old_second_realm) = {
+        let mut route_scope = ctx
+            .conn
+            .scoped_none_session_owner_route_override(route.clone());
+        let owner = route_scope.conn_mut();
+        (
+            owner
+                .current_renderer_agent_attachment_id_for_session_owner(None)
+                .expect("old Page renderer attachment"),
+            owner
+                .runtime_remote_object_realm_for_session_owner(None, second_handle.as_str())
+                .expect("second handle realm"),
+        )
+    };
+
+    let step = ctx
+        .conn
+        .start_devtools_runtime_command_dispatch(DevToolsCommand::ReleaseObjects(
+            DevToolsReleaseObjectsCommand {
+                context: target_context,
+                realm_id: None,
+                world_name: None,
+                handles: vec![first_handle, second_handle.clone()],
+            },
+        ))
+        .await;
+    let pending = match step {
+        DevToolsRuntimeCommandTaskStep::Pending(pending) => *pending,
+        DevToolsRuntimeCommandTaskStep::Complete(_) => {
+            panic!("the first handle must become a Runtime participant")
+        }
+    };
+    assert!(pending.owns_release_objects_sequence_for_test());
+    let completed = pending.wait().await;
+
+    let replacement = ctx
+        .conn
+        .load_page_via_runtime_async("data:text/html,<!doctype html><body>replacement</body>")
+        .await
+        .expect("replacement Page should load");
+    {
+        let mut route_scope = ctx
+            .conn
+            .scoped_none_session_owner_route_override(route.clone());
+        let owner = route_scope.conn_mut();
+        let old_page = owner
+            .runtime_session_owner_slot_mut(None)
+            .expect("target runtime slot")
+            .clear_loaded_page_for_test_fixture();
+        drop(old_page);
+        owner
+            .runtime_session_owner_slot_mut(None)
+            .expect("target runtime slot")
+            .set_loaded_page_for_test(replacement);
+        owner.unregister_runtime_remote_object_ids_for_session_owner(
+            None,
+            &[second_handle.as_str().to_owned()],
+        );
+        owner.register_runtime_remote_object_ids_for_session_owner_with_realm(
+            None,
+            vec![second_handle.as_str().to_owned()],
+            &old_second_realm,
+        );
+    }
+    let replacement_attachment = {
+        let mut route_scope = ctx
+            .conn
+            .scoped_none_session_owner_route_override(route.clone());
+        route_scope
+            .conn_mut()
+            .current_renderer_agent_attachment_id_for_session_owner(None)
+            .expect("replacement Page renderer attachment")
+    };
+    assert_ne!(old_attachment, replacement_attachment);
+
+    let step = ctx
+        .conn
+        .complete_devtools_runtime_command_dispatch(completed)
+        .await;
+    let outcome = match step {
+        DevToolsRuntimeCommandTaskStep::Complete(outcome) => *outcome,
+        DevToolsRuntimeCommandTaskStep::Pending(_) => {
+            panic!("a stale first handle must terminate the outer release command")
+        }
+    };
+    let (result, scheduler_events, protocol_events, renderer_output_predecessor) =
+        outcome.into_complete_parts();
+    if let Some(predecessor) = renderer_output_predecessor {
+        ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
+            .await;
+    }
+    ctx.route_direct_command_output_for_test(protocol_events, scheduler_events)
+        .await;
+    let error = result.expect_err("stale releaseObjects should fail");
+    assert!(
+        error.message.contains("destroyed by navigation"),
+        "unexpected stale release error: {error:?}"
+    );
+
+    let mut route_scope = ctx.conn.scoped_none_session_owner_route_override(route);
+    let owner = route_scope.conn_mut();
+    assert_eq!(
+        owner.current_renderer_agent_attachment_id_for_session_owner(None),
+        Some(replacement_attachment)
+    );
+    assert!(
+        owner.runtime_remote_object_id_known_for_session_owner(None, second_handle.as_str()),
+        "the stale outer command must not release a successor-owned matching handle"
+    );
+    assert!(!owner.has_pending_inspector_awaits());
+}
+
+#[tokio::test]
 async fn devtools_command_executes_script_evaluate_and_call_function() {
     let mut ctx = crate::testing::TestContext::from_conn(CdpConnection::new());
     let context = DevToolsCommandContext {
@@ -6948,7 +7528,7 @@ async fn command_dispatch_completes_live_browser_permission_without_legacy_fallb
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-browser-permission-live".to_owned());
     browser_context.set_active_target_id("TID-browser-permission-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>browser permission</p>")
         .await
@@ -6981,7 +7561,12 @@ async fn command_dispatch_completes_live_browser_permission_without_legacy_fallb
         complete_messages(step),
         vec![json!({ "id": 28, "result": {} })]
     );
-    assert_eq!(conn.permission_overrides.len(), 1);
+    assert_eq!(
+        conn.browser_host_policy_snapshot()
+            .permission_overrides()
+            .len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -7147,7 +7732,7 @@ fn command_dispatch_completes_additional_page_sync_commands_without_legacy_fallb
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-page-sync".to_owned());
     browser_context.set_active_target_id("TID-page-sync");
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let download_raw = serde_json::to_string(&json!({
         "id": 411,
@@ -7160,10 +7745,8 @@ fn command_dispatch_completes_additional_page_sync_commands_without_legacy_fallb
         complete_messages(step),
         vec![json!({ "id": 411, "result": {} })]
     );
-    let settings = conn
-        .download_behavior
-        .effective_for_browser_context(Some("BID-page-sync"));
-    assert_eq!(settings.behavior, "allow");
+    let settings = conn.effective_browser_download_policy(Some("BID-page-sync"));
+    assert_eq!(settings.behavior().as_str(), "allow");
 
     let metrics_raw = serde_json::to_string(&json!({
         "id": 412,
@@ -7314,18 +7897,16 @@ fn command_dispatch_completes_dom_sync_and_error_commands_without_legacy_fallbac
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() {
-    let mut ctx = crate::testing::TestContext::new();
+    let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-page-preload-live".to_owned());
     browser_context.set_active_target_id("TID-page-preload-live".to_owned());
     browser_context.attach_active_session("SID-page-preload-live");
-    ctx.conn.browser_context = Some(browser_context);
-    let page = ctx
-        .conn
+    conn.insert_browser_context(browser_context);
+    let page = conn
         .load_page_via_runtime_async("data:text/html,<p>preload</p>")
         .await
         .expect("page should load");
-    ctx.conn
-        .browser_context
+    conn.browser_context
         .as_mut()
         .expect("browser context")
         .active_target
@@ -7342,17 +7923,16 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let add_pending = match ctx.conn.start_command_dispatch(&add_raw) {
+    let add_pending = match conn.start_command_dispatch(&add_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.addScriptToEvaluateOnNewDocument should update the live page")
         }
     };
-    let add_step = ctx
-        .conn
+    let add_step = conn
         .complete_pending_command_dispatch(add_pending.wait().await)
         .await;
-    let (add_messages, _) = ctx.complete_command_task_step_for_test(add_step).await;
+    let add_messages = complete_messages(add_step);
     assert_eq!(add_messages.len(), 1);
     assert_eq!(add_messages[0]["id"], json!(42));
     assert_eq!(add_messages[0]["sessionId"], json!("SID-page-preload-live"));
@@ -7361,8 +7941,7 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         .expect("preload identifier")
         .to_owned();
     assert!(
-        ctx.conn
-            .browser_context
+        conn.browser_context
             .as_ref()
             .expect("browser context")
             .active_target
@@ -7384,19 +7963,17 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         "params": { "identifier": identifier }
     }))
     .unwrap();
-    let remove_pending = match ctx.conn.start_command_dispatch(&remove_raw) {
+    let remove_pending = match conn.start_command_dispatch(&remove_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.removeScriptToEvaluateOnNewDocument should update the live page")
         }
     };
-    let remove_step = ctx
-        .conn
+    let remove_step = conn
         .complete_pending_command_dispatch(remove_pending.wait().await)
         .await;
-    let (remove_messages, _) = ctx.complete_command_task_step_for_test(remove_step).await;
     assert_eq!(
-        remove_messages,
+        complete_messages(remove_step),
         vec![json!({
             "id": 43,
             "sessionId": "SID-page-preload-live",
@@ -7404,8 +7981,7 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         })]
     );
     assert!(
-        ctx.conn
-            .browser_context
+        conn.browser_context
             .as_ref()
             .expect("browser context")
             .active_target
@@ -7425,15 +8001,14 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let create_world_pending = match ctx.conn.start_command_dispatch(&create_world_raw) {
+    let create_world_pending = match conn.start_command_dispatch(&create_world_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.createIsolatedWorld should use explicit pending page dispatch")
         }
     };
-    let (create_world_messages, _) = ctx
-        .complete_command_task_step_for_test(CdpCommandTaskStep::Pending(create_world_pending))
-        .await;
+    let create_world_messages =
+        complete_command_task_for_test(&mut conn, *create_world_pending).await;
     assert_eq!(create_world_messages.len(), 1);
     assert_eq!(create_world_messages[0]["id"], json!(44));
     assert_eq!(
@@ -7483,7 +8058,7 @@ async fn command_dispatch_completes_target_activate_without_legacy_fallback() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-target-activate".to_owned());
     browser_context.set_active_target_id("TID-target-activate".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let raw = serde_json::to_string(&json!({
         "id": 56,
@@ -7508,7 +8083,7 @@ async fn command_dispatch_completes_target_set_auto_attach_without_legacy_fallba
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-target-auto-attach".to_owned());
     browser_context.set_active_target_id("TID-target-auto-attach".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let raw = serde_json::to_string(&json!({
         "id": 57,
@@ -7542,7 +8117,7 @@ async fn command_dispatch_completes_page_bring_to_front_without_legacy_fallback(
     let mut browser_context = BrowserContext::new("BID-page-bring".to_owned());
     browser_context.set_active_target_id("TID-page-bring".to_owned());
     browser_context.attach_active_session("SID-page-bring".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let raw = serde_json::to_string(&json!({
         "id": 5701,
@@ -7572,7 +8147,7 @@ async fn command_dispatch_completes_target_detach_without_legacy_fallback() {
     let mut browser_context = BrowserContext::new("BID-target-detach".to_owned());
     browser_context.set_active_target_id("TID-target-detach".to_owned());
     browser_context.attach_active_session("SID-target-detach".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let raw = serde_json::to_string(&json!({
         "id": 58,
@@ -7615,21 +8190,20 @@ async fn command_dispatch_completes_target_close_without_legacy_fallback() {
     let mut browser_context = BrowserContext::new("BID-target-close".to_owned());
     browser_context.set_active_target_id("TID-target-close".to_owned());
     browser_context.attach_active_session("SID-target-close".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
-    let raw = serde_json::to_string(&json!({
+    let mut ctx = crate::testing::TestContext::from_conn(conn);
+    let command = json!({
         "id": 59,
         "method": "Target.closeTarget",
         "params": { "targetId": "TID-target-close" }
-    }))
-    .unwrap();
-    let pending = match conn.start_command_dispatch(&raw) {
-        CdpCommandTaskStep::Pending(pending) => pending,
-        CdpCommandTaskStep::Complete(_) => {
-            panic!("Target.closeTarget should use the Target pending dispatcher")
-        }
-    };
-    let messages = complete_command_task_for_test(&mut conn, *pending).await;
+    });
+    let scheduler_events = ctx.process_command_only_async(&command).await;
+    assert!(scheduler_events.is_empty());
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(ctx.sent.len(), 1, "frontend response must route first");
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+    let messages = ctx.sent;
     assert_eq!(messages.len(), 3);
     assert_eq!(
         messages[0],
@@ -7650,7 +8224,8 @@ async fn command_dispatch_completes_target_close_without_legacy_fallback() {
         })
     );
     assert!(
-        conn.browser_context
+        ctx.conn
+            .browser_context
             .as_ref()
             .expect("browser context should remain loaded")
             .active_target_identity()
@@ -7665,7 +8240,10 @@ async fn command_dispatch_completes_target_dispose_browser_context_without_legac
     let mut browser_context = BrowserContext::new("BID-target-dispose".to_owned());
     browser_context.set_active_target_id("TID-target-dispose".to_owned());
     browser_context.attach_active_session("SID-target-dispose".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
+    let (mut browser_host, browser_host_handle) =
+        moli_core::browser_host::BrowserHostActor::new(conn.browser_host_state());
+    conn.install_browser_host_handle(browser_host_handle);
 
     let raw = serde_json::to_string(&json!({
         "id": 60,
@@ -7679,6 +8257,18 @@ async fn command_dispatch_completes_target_dispose_browser_context_without_legac
             panic!("Target.disposeBrowserContext should use the Target pending dispatcher")
         }
     };
+    assert!(
+        conn.has_browser_context_id("BID-target-dispose"),
+        "publishing the command cannot mutate BrowserContext topology before Host selection"
+    );
+    let dispatch = browser_host
+        .complete_next_turn(&mut conn)
+        .expect("queued Context disposal Browser Host turn");
+    let host_outcome = conn.finish_browser_host_turn_for_test(dispatch).await;
+    assert!(
+        host_outcome.into_parts().0.is_empty(),
+        "the owner turn must send its result through the prepared command sidecar"
+    );
     let messages = complete_command_task_for_test(&mut conn, *pending).await;
     assert_eq!(messages.len(), 3);
     assert_eq!(messages[0], json!({ "id": 60, "result": {} }));
@@ -7703,12 +8293,114 @@ async fn command_dispatch_completes_target_dispose_browser_context_without_legac
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn queued_context_disposal_cannot_remove_recreated_same_id_context() {
+    let mut conn = CdpConnection::new();
+    let mut original = BrowserContext::new("BID-context-aba".to_owned());
+    original.set_active_target_id("TID-context-aba-old".to_owned());
+    conn.insert_browser_context(original);
+    let original_handle = conn
+        .browser_context_by_id("BID-context-aba")
+        .expect("original Context")
+        .browser_context_handle()
+        .clone();
+    let (mut browser_host, browser_host_handle) =
+        moli_core::browser_host::BrowserHostActor::new(conn.browser_host_state());
+    conn.install_browser_host_handle(browser_host_handle);
+
+    let raw = serde_json::to_string(&json!({
+        "id": 61,
+        "method": "Target.disposeBrowserContext",
+        "params": { "browserContextId": "BID-context-aba" }
+    }))
+    .unwrap();
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(_) => panic!("Context disposal should enter Browser Host"),
+    };
+
+    let removed = conn
+        .remove_browser_context_by_id_restoring_active_async("BID-context-aba", None)
+        .await
+        .expect("remove original Context before queued owner selection");
+    drop(removed);
+    assert!(original_handle.is_retired());
+    let mut replacement = BrowserContext::new("BID-context-aba".to_owned());
+    replacement.set_active_target_id("TID-context-aba-new".to_owned());
+    conn.insert_browser_context(replacement);
+
+    let dispatch = browser_host
+        .complete_next_turn(&mut conn)
+        .expect("queued stale Context disposal turn");
+    let _ = conn.finish_browser_host_turn_for_test(dispatch).await;
+    let messages = complete_command_task_for_test(&mut conn, *pending).await;
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["id"], json!(61));
+    assert_eq!(messages[0]["error"]["code"], json!(-32000));
+    assert!(
+        conn.browser_context_by_id("BID-context-aba")
+            .is_some_and(|context| context.active_target_id() == Some("TID-context-aba-new")),
+        "an old exact handle must not authorize disposal of the recreated Context"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn accepted_context_disposal_finishes_after_frontend_reply_is_dropped() {
+    let mut conn = CdpConnection::new();
+    let mut browser_context = BrowserContext::new("BID-dispose-detached".to_owned());
+    browser_context.set_active_target_id("TID-dispose-detached".to_owned());
+    browser_context.attach_active_session("SID-dispose-detached".to_owned());
+    conn.insert_browser_context(browser_context);
+    let retired_runtime_access = conn
+        .browser_context
+        .as_ref()
+        .expect("registered Context projection")
+        .renderer_runtime_owner_access();
+    let (mut browser_host, browser_host_handle) =
+        moli_core::browser_host::BrowserHostActor::new(conn.browser_host_state());
+    conn.install_browser_host_handle(browser_host_handle);
+
+    let raw = serde_json::to_string(&json!({
+        "id": 62,
+        "method": "Target.disposeBrowserContext",
+        "params": { "browserContextId": "BID-dispose-detached" }
+    }))
+    .unwrap();
+    let pending = match conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => pending,
+        CdpCommandTaskStep::Complete(_) => panic!("Context disposal should enter Browser Host"),
+    };
+    drop(pending);
+
+    let dispatch = browser_host
+        .complete_next_turn(&mut conn)
+        .expect("accepted Context disposal owner turn");
+    let outcome = conn.finish_browser_host_turn_for_test(dispatch).await;
+    let messages = outcome.into_parts().0;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["method"] == json!("Inspector.detached")),
+        "detached frontend effects must be settled through background output"
+    );
+    assert!(
+        !conn.has_browser_context_id("BID-dispose-detached"),
+        "dropping only the frontend reply cannot cancel accepted Browser cleanup"
+    );
+    assert!(
+        retired_runtime_access
+            .current_browser_resource_runtime()
+            .is_err(),
+        "the detached Browser cleanup participant must retire the Context network root"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_target_send_message_without_legacy_fallback() {
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-target-send".to_owned());
     browser_context.set_active_target_id("TID-target-send".to_owned());
     browser_context.attach_active_session("SID-target-send".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
 
     let nested = serde_json::to_string(&json!({
         "id": 6101,
@@ -7802,7 +8494,7 @@ async fn command_dispatch_completes_live_storage_set_cookies_without_legacy_fall
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-storage-live".to_owned());
     browser_context.set_active_target_id("TID-storage-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>storage</p>")
         .await
@@ -7850,7 +8542,7 @@ async fn command_dispatch_completes_live_network_extra_headers_without_legacy_fa
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-network-live".to_owned());
     browser_context.set_active_target_id("TID-network-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>network</p>")
         .await
@@ -7887,7 +8579,7 @@ async fn command_dispatch_completes_live_network_blocked_urls_without_legacy_fal
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-network-blocked-live".to_owned());
     browser_context.set_active_target_id("TID-network-blocked-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>network blocked</p>")
         .await
@@ -7924,7 +8616,7 @@ async fn command_dispatch_completes_live_network_set_cookie_without_legacy_fallb
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-network-cookie-live".to_owned());
     browser_context.set_active_target_id("TID-network-cookie-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>network cookie</p>")
         .await
@@ -7969,7 +8661,7 @@ async fn command_dispatch_completes_live_network_emulation_without_legacy_fallba
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-network-emulated-live".to_owned());
     browser_context.set_active_target_id("TID-network-emulated-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>network emulated</p>")
         .await
@@ -8012,7 +8704,7 @@ async fn command_dispatch_completes_live_network_user_agent_without_legacy_fallb
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-network-ua-live".to_owned());
     browser_context.set_active_target_id("TID-network-ua-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>network ua</p>")
         .await
@@ -8049,7 +8741,7 @@ async fn command_dispatch_completes_live_emulation_user_agent_without_legacy_fal
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-emulation-ua-live".to_owned());
     browser_context.set_active_target_id("TID-emulation-ua-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>emulation ua</p>")
         .await
@@ -8261,7 +8953,7 @@ async fn command_dispatch_completes_live_emulation_locale_without_legacy_fallbac
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-emulation-locale-live".to_owned());
     browser_context.set_active_target_id("TID-emulation-locale-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>emulation locale</p>")
         .await
@@ -8298,7 +8990,7 @@ async fn command_dispatch_completes_live_security_tls_without_legacy_fallback() 
     let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-security-tls-live".to_owned());
     browser_context.set_active_target_id("TID-security-tls-live".to_owned());
-    conn.browser_context = Some(browser_context);
+    conn.insert_browser_context(browser_context);
     let page = conn
         .load_page_via_runtime_async("data:text/html,<p>security tls</p>")
         .await
@@ -8418,17 +9110,15 @@ async fn pending_security_tls_keeps_background_owner_route_across_completion() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_fetch_enable_without_legacy_fallback() {
-    let mut ctx = crate::testing::TestContext::new();
+    let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-fetch-live".to_owned());
     browser_context.set_active_target_id("TID-fetch-live".to_owned());
-    ctx.conn.browser_context = Some(browser_context);
-    let page = ctx
-        .conn
+    conn.insert_browser_context(browser_context);
+    let page = conn
         .load_page_via_runtime_async("data:text/html,<p>fetch</p>")
         .await
         .expect("page should load");
-    ctx.conn
-        .browser_context
+    conn.browser_context
         .as_mut()
         .expect("browser context")
         .active_target
@@ -8443,16 +9133,18 @@ async fn command_dispatch_completes_live_fetch_enable_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let pending = match ctx.conn.start_command_dispatch(&raw) {
+    let pending = match conn.start_command_dispatch(&raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Fetch.enable should update live page interception state")
         }
     };
     let completed = pending.wait().await;
-    let step = ctx.conn.complete_pending_command_dispatch(completed).await;
-    let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
-    assert_eq!(messages, vec![json!({ "id": 69, "result": {} })]);
+    let step = conn.complete_pending_command_dispatch(completed).await;
+    assert_eq!(
+        complete_messages(step),
+        vec![json!({ "id": 69, "result": {} })]
+    );
 }
 
 #[tokio::test]
@@ -8653,21 +9345,19 @@ async fn devtools_network_intercept_commands_route_to_fetch_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_fetch_disable_without_legacy_fallback() {
-    let mut ctx = crate::testing::TestContext::new();
+    let mut conn = CdpConnection::new();
     let mut browser_context = BrowserContext::new("BID-fetch-disable-live".to_owned());
     browser_context.set_active_target_id("TID-fetch-disable-live".to_owned());
     browser_context
         .active_target
         .fetch_owner
         .configure(None, true, Vec::new());
-    ctx.conn.browser_context = Some(browser_context);
-    let page = ctx
-        .conn
+    conn.insert_browser_context(browser_context);
+    let page = conn
         .load_page_via_runtime_async("data:text/html,<p>fetch disable</p>")
         .await
         .expect("page should load");
-    ctx.conn
-        .browser_context
+    conn.browser_context
         .as_mut()
         .expect("browser context")
         .active_target
@@ -8679,18 +9369,20 @@ async fn command_dispatch_completes_live_fetch_disable_without_legacy_fallback()
         "method": "Fetch.disable"
     }))
     .unwrap();
-    let pending = match ctx.conn.start_command_dispatch(&raw) {
+    let pending = match conn.start_command_dispatch(&raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Fetch.disable should clear live page interception state")
         }
     };
     let completed = pending.wait().await;
-    let step = ctx.conn.complete_pending_command_dispatch(completed).await;
-    let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
-    assert_eq!(messages, vec![json!({ "id": 6901, "result": {} })]);
+    let step = conn.complete_pending_command_dispatch(completed).await;
+    assert_eq!(
+        complete_messages(step),
+        vec![json!({ "id": 6901, "result": {} })]
+    );
     assert!(
-        !ctx.conn
+        !conn
             .browser_context
             .as_ref()
             .expect("browser context should remain loaded")

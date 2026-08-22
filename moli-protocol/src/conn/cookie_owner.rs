@@ -554,7 +554,7 @@ impl BrowserContext {
     pub(crate) async fn document_cookie_owner_snapshot_async(
         &mut self,
     ) -> Option<DocumentCookieOwnerSnapshot> {
-        let page = self.active_target.runtime_slot.loaded_page_mut()?;
+        let mut page = self.active_target.runtime_slot.loaded_page_mut()?;
         page.document_cookie_owner_snapshot_async().await.ok()
     }
 

@@ -2,7 +2,7 @@ use url::Url;
 
 use crate::conn::{
     CdpConnection, CommandDispatchContext, CommittedRendererAgentAttachment,
-    DocumentNavigationToken, LoadedNavigationRendererAttachmentCommit, NavigationDispatchState,
+    DocumentNavigationToken, NavigationDispatchState,
 };
 use crate::domains::activity::{
     MainDocumentDownloadNavigationActivity, MainDocumentNavigationActivity,
@@ -11,25 +11,180 @@ use crate::domains::command_output::CommandOutputBuffer;
 use crate::domains::network::{
     MaterializedDownloadDocumentProgress, MaterializedLoadedDocumentProgress,
 };
-use moli_core::page::{
-    Page, RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
-    RendererDocumentLifecycleMilestone, RendererPageCreationArtifacts, RendererRuntimeRealmInfo,
+use moli_core::{
+    RendererOutputFence,
+    browser_host::{BrowserNavigationFailure, BrowserPageOwnerKey},
+    page::{
+        RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
+        RendererDocumentLifecycleMilestone, RendererPageCreationArtifacts,
+        RendererPendingDownloadActivation,
+    },
+    runtime::NavigationEngine,
 };
 
-#[derive(Default)]
-struct LoadedPageCommitOutcome {
-    preload_channel_execution_context_ids: Vec<i64>,
+use super::loaded_page_install::{
+    CompletedLoadedPageInstall, CompletedLoadedPagePostInstall, LoadedPageInstallOutcome,
+    LoadedPageInstallStart, LoadedPagePostInstallStart, PendingLoadedPageInstall,
+    PendingLoadedPagePostInstall, complete_loaded_navigation_page_post_install,
+    start_loaded_navigation_page_install, start_loaded_navigation_page_post_install,
+};
+use super::loaded_page_restore::{
+    CompletedLoadedPageRestore, LoadedPageRestoreStart, PendingLoadedPageRestore,
+    start_loaded_navigation_page_restore,
+};
+
+pub(super) enum LoadedNavigationCommitStart {
+    Pending(Box<PendingLoadedNavigationCommit>),
+    Ready(Box<CompletedLoadedNavigationCommit>),
+    Rejected,
+}
+
+pub(super) struct PendingLoadedNavigationCommit {
+    continuation: LoadedNavigationCommitContinuation,
+    restore: PendingLoadedPageRestore,
+}
+
+pub(super) struct CompletedLoadedNavigationCommit {
+    continuation: LoadedNavigationCommitContinuation,
+    restore: CompletedLoadedPageRestore,
+}
+
+pub(super) enum LoadedNavigationCommitApplyStart {
+    Pending(Box<PendingLoadedNavigationPageDisposal>),
+    Ready(Box<CompletedLoadedNavigationPageDisposal>),
+    Rejected,
+}
+
+pub(super) struct PendingLoadedNavigationPageDisposal {
+    continuation: LoadedNavigationCommitContinuation,
+    install: PendingLoadedPageInstall,
+}
+
+pub(super) struct CompletedLoadedNavigationPageDisposal {
+    continuation: LoadedNavigationCommitContinuation,
+    install: CompletedLoadedPageInstall,
+}
+
+pub(super) enum LoadedNavigationPostDisposalStart {
+    Pending(Box<PendingLoadedNavigationPreloadListeners>),
+    Ready(Option<BrowserPageOwnerKey>),
+}
+
+pub(super) struct PendingLoadedNavigationPreloadListeners {
+    continuation: LoadedNavigationCommitContinuation,
+    post_install: PendingLoadedPagePostInstall,
+}
+
+pub(super) struct CompletedLoadedNavigationPreloadListeners {
+    continuation: LoadedNavigationCommitContinuation,
+    post_install: CompletedLoadedPagePostInstall,
+}
+
+struct LoadedNavigationCommitContinuation {
+    token: DocumentNavigationToken,
+    navigation_activity: MainDocumentNavigationActivity,
+    pending_download: Option<RendererPendingDownloadActivation>,
+    page_creation_artifacts: RendererPageCreationArtifacts,
+    deferred_initial_renderer_document_lifecycle_events: Vec<RendererDocumentLifecycleEvent>,
+    final_url: Url,
+    response_headers: Vec<(String, String)>,
+    response_from_cache: bool,
+    main_document_body: Option<crate::conn::CapturedBody>,
+    is_network_error_page: bool,
+    renderer_output_predecessor: Option<RendererOutputFence>,
+    navigation_engine: Option<NavigationEngine>,
+    engine_adoption_error: Option<String>,
+}
+
+impl PendingLoadedNavigationCommit {
+    pub(super) async fn wait(self) -> CompletedLoadedNavigationCommit {
+        CompletedLoadedNavigationCommit {
+            continuation: self.continuation,
+            restore: self.restore.wait().await,
+        }
+    }
+}
+
+impl LoadedNavigationCommitApplyStart {
+    pub(super) fn committed_owner(&self) -> Option<&BrowserPageOwnerKey> {
+        match self {
+            Self::Pending(pending) => pending.committed_owner(),
+            Self::Ready(completed) => completed.committed_owner(),
+            Self::Rejected => None,
+        }
+    }
+}
+
+impl PendingLoadedNavigationPageDisposal {
+    pub(super) fn committed_owner(&self) -> Option<&BrowserPageOwnerKey> {
+        self.install.committed_owner()
+    }
+
+    pub(super) async fn wait(self) -> CompletedLoadedNavigationPageDisposal {
+        CompletedLoadedNavigationPageDisposal {
+            continuation: self.continuation,
+            install: self.install.wait().await,
+        }
+    }
+}
+
+impl CompletedLoadedNavigationPageDisposal {
+    pub(super) fn committed_owner(&self) -> Option<&BrowserPageOwnerKey> {
+        self.install.committed_owner()
+    }
+}
+
+impl PendingLoadedNavigationPreloadListeners {
+    pub(super) async fn wait(self) -> CompletedLoadedNavigationPreloadListeners {
+        CompletedLoadedNavigationPreloadListeners {
+            continuation: self.continuation,
+            post_install: self.post_install.wait().await,
+        }
+    }
 }
 
 pub(super) async fn commit_loaded_navigation_async(
     conn: &mut CdpConnection,
     out: &mut CommandOutputBuffer,
-    token: Option<&DocumentNavigationToken>,
+    token: &DocumentNavigationToken,
     state: NavigationDispatchState,
     navigation: MaterializedLoadedDocumentProgress,
     committed_renderer_attachment: Option<CommittedRendererAgentAttachment>,
     command_context: &mut CommandDispatchContext,
-) {
+) -> Option<BrowserPageOwnerKey> {
+    let navigation_session_id = state.navigate_session_id.clone();
+    let completed = match start_loaded_navigation_commit(
+        conn,
+        out,
+        token.clone(),
+        state,
+        navigation,
+        committed_renderer_attachment,
+    ) {
+        LoadedNavigationCommitStart::Pending(pending) => pending.wait().await,
+        LoadedNavigationCommitStart::Ready(completed) => *completed,
+        LoadedNavigationCommitStart::Rejected => {
+            let _ = conn.fail_document_navigation_for_session_owner_if_matches(
+                navigation_session_id.as_deref(),
+                token,
+                BrowserNavigationFailure::Commit {
+                    error_text: "loaded navigation restore was rejected".to_owned(),
+                },
+            );
+            return None;
+        }
+    };
+    complete_loaded_navigation_commit_async(conn, out, completed, command_context).await
+}
+
+pub(super) fn start_loaded_navigation_commit(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    token: DocumentNavigationToken,
+    state: NavigationDispatchState,
+    navigation: MaterializedLoadedDocumentProgress,
+    committed_renderer_attachment: Option<CommittedRendererAgentAttachment>,
+) -> LoadedNavigationCommitStart {
     let MaterializedLoadedDocumentProgress {
         page,
         pending_download,
@@ -60,39 +215,235 @@ pub(super) async fn commit_loaded_navigation_async(
                 "{error} after early Page.navigate result"
             );
         }
-        return;
+        return LoadedNavigationCommitStart::Rejected;
     };
     let is_network_error_page = network_error_page.is_some();
-    let navigation_session_id = state.navigate_session_id.clone();
-    let (page_creation_artifacts, mut deferred_initial_renderer_document_lifecycle_events) =
+    let (page_creation_artifacts, deferred_initial_renderer_document_lifecycle_events) =
         split_renderer_page_creation_lifecycle_at_load_boundary(page_creation_artifacts);
     let mut navigation_activity = MainDocumentNavigationActivity::new(
         state,
         final_url.clone(),
         progress_gate,
-        token.cloned(),
+        Some(token.clone()),
     );
     if let Some(error_page) = network_error_page.as_ref() {
         navigation_activity =
             navigation_activity.with_network_error_page_result(error_page.error_text().to_owned());
     }
-    let Some(commit) = restore_and_commit_loaded_navigation_page_async(
+    let restore = start_loaded_navigation_page_restore(
         conn,
-        out,
-        token,
+        &token,
         navigation_activity.state(),
         page,
         &final_url,
-        &target_url,
-        &main_document_commit,
+        target_url,
+        main_document_commit,
         initial_runtime_realms,
         committed_renderer_attachment,
-        command_context,
-    )
-    .await
-    else {
-        return;
+    );
+    let continuation = LoadedNavigationCommitContinuation {
+        token,
+        navigation_activity,
+        pending_download,
+        page_creation_artifacts,
+        deferred_initial_renderer_document_lifecycle_events,
+        final_url,
+        response_headers,
+        response_from_cache,
+        main_document_body,
+        is_network_error_page,
+        renderer_output_predecessor,
+        navigation_engine,
+        engine_adoption_error: None,
     };
+    match restore {
+        LoadedPageRestoreStart::Pending(restore) => {
+            LoadedNavigationCommitStart::Pending(Box::new(PendingLoadedNavigationCommit {
+                continuation,
+                restore: *restore,
+            }))
+        }
+        LoadedPageRestoreStart::Ready(restore) => {
+            LoadedNavigationCommitStart::Ready(Box::new(CompletedLoadedNavigationCommit {
+                continuation,
+                restore,
+            }))
+        }
+        LoadedPageRestoreStart::Rejected => LoadedNavigationCommitStart::Rejected,
+    }
+}
+
+pub(super) async fn complete_loaded_navigation_commit_async(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    completed: CompletedLoadedNavigationCommit,
+    command_context: &mut CommandDispatchContext,
+) -> Option<BrowserPageOwnerKey> {
+    let completed =
+        match start_completed_loaded_navigation_commit(conn, out, completed, command_context) {
+            LoadedNavigationCommitApplyStart::Pending(pending) => pending.wait().await,
+            LoadedNavigationCommitApplyStart::Ready(completed) => *completed,
+            LoadedNavigationCommitApplyStart::Rejected => return None,
+        };
+    complete_loaded_navigation_commit_after_page_disposal_async(conn, out, completed).await
+}
+
+pub(super) fn start_completed_loaded_navigation_commit(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    completed: CompletedLoadedNavigationCommit,
+    command_context: &mut CommandDispatchContext,
+) -> LoadedNavigationCommitApplyStart {
+    let CompletedLoadedNavigationCommit {
+        mut continuation,
+        restore,
+    } = completed;
+    let install = start_loaded_navigation_page_install(
+        conn,
+        out,
+        &continuation.token,
+        continuation.navigation_activity.state(),
+        &continuation.final_url,
+        restore,
+        command_context,
+    );
+    if install.committed_owner().is_none() {
+        let _ = conn.fail_document_navigation_for_session_owner_if_matches(
+            continuation
+                .navigation_activity
+                .state()
+                .navigate_session_id
+                .as_deref(),
+            &continuation.token,
+            BrowserNavigationFailure::Commit {
+                error_text: "loaded navigation Page install did not commit".to_owned(),
+            },
+        );
+    }
+    if let Some(owner) = install.committed_owner().cloned()
+        && let Some(engine) = continuation.navigation_engine.take()
+    {
+        continuation.engine_adoption_error = conn
+            .adopt_loaded_navigation_engine_for_target_owner(owner, engine)
+            .err()
+            .map(|error| format!("failed to adopt loaded Page engine: {error}"));
+    }
+    match install {
+        LoadedPageInstallStart::Pending(install) => LoadedNavigationCommitApplyStart::Pending(
+            Box::new(PendingLoadedNavigationPageDisposal {
+                continuation,
+                install: *install,
+            }),
+        ),
+        LoadedPageInstallStart::Ready(install) => LoadedNavigationCommitApplyStart::Ready(
+            Box::new(CompletedLoadedNavigationPageDisposal {
+                continuation,
+                install,
+            }),
+        ),
+        LoadedPageInstallStart::Failed => LoadedNavigationCommitApplyStart::Rejected,
+    }
+}
+
+pub(super) async fn complete_loaded_navigation_commit_after_page_disposal_async(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    completed: CompletedLoadedNavigationPageDisposal,
+) -> Option<BrowserPageOwnerKey> {
+    let mut step = start_loaded_navigation_commit_after_page_disposal(conn, out, completed);
+    loop {
+        match step {
+            LoadedNavigationPostDisposalStart::Pending(pending) => {
+                let completed = (*pending).wait().await;
+                step = complete_loaded_navigation_preload_listeners(conn, out, completed);
+            }
+            LoadedNavigationPostDisposalStart::Ready(owner) => return owner,
+        }
+    }
+}
+
+pub(super) fn start_loaded_navigation_commit_after_page_disposal(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    completed: CompletedLoadedNavigationPageDisposal,
+) -> LoadedNavigationPostDisposalStart {
+    let CompletedLoadedNavigationPageDisposal {
+        continuation,
+        install,
+    } = completed;
+    let post_install = start_loaded_navigation_page_post_install(
+        conn,
+        out,
+        continuation.navigation_activity.state(),
+        install,
+    );
+    continue_loaded_navigation_after_page_post_install(conn, out, continuation, post_install)
+}
+
+pub(super) fn complete_loaded_navigation_preload_listeners(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    completed: CompletedLoadedNavigationPreloadListeners,
+) -> LoadedNavigationPostDisposalStart {
+    let CompletedLoadedNavigationPreloadListeners {
+        continuation,
+        post_install,
+    } = completed;
+    let post_install = complete_loaded_navigation_page_post_install(conn, out, post_install);
+    continue_loaded_navigation_after_page_post_install(conn, out, continuation, post_install)
+}
+
+fn continue_loaded_navigation_after_page_post_install(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    continuation: LoadedNavigationCommitContinuation,
+    post_install: LoadedPagePostInstallStart,
+) -> LoadedNavigationPostDisposalStart {
+    match post_install {
+        LoadedPagePostInstallStart::Pending(post_install) => {
+            LoadedNavigationPostDisposalStart::Pending(Box::new(
+                PendingLoadedNavigationPreloadListeners {
+                    continuation,
+                    post_install: *post_install,
+                },
+            ))
+        }
+        LoadedPagePostInstallStart::Ready(Some(commit)) => {
+            LoadedNavigationPostDisposalStart::Ready(
+                finish_loaded_navigation_commit_after_page_post_install(
+                    conn,
+                    out,
+                    continuation,
+                    commit,
+                ),
+            )
+        }
+        LoadedPagePostInstallStart::Ready(None) => LoadedNavigationPostDisposalStart::Ready(None),
+    }
+}
+
+fn finish_loaded_navigation_commit_after_page_post_install(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    continuation: LoadedNavigationCommitContinuation,
+    commit: LoadedPageInstallOutcome,
+) -> Option<BrowserPageOwnerKey> {
+    let LoadedNavigationCommitContinuation {
+        token,
+        mut navigation_activity,
+        pending_download,
+        page_creation_artifacts,
+        mut deferred_initial_renderer_document_lifecycle_events,
+        final_url,
+        response_headers,
+        response_from_cache,
+        main_document_body,
+        is_network_error_page,
+        renderer_output_predecessor,
+        navigation_engine,
+        engine_adoption_error,
+    } = continuation;
+    let navigation_session_id = navigation_activity.state().navigate_session_id.clone();
     if !is_network_error_page {
         let _ = conn.commit_main_document_resource_for_session_owner(
             navigation_session_id.as_deref(),
@@ -105,14 +456,14 @@ pub(super) async fn commit_loaded_navigation_async(
         );
     }
 
-    let LoadedPageCommitOutcome {
-        preload_channel_execution_context_ids: _,
+    let LoadedPageInstallOutcome {
+        owner: committed_owner,
     } = commit;
     let (renderer_document_binding, mut initial_renderer_document_lifecycle_events) = conn
         .bind_renderer_document_lifecycle_for_session_owner(
             navigation_activity.state().navigate_session_id.as_deref(),
             page_creation_artifacts,
-            token.cloned(),
+            Some(token),
             navigation_activity.state().frame_id.clone(),
             navigation_activity.state().loader_id.clone(),
         );
@@ -136,28 +487,36 @@ pub(super) async fn commit_loaded_navigation_async(
     navigation_activity.defer_initial_renderer_document_lifecycle_events_until_load_boundary(
         deferred_initial_renderer_document_lifecycle_events,
     );
-    if let Some(engine) = navigation_engine {
-        conn.adopt_loaded_navigation_engine_for_session_owner(
-            navigation_session_id.as_deref(),
-            engine,
-        );
+    let late_engine_adoption_error = navigation_engine.and_then(|engine| {
+        let Some(owner) = committed_owner.as_ref().cloned() else {
+            return Some("loaded Page engine has no committed Browser owner".to_owned());
+        };
+        conn.adopt_loaded_navigation_engine_for_target_owner(owner, engine)
+            .err()
+            .map(|error| format!("failed to adopt loaded Page engine: {error}"))
+    });
+    let engine_adoption_error = engine_adoption_error.or(late_engine_adoption_error);
+    if let Some(message) = engine_adoption_error {
+        if navigation_activity.state().navigate_id.is_some() {
+            navigation_activity.emit_navigation_error_instead_of_result_into_buffer(out, message);
+        } else {
+            tracing::warn!(
+                error = %message,
+                session_id = navigation_session_id.as_deref(),
+                "navigation engine adoption failed after early Page.navigate result"
+            );
+        }
     }
 
-    // Keep the loaded commit tail boxed: the target/Patchright CDP test thread
-    // has historically hit stack limits when this future is inlined.
-    Box::pin(async move {
-        navigation_activity
-            .emit_loaded_navigation_commit_async(
-                conn,
-                out,
-                pending_download,
-                renderer_document_binding,
-                initial_renderer_document_lifecycle_events,
-                renderer_output_predecessor,
-            )
-            .await;
-    })
-    .await;
+    navigation_activity.emit_loaded_navigation_commit(
+        conn,
+        out,
+        pending_download,
+        renderer_document_binding,
+        initial_renderer_document_lifecycle_events,
+        renderer_output_predecessor,
+    );
+    committed_owner
 }
 
 fn split_renderer_page_creation_lifecycle_at_load_boundary(
@@ -235,345 +594,4 @@ pub(super) async fn commit_download_navigation_async(
             .await;
     })
     .await;
-}
-
-async fn restore_and_commit_loaded_navigation_page_async(
-    conn: &mut CdpConnection,
-    out: &mut CommandOutputBuffer,
-    token: Option<&DocumentNavigationToken>,
-    state: &NavigationDispatchState,
-    page: Page,
-    final_url: &Url,
-    target_url: &Url,
-    main_document_commit: &moli_core::page::RendererMainDocumentCommit,
-    initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
-    committed_renderer_attachment: Option<CommittedRendererAgentAttachment>,
-    command_context: &mut CommandDispatchContext,
-) -> Option<LoadedPageCommitOutcome> {
-    let timing_enabled = moli_trace::cdp_nav_timing_enabled();
-    let timing_started = timing_enabled.then(std::time::Instant::now);
-    if timing_enabled {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_start",
-        );
-    }
-    let mut outcome = LoadedPageCommitOutcome::default();
-    let prepared_configuration_committed = committed_renderer_attachment.is_some();
-    let mut page = page;
-    let page_agent_token = page.renderer_devtools_agent_token();
-    if let Some(transaction) = committed_renderer_attachment.as_ref() {
-        if token != Some(transaction.navigation())
-            || transaction.current().agent_token() != page_agent_token
-            || conn.current_renderer_agent_attachment_id_for_session_owner(
-                state.navigate_session_id.as_deref(),
-            ) != Some(transaction.current().id())
-        {
-            tracing::warn!(
-                session_id = state.navigate_session_id.as_deref(),
-                "prepared navigation Page does not match its committed renderer attachment"
-            );
-            return None;
-        }
-        page.bind_renderer_agent_attachment(transaction.current().id());
-    }
-    let renderer_agent_candidate = match (token, committed_renderer_attachment.as_ref()) {
-        (Some(token), None) => {
-            match conn.prepare_renderer_agent_candidate_for_session_owner(
-                state.navigate_session_id.as_deref(),
-                token,
-                &mut page,
-            ) {
-                Ok(candidate) => Some(candidate),
-                Err(error) => {
-                    tracing::debug!(
-                        %error,
-                        session_id = state.navigate_session_id.as_deref(),
-                        loader_id = token.loader_id,
-                        "dropping superseded renderer navigation candidate before commit"
-                    );
-                    return None;
-                }
-            }
-        }
-        _ => None,
-    };
-    let Some(commit_state) = conn
-        .prepare_loaded_navigation_commit_for_session_owner(state.navigate_session_id.as_deref())
-    else {
-        return Some(outcome);
-    };
-    let permission_overrides = conn
-        .effective_permission_overrides_for_browser_context_id(&commit_state.browser_context_id);
-
-    let restore_started = timing_enabled.then(std::time::Instant::now);
-    let runtime_output_predecessor = if prepared_configuration_committed {
-        Ok(None)
-    } else {
-        page.restore_runtime_protocol_state_async(
-            commit_state.renderer_runtime_inspector_session_id.clone(),
-            &commit_state.runtime_inspector_session_restore_snapshots,
-            &commit_state.isolated_worlds,
-            &commit_state.stored_runtime_bindings,
-            &commit_state.session_runtime_bindings,
-            commit_state.runtime_frontend_enabled,
-        )
-        .await
-    };
-    match runtime_output_predecessor {
-        Ok(runtime_output_predecessor) => {
-            if let Some(predecessor) = runtime_output_predecessor {
-                command_context.set_renderer_output_predecessor(predecessor);
-            }
-            let preload_channel_execution_context_ids = initial_runtime_realms
-                .iter()
-                .filter_map(runtime_realm_execution_context_id)
-                .collect::<Vec<_>>();
-            let preload_channel_execution_context_ids =
-                dedupe_preload_channel_execution_context_ids(preload_channel_execution_context_ids);
-            // `initial_runtime_realms` is current-state inventory. It is valid
-            // for resolving BiDi preload listener context IDs, but it is not a
-            // second source of live CDP lifecycle events. Context-created
-            // notifications travel exclusively through the concrete renderer
-            // output stream produced while applying Runtime configuration.
-            outcome.preload_channel_execution_context_ids = preload_channel_execution_context_ids;
-        }
-        Err(error) => {
-            if state.navigate_id.is_some() {
-                out.push_error_after_messages(
-                    -32000,
-                    format!("failed to restore page runtime protocol state: {error}"),
-                );
-            } else {
-                // No navigate_id means an early Page.navigate result already
-                // shipped via response-head fast-ack. The error is invisible
-                // to the client; log it so post-ack commit failures don't
-                // disappear silently and leave the client waiting on
-                // lifecycle events that will never arrive.
-                tracing::warn!(
-                    %error,
-                    session_id = state.navigate_session_id.as_deref(),
-                    "navigation commit failed after early Page.navigate result: runtime protocol state restore"
-                );
-            }
-            return None;
-        }
-    }
-    if let Some(started) = restore_started {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_runtime_restored",
-            phase_ms = started.elapsed().as_millis(),
-            elapsed_ms = timing_started
-                .as_ref()
-                .map(std::time::Instant::elapsed)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default(),
-        );
-    }
-    let (fetch_subresource_enabled, fetch_subresource_resource_type) =
-        commit_state.fetch_subresource_config;
-    let fetch_restore_started = timing_enabled.then(std::time::Instant::now);
-    if !prepared_configuration_committed
-        && (fetch_subresource_enabled || fetch_subresource_resource_type.is_some())
-        && let Err(error) = page
-            .set_fetch_subresource_interception_async(
-                fetch_subresource_enabled,
-                fetch_subresource_resource_type,
-            )
-            .await
-    {
-        if state.navigate_id.is_some() {
-            out.push_error_after_messages(
-                -32000,
-                format!("failed to restore page fetch interception state: {error}"),
-            );
-        } else {
-            tracing::warn!(
-                %error,
-                session_id = state.navigate_session_id.as_deref(),
-                "navigation commit failed after early Page.navigate result: fetch interception state restore"
-            );
-        }
-        return None;
-    }
-    if let Some(started) = fetch_restore_started {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_fetch_restored",
-            phase_ms = started.elapsed().as_millis(),
-            elapsed_ms = timing_started
-                .as_ref()
-                .map(std::time::Instant::elapsed)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default(),
-        );
-    }
-    let permission_started = timing_enabled.then(std::time::Instant::now);
-    if !prepared_configuration_committed
-        && !permission_overrides.is_empty()
-        && let Err(error) = page
-            .set_permission_overrides_async(&permission_overrides)
-            .await
-    {
-        if state.navigate_id.is_some() {
-            out.push_error_after_messages(
-                -32000,
-                format!("failed to apply page permission overrides: {error}"),
-            );
-        } else {
-            tracing::warn!(
-                %error,
-                session_id = state.navigate_session_id.as_deref(),
-                "navigation commit failed after early Page.navigate result: permission overrides apply"
-            );
-        }
-        return None;
-    }
-    if let Some(started) = permission_started {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_permissions_restored",
-            phase_ms = started.elapsed().as_millis(),
-            elapsed_ms = timing_started
-                .as_ref()
-                .map(std::time::Instant::elapsed)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default(),
-        );
-    }
-    let page_commit_started = timing_enabled.then(std::time::Instant::now);
-    let page_commit = match conn
-        .commit_loaded_navigation_page_for_session_owner_async(
-            state.navigate_session_id.as_deref(),
-            page,
-            match committed_renderer_attachment {
-                Some(transaction) => {
-                    LoadedNavigationRendererAttachmentCommit::AlreadyCommitted(transaction)
-                }
-                None => LoadedNavigationRendererAttachmentCommit::Prepare(renderer_agent_candidate),
-            },
-            target_url,
-        )
-        .await
-    {
-        Some(Ok(commit)) => commit,
-        Some(Err(error)) => {
-            if state.navigate_id.is_some() {
-                out.push_error_after_messages(
-                    -32000,
-                    format!("failed to collect navigation Inspector output: {error}"),
-                );
-            } else {
-                tracing::warn!(
-                    %error,
-                    session_id = state.navigate_session_id.as_deref(),
-                    "navigation commit failed after early Page.navigate result: Inspector output collection"
-                );
-            }
-            return None;
-        }
-        None => return None,
-    };
-    if let Some(replaced_page_owner) = page_commit.replaced_page_owner.as_ref() {
-        let worker_retirement_events =
-            crate::domains::target::retire_dedicated_worker_targets_for_replaced_page_async(
-                conn,
-                replaced_page_owner,
-            )
-            .await;
-        out.extend_background_events_after_messages(worker_retirement_events);
-    }
-    if let Some(continuation) = page_commit.committed_document_post_response_continuation {
-        command_context
-            .response_flush()
-            .defer_until_response_flush(move || continuation.release());
-    }
-    let _ = conn.commit_loaded_navigation_target_identity_for_session_owner(
-        state.navigate_session_id.as_deref(),
-        main_document_commit,
-        target_url,
-    );
-    if commit_state.runtime_frontend_enabled {
-        let _ = conn.set_renderer_runtime_agent_owns_page_console_api_events_for_session_owner(
-            state.navigate_session_id.as_deref(),
-            true,
-        );
-    }
-    if let Some(token) = token {
-        conn.commit_document_navigation_for_session_owner_if_matches(
-            state.navigate_session_id.as_deref(),
-            token,
-        );
-    }
-    if let Some(started) = page_commit_started {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_page_installed",
-            phase_ms = started.elapsed().as_millis(),
-            elapsed_ms = timing_started
-                .as_ref()
-                .map(std::time::Instant::elapsed)
-                .map(|elapsed| elapsed.as_millis())
-                .unwrap_or_default(),
-        );
-    }
-    let preload_channel_execution_context_ids = if conn
-        .target_owner_has_bidi_channel_preload_script_for_session(
-            state.navigate_session_id.as_deref(),
-        ) {
-        dedupe_preload_channel_execution_context_ids(std::mem::take(
-            &mut outcome.preload_channel_execution_context_ids,
-        ))
-    } else {
-        Vec::new()
-    };
-    let mut preload_channel_listener_events = Vec::new();
-    for execution_context_id in preload_channel_execution_context_ids {
-        Box::pin(
-            crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
-                conn,
-                state.navigate_session_id.as_deref(),
-                execution_context_id,
-                &mut preload_channel_listener_events,
-            ),
-        )
-        .await;
-    }
-    out.extend_background_events_after_messages(preload_channel_listener_events);
-    if let Some(started) = timing_started {
-        tracing::info!(
-            target: "moli_cdp_nav_timing",
-            url = %final_url,
-            stage = "restore_commit_done",
-            elapsed_ms = started.elapsed().as_millis(),
-        );
-    }
-    Some(outcome)
-}
-
-fn runtime_realm_execution_context_id(realm: &RendererRuntimeRealmInfo) -> Option<i64> {
-    runtime_realm_has_native_unique_id(realm).then_some(realm.context_id)
-}
-
-fn runtime_realm_has_native_unique_id(realm: &RendererRuntimeRealmInfo) -> bool {
-    realm
-        .realm_id
-        .as_deref()
-        .is_some_and(|realm_id| !realm_id.is_empty())
-}
-
-fn dedupe_preload_channel_execution_context_ids(mut ids: Vec<i64>) -> Vec<i64> {
-    let mut deduped = Vec::new();
-    for id in ids.drain(..) {
-        if !deduped.contains(&id) {
-            deduped.push(id);
-        }
-    }
-    deduped
 }

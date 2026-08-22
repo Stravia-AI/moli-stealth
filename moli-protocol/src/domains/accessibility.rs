@@ -427,11 +427,11 @@ fn start_pending_object_reference_command(
             message: "Could not find node with given id".to_owned(),
         });
     };
-    let Some(page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
+    let Some(mut page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
         return Err(PendingAccessibilityCommandStartError::no_document_loaded());
     };
     let pending = start_accessibility_object_page_command(
-        page,
+        &mut page,
         cmd.session_id.map(str::to_owned),
         object_id,
         &operation,
@@ -540,10 +540,10 @@ fn start_pending_backend_reference_command(
         return Err(PendingAccessibilityCommandStartError::no_document_loaded());
     };
     let resolved_frame_id = frame_id.unwrap_or(top_frame_id.as_str()).to_owned();
-    let Some(page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
+    let Some(mut page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
         return Err(PendingAccessibilityCommandStartError::no_document_loaded());
     };
-    let pending = start_accessibility_backend_page_command(page, backend_node_id, &operation)
+    let pending = start_accessibility_backend_page_command(&mut page, backend_node_id, &operation)
         .map_err(PendingAccessibilityCommandStartError::renderer_error)?;
     Ok(Some(PendingAccessibilityCommandDispatch {
         command_id: cmd.id,
@@ -615,16 +615,16 @@ fn start_pending_frame_scoped_accessibility_command(
         return Err(PendingAccessibilityCommandStartError::no_document_loaded());
     };
     let resolved_frame_id = frame_id.unwrap_or(top_frame_id.as_str());
-    let Some(page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
+    let Some(mut page) = helpers::loaded_page_mut_for_session(conn, cmd.session_id) else {
         return Err(PendingAccessibilityCommandStartError::no_document_loaded());
     };
     let (kind, pending) = if resolved_frame_id == top_frame_id {
-        let pending = start_top_frame_accessibility_page_command(page, &top_frame_kind)
+        let pending = start_top_frame_accessibility_page_command(&mut page, &top_frame_kind)
             .map_err(PendingAccessibilityCommandStartError::renderer_error)?;
         (top_frame_kind, pending)
     } else {
         let pending = start_child_frame_accessibility_page_command(
-            page,
+            &mut page,
             resolved_frame_id,
             &child_frame_kind,
         )
@@ -674,7 +674,7 @@ pub(crate) async fn complete_pending_accessibility_command(
             -32000, message,
         ));
     }
-    let Some(page) = helpers::loaded_page_mut_for_session(conn, session_id_ref) else {
+    let Some(mut page) = helpers::loaded_page_mut_for_session(conn, session_id_ref) else {
         return AccessibilityCommandDispatchStep::Complete(CommandOutputPlan::error(
             -32000,
             "NoDocumentLoaded",
@@ -712,7 +712,7 @@ pub(crate) async fn complete_pending_accessibility_command(
         PendingAccessibilityCommandKind::ChildFrameFullTree { max_depth } => {
             let _ = max_depth;
             match finish_child_frame_accessibility_nodes_for_protocol(
-                page,
+                &mut page,
                 completion,
                 "Could not build accessibility tree for frame",
             ) {
@@ -722,7 +722,7 @@ pub(crate) async fn complete_pending_accessibility_command(
         }
         PendingAccessibilityCommandKind::ChildFrameRoot => {
             match finish_child_frame_accessibility_nodes_for_protocol(
-                page,
+                &mut page,
                 completion,
                 "Could not build root accessibility node for frame",
             ) {
@@ -740,7 +740,7 @@ pub(crate) async fn complete_pending_accessibility_command(
         } => {
             return AccessibilityCommandDispatchStep::Complete(
                 complete_object_accessibility_payloads_command(
-                    page,
+                    &mut page,
                     completion,
                     frame_id,
                     top_frame_id,
@@ -770,18 +770,19 @@ pub(crate) async fn complete_pending_accessibility_command(
                     ));
                 }
             };
-            let pending =
-                match start_accessibility_backend_page_command(page, backend_node_id, &operation) {
-                    Ok(pending) => pending,
-                    Err(error) => {
-                        return AccessibilityCommandDispatchStep::Complete(
-                            CommandOutputPlan::error(
-                                -32000,
-                                format!("Could not build accessibility payload for node: {error}"),
-                            ),
-                        );
-                    }
-                };
+            let pending = match start_accessibility_backend_page_command(
+                &mut page,
+                backend_node_id,
+                &operation,
+            ) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    return AccessibilityCommandDispatchStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        format!("Could not build accessibility payload for node: {error}"),
+                    ));
+                }
+            };
             return AccessibilityCommandDispatchStep::Pending(
                 PendingAccessibilityCommandDispatch {
                     command_id,
@@ -802,7 +803,7 @@ pub(crate) async fn complete_pending_accessibility_command(
         } => {
             return AccessibilityCommandDispatchStep::Complete(
                 complete_backend_accessibility_payloads_command(
-                    page,
+                    &mut page,
                     completion,
                     frame_id,
                     top_frame_id,

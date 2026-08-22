@@ -1,4 +1,4 @@
-use std::{marker::PhantomData, rc::Rc, sync::Arc};
+use std::{marker::PhantomData, ops::Deref, rc::Rc, sync::Arc};
 
 use super::owner_local_store::{
     RendererPageToken, has_current_render_runtime_owner_local_store,
@@ -64,13 +64,17 @@ impl RendererAttachedPage {
         (
             RendererPageHandle {
                 local_executor,
-                render_runtime,
-                token: Some(self.token),
-                devtools_agent_token: self.devtools_agent_token,
+                client: RendererPageClientHandle {
+                    render_runtime,
+                    token: self.token,
+                    devtools_agent_token: self.devtools_agent_token,
+                    javascript_dialog_broker: self.javascript_dialog_broker,
+                    devtools_target: self.devtools_target,
+                    script_execution_control: self.script_execution_control,
+                    _not_send: PhantomData,
+                },
                 page_context_cancel_tx: self.page_context_cancel_tx,
-                javascript_dialog_broker: self.javascript_dialog_broker,
-                devtools_target: self.devtools_target,
-                script_execution_control: self.script_execution_control,
+                open: true,
                 committed_document_post_response_continuation: self
                     .committed_document_post_response_continuation,
                 _not_send: PhantomData,
@@ -85,15 +89,27 @@ impl RendererAttachedPage {
 
 pub struct RendererPageHandle {
     local_executor: JsLocalExecutor,
-    render_runtime: RenderRuntimeHandle,
-    token: Option<RendererPageToken>,
-    devtools_agent_token: RendererDevToolsAgentToken,
+    client: RendererPageClientHandle,
     page_context_cancel_tx: RendererPageContextCancelSender,
+    open: bool,
+    committed_document_post_response_continuation:
+        Option<RendererPageCommandPostResponseContinuation>,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+/// Cloneable command capability for one exact renderer Page.
+///
+/// This handle can submit work and observe stable Page identity, but dropping
+/// it never removes the Page from the renderer owner. The unique
+/// [`RendererPageHandle`] remains the lifetime authority.
+#[derive(Clone)]
+pub struct RendererPageClientHandle {
+    render_runtime: RenderRuntimeHandle,
+    token: RendererPageToken,
+    devtools_agent_token: RendererDevToolsAgentToken,
     javascript_dialog_broker: RendererJavaScriptDialogBroker,
     devtools_target: crate::devtools::target::RendererDevToolsTargetHandle,
     script_execution_control: crate::script_execution_control::RendererScriptExecutionControl,
-    committed_document_post_response_continuation:
-        Option<RendererPageCommandPostResponseContinuation>,
     _not_send: PhantomData<Rc<()>>,
 }
 
@@ -137,9 +153,17 @@ impl Drop for RendererRuntimeInspectorSessionDetachGuard {
 }
 
 impl RendererPageHandle {
+    #[doc(hidden)]
+    pub fn take_committed_document_post_response_continuation(
+        &mut self,
+    ) -> Option<RendererPageCommandPostResponseContinuation> {
+        self.committed_document_post_response_continuation.take()
+    }
+}
+
+impl RendererPageClientHandle {
     fn token(&self) -> RendererPageToken {
         self.token
-            .expect("renderer page handle should remain open while in use")
     }
 
     pub fn page_id(&self) -> u64 {
@@ -163,13 +187,6 @@ impl RendererPageHandle {
     #[doc(hidden)]
     pub fn crash_devtools_target_from_io(&self) {
         self.devtools_target.crash_from_io();
-    }
-
-    #[doc(hidden)]
-    pub fn take_committed_document_post_response_continuation(
-        &mut self,
-    ) -> Option<RendererPageCommandPostResponseContinuation> {
-        self.committed_document_post_response_continuation.take()
     }
 
     pub fn take_pending_modal_javascript_dialogs(&self) -> Vec<RendererPendingJavaScriptDialog> {
@@ -506,11 +523,18 @@ impl RendererPageHandle {
             )),
         }
     }
+}
+
+impl RendererPageHandle {
+    pub fn client_handle(&self) -> RendererPageClientHandle {
+        self.client.clone()
+    }
 
     pub async fn close_async(&mut self) -> Result<()> {
-        let Some(token) = self.token else {
+        if !self.open {
             return Ok(());
-        };
+        }
+        let token = self.client.token();
         let terminated_active_execution = self
             .devtools_target
             .close("Inspector target closed with its Page handle");
@@ -527,7 +551,7 @@ impl RendererPageHandle {
             && has_current_render_runtime_owner_local_store()
         {
             remove_page(token);
-            self.token = None;
+            self.open = false;
             tracing::debug!("renderer page handle closed on owner lane");
             return Ok(());
         }
@@ -540,7 +564,7 @@ impl RendererPageHandle {
             .await?
         {
             RendererOwnerReply::PageRemoved => {
-                self.token = None;
+                self.open = false;
                 tracing::debug!("renderer page handle closed through owner command");
                 Ok(())
             }
@@ -548,6 +572,14 @@ impl RendererPageHandle {
                 "renderer owner returned non-remove-page reply for remove page command"
             )),
         }
+    }
+}
+
+impl Deref for RendererPageHandle {
+    type Target = RendererPageClientHandle;
+
+    fn deref(&self) -> &Self::Target {
+        &self.client
     }
 }
 
@@ -615,9 +647,11 @@ impl RendererPageCommandPending {
 
 impl Drop for RendererPageHandle {
     fn drop(&mut self) {
-        let Some(token) = self.token.take() else {
+        if !self.open {
             return;
-        };
+        }
+        self.open = false;
+        let token = self.client.token();
         self.devtools_target
             .detach_page(token.page_id, "Inspector Page handle was dropped");
         self.javascript_dialog_broker.dismiss_pending();
@@ -650,6 +684,10 @@ impl Drop for RendererPageHandle {
 
 impl RendererPageTestingHandle {
     pub fn new_for_testing(handle: &RendererPageHandle) -> Self {
+        Self::new_for_client_for_testing(&handle.client)
+    }
+
+    pub fn new_for_client_for_testing(handle: &RendererPageClientHandle) -> Self {
         Self {
             render_runtime: handle.render_runtime.clone(),
             token: handle.token(),

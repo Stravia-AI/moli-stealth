@@ -116,7 +116,7 @@ async fn cached_subresource_reload_emits_served_from_cache_before_response() {
     let mut browser_context = ctx.conn.new_browser_context("BID-1".to_owned());
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({
         "id": 70,
@@ -212,7 +212,7 @@ async fn cached_main_document_navigation_emits_served_from_cache_before_response
     let mut browser_context = ctx.conn.new_browser_context("BID-1".to_owned());
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({
         "id": 73,
@@ -298,7 +298,7 @@ async fn clear_browser_cache_clears_response_body_and_stream_artifacts() {
     let mut bc = BrowserContext::new("BID-1".into());
     bc.record_captured_response_body("REQ-1".to_owned(), "body".to_owned(), [None]);
     bc.insert_io_stream("STREAM-1".to_owned(), b"payload".to_vec(), 0);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({"id": 4, "method": "Network.clearBrowserCache"}))
         .await;
@@ -330,7 +330,7 @@ async fn clear_browser_cache_clears_configured_disk_http_cache() {
         fetch_config,
     ));
     let browser_context = ctx.conn.new_browser_context("BID-1".into());
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({"id": 44, "method": "Network.clearBrowserCache"}))
         .await;
@@ -364,7 +364,7 @@ async fn clear_browser_cache_uses_browser_context_http_cache_owner() {
     ));
     let mut browser_context = BrowserContext::new("BID-1".into());
     browser_context.http_cache_root = Some(cache_dir.clone());
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({"id": 45, "method": "Network.clearBrowserCache"}))
         .await;
@@ -399,11 +399,13 @@ async fn clear_browser_cache_targets_command_session_browser_context() {
         .expect("inactive cache body fixture should be written");
 
     let mut active = BrowserContext::new("BID-cache-active".into());
+    active.set_active_target_id("TID-cache-active");
     active.attach_active_session("SID-cache-active");
     active.http_cache_root = Some(active_cache_dir.clone());
     active.record_captured_response_body("REQ-active".to_owned(), "active".to_owned(), [None]);
 
     let mut inactive = BrowserContext::new("BID-cache-inactive".into());
+    inactive.set_active_target_id("TID-cache-inactive");
     inactive.attach_active_session("SID-cache-inactive");
     inactive.http_cache_root = Some(inactive_cache_dir.clone());
     inactive.record_captured_response_body(
@@ -413,8 +415,8 @@ async fn clear_browser_cache_targets_command_session_browser_context() {
     );
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(active);
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(active);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 46,
@@ -536,7 +538,7 @@ async fn clear_browser_cache_keeps_pending_response_navigation_transfer() {
             network_observation_journal: Default::default(),
         },
     );
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({"id": 5, "method": "Network.clearBrowserCache"}))
         .await;
@@ -563,7 +565,8 @@ async fn set_cache_disabled_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_cache_disabled_rejects_invalid_params() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 21,
@@ -576,7 +579,8 @@ async fn set_cache_disabled_rejects_invalid_params() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_cache_disabled_updates_browser_context_state() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 22,
@@ -616,13 +620,14 @@ async fn devtools_set_cache_behavior_global_updates_existing_targets_and_default
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-active".to_owned());
-    bc.background_targets.push(BackgroundTarget::new(
-        "TID-background".to_owned(),
-        None,
-        TargetIdentityState::about_blank(),
-        TargetPageSlot::empty_for_test_fixture(),
-    ));
-    ctx.conn.browser_context = Some(bc);
+    bc.background_targets
+        .push(BackgroundTarget::new_with_frontend_session(
+            "TID-background".to_owned(),
+            None,
+            TargetIdentityState::about_blank(),
+            TargetPageSlot::empty_for_test_fixture(),
+        ));
+    ctx.conn.insert_browser_context(bc);
 
     let result = ctx
         .conn
@@ -670,13 +675,14 @@ async fn devtools_set_cache_behavior_contexts_only_updates_requested_targets() {
     let mut ctx = TestContext::new();
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-active".to_owned());
-    bc.background_targets.push(BackgroundTarget::new(
-        "TID-background".to_owned(),
-        None,
-        TargetIdentityState::about_blank(),
-        TargetPageSlot::empty_for_test_fixture(),
-    ));
-    ctx.conn.browser_context = Some(bc);
+    bc.background_targets
+        .push(BackgroundTarget::new_with_frontend_session(
+            "TID-background".to_owned(),
+            None,
+            TargetIdentityState::about_blank(),
+            TargetPageSlot::empty_for_test_fixture(),
+        ));
+    ctx.conn.insert_browser_context(bc);
 
     ctx.conn
         .execute_devtools_command(crate::devtools_runtime::DevToolsCommand::SetCacheBehavior(
@@ -719,7 +725,8 @@ async fn devtools_set_cache_behavior_contexts_only_updates_requested_targets() {
 #[tokio::test(flavor = "multi_thread")]
 async fn devtools_set_cache_behavior_rejects_unknown_context() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     let error = ctx
         .conn
@@ -796,7 +803,8 @@ async fn set_bypass_service_worker_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_bypass_service_worker_rejects_invalid_params() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({
         "id": 25,
         "method": "Network.setBypassServiceWorker",
@@ -808,7 +816,8 @@ async fn set_bypass_service_worker_rejects_invalid_params() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_bypass_service_worker_updates_browser_context_state() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 26,

@@ -50,7 +50,10 @@ async def run_dom_shadow_outer_html_group(state: SmokeState) -> None:
     try:
         await page.goto(
             f"{state.fixture}/dom-shadow-outer-html",
-            wait_until="domcontentloaded",
+            # Chromium can publish the main Document's DCL while this fixture's
+            # iframe still exposes its initial about:blank Document. This group
+            # reads the committed child shadow tree, so synchronize with load.
+            wait_until="load",
             timeout=10_000,
         )
         session = await state.context.new_cdp_session(page)

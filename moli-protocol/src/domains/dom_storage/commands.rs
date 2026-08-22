@@ -303,7 +303,7 @@ fn complete_top_frame_resolution(
     };
     let mut route_scope = owner_scope.enter(conn);
     let storage_key = {
-        let Ok(page) = route_scope
+        let Ok(mut page) = route_scope
             .conn_mut()
             .loaded_page_mut_for_protocol_access(owner_scope.session_id())
         else {
@@ -374,7 +374,7 @@ fn complete_child_frame_resolution(
     };
     let mut route_scope = owner_scope.enter(conn);
     let child_frames = {
-        let Ok(page) = route_scope
+        let Ok(mut page) = route_scope
             .conn_mut()
             .loaded_page_mut_for_protocol_access(owner_scope.session_id())
         else {

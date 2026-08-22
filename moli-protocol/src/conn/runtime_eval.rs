@@ -1,4 +1,8 @@
-use std::{collections::hash_map::Entry, future::Future, pin::Pin};
+use std::{
+    collections::{HashMap, VecDeque, hash_map::Entry},
+    future::Future,
+    pin::Pin,
+};
 
 use moli_page_types::{FrontendCommandId, RendererCallId, RendererInspectorResponseDelivery};
 use moli_protocol_cdp::CdpRendererCommandReplayDispatch;
@@ -23,8 +27,7 @@ use moli_core::{
 
 use crate::conn::state::{
     DevToolsSessionState, PreparedRendererCallTermination, SessionRendererCallReplay,
-    SessionRendererCallTermination, devtools_sessions_have_pending_inspector_awaits,
-    drain_pending_inspector_awaits_for_devtools_sessions,
+    SessionRendererCallTermination, drain_pending_inspector_awaits_for_devtools_sessions,
 };
 use crate::domains::command_output::protocol_message_background_event;
 use crate::domains::runtime_context_events::{
@@ -34,6 +37,12 @@ use crate::domains::runtime_context_events::{
 };
 
 use super::*;
+
+mod normalization;
+pub(crate) use normalization::{
+    CompletedRuntimeProtocolMessageNormalization, PendingRuntimeProtocolMessageNormalization,
+    RuntimeProtocolMessageCompletionStep,
+};
 
 type RuntimeInspectorResponseReceiver = RuntimeInspectorAsyncCompletionReceiver;
 
@@ -230,22 +239,19 @@ enum BidiChannelListenerRoute {
     Event(BackgroundProtocolEvent),
 }
 
-fn unregister_runtime_remote_object_group_from_parked_page_session_state(
-    page_session_state: &mut ParkedPageSessionState,
+fn unregister_runtime_remote_object_group_from_top_level_session_states(
+    primary: &mut DevToolsSessionState,
+    auxiliary: &mut HashMap<String, DevToolsSessionState>,
     session_id: Option<&str>,
     object_group: &str,
 ) {
     if let Some(session_id) = session_id
-        && let Some(state) = page_session_state
-            .auxiliary_devtools_session_states
-            .get_mut(session_id)
+        && let Some(state) = auxiliary.get_mut(session_id)
     {
         state.unregister_runtime_remote_object_group(object_group);
         return;
     }
-    page_session_state
-        .devtools_session_state
-        .unregister_runtime_remote_object_group(object_group);
+    primary.unregister_runtime_remote_object_group(object_group);
 }
 
 #[derive(Debug)]
@@ -454,6 +460,94 @@ pub struct CompletedRuntimeProtocolMessageDispatch {
     response_route: RuntimeProtocolResponseRoute,
 }
 
+/// One exact-Page renderer wait needed to start or clean up a BiDi channel
+/// listener.
+///
+/// The pending Page dispatch (or deferred Inspector response) is owned by this
+/// value. Waiting therefore never borrows [`CdpConnection`]; the captured Page
+/// owner is revalidated only when the completion is applied.
+pub(crate) struct PendingBidiChannelOwnerAction {
+    owner: BidiChannelPageOwner,
+    command_id: u64,
+    action: PendingBidiChannelOwnerActionKind,
+    wait: PendingBidiChannelOwnerActionWait,
+}
+
+enum PendingBidiChannelOwnerActionWait {
+    Page(PendingRuntimeProtocolMessageDispatch),
+    Normalize {
+        pending: Box<PendingRuntimeProtocolMessageNormalization>,
+        renderer_response_rx: Option<RuntimeInspectorResponseReceiver>,
+    },
+    DeferredResponse(RuntimeInspectorResponseReceiver),
+}
+
+pub(crate) struct CompletedBidiChannelOwnerAction {
+    owner: BidiChannelPageOwner,
+    command_id: u64,
+    action: PendingBidiChannelOwnerActionKind,
+    completion: CompletedBidiChannelOwnerActionWait,
+}
+
+enum CompletedBidiChannelOwnerActionWait {
+    Page(Result<CompletedRuntimeProtocolMessageDispatch, String>),
+    Normalize {
+        completed: Box<CompletedRuntimeProtocolMessageNormalization>,
+        renderer_response_rx: Option<RuntimeInspectorResponseReceiver>,
+    },
+    DeferredResponse(RuntimeInspectorResponseReady),
+}
+
+#[derive(Debug)]
+enum PendingBidiChannelOwnerActionKind {
+    StartListener { object_group: String },
+    ReleaseObjectGroup { object_group: String },
+}
+
+pub(crate) enum BidiChannelOwnerActionStep {
+    Pending(Box<PendingBidiChannelOwnerAction>),
+    Complete(Vec<BackgroundProtocolEvent>),
+}
+
+/// One move-owned renderer Inspector replay wait after a Document replacement.
+///
+/// The pending Page dispatch and the remainder of the exact replay batch live
+/// here instead of behind `&mut CdpConnection`. Browser Host can therefore
+/// keep servicing owner inputs while the replacement renderer executes this
+/// command.
+pub(crate) struct PendingRendererCallReplayBatch {
+    pending: PendingRendererCallReplayDispatch,
+    frontend_session_id: Option<String>,
+    correlation: RendererCommandCorrelation,
+    response_delivery: RendererInspectorResponseDelivery,
+    response_sender: RendererRuntimeInspectorResponseSender,
+    remaining: VecDeque<SessionRendererCallReplay>,
+    new_attachment_id: RendererAgentAttachmentId,
+}
+
+/// Move-owned completion of one renderer Inspector replay dispatch.
+pub(crate) struct CompletedRendererCallReplayBatch {
+    completed: CompletedRendererCallReplayDispatch,
+    frontend_session_id: Option<String>,
+    correlation: RendererCommandCorrelation,
+    response_delivery: RendererInspectorResponseDelivery,
+    response_sender: RendererRuntimeInspectorResponseSender,
+    remaining: VecDeque<SessionRendererCallReplay>,
+    new_attachment_id: RendererAgentAttachmentId,
+}
+
+enum PendingRendererCallReplayDispatch {
+    Inspector(PendingRuntimeProtocolMessageDispatch),
+    PerformanceGetMetrics(moli_core::page::PendingDevToolsIoCommandDispatch),
+    SetScriptExecutionDisabled(moli_core::page::PendingDevToolsIoCommandDispatch),
+}
+
+enum CompletedRendererCallReplayDispatch {
+    Inspector(Result<CompletedRuntimeProtocolMessageDispatch, String>),
+    PerformanceGetMetrics(Result<moli_core::page::CompletedDevToolsIoCommandDispatch, String>),
+    SetScriptExecutionDisabled(Result<moli_core::page::CompletedDevToolsIoCommandDispatch, String>),
+}
+
 pub struct CompletedSharedWorkerRuntimeProtocolMessageDispatch {
     session_id: Option<String>,
     messages: Vec<RendererRuntimeInspectorMessage>,
@@ -544,6 +638,7 @@ struct RuntimeProtocolMessagePageRoute {
     browser_context_id: String,
     target_id: Option<String>,
     renderer_agent_attachment_id: RendererAgentAttachmentId,
+    inspector_session_id: Option<String>,
 }
 
 fn collect_moli_diagnostics_pending_snapshots(
@@ -606,6 +701,69 @@ impl PendingRuntimeProtocolMessageDispatch {
             completion,
             response_route: self.response_route,
         })
+    }
+}
+
+impl PendingBidiChannelOwnerAction {
+    pub(crate) async fn wait(self) -> CompletedBidiChannelOwnerAction {
+        let completion = match self.wait {
+            PendingBidiChannelOwnerActionWait::Page(pending) => {
+                CompletedBidiChannelOwnerActionWait::Page(pending.wait().await)
+            }
+            PendingBidiChannelOwnerActionWait::Normalize {
+                pending,
+                renderer_response_rx,
+            } => CompletedBidiChannelOwnerActionWait::Normalize {
+                completed: Box::new((*pending).wait().await),
+                renderer_response_rx,
+            },
+            PendingBidiChannelOwnerActionWait::DeferredResponse(response_rx) => {
+                CompletedBidiChannelOwnerActionWait::DeferredResponse(
+                    RuntimeInspectorResponseReady::new(
+                        self.command_id,
+                        self.owner.session_id(),
+                        response_rx
+                            .await
+                            .map_err(|_| "RuntimeInspectorResponseCanceled".to_owned()),
+                    ),
+                )
+            }
+        };
+        CompletedBidiChannelOwnerAction {
+            owner: self.owner,
+            command_id: self.command_id,
+            action: self.action,
+            completion,
+        }
+    }
+}
+
+impl PendingRendererCallReplayBatch {
+    pub(crate) async fn wait(self) -> CompletedRendererCallReplayBatch {
+        let completed = match self.pending {
+            PendingRendererCallReplayDispatch::Inspector(pending) => {
+                CompletedRendererCallReplayDispatch::Inspector(pending.wait().await)
+            }
+            PendingRendererCallReplayDispatch::PerformanceGetMetrics(pending) => {
+                CompletedRendererCallReplayDispatch::PerformanceGetMetrics(
+                    pending.wait().await.map_err(|error| error.to_string()),
+                )
+            }
+            PendingRendererCallReplayDispatch::SetScriptExecutionDisabled(pending) => {
+                CompletedRendererCallReplayDispatch::SetScriptExecutionDisabled(
+                    pending.wait().await.map_err(|error| error.to_string()),
+                )
+            }
+        };
+        CompletedRendererCallReplayBatch {
+            completed,
+            frontend_session_id: self.frontend_session_id,
+            correlation: self.correlation,
+            response_delivery: self.response_delivery,
+            response_sender: self.response_sender,
+            remaining: self.remaining,
+            new_attachment_id: self.new_attachment_id,
+        }
     }
 }
 
@@ -1627,12 +1785,7 @@ impl CdpConnection {
             return true;
         }
         self.browser_contexts().any(|browser_context| {
-            devtools_sessions_have_pending_inspector_awaits(
-                &browser_context.devtools_session_state,
-                &browser_context.auxiliary_devtools_session_states,
-            ) || browser_context
-                .target_parking
-                .has_pending_inspector_awaits()
+            browser_context.page_target_pending_inspector_await_count_for_diagnostics() > 0
                 || browser_context
                     .shared_worker_targets
                     .values()
@@ -1670,21 +1823,21 @@ impl CdpConnection {
             .is_some_and(DevToolsSessionState::has_pending_inspector_awaits)
     }
 
-    pub(crate) fn fail_pending_inspector_awaits_from_page_session_state_for_sessions_background_events_into(
+    pub(crate) fn fail_pending_inspector_awaits_from_top_level_session_states_for_sessions_background_events_into(
         out: &mut Vec<BackgroundProtocolEvent>,
-        page_session_state: &mut ParkedPageSessionState,
+        primary: &mut DevToolsSessionState,
+        auxiliary: &mut HashMap<String, DevToolsSessionState>,
         primary_session_id: Option<&str>,
         session_ids: &[&str],
         reason: &'static str,
     ) {
-        for (cdp_id, entry) in drain_pending_inspector_awaits_for_devtools_sessions(
-            &mut page_session_state.devtools_session_state,
-            &mut page_session_state.auxiliary_devtools_session_states,
-            session_ids,
-        ) {
+        for (cdp_id, entry) in
+            drain_pending_inspector_awaits_for_devtools_sessions(primary, auxiliary, session_ids)
+        {
             if let Some(listener) = entry.bidi_channel_listener() {
-                unregister_runtime_remote_object_group_from_parked_page_session_state(
-                    page_session_state,
+                unregister_runtime_remote_object_group_from_top_level_session_states(
+                    primary,
+                    auxiliary,
                     entry.session_id(),
                     listener.channel_object_group(),
                 );
@@ -1700,9 +1853,7 @@ impl CdpConnection {
         if let Some(primary_session_id) = primary_session_id
             && session_ids.contains(&primary_session_id)
         {
-            let terminated = page_session_state
-                .devtools_session_state
-                .terminate_all_renderer_calls(reason);
+            let terminated = primary.terminate_all_renderer_calls(reason);
             push_terminated_renderer_call_error_background_events(
                 out,
                 terminated,
@@ -1711,10 +1862,7 @@ impl CdpConnection {
             );
         }
         for session_id in session_ids {
-            let Some(state) = page_session_state
-                .auxiliary_devtools_session_states
-                .get_mut(*session_id)
-            else {
+            let Some(state) = auxiliary.get_mut(*session_id) else {
                 continue;
             };
             let terminated = state.terminate_all_renderer_calls(reason);
@@ -2420,76 +2568,30 @@ impl CdpConnection {
         object_id: &str,
     ) -> bool {
         for browser_context in self.browser_contexts() {
-            let active_is_current_owner = matches!(
-                owner,
-                RuntimeRemoteObjectOwnerIdentity::Page {
-                    browser_context_id,
-                    target_id,
-                    ..
-                } if browser_context_id == &browser_context.id
-                    && target_id
-                        .as_deref()
-                        .is_none_or(|target_id| browser_context.is_active_target(target_id))
-            );
-            if active_is_current_owner {
-                let current_devtools_session_id = match owner {
-                    RuntimeRemoteObjectOwnerIdentity::Page {
-                        devtools_session_id,
-                        ..
-                    } => devtools_session_id.as_deref(),
-                    RuntimeRemoteObjectOwnerIdentity::SharedWorker { .. }
-                    | RuntimeRemoteObjectOwnerIdentity::DedicatedWorker { .. }
-                    | RuntimeRemoteObjectOwnerIdentity::ServiceWorker { .. } => None,
-                };
-                if current_devtools_session_id.is_some()
-                    && browser_context
-                        .devtools_session_state
-                        .has_runtime_remote_object_id(object_id)
-                {
-                    return true;
-                }
-                for (session_id, state) in &browser_context.auxiliary_devtools_session_states {
-                    if Some(session_id.as_str()) != current_devtools_session_id
-                        && state.has_runtime_remote_object_id(object_id)
-                    {
-                        return true;
-                    }
-                }
-            } else if browser_context
-                .devtools_session_state
-                .has_runtime_remote_object_id(object_id)
-                || browser_context
-                    .auxiliary_devtools_session_states
-                    .values()
-                    .any(|state| state.has_runtime_remote_object_id(object_id))
-            {
-                return true;
-            }
-
-            let parked_has_different_owner = match owner {
+            let current_page_owner = match owner {
                 RuntimeRemoteObjectOwnerIdentity::Page {
                     browser_context_id,
                     target_id,
                     devtools_session_id,
-                } if browser_context_id == &browser_context.id => match target_id.as_deref() {
-                    Some(target_id) if !browser_context.is_active_target(target_id) => {
-                        browser_context
-                            .target_parking
-                            .runtime_remote_object_id_known_for_different_page_owner(
-                                target_id,
-                                devtools_session_id.as_deref(),
-                                object_id,
-                            )
-                    }
-                    Some(_) | None => browser_context
-                        .target_parking
-                        .has_runtime_remote_object_id(object_id),
-                },
-                _ => browser_context
-                    .target_parking
-                    .has_runtime_remote_object_id(object_id),
+                } if browser_context_id == &browser_context.id => Some((
+                    target_id
+                        .as_deref()
+                        .or_else(|| browser_context.active_target_id()),
+                    devtools_session_id.as_deref(),
+                )),
+                _ => None,
             };
-            if parked_has_different_owner {
+            if let Some((Some(target_id), devtools_session_id)) = current_page_owner {
+                if browser_context.runtime_remote_object_id_known_for_different_top_level_owner(
+                    target_id,
+                    devtools_session_id,
+                    object_id,
+                ) {
+                    return true;
+                }
+            } else if current_page_owner.is_none()
+                && browser_context.has_runtime_remote_object_id_in_top_level_target(object_id)
+            {
                 return true;
             }
 
@@ -2741,6 +2843,14 @@ impl CdpConnection {
         page_owner_access_allowed: bool,
         ordered_events: &mut Vec<BackgroundProtocolEvent>,
     ) -> bool {
+        if !page_owner_access_allowed {
+            return self.route_normalized_renderer_runtime_command_output_into(
+                output,
+                current_cmd_id,
+                current_session_id,
+                ordered_events,
+            );
+        }
         if let Some(attachment_id) = output.renderer_agent_attachment_id()
             && !self.renderer_agent_attachment_is_current_for_session_owner(
                 current_session_id,
@@ -2765,9 +2875,7 @@ impl CdpConnection {
             // Pause-loop responses are already concrete V8 protocol output.
             // Context and DOM-node normalization can enqueue Page commands,
             // so preserve the raw response until that owner can run again.
-            if page_owner_access_allowed
-                && let RendererRuntimeInspectorMessage::Protocol(message) = &mut message
-            {
+            if let RendererRuntimeInspectorMessage::Protocol(message) = &mut message {
                 let mut message_value = message.value_mut();
                 self.normalize_runtime_event_context_ids_for_session_owner_async(
                     current_session_id,
@@ -2796,7 +2904,53 @@ impl CdpConnection {
         current_seen
     }
 
-    pub(crate) async fn route_renderer_command_turn_output_into(
+    /// Routes Runtime output whose exact-Page normalization has already been
+    /// completed by a move-owned participant.
+    pub(crate) fn route_normalized_renderer_runtime_command_output_into(
+        &mut self,
+        output: RendererRuntimeCommandOutput,
+        current_cmd_id: Option<u64>,
+        current_session_id: Option<&str>,
+        ordered_events: &mut Vec<BackgroundProtocolEvent>,
+    ) -> bool {
+        if let Some(attachment_id) = output.renderer_agent_attachment_id()
+            && !self.renderer_agent_attachment_is_current_for_session_owner(
+                current_session_id,
+                attachment_id,
+            )
+        {
+            tracing::debug!(
+                ?attachment_id,
+                session_id = current_session_id,
+                "dropping normalized renderer command output from a stale attachment"
+            );
+            return false;
+        }
+        if output.renderer_agent_attachment_id().is_some()
+            && let Some(state) = output.v8_state_update().cloned()
+        {
+            let _ =
+                self.merge_v8_inspector_session_state_for_session_owner(current_session_id, state);
+        }
+        let mut current_seen = false;
+        for message in output.into_messages() {
+            let mut response_events = Vec::new();
+            let mut background_events = Vec::new();
+            current_seen |= self
+                .route_renderer_runtime_inspector_messages_with_background_events_into(
+                    vec![message],
+                    current_cmd_id,
+                    current_session_id,
+                    &mut response_events,
+                    &mut background_events,
+                );
+            ordered_events.extend(response_events);
+            ordered_events.extend(background_events);
+        }
+        current_seen
+    }
+
+    pub(crate) fn route_normalized_renderer_command_turn_output_into(
         &mut self,
         output: RendererCommandTurnOutput,
         current_cmd_id: Option<u64>,
@@ -2815,13 +2969,12 @@ impl CdpConnection {
             return (false, renderer_output_predecessor);
         };
         (
-            self.route_renderer_runtime_command_output_into(
+            self.route_normalized_renderer_runtime_command_output_into(
                 output,
                 current_cmd_id,
                 current_session_id,
                 ordered_events,
-            )
-            .await,
+            ),
             renderer_output_predecessor,
         )
     }
@@ -3406,31 +3559,15 @@ impl CdpConnection {
         .await;
     }
 
-    async fn normalize_node_remote_objects_for_runtime_protocol_message_route_async(
-        &mut self,
-        session_id: Option<&str>,
-        route: &RuntimeProtocolMessagePageRoute,
-        payload: &mut Value,
-    ) {
-        let inspector_session_id =
-            self.target_renderer_runtime_inspector_session_id_for_session(session_id);
-        let include_whitespace =
-            crate::domains::dom::dom_agent_includes_whitespace_for_session(self, session_id);
-        self.normalize_node_remote_objects_by_page_lookup_async(
-            inspector_session_id.as_deref(),
-            include_whitespace,
-            payload,
-            |connection| connection.runtime_protocol_message_started_page_mut(route),
-        )
-        .await;
-    }
-
     async fn normalize_node_remote_objects_by_page_lookup_async(
         &mut self,
         inspector_session_id: Option<&str>,
         include_whitespace: bool,
         payload: &mut Value,
-        mut page_lookup: impl for<'a> FnMut(&'a mut Self) -> Result<&'a mut Page, String>,
+        mut page_lookup: impl FnMut(
+            &mut Self,
+        )
+            -> Result<moli_core::browser_host::BrowserPageRuntimeLease, String>,
     ) {
         let mut paths = Vec::new();
         collect_remote_object_paths(payload, "", &mut paths);
@@ -3469,7 +3606,7 @@ impl CdpConnection {
             let is_node = match pending {
                 Ok(pending) => match pending.wait().await {
                     Ok(completion) => page_lookup(self)
-                        .and_then(|page| {
+                        .and_then(|mut page| {
                             page.finish_document_node_snapshot_for_object_id(completion)
                                 .map_err(|error| error.to_string())
                         })
@@ -3545,7 +3682,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve runtime node snapshot failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_document_node_snapshot_for_object_id(completion)
             .map_err(|error| format!("resolve runtime node snapshot failed: {error}"))
     }
@@ -3566,7 +3703,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve backend node snapshot failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_document_node_snapshot_for_backend_node_id(completion)
             .map_err(|error| format!("resolve backend node snapshot failed: {error}"))
     }
@@ -3592,7 +3729,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("register BiDi node binding failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_register_document_bidi_node_binding(completion)
             .map_err(|error| format!("register BiDi node binding failed: {error}"))
     }
@@ -3613,7 +3750,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve BiDi node binding failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_document_bidi_node_binding(completion)
             .map_err(|error| format!("resolve BiDi node binding failed: {error}"))
     }
@@ -3637,7 +3774,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve BiDi node shared id failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_document_bidi_node_shared_id_for_backend_node_id(completion)
             .map_err(|error| format!("resolve BiDi node shared id failed: {error}"))
     }
@@ -3665,7 +3802,7 @@ impl CdpConnection {
             .wait()
             .await
             .map_err(|error| format!("resolve runtime object for backend node failed: {error}"))?;
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         let result = page
             .finish_resolve_runtime_object_for_backend_node_id(completion)
             .map_err(|error| format!("resolve runtime object for backend node failed: {error}"))?;
@@ -3728,7 +3865,7 @@ impl CdpConnection {
         await_promise: bool,
     ) -> Result<Value, String> {
         let payload = {
-            let page = self.runtime_session_owner_page_mut(session_id)?;
+            let mut page = self.runtime_session_owner_page_mut(session_id)?;
             page.evaluate_runtime_expression_without_navigation_follow_with_await_async(
                 expression,
                 await_promise,
@@ -3772,7 +3909,7 @@ impl CdpConnection {
         completed: CompletedRuntimeEnableEventsDispatch,
     ) -> Result<RuntimeEnableEventsReplay, String> {
         let session_id = completed.session_id.as_deref();
-        let page = self.runtime_protocol_message_started_page_mut(&completed.route)?;
+        let mut page = self.runtime_protocol_message_started_page_mut(&completed.route)?;
         let output = page
             .finish_runtime_enable_output(completed.completion)
             .map_err(|error| format!("runtime enable event replay failed: {error}"))?;
@@ -3810,14 +3947,14 @@ impl CdpConnection {
     fn runtime_session_owner_page_mut(
         &mut self,
         session_id: Option<&str>,
-    ) -> Result<&mut Page, String> {
+    ) -> Result<moli_core::browser_host::BrowserPageRuntimeLease, String> {
         self.loaded_page_mut_for_protocol_access(session_id)
     }
 
     fn runtime_session_owner_page_mut_for_interruptible_control(
         &mut self,
         session_id: Option<&str>,
-    ) -> Result<&mut Page, String> {
+    ) -> Result<moli_core::browser_host::BrowserPageRuntimeLease, String> {
         self.loaded_page_mut_for_interruptible_protocol_access(session_id)
     }
 
@@ -3837,6 +3974,8 @@ impl CdpConnection {
             browser_context_id,
             target_id,
             renderer_agent_attachment_id,
+            inspector_session_id: self
+                .target_renderer_runtime_inspector_session_id_for_session(session_id),
         })
     }
 
@@ -3872,7 +4011,7 @@ impl CdpConnection {
     fn runtime_protocol_message_started_page_mut(
         &mut self,
         route: &RuntimeProtocolMessagePageRoute,
-    ) -> Result<&mut Page, String> {
+    ) -> Result<moli_core::browser_host::BrowserPageRuntimeLease, String> {
         self.runtime_protocol_message_started_slot_mut(route)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())
@@ -3883,7 +4022,7 @@ impl CdpConnection {
         route: &RuntimeProtocolMessagePageRoute,
         completion: moli_core::page::CompletedPageCommand,
     ) -> Result<RendererCommandTurnOutput, String> {
-        let output = if let Ok(page) = self.runtime_protocol_message_started_page_mut(route) {
+        let output = if let Ok(mut page) = self.runtime_protocol_message_started_page_mut(route) {
             page.finish_runtime_protocol_message_command_turn(completion)
         } else {
             // Completion means the renderer owner has already committed the
@@ -4276,7 +4415,7 @@ impl CdpConnection {
         let mut failed_page_snapshot_count = 0;
 
         for completed in completed.completed {
-            let Some(page) = self
+            let Some(mut page) = self
                 .browser_context_by_id_mut(&completed.browser_context_id)
                 .and_then(|browser_context| {
                     if let Some(target_id) = completed.target_id.as_deref() {
@@ -4407,7 +4546,7 @@ impl CdpConnection {
         let inspector_session_id =
             self.target_renderer_runtime_inspector_session_id_for_session(session_id);
         let mut messages = {
-            let page = self.runtime_session_owner_page_mut(session_id)?;
+            let mut page = self.runtime_session_owner_page_mut(session_id)?;
             page.dispatch_runtime_protocol_message_for_inspector_session_async(
                 inspector_session_id,
                 raw_json,
@@ -4541,6 +4680,9 @@ impl CdpConnection {
         raw_json: String,
         inspector_route: RendererInspectorCommandRoute,
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
+        if inspector_route == RendererInspectorCommandRoute::MainThread {
+            self.ensure_document_accessible_for_session_owner(session_id)?;
+        }
         let route = self.runtime_protocol_message_page_route_for_session_owner(session_id)?;
         let raw_json =
             self.rewrite_runtime_inspector_command_for_session_owner(session_id, &raw_json, None)?;
@@ -4609,6 +4751,9 @@ impl CdpConnection {
         command_id: u64,
         inspector_route: RendererInspectorCommandRoute,
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
+        if inspector_route == RendererInspectorCommandRoute::MainThread {
+            self.ensure_document_accessible_for_session_owner(session_id)?;
+        }
         let route = self.runtime_protocol_message_page_route_for_session_owner(session_id)?;
         let (correlation, raw_json, response_sender, response_route) = self
             .prepare_renderer_call_for_session_owner(
@@ -4665,6 +4810,7 @@ impl CdpConnection {
         action: &str,
         raw_json: String,
     ) -> Result<PendingRuntimeProtocolMessageDispatch, String> {
+        self.ensure_document_accessible_for_session_owner(session_id)?;
         let route = self.runtime_protocol_message_page_route_for_session_owner(session_id)?;
         let raw_json =
             self.rewrite_runtime_inspector_command_for_session_owner(session_id, &raw_json, None)?;
@@ -4735,97 +4881,66 @@ impl CdpConnection {
         })
     }
 
+    /// Test-fixture drain for callers which do not run the production command
+    /// participant loop. Production paths use the start/complete pair below.
+    #[cfg(test)]
     pub(crate) async fn complete_runtime_protocol_message_for_session_owner_async(
         &mut self,
         completed: CompletedRuntimeProtocolMessageDispatch,
     ) -> Result<Option<RendererCommandTurnOutput>, String> {
-        let timing_started = moli_trace::cdp_nav_timing_enabled().then(std::time::Instant::now);
-        let completion = match completed.completion {
-            moli_core::page::CompletedRuntimeInspectorCommandDispatch::Owner(completion) => {
-                *completion
+        let mut step = self.start_runtime_protocol_message_completion(completed);
+        loop {
+            match step {
+                RuntimeProtocolMessageCompletionStep::Pending(pending) => {
+                    step = self
+                        .complete_runtime_protocol_message_normalization((*pending).wait().await);
+                }
+                RuntimeProtocolMessageCompletionStep::Complete(result) => return *result,
             }
-            moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionResponse {
-                completion,
-                ..
-            } => *completion,
-            moli_core::page::CompletedRuntimeInspectorCommandDispatch::Inspector
-            | moli_core::page::CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
-                ..
-            }
-            | moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(
-                _,
-            ) => {
-                return Ok(None);
-            }
-        };
-        let mut output =
-            self.consume_runtime_protocol_message_completion(&completed.route, completion)?;
-        if let Some(started) = timing_started {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                stage = "runtime_inspector_page_dispatch_done",
-                output_messages = output
-                    .runtime_inspector_output()
-                    .map_or(0, |messages| messages.len()),
-                elapsed_ms = started.elapsed().as_millis(),
-            );
         }
-        self.ingest_runtime_protocol_message_started_route_output_updates(&completed.route);
-        if let Some(started) = timing_started {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                stage = "runtime_inspector_output_ingested",
-                elapsed_ms = started.elapsed().as_millis(),
-            );
-        }
-        let runtime_messages = output.runtime_inspector_output_mut().ok_or_else(|| {
-            "runtime inspector dispatch completed with a non-Runtime renderer reply".to_owned()
-        })?;
-        runtime_messages
-            .bind_renderer_agent_attachment(completed.route.renderer_agent_attachment_id);
-        let runtime_messages = runtime_messages.messages_mut();
-        for runtime_message in runtime_messages.iter_mut() {
-            let RendererRuntimeInspectorMessage::Protocol(message) = runtime_message else {
-                continue;
-            };
-            let mut message_value = message.value_mut();
-            self.normalize_runtime_event_context_ids_for_session_owner_async(
-                completed.session_id.as_deref(),
-                &mut message_value,
-            )
-            .await;
-            self.normalize_node_remote_objects_for_runtime_protocol_message_route_async(
-                completed.session_id.as_deref(),
-                &completed.route,
-                &mut message_value,
-            )
-            .await;
-        }
-        self.restore_frontend_command_ids_in_runtime_messages(
-            completed.session_id.as_deref(),
-            Some(completed.route.renderer_agent_attachment_id),
-            runtime_messages,
-        );
-        if let Some(started) = timing_started {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                stage = "runtime_inspector_command_output_ready",
-                output_messages = output
-                    .runtime_inspector_output()
-                    .map_or(0, |messages| messages.len()),
-                elapsed_ms = started.elapsed().as_millis(),
-            );
-        }
-        Ok(Some(output))
     }
 
-    pub(crate) async fn replay_prepared_renderer_calls_after_navigation_async(
+    pub(crate) fn start_runtime_protocol_message_completion(
+        &mut self,
+        completed: CompletedRuntimeProtocolMessageDispatch,
+    ) -> RuntimeProtocolMessageCompletionStep {
+        normalization::start_runtime_protocol_message_completion(self, completed)
+    }
+
+    pub(crate) fn complete_runtime_protocol_message_normalization(
+        &mut self,
+        completed: CompletedRuntimeProtocolMessageNormalization,
+    ) -> RuntimeProtocolMessageCompletionStep {
+        normalization::complete_runtime_protocol_message_normalization(self, completed)
+    }
+
+    /// Starts the first viable command in an exact renderer replay batch.
+    ///
+    /// Invalid or already-stale entries receive their terminal frontend error
+    /// synchronously. A returned participant owns the Page dispatch future and
+    /// every not-yet-started replay, so waiting for it never borrows this
+    /// connection.
+    pub(crate) fn start_prepared_renderer_calls_after_navigation(
         &mut self,
         replays: Vec<SessionRendererCallReplay>,
         new_attachment_id: RendererAgentAttachmentId,
-    ) -> Result<Vec<BackgroundProtocolEvent>, String> {
+    ) -> (
+        Vec<BackgroundProtocolEvent>,
+        Option<PendingRendererCallReplayBatch>,
+    ) {
+        self.start_next_prepared_renderer_call_after_navigation(replays.into(), new_attachment_id)
+    }
+
+    fn start_next_prepared_renderer_call_after_navigation(
+        &mut self,
+        mut remaining: VecDeque<SessionRendererCallReplay>,
+        new_attachment_id: RendererAgentAttachmentId,
+    ) -> (
+        Vec<BackgroundProtocolEvent>,
+        Option<PendingRendererCallReplayBatch>,
+    ) {
         let mut events = Vec::new();
-        for replay in replays {
+        while let Some(replay) = remaining.pop_front() {
             let frontend_session_id = replay.frontend_session_id().map(str::to_owned);
             let renderer_inspector_session_id =
                 replay.renderer_inspector_session_id().map(str::to_owned);
@@ -4879,17 +4994,24 @@ impl CdpConnection {
                             )
                             .map_err(|error| error.to_string())
                         });
-                    let completion = match pending {
-                        Ok(pending) => pending.wait().await.map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    };
-                    match completion {
-                        Ok(
-                            moli_core::page::CompletedDevToolsIoCommandDispatch::SessionResponse {
-                                ..
-                            },
-                        )
-                        | Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Dispatched) => {}
+                    match pending {
+                        Ok(pending) => {
+                            return (
+                                events,
+                                Some(PendingRendererCallReplayBatch {
+                                    pending:
+                                        PendingRendererCallReplayDispatch::PerformanceGetMetrics(
+                                            pending,
+                                        ),
+                                    frontend_session_id,
+                                    correlation,
+                                    response_delivery,
+                                    response_sender,
+                                    remaining,
+                                    new_attachment_id,
+                                }),
+                            );
+                        }
                         Err(error) => {
                             self.settle_renderer_replacement_error(
                                 &mut events,
@@ -4899,9 +5021,9 @@ impl CdpConnection {
                                 correlation,
                                 &format!("Performance replay dispatch failed: {error}"),
                             );
+                            continue;
                         }
                     }
-                    continue;
                 }
                 RendererCommandReplay::SetScriptExecutionDisabled { disabled } => {
                     debug_assert_eq!(
@@ -4919,17 +5041,23 @@ impl CdpConnection {
                             )
                             .map_err(|error| error.to_string())
                         });
-                    let completion = match pending {
-                        Ok(pending) => pending.wait().await.map_err(|error| error.to_string()),
-                        Err(error) => Err(error),
-                    };
-                    match completion {
-                        Ok(
-                            moli_core::page::CompletedDevToolsIoCommandDispatch::SessionResponse {
-                                ..
-                            },
-                        )
-                        | Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Dispatched) => {}
+                    match pending {
+                        Ok(pending) => {
+                            return (
+                                events,
+                                Some(PendingRendererCallReplayBatch {
+                                    pending: PendingRendererCallReplayDispatch::SetScriptExecutionDisabled(
+                                        pending,
+                                    ),
+                                    frontend_session_id,
+                                    correlation,
+                                    response_delivery,
+                                    response_sender,
+                                    remaining,
+                                    new_attachment_id,
+                                }),
+                            );
+                        }
                         Err(error) => {
                             self.settle_renderer_replacement_error(
                                 &mut events,
@@ -4939,9 +5067,9 @@ impl CdpConnection {
                                 correlation,
                                 &format!("Emulation replay dispatch failed: {error}"),
                             );
+                            continue;
                         }
                     }
-                    continue;
                 }
             };
             let raw_json = match self.rewrite_runtime_inspector_command_for_session_owner(
@@ -5039,86 +5167,184 @@ impl CdpConnection {
                     continue;
                 }
             };
-            let completed = match pending.wait().await {
-                Ok(completed) => completed,
-                Err(error) => {
-                    self.settle_renderer_replacement_error(
-                        &mut events,
-                        frontend_session_id.as_deref(),
-                        response_delivery,
-                        &response_sender,
-                        correlation,
-                        &error,
-                    );
-                    continue;
+            return (
+                events,
+                Some(PendingRendererCallReplayBatch {
+                    pending: PendingRendererCallReplayDispatch::Inspector(pending),
+                    frontend_session_id,
+                    correlation,
+                    response_delivery,
+                    response_sender,
+                    remaining,
+                    new_attachment_id,
+                }),
+            );
+        }
+        (events, None)
+    }
+
+    /// Applies one completed replay and starts the next exact replay, if any.
+    ///
+    /// Output normalization still runs in this apply turn; only the renderer
+    /// Inspector dispatch wait is detached by this slice.
+    pub(crate) async fn complete_prepared_renderer_call_after_navigation(
+        &mut self,
+        completed: CompletedRendererCallReplayBatch,
+    ) -> (
+        Vec<BackgroundProtocolEvent>,
+        Option<PendingRendererCallReplayBatch>,
+    ) {
+        let CompletedRendererCallReplayBatch {
+            completed,
+            frontend_session_id,
+            correlation,
+            response_delivery,
+            response_sender,
+            remaining,
+            new_attachment_id,
+        } = completed;
+        let mut events = Vec::new();
+        match completed {
+            CompletedRendererCallReplayDispatch::Inspector(completed) => {
+                match completed {
+                    Err(error) => {
+                        self.settle_renderer_replacement_error(
+                            &mut events,
+                            frontend_session_id.as_deref(),
+                            response_delivery,
+                            &response_sender,
+                            correlation,
+                            &error,
+                        );
+                    }
+                    Ok(completed) => {
+                        let completion = match completed.completion {
+                            moli_core::page::CompletedRuntimeInspectorCommandDispatch::Owner(
+                                completion,
+                            )
+                            | moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionResponse {
+                                completion,
+                                ..
+                            } => Some(*completion),
+                            moli_core::page::CompletedRuntimeInspectorCommandDispatch::Inspector
+                            | moli_core::page::CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
+                                ..
+                            }
+                            | moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(
+                                _,
+                            ) => None,
+                        };
+                        if let Some(completion) = completion {
+                            match self.consume_runtime_protocol_message_completion(
+                                &completed.route,
+                                completion,
+                            ) {
+                                Err(error) => self.settle_renderer_replacement_error(
+                                    &mut events,
+                                    frontend_session_id.as_deref(),
+                                    response_delivery,
+                                    &response_sender,
+                                    correlation,
+                                    &format!("runtime inspector replay dispatch failed: {error}"),
+                                ),
+                                Ok(mut command_turn_output) => {
+                                    command_turn_output
+                                        .bind_renderer_agent_attachment(new_attachment_id);
+                                    self.ingest_runtime_protocol_message_started_route_output_updates(
+                                        &completed.route,
+                                    );
+                                    let mut command = CommandDispatchContext::default();
+                                    let completion = command
+                                        .consume_renderer_command_turn_output(command_turn_output);
+                                    events.extend(command.take_protocol_events());
+                                    events.extend(command.take_post_response_events());
+                                    match completion.into_runtime_inspector_output() {
+                                        None => self.settle_renderer_replacement_error(
+                                            &mut events,
+                                            frontend_session_id.as_deref(),
+                                            response_delivery,
+                                            &response_sender,
+                                            correlation,
+                                            "runtime inspector replay completed with a non-Runtime renderer reply",
+                                        ),
+                                        Some(output)
+                                            if output
+                                                .protocol_response(
+                                                    correlation.renderer_call_id().get(),
+                                                )
+                                                .is_some() =>
+                                        {
+                                            let _ = response_sender.send_output(output);
+                                        }
+                                        Some(output) => {
+                                            let _ = self
+                                                .route_renderer_runtime_command_output_into(
+                                                    output,
+                                                    None,
+                                                    completed.session_id.as_deref(),
+                                                    &mut events,
+                                                )
+                                                .await;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
-            };
-            let completion = match completed.completion {
-                moli_core::page::CompletedRuntimeInspectorCommandDispatch::Owner(completion) => {
-                    *completion
-                }
-                moli_core::page::CompletedRuntimeInspectorCommandDispatch::Inspector => {
-                    continue;
-                }
-                moli_core::page::CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
-                    ..
-                } => {
-                    continue;
-                }
-                moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(
-                    _,
-                ) => {
-                    continue;
-                }
-                moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionResponse {
-                    completion,
-                    ..
-                } => *completion,
-            };
-            let mut command_turn_output = match self
-                .consume_runtime_protocol_message_completion(&completed.route, completion)
-            {
-                Ok(output) => output,
-                Err(error) => {
-                    send_renderer_replacement_error(
-                        &response_sender,
-                        correlation,
-                        &format!("runtime inspector replay dispatch failed: {error}"),
-                    );
-                    continue;
-                }
-            };
-            command_turn_output.bind_renderer_agent_attachment(new_attachment_id);
-            self.ingest_runtime_protocol_message_started_route_output_updates(&completed.route);
-            let mut command = CommandDispatchContext::default();
-            let completion = command.consume_renderer_command_turn_output(command_turn_output);
-            events.extend(command.take_protocol_events());
-            events.extend(command.take_post_response_events());
-            let Some(output) = completion.into_runtime_inspector_output() else {
-                send_renderer_replacement_error(
+            }
+            CompletedRendererCallReplayDispatch::PerformanceGetMetrics(completed) => {
+                self.settle_completed_io_renderer_replay(
+                    &mut events,
+                    frontend_session_id.as_deref(),
+                    response_delivery,
                     &response_sender,
                     correlation,
-                    "runtime inspector replay completed with a non-Runtime renderer reply",
+                    completed,
+                    "Performance",
                 );
-                continue;
-            };
-            if output
-                .protocol_response(correlation.renderer_call_id().get())
-                .is_some()
-            {
-                let _ = response_sender.send_output(output);
-                continue;
             }
-            let _ = self
-                .route_renderer_runtime_command_output_into(
-                    output,
-                    None,
-                    frontend_session_id.as_deref(),
+            CompletedRendererCallReplayDispatch::SetScriptExecutionDisabled(completed) => {
+                self.settle_completed_io_renderer_replay(
                     &mut events,
-                )
-                .await;
+                    frontend_session_id.as_deref(),
+                    response_delivery,
+                    &response_sender,
+                    correlation,
+                    completed,
+                    "Emulation",
+                );
+            }
         }
-        Ok(events)
+        let (start_events, pending) =
+            self.start_next_prepared_renderer_call_after_navigation(remaining, new_attachment_id);
+        events.extend(start_events);
+        (events, pending)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn settle_completed_io_renderer_replay(
+        &mut self,
+        events: &mut Vec<BackgroundProtocolEvent>,
+        frontend_session_id: Option<&str>,
+        response_delivery: RendererInspectorResponseDelivery,
+        response_sender: &RendererRuntimeInspectorResponseSender,
+        correlation: RendererCommandCorrelation,
+        completed: Result<moli_core::page::CompletedDevToolsIoCommandDispatch, String>,
+        action: &str,
+    ) {
+        match completed {
+            Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::SessionResponse { .. })
+            | Ok(moli_core::page::CompletedDevToolsIoCommandDispatch::Dispatched) => {}
+            Err(error) => self.settle_renderer_replacement_error(
+                events,
+                frontend_session_id,
+                response_delivery,
+                response_sender,
+                correlation,
+                &format!("{action} replay dispatch failed: {error}"),
+            ),
+        }
     }
 
     fn settle_renderer_replacement_error(
@@ -5246,57 +5472,104 @@ impl CdpConnection {
         Ok(messages)
     }
 
-    /// Completes one concrete BiDi channel owner action under its frozen Page
-    /// route.
-    ///
-    /// Stale work is consumed without entering a replacement runtime. The old
-    /// Page or detached session owns any renderer-side cleanup; applying an
-    /// object-group release to the new attachment would be the more dangerous
-    /// outcome because group names belong to the producing runtime.
-    pub(crate) async fn complete_bidi_channel_owner_action_with_background_events_async(
+    /// Starts one concrete BiDi channel owner action under its frozen Page
+    /// route. Any renderer wait is returned as a move-owned participant.
+    pub(crate) fn start_bidi_channel_owner_action(
         &mut self,
         action: BidiChannelOwnerAction,
-        background_events: &mut Vec<BackgroundProtocolEvent>,
-    ) {
+    ) -> BidiChannelOwnerActionStep {
         let (owner, body) = action.into_parts();
-        let mut route_scope = owner.enter(self);
-        if !owner.is_current(route_scope.conn_mut()) {
-            tracing::debug!(
-                session_id = owner.session_id(),
-                action = ?body,
-                "discarding stale BiDi channel owner action"
-            );
-            return;
+        {
+            let mut route_scope = owner.enter(self);
+            if !owner.is_current(route_scope.conn_mut()) {
+                tracing::debug!(
+                    session_id = owner.session_id(),
+                    action = ?body,
+                    "discarding stale BiDi channel owner action"
+                );
+                return BidiChannelOwnerActionStep::Complete(Vec::new());
+            }
         }
-        let session_id = owner.session_id().map(str::to_owned);
         match body {
             BidiChannelOwnerActionBody::StartListener(listener) => {
-                route_scope
-                    .conn_mut()
-                    .start_bidi_channel_listener_once_for_session_owner_with_background_events_async(
-                        session_id.as_deref(),
-                        BidiChannelListenerResidence::from_boxed(owner, listener),
-                        background_events,
-                    )
-                    .await;
+                self.start_bidi_channel_listener_owner_action(owner, listener)
             }
             BidiChannelOwnerActionBody::ReleaseObjectGroup(object_group) => {
-                route_scope
-                    .conn_mut()
-                    .release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                        session_id.as_deref(),
-                        &object_group,
-                    )
-                    .await;
+                self.start_bidi_channel_object_group_release_owner_action(owner, object_group)
             }
         }
     }
 
-    pub(crate) async fn release_bidi_channel_object_group_for_session_owner_best_effort_async(
+    fn start_bidi_channel_listener_owner_action(
         &mut self,
-        session_id: Option<&str>,
-        object_group: &str,
-    ) {
+        owner: BidiChannelPageOwner,
+        listener: Box<PendingBidiChannelListener>,
+    ) -> BidiChannelOwnerActionStep {
+        let session_id = owner.session_id().map(str::to_owned);
+        let object_group = listener.channel_object_group().to_owned();
+        let channel = listener.properties().channel.clone();
+        let pending = {
+            let mut route_scope = owner.enter(self);
+            let conn = route_scope.conn_mut();
+            if conn.runtime_inspector_response_ready_sender().is_none() {
+                None
+            } else {
+                let command_id = conn.next_internal_runtime_command_id();
+                let raw_json = bidi_channel_listener_call_function_json(command_id, &listener);
+                match RendererCommandDescriptor::from_synthesized_payload(raw_json) {
+                    Err(error) => {
+                        tracing::debug!(
+                            %error,
+                            %channel,
+                            "failed to prepare BiDi channel listener"
+                        );
+                        None
+                    }
+                    Ok(descriptor) => {
+                        match conn.start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
+                            session_id.as_deref(),
+                            "callFunctionOn",
+                            descriptor,
+                            command_id,
+                        ) {
+                            Ok(pending) => {
+                                conn.register_pending_bidi_channel_listener(
+                                    command_id,
+                                    session_id.as_deref(),
+                                    BidiChannelListenerResidence::from_boxed(owner.clone(), listener),
+                                );
+                                Some((command_id, pending))
+                            }
+                            Err(error) => {
+                                tracing::debug!(
+                                    %error,
+                                    %channel,
+                                    "failed to start BiDi channel listener"
+                                );
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let Some((command_id, pending)) = pending else {
+            return self.start_bidi_channel_object_group_release_owner_action(owner, object_group);
+        };
+        BidiChannelOwnerActionStep::Pending(Box::new(PendingBidiChannelOwnerAction {
+            owner,
+            command_id,
+            action: PendingBidiChannelOwnerActionKind::StartListener { object_group },
+            wait: PendingBidiChannelOwnerActionWait::Page(pending),
+        }))
+    }
+
+    fn start_bidi_channel_object_group_release_owner_action(
+        &mut self,
+        owner: BidiChannelPageOwner,
+        object_group: String,
+    ) -> BidiChannelOwnerActionStep {
+        let session_id = owner.session_id().map(str::to_owned);
         let command_id = self.next_internal_runtime_command_id();
         let raw_json = json!({
             "id": command_id,
@@ -5307,300 +5580,395 @@ impl CdpConnection {
         let descriptor = match RendererCommandDescriptor::from_synthesized_payload(raw_json) {
             Ok(descriptor) => descriptor,
             Err(error) => {
-                tracing::debug!(%error, object_group, "failed to prepare BiDi object group release");
-                self.unregister_runtime_remote_object_group_for_session_owner(
-                    session_id,
-                    object_group,
+                tracing::debug!(
+                    %error,
+                    %object_group,
+                    "failed to prepare BiDi object group release"
                 );
-                return;
+                let mut route_scope = owner.enter(self);
+                route_scope
+                    .conn_mut()
+                    .unregister_runtime_remote_object_group_for_session_owner(
+                        session_id.as_deref(),
+                        &object_group,
+                    );
+                return BidiChannelOwnerActionStep::Complete(Vec::new());
             }
         };
-        let pending = match self
-            .start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
-                session_id,
-                "releaseObjectGroup",
-                descriptor,
-                command_id,
-            ) {
+        let pending = {
+            let mut route_scope = owner.enter(self);
+            route_scope
+                .conn_mut()
+                .start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
+                    session_id.as_deref(),
+                    "releaseObjectGroup",
+                    descriptor,
+                    command_id,
+                )
+        };
+        let pending = match pending {
             Ok(pending) => pending,
             Err(error) => {
                 tracing::debug!(
                     %error,
-                    object_group,
+                    %object_group,
                     "failed to start BiDi channel object group release"
                 );
-                self.unregister_runtime_remote_object_group_for_session_owner(
-                    session_id,
-                    object_group,
-                );
-                return;
-            }
-        };
-        let mut completed = match pending.wait().await {
-            Ok(completed) => completed,
-            Err(error) => {
-                self.forget_pending_inspector_await(command_id, session_id);
-                tracing::debug!(
-                    %error,
-                    object_group,
-                    "BiDi channel object group release dispatch failed"
-                );
-                self.unregister_runtime_remote_object_group_for_session_owner(
-                    session_id,
-                    object_group,
-                );
-                return;
-            }
-        };
-        let mut renderer_response_rx = completed.take_deferred_response_receiver();
-        let messages = match self
-            .complete_runtime_protocol_message_for_session_owner_async(completed)
-            .await
-        {
-            Ok(messages) => messages,
-            Err(error) => {
-                self.forget_pending_inspector_await(command_id, session_id);
-                tracing::debug!(
-                    %error,
-                    object_group,
-                    "BiDi channel object group release completion failed"
-                );
-                self.unregister_runtime_remote_object_group_for_session_owner(
-                    session_id,
-                    object_group,
-                );
-                return;
-            }
-        };
-        let mut release_events = Vec::new();
-        let mut release_post_response_events = Vec::new();
-        let response_flush = CommandResponseFlushContext::default();
-        let release_response_seen = if let Some(messages) = messages {
-            self.route_renderer_command_turn_output_into(
-                messages,
-                Some(command_id),
-                session_id,
-                &response_flush,
-                &mut release_events,
-                &mut release_post_response_events,
-            )
-            .await
-            .0
-        } else {
-            false
-        };
-        if !release_response_seen {
-            tracing::debug!(
-                command_id,
-                "internal object group release inspector response was not routed as current command"
-            );
-        }
-        if release_response_seen {
-            renderer_response_rx.take();
-        }
-        release_events.extend(release_post_response_events);
-        if let Some(renderer_response_rx) = renderer_response_rx {
-            let response = RuntimeInspectorResponseReady::new(
-                command_id,
-                session_id,
-                renderer_response_rx
-                    .await
-                    .map_err(|_| "RuntimeInspectorResponseCanceled".to_owned()),
-            );
-            if let Some(response) = self.resolve_runtime_inspector_response_ready(response) {
-                let (_, output, renderer_output_predecessor) =
-                    response.into_renderer_command_output();
-                assert!(
-                    renderer_output_predecessor.is_none(),
-                    "internal object-group cleanup cannot discard a concrete output cursor"
-                );
-                let release_response_seen = self
-                    .route_renderer_runtime_command_output_into(
-                        output,
-                        Some(command_id),
-                        session_id,
-                        &mut release_events,
-                    )
-                    .await;
-                if !release_response_seen {
-                    tracing::debug!(
-                        command_id,
-                        "internal object group release deferred inspector response was not routed as current command"
+                let mut route_scope = owner.enter(self);
+                route_scope
+                    .conn_mut()
+                    .unregister_runtime_remote_object_group_for_session_owner(
+                        session_id.as_deref(),
+                        &object_group,
                     );
-                }
+                return BidiChannelOwnerActionStep::Complete(Vec::new());
             }
-        }
-        self.unregister_runtime_remote_object_group_for_session_owner(session_id, object_group);
+        };
+        BidiChannelOwnerActionStep::Pending(Box::new(PendingBidiChannelOwnerAction {
+            owner,
+            command_id,
+            action: PendingBidiChannelOwnerActionKind::ReleaseObjectGroup { object_group },
+            wait: PendingBidiChannelOwnerActionWait::Page(pending),
+        }))
     }
 
-    async fn start_bidi_channel_listener_once_for_session_owner_with_background_events_async(
+    /// Applies one completed BiDi channel participant and either starts its
+    /// next exact wait or returns the listener events made visible by it.
+    pub(crate) fn complete_bidi_channel_owner_action(
         &mut self,
-        session_id: Option<&str>,
-        residence: BidiChannelListenerResidence,
-        background_events: &mut Vec<BackgroundProtocolEvent>,
-    ) {
-        let listener = residence.listener();
-        if self.runtime_inspector_response_ready_sender().is_none() {
-            self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                session_id,
-                listener.channel_object_group(),
-            )
-            .await;
-            return;
-        }
-        let command_id = self.next_internal_runtime_command_id();
-        let raw_json = bidi_channel_listener_call_function_json(command_id, listener);
-        let descriptor = match RendererCommandDescriptor::from_synthesized_payload(raw_json) {
-            Ok(descriptor) => descriptor,
-            Err(error) => {
-                tracing::debug!(%error, "failed to prepare BiDi channel listener command");
-                self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                    session_id,
-                    listener.channel_object_group(),
-                )
-                .await;
-                return;
-            }
-        };
-        let pending = match self
-            .start_runtime_protocol_message_with_context_resolution_for_session_owner_with_deferred_response(
-                session_id,
-                "callFunctionOn",
-                descriptor,
-                command_id,
-            ) {
-            Ok(pending) => pending,
-            Err(error) => {
-                tracing::debug!(
-                    %error,
-                    channel = %listener.properties().channel,
-                    "failed to start BiDi channel listener"
-                );
-                self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                    session_id,
-                    listener.channel_object_group(),
-                )
-                .await;
-                return;
-            }
-        };
-        self.register_pending_bidi_channel_listener(command_id, session_id, residence);
-        let mut completed = match pending.wait().await {
-            Ok(completed) => completed,
-            Err(error) => {
-                let object_group = self
-                    .remove_pending_inspector_await_for_cancellation(command_id, session_id)
-                    .and_then(|entry| {
-                        entry
-                            .bidi_channel_listener()
-                            .map(|listener| listener.channel_object_group().to_owned())
-                    });
-                tracing::debug!(%error, "BiDi channel listener dispatch failed");
-                if let Some(object_group) = object_group {
-                    self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                        session_id,
-                        &object_group,
-                    )
-                    .await;
-                }
-                return;
-            }
-        };
-        let mut renderer_response_rx = completed.take_deferred_response_receiver();
-        let messages = match self
-            .complete_runtime_protocol_message_for_session_owner_async(completed)
-            .await
+        completed: CompletedBidiChannelOwnerAction,
+    ) -> BidiChannelOwnerActionStep {
+        let CompletedBidiChannelOwnerAction {
+            owner,
+            command_id,
+            action,
+            completion,
+        } = completed;
+        let session_id = owner.session_id().map(str::to_owned);
         {
-            Ok(messages) => messages,
-            Err(error) => {
-                let object_group = self
-                    .remove_pending_inspector_await_for_cancellation(command_id, session_id)
-                    .and_then(|entry| {
-                        entry
-                            .bidi_channel_listener()
-                            .map(|listener| listener.channel_object_group().to_owned())
-                    });
-                tracing::debug!(%error, "BiDi channel listener completion failed");
-                if let Some(object_group) = object_group {
-                    self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                        session_id,
-                        &object_group,
-                    )
-                    .await;
-                }
-                return;
+            let mut route_scope = owner.enter(self);
+            if !owner.is_current(route_scope.conn_mut()) {
+                tracing::debug!(
+                    session_id = owner.session_id(),
+                    ?action,
+                    command_id,
+                    "discarding stale BiDi channel participant completion"
+                );
+                return BidiChannelOwnerActionStep::Complete(Vec::new());
             }
-        };
-        let mut listener_events = Vec::new();
-        let mut listener_post_response_events = Vec::new();
-        let response_flush = CommandResponseFlushContext::default();
-        let listener_response_seen = if let Some(messages) = messages {
-            self.route_renderer_command_turn_output_into(
-                messages,
-                Some(command_id),
-                session_id,
-                &response_flush,
-                &mut listener_events,
-                &mut listener_post_response_events,
-            )
-            .await
-            .0
+        }
+        match completion {
+            CompletedBidiChannelOwnerActionWait::Page(completed) => {
+                let mut completed = match completed {
+                    Ok(completed) => completed,
+                    Err(error) => {
+                        return self.finish_failed_bidi_channel_owner_action(
+                            owner, command_id, action, "dispatch", error,
+                        );
+                    }
+                };
+                let renderer_response_rx = completed.take_deferred_response_receiver();
+                let step = {
+                    let mut route_scope = owner.enter(self);
+                    route_scope
+                        .conn_mut()
+                        .start_runtime_protocol_message_completion(completed)
+                };
+                self.continue_bidi_channel_owner_action_normalization(
+                    owner,
+                    command_id,
+                    action,
+                    renderer_response_rx,
+                    step,
+                )
+            }
+            CompletedBidiChannelOwnerActionWait::Normalize {
+                completed,
+                renderer_response_rx,
+            } => {
+                let step = {
+                    let mut route_scope = owner.enter(self);
+                    route_scope
+                        .conn_mut()
+                        .complete_runtime_protocol_message_normalization(*completed)
+                };
+                self.continue_bidi_channel_owner_action_normalization(
+                    owner,
+                    command_id,
+                    action,
+                    renderer_response_rx,
+                    step,
+                )
+            }
+            CompletedBidiChannelOwnerActionWait::DeferredResponse(response) => {
+                let PendingBidiChannelOwnerActionKind::ReleaseObjectGroup { object_group } = action
+                else {
+                    tracing::warn!(
+                        command_id,
+                        "BiDi listener startup unexpectedly waited for its message response"
+                    );
+                    return BidiChannelOwnerActionStep::Complete(Vec::new());
+                };
+                let mut release_events = Vec::new();
+                let mut route_scope = owner.enter(self);
+                let conn = route_scope.conn_mut();
+                if let Some(response) = conn.resolve_runtime_inspector_response_ready(response) {
+                    let (_, output, renderer_output_predecessor) =
+                        response.into_renderer_command_output();
+                    if renderer_output_predecessor.is_some() {
+                        tracing::warn!(
+                            command_id,
+                            "discarding an unexpected object-group cleanup output predecessor"
+                        );
+                    }
+                    // This receiver belongs exclusively to the internal
+                    // Runtime.releaseObjectGroup response. That method cannot
+                    // carry execution-context ids or RemoteObjects, so the
+                    // Page-dispatch participant above is the final output
+                    // normalization boundary for this owner action.
+                    if !conn.route_normalized_renderer_runtime_command_output_into(
+                        output,
+                        Some(command_id),
+                        session_id.as_deref(),
+                        &mut release_events,
+                    ) {
+                        tracing::debug!(
+                            command_id,
+                            "internal object group release deferred inspector response was not routed as current command"
+                        );
+                    }
+                }
+                conn.unregister_runtime_remote_object_group_for_session_owner(
+                    session_id.as_deref(),
+                    &object_group,
+                );
+                BidiChannelOwnerActionStep::Complete(Vec::new())
+            }
+        }
+    }
+
+    fn continue_bidi_channel_owner_action_normalization(
+        &mut self,
+        owner: BidiChannelPageOwner,
+        command_id: u64,
+        action: PendingBidiChannelOwnerActionKind,
+        renderer_response_rx: Option<RuntimeInspectorResponseReceiver>,
+        step: RuntimeProtocolMessageCompletionStep,
+    ) -> BidiChannelOwnerActionStep {
+        match step {
+            RuntimeProtocolMessageCompletionStep::Pending(pending) => {
+                BidiChannelOwnerActionStep::Pending(Box::new(PendingBidiChannelOwnerAction {
+                    owner,
+                    command_id,
+                    action,
+                    wait: PendingBidiChannelOwnerActionWait::Normalize {
+                        pending,
+                        renderer_response_rx,
+                    },
+                }))
+            }
+            RuntimeProtocolMessageCompletionStep::Complete(result) => match *result {
+                Ok(output) => self.finish_bidi_channel_owner_action_output(
+                    owner,
+                    command_id,
+                    action,
+                    renderer_response_rx,
+                    output,
+                ),
+                Err(error) => self.finish_failed_bidi_channel_owner_action(
+                    owner,
+                    command_id,
+                    action,
+                    "normalization",
+                    error,
+                ),
+            },
+        }
+    }
+
+    fn finish_bidi_channel_owner_action_output(
+        &mut self,
+        owner: BidiChannelPageOwner,
+        command_id: u64,
+        action: PendingBidiChannelOwnerActionKind,
+        mut renderer_response_rx: Option<RuntimeInspectorResponseReceiver>,
+        output: Option<RendererCommandTurnOutput>,
+    ) -> BidiChannelOwnerActionStep {
+        let session_id = owner.session_id().map(str::to_owned);
+        let mut events = Vec::new();
+        let mut post_response_events = Vec::new();
+        let response_seen = if let Some(output) = output {
+            let response_flush = CommandResponseFlushContext::default();
+            let mut route_scope = owner.enter(self);
+            route_scope
+                .conn_mut()
+                .route_normalized_renderer_command_turn_output_into(
+                    output,
+                    Some(command_id),
+                    session_id.as_deref(),
+                    &response_flush,
+                    &mut events,
+                    &mut post_response_events,
+                )
+                .0
         } else {
             false
         };
-        if !listener_response_seen {
-            tracing::debug!(
-                command_id,
-                "BiDi channel listener inspector response was consumed before command response routing"
-            );
-        }
-        if listener_response_seen {
+        if response_seen {
             renderer_response_rx.take();
         }
-        listener_events.extend(listener_post_response_events);
-        let non_listener_response_count = listener_events
-            .iter()
-            .filter(|event| event.protocol_message_id().is_some())
-            .count();
-        if non_listener_response_count > 0 {
-            tracing::debug!(
-                messages = non_listener_response_count,
-                "BiDi channel listener produced non-listener protocol messages on background route"
-            );
+        events.extend(post_response_events);
+        match action {
+            PendingBidiChannelOwnerActionKind::StartListener { object_group } => {
+                let non_listener_response_count = events
+                    .iter()
+                    .filter(|event| event.protocol_message_id().is_some())
+                    .count();
+                if non_listener_response_count > 0 {
+                    tracing::debug!(
+                        messages = non_listener_response_count,
+                        "BiDi channel listener produced non-listener protocol messages on background route"
+                    );
+                }
+                let background_events = events
+                    .into_iter()
+                    .filter(|event| event.protocol_message_id().is_none())
+                    .collect();
+                if let Some(renderer_response_rx) = renderer_response_rx {
+                    let enqueued = {
+                        let mut route_scope = owner.enter(self);
+                        route_scope
+                            .conn_mut()
+                            .start_or_enqueue_registered_runtime_inspector_response_ready(
+                                command_id,
+                                session_id.as_deref(),
+                                renderer_response_rx,
+                            )
+                    };
+                    if !enqueued {
+                        let mut route_scope = owner.enter(self);
+                        let conn = route_scope.conn_mut();
+                        let _ = conn.remove_pending_inspector_await_for_cancellation(
+                            command_id,
+                            session_id.as_deref(),
+                        );
+                        drop(route_scope);
+                        tracing::debug!(
+                            %object_group,
+                            "BiDi channel listener started without scheduler runtime response hook"
+                        );
+                        return self.start_bidi_channel_object_group_release_owner_action(
+                            owner,
+                            object_group,
+                        );
+                    }
+                }
+                BidiChannelOwnerActionStep::Complete(background_events)
+            }
+            PendingBidiChannelOwnerActionKind::ReleaseObjectGroup { object_group } => {
+                if let Some(renderer_response_rx) = renderer_response_rx {
+                    return BidiChannelOwnerActionStep::Pending(Box::new(
+                        PendingBidiChannelOwnerAction {
+                            owner,
+                            command_id,
+                            action: PendingBidiChannelOwnerActionKind::ReleaseObjectGroup {
+                                object_group,
+                            },
+                            wait: PendingBidiChannelOwnerActionWait::DeferredResponse(
+                                renderer_response_rx,
+                            ),
+                        },
+                    ));
+                }
+                let mut route_scope = owner.enter(self);
+                route_scope
+                    .conn_mut()
+                    .unregister_runtime_remote_object_group_for_session_owner(
+                        session_id.as_deref(),
+                        &object_group,
+                    );
+                BidiChannelOwnerActionStep::Complete(Vec::new())
+            }
         }
-        background_events.extend(
-            listener_events
-                .into_iter()
-                .filter(|event| event.protocol_message_id().is_none()),
-        );
-        if let Some(renderer_response_rx) = renderer_response_rx {
-            // Listener responses use the same response-ready lane whether the
-            // oneshot is already completed or still pending.
-            if self.start_or_enqueue_registered_runtime_inspector_response_ready(
-                command_id,
-                session_id,
-                renderer_response_rx,
-            ) {
-                return;
+    }
+
+    fn finish_failed_bidi_channel_owner_action(
+        &mut self,
+        owner: BidiChannelPageOwner,
+        command_id: u64,
+        action: PendingBidiChannelOwnerActionKind,
+        stage: &'static str,
+        error: String,
+    ) -> BidiChannelOwnerActionStep {
+        let session_id = owner.session_id().map(str::to_owned);
+        match action {
+            PendingBidiChannelOwnerActionKind::StartListener { object_group } => {
+                {
+                    let mut route_scope = owner.enter(self);
+                    let _ = route_scope
+                        .conn_mut()
+                        .remove_pending_inspector_await_for_cancellation(
+                            command_id,
+                            session_id.as_deref(),
+                        );
+                }
+                tracing::debug!(%error, stage, "BiDi channel listener participant failed");
+                self.start_bidi_channel_object_group_release_owner_action(owner, object_group)
             }
-            let object_group = self
-                .remove_pending_inspector_await_for_cancellation(command_id, session_id)
-                .and_then(|entry| {
-                    entry
-                        .bidi_channel_listener()
-                        .map(|listener| listener.channel_object_group().to_owned())
-                });
-            tracing::debug!(
-                channel_object_group = object_group.as_deref(),
-                "BiDi channel listener started without scheduler runtime response hook"
-            );
-            if let Some(object_group) = object_group {
-                self.release_bidi_channel_object_group_for_session_owner_best_effort_async(
-                    session_id,
+            PendingBidiChannelOwnerActionKind::ReleaseObjectGroup { object_group } => {
+                let mut route_scope = owner.enter(self);
+                let conn = route_scope.conn_mut();
+                conn.forget_pending_inspector_await(command_id, session_id.as_deref());
+                conn.unregister_runtime_remote_object_group_for_session_owner(
+                    session_id.as_deref(),
                     &object_group,
-                )
-                .await;
+                );
+                tracing::debug!(
+                    %error,
+                    stage,
+                    %object_group,
+                    "BiDi channel object group release participant failed"
+                );
+                BidiChannelOwnerActionStep::Complete(Vec::new())
             }
+        }
+    }
+
+    /// Compatibility drain for protocol scheduler callers that have not yet
+    /// exposed the BiDi action participant at their own owner boundary.
+    pub(crate) async fn complete_bidi_channel_owner_action_with_background_events_async(
+        &mut self,
+        action: BidiChannelOwnerAction,
+        background_events: &mut Vec<BackgroundProtocolEvent>,
+    ) {
+        let mut step = self.start_bidi_channel_owner_action(action);
+        loop {
+            match step {
+                BidiChannelOwnerActionStep::Pending(pending) => {
+                    step = self.complete_bidi_channel_owner_action((*pending).wait().await);
+                }
+                BidiChannelOwnerActionStep::Complete(events) => {
+                    background_events.extend(events);
+                    return;
+                }
+            }
+        }
+    }
+
+    pub(crate) async fn release_bidi_channel_object_group_for_session_owner_best_effort_async(
+        &mut self,
+        session_id: Option<&str>,
+        object_group: &str,
+    ) {
+        let Some(owner) = BidiChannelPageOwner::capture(self, session_id) else {
+            self.unregister_runtime_remote_object_group_for_session_owner(session_id, object_group);
+            return;
+        };
+        let mut step = self.start_bidi_channel_owner_action(
+            BidiChannelOwnerAction::release_object_group(owner, object_group),
+        );
+        while let BidiChannelOwnerActionStep::Pending(pending) = step {
+            step = self.complete_bidi_channel_owner_action((*pending).wait().await);
         }
     }
 
@@ -5611,7 +5979,7 @@ impl CdpConnection {
         let target_id = self
             .target_owner_identity_for_session(session_id)
             .and_then(|(_, target_id)| target_id);
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         let target_id = target_id.as_deref();
         let devtools_target_id = target_id.map(DevToolsTargetId::from);
         let realms = page
@@ -5641,7 +6009,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<Option<i64>, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.default_execution_context_id_async()
             .await
             .map_err(|error| format!("runtime default execution context lookup failed: {error}"))
@@ -5651,7 +6019,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<Option<i64>, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.default_or_initial_execution_context_id_async()
             .await
             .map_err(|error| format!("runtime default execution context lookup failed: {error}"))
@@ -5666,7 +6034,7 @@ impl CdpConnection {
         let owner_target_id = self
             .target_owner_identity_for_session(session_id)
             .and_then(|(_, target_id)| target_id);
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         let result = if let Some(frame_id) = frame_id
             && owner_target_id.as_deref() != Some(frame_id)
         {
@@ -5691,7 +6059,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         execution_context_id: i64,
     ) -> Result<bool, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.has_isolated_execution_context_id_async(execution_context_id)
             .await
             .map_err(|error| format!("runtime isolated context lookup failed: {error}"))
@@ -5702,7 +6070,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         execution_context_id: i64,
     ) -> Result<bool, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.child_frame_id_for_default_execution_context_id_async(execution_context_id)
             .await
             .map(|frame_id| frame_id.is_some())
@@ -5714,7 +6082,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         frame_id: &str,
     ) -> Result<Option<i64>, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.child_default_execution_context_id_for_frame_id_async(frame_id)
             .await
             .map_err(|error| format!("runtime child default context lookup failed: {error}"))
@@ -5740,7 +6108,7 @@ impl CdpConnection {
         completed: CompletedRuntimeChildDefaultContextLookupDispatch,
     ) -> Result<bool, String> {
         let session_id = completed.session_id.as_deref();
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_child_frame_id_for_default_execution_context_id(completed.completion)
             .map(|frame_id| frame_id.is_some())
             .map_err(|error| format!("runtime child default context lookup failed: {error}"))
@@ -5762,7 +6130,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         execution_context_id: i64,
     ) -> Result<Option<i64>, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.ensure_isolated_worlds_attached_to_inspector_async()
             .await
             .map_err(|error| {
@@ -5789,7 +6157,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         execution_context_id: i64,
     ) -> Result<Option<i64>, String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.ensure_isolated_worlds_attached_to_inspector_async()
             .await
             .map_err(|error| {
@@ -5841,7 +6209,7 @@ impl CdpConnection {
         await_promise: bool,
     ) -> Result<Value, String> {
         let payload = {
-            let page = self.runtime_session_owner_page_mut(session_id)?;
+            let mut page = self.runtime_session_owner_page_mut(session_id)?;
             page.evaluate_runtime_expression_in_execution_context_without_navigation_follow_with_await_async(
                 execution_context_id,
                 expression,
@@ -5876,7 +6244,7 @@ impl CdpConnection {
         execution_context_name: Option<&str>,
         execution_context_id: Option<i64>,
     ) -> Result<(), String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.install_runtime_binding_async(name, execution_context_name, execution_context_id)
             .await
             .map_err(|error| format!("runtime binding install failed: {error}"))
@@ -5935,7 +6303,7 @@ impl CdpConnection {
             self.target_runtime_bindings_for_current_inspector_session_owner(session_id);
         let inspector_session_id =
             self.target_renderer_runtime_inspector_session_id_for_session(session_id);
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.set_runtime_binding_state_async(
             inspector_session_id,
             &stored_runtime_bindings,
@@ -5955,7 +6323,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         name: &str,
     ) -> Result<(), String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.remove_runtime_binding_async(name)
             .await
             .map_err(|error| format!("runtime binding removal failed: {error}"))
@@ -5982,7 +6350,7 @@ impl CdpConnection {
         completed: CompletedRuntimeBindingPageCommandDispatch,
     ) -> Result<(), String> {
         let session_id = completed.session_id.as_deref();
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.finish_unit_runtime_page_command(completed.completion, completed.operation)
             .map_err(|error| format!("{} failed: {error}", completed.operation))
     }
@@ -5997,7 +6365,7 @@ impl CdpConnection {
         session_id: Option<&str>,
         name: &str,
     ) -> Result<(), String> {
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.remove_default_runtime_binding_async(name)
             .await
             .map_err(|error| format!("runtime default binding removal failed: {error}"))
@@ -6009,7 +6377,7 @@ impl CdpConnection {
     ) -> Result<bool, String> {
         let inspector_session_id =
             self.target_renderer_runtime_inspector_session_id_for_session(session_id);
-        let page = self.runtime_session_owner_page_mut(session_id)?;
+        let mut page = self.runtime_session_owner_page_mut(session_id)?;
         page.detach_runtime_inspector_session_async(inspector_session_id.as_deref())
             .await
             .map_err(|error| format!("runtime inspector session detach failed: {error}"))
@@ -6316,16 +6684,114 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn renderer_replay_batch_waits_one_move_owned_page_dispatch_at_a_time() {
+        let mut ctx = TestContext::new();
+        let mut browser_context = BrowserContext::new("BID-replay-batch".to_owned());
+        browser_context.set_active_target_id("TID-replay-batch");
+        browser_context.attach_active_session("SID-replay-batch".to_owned());
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<!doctype html><body>replay batch</body>",
+            Some("SID-replay-batch"),
+        )
+        .await;
+
+        let attachment = ctx
+            .conn
+            .current_renderer_agent_attachment_id_for_session_owner(Some("SID-replay-batch"))
+            .expect("loaded Page should expose its exact renderer attachment");
+        let mut response_receivers = Vec::new();
+        let mut stale_senders = Vec::new();
+        for command_id in [71, 72] {
+            let prepared = ctx
+                .conn
+                .try_register_renderer_call_for_session_owner(
+                    Some("SID-replay-batch"),
+                    command_id,
+                    Some(attachment),
+                    RendererCommandDescriptor::from_synthesized_payload(
+                        json!({
+                            "id": command_id,
+                            "method": "Console.clearMessages",
+                            "params": {},
+                        })
+                        .to_string(),
+                    )
+                    .unwrap(),
+                )
+                .expect("replayable renderer command should register");
+            let (_, stale_sender, response_receiver) = prepared.into_parts();
+            stale_senders.push(stale_sender);
+            response_receivers.push(
+                response_receiver.expect("command-reply replay should retain its local receiver"),
+            );
+        }
+        let replays = ctx
+            .conn
+            .with_target_devtools_session_state_for_session_mut(Some("SID-replay-batch"), |state| {
+                state.prepare_renderer_call_replays(attachment, attachment)
+            })
+            .expect("session state should remain resident")
+            .expect("renderer call ids should remain available")
+            .into_iter()
+            .map(|replay| {
+                SessionRendererCallReplay::new(Some("SID-replay-batch".to_owned()), None, replay)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(replays.len(), 2);
+        for stale_sender in stale_senders {
+            assert!(
+                stale_sender.send(json!({ "id": 1, "result": {} })).is_err(),
+                "rotating the replay lease must retire the old renderer sender"
+            );
+        }
+
+        let (start_events, first) = ctx
+            .conn
+            .start_prepared_renderer_calls_after_navigation(replays, attachment);
+        assert!(start_events.is_empty());
+        let first = first.expect("the first exact replay should start");
+        assert_eq!(
+            ctx.conn
+                .current_renderer_agent_attachment_id_for_session_owner(Some("SID-replay-batch")),
+            Some(attachment),
+            "the connection remains independently accessible while the participant owns its wait"
+        );
+
+        let first = first.wait().await;
+        let (first_events, second) = ctx
+            .conn
+            .complete_prepared_renderer_call_after_navigation(first)
+            .await;
+        assert!(first_events.is_empty());
+        let second = second.expect("the second replay must not start before the first applies");
+        let second = second.wait().await;
+        let (second_events, terminal) = ctx
+            .conn
+            .complete_prepared_renderer_call_after_navigation(second)
+            .await;
+        assert!(second_events.is_empty());
+        assert!(terminal.is_none());
+
+        for response_receiver in response_receivers {
+            let completion = response_receiver
+                .await
+                .expect("each replay should complete its original frontend response lease");
+            let response = completion
+                .output
+                .protocol_response(completion.call_id)
+                .expect("Console.clearMessages replay should produce a protocol response");
+            assert_eq!(response["result"], json!({}));
+        }
+    }
+
     fn connection_with_bidi_page_session() -> CdpConnection {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new("BID-owner".to_owned());
         browser_context.set_active_target_id("TID-active");
         browser_context.attach_active_session("SID-active".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
         conn
     }
 
@@ -6339,7 +6805,7 @@ mod tests {
             browser_context
                 .assign_auxiliary_session_to_target("TID-active", "SID-auxiliary".to_owned(),)
         );
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.register_runtime_remote_object_ids_for_session_owner(
             Some("SID-active"),
@@ -6481,10 +6947,11 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("test browser context should remain loaded");
+            let (primary, auxiliary) = browser_context.devtools_session_states_mut();
             crate::conn::state::prepare_renderer_call_replacements_for_devtools_sessions(
                 Some("SID-navigation-termination"),
-                &mut browser_context.devtools_session_state,
-                &mut browser_context.auxiliary_devtools_session_states,
+                primary,
+                auxiliary,
                 old_attachment,
                 terminal_attachment,
             )
@@ -6578,10 +7045,11 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("test browser context should remain loaded");
+            let (primary, auxiliary) = browser_context.devtools_session_states_mut();
             crate::conn::state::prepare_renderer_call_replacements_for_devtools_sessions(
                 Some("SID-navigation-primary"),
-                &mut browser_context.devtools_session_state,
-                &mut browser_context.auxiliary_devtools_session_states,
+                primary,
+                auxiliary,
                 old_attachment,
                 terminal_attachment,
             )
@@ -6677,10 +7145,11 @@ mod tests {
                 .browser_context
                 .as_mut()
                 .expect("test browser context should remain loaded");
+            let (primary, auxiliary) = browser_context.devtools_session_states_mut();
             crate::conn::state::prepare_renderer_call_replacements_for_devtools_sessions(
                 None,
-                &mut browser_context.devtools_session_state,
-                &mut browser_context.auxiliary_devtools_session_states,
+                primary,
+                auxiliary,
                 old_attachment,
                 terminal_attachment,
             )
@@ -7180,13 +7649,22 @@ mod tests {
         let mut ctx = TestContext::new();
         let mut browser_context = BrowserContext::new("BID-runtime-node-snapshot".to_owned());
         browser_context.set_active_target_id("TID-runtime-node-snapshot".to_owned());
-        ctx.conn.browser_context = Some(browser_context);
-        ctx.install_navigation_fixture_for_session_owner(
-            "data:text/html,<html><body><article id='target'>live</article></body></html>",
-            None,
-        )
-        .await;
-        ctx.sent.clear();
+        ctx.conn.insert_browser_context(browser_context);
+        let page = ctx
+            .conn
+            .load_page_via_runtime_async(
+                "data:text/html,<html><body><article id='target'>live</article></body></html>",
+            )
+            .await
+            .expect("test page should load");
+        let _ = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .expect("test BrowserContext should remain selected")
+            .active_target
+            .runtime_slot
+            .replace_loaded_page(Some(page));
 
         ctx.process_async(json!({
             "id": 1,
@@ -7442,7 +7920,7 @@ mod tests {
                 Some("SID-bg".to_owned()),
                 "about:blank#bg".to_owned(),
             ));
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.register_pending_inspector_await(1, Some("SID-active"));
         conn.register_pending_inspector_await(2, Some("SID-bg"));
@@ -7451,18 +7929,15 @@ mod tests {
             let browser_context = conn.browser_context.as_ref().expect("browser context");
             assert!(
                 browser_context
-                    .devtools_session_state
+                    .devtools_session_state()
                     .has_pending_inspector_awaits(),
                 "active DevTools session should physically store its pending await"
             );
             assert!(
                 browser_context
-                    .target_parking
-                    .page_session_state("TID-bg")
-                    .is_some_and(|state| state
-                        .devtools_session_state
-                        .has_pending_inspector_awaits()),
-                "parked DevTools session should physically store its pending await"
+                    .primary_devtools_session_state_for_target("TID-bg")
+                    .is_some_and(DevToolsSessionState::has_pending_inspector_awaits),
+                "background DevTools session should remain in the exact Target registry"
             );
         }
 
@@ -7523,7 +7998,7 @@ mod tests {
                 Some("SID-bg".to_owned()),
                 "about:blank#bg".to_owned(),
             ));
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.register_pending_inspector_await(1, Some("SID-active"));
         conn.register_pending_inspector_await(1, Some("SID-bg"));
@@ -7596,7 +8071,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-duplicate-owner".to_owned());
         browser_context.set_active_target_id("TID-duplicate-owner".to_owned());
         browser_context.attach_active_session("SID-duplicate-owner".to_owned());
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         let original = conn
             .try_register_renderer_call_for_session_owner(
@@ -7642,11 +8117,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-listener-cancel".to_owned());
         browser_context.set_active_target_id("TID-listener-cancel".to_owned());
         browser_context.attach_active_session("SID-listener-cancel".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.try_register_renderer_call_for_session_owner(
             Some("SID-listener-cancel"),
@@ -7688,7 +8159,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-command-cancel".to_owned());
         browser_context.set_active_target_id("TID-command-cancel".to_owned());
         browser_context.attach_active_session("SID-command-cancel".to_owned());
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.try_register_renderer_call_for_session_owner(
             Some("SID-command-cancel"),
@@ -7718,7 +8189,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-terminal".to_owned());
         browser_context.set_active_target_id("TID-terminal".to_owned());
         browser_context.attach_active_session("SID-terminal".to_owned());
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         let attachment = RendererAgentAttachmentId::allocate();
         let prepared = conn
@@ -7803,7 +8274,7 @@ mod tests {
                 Some("SID-bg".to_owned()),
                 "about:blank#bg".to_owned(),
             ));
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         conn.try_register_pending_inspector_await_with_object_group(
             77,
@@ -7871,9 +8342,13 @@ mod tests {
         conn.publish_bidi_channel_listener_start(listener);
         let held_listener_work = take_only_protocol_work(&mut conn);
 
+        let current_generation = conn
+            .runtime_session_owner_slot(Some("SID-active"))
+            .expect("test runtime slot")
+            .loaded_page_generation();
         conn.runtime_session_owner_slot_mut(Some("SID-active"))
             .expect("test runtime slot")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(current_generation + 1);
 
         let mut direct_events = Vec::new();
         let mut claimed_events = Vec::new();
@@ -8001,9 +8476,14 @@ mod tests {
         );
         let work = take_only_protocol_work(&mut conn);
 
+        let next_generation = conn
+            .runtime_session_owner_slot(Some("SID-active"))
+            .expect("test runtime slot")
+            .loaded_page_generation()
+            + 1;
         conn.runtime_session_owner_slot_mut(Some("SID-active"))
             .expect("test runtime slot")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(next_generation);
         conn.register_runtime_remote_object_ids_for_session_owner_with_group(
             Some("SID-active"),
             vec!["replacement-object".to_owned()],
@@ -8028,9 +8508,14 @@ mod tests {
         let listener = bidi_channel_listener_residence_for_test(&conn, "SID-active", "stale-reply");
         conn.register_pending_bidi_channel_listener(9, Some("SID-active"), listener);
 
+        let next_generation = conn
+            .runtime_session_owner_slot(Some("SID-active"))
+            .expect("test runtime slot")
+            .loaded_page_generation()
+            + 1;
         conn.runtime_session_owner_slot_mut(Some("SID-active"))
             .expect("test runtime slot")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(next_generation);
         conn.register_runtime_remote_object_ids_for_session_owner_with_group(
             Some("SID-active"),
             vec!["replacement-object".to_owned()],

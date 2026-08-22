@@ -10,22 +10,27 @@ use crate::devtools_runtime::{
 use chromiumoxide_cdp::cdp::browser_protocol::page::{
     NavigateParams, NavigateToHistoryEntryParams, ReloadParams,
 };
+use moli_core::browser_host::{
+    BrowserExactHistoryTraversalResolutionError, BrowserHistoryTraversalDestination,
+    BrowserHistoryTraversalResolution, BrowserHistoryTraversalResolutionError,
+    BrowserHistoryTraversalResult, BrowserNavigationFailure, BrowserNavigationTraceContext,
+    BrowserNavigationTraceEvent, BrowserNavigationTraceSource,
+};
 use moli_core::page::{
     ChildFrameDocumentOpenedSnapshot, CompletedPageCommand, PendingPageCommand,
     SameDocumentHistoryUpdate,
 };
 use moli_core::runtime::NavigationEngine;
-use moli_fetch::NET_ERR_ABORTED_ERROR_TEXT;
 use moli_url_policy::{LocalFileNavigationAccess, route_navigation_url};
 use serde_json::{Value, json};
 use url::Url;
 
 use crate::conn::{
-    BackgroundNavigationLoadJob, BackgroundProtocolEvent, BrowserContext, CapturedBody,
-    CdpConnection, CdpSessionRoute, Cmd, CommandDispatchContext, DocumentNavigationToken,
-    FetchRequestStage, NavigationDispatchState, NavigationLoadOutcome, NavigationRequestLoadPolicy,
-    NavigationResultProjection, NavigationSourceDocumentSecurityContext, PendingFetchNavigation,
-    ResponseStageUrlMatchPolicy, monotonic_timestamp_seconds,
+    BackgroundProtocolEvent, BrowserContext, CapturedBody, CdpConnection, CdpSessionRoute, Cmd,
+    CommandDispatchContext, DocumentNavigationToken, FetchRequestStage, NavigationDispatchState,
+    NavigationLoadOutcome, NavigationRequestLoadPolicy, NavigationResultProjection,
+    NavigationSourceDocumentSecurityContext, PendingFetchNavigation, ResponseStageUrlMatchPolicy,
+    TargetPageResidenceIdentity, monotonic_timestamp_seconds,
 };
 use moli_cookie_jar::{NetworkCookieRequestContext, StoredCookieQueryReport};
 
@@ -48,22 +53,11 @@ use super::{
         emit_child_frame_navigation_commit, emit_navigation_started_background_events,
     },
     navigation_commit::{commit_download_navigation_async, commit_loaded_navigation_async},
+    navigation_completion::{
+        BackgroundNavigationParticipantCompletion, CompletedNavigateCommand, PendingNavigateCommand,
+    },
+    navigation_tail::finish_materialized_navigation_tail_async,
 };
-
-pub(super) struct PendingNavigateLoadCommand {
-    prefix_events: Vec<BackgroundProtocolEvent>,
-    token: DocumentNavigationToken,
-    state: NavigationDispatchState,
-    job: BackgroundNavigationLoadJob,
-}
-
-pub(super) struct CompletedNavigateLoadCommand {
-    prefix_events: Vec<BackgroundProtocolEvent>,
-    token: DocumentNavigationToken,
-    state: NavigationDispatchState,
-    engine: NavigationEngine,
-    navigation: Result<NavigationLoadOutcome, String>,
-}
 
 pub(super) struct PendingChildFrameNavigateCommand {
     prefix_events: Vec<BackgroundProtocolEvent>,
@@ -109,6 +103,7 @@ struct HistoryTraversalUrlFallback {
     result_projection: NavigationResultProjection,
     reloaded_after_crash_session_ids: Vec<Option<String>>,
     allow_background_navigation: bool,
+    source: HistoryTraversalStartSource,
 }
 
 pub(super) struct PendingSameDocumentHistoryTraversalCommand {
@@ -146,18 +141,12 @@ impl CompletedSameDocumentHistoryTraversalCommand {
             .ok()
             .and_then(CompletedPageCommand::renderer_output_predecessor)
     }
-}
 
-impl PendingNavigateLoadCommand {
-    pub(super) async fn wait(self) -> CompletedNavigateLoadCommand {
-        let (engine, navigation, _early_result_sent) = self.job.run(None).await;
-        CompletedNavigateLoadCommand {
-            prefix_events: self.prefix_events,
-            token: self.token,
-            state: self.state,
-            engine,
-            navigation,
-        }
+    pub(super) fn renderer_accepted_same_document_traversal(&self) -> Option<bool> {
+        self.completed
+            .as_ref()
+            .ok()
+            .and_then(CompletedPageCommand::bool_reply_value)
     }
 }
 
@@ -204,7 +193,7 @@ impl PendingSameDocumentHistoryTraversalCommand {
 pub(super) enum NavigateCommandStart {
     CompletePlan(CommandOutputPlan),
     CompleteImmediate(CommandOutputPlan),
-    PendingLoad(Box<PendingNavigateLoadCommand>),
+    PendingLoad(Box<PendingNavigateCommand>),
     PendingChildFrame(Box<PendingChildFrameNavigateCommand>),
     PendingSameDocument(Box<PendingSameDocumentNavigateCommand>),
     PendingContinueWithoutRequestPause(Box<PendingContinueNavigationWithoutRequestPauseCommand>),
@@ -221,8 +210,6 @@ struct DirectNavigationResult {
     frame_id: Option<DevToolsFrameId>,
     loader_id: Option<DevToolsLoaderId>,
     navigation_id: Option<DevToolsNavigationId>,
-    error_text: Option<String>,
-    is_download: Option<bool>,
 }
 
 impl DirectNavigationResult {
@@ -252,8 +239,6 @@ impl DirectNavigationResult {
                 loader_id.map(DevToolsLoaderId::from)
             },
             navigation_id,
-            error_text: None,
-            is_download: None,
         }
     }
 
@@ -265,8 +250,6 @@ impl DirectNavigationResult {
             frame_id: None,
             loader_id: None,
             navigation_id: None,
-            error_text: None,
-            is_download: None,
         }
     }
 
@@ -278,8 +261,6 @@ impl DirectNavigationResult {
             frame_id: None,
             loader_id: None,
             navigation_id: None,
-            error_text: None,
-            is_download: None,
         }
     }
 
@@ -306,13 +287,6 @@ impl DirectNavigationResult {
         self.url = url;
     }
 
-    fn set_cdp_navigation_aborted(&mut self, frame_id: &str) {
-        self.frame_id = Some(DevToolsFrameId::from(frame_id));
-        self.loader_id = None;
-        self.error_text = Some(NET_ERR_ABORTED_ERROR_TEXT.to_owned());
-        self.is_download = Some(false);
-    }
-
     fn ensure_navigation_id_from_loader(&mut self, loader_id: Option<String>) {
         if self.navigation_id.is_none() {
             self.navigation_id = loader_id
@@ -335,8 +309,6 @@ impl DirectNavigationResult {
                     frame_id: self.frame_id,
                     loader_id: self.loader_id,
                     url: self.url,
-                    error_text: self.error_text,
-                    is_download: self.is_download,
                 })
             }
         }
@@ -422,16 +394,17 @@ impl MaterializedNavigationCompletion {
         )
     }
 
-    pub(crate) fn requested_url(&self) -> &str {
-        self.state.requested_url.as_str()
-    }
-
     pub(crate) fn navigate_id(&self) -> Option<u64> {
         self.state.navigate_id
     }
 
     pub(crate) fn navigate_session_id(&self) -> Option<&str> {
         self.state.navigate_session_id.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn requested_url(&self) -> &Url {
+        &self.state.requested_url
     }
 
     pub(crate) fn into_parts(
@@ -536,6 +509,7 @@ impl BackgroundMainDocumentBodyCompletion {
 
 pub enum BackgroundNavigationCompletion {
     Lifecycle(Box<BackgroundNavigationLifecycleCompletion>),
+    Participant(Box<BackgroundNavigationParticipantCompletion>),
     MainDocumentBody(Box<BackgroundMainDocumentBodyCompletion>),
 }
 
@@ -543,6 +517,7 @@ impl BackgroundNavigationCompletion {
     pub fn requested_url(&self) -> &str {
         match self {
             Self::Lifecycle(completion) => completion.state.requested_url.as_str(),
+            Self::Participant(completion) => completion.requested_url(),
             Self::MainDocumentBody(completion) => completion.state.requested_url.as_str(),
         }
     }
@@ -550,8 +525,78 @@ impl BackgroundNavigationCompletion {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Lifecycle(_) => "lifecycle",
+            Self::Participant(_) => "participant",
             Self::MainDocumentBody(_) => "main_document_body",
         }
+    }
+
+    pub fn background_navigation_gate_key(
+        &self,
+    ) -> Option<crate::conn::BackgroundNavigationGateKey> {
+        match self {
+            Self::Lifecycle(completion) => {
+                Some(crate::conn::BackgroundNavigationGateKey::for_navigation(
+                    &completion.token,
+                    &completion.state,
+                ))
+            }
+            Self::Participant(completion) => completion.gate_key().cloned(),
+            Self::MainDocumentBody(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_navigation_engine_for_test(
+        mut self,
+        engine: NavigationEngine,
+    ) -> Result<Self, String> {
+        let Self::Lifecycle(completion) = &mut self else {
+            return Err("test engine replacement requires a lifecycle completion".to_owned());
+        };
+        completion.engine = engine;
+        Ok(self)
+    }
+
+    /// Converts the production response-ready fixture into the legacy
+    /// materialized-Loaded shape so tests can exercise the generic completion
+    /// branch without inventing a synthetic `Page` payload.
+    #[cfg(test)]
+    pub(crate) async fn commit_response_ready_as_loaded_for_test(
+        self,
+        conn: &mut CdpConnection,
+    ) -> Result<Self, String> {
+        let Self::Lifecycle(mut completion) = self else {
+            return Err("test conversion requires a lifecycle completion".to_owned());
+        };
+        let navigation = std::mem::replace(
+            &mut completion.navigation,
+            Err("test conversion consumed the lifecycle outcome".to_owned()),
+        )?;
+        let NavigationLoadOutcome::ResponseCommitReady(navigation) = navigation else {
+            return Err("test conversion requires a response-ready outcome".to_owned());
+        };
+        let configuration = conn.prepared_document_commit_configuration_for_session_owner(
+            completion.state.navigate_session_id.as_deref(),
+            navigation.final_url(),
+        );
+        navigation
+            .update_commit_configuration(configuration)
+            .await?;
+        let permit = navigation.issue_commit_permit();
+        let mut navigation = navigation.commit(permit).await?;
+        // The generic `Loaded` branch predates prepared-Document commit and
+        // therefore represents a Page whose commit response boundary has
+        // already been released. Preserve that invariant in this test-only
+        // conversion: otherwise runtime-state restore waits behind the
+        // synthetic commit continuation that this helper just introduced.
+        if let Some(continuation) = navigation
+            .page
+            .take_committed_document_post_response_continuation()
+        {
+            continuation.release();
+        }
+        completion.navigation = Ok(NavigationLoadOutcome::Loaded(Box::new(navigation)));
+        Ok(Self::Lifecycle(completion))
     }
 }
 
@@ -580,14 +625,6 @@ impl BackgroundNavigationLifecycleCompletion {
             navigation,
             ready_at: std::time::Instant::now(),
         }
-    }
-
-    pub(crate) fn navigate_session_id(&self) -> Option<&str> {
-        self.state.navigate_session_id.as_deref()
-    }
-
-    pub(crate) fn navigation_token(&self) -> &DocumentNavigationToken {
-        &self.token
     }
 
     pub(crate) fn none_session_owner_route(&self) -> Option<CdpSessionRoute> {
@@ -645,6 +682,10 @@ impl BackgroundNavigationLifecycleCompletion {
 }
 
 impl BackgroundNavigationCompletion {
+    pub(crate) fn participant(completion: BackgroundNavigationParticipantCompletion) -> Self {
+        Self::Participant(Box::new(completion))
+    }
+
     pub(crate) fn new(
         token: DocumentNavigationToken,
         state: NavigationDispatchState,
@@ -735,6 +776,7 @@ fn navigation_cookie_access_report_for_context(
 pub(super) fn try_start_navigate_command_dispatch(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
+    command_context: &CommandDispatchContext,
 ) -> PageCommandTaskStep {
     let params: NavigateParams = match cmd.get_params() {
         Ok(Some(p)) => p,
@@ -768,6 +810,33 @@ pub(super) fn try_start_navigate_command_dispatch(
         Some(LOADER_ID),
         &shared_command.url,
     );
+    if child_frame_navigation_target_id(conn, &shared_command).is_none() {
+        let Some(page_owner) = conn.target_page_residence_identity_for_session(cmd.session_id)
+        else {
+            return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "NoSuchTarget"));
+        };
+        return match conn.publish_browser_owner_navigate_command(
+            cmd.id,
+            cmd.session_id,
+            page_owner,
+            shared_command.url,
+            shared_command.referrer,
+            true,
+            result_payload,
+            command_context.detached_participant_context(),
+        ) {
+            Ok(pending) => PageCommandTaskStep::Pending(super::PendingPageCommandDispatch {
+                command_id: cmd.id,
+                owner_scope: crate::conn::CommandOwnerScope::capture(conn, cmd.session_id),
+                kind: Box::new(
+                    super::PendingPageCommandKind::BrowserOwnerNavigationCompletion(pending),
+                ),
+            }),
+            Err(error) => {
+                PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error.to_string()))
+            }
+        };
+    }
     let result_projection =
         NavigationResultProjection::new(shared_command.context.protocol, result_payload);
     start_devtools_page_command(
@@ -797,7 +866,7 @@ fn build_cdp_navigate_command(
     }
 }
 
-fn cdp_navigate_result_payload(
+pub(super) fn cdp_navigate_result_payload(
     navigation_id: Option<&str>,
     frame_id: Option<&str>,
     loader_id: Option<&str>,
@@ -809,8 +878,6 @@ fn cdp_navigate_result_payload(
             frame_id: frame_id.map(DevToolsFrameId::from),
             loader_id: loader_id.map(DevToolsLoaderId::from),
             url: url.to_owned(),
-            error_text: None,
-            is_download: None,
         },
     ))
 }
@@ -1018,7 +1085,7 @@ pub(crate) fn execute_devtools_get_navigation_history_command(
     ))
 }
 
-fn devtools_navigation_target_route(
+pub(super) fn devtools_navigation_target_route(
     conn: &CdpConnection,
     command: &DevToolsCommand,
 ) -> Result<CdpSessionRoute, DevToolsError> {
@@ -1115,8 +1182,6 @@ fn start_protocol_neutral_navigation_command(
             frame_id: None,
             loader_id: None,
             navigation_id: None,
-            error_text: None,
-            is_download: None,
         },
     };
     let reloaded_after_crash_session_ids =
@@ -1184,7 +1249,7 @@ fn start_protocol_neutral_navigation_command(
             let result_protocol = command.context.protocol;
             command.context.session_id = None;
             match resolve_devtools_history_traversal_destination(conn, None, &command.destination) {
-                Ok(ResolvedDevToolsHistoryTraversal::Noop) => {
+                Ok(ResolvedDevToolsHistoryTraversal::Noop { .. }) => {
                     return (
                         PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_result(
                             DevToolsCommandResult::Empty,
@@ -1314,25 +1379,27 @@ fn direct_navigation_result_from_completed_same_document_traversal(
 
 fn direct_navigation_result_from_completed_load(
     conn: &CdpConnection,
-    completed: &CompletedNavigateLoadCommand,
+    completed: &CompletedNavigateCommand,
     result: &mut DirectNavigationResult,
 ) -> Result<(), DevToolsError> {
+    let Some((token, state, navigation)) = completed.load_result() else {
+        // Configuration and renderer commit are continuation stages of the
+        // same load. The protocol-neutral navigation identity was frozen by
+        // the initial load completion and must not be recomputed.
+        return Ok(());
+    };
     if !conn.accepts_pending_document_navigation_for_session_owner(
-        completed.state.navigate_session_id.as_deref(),
-        &completed.token,
+        state.navigate_session_id.as_deref(),
+        token,
     ) {
-        if superseded_cdp_page_navigate_payload(&completed.state).is_some() {
-            result.set_cdp_navigation_aborted(&completed.state.frame_id);
-            return Ok(());
-        }
         return Err(DevToolsError::new(
             DevToolsErrorKind::Internal,
             "Navigation aborted",
         ));
     }
-    match &completed.navigation {
+    match navigation {
         Ok(navigation) => {
-            result.set_navigation_identity(&completed.state.frame_id, &completed.state.loader_id);
+            result.set_navigation_identity(&state.frame_id, &state.loader_id);
             if result.protocol != DevToolsProtocol::WebDriverBidi
                 && matches!(navigation, NavigationLoadOutcome::Download(_))
             {
@@ -1366,10 +1433,6 @@ fn direct_navigation_result_from_fetch_continuation(
     result: &mut DirectNavigationResult,
 ) -> Result<(), DevToolsError> {
     if completed.pending.document_navigation_token.is_none() {
-        if superseded_cdp_page_navigate_payload(&completed.pending.navigation).is_some() {
-            result.set_cdp_navigation_aborted(&completed.pending.navigation.frame_id);
-            return Ok(());
-        }
         return Err(DevToolsError::new(
             DevToolsErrorKind::Internal,
             "Navigation aborted",
@@ -1380,36 +1443,6 @@ fn direct_navigation_result_from_fetch_continuation(
         result.set_navigation_identity(&state.frame_id, &state.loader_id);
     }
     Ok(())
-}
-
-fn superseded_cdp_page_navigate_payload(state: &NavigationDispatchState) -> Option<Value> {
-    if state.result_projection.protocol() != DevToolsProtocol::Cdp {
-        return None;
-    }
-    let mut result = state.result_projection.payload().clone();
-    let payload = result.as_object_mut()?;
-    if !payload.contains_key("frameId") {
-        return None;
-    }
-    payload.insert("frameId".to_owned(), json!(state.frame_id));
-    payload.remove("loaderId");
-    payload.insert("errorText".to_owned(), json!(NET_ERR_ABORTED_ERROR_TEXT));
-    payload.insert("isDownload".to_owned(), json!(false));
-    Some(result)
-}
-
-pub(crate) fn push_superseded_navigation_result(
-    out: &mut CommandOutputBuffer,
-    state: &NavigationDispatchState,
-) {
-    if state.navigate_id.is_none() {
-        return;
-    }
-    if let Some(result) = superseded_cdp_page_navigate_payload(state) {
-        out.push_result_after_messages(result);
-    } else {
-        out.push_error_after_messages(-32000, "Navigation aborted");
-    }
 }
 
 fn fill_navigation_id_from_current_loader_for_route(
@@ -1470,6 +1503,60 @@ fn start_devtools_navigate_command(
         allow_background_navigation,
         NavigationRequestLoadPolicy::BrowserInitiated,
         NavigationStartInitiator::Browser,
+    )
+}
+
+/// Starts one actor-selected frontend navigation against its exact Page.
+///
+/// Child-frame classification remains in the frontend during migration. Once
+/// a top-level command is admitted, this function validates its exact Page and
+/// is the only production authority that classifies it as same-Document or
+/// cross-Document and starts the resulting operation.
+pub(super) fn start_page_owned_frontend_navigate_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    command_session_id: Option<&str>,
+    owner: &TargetPageResidenceIdentity,
+    url: &str,
+    referrer: Option<&str>,
+    allow_background_navigation: bool,
+    result_payload: Value,
+) -> PageCommandTaskStep {
+    let Some(owner_route) = conn.target_page_owner_route_if_current(owner) else {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "NoSuchTarget"));
+    };
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(owner_route);
+    let conn = owner_scope.conn_mut();
+    let same_document = session_owner_navigation_is_same_document_fragment(conn, None, url);
+    let execution_session_id = if same_document {
+        None
+    } else {
+        command_session_id
+    };
+    let reloaded_after_crash_session_ids =
+        reloaded_after_crash_session_ids_for_session_owner(conn, execution_session_id);
+    let start = if same_document {
+        let result_payload = cdp_navigate_result_payload(None, owner.target_id(), None, url);
+        start_top_level_same_document_navigate(conn, None, url.to_owned(), result_payload)
+    } else {
+        start_navigate_to_url_command_with_background_policy(
+            conn,
+            command_id,
+            command_session_id,
+            url,
+            referrer,
+            NavigationResultProjection::Cdp(result_payload),
+            allow_background_navigation,
+            NavigationRequestLoadPolicy::BrowserInitiated,
+            NavigationStartInitiator::Browser,
+        )
+    };
+    finish_started_navigation_command_for_parts(
+        conn,
+        command_id,
+        execution_session_id,
+        start,
+        &reloaded_after_crash_session_ids,
     )
 }
 
@@ -1547,7 +1634,7 @@ fn start_top_level_same_document_navigate(
     }
 }
 
-fn child_frame_navigation_target_id<'a>(
+pub(super) fn child_frame_navigation_target_id<'a>(
     conn: &CdpConnection,
     command: &'a DevToolsNavigateCommand,
 ) -> Option<&'a str> {
@@ -1617,6 +1704,7 @@ fn start_child_frame_navigate_command(
 pub(super) fn try_start_reload_command_dispatch(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
+    command_context: &CommandDispatchContext,
 ) -> PageCommandTaskStep {
     let params = match cmd.get_params::<ReloadParams>() {
         Ok(Some(params)) => params,
@@ -1635,38 +1723,68 @@ pub(super) fn try_start_reload_command_dispatch(
             "BrowserContextNotLoaded",
         ));
     };
-    let Some(target_id) = target_id else {
+    let Some(_target_id) = target_id else {
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded"));
     };
-    let reloaded_after_crash_session_ids =
-        reloaded_after_crash_session_ids_for_session_owner(conn, cmd.session_id);
-    let shared_command = build_cdp_reload_command(cmd, Some(target_id.as_str()), params);
-    let result_projection =
-        NavigationResultProjection::new(shared_command.context.protocol, json!({}));
-    start_devtools_page_command(
-        conn,
+    let Some(page_owner) = conn.target_page_residence_identity_for_session(cmd.session_id) else {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded"));
+    };
+    match conn.publish_browser_owner_reload_command(
         cmd.id,
         cmd.session_id,
-        DevToolsCommand::Reload(shared_command),
-        DevToolsNavigationStartOptions {
-            result_projection,
-            reloaded_after_crash_session_ids,
-            allow_background_navigation: true,
-        },
-    )
+        page_owner,
+        params.ignore_cache.unwrap_or(false),
+        params.script_to_evaluate_on_load,
+        true,
+        json!({}),
+        command_context.detached_participant_context(),
+    ) {
+        Ok(pending) => PageCommandTaskStep::Pending(super::PendingPageCommandDispatch {
+            command_id: cmd.id,
+            owner_scope: crate::conn::CommandOwnerScope::capture(conn, cmd.session_id),
+            kind: Box::new(
+                super::PendingPageCommandKind::BrowserOwnerNavigationCompletion(pending),
+            ),
+        }),
+        Err(error) => {
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error.to_string()))
+        }
+    }
 }
 
-fn build_cdp_reload_command(
-    cmd: &Cmd<'_>,
-    target_id: Option<&str>,
-    params: ReloadParams,
-) -> DevToolsReloadCommand {
-    DevToolsReloadCommand {
-        context: cmd.devtools_command_context(target_id, Option::<&str>::None),
-        ignore_cache: params.ignore_cache.unwrap_or(false),
-        script_to_evaluate_on_load: params.script_to_evaluate_on_load,
-        wait: DevToolsNavigationWait::DocumentInstalled,
-    }
+/// Starts one actor-selected frontend reload against its exact Page.
+///
+/// Browser Owner resolves the current URL inside the selected owner route. The
+/// frontend session remains response correlation only and cannot retarget the
+/// operation after Page replacement or session churn.
+pub(super) fn start_page_owned_frontend_reload_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    owner: &TargetPageResidenceIdentity,
+    _ignore_cache: bool,
+    _script_to_evaluate_on_load: Option<String>,
+    allow_background_navigation: bool,
+    result_payload: Value,
+) -> (String, PageCommandTaskStep) {
+    let Some(owner_route) = conn.target_page_owner_route_if_current(owner) else {
+        return (
+            String::new(),
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "NoSuchTarget")),
+        );
+    };
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(owner_route);
+    let conn = owner_scope.conn_mut();
+    let reloaded_after_crash_session_ids =
+        reloaded_after_crash_session_ids_for_session_owner(conn, None);
+    let (url, step) = start_reload_current_page_command(
+        conn,
+        command_id,
+        None,
+        NavigationResultProjection::Cdp(result_payload),
+        allow_background_navigation,
+        &reloaded_after_crash_session_ids,
+    );
+    (url.unwrap_or_default(), step)
 }
 
 fn start_devtools_reload_command(
@@ -1678,14 +1796,39 @@ fn start_devtools_reload_command(
 ) -> PageCommandTaskStep {
     let context_session_id = command.context.session_id.as_ref().map(|id| id.as_str());
     let command_session_id = command_session_id.or(context_session_id);
+    start_reload_current_page_command(
+        conn,
+        command_id,
+        command_session_id,
+        options.result_projection,
+        options.allow_background_navigation,
+        &options.reloaded_after_crash_session_ids,
+    )
+    .1
+}
+
+fn start_reload_current_page_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    command_session_id: Option<&str>,
+    result_projection: NavigationResultProjection,
+    allow_background_navigation: bool,
+    reloaded_after_crash_session_ids: &[Option<String>],
+) -> (Option<String>, PageCommandTaskStep) {
     let Some(url) = conn.runtime_session_owner_target_url(command_session_id) else {
-        return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded"));
+        return (
+            None,
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded")),
+        );
     };
     if conn
         .mark_next_navigation_history_replace_current_for_session_owner(command_session_id)
         .is_none()
     {
-        return PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded"));
+        return (
+            Some(url),
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "TargetNotLoaded")),
+        );
     }
     let start = start_navigate_to_url_command_with_background_policy(
         conn,
@@ -1693,23 +1836,27 @@ fn start_devtools_reload_command(
         command_session_id,
         url.as_str(),
         None,
-        options.result_projection,
-        options.allow_background_navigation,
+        result_projection,
+        allow_background_navigation,
         NavigationRequestLoadPolicy::Reload,
         NavigationStartInitiator::Browser,
     );
-    finish_started_navigation_command_for_parts(
-        conn,
-        command_id,
-        command_session_id,
-        start,
-        &options.reloaded_after_crash_session_ids,
+    (
+        Some(url),
+        finish_started_navigation_command_for_parts(
+            conn,
+            command_id,
+            command_session_id,
+            start,
+            reloaded_after_crash_session_ids,
+        ),
     )
 }
 
 pub(super) fn try_start_navigate_to_history_entry_command_dispatch(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
+    command_context: &CommandDispatchContext,
 ) -> PageCommandTaskStep {
     let params: NavigateToHistoryEntryParams = match cmd.get_params() {
         Ok(Some(params)) => params,
@@ -1723,113 +1870,60 @@ pub(super) fn try_start_navigate_to_history_entry_command_dispatch(
     let Ok(entry_id) = i32::try_from(params.entry_id) else {
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(-32602, "InvalidParams"));
     };
-    let Some(url) =
-        conn.target_session_owner_navigation_history_entry_url(cmd.session_id, entry_id)
-    else {
+    let Some(page_owner) = conn.target_page_residence_identity_for_session(cmd.session_id) else {
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(
             -32000,
             "Navigation history entry not found",
         ));
     };
-    let shared_command = build_cdp_traverse_history_command(cmd, None, entry_id, url);
-    let result_projection =
-        NavigationResultProjection::new(shared_command.context.protocol, json!({}));
-    start_devtools_page_command(
-        conn,
+    match conn.publish_browser_owner_history_traversal_command(
         cmd.id,
         cmd.session_id,
-        DevToolsCommand::TraverseHistory(shared_command),
-        DevToolsNavigationStartOptions {
-            result_projection,
-            reloaded_after_crash_session_ids: reloaded_after_crash_session_ids_for_session_owner(
-                conn,
-                cmd.session_id,
+        page_owner,
+        BrowserHistoryTraversalDestination::Entry(entry_id),
+        true,
+        json!({}),
+        command_context.detached_participant_context(),
+    ) {
+        Ok(pending) => PageCommandTaskStep::Pending(super::PendingPageCommandDispatch {
+            command_id: cmd.id,
+            owner_scope: crate::conn::CommandOwnerScope::capture(conn, cmd.session_id),
+            kind: Box::new(
+                super::PendingPageCommandKind::BrowserOwnerNavigationCompletion(pending),
             ),
-            allow_background_navigation: true,
-        },
-    )
-}
-
-fn build_cdp_traverse_history_command(
-    cmd: &Cmd<'_>,
-    target_id: Option<&str>,
-    entry_id: i32,
-    url: String,
-) -> DevToolsTraverseHistoryCommand {
-    DevToolsTraverseHistoryCommand {
-        context: cmd.devtools_command_context(target_id, Option::<&str>::None),
-        destination: DevToolsHistoryTraversalDestination::Entry { entry_id, url },
-        wait: DevToolsNavigationWait::DocumentInstalled,
+        }),
+        Err(error) => {
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error.to_string()))
+        }
     }
 }
 
-enum ResolvedDevToolsHistoryTraversal {
-    Noop,
-    Entry {
-        entry_id: i32,
-        url: String,
-        same_document_delta: Option<i64>,
-    },
-}
+type ResolvedDevToolsHistoryTraversal = BrowserHistoryTraversalResolution;
 
 fn resolve_devtools_history_traversal_destination(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
     destination: &DevToolsHistoryTraversalDestination,
 ) -> Result<ResolvedDevToolsHistoryTraversal, DevToolsError> {
-    let Some((current_index, entries)) =
-        conn.target_session_owner_navigation_history_snapshot(session_id)
+    let destination = match destination {
+        DevToolsHistoryTraversalDestination::Entry { entry_id, .. } => {
+            BrowserHistoryTraversalDestination::Entry(*entry_id)
+        }
+        DevToolsHistoryTraversalDestination::Delta(delta) => {
+            BrowserHistoryTraversalDestination::Delta(*delta)
+        }
+    };
+    let Some(resolution) =
+        conn.resolve_navigation_history_traversal_for_session_owner(session_id, destination)
     else {
         return Err(DevToolsError::new(
             DevToolsErrorKind::NoSuchTarget,
             "TargetNotLoaded",
         ));
     };
-    let target_index = match destination {
-        DevToolsHistoryTraversalDestination::Entry { entry_id, .. } => entries
-            .iter()
-            .position(|entry| entry.id == *entry_id)
-            .ok_or_else(|| {
-                DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-            })?,
-        DevToolsHistoryTraversalDestination::Delta(delta) => {
-            let target_index = current_index as i128 + i128::from(*delta);
-            if target_index < 0 || target_index >= entries.len() as i128 {
-                return Err(DevToolsError::new(
-                    DevToolsErrorKind::NoSuchHistoryEntry,
-                    "NoSuchHistoryEntry",
-                ));
-            }
-            usize::try_from(target_index).map_err(|_| {
-                DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-            })?
-        }
-    };
-    if target_index == current_index {
-        return Ok(ResolvedDevToolsHistoryTraversal::Noop);
-    }
-    let current_entry = entries.get(current_index).ok_or_else(|| {
+    resolution.map_err(|error| {
+        let BrowserHistoryTraversalResolutionError::NoSuchHistoryEntry = error;
         DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-    })?;
-    let target_entry = entries.get(target_index).ok_or_else(|| {
-        DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-    })?;
-    let same_document_delta = (current_entry.document_sequence_number.is_some()
-        && current_entry.document_sequence_number == target_entry.document_sequence_number)
-        .then(|| {
-            let current_index = i64::try_from(current_index).map_err(|_| {
-                DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-            })?;
-            let target_index = i64::try_from(target_index).map_err(|_| {
-                DevToolsError::new(DevToolsErrorKind::NoSuchHistoryEntry, "NoSuchHistoryEntry")
-            })?;
-            Ok::<_, DevToolsError>(target_index - current_index)
-        })
-        .transpose()?;
-    Ok(ResolvedDevToolsHistoryTraversal::Entry {
-        entry_id: target_entry.id,
-        url: target_entry.url.clone(),
-        same_document_delta,
     })
 }
 
@@ -1893,7 +1987,7 @@ pub(super) fn complete_pending_same_document_history_traversal_command(
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
         .ok_or_else(|| anyhow::anyhow!("TargetNotLoaded"))
-        .and_then(|page| page.finish_top_level_history_traversal_by_delta(completion));
+        .and_then(|mut page| page.finish_top_level_history_traversal_by_delta(completion));
     match result {
         Ok(true) => PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_result(
             DevToolsCommandResult::Empty,
@@ -1917,6 +2011,7 @@ fn start_history_traversal_url_fallback(
         result_projection,
         reloaded_after_crash_session_ids,
         allow_background_navigation,
+        source,
     } = fallback;
     start_resolved_history_traversal_command(
         conn,
@@ -1929,40 +2024,48 @@ fn start_history_traversal_url_fallback(
             reloaded_after_crash_session_ids,
             allow_background_navigation,
         },
-        HistoryTraversalStartSource::BrowserCommand,
+        source,
     )
 }
 
-pub(super) fn start_session_owner_history_traversal_from_renderer(
+pub(super) fn start_page_owned_top_level_history_traversal_from_renderer(
     conn: &mut CdpConnection,
-    session_id: Option<&str>,
+    owner: &TargetPageResidenceIdentity,
     delta: i64,
 ) -> PageCommandTaskStep {
+    let Some(owner_route) = conn.target_page_owner_route_if_current(owner) else {
+        tracing::debug!(
+            ?owner,
+            delta,
+            "dropping renderer history traversal produced for a stale Page residence"
+        );
+        return PageCommandTaskStep::Complete(CommandOutputPlan::success());
+    };
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(owner_route);
+    let conn = owner_scope.conn_mut();
+    let resolution = match conn.resolve_exact_navigation_history_traversal_for_session_owner(
+        None,
+        owner,
+        BrowserHistoryTraversalDestination::Delta(delta),
+    ) {
+        Ok(resolution) => resolution,
+        Err(error) => {
+            tracing::debug!(
+                ?owner,
+                delta,
+                %error,
+                "ignoring renderer history traversal without a current browser-side destination"
+            );
+            return PageCommandTaskStep::Complete(CommandOutputPlan::success());
+        }
+    };
     let reloaded_after_crash_session_ids =
-        reloaded_after_crash_session_ids_for_session_owner(conn, session_id);
-    let destination = DevToolsHistoryTraversalDestination::Delta(delta);
-    let (entry_id, url) =
-        match resolve_devtools_history_traversal_destination(conn, session_id, &destination) {
-            Ok(ResolvedDevToolsHistoryTraversal::Entry { entry_id, url, .. }) => (entry_id, url),
-            Ok(ResolvedDevToolsHistoryTraversal::Noop) => {
-                return PageCommandTaskStep::Complete(CommandOutputPlan::success());
-            }
-            Err(error) => {
-                tracing::debug!(
-                    session_id,
-                    delta,
-                    error = error.message.as_str(),
-                    "ignoring renderer history traversal without a browser-side destination"
-                );
-                return PageCommandTaskStep::Complete(CommandOutputPlan::success());
-            }
-        };
-    start_resolved_history_traversal_command(
+        reloaded_after_crash_session_ids_for_session_owner(conn, None);
+    start_classified_history_traversal_command(
         conn,
         None,
-        session_id,
-        entry_id,
-        &url,
+        None,
+        resolution,
         DevToolsNavigationStartOptions {
             result_projection: NavigationResultProjection::Cdp(json!({})),
             reloaded_after_crash_session_ids,
@@ -1970,6 +2073,7 @@ pub(super) fn start_session_owner_history_traversal_from_renderer(
         },
         HistoryTraversalStartSource::Renderer,
     )
+    .2
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2034,25 +2138,124 @@ fn start_devtools_traverse_history_command(
 ) -> PageCommandTaskStep {
     let context_session_id = command.context.session_id.as_ref().map(|id| id.as_str());
     let command_session_id = command_session_id.or(context_session_id);
-    let (entry_id, url, same_document_delta) = match resolve_devtools_history_traversal_destination(
+    let resolution = match resolve_devtools_history_traversal_destination(
         conn,
         command_session_id,
         &command.destination,
     ) {
-        Ok(ResolvedDevToolsHistoryTraversal::Noop) => {
-            return PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_result(
-                DevToolsCommandResult::Empty,
-            ));
-        }
-        Ok(ResolvedDevToolsHistoryTraversal::Entry {
-            entry_id,
-            url,
-            same_document_delta,
-        }) => (entry_id, url, same_document_delta),
+        Ok(resolution) => resolution,
         Err(error) => {
             return PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(error));
         }
     };
+    start_classified_history_traversal_command(
+        conn,
+        command_id,
+        command_session_id,
+        resolution,
+        options,
+        HistoryTraversalStartSource::BrowserCommand,
+    )
+    .2
+}
+
+/// Starts one actor-selected frontend history traversal against its exact
+/// Page. Browser Core resolves the entry id and Document sequence only after
+/// this Page has won its Browser Host turn.
+pub(super) fn start_page_owned_frontend_history_traversal_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    owner: &TargetPageResidenceIdentity,
+    destination: BrowserHistoryTraversalDestination,
+    allow_background_navigation: bool,
+    result_payload: Value,
+) -> (
+    String,
+    Option<BrowserHistoryTraversalResult>,
+    PageCommandTaskStep,
+) {
+    let Some(owner_route) = conn.target_page_owner_route_if_current(owner) else {
+        return (
+            String::new(),
+            None,
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "NoSuchTarget")),
+        );
+    };
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(owner_route);
+    let conn = owner_scope.conn_mut();
+    let resolution = match conn.resolve_exact_navigation_history_traversal_for_session_owner(
+        None,
+        owner,
+        destination,
+    ) {
+        Ok(resolution) => resolution,
+        Err(BrowserExactHistoryTraversalResolutionError::PageResidenceNoLongerCurrent {
+            ..
+        }) => {
+            return (
+                String::new(),
+                None,
+                PageCommandTaskStep::Complete(CommandOutputPlan::error(-31998, "NoSuchTarget")),
+            );
+        }
+        Err(BrowserExactHistoryTraversalResolutionError::History(
+            BrowserHistoryTraversalResolutionError::NoSuchHistoryEntry,
+        )) => {
+            return (
+                String::new(),
+                None,
+                PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                    -32000,
+                    "Navigation history entry not found",
+                )),
+            );
+        }
+    };
+    let reloaded_after_crash_session_ids =
+        reloaded_after_crash_session_ids_for_session_owner(conn, None);
+    start_classified_history_traversal_command(
+        conn,
+        command_id,
+        None,
+        resolution,
+        DevToolsNavigationStartOptions {
+            result_projection: NavigationResultProjection::Cdp(result_payload),
+            reloaded_after_crash_session_ids,
+            allow_background_navigation,
+        },
+        HistoryTraversalStartSource::BrowserCommand,
+    )
+}
+
+fn start_classified_history_traversal_command(
+    conn: &mut CdpConnection,
+    command_id: Option<u64>,
+    command_session_id: Option<&str>,
+    resolution: ResolvedDevToolsHistoryTraversal,
+    options: DevToolsNavigationStartOptions,
+    source: HistoryTraversalStartSource,
+) -> (
+    String,
+    Option<BrowserHistoryTraversalResult>,
+    PageCommandTaskStep,
+) {
+    let (entry_id, url, same_document_delta) = match resolution {
+        ResolvedDevToolsHistoryTraversal::Noop { url, .. } => {
+            return (
+                url,
+                Some(BrowserHistoryTraversalResult::Noop),
+                PageCommandTaskStep::Complete(CommandOutputPlan::from_devtools_result(
+                    DevToolsCommandResult::Empty,
+                )),
+            );
+        }
+        ResolvedDevToolsHistoryTraversal::Entry {
+            entry_id,
+            url,
+            same_document_delta,
+        } => (entry_id, url, same_document_delta),
+    };
+    let requested_url = url.clone();
     if let Some(delta) = same_document_delta {
         let fallback = HistoryTraversalUrlFallback {
             entry_id,
@@ -2060,26 +2263,36 @@ fn start_devtools_traverse_history_command(
             result_projection: options.result_projection,
             reloaded_after_crash_session_ids: options.reloaded_after_crash_session_ids,
             allow_background_navigation: options.allow_background_navigation,
+            source,
         };
-        return start_same_document_history_traversal_command(
+        return (
+            requested_url,
+            Some(BrowserHistoryTraversalResult::SameDocument),
+            start_same_document_history_traversal_command(
+                conn,
+                command_id,
+                command_session_id,
+                delta,
+                fallback,
+            ),
+        );
+    }
+    (
+        requested_url,
+        Some(BrowserHistoryTraversalResult::CrossDocument),
+        start_history_traversal_url_fallback(
             conn,
             command_id,
             command_session_id,
-            delta,
-            fallback,
-        );
-    }
-    start_history_traversal_url_fallback(
-        conn,
-        command_id,
-        command_session_id,
-        HistoryTraversalUrlFallback {
-            entry_id,
-            url,
-            result_projection: options.result_projection,
-            reloaded_after_crash_session_ids: options.reloaded_after_crash_session_ids,
-            allow_background_navigation: options.allow_background_navigation,
-        },
+            HistoryTraversalUrlFallback {
+                entry_id,
+                url,
+                result_projection: options.result_projection,
+                reloaded_after_crash_session_ids: options.reloaded_after_crash_session_ids,
+                allow_background_navigation: options.allow_background_navigation,
+                source,
+            },
+        ),
     )
 }
 
@@ -2102,7 +2315,7 @@ pub(super) fn finish_started_navigation_command_for_parts(
         }
         NavigateCommandStart::PendingLoad(pending) => clear_crash_state_after_navigation(
             conn,
-            &mut pending.prefix_events,
+            pending.prefix_events_mut(),
             command_session_id,
             reloaded_after_crash_session_ids,
         ),
@@ -2161,7 +2374,15 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    trace: Option<BrowserNavigationTraceContext>,
 ) -> NavigateCommandStart {
+    let trace = trace.or_else(|| {
+        conn.prepare_navigation_trace_context_for_session_owner(
+            session_id,
+            BrowserNavigationTraceSource::RendererIntent,
+            None,
+        )
+    });
     let reloaded_after_crash_session_ids =
         reloaded_after_crash_session_ids_for_session_owner(conn, session_id);
     let result_payload = cdp_navigate_result_payload(
@@ -2173,6 +2394,14 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     let start = if request_method.eq_ignore_ascii_case("GET")
         && session_owner_navigation_is_same_document_fragment(conn, session_id, url)
     {
+        if let Some(trace) = trace.as_ref() {
+            trace.emit(BrowserNavigationTraceEvent::new(
+                "same_document_navigation_selected",
+                BrowserNavigationTraceSource::RendererIntent,
+                "browser-owner-inbox",
+                "current-document",
+            ));
+        }
         // A renderer-owned top-level navigation follows the same fragment
         // classification as Page.navigate. In particular, a freshly created
         // popup's `about:blank#fragment` target must not discard its initial
@@ -2180,7 +2409,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
         start_top_level_same_document_navigate(conn, session_id, url.to_owned(), result_payload)
     } else {
         let result_projection = NavigationResultProjection::Cdp(result_payload);
-        start_navigate_to_url_command_with_background_policy_and_request(
+        start_navigate_to_url_command_with_background_policy_request_and_trace(
             conn,
             None,
             session_id,
@@ -2212,6 +2441,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
                 }
             },
             NavigationStartInitiator::Renderer,
+            trace,
         )
     };
     clear_crash_state_for_renderer_navigation(
@@ -2617,7 +2847,7 @@ pub(super) fn complete_reset_navigation_history_command(
             return PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, message));
         }
     };
-    let Some(page) = conn
+    let Some(mut page) = conn
         .runtime_session_owner_slot_mut(session_id)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
@@ -2724,7 +2954,7 @@ fn clear_crash_state_for_renderer_navigation(
         }
         NavigateCommandStart::PendingLoad(pending) => clear_crash_state_after_navigation(
             conn,
-            &mut pending.prefix_events,
+            pending.prefix_events_mut(),
             owner_session_id,
             reloaded_after_crash_session_ids,
         ),
@@ -2742,27 +2972,6 @@ fn clear_crash_state_for_renderer_navigation(
     start
 }
 
-pub(super) fn start_navigate_to_url_command(
-    conn: &mut CdpConnection,
-    command_id: Option<u64>,
-    command_session_id: Option<&str>,
-    url: &str,
-    referrer: Option<&str>,
-    result_payload: Value,
-) -> NavigateCommandStart {
-    start_navigate_to_url_command_with_background_policy(
-        conn,
-        command_id,
-        command_session_id,
-        url,
-        referrer,
-        NavigationResultProjection::Cdp(result_payload),
-        true,
-        NavigationRequestLoadPolicy::BrowserInitiated,
-        NavigationStartInitiator::Browser,
-    )
-}
-
 fn start_navigate_to_url_command_with_background_policy(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
@@ -2774,7 +2983,15 @@ fn start_navigate_to_url_command_with_background_policy(
     request_load_policy: NavigationRequestLoadPolicy,
     initiator: NavigationStartInitiator,
 ) -> NavigateCommandStart {
-    start_navigate_to_url_command_with_background_policy_and_request(
+    let origin = match initiator {
+        NavigationStartInitiator::Browser => BrowserNavigationTraceSource::FrontendCommand,
+        NavigationStartInitiator::Renderer | NavigationStartInitiator::RendererChildFrame => {
+            BrowserNavigationTraceSource::RendererIntent
+        }
+    };
+    let trace =
+        conn.prepare_navigation_trace_context_for_session_owner(command_session_id, origin, None);
+    start_navigate_to_url_command_with_background_policy_request_and_trace(
         conn,
         command_id,
         command_session_id,
@@ -2787,6 +3004,7 @@ fn start_navigate_to_url_command_with_background_policy(
         allow_background_navigation,
         request_load_policy,
         initiator,
+        trace,
     )
 }
 
@@ -2801,7 +3019,7 @@ fn overlay_navigation_request_headers(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn start_navigate_to_url_command_with_background_policy_and_request(
+fn start_navigate_to_url_command_with_background_policy_request_and_trace(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
     command_session_id: Option<&str>,
@@ -2814,11 +3032,20 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     allow_background_navigation: bool,
     request_load_policy: NavigationRequestLoadPolicy,
     initiator: NavigationStartInitiator,
+    trace: Option<BrowserNavigationTraceContext>,
 ) -> NavigateCommandStart {
     let mut out = Vec::new();
     let timestamp = monotonic_timestamp_seconds();
     let mut fetch_request_stage = FetchRequestStage::Request;
     let Some(requested_url) = Url::parse(url).ok() else {
+        if let Some(trace) = trace.as_ref() {
+            trace.emit(BrowserNavigationTraceEvent::new(
+                "browser_owner_rejected",
+                trace.origin(),
+                "browser-owner-inbox",
+                "invalid-url",
+            ));
+        }
         return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
             -32000,
             "Invalid navigation URL",
@@ -2828,6 +3055,14 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
             -32000,
             error.to_string(),
+        ));
+    }
+    if let Some(trace) = trace.as_ref() {
+        trace.emit(BrowserNavigationTraceEvent::new(
+            "browser_owner_accepted",
+            trace.origin(),
+            "browser-owner-inbox",
+            "navigation-preflight",
         ));
     }
     let mut navigation_preflight = conn.prepare_navigation_request_for_session_owner(
@@ -2940,9 +3175,10 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     }
 
     let navigation_loader_id = navigation_state.loader_id.as_str();
-    let document_navigation_token = conn.start_document_navigation_for_session_owner(
+    let document_navigation_token = conn.start_document_navigation_for_session_owner_with_trace(
         command_session_id,
         navigation_loader_id.to_owned(),
+        trace,
     );
     let Some(document_navigation_token) = document_navigation_token else {
         return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
@@ -2950,10 +3186,38 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
             "TargetNotLoaded",
         ));
     };
+    let navigation_admission_projected =
+        match conn.take_navigation_admission_fact(&document_navigation_token) {
+            Ok(_) => true,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    target_id = document_navigation_token.target_id(),
+                    loader_id = document_navigation_token.loader_id(),
+                    "refusing to project navigation start without an exact Browser fact"
+                );
+                false
+            }
+        };
+    if let Some(trace) = conn.document_navigation_trace_context(&document_navigation_token) {
+        trace.emit(
+            BrowserNavigationTraceEvent::new(
+                "network_request_admitted",
+                BrowserNavigationTraceSource::Network,
+                "request-pending",
+                "network-active",
+            )
+            .with_navigation(&document_navigation_token),
+        );
+    }
     if let Some(pending) = pending_fetch_navigation.as_mut() {
         pending.document_navigation_token = Some(document_navigation_token.clone());
     }
-    if pending_fetch_navigation.is_some() {
+    if !navigation_admission_projected {
+        // Browser request authority has already committed. Keep progressing
+        // the request, but fail closed for frontend events rather than letting
+        // mutable protocol state manufacture a navigation occurrence.
+    } else if pending_fetch_navigation.is_some() {
         emit_navigation_started_for_session_owner(
             conn,
             &mut out,
@@ -3065,32 +3329,33 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         };
         let mut completion_state = navigation_state;
         completion_state.request_announced = completion_state.request_id.is_some();
-        let early_result = conn.background_event_sender().and_then(|sender| {
+        let early_outcome = conn.background_event_sender().and_then(|sender| {
             completion_state.navigate_id.map(|navigate_id| {
-                crate::conn::BackgroundNavigationEarlyResult::new(
+                crate::conn::BackgroundNavigationEarlyOutcome::new(
                     sender,
                     navigate_id,
                     completion_state.navigate_session_id.clone(),
+                    completion_state.requested_url.as_str(),
                     completion_state.result_projection.payload().clone(),
                 )
             })
         });
-        let Some(job) = conn.background_navigation_load_job_for_navigation(
-            &document_navigation_token,
+        let job = conn.background_navigation_load_job_for_navigation(
             &completion_state,
             body_progress_source,
-            early_result,
-        ) else {
-            return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
-                -31998,
-                "NavigationRequestNotCurrent",
-            ));
-        };
+            early_outcome,
+        );
+        let cancellation = job.cancellation();
         let none_session_owner_route = completion_state
             .navigate_session_id
             .is_none()
             .then(|| conn.none_session_owner_route_override())
             .flatten();
+        conn.record_background_navigation_started_scheduler_event(
+            &document_navigation_token,
+            &completion_state,
+            cancellation,
+        );
         tokio::task::spawn_local(async move {
             let body_completion_sink = crate::conn::BackgroundNavigationBodyCompletionSink::new(
                 sender.clone(),
@@ -3098,8 +3363,9 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
                 completion_state.clone(),
                 none_session_owner_route.clone(),
             );
-            let (engine, navigation, early_result_sent) = job.run(Some(body_completion_sink)).await;
-            if early_result_sent {
+            let (engine, navigation, early_outcome_sent) =
+                job.run(Some(body_completion_sink)).await;
+            if early_outcome_sent {
                 completion_state.navigate_id = None;
             }
             if moli_trace::cdp_nav_timing_enabled() {
@@ -3141,84 +3407,17 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         network::MainDocumentBodyProgressSource::default()
     };
     navigation_state.request_announced = navigation_state.request_id.is_some();
-    let Some(job) = conn.navigation_load_job_for_navigation(
-        &document_navigation_token,
+    let job = conn.background_navigation_load_job_for_navigation(
         &navigation_state,
         body_progress_source,
         None,
-    ) else {
-        return NavigateCommandStart::CompletePlan(CommandOutputPlan::error(
-            -31998,
-            "NavigationRequestNotCurrent",
-        ));
-    };
-    NavigateCommandStart::PendingLoad(Box::new(PendingNavigateLoadCommand {
-        prefix_events: out,
-        token: document_navigation_token,
-        state: navigation_state,
-        job,
-    }))
-}
-
-pub(super) fn start_initial_document_navigation_for_session_owner(
-    conn: &mut CdpConnection,
-    command_id: Option<u64>,
-    command_session_id: Option<&str>,
-    result_payload: Value,
-) -> Result<NavigateCommandStart, CommandOutputPlan> {
-    let Some(url) = conn.runtime_session_owner_target_url(command_session_id) else {
-        if conn.browser_context.is_none() {
-            return Err(CommandOutputPlan::error(-31998, "BrowserContextNotLoaded"));
-        }
-        return Err(CommandOutputPlan::error(-31998, "TargetNotLoaded"));
-    };
-    Ok(start_navigate_to_url_command(
-        conn,
-        command_id,
-        command_session_id,
-        url.as_str(),
-        None,
-        result_payload,
-    ))
-}
-
-pub(super) async fn complete_pending_navigate_load_command(
-    conn: &mut CdpConnection,
-    completed: CompletedNavigateLoadCommand,
-    command_context: &mut crate::conn::CommandDispatchContext,
-) -> PageCommandTaskStep {
-    let CompletedNavigateLoadCommand {
-        prefix_events,
-        token,
-        state,
-        engine,
-        navigation,
-    } = completed;
-    let is_current = conn.accepts_pending_document_navigation_for_session_owner(
-        state.navigate_session_id.as_deref(),
-        &token,
     );
-    let should_retain_engine = is_current
-        && matches!(
-            navigation,
-            Ok(NavigationLoadOutcome::ResponseCommitReady(_) | NavigationLoadOutcome::Loaded(_))
-        );
-    let navigation = network::materialize_navigation_load_result(conn, &state, navigation);
-    let completion = MaterializedNavigationCompletion::new(token, state, navigation);
-    let completion = if should_retain_engine {
-        completion.with_navigation_engine(engine)
-    } else {
-        completion
-    };
-    let mut output = CommandOutputBuffer::default();
-    output.extend_background_events_after_messages(prefix_events);
-    conn.drain_materialized_navigation_completion_into_buffer(
-        &mut output,
-        completion,
-        command_context,
-    )
-    .await;
-    PageCommandTaskStep::Complete(output.into_plan())
+    NavigateCommandStart::PendingLoad(Box::new(PendingNavigateCommand::load(
+        out,
+        document_navigation_token,
+        navigation_state,
+        job,
+    )))
 }
 
 pub(super) async fn complete_pending_child_frame_navigate_command(
@@ -3245,7 +3444,7 @@ pub(super) async fn complete_pending_child_frame_navigate_command(
         }
     };
     let (navigated, renderer_output) = {
-        let Some(page) = conn
+        let Some(mut page) = conn
             .runtime_session_owner_slot_mut(command_session_id)
             .ok()
             .and_then(|slot| slot.loaded_page_mut())
@@ -3332,7 +3531,7 @@ pub(super) async fn complete_pending_same_document_navigate_command(
         }
     };
     let (navigated, output) = {
-        let Some(page) = conn
+        let Some(mut page) = conn
             .runtime_session_owner_slot_mut(command_session_id)
             .ok()
             .and_then(|slot| slot.loaded_page_mut())
@@ -3384,9 +3583,35 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
     state: NavigationDispatchState,
     navigation: network::MaterializedNavigationLoadOutcome,
     command_context: &mut crate::conn::CommandDispatchContext,
-) {
-    let navigation_session_id = state.navigate_session_id.clone();
-    let navigation_loader_id = state.loader_id.clone();
+) -> Option<moli_core::browser_host::BrowserPageOwnerKey> {
+    let tail_state = state.clone();
+    let committed_owner = apply_materialized_navigation_into_buffer_async(
+        conn,
+        out,
+        &token,
+        state,
+        navigation,
+        command_context,
+    )
+    .await;
+    finish_materialized_navigation_tail_async(conn, out, &token, &tail_state).await;
+    committed_owner
+}
+
+/// Applies the materialized navigation body without waiting for its renderer
+/// tail. The Browser Host participant state machine uses this seam to publish
+/// each Inspector replay as a separate exact participant before the navigation
+/// gate can become terminal.
+pub(super) async fn apply_materialized_navigation_into_buffer_async(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    token: &DocumentNavigationToken,
+    state: NavigationDispatchState,
+    navigation: network::MaterializedNavigationLoadOutcome,
+    command_context: &mut crate::conn::CommandDispatchContext,
+) -> Option<moli_core::browser_host::BrowserPageOwnerKey> {
+    let mut committed_owner = None;
+    emit_materialized_navigation_ready_trace(conn, token, &navigation);
     match navigation {
         network::MaterializedNavigationLoadOutcome::ResponseCommitReady(navigation) => {
             let navigation = *navigation;
@@ -3395,12 +3620,12 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                 navigation.final_url(),
             );
             if let Err(error) = navigation.update_commit_configuration(configuration).await {
-                push_navigation_commit_error(out, &state, error);
+                push_navigation_commit_failure(conn, out, token, &state, error);
             } else {
                 let renderer_page = navigation.renderer_page_residence_identity();
                 let candidate = conn.prepare_renderer_agent_candidate_token_for_session_owner(
                     state.navigate_session_id.as_deref(),
-                    &token,
+                    token,
                     navigation.renderer_devtools_agent_token(),
                 );
                 match candidate.and_then(|candidate| {
@@ -3417,10 +3642,10 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                 let navigation = network::materialize_loaded_navigation_progress(
                                     conn, &state, navigation,
                                 );
-                                commit_loaded_navigation_async(
+                                committed_owner = commit_loaded_navigation_async(
                                     conn,
                                     out,
-                                    Some(&token),
+                                    token,
                                     state,
                                     navigation,
                                     Some(transaction),
@@ -3441,7 +3666,7 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                         "failed to roll back renderer channel after prepared document commit failure"
                                     );
                                 }
-                                push_navigation_commit_error(out, &state, error);
+                                push_navigation_commit_failure(conn, out, token, &state, error);
                             }
                         }
                     }
@@ -3449,19 +3674,19 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                         tracing::debug!(
                             %error,
                             session_id = state.navigate_session_id.as_deref(),
-                            loader_id = token.loader_id,
+                            loader_id = token.loader_id(),
                             "dropping superseded response commit-ready navigation"
                         );
-                        push_navigation_commit_error(out, &state, error);
+                        push_navigation_commit_failure(conn, out, token, &state, error);
                     }
                 }
             }
         }
         network::MaterializedNavigationLoadOutcome::Loaded(navigation) => {
-            commit_loaded_navigation_async(
+            committed_owner = commit_loaded_navigation_async(
                 conn,
                 out,
-                Some(&token),
+                token,
                 state,
                 *navigation,
                 None,
@@ -3473,7 +3698,15 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
             let _ = conn.clear_pending_navigation_history_update_for_session_owner(
                 state.navigate_session_id.as_deref(),
             );
-            commit_download_navigation_async(conn, out, state, navigation, command_context).await;
+            if conn.convert_document_navigation_to_download_for_session_owner_if_matches(
+                state.navigate_session_id.as_deref(),
+                token,
+            ) {
+                commit_download_navigation_async(conn, out, state, navigation, command_context)
+                    .await;
+            } else if state.navigate_id.is_some() {
+                out.push_error_after_messages(-32000, "Navigation aborted");
+            }
         }
         network::MaterializedNavigationLoadOutcome::Failed(navigation) => {
             let _ = conn.clear_pending_navigation_history_update_for_session_owner(
@@ -3485,68 +3718,103 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                 response_mode,
                 progress_gate,
             } = navigation;
-            if document_policy.invalidates_committed_document() {
-                let _ = conn
+            let failure = BrowserNavigationFailure::Network {
+                error_text: error_text.clone(),
+            };
+            let browser_failure_projected = if document_policy.invalidates_committed_document() {
+                match conn
                     .discard_loaded_page_after_failed_navigation_for_session_owner_async(
                         state.navigate_session_id.as_deref(),
+                        token,
+                        failure.clone(),
                         &state.requested_url,
                     )
-                    .await;
+                    .await
+                {
+                    Ok(Some(())) => true,
+                    Ok(None) => conn.fail_document_navigation_for_session_owner_if_matches(
+                        state.navigate_session_id.as_deref(),
+                        token,
+                        failure.clone(),
+                    ),
+                    Err(error) => {
+                        let projected = conn.fail_document_navigation_for_session_owner_if_matches(
+                            state.navigate_session_id.as_deref(),
+                            token,
+                            failure.clone(),
+                        );
+                        tracing::warn!(
+                            %error,
+                            session_id = state.navigate_session_id.as_deref(),
+                            requested_url = %state.requested_url,
+                            "failed to project invalidated Page after document navigation failure"
+                        );
+                        projected
+                    }
+                }
+            } else {
+                conn.fail_document_navigation_for_session_owner_if_matches(
+                    state.navigate_session_id.as_deref(),
+                    token,
+                    failure,
+                )
+            };
+            if browser_failure_projected {
+                activity::MainDocumentFailedNavigationActivity::new(
+                    state,
+                    progress_gate,
+                    response_mode,
+                )
+                .emit_navigation_error_into_buffer(out, &error_text);
+            } else if state.navigate_id.is_some() {
+                out.push_error_after_messages(-32000, "Navigation aborted");
             }
-            activity::MainDocumentFailedNavigationActivity::new(
-                state,
-                progress_gate,
-                response_mode,
-            )
-            .emit_navigation_error_into_buffer(out, &error_text);
         }
     }
-    let primary_protocol_session_id = conn
-        .runtime_session_owner_primary_session_id(navigation_session_id.as_deref())
-        .or_else(|| navigation_session_id.clone());
-    let (routed_renderer_output, renderer_call_replacements) = conn
-        .finish_renderer_document_navigation_for_session_owner(
-            navigation_session_id.as_deref(),
-            &token,
+    committed_owner
+}
+
+fn emit_materialized_navigation_ready_trace(
+    conn: &CdpConnection,
+    token: &DocumentNavigationToken,
+    navigation: &network::MaterializedNavigationLoadOutcome,
+) {
+    let (stage, owner_state_after) = match navigation {
+        network::MaterializedNavigationLoadOutcome::ResponseCommitReady(_)
+        | network::MaterializedNavigationLoadOutcome::Loaded(_) => {
+            ("response_commit_ready", "commit-ready")
+        }
+        network::MaterializedNavigationLoadOutcome::Download(_) => {
+            ("navigation_download_ready", "download-ready")
+        }
+        network::MaterializedNavigationLoadOutcome::Failed(_) => {
+            ("navigation_request_failed", "request-failed")
+        }
+    };
+    emit_navigation_ready_trace(conn, token, stage, owner_state_after);
+}
+
+pub(super) fn emit_navigation_ready_trace(
+    conn: &CdpConnection,
+    token: &DocumentNavigationToken,
+    stage: &'static str,
+    owner_state_after: &'static str,
+) {
+    let Some(trace) = conn.document_navigation_trace_context(token) else {
+        return;
+    };
+    trace.emit(
+        BrowserNavigationTraceEvent::new(
+            stage,
+            BrowserNavigationTraceSource::Network,
+            "network-active",
+            owner_state_after,
         )
-        .map(|finish| (finish.released_output, finish.renderer_call_replacements))
-        .unwrap_or_default();
-    if !routed_renderer_output.is_empty() {
-        let mut background_events = Vec::new();
-        crate::domains::runtime::push_routed_renderer_runtime_inspector_message_batch_background_events(
-            conn,
-            &mut background_events,
-            routed_renderer_output,
-            primary_protocol_session_id.as_deref(),
-        );
-        out.extend_background_events_after_messages(background_events);
-    }
-    if let Some(renderer_call_replacements) = renderer_call_replacements {
-        let (new_attachment_id, terminations, replays) = renderer_call_replacements.into_parts();
-        let termination_events = conn.terminate_prepared_renderer_calls_after_navigation(
-            terminations,
-            "Inspected target navigated or closed",
-        );
-        out.extend_background_events_after_messages(termination_events);
-        match conn
-            .replay_prepared_renderer_calls_after_navigation_async(replays, new_attachment_id)
-            .await
-        {
-            Ok(events) => out.extend_background_events_after_messages(events),
-            Err(error) => tracing::warn!(
-                %error,
-                session_id = navigation_session_id.as_deref(),
-                "failed to replay renderer Inspector commands after navigation"
-            ),
-        }
-    }
-    conn.clear_pending_document_navigation_for_session_owner_if_loader_matches(
-        navigation_session_id.as_deref(),
-        &navigation_loader_id,
+        .with_navigation(token),
     );
 }
 
-fn push_navigation_commit_error(
+pub(super) fn push_navigation_commit_error(
     out: &mut CommandOutputBuffer,
     state: &NavigationDispatchState,
     error: impl Into<String>,
@@ -3563,18 +3831,56 @@ fn push_navigation_commit_error(
     }
 }
 
+pub(super) fn push_navigation_commit_failure(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    token: &DocumentNavigationToken,
+    state: &NavigationDispatchState,
+    error: impl Into<String>,
+) {
+    let error = error.into();
+    if conn.fail_document_navigation_for_session_owner_if_matches(
+        state.navigate_session_id.as_deref(),
+        token,
+        BrowserNavigationFailure::Commit {
+            error_text: error.clone(),
+        },
+    ) {
+        push_navigation_commit_error(out, state, error);
+    } else if state.navigate_id.is_some() {
+        out.push_error_after_messages(-32000, "Navigation aborted");
+    }
+}
+
 fn emit_same_document_navigation_background_event(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
     session_id: Option<&str>,
+    expected_page: &TargetPageResidenceIdentity,
     url: Url,
     navigation_type: &str,
     history_update: SameDocumentHistoryUpdate,
 ) {
-    let Some(frame_id) =
-        conn.record_same_document_navigation_for_session_owner(session_id, &url, history_update)
-    else {
-        return;
+    let frame_id = match conn.record_same_document_navigation_for_session_owner(
+        session_id,
+        expected_page,
+        &url,
+        history_update,
+    ) {
+        Ok(frame_id) => frame_id,
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                session_id,
+                browser_context_id = expected_page.browser_context_id(),
+                target_id = expected_page.target_id(),
+                loaded_page_generation = expected_page.loaded_page_generation(),
+                url = url.as_str(),
+                navigation_type,
+                "same-Document navigation rejected before target/event projection"
+            );
+            return;
+        }
     };
     for event_session_id in conn.page_event_session_ids_for_session_owner(session_id) {
         let event = SameDocumentNavigationEvent {
@@ -3598,15 +3904,14 @@ pub(crate) async fn emit_same_document_navigation_background_events_async(
 ) {
     for navigation in navigations {
         let source_document = navigation.source_document();
-        if !conn
-            .target_page_residence_identity_is_current_for_session(session_id, navigation.owner())
-        {
+        let expected_page = navigation.owner().clone();
+        if !conn.target_page_residence_identity_is_current_for_session(session_id, &expected_page) {
             tracing::debug!(
                 session_id,
                 ?source_document,
-                browser_context_id = navigation.owner().browser_context_id(),
-                target_id = navigation.owner().target_id(),
-                page_attachment_id = navigation.owner().page_attachment_id().get(),
+                browser_context_id = expected_page.browser_context_id(),
+                target_id = expected_page.target_id(),
+                loaded_page_generation = expected_page.loaded_page_generation(),
                 "dropping same-document navigation produced by a stale Page residence"
             );
             continue;
@@ -3628,6 +3933,7 @@ pub(crate) async fn emit_same_document_navigation_background_events_async(
             conn,
             out,
             session_id,
+            &expected_page,
             url,
             &navigation.navigation_type,
             navigation.history_update,
@@ -3639,7 +3945,7 @@ pub(crate) async fn emit_same_document_navigation_background_events_async(
 mod child_frame_attachment_tests {
     use crate::devtools_runtime::{
         DevToolsCommand, DevToolsHistoryTraversalDestination, DevToolsNavigationWait,
-        DevToolsProtocol,
+        DevToolsProtocol, DevToolsReloadCommand, DevToolsTraverseHistoryCommand,
     };
     use serde_json::{Value, json};
 
@@ -3647,9 +3953,9 @@ mod child_frame_attachment_tests {
 
     use super::{
         DevToolsNavigationStartOptions, NavigationResultProjection, PageCommandTaskStep,
-        PagePreparedChildFrameTreeEvent, build_cdp_navigate_command, build_cdp_reload_command,
-        build_cdp_traverse_history_command, merge_child_frame_tree_attachments_into_events,
-        start_devtools_page_command, update_navigation_result_payload_identity,
+        PagePreparedChildFrameTreeEvent, build_cdp_navigate_command,
+        merge_child_frame_tree_attachments_into_events, start_devtools_page_command,
+        update_navigation_result_payload_identity,
     };
 
     #[test]
@@ -3754,43 +4060,6 @@ mod child_frame_attachment_tests {
     }
 
     #[test]
-    fn cdp_reload_builds_protocol_neutral_reload_command() {
-        let params = json!({
-            "ignoreCache": true,
-            "scriptToEvaluateOnLoad": "globalThis.reloaded = true"
-        });
-        let cmd = Cmd::for_test(
-            Some(13),
-            "Page.reload",
-            &params,
-            Some("SID-3"),
-            r#"{"id":13,"method":"Page.reload"}"#,
-        );
-        let params = cmd
-            .get_params()
-            .expect("reload params should parse")
-            .expect("reload params should be present");
-
-        let command = build_cdp_reload_command(&cmd, Some("TID-3"), params);
-
-        assert_eq!(command.context.protocol, DevToolsProtocol::Cdp);
-        assert_eq!(
-            command.context.session_id.as_ref().map(|id| id.as_str()),
-            Some("SID-3")
-        );
-        assert_eq!(
-            command.context.target_id.as_ref().map(|id| id.as_str()),
-            Some("TID-3")
-        );
-        assert!(command.ignore_cache);
-        assert_eq!(
-            command.script_to_evaluate_on_load.as_deref(),
-            Some("globalThis.reloaded = true")
-        );
-        assert_eq!(command.wait, DevToolsNavigationWait::DocumentInstalled);
-    }
-
-    #[test]
     fn devtools_page_entry_routes_reload_command_to_navigation_owner() {
         let mut conn = CdpConnection::new();
         let params = Value::Null;
@@ -3801,7 +4070,12 @@ mod child_frame_attachment_tests {
             Some("SID-4"),
             r#"{"id":14,"method":"Page.reload"}"#,
         );
-        let command = build_cdp_reload_command(&cmd, Some("TID-4"), Default::default());
+        let command = DevToolsReloadCommand {
+            context: cmd.devtools_command_context(Some("TID-4"), Option::<&str>::None),
+            ignore_cache: false,
+            script_to_evaluate_on_load: None,
+            wait: DevToolsNavigationWait::DocumentInstalled,
+        };
 
         let step = start_devtools_page_command(
             &mut conn,
@@ -3825,43 +4099,6 @@ mod child_frame_attachment_tests {
     }
 
     #[test]
-    fn cdp_history_traversal_builds_protocol_neutral_command() {
-        let params = Value::Null;
-        let cmd = Cmd::for_test(
-            Some(15),
-            "Page.navigateToHistoryEntry",
-            &params,
-            Some("SID-5"),
-            r#"{"id":15,"method":"Page.navigateToHistoryEntry"}"#,
-        );
-
-        let command = build_cdp_traverse_history_command(
-            &cmd,
-            Some("TID-5"),
-            7,
-            "https://example.test/history".to_owned(),
-        );
-
-        assert_eq!(command.context.protocol, DevToolsProtocol::Cdp);
-        assert_eq!(
-            command.context.session_id.as_ref().map(|id| id.as_str()),
-            Some("SID-5")
-        );
-        assert_eq!(
-            command.context.target_id.as_ref().map(|id| id.as_str()),
-            Some("TID-5")
-        );
-        assert_eq!(
-            command.destination,
-            DevToolsHistoryTraversalDestination::Entry {
-                entry_id: 7,
-                url: "https://example.test/history".to_owned(),
-            }
-        );
-        assert_eq!(command.wait, DevToolsNavigationWait::DocumentInstalled);
-    }
-
-    #[test]
     fn devtools_page_entry_routes_history_traversal_to_navigation_owner() {
         let mut conn = CdpConnection::new();
         let params = Value::Null;
@@ -3872,12 +4109,14 @@ mod child_frame_attachment_tests {
             Some("SID-6"),
             r#"{"id":16,"method":"Page.navigateToHistoryEntry"}"#,
         );
-        let command = build_cdp_traverse_history_command(
-            &cmd,
-            Some("TID-6"),
-            9,
-            "https://example.test/history".to_owned(),
-        );
+        let command = DevToolsTraverseHistoryCommand {
+            context: cmd.devtools_command_context(Some("TID-6"), Option::<&str>::None),
+            destination: DevToolsHistoryTraversalDestination::Entry {
+                entry_id: 9,
+                url: "https://example.test/history".to_owned(),
+            },
+            wait: DevToolsNavigationWait::DocumentInstalled,
+        };
 
         let step = start_devtools_page_command(
             &mut conn,

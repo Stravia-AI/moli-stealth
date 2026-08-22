@@ -12,7 +12,7 @@ use crate::conn::{BackgroundTarget, BrowserContext, NETWORK_ERROR_PAGE_URL};
 use crate::domains::page::LOADER_ID;
 use crate::testing::{
     TestContext, wait_until_frame_stopped_loading, wait_until_message, wait_until_messages,
-    wait_until_scheduler_message,
+    wait_until_renderer_document_load, wait_until_scheduler_message,
 };
 use axum::{
     Router,
@@ -43,9 +43,9 @@ async fn with_loaded_http_document(
     target_id: &str,
 ) {
     let mut bc = BrowserContext::new("BID-1".into());
-    bc.attach_active_session(session_id.to_owned());
     bc.set_active_target_id(target_id.to_owned());
-    ctx.conn.browser_context = Some(bc);
+    bc.attach_active_session(session_id.to_owned());
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(url, Some(session_id))
         .await;
     ctx.conn
@@ -69,12 +69,40 @@ async fn with_loaded_http_background_document(
     );
 
     let mut bc = BrowserContext::new("BID-1".into());
-    bc.attach_active_session(active_session_id.to_owned());
     bc.set_active_target_id(active_target_id.to_owned());
+    bc.attach_active_session(active_session_id.to_owned());
     bc.background_targets.push(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(url, Some(background_session_id))
         .await;
+}
+
+async fn insert_browser_context_with_navigation(
+    ctx: &mut TestContext,
+    browser_context: BrowserContext,
+    url: &str,
+    session_id: Option<&str>,
+) {
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(url, session_id)
+        .await;
+}
+
+async fn install_navigation_for_target_without_session(
+    ctx: &mut TestContext,
+    target_id: &str,
+    url: &str,
+) {
+    let route = ctx
+        .conn
+        .target_session_route_for_target_id(target_id)
+        .expect("fixture Target route");
+    let previous = ctx
+        .conn
+        .replace_none_session_owner_route_override(Some(route));
+    ctx.install_navigation_fixture_for_session_owner(url, None)
+        .await;
+    ctx.conn.replace_none_session_owner_route_override(previous);
 }
 
 async fn loaded_page_html_for_test(ctx: &mut TestContext) -> String {

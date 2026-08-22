@@ -1,6 +1,7 @@
 use data_url::DataUrl;
 use moli_core::{
     RendererOutputFence,
+    browser_host::BrowserPageOwnerKey,
     page::{RendererMainDocumentCommit, RendererPageCreationDiagnostics, RendererRuntimeRealmInfo},
     runtime::{
         CommittedDocumentResourceSource, PageVmInitStage, PreparedDocumentPage,
@@ -18,10 +19,12 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use url::Url;
 
+use super::browser_document_page_builder::BrowserDocumentPageBuilder;
 use super::*;
 use crate::conn::state::{
     InitialDocumentPageBuildWaiter, RendererPageResidenceIdentity, TargetPageAbsenceReason,
 };
+use crate::domains::command_output::BrowserNavigateCommandOutcomeDelivery;
 use crate::domains::network::{
     CompletedDocumentProgressTransfer, CompletedDownloadProgressTransfer,
     CompletedMainDocumentNetworkEvents, MainDocumentBodyNetworkProgress,
@@ -84,7 +87,7 @@ fn response_status_may_use_http_error_page(status: u16) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_browser_owned_error_page_navigation_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     unreachable_url: Url,
@@ -131,7 +134,7 @@ async fn prepare_browser_owned_error_page_navigation_with_engine_async(
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_network_error_page_navigation_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     unreachable_url: Url,
@@ -694,8 +697,8 @@ fn spawn_captured_body_replay(
 pub(crate) struct BackgroundNavigationLoadJob {
     engine: NavigationEngine,
     page_reservation: RendererPageReservationToken,
-    cancellation: FetchCancelHandle,
-    early_result: Option<BackgroundNavigationEarlyResult>,
+    cancellation: BackgroundNavigationCancellation,
+    early_outcome: Option<BackgroundNavigationEarlyOutcome>,
     load_inputs: TargetNavigationLoadInputs,
     method: String,
     raw_url: String,
@@ -707,6 +710,91 @@ pub(crate) struct BackgroundNavigationLoadJob {
     /// The detached job must not retain a source Page's request-policy view;
     /// its own NavigationEngine supplies the target Page policy.
     shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BackgroundInterceptedNavigationFetchMode {
+    Streaming,
+    CollectStreaming,
+    Buffered,
+}
+
+/// Move-owned top-level request used after an intercepted navigation is
+/// continued.
+///
+/// Construction freezes the target's transport/cookie/profile inputs while
+/// Browser Owner holds the physical executor. `run` owns the loader and request
+/// and therefore performs no `CdpConnection` borrow while network I/O is
+/// pending.
+pub(crate) struct BackgroundInterceptedNavigationFetchJob {
+    loader: moli_core::network::ResourceRequestClient,
+    request: Request,
+    raw_url: String,
+    mode: BackgroundInterceptedNavigationFetchMode,
+}
+
+pub(crate) enum BackgroundInterceptedNavigationFetchResult {
+    Streaming(NetworkFetchResult<StreamingRawResponse>),
+    Buffered(NetworkFetchResult<RawResponse>),
+}
+
+pub(crate) struct BackgroundStreamingResponseCollectionJob {
+    response: NetworkFetchResult<StreamingRawResponse>,
+}
+
+pub(crate) struct BackgroundBufferedResponseNavigationLoadJob {
+    engine: NavigationEngine,
+    page_reservation: Option<RendererPageReservationToken>,
+    load_inputs: TargetNavigationLoadInputs,
+    requested_url: Url,
+    request_method: String,
+    request_headers: Vec<(String, String)>,
+    response: NetworkFetchResult<RawResponse>,
+    body_progress_source: MainDocumentBodyProgressSource,
+    shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
+}
+
+/// Move-owned captured response replay for a paused top-level navigation.
+///
+/// Construction freezes load inputs and reserves the future Page while the
+/// Browser Host owns the physical executor. `run` can then await parser/
+/// renderer work without borrowing `CdpConnection`.
+pub(crate) struct BackgroundCapturedResponseNavigationLoadJob {
+    engine: NavigationEngine,
+    page_reservation: Option<RendererPageReservationToken>,
+    load_inputs: TargetNavigationLoadInputs,
+    requested_url: Url,
+    request_method: String,
+    request_headers: Vec<(String, String)>,
+    head: ResponseHead,
+    body: CapturedBody,
+    network_observation_journal: NetworkObservationJournal,
+    body_progress_source: MainDocumentBodyProgressSource,
+    allow_download: bool,
+    reply_boundary: RendererReplyBoundary,
+    shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
+}
+
+pub(crate) struct BackgroundPausedStreamingResponseNavigationPreparationJob {
+    engine: NavigationEngine,
+    page_reservation: RendererPageReservationToken,
+    load_inputs: TargetNavigationLoadInputs,
+    requested_url: Url,
+    final_url: Url,
+    request_method: String,
+    request_headers: Vec<(String, String)>,
+    response_status: u16,
+    response_headers: Vec<(String, String)>,
+    response_cookie_reports: Vec<moli_cookie_jar::StoredCookieSetReport>,
+    response_from_cache: bool,
+    negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
+    initial_request_cookie_report: Option<moli_cookie_jar::StoredCookieQueryReport>,
+    redirected: bool,
+    redirect_chain: Vec<moli_fetch::RedirectInfo>,
+    network_observation_journal: NetworkObservationJournal,
+    body_progress_source: MainDocumentBodyProgressSource,
+    shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
+    timing_started: Option<std::time::Instant>,
 }
 
 pub(crate) struct BackgroundStreamingResponseNavigationLoadJob {
@@ -724,11 +812,9 @@ pub(crate) struct BackgroundStreamingResponseNavigationLoadJob {
     shared_resource_runtime: Option<moli_core::network::BrowserResourceRuntime>,
 }
 
-pub(crate) struct BackgroundNavigationEarlyResult {
+pub(crate) struct BackgroundNavigationEarlyOutcome {
     sender: BackgroundEventSender,
-    navigate_id: u64,
-    session_id: Option<String>,
-    result_payload: Value,
+    delivery: BrowserNavigateCommandOutcomeDelivery,
 }
 
 pub(crate) struct BackgroundNavigationBodyCompletionSink {
@@ -780,36 +866,39 @@ impl BackgroundNavigationBodyCompletionSink {
     }
 }
 
-impl BackgroundNavigationEarlyResult {
+impl BackgroundNavigationEarlyOutcome {
     pub(crate) fn new(
         sender: BackgroundEventSender,
         navigate_id: u64,
         session_id: Option<String>,
+        requested_url: &str,
         result_payload: Value,
     ) -> Self {
         Self {
             sender,
-            navigate_id,
-            session_id,
-            result_payload,
+            delivery: BrowserNavigateCommandOutcomeDelivery::completed(
+                navigate_id,
+                session_id.as_deref(),
+                requested_url,
+                result_payload,
+            ),
         }
     }
 
     fn emit(self) -> bool {
-        let session_id = self.session_id;
         self.sender
-            .send(BackgroundProtocolEvent::command_success(
-                Some(self.navigate_id),
-                session_id.as_deref(),
-                self.result_payload,
-            ))
+            .send_browser_navigate_outcome(self.delivery)
             .is_ok()
     }
 }
 
 impl BackgroundNavigationLoadJob {
-    fn emit_early_result_for_successful_document(
-        early_result: &mut Option<BackgroundNavigationEarlyResult>,
+    pub(crate) fn cancellation(&self) -> BackgroundNavigationCancellation {
+        self.cancellation.clone()
+    }
+
+    fn emit_early_outcome_for_successful_document(
+        early_outcome: &mut Option<BackgroundNavigationEarlyOutcome>,
         navigation: &Result<NavigationLoadOutcome, String>,
     ) -> bool {
         let is_successful_document = match navigation {
@@ -824,9 +913,9 @@ impl BackgroundNavigationLoadJob {
         if !is_successful_document {
             return false;
         }
-        early_result
+        early_outcome
             .take()
-            .is_some_and(BackgroundNavigationEarlyResult::emit)
+            .is_some_and(BackgroundNavigationEarlyOutcome::emit)
     }
 
     pub(crate) async fn run(
@@ -840,13 +929,13 @@ impl BackgroundNavigationLoadJob {
         let timing_started = moli_trace::cdp_nav_timing_enabled().then(std::time::Instant::now);
         let timing_url = self.raw_url.clone();
         let mut engine = self.engine;
-        let mut early_result = self.early_result.take();
+        let mut early_outcome = self.early_outcome.take();
         if let Some(resource_runtime) = self.shared_resource_runtime.take()
             && let Err(error) = engine.adopt_registered_resource_runtime(resource_runtime)
         {
             return (engine, Err(error.to_string()), false);
         }
-        let mut early_result_sent = false;
+        let mut early_outcome_sent = false;
         let navigation = async {
             if let Some(navigation) = load_inline_html_navigation_with_engine_async(
                 &mut engine,
@@ -859,8 +948,10 @@ impl BackgroundNavigationLoadJob {
             )
             .await
             {
-                early_result_sent =
-                    Self::emit_early_result_for_successful_document(&mut early_result, &navigation);
+                early_outcome_sent = Self::emit_early_outcome_for_successful_document(
+                    &mut early_outcome,
+                    &navigation,
+                );
                 return navigation;
             }
 
@@ -875,8 +966,10 @@ impl BackgroundNavigationLoadJob {
             )
             .await
             {
-                early_result_sent =
-                    Self::emit_early_result_for_successful_document(&mut early_result, &navigation);
+                early_outcome_sent = Self::emit_early_outcome_for_successful_document(
+                    &mut early_outcome,
+                    &navigation,
+                );
                 return navigation;
             }
 
@@ -900,7 +993,7 @@ impl BackgroundNavigationLoadJob {
                     self.body,
                     self.request_headers.clone(),
                     None,
-                    self.cancellation.clone(),
+                    self.cancellation.fetch_cancel_handle(),
                 )
                 .await;
             let navigation_response = match navigation_response {
@@ -957,9 +1050,9 @@ impl BackgroundNavigationLoadJob {
                 response_status_may_use_http_error_page(response.status);
             if !super::downloads::response_headers_indicate_download(&response.headers)
                 && !defer_early_result_for_http_error_body
-                && let Some(early_result) = early_result.take()
+                && let Some(early_outcome) = early_outcome.take()
             {
-                early_result_sent = early_result.emit();
+                early_outcome_sent = early_outcome.emit();
             }
             let navigation = build_navigation_from_streaming_raw_response_with_engine_async(
                 &mut engine,
@@ -980,8 +1073,10 @@ impl BackgroundNavigationLoadJob {
             )
             .await;
             if defer_early_result_for_http_error_body {
-                early_result_sent =
-                    Self::emit_early_result_for_successful_document(&mut early_result, &navigation);
+                early_outcome_sent = Self::emit_early_outcome_for_successful_document(
+                    &mut early_outcome,
+                    &navigation,
+                );
             }
             navigation
         }
@@ -994,7 +1089,291 @@ impl BackgroundNavigationLoadJob {
                 elapsed_ms = started.elapsed().as_millis(),
             );
         }
-        (engine, navigation, early_result_sent)
+        (engine, navigation, early_outcome_sent)
+    }
+}
+
+impl BackgroundInterceptedNavigationFetchJob {
+    pub(crate) async fn run(self) -> Result<BackgroundInterceptedNavigationFetchResult, String> {
+        match self.mode {
+            BackgroundInterceptedNavigationFetchMode::Streaming => self
+                .loader
+                .fetch_raw_stream_with_cancel_and_network_metadata(
+                    self.request,
+                    FetchCancelHandle::new(),
+                )
+                .await
+                .map(BackgroundInterceptedNavigationFetchResult::Streaming)
+                .map_err(|error| format!("failed to fetch page `{}`: {error}", self.raw_url)),
+            BackgroundInterceptedNavigationFetchMode::CollectStreaming => {
+                let response = self
+                    .loader
+                    .fetch_raw_stream_with_cancel_and_network_metadata(
+                        self.request,
+                        FetchCancelHandle::new(),
+                    )
+                    .await
+                    .map_err(|error| format!("failed to fetch page `{}`: {error}", self.raw_url))?;
+                let (response, network_observation_journal) =
+                    response.into_parts_with_observation_journal();
+                let response = response
+                    .into_materialized_raw_response()
+                    .await
+                    .map_err(|error| format!("failed to read page body from stream: {error}"))?;
+                Ok(BackgroundInterceptedNavigationFetchResult::Buffered(
+                    NetworkFetchResult::with_observation_journal(
+                        response,
+                        network_observation_journal,
+                    ),
+                ))
+            }
+            BackgroundInterceptedNavigationFetchMode::Buffered => self
+                .loader
+                .fetch_raw_with_network_metadata(self.request)
+                .await
+                .map(BackgroundInterceptedNavigationFetchResult::Buffered)
+                .map_err(|error| format!("failed to fetch page `{}`: {error}", self.raw_url)),
+        }
+    }
+}
+
+impl BackgroundStreamingResponseCollectionJob {
+    pub(crate) async fn run(self) -> Result<NetworkFetchResult<RawResponse>, String> {
+        let (response, network_observation_journal) =
+            self.response.into_parts_with_observation_journal();
+        let response = response
+            .into_materialized_raw_response()
+            .await
+            .map_err(|error| format!("failed to read page body from stream: {error}"))?;
+        Ok(NetworkFetchResult::with_observation_journal(
+            response,
+            network_observation_journal,
+        ))
+    }
+}
+
+impl BackgroundBufferedResponseNavigationLoadJob {
+    pub(crate) async fn run(mut self) -> (NavigationEngine, Result<NavigationLoadOutcome, String>) {
+        if let Some(resource_runtime) = self.shared_resource_runtime.take()
+            && let Err(error) = self
+                .engine
+                .adopt_registered_resource_runtime(resource_runtime)
+        {
+            return (self.engine, Err(error.to_string()));
+        }
+        let (response, network_observation_journal) =
+            self.response.into_parts_with_observation_journal();
+        if super::downloads::response_headers_indicate_download(&response.headers) {
+            let navigation =
+                NavigationLoadOutcome::download(materialize_download_from_raw_response(
+                    self.request_method,
+                    self.request_headers,
+                    response,
+                    network_observation_journal,
+                ));
+            return (self.engine, Ok(navigation));
+        }
+        let Some(page_reservation) = self.page_reservation else {
+            return (
+                self.engine,
+                Err("buffered navigation is missing its future Page reservation".to_owned()),
+            );
+        };
+        let head = response.head();
+        let body = CapturedBody::from_bytes(response.clone_body_bytes());
+        let navigation = prepare_navigation_from_captured_raw_response_with_engine_async(
+            &mut self.engine,
+            page_reservation,
+            &self.load_inputs,
+            self.requested_url,
+            self.request_method,
+            self.request_headers,
+            head,
+            body,
+            self.body_progress_source,
+            network_observation_journal,
+            None,
+            false,
+            RendererReplyBoundary::DocumentCommit,
+        )
+        .await
+        .map(NavigationLoadOutcome::response_commit_ready);
+        (self.engine, navigation)
+    }
+}
+
+impl BackgroundCapturedResponseNavigationLoadJob {
+    pub(crate) async fn run(mut self) -> (NavigationEngine, Result<NavigationLoadOutcome, String>) {
+        if let Some(resource_runtime) = self.shared_resource_runtime.take()
+            && let Err(error) = self
+                .engine
+                .adopt_registered_resource_runtime(resource_runtime)
+        {
+            return (self.engine, Err(error.to_string()));
+        }
+        if self.allow_download
+            && super::downloads::response_headers_indicate_download(&self.head.headers)
+        {
+            let body = match self.body.materialize_bytes() {
+                Ok(body) => body,
+                Err(error) => {
+                    return (
+                        self.engine,
+                        Err(format!(
+                            "failed to materialize captured download body: {error}"
+                        )),
+                    );
+                }
+            };
+            let navigation =
+                NavigationLoadOutcome::download(materialize_download_from_raw_response(
+                    self.request_method,
+                    self.request_headers,
+                    RawResponse::from_head_and_body(self.head, body),
+                    self.network_observation_journal,
+                ));
+            return (self.engine, Ok(navigation));
+        }
+        let Some(page_reservation) = self.page_reservation else {
+            return (
+                self.engine,
+                Err("captured navigation is missing its future Page reservation".to_owned()),
+            );
+        };
+        let navigation = prepare_navigation_from_captured_raw_response_with_engine_async(
+            &mut self.engine,
+            page_reservation,
+            &self.load_inputs,
+            self.requested_url,
+            self.request_method,
+            self.request_headers,
+            self.head,
+            self.body,
+            self.body_progress_source,
+            self.network_observation_journal,
+            None,
+            false,
+            self.reply_boundary,
+        )
+        .await
+        .map(NavigationLoadOutcome::response_commit_ready);
+        (self.engine, navigation)
+    }
+}
+
+impl BackgroundPausedStreamingResponseNavigationPreparationJob {
+    pub(crate) async fn run(mut self) -> Result<PausedResponsePreparedDocument, String> {
+        if let Some(resource_runtime) = self.shared_resource_runtime.take() {
+            self.engine
+                .adopt_registered_resource_runtime(resource_runtime)
+                .map_err(|error| error.to_string())?;
+        }
+        let network_extra_info_available = !self.network_observation_journal.is_empty();
+        let redirect_chain = self
+            .redirect_chain
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        let network_events = CompletedMainDocumentNetworkEvents::new(
+            self.request_method.clone(),
+            self.request_headers.clone(),
+            self.initial_request_cookie_report.clone(),
+            self.response_status,
+            self.response_headers.clone(),
+            self.response_cookie_reports.clone(),
+            redirect_chain.clone(),
+            network_extra_info_available,
+            self.response_from_cache,
+        )
+        .with_negotiated_http_version(self.negotiated_http_version)
+        .with_network_observation_journal(self.network_observation_journal.clone());
+        let body_network_progress_state = self
+            .body_progress_source
+            .body_network_progress_for_completed_events(network_events);
+        let (renderer_body_tx, renderer_body_rx) =
+            mpsc::channel(EXTERNAL_RAW_BODY_CHANNEL_CAPACITY);
+        let (renderer_completion_tx, renderer_completion_rx) = oneshot::channel();
+        let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(
+            renderer_body_rx,
+            renderer_completion_rx,
+        );
+        let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
+            self.load_inputs.fetch_subresource_interception;
+        let page_storage = self.load_inputs.page_storage_handles();
+        let main_document_commit = self
+            .load_inputs
+            .main_document_commit_for_final_url(&self.final_url, None)
+            .map(Arc::new);
+        let prepared_page = self
+            .engine
+            .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
+                self.page_reservation,
+                page_storage.into_navigation_storage(),
+                self.requested_url.clone(),
+                self.final_url.clone(),
+                self.load_inputs.navigation_initiator_url.clone(),
+                self.redirected,
+                redirect_chain.len(),
+                self.response_status,
+                self.response_headers.clone(),
+                raw_body,
+                self.load_inputs.document_start_scripts.clone(),
+                self.load_inputs.runtime_bindings.clone(),
+                self.load_inputs.runtime_inspector_session_restore_snapshots.clone(),
+                self.load_inputs.extra_http_headers.clone(),
+                self.load_inputs.locale_override.clone(),
+                self.load_inputs.timezone_override.clone(),
+                self.load_inputs.script_execution_disabled,
+                self.load_inputs.bypass_content_security_policy,
+                self.load_inputs.cpu_throttling_rate,
+                self.load_inputs.emulated_media.clone(),
+                self.load_inputs.viewport_surface,
+                self.load_inputs.network_offline,
+                self.load_inputs.blocked_url_patterns.clone(),
+                fetch_subresource_interception_enabled,
+                fetch_subresource_interception_resource_type,
+                PageVmInitStage::DomContentLoaded,
+                RendererReplyBoundary::DocumentCommit,
+                self.load_inputs.root_frame_id.clone(),
+                CommittedDocumentResourceSource::Synthetic,
+                None,
+                main_document_commit.as_deref().cloned(),
+            )
+            .await
+            .map_err(|error| {
+                format!(
+                    "failed to prepare response-stage page `{}`: {error:#}",
+                    self.requested_url
+                )
+            })?;
+        if let Some(started) = self.timing_started {
+            tracing::info!(
+                target: "moli_cdp_nav_timing",
+                url = %self.requested_url,
+                stage = "response_stage_document_prepared",
+                elapsed_ms = started.elapsed().as_millis(),
+            );
+        }
+        Ok(PausedResponsePreparedDocument {
+            prepared_page,
+            renderer_body_tx,
+            renderer_completion_tx,
+            body_progress_source: self.body_progress_source,
+            body_network_progress_state,
+            requested_url: self.requested_url,
+            final_url: self.final_url,
+            request_method: self.request_method,
+            request_headers: self.request_headers,
+            response_status: self.response_status,
+            response_headers: self.response_headers,
+            response_from_cache: self.response_from_cache,
+            negotiated_http_version: self.negotiated_http_version,
+            network_observation_journal: self.network_observation_journal,
+            engine: self.engine,
+            timing_started: self.timing_started,
+            main_document_commit,
+        })
     }
 }
 
@@ -1148,7 +1527,7 @@ fn inline_html_navigation_source(
 }
 
 async fn load_inline_html_navigation_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     method: &str,
@@ -1198,7 +1577,7 @@ async fn load_inline_html_navigation_with_engine_async(
 }
 
 async fn load_data_url_navigation_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     method: &str,
@@ -1238,7 +1617,7 @@ async fn load_data_url_navigation_with_engine_async(
 }
 
 async fn build_navigation_from_streaming_raw_response_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     requested_url: Url,
@@ -1303,8 +1682,6 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
         }));
     }
 
-    let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
-        load_inputs.fetch_subresource_interception;
     body_progress_source.emit_response_metadata(
         &request_method,
         &request_headers,
@@ -1379,40 +1756,20 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
             .materialize_bytes()
             .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .map_err(|error| format!("failed to materialize XML page body: {error}"))?;
-        let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
             .main_document_commit_for_final_url(&final_url, None)
             .map(Arc::new);
         let prepared_page = engine
-            .prepare_document_page_from_response_with_storage_and_inspector_session_restores_async(
+            .prepare_protocol_document_page(
                 page_reservation,
-                page_storage.into_navigation_storage(),
+                load_inputs,
                 requested_url.clone(),
                 final_url.clone(),
-                load_inputs.navigation_initiator_url.clone(),
                 redirected,
                 redirect_chain.len(),
                 response_status,
                 response_headers.clone(),
                 response_text,
-                load_inputs.document_start_scripts.clone(),
-                load_inputs.runtime_bindings.clone(),
-                load_inputs
-                    .runtime_inspector_session_restore_snapshots
-                    .clone(),
-                load_inputs.extra_http_headers.clone(),
-                load_inputs.locale_override.clone(),
-                load_inputs.timezone_override.clone(),
-                load_inputs.script_execution_disabled,
-                load_inputs.bypass_content_security_policy,
-                load_inputs.cpu_throttling_rate,
-                load_inputs.emulated_media.clone(),
-                load_inputs.viewport_surface,
-                load_inputs.network_offline,
-                load_inputs.blocked_url_patterns.clone(),
-                fetch_subresource_interception_enabled,
-                fetch_subresource_interception_resource_type,
-                load_inputs.root_frame_id.clone(),
                 resource_source,
                 main_document_commit.as_deref().cloned(),
             )
@@ -1452,46 +1809,25 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
     let (body_tx, body_rx) = mpsc::channel(EXTERNAL_RAW_BODY_CHANNEL_CAPACITY);
     let (completion_tx, completion_rx) = oneshot::channel();
     let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(body_rx, completion_rx);
-    let page_storage = load_inputs.page_storage_handles();
     let main_document_commit = load_inputs
         .main_document_commit_for_final_url(&final_url, None)
         .map(Arc::new);
-    let prepared_future = engine
-        .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
-            page_reservation,
-            page_storage.into_navigation_storage(),
-            requested_url.clone(),
-            final_url.clone(),
-            load_inputs.navigation_initiator_url.clone(),
-            response.redirected,
-            redirect_chain.len(),
-            response_status,
-            response_headers.clone(),
-            raw_body,
-            load_inputs.document_start_scripts.clone(),
-            load_inputs.runtime_bindings.clone(),
-            load_inputs
-                .runtime_inspector_session_restore_snapshots
-                .clone(),
-            load_inputs.extra_http_headers.clone(),
-            load_inputs.locale_override.clone(),
-            load_inputs.timezone_override.clone(),
-            load_inputs.script_execution_disabled,
-            load_inputs.bypass_content_security_policy,
-            load_inputs.cpu_throttling_rate,
-            load_inputs.emulated_media.clone(),
-            load_inputs.viewport_surface,
-            load_inputs.network_offline,
-            load_inputs.blocked_url_patterns.clone(),
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
-            PageVmInitStage::DomContentLoaded,
-            reply_boundary,
-            load_inputs.root_frame_id.clone(),
-            resource_source,
-            reserved_service_worker_client,
-            main_document_commit.as_deref().cloned(),
-        );
+    let prepared_future = engine.prepare_protocol_streaming_raw_page(
+        page_reservation,
+        load_inputs,
+        requested_url.clone(),
+        final_url.clone(),
+        response.redirected,
+        redirect_chain.len(),
+        response_status,
+        response_headers.clone(),
+        raw_body,
+        PageVmInitStage::DomContentLoaded,
+        reply_boundary,
+        resource_source,
+        reserved_service_worker_client,
+        main_document_commit.as_deref().cloned(),
+    );
     let prepared_future = async {
         prepared_future
             .await
@@ -1608,13 +1944,13 @@ impl CdpConnection {
             .flatten()
     }
 
-    pub(crate) async fn prepare_paused_streaming_response_navigation_async(
+    pub(crate) fn background_paused_streaming_response_navigation_preparation_job(
         &mut self,
         navigation: &NavigationDispatchState,
         response: &StreamingRawResponse,
         network_observation_journal: &NetworkObservationJournal,
         body_progress_source: MainDocumentBodyProgressSource,
-    ) -> Result<Option<PausedResponsePreparedDocument>, String> {
+    ) -> Result<Option<BackgroundPausedStreamingResponseNavigationPreparationJob>, String> {
         if super::downloads::response_headers_indicate_download(&response.headers)
             || response_headers_indicate_xml_document(&response.headers)
             || response_status_may_use_http_error_page(response.status)
@@ -1626,7 +1962,6 @@ impl CdpConnection {
             return Ok(None);
         }
         let requested_url = navigation.requested_url.clone();
-        let network_extra_info_available = !network_observation_journal.is_empty();
         let request_method = navigation.request_method.clone();
         let request_headers = navigation.request_headers.clone();
         let timing_started = moli_trace::cdp_nav_timing_enabled().then(std::time::Instant::now);
@@ -1637,123 +1972,57 @@ impl CdpConnection {
         let response_from_cache = response.from_cache;
         let negotiated_http_version = response.negotiated_http_version;
         let initial_request_cookie_report = response.request_cookie_report.clone();
-        let redirect_chain = response
-            .redirect_chain
-            .clone()
-            .into_iter()
-            .map(Into::into)
-            .collect::<Vec<_>>();
-        let network_events = CompletedMainDocumentNetworkEvents::new(
-            request_method.clone(),
-            request_headers.clone(),
-            initial_request_cookie_report,
-            response_status,
-            response_headers.clone(),
-            response_cookie_reports.clone(),
-            redirect_chain.clone(),
-            network_extra_info_available,
-            response_from_cache,
-        )
-        .with_negotiated_http_version(negotiated_http_version)
-        .with_network_observation_journal(network_observation_journal.clone());
-        let body_network_progress_state =
-            body_progress_source.body_network_progress_for_completed_events(network_events);
-        let (renderer_body_tx, renderer_body_rx) =
-            mpsc::channel(EXTERNAL_RAW_BODY_CHANNEL_CAPACITY);
-        let (renderer_completion_tx, renderer_completion_rx) = oneshot::channel();
-        let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(
-            renderer_body_rx,
-            renderer_completion_rx,
-        );
+        let redirect_chain = response.redirect_chain.clone();
         let shared_resource_runtime =
             self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
-        let mut engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
-        if let Some(resource_runtime) = shared_resource_runtime {
-            engine
-                .adopt_registered_resource_runtime(resource_runtime)
-                .map_err(|error| error.to_string())?;
-        }
-        let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
-            load_inputs.fetch_subresource_interception;
-        let page_storage = load_inputs.page_storage_handles();
-        let main_document_commit = load_inputs
-            .main_document_commit_for_final_url(&final_url, None)
-            .map(Arc::new);
+        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
         let page_reservation = self.reserve_renderer_page_for_session_owner(
             navigation.navigate_session_id.as_deref(),
             &load_inputs,
             &engine,
         );
-        let prepared_page = engine
-            .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
+        Ok(Some(
+            BackgroundPausedStreamingResponseNavigationPreparationJob {
+                engine,
                 page_reservation,
-                page_storage.into_navigation_storage(),
-                requested_url.clone(),
-                final_url.clone(),
-                load_inputs.navigation_initiator_url.clone(),
-                response.redirected,
-                redirect_chain.len(),
+                load_inputs,
+                requested_url,
+                final_url,
+                request_method,
+                request_headers,
                 response_status,
-                response_headers.clone(),
-                raw_body,
-                load_inputs.document_start_scripts.clone(),
-                load_inputs.runtime_bindings.clone(),
-                load_inputs
-                    .runtime_inspector_session_restore_snapshots
-                    .clone(),
-                load_inputs.extra_http_headers.clone(),
-                load_inputs.locale_override.clone(),
-                load_inputs.timezone_override.clone(),
-                load_inputs.script_execution_disabled,
-                load_inputs.bypass_content_security_policy,
-                load_inputs.cpu_throttling_rate,
-                load_inputs.emulated_media.clone(),
-                load_inputs.viewport_surface,
-                load_inputs.network_offline,
-                load_inputs.blocked_url_patterns.clone(),
-                fetch_subresource_interception_enabled,
-                fetch_subresource_interception_resource_type,
-                PageVmInitStage::DomContentLoaded,
-                RendererReplyBoundary::DocumentCommit,
-                load_inputs.root_frame_id.clone(),
-                CommittedDocumentResourceSource::Synthetic,
-                None,
-                main_document_commit.as_deref().cloned(),
-            )
-            .await
-            .map_err(|error| {
-                format!(
-                    "failed to prepare response-stage page `{}`: {error:#}",
-                    requested_url
-                )
-            })?;
-        if let Some(started) = timing_started {
-            tracing::info!(
-                target: "moli_cdp_nav_timing",
-                url = %requested_url,
-                stage = "response_stage_document_prepared",
-                elapsed_ms = started.elapsed().as_millis(),
-            );
-        }
-        Ok(Some(PausedResponsePreparedDocument {
-            prepared_page,
-            renderer_body_tx,
-            renderer_completion_tx,
+                response_headers,
+                response_cookie_reports,
+                response_from_cache,
+                negotiated_http_version,
+                initial_request_cookie_report,
+                redirected: response.redirected,
+                redirect_chain,
+                network_observation_journal: network_observation_journal.clone(),
+                body_progress_source,
+                shared_resource_runtime,
+                timing_started,
+            },
+        ))
+    }
+
+    pub(crate) async fn prepare_paused_streaming_response_navigation_async(
+        &mut self,
+        navigation: &NavigationDispatchState,
+        response: &StreamingRawResponse,
+        network_observation_journal: &NetworkObservationJournal,
+        body_progress_source: MainDocumentBodyProgressSource,
+    ) -> Result<Option<PausedResponsePreparedDocument>, String> {
+        let Some(job) = self.background_paused_streaming_response_navigation_preparation_job(
+            navigation,
+            response,
+            network_observation_journal,
             body_progress_source,
-            body_network_progress_state,
-            requested_url,
-            final_url,
-            request_method,
-            request_headers,
-            response_status,
-            response_headers,
-            response_from_cache,
-            negotiated_http_version,
-            network_observation_journal: network_observation_journal.clone(),
-            engine,
-            timing_started,
-            main_document_commit,
-        }))
+        )?
+        else {
+            return Ok(None);
+        };
+        job.run().await.map(Some)
     }
 
     pub(crate) fn start_initial_document_page_ensure_for_session_owner(
@@ -1894,9 +2163,9 @@ impl CdpConnection {
         // command; binding after `start_*` would leave a real cross-thread race
         // where the concrete FIFO receives its first publication ownerless.
         let page_owner = self
-            .pending_target_page_residence_identity_for_session(session_id)
+            .target_page_owner_key_for_session(session_id)
             .ok_or_else(|| "initial document Page reservation lost its target owner".to_owned())?;
-        self.bind_renderer_page_output_owner(renderer_page, page_owner);
+        self.bind_renderer_page_output_target(renderer_page, page_owner);
         let pending = engine
             .start_build_html_page_from_response_with_storage_and_inspector_session_restores(
                 page_reservation,
@@ -2034,10 +2303,10 @@ impl CdpConnection {
         &self,
         owner: &InitialDocumentPageOwner,
     ) -> bool {
-        self.browser_context_by_id(&owner.browser_context_id)
-            .is_some_and(|browser_context| {
-                browser_context.can_install_current_initial_empty_document_page(&owner.target_id)
-            })
+        self.can_install_target_initial_empty_document_page(&BrowserPageOwnerKey::new(
+            &owner.browser_context_id,
+            &owner.target_id,
+        ))
     }
 
     fn fail_initial_document_page_build_for_owner(
@@ -2108,6 +2377,7 @@ impl CdpConnection {
         let install_result = self
             .install_initial_loaded_page_for_page_owner_async(&owner, page, page_creation_artifacts)
             .await
+            .map_err(|error| error.to_string())
             .inspect_err(|message| {
                 self.fail_initial_document_page_build_for_owner(&owner, message.clone());
             })?;
@@ -2116,7 +2386,11 @@ impl CdpConnection {
             return Ok(LoadedPageCreationDiagnosticsParts::default());
         }
         if let Some(engine) = engine {
-            self.adopt_loaded_navigation_engine_for_page_owner(&owner, engine);
+            self.adopt_loaded_navigation_engine_for_target_owner(
+                BrowserPageOwnerKey::new(owner.browser_context_id.clone(), owner.target_id.clone()),
+                engine,
+            )
+            .map_err(|error| format!("failed to adopt initial Document engine: {error}"))?;
         }
         self.complete_initial_document_page_build_for_page_owner(&owner);
         Ok(diagnostics)
@@ -2270,56 +2544,11 @@ impl CdpConnection {
         request_headers: Vec<(String, String)>,
         body_progress_source: MainDocumentBodyProgressSource,
     ) -> Result<NavigationLoadOutcome, String> {
-        if load_inputs.browser_context_id.is_none() {
-            let page_reservation = self.engine.reserve_page_for_creation();
-            if let Some(navigation) = self
-                .load_inline_html_navigation_async(
-                    page_reservation,
-                    &load_inputs,
-                    method,
-                    raw_url,
-                    request_headers.clone(),
-                )
-                .await
-            {
-                return navigation;
-            }
-            if let Some(navigation) = load_data_url_navigation_with_engine_async(
-                &mut self.engine,
-                page_reservation,
-                &load_inputs,
-                method,
-                raw_url,
-                request_headers.clone(),
-                RendererReplyBoundary::Stage,
-            )
-            .await
-            {
-                return navigation;
-            }
-        } else {
-            let mut inline_engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
-            let page_reservation = self.reserve_renderer_page_for_session_owner(
-                session_id,
-                &load_inputs,
-                &inline_engine,
-            );
-            if let Some(navigation) = self
-                .load_inline_html_navigation_with_engine_async(
-                    &mut inline_engine,
-                    page_reservation,
-                    &load_inputs,
-                    method,
-                    raw_url,
-                    request_headers.clone(),
-                    RendererReplyBoundary::Stage,
-                )
-                .await
-            {
-                return navigation
-                    .map(|navigation| navigation.with_navigation_engine(inline_engine));
-            }
-            if let Some(navigation) = load_data_url_navigation_with_engine_async(
+        let mut inline_engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let page_reservation =
+            self.reserve_renderer_page_for_session_owner(session_id, &load_inputs, &inline_engine);
+        if let Some(navigation) = self
+            .load_inline_html_navigation_with_engine_async(
                 &mut inline_engine,
                 page_reservation,
                 &load_inputs,
@@ -2329,10 +2558,21 @@ impl CdpConnection {
                 RendererReplyBoundary::Stage,
             )
             .await
-            {
-                return navigation
-                    .map(|navigation| navigation.with_navigation_engine(inline_engine));
-            }
+        {
+            return navigation.map(|navigation| navigation.with_navigation_engine(inline_engine));
+        }
+        if let Some(navigation) = load_data_url_navigation_with_engine_async(
+            &mut inline_engine,
+            page_reservation,
+            &load_inputs,
+            method,
+            raw_url,
+            request_headers.clone(),
+            RendererReplyBoundary::Stage,
+        )
+        .await
+        {
+            return navigation.map(|navigation| navigation.with_navigation_engine(inline_engine));
         }
 
         ensure_url_not_blocked_for_load_inputs(&load_inputs, raw_url)?;
@@ -2366,14 +2606,12 @@ impl CdpConnection {
         .await
     }
 
-    pub(crate) fn navigation_load_job_for_navigation(
+    pub(crate) fn background_navigation_load_job_for_navigation(
         &mut self,
-        token: &DocumentNavigationToken,
         navigation: &NavigationDispatchState,
         body_progress_source: MainDocumentBodyProgressSource,
-        early_result: Option<BackgroundNavigationEarlyResult>,
-    ) -> Option<BackgroundNavigationLoadJob> {
-        let cancellation = self.document_navigation_cancellation_handle(token)?;
+        early_outcome: Option<BackgroundNavigationEarlyOutcome>,
+    ) -> BackgroundNavigationLoadJob {
         let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         // Ensure the connection's resident browser resource runtime exists,
         // then share only that transport/cache owner with the background job.
@@ -2386,11 +2624,11 @@ impl CdpConnection {
             &load_inputs,
             &engine,
         );
-        Some(BackgroundNavigationLoadJob {
+        BackgroundNavigationLoadJob {
             engine,
             page_reservation,
-            cancellation,
-            early_result,
+            cancellation: BackgroundNavigationCancellation::new(),
+            early_outcome,
             load_inputs,
             method: navigation.request_method.clone(),
             raw_url: navigation.requested_url.as_str().to_owned(),
@@ -2398,24 +2636,206 @@ impl CdpConnection {
             request_headers: navigation.request_headers.clone(),
             body_progress_source,
             shared_resource_runtime,
+        }
+    }
+
+    pub(crate) fn background_intercepted_navigation_fetch_job_for_navigation(
+        &mut self,
+        navigation: &NavigationDispatchState,
+        auth: Option<SubresourceAuthCredentials>,
+        mode: BackgroundInterceptedNavigationFetchMode,
+    ) -> Result<BackgroundInterceptedNavigationFetchJob, String> {
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        let raw_url = navigation.requested_url.as_str().to_owned();
+        ensure_url_not_blocked_for_load_inputs(&load_inputs, &raw_url)?;
+        if load_inputs.network_offline {
+            return Err("Network emulation offline".to_owned());
+        }
+
+        let mut request = Request::new_bytes(
+            &navigation.request_method,
+            &raw_url,
+            navigation.clone_request_body_bytes(),
+            navigation.request_headers.clone(),
+        )
+        .map_err(|error| format!("failed to build request for `{raw_url}`: {error}"))?
+        .with_top_level_navigation_cookie_context()
+        .with_browser_navigation_kind(load_inputs.browser_navigation_kind);
+        if !load_inputs.infer_navigation_referrer {
+            request = request.without_inferred_referrer();
+        }
+        if let Some(initiator_url) = load_inputs.navigation_initiator_url.as_ref() {
+            request = request.with_initiator_url(initiator_url);
+        }
+        request.set_auth(auth.map(Into::into));
+        let loader = self
+            .ensure_resource_request_client_for_navigation_load_inputs(&load_inputs)?
+            .clone();
+        Ok(BackgroundInterceptedNavigationFetchJob {
+            loader,
+            request,
+            raw_url,
+            mode,
         })
     }
 
-    pub(crate) fn background_navigation_load_job_for_navigation(
+    pub(crate) fn background_streaming_response_collection_job(
+        &self,
+        response: NetworkFetchResult<StreamingRawResponse>,
+    ) -> BackgroundStreamingResponseCollectionJob {
+        BackgroundStreamingResponseCollectionJob { response }
+    }
+
+    pub(crate) fn background_buffered_response_navigation_load_job_for_navigation(
         &mut self,
-        token: &DocumentNavigationToken,
         navigation: &NavigationDispatchState,
+        response: NetworkFetchResult<RawResponse>,
         body_progress_source: MainDocumentBodyProgressSource,
-        early_result: Option<BackgroundNavigationEarlyResult>,
-    ) -> Option<BackgroundNavigationLoadJob> {
-        let job = self.navigation_load_job_for_navigation(
-            token,
-            navigation,
+    ) -> BackgroundBufferedResponseNavigationLoadJob {
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        let shared_resource_runtime =
+            self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
+        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let page_reservation =
+            (!super::downloads::response_headers_indicate_download(&response.response().headers))
+                .then(|| {
+                    self.reserve_renderer_page_for_session_owner(
+                        navigation.navigate_session_id.as_deref(),
+                        &load_inputs,
+                        &engine,
+                    )
+                });
+        BackgroundBufferedResponseNavigationLoadJob {
+            engine,
+            page_reservation,
+            load_inputs,
+            requested_url: navigation.requested_url.clone(),
+            request_method: navigation.request_method.clone(),
+            request_headers: navigation.request_headers.clone(),
+            response,
             body_progress_source,
-            early_result,
-        )?;
-        self.arm_background_navigation_completion(token, None)
-            .then_some(job)
+            shared_resource_runtime,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn background_captured_response_navigation_load_job_for_navigation(
+        &mut self,
+        navigation: &NavigationDispatchState,
+        mut head: ResponseHead,
+        body: CapturedBody,
+        network_observation_journal: NetworkObservationJournal,
+        body_progress_source: MainDocumentBodyProgressSource,
+        response_code: Option<u16>,
+        response_headers_override: Vec<(String, String)>,
+    ) -> BackgroundCapturedResponseNavigationLoadJob {
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        let has_response_override =
+            response_code.is_some() || !response_headers_override.is_empty();
+        if has_response_override {
+            let response_status = response_code.unwrap_or(head.status);
+            let response_headers = if response_headers_override.is_empty() {
+                head.headers
+            } else {
+                response_headers_override
+            };
+            let response_cookie_reports =
+                load_inputs.store_response_cookie_reports(&head.final_url, &response_headers);
+            // Preserve the previous buffered-override semantics: an explicit
+            // Fetch override becomes a synthetic response head rather than
+            // inheriting redirect/cache transport metadata from the wire.
+            head = ResponseHead {
+                final_url: head.final_url,
+                status: response_status,
+                headers: response_headers,
+                request_cookie_report: head.request_cookie_report,
+                cookie_set_reports: response_cookie_reports,
+                redirected: false,
+                redirect_chain: Vec::new(),
+                from_cache: false,
+                negotiated_http_version: None,
+            };
+        }
+        let allow_download = !has_response_override;
+        let shared_resource_runtime =
+            self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
+        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let page_reservation = if allow_download
+            && super::downloads::response_headers_indicate_download(&head.headers)
+        {
+            None
+        } else {
+            Some(self.reserve_renderer_page_for_session_owner(
+                navigation.navigate_session_id.as_deref(),
+                &load_inputs,
+                &engine,
+            ))
+        };
+        BackgroundCapturedResponseNavigationLoadJob {
+            engine,
+            page_reservation,
+            load_inputs,
+            requested_url: navigation.requested_url.clone(),
+            request_method: navigation.request_method.clone(),
+            request_headers: navigation.request_headers.clone(),
+            head,
+            body,
+            network_observation_journal,
+            body_progress_source,
+            allow_download,
+            reply_boundary: RendererReplyBoundary::DocumentCommit,
+            shared_resource_runtime,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn background_synthetic_response_navigation_load_job_for_navigation(
+        &mut self,
+        navigation: &NavigationDispatchState,
+        final_url: Url,
+        response_code: u16,
+        response_headers: Vec<(String, String)>,
+        body: CapturedBody,
+        request_cookie_report: Option<moli_cookie_jar::StoredCookieQueryReport>,
+        body_progress_source: MainDocumentBodyProgressSource,
+    ) -> BackgroundCapturedResponseNavigationLoadJob {
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        let response_cookie_reports =
+            load_inputs.store_response_cookie_reports(&final_url, &response_headers);
+        let head = ResponseHead {
+            final_url,
+            status: response_code,
+            headers: response_headers,
+            request_cookie_report,
+            cookie_set_reports: response_cookie_reports,
+            redirected: false,
+            redirect_chain: Vec::new(),
+            from_cache: false,
+            negotiated_http_version: None,
+        };
+        let shared_resource_runtime =
+            self.shared_resource_runtime_for_navigation_load_inputs(&load_inputs);
+        let engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let page_reservation = Some(self.reserve_renderer_page_for_session_owner(
+            navigation.navigate_session_id.as_deref(),
+            &load_inputs,
+            &engine,
+        ));
+        BackgroundCapturedResponseNavigationLoadJob {
+            engine,
+            page_reservation,
+            load_inputs,
+            requested_url: navigation.requested_url.clone(),
+            request_method: navigation.request_method.clone(),
+            request_headers: navigation.request_headers.clone(),
+            head,
+            body,
+            network_observation_journal: NetworkObservationJournal::default(),
+            body_progress_source,
+            allow_download: false,
+            reply_boundary: RendererReplyBoundary::Stage,
+            shared_resource_runtime,
+        }
     }
 
     pub(crate) fn background_streaming_response_navigation_load_job_for_navigation(
@@ -2495,14 +2915,16 @@ impl CdpConnection {
                 Some(browser_context_id.as_str()),
                 "navigation Page reservation must bind inside its captured browser context"
             );
-            let renderer_page = RendererPageResidenceIdentity::from_parts(
-                page_reservation.local_host_id(),
-                page_reservation.page_id(),
-            );
             let page_owner = self
-                .reserve_target_page_residence_identity_for_session(session_id, renderer_page)
+                .target_page_owner_key_for_session(session_id)
                 .expect("navigation Page reservation must retain its target owner");
-            self.bind_renderer_page_output_owner(renderer_page, page_owner);
+            self.bind_renderer_page_output_target(
+                RendererPageResidenceIdentity::from_parts(
+                    page_reservation.local_host_id(),
+                    page_reservation.page_id(),
+                ),
+                page_owner,
+            );
         }
     }
 
@@ -2510,31 +2932,44 @@ impl CdpConnection {
         &self,
         load_inputs: &TargetNavigationLoadInputs,
     ) -> NavigationEngine {
+        // Before a BrowserContext/Target is installed, `load_inputs` carries a
+        // synthetic renderer-context runtime on every call. It is storage
+        // input, not a renderer-owner identity. Replacing the unbound engine
+        // from that transient runtime would drop the render-runtime owner of
+        // Pages returned by an earlier fixture load. Keep the exact selected
+        // renderer owner while moving an engine clone across the await.
+        if load_inputs.browser_context_id.is_none() {
+            return self.active_navigation_engine_for_async_load(load_inputs);
+        }
+
         // Same-browser-context CDP background targets retain only another
         // NavigationEngine wrapper; their page contexts still live under the
         // same renderer owner. Different browser contexts keep distinct
         // renderer owners.
         let mut engine = if self
-            .engine
-            .browser_context_runtime()
-            .shares_state_with(&load_inputs.renderer_runtime.runtime())
+            .browser_host_state
+            .navigation_owner()
+            .active_runtime_shares_state_with(&load_inputs.renderer_runtime)
         {
-            NavigationEngine::new_with_runtime_config_and_shared_renderer_owner(
-                self.navigation_runtime_config_for_load_inputs(load_inputs),
-                &self.engine,
-            )
-            .expect("active shared BrowserContext owner must be live")
-        } else if let Some(engine) = self
-            .retained_background_navigation_engine_for_load_inputs(load_inputs)
-            .cloned()
+            self.browser_host_state
+                .navigation_owner()
+                .new_engine_sharing_active_renderer_owner(
+                    self.fetch_config_for_load_inputs(load_inputs),
+                )
+                .expect("active shared BrowserContext owner must be live")
+        } else if let Some(engine) =
+            self.cloned_retained_background_navigation_engine_for_load_inputs(load_inputs)
         {
             engine
         } else {
-            NavigationEngine::new_with_runtime_config_and_browser_context_access(
-                self.navigation_runtime_config_for_load_inputs(load_inputs),
-                load_inputs.renderer_runtime.clone(),
-            )
-            .expect("navigation load BrowserContext owner must be live")
+            let fetch_config = self.fetch_config_for_load_inputs(load_inputs);
+            self.browser_host_state
+                .navigation_owner()
+                .new_engine_for_browser_context_runtime(
+                    fetch_config,
+                    load_inputs.renderer_runtime.clone(),
+                )
+                .expect("navigation load BrowserContext owner must be live")
         };
         self.apply_fetch_overrides_to_background_navigation_engine(&mut engine, load_inputs);
         if !self.active_resource_runtime_matches_navigation_load_inputs(load_inputs) {
@@ -2553,23 +2988,36 @@ impl CdpConnection {
         engine
     }
 
-    fn navigation_runtime_config_for_load_inputs(
+    /// Moves the selected engine's renderer capability into one async load
+    /// without borrowing Browser Host state across the wait.
+    ///
+    /// The returned clone is intentionally not a target handoff payload. The
+    /// authoritative selected engine remains resident and keeps every Page
+    /// built by active-owner setup helpers alive, matching their pre-split
+    /// contract.
+    fn active_navigation_engine_for_async_load(
         &self,
         load_inputs: &TargetNavigationLoadInputs,
-    ) -> moli_core::runtime::NavigationRuntimeConfig {
-        let mut config = self.engine.runtime_config();
-        *config.fetch_config_mut() = self.fetch_config_for_load_inputs(load_inputs);
-        config
+    ) -> NavigationEngine {
+        let mut engine = self
+            .browser_host_state
+            .navigation_owner()
+            .clone_active_navigation_engine();
+        self.apply_fetch_overrides_to_background_navigation_engine(&mut engine, load_inputs);
+        engine.set_bypass_service_worker(load_inputs.bypass_service_worker);
+        self.apply_scheduler_senders_to_navigation_engine(&engine);
+        engine
     }
 
-    fn retained_background_navigation_engine_for_load_inputs(
+    fn cloned_retained_background_navigation_engine_for_load_inputs(
         &self,
         load_inputs: &TargetNavigationLoadInputs,
-    ) -> Option<&NavigationEngine> {
+    ) -> Option<NavigationEngine> {
         let browser_context_id = load_inputs.browser_context_id.as_ref()?;
         let target_id = load_inputs.root_frame_id.as_ref()?;
-        self.retained_background_navigation_engines
-            .get(&(browser_context_id.clone(), target_id.clone()))
+        self.browser_host_state
+            .navigation_owner()
+            .clone_retained_background_engine(browser_context_id, target_id)
     }
 
     fn apply_fetch_overrides_to_background_navigation_engine(
@@ -2577,29 +3025,30 @@ impl CdpConnection {
         engine: &mut NavigationEngine,
         load_inputs: &TargetNavigationLoadInputs,
     ) {
+        let policy = self.browser_host_network_policy_snapshot();
         engine.set_browser_identity_override(
             load_inputs
                 .browser_identity_override
                 .clone()
-                .or_else(|| self.global_browser_identity_override.clone())
-                .unwrap_or_else(|| self.base_browser_identity.clone()),
+                .or_else(|| policy.global_browser_identity_override().cloned())
+                .unwrap_or_else(|| policy.base_browser_identity().clone()),
         );
         engine.set_http_proxy_override(
             load_inputs
                 .http_proxy_override
                 .clone()
-                .or_else(|| self.base_http_proxy.clone()),
+                .or_else(|| policy.base_http_proxy().map(str::to_owned)),
         );
         engine.set_http_no_proxy_override(
             load_inputs
                 .http_no_proxy_override
                 .clone()
-                .or_else(|| self.base_http_no_proxy.clone()),
+                .or_else(|| policy.base_http_no_proxy().map(str::to_owned)),
         );
         engine.set_tls_verify_host(
             load_inputs
                 .tls_verify_host_override
-                .unwrap_or(self.base_tls_verify_host),
+                .unwrap_or(policy.base_tls_verify_host()),
         );
     }
 
@@ -2611,13 +3060,13 @@ impl CdpConnection {
             return None;
         }
         let resource_storage = load_inputs.resource_storage_handles();
-        self.engine
-            .ensure_resource_runtime_ready_for_navigation_storage(
-                resource_storage.into_navigation_storage(),
-            )
+        self.browser_host_state
+            .navigation_owner_mut()
+            .ensure_active_resource_runtime_ready(resource_storage.into_navigation_storage())
             .ok()?;
-        self.engine
-            .resource_request_client()
+        self.browser_host_state
+            .navigation_owner()
+            .active_resource_request_client()
             .map(|client| client.browser_resource_runtime())
     }
 
@@ -2626,47 +3075,53 @@ impl CdpConnection {
         load_inputs: &TargetNavigationLoadInputs,
     ) -> bool {
         if !self
-            .engine
-            .browser_context_runtime()
-            .shares_state_with(&load_inputs.renderer_runtime.runtime())
+            .browser_host_state
+            .navigation_owner()
+            .active_runtime_shares_state_with(&load_inputs.renderer_runtime)
         {
             return false;
         }
         let fetch_config = self.fetch_config_for_load_inputs(load_inputs);
-        fetch_config.browser_identity() == self.engine.fetch_config().browser_identity()
-            && fetch_config.http_proxy() == self.http_proxy()
-            && fetch_config.http_no_proxy() == self.http_no_proxy()
-            && fetch_config.tls_verify_host() == self.tls_verify_host()
+        let active_fetch_config = self
+            .browser_host_state
+            .navigation_owner()
+            .active_fetch_config()
+            .clone();
+        fetch_config.browser_identity() == active_fetch_config.browser_identity()
+            && fetch_config.http_proxy() == active_fetch_config.http_proxy()
+            && fetch_config.http_no_proxy() == active_fetch_config.http_no_proxy()
+            && fetch_config.tls_verify_host() == active_fetch_config.tls_verify_host()
     }
 
     fn fetch_config_for_load_inputs(
         &self,
         load_inputs: &TargetNavigationLoadInputs,
     ) -> FetchConfig {
-        let mut fetch_config = self.fetch_config().clone();
+        let policy = self.browser_host_network_policy_snapshot();
+        let mut fetch_config = self.fetch_config();
         fetch_config.set_browser_identity(
             load_inputs
                 .browser_identity_override
                 .clone()
-                .or_else(|| self.global_browser_identity_override.clone())
-                .unwrap_or_else(|| self.base_browser_identity.clone()),
+                .or_else(|| policy.global_browser_identity_override().cloned())
+                .unwrap_or_else(|| policy.base_browser_identity().clone()),
         );
         fetch_config.set_http_proxy(
             load_inputs
                 .http_proxy_override
                 .clone()
-                .or_else(|| self.base_http_proxy.clone()),
+                .or_else(|| policy.base_http_proxy().map(str::to_owned)),
         );
         fetch_config.set_http_no_proxy(
             load_inputs
                 .http_no_proxy_override
                 .clone()
-                .or_else(|| self.base_http_no_proxy.clone()),
+                .or_else(|| policy.base_http_no_proxy().map(str::to_owned)),
         );
         fetch_config.set_tls_verify_host(
             load_inputs
                 .tls_verify_host_override
-                .unwrap_or(self.base_tls_verify_host),
+                .unwrap_or(policy.base_tls_verify_host()),
         );
         fetch_config
     }
@@ -2674,29 +3129,10 @@ impl CdpConnection {
     pub async fn load_page_via_runtime_async(&mut self, raw_url: &str) -> Result<Page, String> {
         let navigation = self.load_navigation_via_runtime_async(raw_url).await?;
         if let Some(engine) = navigation.navigation_engine {
-            self.replace_navigation_engine(engine);
+            self.adopt_navigation_engine_for_current_owner(engine)
+                .map_err(|error| format!("failed to adopt loaded Page engine: {error}"))?;
         }
         Ok(navigation.page)
-    }
-
-    async fn load_inline_html_navigation_async(
-        &mut self,
-        page_reservation: RendererPageReservationToken,
-        load_inputs: &TargetNavigationLoadInputs,
-        method: &str,
-        raw_url: &str,
-        request_headers: Vec<(String, String)>,
-    ) -> Option<Result<NavigationLoadOutcome, String>> {
-        load_inline_html_navigation_with_engine_async(
-            &mut self.engine,
-            page_reservation,
-            load_inputs,
-            method,
-            raw_url,
-            request_headers,
-            RendererReplyBoundary::Stage,
-        )
-        .await
     }
 
     async fn load_inline_html_navigation_with_engine_async(
@@ -2749,6 +3185,7 @@ impl CdpConnection {
             response_body,
             None,
             initial_request_cookie_report,
+            false,
         )
         .await
     }
@@ -2834,6 +3271,7 @@ impl CdpConnection {
             response_body,
             None,
             initial_request_cookie_report,
+            false,
         )
         .await
     }
@@ -2896,14 +3334,11 @@ impl CdpConnection {
             from_cache: false,
             negotiated_http_version: None,
         };
-        let page_reservation = self.engine.reserve_page_for_creation();
-        self.bind_renderer_page_reservation_for_session_owner(
-            session_id,
-            load_inputs,
-            page_reservation,
-        );
-        prepare_navigation_from_captured_raw_response_with_engine_async(
-            &mut self.engine,
+        let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
+        let page_reservation =
+            self.reserve_renderer_page_for_session_owner(session_id, load_inputs, &engine);
+        let navigation = prepare_navigation_from_captured_raw_response_with_engine_async(
+            &mut engine,
             page_reservation,
             load_inputs,
             requested_url,
@@ -2917,8 +3352,8 @@ impl CdpConnection {
             false,
             RendererReplyBoundary::Stage,
         )
-        .await
-        .map(NavigationLoadOutcome::response_commit_ready)
+        .await?;
+        Ok(NavigationLoadOutcome::response_commit_ready(navigation).with_navigation_engine(engine))
     }
 
     async fn build_loaded_navigation_from_buffered_response_with_request_cookie_report_async(
@@ -2932,45 +3367,28 @@ impl CdpConnection {
         response_body: String,
         captured_response_body: Option<CapturedBody>,
         initial_request_cookie_report: Option<StoredCookieQueryReport>,
+        retain_navigation_engine_for_owner_adoption: bool,
     ) -> Result<LoadedNavigation, String> {
         let response_cookie_reports =
             load_inputs.store_response_cookie_reports(&requested_url, &response_headers);
-        let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
-            load_inputs.fetch_subresource_interception;
-        let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
             .main_document_commit_for_final_url(&requested_url, None)
             .map(Arc::new);
-        let built = self
-            .engine
-            .build_html_page_from_response_with_storage_and_inspector_session_restores_async(
-                page_storage.into_navigation_storage(),
+        let mut engine = if retain_navigation_engine_for_owner_adoption {
+            self.background_navigation_engine_for_load_inputs(load_inputs)
+        } else {
+            self.active_navigation_engine_for_async_load(load_inputs)
+        };
+        let built = engine
+            .build_protocol_html_page(
+                load_inputs,
                 requested_url.clone(),
                 requested_url.clone(),
-                load_inputs.navigation_initiator_url.clone(),
                 false,
                 0,
                 response_status,
                 response_headers.clone(),
                 response_body.clone(),
-                load_inputs.document_start_scripts.clone(),
-                load_inputs.runtime_bindings.clone(),
-                load_inputs
-                    .runtime_inspector_session_restore_snapshots
-                    .clone(),
-                load_inputs.extra_http_headers.clone(),
-                load_inputs.locale_override.clone(),
-                load_inputs.timezone_override.clone(),
-                load_inputs.script_execution_disabled,
-                load_inputs.bypass_content_security_policy,
-                load_inputs.cpu_throttling_rate,
-                load_inputs.emulated_media.clone(),
-                load_inputs.viewport_surface,
-                load_inputs.network_offline,
-                load_inputs.blocked_url_patterns.clone(),
-                fetch_subresource_interception_enabled,
-                fetch_subresource_interception_resource_type,
-                load_inputs.root_frame_id.clone(),
                 main_document_commit.as_deref().cloned(),
             )
             .await
@@ -3022,7 +3440,7 @@ impl CdpConnection {
                 false,
                 network_progress,
             ),
-            navigation_engine: None,
+            navigation_engine: retain_navigation_engine_for_owner_adoption.then_some(engine),
             network_error_page: None,
         })
     }
@@ -3041,9 +3459,8 @@ impl CdpConnection {
             return Err("Network emulation offline".to_owned());
         }
         let resource_storage = load_inputs.resource_storage_handles();
-        self.engine
-            .set_bypass_service_worker(load_inputs.bypass_service_worker);
-        self.engine
+        let mut engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let fetch_result = engine
             .fetch_navigation_response_with_storage_async(
                 resource_storage.into_navigation_storage(),
                 load_inputs.navigation_initiator_url.as_ref(),
@@ -3055,8 +3472,10 @@ impl CdpConnection {
                 request_headers,
                 auth,
             )
-            .await
-            .map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
+            .await;
+        self.adopt_navigation_engine_for_current_owner(engine)
+            .map_err(|error| format!("failed to restore navigation engine after fetch: {error}"))?;
+        fetch_result.map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
     }
 
     pub(crate) async fn fetch_navigation_auth_raw_response_for_session_owner_async(
@@ -3179,6 +3598,18 @@ impl CdpConnection {
             .map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
     }
 
+    pub fn ensure_navigation_response_status(
+        &self,
+        raw_url: &str,
+        status: u16,
+        allow_auth_challenge: bool,
+    ) -> Result<(), String> {
+        self.browser_host_state
+            .navigation_owner()
+            .ensure_active_navigation_response_status(raw_url, status, allow_auth_challenge)
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn build_navigation_from_network_response_async(
         &mut self,
         requested_url: Url,
@@ -3208,8 +3639,6 @@ impl CdpConnection {
         let (response, network_observation_journal) =
             response.into_parts_with_observation_journal();
         let network_extra_info_available = !network_observation_journal.is_empty();
-        let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
-            load_inputs.fetch_subresource_interception;
         let (response_head, response_body, response_body_bytes) = response.into_parts();
         let final_url = response_head.final_url.clone();
         let response_status = response_head.status;
@@ -3226,40 +3655,20 @@ impl CdpConnection {
             .into_iter()
             .map(Into::into)
             .collect();
-        let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
             .main_document_commit_for_final_url(&final_url, None)
             .map(Arc::new);
-        let built = self
-            .engine
-            .build_html_page_from_response_with_storage_and_inspector_session_restores_async(
-                page_storage.into_navigation_storage(),
+        let mut engine = self.background_navigation_engine_for_load_inputs(&load_inputs);
+        let built = engine
+            .build_protocol_html_page(
+                &load_inputs,
                 requested_url.clone(),
                 final_url.clone(),
-                load_inputs.navigation_initiator_url.clone(),
                 redirected,
                 redirect_chain.len(),
                 response_status,
                 response_headers.clone(),
                 response_body,
-                load_inputs.document_start_scripts.clone(),
-                load_inputs.runtime_bindings.clone(),
-                load_inputs
-                    .runtime_inspector_session_restore_snapshots
-                    .clone(),
-                load_inputs.extra_http_headers.clone(),
-                load_inputs.locale_override.clone(),
-                load_inputs.timezone_override.clone(),
-                load_inputs.script_execution_disabled,
-                load_inputs.bypass_content_security_policy,
-                load_inputs.cpu_throttling_rate,
-                load_inputs.emulated_media.clone(),
-                load_inputs.viewport_surface,
-                load_inputs.network_offline,
-                load_inputs.blocked_url_patterns.clone(),
-                fetch_subresource_interception_enabled,
-                fetch_subresource_interception_resource_type,
-                load_inputs.root_frame_id.clone(),
                 main_document_commit.as_deref().cloned(),
             )
             .await
@@ -3312,7 +3721,7 @@ impl CdpConnection {
                 false,
                 network_progress,
             ),
-            navigation_engine: None,
+            navigation_engine: Some(engine),
             network_error_page: None,
         })
     }
@@ -3464,14 +3873,11 @@ impl CdpConnection {
             ));
         }
 
-        let page_reservation = self.engine.reserve_page_for_creation();
-        self.bind_renderer_page_reservation_for_session_owner(
-            session_id,
-            load_inputs,
-            page_reservation,
-        );
-        prepare_navigation_from_captured_raw_response_with_engine_async(
-            &mut self.engine,
+        let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
+        let page_reservation =
+            self.reserve_renderer_page_for_session_owner(session_id, load_inputs, &engine);
+        let navigation = prepare_navigation_from_captured_raw_response_with_engine_async(
+            &mut engine,
             page_reservation,
             load_inputs,
             requested_url,
@@ -3485,8 +3891,8 @@ impl CdpConnection {
             false,
             RendererReplyBoundary::Stage,
         )
-        .await
-        .map(NavigationLoadOutcome::response_commit_ready)
+        .await?;
+        Ok(NavigationLoadOutcome::response_commit_ready(navigation).with_navigation_engine(engine))
     }
 
     pub async fn build_navigation_from_streaming_raw_response_async(
@@ -3591,28 +3997,6 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let (response, network_observation_journal) =
             response.into_parts_with_observation_journal();
-        if load_inputs.browser_context_id.is_none() {
-            let page_reservation = self.engine.reserve_page_for_creation();
-            return build_navigation_from_streaming_raw_response_with_engine_async(
-                &mut self.engine,
-                page_reservation,
-                load_inputs,
-                requested_url,
-                request_method,
-                request_headers,
-                response,
-                network_observation_journal,
-                response_code,
-                response_headers_override,
-                body_progress_source,
-                None,
-                None,
-                CommittedDocumentResourceSource::Synthetic,
-                RendererReplyBoundary::Stage,
-            )
-            .await;
-        }
-
         let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
         let page_reservation =
             self.reserve_renderer_page_for_session_owner(session_id, load_inputs, &engine);
@@ -3660,31 +4044,12 @@ impl CdpConnection {
         response: RawResponse,
         network_observation_journal: NetworkObservationJournal,
     ) -> DownloadNavigation {
-        let network_extra_info_available = !network_observation_journal.is_empty();
-        let (head, body) = response.into_body();
-        let body = body
-            .try_into_materialized_bytes()
-            .expect("RawResponse body should remain materialized at the download boundary");
-        let response_from_cache = head.from_cache;
-        let negotiated_http_version = head.negotiated_http_version;
-        let final_url = head.final_url;
-        let network_events = CompletedMainDocumentNetworkEvents::new(
+        materialize_download_from_raw_response(
             request_method,
             request_headers,
-            head.request_cookie_report,
-            head.status,
-            head.headers,
-            head.cookie_set_reports,
-            head.redirect_chain.into_iter().map(Into::into).collect(),
-            network_extra_info_available,
-            response_from_cache,
+            response,
+            network_observation_journal,
         )
-        .with_negotiated_http_version(negotiated_http_version)
-        .with_network_observation_journal(network_observation_journal);
-        DownloadNavigation {
-            final_url,
-            progress_transfer: CompletedDownloadProgressTransfer::new(body, network_events),
-        }
     }
 
     #[cfg(test)]
@@ -3703,8 +4068,41 @@ impl CdpConnection {
     }
 }
 
+fn materialize_download_from_raw_response(
+    request_method: String,
+    request_headers: Vec<(String, String)>,
+    response: RawResponse,
+    network_observation_journal: NetworkObservationJournal,
+) -> DownloadNavigation {
+    let network_extra_info_available = !network_observation_journal.is_empty();
+    let (head, body) = response.into_body();
+    let body = body
+        .try_into_materialized_bytes()
+        .expect("RawResponse body should remain materialized at the download boundary");
+    let response_from_cache = head.from_cache;
+    let negotiated_http_version = head.negotiated_http_version;
+    let final_url = head.final_url;
+    let network_events = CompletedMainDocumentNetworkEvents::new(
+        request_method,
+        request_headers,
+        head.request_cookie_report,
+        head.status,
+        head.headers,
+        head.cookie_set_reports,
+        head.redirect_chain.into_iter().map(Into::into).collect(),
+        network_extra_info_available,
+        response_from_cache,
+    )
+    .with_negotiated_http_version(negotiated_http_version)
+    .with_network_observation_journal(network_observation_journal);
+    DownloadNavigation {
+        final_url,
+        progress_transfer: CompletedDownloadProgressTransfer::new(body, network_events),
+    }
+}
+
 async fn prepare_navigation_from_captured_raw_response_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     requested_url: Url,
@@ -3721,7 +4119,7 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
     let network_extra_info_available = !network_observation_journal.is_empty();
     if network_error_page.is_none()
         && response_status_may_use_http_error_page(head.status)
-        && body.len() == 0
+        && body.is_empty()
     {
         body_progress_source.emit_response_metadata(
             &request_method,
@@ -3773,7 +4171,7 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_captured_document_response_with_engine_async(
-    engine: &mut NavigationEngine,
+    engine: &mut impl BrowserDocumentPageBuilder,
     page_reservation: RendererPageReservationToken,
     load_inputs: &TargetNavigationLoadInputs,
     requested_url: Url,
@@ -3802,8 +4200,6 @@ async fn prepare_captured_document_response_with_engine_async(
         head.from_cache,
         head.negotiated_http_version,
     );
-    let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
-        load_inputs.fetch_subresource_interception;
     let response_from_cache = head.from_cache;
     let negotiated_http_version = head.negotiated_http_version;
     let final_url = head.final_url;
@@ -3837,46 +4233,25 @@ async fn prepare_captured_document_response_with_engine_async(
     let (body_tx, body_rx) = mpsc::channel(EXTERNAL_RAW_BODY_CHANNEL_CAPACITY);
     let (completion_tx, completion_rx) = oneshot::channel();
     let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(body_rx, completion_rx);
-    let page_storage = load_inputs.page_storage_handles();
     let main_document_commit = load_inputs
         .main_document_commit_for_final_url(&final_url, network_error_page.as_ref())
         .map(Arc::new);
-    let prepared_future = engine
-        .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
-            page_reservation,
-            page_storage.into_navigation_storage(),
-            requested_url.clone(),
-            final_url.clone(),
-            load_inputs.navigation_initiator_url.clone(),
-            redirected,
-            redirect_chain.len(),
-            response_status,
-            response_headers.clone(),
-            raw_body,
-            load_inputs.document_start_scripts.clone(),
-            load_inputs.runtime_bindings.clone(),
-            load_inputs
-                .runtime_inspector_session_restore_snapshots
-                .clone(),
-            load_inputs.extra_http_headers.clone(),
-            load_inputs.locale_override.clone(),
-            load_inputs.timezone_override.clone(),
-            load_inputs.script_execution_disabled,
-            load_inputs.bypass_content_security_policy,
-            load_inputs.cpu_throttling_rate,
-            load_inputs.emulated_media.clone(),
-            load_inputs.viewport_surface,
-            load_inputs.network_offline,
-            load_inputs.blocked_url_patterns.clone(),
-            fetch_subresource_interception_enabled,
-            fetch_subresource_interception_resource_type,
-            PageVmInitStage::DomContentLoaded,
-            reply_boundary,
-            load_inputs.root_frame_id.clone(),
-            CommittedDocumentResourceSource::Synthetic,
-            None,
-            main_document_commit.as_deref().cloned(),
-        );
+    let prepared_future = engine.prepare_protocol_streaming_raw_page(
+        page_reservation,
+        load_inputs,
+        requested_url.clone(),
+        final_url.clone(),
+        redirected,
+        redirect_chain.len(),
+        response_status,
+        response_headers.clone(),
+        raw_body,
+        PageVmInitStage::DomContentLoaded,
+        reply_boundary,
+        CommittedDocumentResourceSource::Synthetic,
+        None,
+        main_document_commit.as_deref().cloned(),
+    );
     let body_capture_task = spawn_captured_body_replay(body, body_tx, completion_tx);
     let prepared_page = match prepared_future.await {
         Ok(prepared_page) => prepared_page,
@@ -3973,10 +4348,11 @@ async fn apply_navigation_load_input_overrides_async(
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundNavigationEarlyResult, decode_data_url_body, decode_data_url_response,
+        BackgroundNavigationEarlyOutcome, decode_data_url_body, decode_data_url_response,
         decode_text_html_data_url, decoded_data_url_navigation_response,
         inline_html_navigation_source,
     };
+    use crate::conn::browser_background_output_channel;
     use serde_json::json;
 
     #[test]
@@ -4072,16 +4448,17 @@ mod tests {
     }
 
     #[test]
-    fn background_navigation_early_result_emits_typed_command_response() {
-        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let early_result = BackgroundNavigationEarlyResult::new(
+    fn background_navigation_early_outcome_projects_typed_command_response() {
+        let (sender, mut receiver) = browser_background_output_channel();
+        let early_outcome = BackgroundNavigationEarlyOutcome::new(
             sender,
             42,
             Some("SID-nav".to_owned()),
+            "https://example.test/",
             json!({ "frameId": "FRAME-1", "loaderId": "LOADER-1" }),
         );
 
-        assert!(early_result.emit());
+        assert!(early_outcome.emit());
         let event = receiver
             .try_recv()
             .expect("early navigation result should be sent");
@@ -4091,6 +4468,16 @@ mod tests {
             event.protocol_message().is_none(),
             "early Page.navigate result should stay as a typed command response until wire projection"
         );
+        let (command_id, outcome) = event
+            .browser_navigate_command_outcome()
+            .expect("early response should retain its protocol-neutral Browser outcome");
+        assert_eq!(command_id, Some(42));
+        let moli_core::browser_host::BrowserNavigateCommandOutcome::Completed(result) = outcome
+        else {
+            panic!("expected a completed Browser navigation outcome");
+        };
+        assert_eq!(result.requested_url(), "https://example.test/");
+        assert_eq!(result.loader_id(), Some("LOADER-1"));
         assert_eq!(
             event.into_protocol_message(),
             json!({

@@ -1,4 +1,3 @@
-use moli_cookie_jar::StoredCookie;
 use tokio::sync::mpsc;
 
 use crate::{cdp_frontend::CdpFrontendControlRequest, cdp_frontend_router::CdpFrontendRouter};
@@ -8,25 +7,8 @@ use super::CdpScheduler;
 
 mod target_control;
 
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CdpCookieSnapshot {
-    profile_backed_cookies: Option<Vec<StoredCookie>>,
-}
-
-impl CdpCookieSnapshot {
-    pub(crate) fn from_profile_backed_cookies(cookies: Option<Vec<StoredCookie>>) -> Self {
-        Self {
-            profile_backed_cookies: cookies,
-        }
-    }
-
-    pub(crate) fn into_profile_backed_cookies(self) -> Option<Vec<StoredCookie>> {
-        self.profile_backed_cookies
-    }
-}
-
 pub(crate) struct CdpOwnerActorLifecycle {
-    pub(crate) checkpoint_tx: mpsc::UnboundedSender<CdpCookieSnapshot>,
+    pub(crate) profile_flush_tx: mpsc::UnboundedSender<()>,
 }
 
 #[derive(Default)]
@@ -85,7 +67,7 @@ impl CdpFrontendControlState {
                                 .detach_frontend_session(scheduler, frontend_router, &session_id)
                                 .await;
                         }
-                        send_cookie_checkpoint(scheduler, owner_lifecycle);
+                        send_profile_flush_request(owner_lifecycle);
                     }
                     Err(Err(_)) => {}
                 }
@@ -134,7 +116,7 @@ impl CdpFrontendControlState {
                                 .detach_frontend_session(scheduler, frontend_router, &session_id)
                                 .await;
                         }
-                        send_cookie_checkpoint(scheduler, owner_lifecycle);
+                        send_profile_flush_request(owner_lifecycle);
                     }
                     Err(Err(_)) => {}
                 }
@@ -145,7 +127,7 @@ impl CdpFrontendControlState {
                     self.target_control
                         .detach_frontend_session(scheduler, frontend_router, &session_id)
                         .await;
-                    send_cookie_checkpoint(scheduler, owner_lifecycle);
+                    send_profile_flush_request(owner_lifecycle);
                 }
                 true
             }
@@ -154,7 +136,7 @@ impl CdpFrontendControlState {
                     self.target_control
                         .detach_frontend_session(scheduler, frontend_router, &session_id)
                         .await;
-                    send_cookie_checkpoint(scheduler, owner_lifecycle);
+                    send_profile_flush_request(owner_lifecycle);
                 }
                 true
             }
@@ -182,7 +164,7 @@ impl CdpFrontendControlState {
                     .close_target(scheduler, frontend_router, &target_id)
                     .await;
                 let _ = completion_tx.send(result);
-                send_cookie_checkpoint(scheduler, owner_lifecycle);
+                send_profile_flush_request(owner_lifecycle);
                 true
             }
             CdpFrontendControlRequest::CreateManagedTarget {
@@ -199,7 +181,7 @@ impl CdpFrontendControlState {
                         .close_target(scheduler, frontend_router, &target.page_target_id)
                         .await;
                 }
-                send_cookie_checkpoint(scheduler, owner_lifecycle);
+                send_profile_flush_request(owner_lifecycle);
                 true
             }
             CdpFrontendControlRequest::EnsureDefaultTarget { completion_tx } => {
@@ -223,16 +205,11 @@ impl CdpFrontendControlState {
     }
 }
 
-fn send_cookie_checkpoint(
-    scheduler: &mut CdpScheduler,
-    owner_lifecycle: Option<&CdpOwnerActorLifecycle>,
-) {
+fn send_profile_flush_request(owner_lifecycle: Option<&CdpOwnerActorLifecycle>) {
     let Some(owner_lifecycle) = owner_lifecycle else {
         return;
     };
-    let snapshot =
-        CdpCookieSnapshot::from_profile_backed_cookies(scheduler.snapshot_profile_backed_cookies());
-    let _ = owner_lifecycle.checkpoint_tx.send(snapshot);
+    let _ = owner_lifecycle.profile_flush_tx.send(());
 }
 
 #[cfg(test)]

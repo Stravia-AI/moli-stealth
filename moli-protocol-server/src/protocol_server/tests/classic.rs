@@ -8891,6 +8891,15 @@ async fn webdriver_classic_history_traversal_preserves_live_same_document_and_fa
     let session_id = session["value"]["sessionId"]
         .as_str()
         .expect("classic session id");
+
+    let initial_back = classic_request_json(
+        app.clone(),
+        Method::POST,
+        &format!("/session/{session_id}/back"),
+    )
+    .await;
+    assert_eq!(initial_back, json!({ "value": null }));
+
     let page_url = format!("http://{fixture_addr}/page");
 
     let navigated = classic_request_json_with_body(

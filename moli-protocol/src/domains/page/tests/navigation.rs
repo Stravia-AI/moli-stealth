@@ -59,6 +59,587 @@ fn assert_runtime_navigation_context_reset(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn top_level_cross_document_page_navigate_starts_only_after_browser_owner_selection() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-OWNER-NAVIGATE",
+        "TID-OWNER-NAVIGATE",
+        "SID-OWNER-NAVIGATE",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-OWNER-NAVIGATE")).await;
+
+    let url = "data:text/html,<main>browser-owner-command</main>";
+    let raw = json!({
+        "id": 90_090,
+        "method": "Page.navigate",
+        "sessionId": "SID-OWNER-NAVIGATE",
+        "params": { "url": url }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(pending_start) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level cross-Document Page.navigate should await Browser Owner admission");
+    };
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-NAVIGATE"))
+            .as_deref(),
+        Some("about:blank"),
+        "frontend dispatch must not start or project the queued navigation"
+    );
+
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    let completed_start = pending_start.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) = ctx
+        .conn
+        .complete_pending_command_dispatch(completed_start)
+        .await
+    else {
+        panic!("Browser Host should retain the exact navigation participant until terminal");
+    };
+
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(90_090))
+        .expect("Browser Owner-started navigation should retain the frontend response identity");
+    assert_eq!(response["result"]["frameId"], json!("TID-OWNER-NAVIGATE"));
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-NAVIGATE"))
+            .as_deref(),
+        Some(url)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn top_level_same_document_page_navigate_is_classified_after_owner_selection() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-OWNER-SAME-DOCUMENT",
+        "TID-OWNER-SAME-DOCUMENT",
+        "SID-OWNER-SAME-DOCUMENT",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-OWNER-SAME-DOCUMENT")).await;
+    ctx.enable_page_events_for_test(Some("SID-OWNER-SAME-DOCUMENT"));
+    ctx.sent.clear();
+
+    let url = "about:blank#browser-owner";
+    let raw = json!({
+        "id": 90_094,
+        "method": "Page.navigate",
+        "sessionId": "SID-OWNER-SAME-DOCUMENT",
+        "params": { "url": url }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level same-Document Page.navigate should await Browser Owner admission");
+    };
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-SAME-DOCUMENT"))
+            .as_deref(),
+        Some("about:blank"),
+        "frontend dispatch must not classify or execute the queued fragment navigation"
+    );
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages
+            .iter()
+            .all(|message| message["id"] != json!(90_094)),
+        "the live frontend retains response projection"
+    );
+
+    wait_until_message(
+        &mut ctx,
+        Some("SID-OWNER-SAME-DOCUMENT"),
+        "Browser-owned same-Document renderer output without a frontend command poll",
+        |message| {
+            message["method"] == json!("Page.navigatedWithinDocument")
+                && message["params"]["url"] == json!(url)
+        },
+    )
+    .await;
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-SAME-DOCUMENT"))
+            .as_deref(),
+        Some(url),
+        "renderer output ingress must advance independently of a frontend command poll"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("frontend should receive only the terminal same-Document projection");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(90_094))
+        .expect("same-Document response should retain its frontend correlation");
+    assert_eq!(response["sessionId"], json!("SID-OWNER-SAME-DOCUMENT"));
+    assert_eq!(
+        response["result"]["frameId"],
+        json!("TID-OWNER-SAME-DOCUMENT")
+    );
+    assert!(
+        response["result"]["loaderId"].is_null(),
+        "same-Document Page.navigate must not report a loader id: {response:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_bidi_top_level_navigate_wait_does_not_own_browser_host_progress() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-DIRECT-OWNER",
+        "TID-DIRECT-OWNER",
+        "SID-DIRECT-OWNER",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-DIRECT-OWNER")).await;
+    ctx.enable_page_events_for_test(Some("SID-DIRECT-OWNER"));
+    ctx.sent.clear();
+
+    let url = "about:blank#direct-browser-owner";
+    let command = DevToolsCommand::Navigate(DevToolsNavigateCommand {
+        context: DevToolsCommandContext {
+            protocol: DevToolsProtocol::WebDriverBidi,
+            session_id: None,
+            target_id: Some(DevToolsTargetId::from("TID-DIRECT-OWNER")),
+            browser_context_id: None,
+        },
+        url: url.to_owned(),
+        referrer: None,
+        wait: DevToolsNavigationWait::DomContentLoaded,
+    });
+    let start = ctx
+        .conn
+        .try_start_devtools_browser_owner_navigation_command(command, Some(90_095))
+        .await
+        .expect("top-level direct navigation should be Browser-owned");
+    let crate::DevToolsBrowserOwnerNavigationCommandTaskStep::Pending(frontend_wait) = start else {
+        panic!("direct navigation should wait for Browser Owner selection");
+    };
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-DIRECT-OWNER"))
+            .as_deref(),
+        Some("about:blank"),
+        "direct frontend admission must not classify or execute the navigation"
+    );
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let _ = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    wait_until_message(
+        &mut ctx,
+        Some("SID-DIRECT-OWNER"),
+        "direct Browser-owned navigation renderer fact without a frontend reply poll",
+        |message| {
+            message["method"] == json!("Page.navigatedWithinDocument")
+                && message["params"]["url"] == json!(url)
+        },
+    )
+    .await;
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-DIRECT-OWNER"))
+            .as_deref(),
+        Some(url),
+        "Browser Host must finish the renderer action before the direct frontend polls its reply"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let outcome = ctx
+        .conn
+        .complete_devtools_browser_owner_navigation_command(completed)
+        .await;
+    let (result, _scheduler_events, _protocol_events, _predecessor) = outcome.into_complete_parts();
+    let DevToolsCommandResult::Navigate(result) = result.expect("direct navigation result") else {
+        panic!("direct navigate should retain its typed result");
+    };
+    assert_eq!(result.url, url);
+    assert_eq!(result.navigation_id, None);
+    assert_eq!(result.frame_id, None);
+    assert_eq!(result.loader_id, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn direct_wait_none_top_level_commands_all_execute_through_browser_owner_lane() {
+    for command_kind in ["navigate", "reload", "history"] {
+        let mut ctx = TestContext::new();
+        load_bc_with_session(
+            &mut ctx,
+            "BID-DIRECT-WAIT-NONE-ADMISSION",
+            "TID-DIRECT-WAIT-NONE-ADMISSION",
+            "SID-DIRECT-WAIT-NONE-ADMISSION",
+            "about:blank",
+        );
+        ensure_initial_document_for_session(&mut ctx, Some("SID-DIRECT-WAIT-NONE-ADMISSION")).await;
+        let context = DevToolsCommandContext {
+            protocol: DevToolsProtocol::WebDriverBidi,
+            session_id: None,
+            target_id: Some(DevToolsTargetId::from("TID-DIRECT-WAIT-NONE-ADMISSION")),
+            browser_context_id: None,
+        };
+        let command = match command_kind {
+            "navigate" => DevToolsCommand::Navigate(DevToolsNavigateCommand {
+                context,
+                url: "data:text/html,<main>wait-none-admission</main>".to_owned(),
+                referrer: None,
+                wait: DevToolsNavigationWait::None,
+            }),
+            "reload" => DevToolsCommand::Reload(DevToolsReloadCommand {
+                context,
+                ignore_cache: false,
+                script_to_evaluate_on_load: None,
+                wait: DevToolsNavigationWait::None,
+            }),
+            "history" => DevToolsCommand::TraverseHistory(DevToolsTraverseHistoryCommand {
+                context,
+                destination: DevToolsHistoryTraversalDestination::Delta(0),
+                wait: DevToolsNavigationWait::None,
+            }),
+            _ => unreachable!("fixed command-kind table"),
+        };
+
+        let start = ctx
+            .conn
+            .try_start_devtools_browser_owner_navigation_command(command, Some(90_096))
+            .await
+            .unwrap_or_else(|_| panic!("{command_kind} wait:none must be Browser-owned"));
+        let crate::DevToolsBrowserOwnerNavigationCommandTaskStep::Pending(frontend_wait) = start
+        else {
+            panic!("{command_kind} wait:none must await exact Browser Host admission");
+        };
+        assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+        assert_eq!(
+            ctx.conn
+                .runtime_session_owner_target_url(Some("SID-DIRECT-WAIT-NONE-ADMISSION"))
+                .as_deref(),
+            Some("about:blank"),
+            "{command_kind} frontend admission cannot execute before Host selection"
+        );
+
+        let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+        let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+        let _ = ctx
+            .route_completed_command_outcome_for_test(host_outcome)
+            .await;
+        let completed = frontend_wait.wait().await;
+        let outcome = ctx
+            .conn
+            .complete_devtools_browser_owner_navigation_command(completed)
+            .await;
+        let (
+            result,
+            _scheduler_events,
+            protocol_events,
+            _renderer_boundary,
+            post_renderer_events,
+            post_response_events,
+            _predecessor,
+        ) = outcome.into_fenced_complete_parts();
+        assert!(
+            protocol_events
+                .iter()
+                .chain(post_renderer_events.iter())
+                .chain(post_response_events.iter())
+                .all(|event| event.protocol_message_id() != Some(90_096)),
+            "{command_kind} wait:none must not retain a second command response"
+        );
+        match (command_kind, result.expect("Browser Owner typed result")) {
+            ("navigate", DevToolsCommandResult::Navigate(result)) => {
+                assert_eq!(
+                    result.url,
+                    "data:text/html,<main>wait-none-admission</main>"
+                );
+                assert!(result.navigation_id.is_some());
+                assert_eq!(result.frame_id, None);
+                assert_eq!(result.loader_id, None);
+            }
+            ("reload", DevToolsCommandResult::Navigate(result)) => {
+                assert_eq!(result.url, "about:blank");
+                assert!(result.navigation_id.is_some());
+                assert_eq!(result.frame_id, None);
+                assert_eq!(result.loader_id, None);
+            }
+            ("history", DevToolsCommandResult::Empty) => {}
+            (command_kind, result) => {
+                panic!("unexpected {command_kind} wait:none result: {result:?}")
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn direct_bidi_wait_none_returns_from_host_start_before_background_commit() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut ctx = TestContext::new();
+            load_bc_with_session(
+                &mut ctx,
+                "BID-DIRECT-WAIT-NONE",
+                "TID-DIRECT-WAIT-NONE",
+                "SID-DIRECT-WAIT-NONE",
+                "about:blank",
+            );
+            ensure_initial_document_for_session(&mut ctx, Some("SID-DIRECT-WAIT-NONE")).await;
+            ctx.enable_page_events_for_test(Some("SID-DIRECT-WAIT-NONE"));
+            ctx.enable_background_navigation_scheduler_for_test();
+            ctx.sent.clear();
+
+            let url = "data:text/html,<main>direct-wait-none-owner</main>";
+            let command = DevToolsCommand::Navigate(DevToolsNavigateCommand {
+                context: DevToolsCommandContext {
+                    protocol: DevToolsProtocol::WebDriverBidi,
+                    session_id: None,
+                    target_id: Some(DevToolsTargetId::from("TID-DIRECT-WAIT-NONE")),
+                    browser_context_id: None,
+                },
+                url: url.to_owned(),
+                referrer: None,
+                wait: DevToolsNavigationWait::None,
+            });
+            let start = ctx
+                .conn
+                .try_start_devtools_browser_owner_navigation_command(command, Some(90_097))
+                .await
+                .expect("top-level wait:none navigation should be Browser-owned");
+            let crate::DevToolsBrowserOwnerNavigationCommandTaskStep::Pending(frontend_wait) =
+                start
+            else {
+                panic!("wait:none should wait only for Browser Host acceptance");
+            };
+
+            assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+            assert_eq!(
+                ctx.conn
+                    .runtime_session_owner_target_url(Some("SID-DIRECT-WAIT-NONE"))
+                    .as_deref(),
+                Some("about:blank")
+            );
+
+            let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+            let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+            assert_eq!(
+                ctx.conn
+                    .runtime_session_owner_target_url(Some("SID-DIRECT-WAIT-NONE"))
+                    .as_deref(),
+                Some("about:blank"),
+                "wait:none response must be ready before the detached load commits"
+            );
+
+            let completed = frontend_wait.wait().await;
+            let outcome = ctx
+                .conn
+                .complete_devtools_browser_owner_navigation_command(completed)
+                .await;
+            let (result, scheduler_events, protocol_events, predecessor) =
+                outcome.into_complete_parts();
+            let DevToolsCommandResult::Navigate(result) =
+                result.expect("wait:none accepted navigation result")
+            else {
+                panic!("wait:none should retain its typed navigate result");
+            };
+            assert_eq!(result.url, url);
+            assert!(result.navigation_id.is_some());
+            assert_eq!(result.frame_id, None);
+            assert_eq!(result.loader_id, None);
+            assert!(predecessor.is_none());
+            assert!(scheduler_events.is_empty());
+            assert!(
+                protocol_events
+                    .iter()
+                    .all(|event| event.protocol_message_id() != Some(90_097)),
+                "detached wait:none load must not retain a second command response"
+            );
+
+            let _ = ctx
+                .route_completed_command_outcome_for_test(host_outcome)
+                .await;
+            wait_until_message(
+                &mut ctx,
+                Some("SID-DIRECT-WAIT-NONE"),
+                "wait:none detached Browser-owned navigation commit",
+                |message| {
+                    message["method"] == json!("Page.frameNavigated")
+                        && message["params"]["frame"]["url"] == json!(url)
+                },
+            )
+            .await;
+            assert_eq!(
+                ctx.conn
+                    .runtime_session_owner_target_url(Some("SID-DIRECT-WAIT-NONE"))
+                    .as_deref(),
+                Some(url)
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn slow_frontend_does_not_own_selected_page_navigate_participant() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-OWNER-NAVIGATE-SLOW",
+        "TID-OWNER-NAVIGATE-SLOW",
+        "SID-OWNER-NAVIGATE-SLOW",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-OWNER-NAVIGATE-SLOW")).await;
+
+    let url = "data:text/html,<main>slow-frontend</main>";
+    let raw = json!({
+        "id": 90_092,
+        "method": "Page.navigate",
+        "sessionId": "SID-OWNER-NAVIGATE-SLOW",
+        "params": { "url": url }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level cross-Document Page.navigate should enter Browser Owner");
+    };
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-NAVIGATE-SLOW"))
+            .as_deref(),
+        Some(url),
+        "Browser Host completion must not wait for the frontend receiver to be polled"
+    );
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages
+            .iter()
+            .all(|message| message["id"] != json!(90_092)),
+        "a live frontend still owns response projection"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("frontend should receive only the terminal navigation projection");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == json!(90_092))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_frontend_wait_after_owner_selection_does_not_cancel_page_navigate() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-OWNER-NAVIGATE-DROP-AFTER",
+        "TID-OWNER-NAVIGATE-DROP-AFTER",
+        "SID-OWNER-NAVIGATE-DROP-AFTER",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-OWNER-NAVIGATE-DROP-AFTER")).await;
+
+    let url = "data:text/html,<main>dropped-after-selection</main>";
+    let raw = json!({
+        "id": 90_093,
+        "method": "Page.navigate",
+        "sessionId": "SID-OWNER-NAVIGATE-DROP-AFTER",
+        "params": { "url": url }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level cross-Document Page.navigate should enter Browser Owner");
+    };
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    drop(frontend_wait);
+
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["id"] != json!(90_093)),
+        "an abandoned frontend command must not receive a late response"
+    );
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-NAVIGATE-DROP-AFTER"))
+            .as_deref(),
+        Some(url),
+        "Browser Host must finish the selected participant after frontend wait loss"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_frontend_wait_before_owner_selection_does_not_cancel_page_navigate() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-OWNER-NAVIGATE-DROP",
+        "TID-OWNER-NAVIGATE-DROP",
+        "SID-OWNER-NAVIGATE-DROP",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-OWNER-NAVIGATE-DROP")).await;
+
+    let url = "data:text/html,<main>accepted-before-frontend-drop</main>";
+    let raw = json!({
+        "id": 90_091,
+        "method": "Page.navigate",
+        "sessionId": "SID-OWNER-NAVIGATE-DROP",
+        "params": { "url": url }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level cross-Document Page.navigate should enter Browser Owner");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    drop(frontend_wait);
+
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-OWNER-NAVIGATE-DROP"))
+            .as_deref(),
+        Some(url),
+        "Browser Host must retain the selected navigation participant after frontend wait loss"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn data_url_commit_applies_preloads_worlds_and_bindings_before_author_script() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
@@ -490,6 +1071,7 @@ async fn renderer_history_back_uses_browser_owned_navigation_history() {
         "SID-RENDERER-HISTORY",
         "about:blank",
     );
+    ctx.enable_page_events_for_test(Some("SID-RENDERER-HISTORY"));
     let first_url = "data:text/html,<title>First</title><main>first</main>";
     let second_url = "data:text/html,<title>Second</title><main>second</main>";
 
@@ -505,22 +1087,59 @@ async fn renderer_history_back_uses_browser_owned_navigation_history() {
         ctx.sent.clear();
     }
 
-    ctx.process_async(json!({
-        "id": 12,
-        "method": "Runtime.evaluate",
-        "sessionId": "SID-RENDERER-HISTORY",
-        "params": {
-            "expression": "history.back(); 'queued'",
-            "returnByValue": true
-        }
-    }))
-    .await;
+    let scheduler_events = ctx
+        .process_command_only_async(json!({
+            "id": 12,
+            "method": "Runtime.evaluate",
+            "sessionId": "SID-RENDERER-HISTORY",
+            "params": {
+                "expression": "history.back(); 'queued'",
+                "returnByValue": true
+            }
+        }))
+        .await;
 
     let response = take_response_by_id(&mut ctx, 12);
     assert_eq!(response["result"]["result"]["value"], json!("queued"));
+    assert!(
+        scheduler_events.is_empty(),
+        "renderer history admission must not recreate Protocol scheduler work: {scheduler_events:?}"
+    );
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn.browser_context.as_ref().unwrap().target_url(),
+        second_url,
+        "Runtime response completion must not execute the renderer history action"
+    );
+
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
     assert_eq!(
         ctx.conn.browser_context.as_ref().unwrap().target_url(),
         first_url
+    );
+    let renderer_probe_methods = ctx
+        .sent
+        .iter()
+        .filter_map(|message| {
+            message["method"].as_str().filter(|method| {
+                matches!(
+                    *method,
+                    "Page.frameScheduledNavigation"
+                        | "Page.frameRequestedNavigation"
+                        | "Page.frameClearedScheduledNavigation"
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        renderer_probe_methods,
+        [
+            "Page.frameScheduledNavigation",
+            "Page.frameRequestedNavigation",
+            "Page.frameClearedScheduledNavigation",
+        ],
+        "history traversal must retain its renderer navigation initiator"
     );
 
     ctx.sent.clear();
@@ -552,6 +1171,8 @@ async fn renderer_history_back_uses_browser_owned_navigation_history() {
         response["result"]["result"]["value"],
         json!("to-initial-empty-document")
     );
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    ctx.complete_one_ready_scheduler_input_for_test().await;
     assert_eq!(
         ctx.conn.browser_context.as_ref().unwrap().target_url(),
         "about:blank"
@@ -570,6 +1191,8 @@ async fn renderer_history_back_uses_browser_owned_navigation_history() {
     .await;
     let response = take_response_by_id(&mut ctx, 15);
     assert_eq!(response["result"]["result"]["value"], json!("at-start"));
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    ctx.complete_one_ready_scheduler_input_for_test().await;
     assert_eq!(
         ctx.conn.browser_context.as_ref().unwrap().target_url(),
         "about:blank"
@@ -595,9 +1218,146 @@ async fn renderer_history_back_uses_browser_owned_navigation_history() {
     .await;
     let response = take_response_by_id(&mut ctx, 16);
     assert_eq!(response["result"]["result"]["value"], json!("queued"));
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    ctx.complete_one_ready_scheduler_input_for_test().await;
     assert_eq!(
         ctx.conn.browser_context.as_ref().unwrap().target_url(),
         first_url
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn renderer_history_traversal_targets_background_page_without_promotion() {
+    let mut ctx = TestContext::new();
+    let active_url = "data:text/html,<title>Active renderer history</title>";
+    let mut browser_context = BrowserContext::new("BID-RENDERER-HISTORY-BACKGROUND".to_owned());
+    browser_context.set_active_target_id("TID-RENDERER-HISTORY-ACTIVE".to_owned());
+    browser_context.attach_active_session("SID-RENDERER-HISTORY-ACTIVE".to_owned());
+    browser_context.set_target_url(active_url.to_owned());
+    browser_context
+        .background_targets
+        .push(BackgroundTarget::with_url(
+            "TID-RENDERER-HISTORY-BACKGROUND".to_owned(),
+            Some("SID-RENDERER-HISTORY-BACKGROUND".to_owned()),
+            "about:blank".to_owned(),
+        ));
+    ctx.conn.insert_browser_context(browser_context);
+
+    let first_url = "data:text/html,<title>First background renderer history</title>";
+    let second_url = "data:text/html,<title>Second background renderer history</title>";
+    for (id, url) in [(31, first_url), (32, second_url)] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Page.navigate",
+            "sessionId": "SID-RENDERER-HISTORY-BACKGROUND",
+            "params": { "url": url }
+        }))
+        .await;
+        take_response_by_id(&mut ctx, id);
+        ctx.sent.clear();
+    }
+
+    let scheduler_events = ctx
+        .process_command_only_async(json!({
+            "id": 33,
+            "method": "Runtime.evaluate",
+            "sessionId": "SID-RENDERER-HISTORY-BACKGROUND",
+            "params": {
+                "expression": "history.back(); 'queued'",
+                "returnByValue": true
+            }
+        }))
+        .await;
+    let response = take_response_by_id(&mut ctx, 33);
+    assert_eq!(response["result"]["result"]["value"], json!("queued"));
+    assert!(
+        scheduler_events.is_empty(),
+        "renderer history admission must enter Browser Host directly: {scheduler_events:?}"
+    );
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-RENDERER-HISTORY-BACKGROUND"))
+            .as_deref(),
+        Some(second_url),
+        "Runtime response completion must not execute the background traversal"
+    );
+
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+
+    let browser_context = ctx.conn.browser_context.as_ref().unwrap();
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    assert_eq!(
+        browser_context.active_target_id(),
+        Some("TID-RENDERER-HISTORY-ACTIVE"),
+        "renderer history traversal must not promote its exact background Page"
+    );
+    assert_eq!(browser_context.target_url(), active_url);
+    assert_eq!(
+        browser_context
+            .background_target("TID-RENDERER-HISTORY-BACKGROUND")
+            .expect("background target should remain parked")
+            .target_url(),
+        first_url
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn renderer_history_intent_is_stale_after_page_generation_advances() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-RENDERER-HISTORY-STALE",
+        "TID-RENDERER-HISTORY-STALE",
+        "SID-RENDERER-HISTORY-STALE",
+        "about:blank",
+    );
+    let first_url = "data:text/html,<title>First stale history</title>";
+    let second_url = "data:text/html,<title>Second stale history</title>";
+
+    for (id, url) in [(17, first_url), (18, second_url)] {
+        ctx.process_async(json!({
+            "id": id,
+            "method": "Page.navigate",
+            "sessionId": "SID-RENDERER-HISTORY-STALE",
+            "params": { "url": url }
+        }))
+        .await;
+        take_response_by_id(&mut ctx, id);
+        ctx.sent.clear();
+    }
+
+    let stale_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-RENDERER-HISTORY-STALE"))
+        .expect("renderer history Page residence");
+    ctx.conn
+        .publish_prepared_top_level_history_traversal_input(stale_page, -1)
+        .expect("renderer history intent should enter Browser Host");
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let page_residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-RENDERER-HISTORY-STALE"))
+        .expect("renderer history Page residence handle");
+    page_residence.advance_generation_for_test_fixture();
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (events, scheduler_events, predecessor) = outcome.into_protocol_event_parts();
+    assert!(events.is_empty());
+    assert!(scheduler_events.is_empty());
+    assert!(predecessor.is_none());
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    assert_eq!(
+        ctx.conn.browser_context.as_ref().unwrap().target_url(),
+        second_url,
+        "an intent captured from a retired Page generation must not traverse its history"
+    );
+    assert!(
+        !ctx.conn
+            .has_pending_document_navigation_for_session_owner(Some("SID-RENDERER-HISTORY-STALE")),
+        "stale renderer history selection must not start a navigation request"
     );
 }
 
@@ -1215,21 +1975,19 @@ async fn navigation_history_is_preserved_per_parked_target() {
         ctx.sent.clear();
     }
 
-    {
-        let browser_context = ctx.conn.browser_context.as_mut().unwrap();
-        browser_context
-            .background_targets
-            .push(BackgroundTarget::new(
-                "TID-B".to_owned(),
-                Some("SID-B".to_owned()),
-                crate::conn::TargetIdentityState::new(
-                    "about:blank".to_owned(),
-                    URL_BASE.to_owned(),
-                    "Secure".to_owned(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-    }
+    register_background_target(
+        &mut ctx,
+        BackgroundTarget::new_with_frontend_session(
+            "TID-B".to_owned(),
+            Some("SID-B".to_owned()),
+            crate::conn::TargetIdentityState::new(
+                "about:blank".to_owned(),
+                URL_BASE.to_owned(),
+                "Secure".to_owned(),
+            ),
+            crate::conn::TargetPageSlot::empty_for_test_fixture(),
+        ),
+    );
     assert!(
         ctx.conn
             .promote_background_target_to_active_for_connection_async("TID-B")
@@ -1305,10 +2063,9 @@ async fn get_navigation_history_targets_loaded_background_owner_without_promotio
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     bc.background_targets.push(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(background_url, Some("SID-background"))
         .await;
-    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 15,
@@ -1404,7 +2161,7 @@ async fn navigate_to_history_entry_targets_background_owner_without_promotion() 
         Some("SID-background".to_owned()),
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let first_url = "data:text/html,<title>Background A</title><main>a</main>";
     let second_url = "data:text/html,<title>Background B</title><main>b</main>";
 
@@ -1433,15 +2190,58 @@ async fn navigate_to_history_entry_targets_background_owner_without_promotion() 
     assert_eq!(history["result"]["currentIndex"], json!(1));
     ctx.sent.clear();
 
-    ctx.process_async(json!({
+    let raw = json!({
         "id": 20,
         "method": "Page.navigateToHistoryEntry",
         "sessionId": "SID-background",
         "params": { "entryId": first_entry_id }
-    }))
-    .await;
-    let response = take_response_by_id(&mut ctx, 20);
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("Page.navigateToHistoryEntry should await Browser Owner admission");
+    };
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-background"))
+            .as_deref(),
+        Some(second_url),
+        "frontend dispatch must not resolve or start the queued history traversal"
+    );
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    assert_eq!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-background"))
+            .as_deref(),
+        Some(first_url),
+        "Browser Host must finish traversal without polling the frontend receiver"
+    );
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages
+            .iter()
+            .all(|message| message["id"] != json!(20)),
+        "the Browser Host output must not bypass the live frontend correlation"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("frontend should receive only the terminal history projection");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(20))
+        .expect("history response should retain its frontend correlation");
     assert_eq!(response["sessionId"], json!("SID-background"));
+    assert_eq!(response["result"], json!({}));
 
     let browser_context = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(
@@ -1464,6 +2264,56 @@ async fn navigate_to_history_entry_targets_background_owner_without_promotion() 
     let history = take_response_by_id(&mut ctx, 21);
     assert_eq!(history["result"]["currentIndex"], json!(0));
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn navigate_to_history_entry_resolves_missing_entry_only_in_owner_turn() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-HISTORY-MISSING",
+        "TID-HISTORY-MISSING",
+        "SID-HISTORY-MISSING",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-HISTORY-MISSING")).await;
+
+    let raw = json!({
+        "id": 90_091,
+        "method": "Page.navigateToHistoryEntry",
+        "sessionId": "SID-HISTORY-MISSING",
+        "params": { "entryId": 987_654 }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("a syntactically valid history command should be resolved by Browser Owner");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(host_messages.is_empty());
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("missing history entry should complete after the exact owner turn");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(90_091))
+        .expect("missing history entry should retain frontend correlation");
+    assert_eq!(response["error"]["code"], json!(-32000));
+    assert_eq!(
+        response["error"]["message"],
+        json!("Navigation history entry not found")
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn get_navigation_history_targets_inactive_loaded_owner_without_activation() {
     let mut ctx = TestContext::new();
@@ -1589,7 +2439,7 @@ async fn navigate_targets_background_owner_without_promotion() {
         Some("SID-background".to_owned()),
         "about:blank".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     let background_url = "data:text/html,<title>Background</title><main>background</main>";
     ctx.process_async(json!({
@@ -1623,11 +2473,13 @@ async fn navigate_targets_background_owner_without_promotion() {
 #[tokio::test(flavor = "multi_thread")]
 async fn navigate_targets_inactive_owner_without_activation() {
     let mut ctx = TestContext::new();
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-selected".to_owned()));
     let mut inactive = BrowserContext::new("BID-inactive".to_owned());
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     let inactive_url = "data:text/html,<title>Inactive</title><main>inactive</main>";
     ctx.process_async(json!({
@@ -1641,7 +2493,10 @@ async fn navigate_targets_inactive_owner_without_activation() {
     assert_eq!(response["sessionId"], json!("SID-inactive"));
     assert_eq!(response["result"]["frameId"], json!("TID-inactive"));
     assert!(
-        ctx.conn.browser_context.is_none(),
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .is_some_and(|context| context.id == "BID-selected"),
         "inactive Page.navigate should not activate its browser context"
     );
     let inactive = ctx
@@ -1847,7 +2702,7 @@ async fn navigate_with_runtime_frontend_enabled_network_child_playwright_style_u
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
     ctx.enable_background_navigation_scheduler_for_test();
@@ -2410,10 +3265,18 @@ async fn renderer_location_reload_keeps_browser_navigation_headers() {
         take_response_by_id(&mut ctx, 20_111)["result"]["result"]["value"],
         json!("reload requested")
     );
-    let headers = tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
-        .await
-        .expect("renderer reload should reach the server")
-        .expect("renderer reload request headers");
+    // The split Browser Host selects renderer navigation on its own owner
+    // turn. Drive that real scheduler wake rather than waiting on the server
+    // while leaving the test-only actor unpolled; no additional frontend
+    // command is involved.
+    let owner_turn = ctx.complete_one_ready_scheduler_input_for_test();
+    let request = async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
+            .await
+            .expect("renderer reload should reach the server")
+            .expect("renderer reload request headers")
+    };
+    let (_, headers) = tokio::join!(owner_turn, request);
     let value = |name: &'static str| {
         headers
             .get(name)
@@ -2561,6 +3424,10 @@ async fn renderer_top_level_form_post_preserves_request_through_document_commit(
     let evaluation = take_response_by_id(&mut ctx, 20_202);
     assert_eq!(evaluation["result"]["result"]["value"], json!("submitted"));
 
+    // Runtime.evaluate publishes the renderer intent, while the independent
+    // Browser Owner queue executes it on the next scheduler turn.
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+
     let (content_type, request_body) =
         tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
             .await
@@ -2632,7 +3499,7 @@ async fn navigate_with_lifecycle_events_enabled_emits_lifecycle_markers() {
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -2799,7 +3666,7 @@ async fn navigate_with_child_iframe_emits_child_frame_navigation_and_lifecycle_e
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -3119,7 +3986,7 @@ async fn navigate_with_nested_child_frame_reports_outer_parent_frame_id() {
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({
@@ -3207,11 +4074,11 @@ async fn navigate_with_runtime_frontend_enabled_emits_nested_child_default_conte
     ctx.enable_page_events_for_test(Some("SID-1"));
     let browser_context = ctx.conn.browser_context.as_mut().unwrap();
     browser_context
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     browser_context
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -3294,7 +4161,7 @@ async fn navigate_with_legacy_runtime_frontend_projection_emits_context_creation
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
     ctx.enable_background_navigation_scheduler_for_test();
@@ -3583,7 +4450,7 @@ async fn navigate_with_runtime_frontend_enabled_emits_initial_console_before_dcl
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -3649,7 +4516,7 @@ async fn navigate_with_console_enabled_emits_initial_console_without_runtime_ena
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .inspector_session_state
             .v8_state
             .is_none(),
@@ -3802,7 +4669,7 @@ async fn navigate_with_runtime_frontend_enabled_emits_child_default_execution_co
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -5030,16 +5897,13 @@ async fn navigate_failure_commits_error_document_with_visible_unreachable_url() 
     ctx.enable_page_events_for_test(Some("SID-1"));
     let committed_document_token = ctx
         .conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .start_document_navigation_for_active_target("LOADER-committed".to_owned())
+        .start_document_navigation_for_session_owner(Some("SID-1"), "LOADER-committed".to_owned())
         .expect("active target should start committed document navigation");
     ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .commit_document_navigation_if_matches(&committed_document_token);
+        .commit_document_navigation_for_session_owner_if_matches(
+            Some("SID-1"),
+            &committed_document_token,
+        );
 
     let unreachable_url = format!("http://{addr}/missing");
     ctx.process_async(json!({
@@ -5068,11 +5932,10 @@ async fn navigate_failure_commits_error_document_with_visible_unreachable_url() 
     assert_eq!(response["result"]["isDownload"], false);
     assert!(response["result"]["errorText"].is_string());
     assert!(
-        !ctx.conn
-            .browser_context
-            .as_ref()
-            .unwrap()
-            .accepts_document_body_completion_event(&committed_document_token),
+        !ctx.conn.accepts_document_body_completion_for_session_owner(
+            Some("SID-1"),
+            &committed_document_token,
+        ),
         "ordinary navigation load failures must invalidate the previously committed document"
     );
 
@@ -5140,10 +6003,10 @@ async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
 
@@ -5378,10 +6241,18 @@ async fn stop_loading_aborts_paused_request_stage_navigation() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    let committed_document_token = bc
-        .start_document_navigation_for_active_target("LOADER-committed-stop".to_owned())
+    let committed_document_token = ctx
+        .conn
+        .start_document_navigation_for_session_owner(
+            Some("SID-1"),
+            "LOADER-committed-stop".to_owned(),
+        )
         .expect("active target should start committed document navigation");
-    bc.commit_document_navigation_if_matches(&committed_document_token);
+    ctx.conn
+        .commit_document_navigation_for_session_owner_if_matches(
+            Some("SID-1"),
+            &committed_document_token,
+        );
 
     ctx.process_async(json!({
         "id": 233,
@@ -5404,6 +6275,10 @@ async fn stop_loading_aborts_paused_request_stage_navigation() {
     assert_eq!(paused["sessionId"], "SID-1");
     assert_eq!(paused["params"]["resourceType"], "Document");
     let network_id = paused["params"]["networkId"].clone();
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("stopLoading should preserve the current Page");
 
     ctx.process_async(json!({
         "id": 235,
@@ -5425,13 +6300,30 @@ async fn stop_loading_aborts_paused_request_stage_navigation() {
     assert_eq!(error["error"]["code"], -32000);
     assert_eq!(error["error"]["message"], "Navigation stopped");
     assert!(
-        ctx.conn
-            .browser_context
-            .as_ref()
-            .unwrap()
-            .accepts_document_body_completion_event(&committed_document_token),
+        ctx.conn.accepts_document_body_completion_for_session_owner(
+            Some("SID-1"),
+            &committed_document_token,
+        ),
         "Page.stopLoading should preserve the previously committed document"
     );
+    let facts = ctx.conn.browser_fact_snapshot_for_test();
+    let canceled = facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact.fact(),
+                moli_core::browser_host::BrowserFact::NavigationFailed {
+                    failure:
+                        moli_core::browser_host::BrowserNavigationFailure::Canceled {
+                            error_text,
+                        },
+                    previous_page: None,
+                    ..
+                } if error_text == "Navigation stopped"
+            )
+        })
+        .expect("Page.stopLoading should publish a canceled navigation terminal");
+    assert_eq!(canceled.page_residence(), &expected_page);
 
     let messages = ctx.take_all();
     for method in [
@@ -5466,6 +6358,442 @@ async fn stop_loading_without_browser_context_returns_empty_result() {
     ctx.expect_result(160, json!({}), None);
     assert!(ctx.take_all().is_empty());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stop_loading_resolves_the_current_document_only_after_owner_selection() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-STOP-OWNER-SELECTION",
+        "TID-STOP-OWNER-SELECTION",
+        "SID-STOP-OWNER-SELECTION",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-STOP-OWNER-SELECTION")).await;
+
+    let raw = json!({
+        "id": 90_098,
+        "method": "Page.stopLoading",
+        "sessionId": "SID-STOP-OWNER-SELECTION"
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("Page.stopLoading should await Browser Host execution");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let page_residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-STOP-OWNER-SELECTION"))
+        .expect("stop-loading target Page residence");
+    assert_eq!(page_residence.advance_generation_for_test_fixture(), 2);
+    let current_page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-STOP-OWNER-SELECTION"))
+        .expect("current stop-loading Page residence");
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-OWNER-SELECTION"),
+                "FETCH-STOP-CURRENT".to_owned(),
+                pending_subresource_fetch_for_page(
+                    current_page_owner.clone(),
+                    "SID-STOP-OWNER-SELECTION",
+                    "FETCH-STOP-CURRENT",
+                    90_098,
+                ),
+            )
+    );
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-OWNER-SELECTION"),
+                "FETCH-STOP-CURRENT-SECOND".to_owned(),
+                pending_subresource_fetch_for_page(
+                    current_page_owner,
+                    "SID-STOP-OWNER-SELECTION",
+                    "FETCH-STOP-CURRENT-SECOND",
+                    90_103,
+                ),
+            )
+    );
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (start_outcome, pending) = dispatch.into_parts();
+    assert!(
+        pending.is_some(),
+        "renderer stop must be a Host participant"
+    );
+    let (start_events, start_scheduler_events, start_predecessor) =
+        start_outcome.into_protocol_event_parts();
+    assert!(start_events.is_empty());
+    assert!(start_scheduler_events.is_empty());
+    assert!(start_predecessor.is_none());
+
+    let pending = pending.expect("stop-loading participant");
+    assert_eq!(
+        pending
+            .stop_loading_page_owner_for_test()
+            .expect("stop-loading participant identity")
+            .loaded_page_generation(),
+        2,
+        "Browser Host selection must resolve the Page slot's then-current Document"
+    );
+    let completed = pending.wait().await;
+    let dispatch = ctx.conn.complete_browser_host_turn(completed).await;
+    let (cancellation_start_outcome, cancellation_pending) = dispatch.into_parts();
+    let (cancellation_start_events, cancellation_start_scheduler_events, cancellation_predecessor) =
+        cancellation_start_outcome.into_protocol_event_parts();
+    assert!(cancellation_start_events.is_empty());
+    assert!(cancellation_start_scheduler_events.is_empty());
+    assert!(cancellation_predecessor.is_none());
+    let cancellation_pending = cancellation_pending
+        .expect("paused Fetch cancellation must be a second Browser Host participant");
+    assert_eq!(
+        cancellation_pending
+            .stop_loading_page_owner_for_test()
+            .expect("Fetch cancellation Page identity")
+            .loaded_page_generation(),
+        2,
+        "the cancellation participant must retain the Document selected by Browser Host"
+    );
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(cancellation_pending.wait().await)
+        .await;
+    let (second_cancellation_start_outcome, second_cancellation_pending) = dispatch.into_parts();
+    let (second_events, second_scheduler_events, second_predecessor) =
+        second_cancellation_start_outcome.into_protocol_event_parts();
+    assert!(second_events.is_empty());
+    assert!(second_scheduler_events.is_empty());
+    assert!(second_predecessor.is_none());
+    let second_cancellation_pending = second_cancellation_pending
+        .expect("the second paused Fetch cancellation must be another Host participant");
+    assert_eq!(
+        second_cancellation_pending
+            .stop_loading_page_owner_for_test()
+            .expect("second Fetch cancellation Page identity")
+            .loaded_page_generation(),
+        2,
+        "every queued cancellation participant must retain the selected Document"
+    );
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(second_cancellation_pending.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(host_messages.iter().all(|message| message["id"] != 90_098));
+    assert!(
+        !ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .active_target
+            .fetch_owner
+            .has_pending_subresource_fetch_for_test("FETCH-STOP-CURRENT"),
+        "the actor-selected stop must resolve and cancel the slot's current generation"
+    );
+    assert!(
+        !ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .active_target
+            .fetch_owner
+            .has_pending_subresource_fetch_for_test("FETCH-STOP-CURRENT-SECOND"),
+        "the participant chain must continue through every queued Fetch cancellation"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("Page.stopLoading frontend projection should be terminal");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == 90_098)
+        .expect("Page.stopLoading response");
+    assert_eq!(response["sessionId"], "SID-STOP-OWNER-SELECTION");
+    assert_eq!(response["result"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_stop_loading_fetch_cancellation_cannot_apply_to_replacement_page() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-STOP-CANCEL-STALE",
+        "TID-STOP-CANCEL-STALE",
+        "SID-STOP-CANCEL-STALE",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-STOP-CANCEL-STALE")).await;
+
+    let original_page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-STOP-CANCEL-STALE"))
+        .expect("original stop-loading Page residence");
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-CANCEL-STALE"),
+                "FETCH-STOP-CANCEL-ORIGINAL".to_owned(),
+                pending_subresource_fetch_for_page(
+                    original_page_owner,
+                    "SID-STOP-CANCEL-STALE",
+                    "FETCH-STOP-CANCEL-ORIGINAL",
+                    90_101,
+                ),
+            )
+    );
+
+    let raw = json!({
+        "id": 90_101,
+        "method": "Page.stopLoading",
+        "sessionId": "SID-STOP-CANCEL-STALE"
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("Page.stopLoading should await Browser Host execution");
+    };
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, renderer_stop) = dispatch.into_parts();
+    let renderer_stop = renderer_stop.expect("renderer stop participant");
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(renderer_stop.wait().await)
+        .await;
+    let (cancellation_start_outcome, cancellation_pending) = dispatch.into_parts();
+    let (events, scheduler_events, predecessor) =
+        cancellation_start_outcome.into_protocol_event_parts();
+    assert!(events.is_empty());
+    assert!(scheduler_events.is_empty());
+    assert!(predecessor.is_none());
+    let cancellation_pending = cancellation_pending.expect("Fetch cancellation participant");
+    assert_eq!(
+        cancellation_pending
+            .stop_loading_page_owner_for_test()
+            .expect("cancellation Page identity")
+            .loaded_page_generation(),
+        1
+    );
+
+    let page_residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-STOP-CANCEL-STALE"))
+        .expect("stop-loading target Page residence");
+    assert_eq!(page_residence.advance_generation_for_test_fixture(), 2);
+    let successor_page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-STOP-CANCEL-STALE"))
+        .expect("successor Page residence");
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-CANCEL-STALE"),
+                "FETCH-STOP-CANCEL-SUCCESSOR".to_owned(),
+                pending_subresource_fetch_for_page(
+                    successor_page_owner,
+                    "SID-STOP-CANCEL-STALE",
+                    "FETCH-STOP-CANCEL-SUCCESSOR",
+                    90_102,
+                ),
+            )
+    );
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(cancellation_pending.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let _ = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .active_target
+            .fetch_owner
+            .has_pending_subresource_fetch_for_test("FETCH-STOP-CANCEL-SUCCESSOR"),
+        "an old cancellation completion must not finish or project successor-Page Fetch work"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("stale Page.stopLoading should settle as an idempotent success");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == 90_101)
+        .expect("Page.stopLoading response");
+    assert_eq!(response["result"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_stop_loading_participant_cannot_cancel_replacement_page_fetch_state() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-STOP-STALE",
+        "TID-STOP-STALE",
+        "SID-STOP-STALE",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-STOP-STALE")).await;
+
+    let raw = json!({
+        "id": 90_099,
+        "method": "Page.stopLoading",
+        "sessionId": "SID-STOP-STALE"
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("Page.stopLoading should await Browser Host execution");
+    };
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (start_outcome, pending) = dispatch.into_parts();
+    let (start_events, start_scheduler_events, start_predecessor) =
+        start_outcome.into_protocol_event_parts();
+    assert!(start_events.is_empty());
+    assert!(start_scheduler_events.is_empty());
+    assert!(start_predecessor.is_none());
+    let pending = pending.expect("actor-selected renderer stop participant");
+    assert_eq!(
+        pending
+            .stop_loading_page_owner_for_test()
+            .expect("stop-loading participant identity")
+            .loaded_page_generation(),
+        1,
+        "the pending participant must retain the Document selected by Browser Host"
+    );
+
+    let page_residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-STOP-STALE"))
+        .expect("stop-loading target Page residence");
+    assert_eq!(page_residence.advance_generation_for_test_fixture(), 2);
+    let successor_page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-STOP-STALE"))
+        .expect("successor stop-loading Page residence");
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-STALE"),
+                "FETCH-SUCCESSOR".to_owned(),
+                pending_subresource_fetch_for_page(
+                    successor_page_owner,
+                    "SID-STOP-STALE",
+                    "FETCH-SUCCESSOR",
+                    90_099,
+                ),
+            )
+    );
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(pending.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let _ = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .active_target
+            .fetch_owner
+            .has_pending_subresource_fetch_for_test("FETCH-SUCCESSOR"),
+        "old Document stop completion must not consume successor fetch state"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("stale Page.stopLoading should settle as an idempotent success");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == 90_099)
+        .expect("stale Page.stopLoading response");
+    assert_eq!(response["result"], json!({}));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_stop_loading_frontend_wait_does_not_cancel_browser_action() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-STOP-DROPPED-FRONTEND",
+        "TID-STOP-DROPPED-FRONTEND",
+        "SID-STOP-DROPPED-FRONTEND",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-STOP-DROPPED-FRONTEND")).await;
+
+    let page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-STOP-DROPPED-FRONTEND"))
+        .expect("stop-loading Page residence");
+    assert!(
+        ctx.conn
+            .register_pending_subresource_fetch_request_for_session_owner(
+                Some("SID-STOP-DROPPED-FRONTEND"),
+                "FETCH-DROPPED-FRONTEND".to_owned(),
+                pending_subresource_fetch_for_page(
+                    page_owner,
+                    "SID-STOP-DROPPED-FRONTEND",
+                    "FETCH-DROPPED-FRONTEND",
+                    90_100,
+                ),
+            )
+    );
+
+    let raw = json!({
+        "id": 90_100,
+        "method": "Page.stopLoading",
+        "sessionId": "SID-STOP-DROPPED-FRONTEND"
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("Page.stopLoading should enter Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    drop(frontend_wait);
+
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    assert!(
+        !ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .active_target
+            .fetch_owner
+            .has_pending_subresource_fetch_for_test("FETCH-DROPPED-FRONTEND"),
+        "Browser Host must complete stop-loading after frontend wait loss"
+    );
+    assert!(
+        ctx.sent.iter().all(|message| message["id"] != 90_100),
+        "an abandoned frontend command must not receive a late response"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn stop_loading_aborts_paused_response_stage_navigation() {
     async fn page() -> impl axum::response::IntoResponse {
@@ -5693,7 +7021,7 @@ async fn stop_loading_aborts_paused_auth_navigation() {
     server.abort();
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn reload_reloads_current_url_and_returns_empty_result() {
+async fn page_reload_is_selected_by_browser_owner_and_outlives_frontend_poll() {
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -5746,20 +7074,59 @@ async fn reload_reloads_current_url_and_returns_empty_result() {
         "expected first navigation html to contain counter 1, got {first_html}"
     );
 
-    ctx.process_async(json!({
+    ctx.sent.clear();
+    let raw = json!({
         "id": 241,
         "method": "Page.reload",
-        "sessionId": "SID-1"
-    }))
-    .await;
-    let reload = take_response_by_id(&mut ctx, 241);
-    assert_eq!(reload["result"], json!({}));
+        "sessionId": "SID-1",
+        "params": {
+            "ignoreCache": true,
+            "scriptToEvaluateOnLoad": "globalThis.__reloadOwner = true"
+        }
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("top-level Page.reload should await Browser Owner admission");
+    };
+
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "frontend dispatch must not start the queued reload request"
+    );
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
 
     let second_html = loaded_page_html_for_test(&mut ctx).await;
     assert!(
         second_html.contains(">2<"),
-        "expected reloaded html to contain counter 2, got {second_html}"
+        "Browser Host should finish reload before the frontend receiver is polled: {second_html}"
     );
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages
+            .iter()
+            .all(|message| message["id"] != json!(241)),
+        "the live frontend retains only response projection"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("frontend should receive only the terminal reload projection");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let reload = messages
+        .iter()
+        .find(|message| message["id"] == json!(241))
+        .expect("reload response should retain its frontend correlation");
+    assert_eq!(reload["sessionId"], json!("SID-1"));
+    assert_eq!(reload["result"], json!({}));
 
     server.abort();
 }
@@ -6049,7 +7416,7 @@ async fn reload_targets_background_owner_without_promotion() {
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<title>Active</title><main>active</main>".to_owned());
     bc.background_targets.push(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-background"))
         .await;
     let initial_html = ctx
@@ -6370,7 +7737,7 @@ async fn reload_after_crash_emits_target_reloaded_after_crash() {
         "data:text/html,<body>reload-after-crash</body>",
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .record_inspector_target_crashed();
     bc.active_target
@@ -6418,7 +7785,7 @@ async fn navigate_after_crash_emits_target_reloaded_after_crash() {
         "data:text/html,<body>before-crash</body>",
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .record_inspector_target_crashed();
     bc.active_target
@@ -6611,7 +7978,7 @@ async fn parser_script_location_navigation_suppresses_aborted_document_dcl() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn parser_script_location_navigation_continues_after_target_response() {
+async fn parser_script_location_navigation_suppression_is_independent_of_target_response() {
     async fn challenge() -> impl axum::response::IntoResponse {
         (
             [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
@@ -6651,19 +8018,24 @@ async fn parser_script_location_navigation_continues_after_target_response() {
 
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    ctx.process_async(json!({
-        "id": 252,
-        "method": "Page.navigate",
-        "sessionId": "SID-1",
-        "params": { "url": format!("http://{addr}/challenge") }
-    }))
-    .await;
-    let _ = take_response_by_id(&mut ctx, 252);
-
-    // Chromium returns Page.navigate once the new document commits. Parser
-    // continuation (and therefore this script navigation) is admitted only
-    // after that response boundary has been flushed.
-    let release_response = tokio::spawn(async move {
+    let navigation = async {
+        ctx.process_async(json!({
+            "id": 252,
+            "method": "Page.navigate",
+            "sessionId": "SID-1",
+            "params": { "url": format!("http://{addr}/challenge") }
+        }))
+        .await;
+        ctx.wait_until_scheduler_state("autonomous Browser Owner successor navigation", |conn| {
+            conn.browser_context
+                .as_ref()
+                .is_some_and(|browser_context| {
+                    browser_context.target_url() == format!("http://{addr}/final")
+                })
+        })
+        .await;
+    };
+    let release_response = async {
         tokio::time::timeout(
             std::time::Duration::from_secs(5),
             final_requested.notified(),
@@ -6671,7 +8043,9 @@ async fn parser_script_location_navigation_continues_after_target_response() {
         .await
         .expect("successor navigation should request the gated final response");
         final_release.notify_one();
-    });
+    };
+    let ((), ()) = tokio::join!(navigation, release_response);
+    let _ = take_response_by_id(&mut ctx, 252);
     wait_until_messages(
         &mut ctx,
         Some("SID-1"),
@@ -6688,9 +8062,6 @@ async fn parser_script_location_navigation_continues_after_target_response() {
         },
     )
     .await;
-    release_response
-        .await
-        .expect("gated final-response release task");
 
     let events = ctx.take_all();
     assert_eq!(

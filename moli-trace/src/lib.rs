@@ -3,10 +3,14 @@
 //! These flags are intentionally process-global and cached after first read:
 //! they are diagnostics controls, not dynamic runtime configuration.
 
+mod browser_owner;
 mod dom_binding;
 mod flags;
 mod promise_hook;
 
+pub use browser_owner::{
+    BrowserOwnerTraceDocument, BrowserOwnerTraceRecord, emit_browser_owner_trace_record,
+};
 pub use dom_binding::{
     DomBindingOperationStats, record_dom_binding_operation, take_dom_binding_operation_stats,
 };

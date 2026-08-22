@@ -616,16 +616,27 @@ async fn attach_to_target_ensures_pending_background_initial_document_before_att
         "<!doctype html><title>active</title>",
     )
     .await;
-    {
-        let bc = ctx.conn.browser_context.as_mut().expect("browser context");
-        bc.stage_background_target(
-            "TID-background-pending".to_owned(),
-            None,
-            "about:blank#direct-attach".to_owned(),
-            None,
-            None,
-        );
-    }
+    ctx.conn
+        .register_background_target_with_creation_metadata_projection(
+            "BID-9",
+            "TID-background-pending",
+            moli_core::browser_host::BrowserTargetCreationMetadata::with_initial_empty_document(
+                moli_core::browser_host::BrowserInitialEmptyDocumentSeed::new(
+                    "about:blank#direct-attach",
+                ),
+            ),
+            |bc, target_handle, page_residence, session_storage_access| {
+                bc.stage_background_target_with_browser_handles(
+                    target_handle,
+                    page_residence,
+                    session_storage_access,
+                    None,
+                    "about:blank#direct-attach".to_owned(),
+                    None,
+                );
+            },
+        )
+        .expect("background Target projection should register");
     assert_eq!(
         ctx.conn
             .browser_context
@@ -692,7 +703,7 @@ async fn attach_to_target_existing_session_creates_distinct_auxiliary_session() 
     // Chromium TargetHandler::AttachToTarget calls Session::Attach on every
     // invocation, even when the host already has another attached session.
     let mut ctx = TestContext::new();
-    load_bc_with_target(&mut ctx, "BID-9", "TID-000000000B");
+    load_bc_with_pending_initial_target(&mut ctx, "BID-9", "TID-000000000B");
     ctx.conn
         .browser_context
         .as_mut()
@@ -767,7 +778,10 @@ async fn attach_to_target_keeps_background_target_parked() {
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.background_targets.len(), 1);
     assert_eq!(bc.background_targets[0].target_id(), "TID-000000000B");
-    assert_eq!(bc.background_targets[0].session_id(), Some("SID-1"));
+    assert_eq!(
+        bc.primary_session_id_for_target("TID-000000000B"),
+        Some("SID-1")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -963,7 +977,7 @@ async fn attach_to_browser_target_emits_browser_attached_event() {
 #[tokio::test(flavor = "multi_thread")]
 async fn attach_to_browser_target_does_not_reuse_page_session() {
     let mut ctx = TestContext::new();
-    load_bc(&mut ctx, "BID-9");
+    load_bc_with_target(&mut ctx, "BID-9", "TID-page");
     ctx.conn
         .browser_context
         .as_mut()
@@ -1037,7 +1051,7 @@ async fn detach_browser_target_session_cascades_owned_target_sessions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn detach_auxiliary_page_session_cascades_owned_target_sessions() {
     let mut ctx = TestContext::new();
-    load_bc_with_target(&mut ctx, "BID-aux-cascade", "TID-page");
+    load_bc_with_pending_initial_target(&mut ctx, "BID-aux-cascade", "TID-page");
 
     ctx.process_async(json!({"id": 151, "method": "Target.attachToBrowserTarget"}))
         .await;
@@ -1104,7 +1118,7 @@ async fn detach_auxiliary_page_session_cascades_owned_target_sessions() {
 #[tokio::test(flavor = "multi_thread")]
 async fn root_frontend_release_preserves_private_browser_owned_page_session() {
     let mut ctx = TestContext::new();
-    load_bc_with_target(&mut ctx, "BID-root-release", "TID-root-release");
+    load_bc_with_pending_initial_target(&mut ctx, "BID-root-release", "TID-root-release");
 
     ctx.process_async(json!({"id": 18, "method": "Target.attachToBrowserTarget"}))
         .await;
@@ -1266,7 +1280,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
     inactive.attach_active_session("SID-inactive");
     inactive
         .background_targets
-        .push(crate::conn::BackgroundTarget::new(
+        .push(crate::conn::BackgroundTarget::new_with_frontend_session(
             "TID-000000000D".to_owned(),
             Some("SID-inactive-background".to_owned()),
             crate::conn::TargetIdentityState::about_blank(),
@@ -1286,7 +1300,7 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
     );
     inactive_shared_worker.attach_session("SID-shared-inactive".to_owned());
     inactive.insert_shared_worker_target(inactive_shared_worker);
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     assert_eq!(
         ctx.conn.session_route(Some("SID-browser")),
@@ -1361,12 +1375,10 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
             Some("SID-inactive-background"),
             |bc, target_id| {
                 assert_eq!(bc.id, "BID-B");
-                bc.mutate_parked_page_session_state(target_id, |state| {
-                    state
-                        .devtools_session_state
-                        .console_output_session_state
-                        .console_enabled = true;
-                });
+                bc.primary_devtools_session_state_for_target_mut(target_id)
+                    .expect("background Target frontend state")
+                    .console_output_session_state
+                    .console_enabled = true;
                 target_id.to_owned()
             }
         ),
@@ -1382,14 +1394,8 @@ async fn session_route_finds_browser_active_auxiliary_background_and_inactive_se
             Some("SID-inactive-background"),
             |bc, target_id| {
                 assert_eq!(bc.id, "BID-B");
-                let mut console_enabled = false;
-                bc.mutate_parked_page_session_state(target_id, |state| {
-                    console_enabled = state
-                        .devtools_session_state
-                        .console_output_session_state
-                        .console_enabled;
-                });
-                console_enabled
+                bc.primary_devtools_session_state_for_target(target_id)
+                    .is_some_and(|state| state.console_output_session_state.console_enabled)
             }
         ),
         Some(true)
@@ -1533,13 +1539,13 @@ async fn detach_from_target() {
     ctx.expect_result(11, json!({ "sessionId": sid }), None);
 
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
@@ -1567,17 +1573,17 @@ async fn detach_from_target() {
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert!(!bc.has_active_session());
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .page_session_state
             .page_lifecycle_events
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .inspector_enabled
     );
@@ -1937,7 +1943,7 @@ async fn detach_from_target_aborts_paused_request_stage_navigation() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 40,
@@ -2007,13 +2013,13 @@ async fn set_auto_attach_false_detaches_existing_target() {
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000D");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
@@ -2073,17 +2079,17 @@ async fn set_auto_attach_false_detaches_existing_target() {
     assert!(!bc.has_active_session());
     assert_eq!(bc.active_target_id(), Some("TID-000000000D"));
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .page_session_state
             .page_lifecycle_events
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .inspector_enabled
     );
@@ -2752,10 +2758,6 @@ async fn non_browser_auto_attach_owners_do_not_replay_existing_shared_worker_tar
         ctx.conn
             .prepare_auto_attached_page_session_binding("TID-page", "SID-page".to_owned())
     );
-    ctx.conn
-        .runtime_session_owner_slot_mut(Some("SID-page"))
-        .expect("page owner runtime slot")
-        .set_page_attachment_id_for_test(1);
     let owner_page = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-page"))

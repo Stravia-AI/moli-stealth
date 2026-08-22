@@ -13,15 +13,29 @@ impl Page {
     }
 
     pub async fn stop_document_lifecycle_async(&mut self) -> Result<()> {
-        let reply = self
-            .dispatch_page_command_async(RendererPageCommand::StopDocumentLifecycle)
-            .await?;
+        let pending = self.start_stop_document_lifecycle()?;
+        self.finish_stop_document_lifecycle(pending.wait().await?)
+            .map(|_| ())
+    }
+
+    pub fn start_stop_document_lifecycle(&self) -> Result<PendingPageCommand> {
+        self.start_page_command(RendererPageCommand::StopDocumentLifecycle)
+    }
+
+    pub fn finish_stop_document_lifecycle(
+        &mut self,
+        completion: CompletedPageCommand,
+    ) -> Result<Option<RendererOutputFence>> {
+        let output = self.finish_page_command_turn(completion);
+        let (completion, predecessor) = output.into_completion_and_predecessor();
+        let (reply, _, _) = completion.into_parts();
         expect_page_reply!(
             reply,
             "stop document lifecycle page command",
             "a unit reply",
             RendererPageReply::Unit => Ok(()),
-        )
+        )?;
+        Ok(predecessor)
     }
 
     pub async fn continue_pending_subresource_fetch_async(

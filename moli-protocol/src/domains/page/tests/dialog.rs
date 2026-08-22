@@ -9,28 +9,15 @@ fn dialog_for_test(
     renderer_dialog_for_test(frame_id, dialog_type, message, "", None)
 }
 
-fn page_owner_for_test(
-    ctx: &mut TestContext,
-    session_id: Option<&str>,
-) -> crate::conn::TargetPageResidenceIdentity {
-    let runtime_slot = ctx
-        .conn
-        .runtime_session_owner_slot_mut(session_id)
-        .expect("target session should expose a runtime owner slot");
-    if runtime_slot.page_attachment_id().is_none() {
-        runtime_slot.replace_page_attachment_id_for_test();
-    }
-    ctx.conn
-        .target_page_residence_identity_for_session(session_id)
-        .expect("target session should expose a Page residence")
-}
-
 fn push_dialog_for_session(
     ctx: &mut TestContext,
     session_id: Option<&str>,
     dialog: RendererPendingJavaScriptDialog,
 ) {
-    let page_owner = page_owner_for_test(ctx, session_id);
+    let page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(session_id)
+        .expect("target session should expose a Page residence");
     let source_frame_id = match dialog.source() {
         moli_core::page::RendererJavaScriptDialogSource::ChildFrame { frame_id, .. } => {
             frame_id.clone()
@@ -118,10 +105,10 @@ fn retiring_page_scope_and_clearing_dialog_state_dismisses_installed_dialog() {
 async fn pending_javascript_dialogs_are_preserved_per_parked_target() {
     fn dialog(target_id: &str, message: &str) -> crate::conn::TargetJavaScriptDialog {
         target_dialog_for_test(
-            crate::conn::TargetPageResidenceIdentity::new_for_test(
+            crate::conn::TargetPageResidenceIdentity::new(
                 "BID-1".to_owned(),
                 Some(target_id.to_owned()),
-                1,
+                0,
             ),
             target_id,
             "alert",
@@ -137,13 +124,13 @@ async fn pending_javascript_dialogs_are_preserved_per_parked_target() {
     {
         let browser_context = ctx.conn.browser_context.as_mut().unwrap();
         browser_context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .javascript_dialog_state
             .push(dialog("TID-A", "a"));
         browser_context
             .background_targets
-            .push(BackgroundTarget::new(
+            .push(BackgroundTarget::new_with_frontend_session(
                 "TID-B".to_owned(),
                 Some("SID-B".to_owned()),
                 crate::conn::TargetIdentityState::new(
@@ -161,13 +148,13 @@ async fn pending_javascript_dialogs_are_preserved_per_parked_target() {
         );
         assert!(
             browser_context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .javascript_dialog_state
                 .is_empty()
         );
         browser_context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .javascript_dialog_state
             .push(dialog("TID-B", "b"));
@@ -183,7 +170,7 @@ async fn pending_javascript_dialogs_are_preserved_per_parked_target() {
         );
         assert_eq!(
             browser_context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .javascript_dialog_state
                 .pending_dialogs(),
@@ -201,7 +188,7 @@ async fn pending_javascript_dialogs_are_preserved_per_parked_target() {
         );
         assert_eq!(
             browser_context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .javascript_dialog_state
                 .pending_dialogs(),
@@ -329,7 +316,10 @@ async fn document_open_preserves_dialog_order_and_retires_replaced_document_stat
 async fn get_javascript_dialog_text_peeks_without_closing_dialog() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    let page_owner = page_owner_for_test(&mut ctx, Some("SID-1"));
+    let page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("dialog fixture should capture the exact Page residence");
     ctx.conn
         .with_target_devtools_session_state_for_session_mut(Some("SID-1"), |state| {
             state
@@ -413,7 +403,10 @@ async fn get_javascript_dialog_text_peeks_without_closing_dialog() {
 async fn set_javascript_dialog_prompt_text_is_used_when_accepting_prompt() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    let page_owner = page_owner_for_test(&mut ctx, Some("SID-1"));
+    let page_owner = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("dialog fixture should capture the exact Page residence");
     ctx.conn
         .with_target_devtools_session_state_for_session_mut(Some("SID-1"), |state| {
             state
@@ -625,7 +618,7 @@ async fn handle_javascript_dialog_rejects_dialog_without_current_page_residence(
                 .page_session_state
                 .javascript_dialog_state
                 .push(target_dialog_for_test(
-                    crate::conn::TargetPageResidenceIdentity::new_for_test(
+                    crate::conn::TargetPageResidenceIdentity::new(
                         "BID-dialog-missing-frame".to_owned(),
                         Some("retired-target".to_owned()),
                         1,

@@ -122,7 +122,7 @@ async fn capture_screenshot_uses_pending_renderer_page_command_residence() {
         r#"{"id":151,"method":"Page.captureScreenshot","sessionId":"SID-SCREENSHOT-FENCE"}"#,
     );
     let PageCommandTaskStep::Pending(pending) =
-        try_start_page_command_dispatch(&mut ctx.conn, &cmd)
+        try_start_page_command_dispatch(&mut ctx.conn, &cmd, &CommandDispatchContext::default())
             .expect("Page.captureScreenshot should be handled by Page domain")
     else {
         panic!("captureScreenshot should use the pending renderer page-command lane");
@@ -166,7 +166,7 @@ async fn capture_screenshot_rejects_completion_from_replaced_renderer_attachment
         r#"{"id":152,"method":"Page.captureScreenshot","sessionId":"SID-SCREENSHOT-STALE"}"#,
     );
     let PageCommandTaskStep::Pending(pending) =
-        try_start_page_command_dispatch(&mut ctx.conn, &cmd)
+        try_start_page_command_dispatch(&mut ctx.conn, &cmd, &CommandDispatchContext::default())
             .expect("Page.captureScreenshot should be handled by Page domain")
     else {
         panic!("captureScreenshot should use the pending renderer page-command lane");
@@ -330,8 +330,12 @@ async fn capture_snapshot_dispatch_serializes_html_in_renderer_owner() {
         None,
         r#"{"id":1120,"method":"Page.captureSnapshot"}"#,
     );
-    let step = try_start_page_command_dispatch(&mut ctx.conn, &cmd)
-        .expect("Page.captureSnapshot should be handled by Page domain");
+    let step = try_start_page_command_dispatch(
+        &mut ctx.conn,
+        &cmd,
+        &crate::conn::CommandDispatchContext::default(),
+    )
+    .expect("Page.captureSnapshot should be handled by Page domain");
     let PageCommandTaskStep::Pending(pending) = step else {
         panic!("Page.captureSnapshot should serialize HTML with a renderer page command");
     };
@@ -1015,7 +1019,7 @@ async fn get_layout_metrics_targets_inactive_loaded_owner_without_activation() {
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.insert_inactive_browser_context_fixture(inactive);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
         .await;
     ctx.sent.clear();
@@ -1051,7 +1055,7 @@ async fn get_layout_metrics_targets_inactive_loaded_owner_without_activation() {
         "content size should come from the inactive owner's live document"
     );
     assert!(
-        ctx.conn.browser_context.is_none(),
+        ctx.inactive_browser_context_fixture_remains_unselected(),
         "inactive Page.getLayoutMetrics should not activate its browser context"
     );
 }

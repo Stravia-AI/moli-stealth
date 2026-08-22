@@ -5701,7 +5701,7 @@ fn context_scoped_subscribe_projects_raw_worker_runtime_context_as_shared_worker
 }
 
 #[test]
-fn context_scoped_service_worker_protocol_events_use_stable_owner_realm() {
+fn context_scoped_service_worker_protocol_events_use_exact_runtime_realm() {
     let (mut state, mut registry) = bidi_connection_with_session();
     record_bidi_context_tree(&mut state, &[("TID-service-worker", "BID-service-worker")]);
     let subscribe = state.handle_message_with_session_registry(
@@ -5758,18 +5758,18 @@ fn context_scoped_service_worker_protocol_events_use_stable_owner_realm() {
     assert_eq!(events[0]["method"], json!("script.realmCreated"));
     assert_eq!(
         events[0]["params"]["realm"],
-        json!("service-worker-TID-service-worker")
+        json!("TID-service-worker:-5857654653247543937.8461351526676111284")
     );
     assert_eq!(events[0]["params"]["type"], json!("service-worker"));
     assert_eq!(events[1]["method"], json!("log.entryAdded"));
     assert_eq!(
         events[1]["params"]["source"]["realm"],
-        json!("service-worker-TID-service-worker")
+        json!("TID-service-worker:-5857654653247543937.8461351526676111284")
     );
     assert_eq!(events[2]["method"], json!("script.realmDestroyed"));
     assert_eq!(
         events[2]["params"]["realm"],
-        json!("service-worker-TID-service-worker")
+        json!("TID-service-worker:-5857654653247543937.8461351526676111284")
     );
 }
 
@@ -7030,8 +7030,6 @@ fn serializes_devtools_navigate_result_to_bidi_response() {
                     "LOADER-1",
                 )),
                 url: "https://example.test/".to_owned(),
-                error_text: None,
-                is_download: None,
             },
         ),
     );

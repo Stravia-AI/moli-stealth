@@ -1,5 +1,3 @@
-use moli_core::RendererOutputTransportSender;
-
 use super::{BackgroundEventSender, RuntimeInspectorResponseReadySender};
 
 #[derive(Default)]
@@ -8,7 +6,6 @@ pub(super) struct CdpSchedulerHooks {
     background_navigation_completion_sender: Option<
         tokio::sync::mpsc::UnboundedSender<crate::domains::page::BackgroundNavigationCompletion>,
     >,
-    renderer_publication_sender: Option<RendererOutputTransportSender>,
     runtime_inspector_response_ready_sender: Option<RuntimeInspectorResponseReadySender>,
 }
 
@@ -53,16 +50,5 @@ impl CdpSchedulerHooks {
 
     pub(super) fn has_background_navigation_completion_sender(&self) -> bool {
         self.background_navigation_completion_sender.is_some()
-    }
-
-    pub(super) fn set_renderer_publication_sender(
-        &mut self,
-        sender: RendererOutputTransportSender,
-    ) {
-        self.renderer_publication_sender = Some(sender);
-    }
-
-    pub(super) fn renderer_publication_sender(&self) -> Option<RendererOutputTransportSender> {
-        self.renderer_publication_sender.clone()
     }
 }

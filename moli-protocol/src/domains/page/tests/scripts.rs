@@ -1,4 +1,5 @@
 use super::*;
+use moli_core::browser_host::{BrowserInitialEmptyDocumentSeed, BrowserPageOwnerKey};
 
 #[tokio::test(flavor = "multi_thread")]
 async fn add_script_to_evaluate_on_new_document_injects_script_into_future_navigation() {
@@ -874,6 +875,12 @@ async fn create_isolated_world_requires_matching_frame_and_uses_fresh_initial_do
         .as_mut()
         .unwrap()
         .clear_loaded_page();
+    ctx.conn
+        .register_target_initial_empty_document_for_test(
+            &BrowserPageOwnerKey::new("BID-1", "TID-1"),
+            BrowserInitialEmptyDocumentSeed::new("about:blank"),
+        )
+        .expect("registered Target should accept test metadata");
     ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
     ctx.process_async(json!({
         "id": 41,
@@ -911,7 +918,13 @@ async fn create_isolated_world_requires_matching_frame_and_uses_fresh_initial_do
         .browser_context
         .as_mut()
         .unwrap()
-        .begin_active_target_initial_empty_document("about:blank".into());
+        .mark_active_initial_document_page_build_pending();
+    ctx.conn
+        .register_target_initial_empty_document_for_test(
+            &BrowserPageOwnerKey::new("BID-1", "TID-1"),
+            BrowserInitialEmptyDocumentSeed::new("about:blank"),
+        )
+        .expect("registered Target should accept test metadata");
     ctx.process_async(json!({
         "id": 42,
         "method": "Page.createIsolatedWorld",
@@ -1725,7 +1738,7 @@ async fn create_isolated_world_targets_loaded_background_owner_without_promotion
     bc.set_active_target_id("TID-active".to_owned());
     bc.attach_active_session("SID-active".to_owned());
     bc.background_targets.push(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<body>background</body>",
         Some("SID-background"),
@@ -1892,7 +1905,7 @@ async fn create_isolated_world_after_reactivating_browser_context_with_another_l
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(first_page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = false;
     }
@@ -1918,7 +1931,7 @@ async fn create_isolated_world_after_reactivating_browser_context_with_another_l
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(second_page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = false;
     }

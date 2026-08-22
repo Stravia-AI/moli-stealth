@@ -3,4 +3,6 @@ mod loaded;
 mod parked;
 mod surfaces;
 
-pub(crate) use loaded::{LoadedNavigationPageCommit, LoadedNavigationRendererAttachmentCommit};
+pub(crate) use loaded::{
+    LoadedNavigationRendererAttachmentCommit, PreparedLoadedNavigationPageCommit,
+};

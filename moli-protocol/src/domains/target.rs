@@ -1,8 +1,8 @@
 use serde::Deserialize;
 
-use crate::conn::{
-    BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd, TargetHandlerAccessMode,
-};
+use moli_core::browser_host::BrowserTargetStateSnapshot;
+
+use crate::conn::{BackgroundProtocolEvent, BrowserContext, CdpConnection, Cmd};
 use crate::devtools_runtime::{
     DevToolsActivateTargetCommand, DevToolsCloseTargetCommand, DevToolsCommand,
     DevToolsCommandResult, DevToolsCreateTargetCommand, DevToolsError, DevToolsErrorKind,
@@ -18,8 +18,7 @@ mod attachment;
 mod auto_attach;
 mod browser_context;
 mod browser_context_disposal;
-mod closing;
-mod creation;
+mod browser_context_disposal_owner_adapter;
 mod events;
 mod info;
 mod popup;
@@ -29,13 +28,21 @@ mod protocol_neutral_tests;
 mod tests;
 mod worker_target;
 
+pub(crate) use browser_context_disposal::{
+    BrowserContextDisposalOwnerTaskStep, CompletedBrowserContextDisposalOwnerTask,
+    PendingBrowserContextDisposalOwnerTask, complete_browser_context_disposal_owner_task,
+    start_browser_context_disposal_owner_task,
+};
+pub use browser_context_disposal_owner_adapter::{
+    CompletedDevToolsBrowserOwnerContextDisposalCommand,
+    DevToolsBrowserOwnerContextDisposalCommandTaskStep,
+    PendingDevToolsBrowserOwnerContextDisposalCommand,
+};
+
 pub(in crate::domains) use browser_context::devtools_client_window_info_for_target;
-pub(crate) use popup::{
-    PopupTargetCreation, PopupTargetOpenerIdentity, complete_popup_target_activation_action_async,
-    complete_popup_target_navigation_owner_action_async,
+pub(crate) use lifecycle::{
+    PopupTargetCreation, PopupTargetOpenerIdentity,
     create_popup_target_from_renderer_output_background_events_async,
-    emit_target_info_changed_for_session_owner_background_event,
-    start_initial_document_target_url_navigation_if_needed_background_events_async,
 };
 pub(crate) fn popup_activation_creates_new_target(
     conn: &CdpConnection,
@@ -63,7 +70,7 @@ pub(in crate::domains) use worker_target::{
     dedicated_worker_target_lifecycle_prepared_outputs_for_event,
     project_worker_target_output_async,
     release_failed_dedicated_worker_target_after_debugger_resume,
-    retire_dedicated_worker_targets_for_replaced_page_async,
+    retire_dedicated_worker_targets_for_replaced_page,
     service_worker_target_lifecycle_prepared_outputs_for_event,
     shared_worker_target_lifecycle_prepared_outputs_for_event,
 };
@@ -210,7 +217,7 @@ async fn clear_detached_target_owner_fetch_state_background_events_async(
     if let Some(pending_page_command) = pending_page_command {
         match pending_page_command.wait().await {
             Ok(completion) => match conn.loaded_page_mut_for_protocol_access(session_id) {
-                Ok(page) => {
+                Ok(mut page) => {
                     if let Err(error) = page.finish_set_fetch_subresource_interception(completion) {
                         tracing::warn!(
                             ?session_id,
@@ -307,7 +314,7 @@ impl CdpConnection {
 enum PendingTargetCommandKind {
     AttachToTarget {
         attached_session_id: String,
-        target_info: DevToolsTargetInfo,
+        target_snapshot: BrowserTargetStateSnapshot,
         initial_document: Option<Box<crate::conn::PendingInitialDocumentPageBuild>>,
     },
     ActivateTarget {
@@ -332,18 +339,19 @@ enum PendingTargetCommandKind {
         command: DevToolsCloseTargetCommand,
     },
     DisposeBrowserContext {
-        browser_context_id: String,
+        pending: crate::conn::PendingBrowserOwnerContextDisposalCommand,
     },
-    SendMessageToTarget {
+    SendMessageToTargetStart {
         message: String,
         target_session_id: Option<String>,
     },
+    SendMessageToTargetContinuation(attachment::PendingSendMessageToTargetCommand),
 }
 
 enum CompletedTargetCommandKind {
     AttachToTarget {
         attached_session_id: String,
-        target_info: DevToolsTargetInfo,
+        target_snapshot: BrowserTargetStateSnapshot,
         initial_document: Option<
             Result<
                 Box<crate::conn::CompletedInitialDocumentPageBuild>,
@@ -378,12 +386,13 @@ enum CompletedTargetCommandKind {
         command: DevToolsCloseTargetCommand,
     },
     DisposeBrowserContext {
-        browser_context_id: String,
+        completion: Result<crate::conn::CompletedBrowserOwnerContextDisposalCommand, String>,
     },
-    SendMessageToTarget {
+    SendMessageToTargetStart {
         message: String,
         target_session_id: Option<String>,
     },
+    SendMessageToTargetContinuation(attachment::CompletedSendMessageToTargetCommand),
 }
 
 impl PendingTargetCommandDispatch {
@@ -391,11 +400,11 @@ impl PendingTargetCommandDispatch {
         let kind = match *self.kind {
             PendingTargetCommandKind::AttachToTarget {
                 attached_session_id,
-                target_info,
+                target_snapshot,
                 initial_document,
             } => CompletedTargetCommandKind::AttachToTarget {
                 attached_session_id,
-                target_info,
+                target_snapshot,
                 initial_document: match initial_document {
                     Some(pending) => Some(pending.wait().await.map(Box::new)),
                     None => None,
@@ -437,16 +446,23 @@ impl PendingTargetCommandDispatch {
             PendingTargetCommandKind::CloseTarget { command } => {
                 CompletedTargetCommandKind::CloseTarget { command }
             }
-            PendingTargetCommandKind::DisposeBrowserContext { browser_context_id } => {
-                CompletedTargetCommandKind::DisposeBrowserContext { browser_context_id }
+            PendingTargetCommandKind::DisposeBrowserContext { pending } => {
+                CompletedTargetCommandKind::DisposeBrowserContext {
+                    completion: pending.wait().await,
+                }
             }
-            PendingTargetCommandKind::SendMessageToTarget {
+            PendingTargetCommandKind::SendMessageToTargetStart {
                 message,
                 target_session_id,
-            } => CompletedTargetCommandKind::SendMessageToTarget {
+            } => CompletedTargetCommandKind::SendMessageToTargetStart {
                 message,
                 target_session_id,
             },
+            PendingTargetCommandKind::SendMessageToTargetContinuation(pending) => {
+                CompletedTargetCommandKind::SendMessageToTargetContinuation(
+                    Box::pin(pending.wait()).await,
+                )
+            }
         };
         CompletedTargetCommandDispatch {
             command_id: self.command_id,
@@ -469,6 +485,7 @@ impl CompletedTargetCommandDispatch {
 pub(crate) fn try_start_target_command_dispatch(
     conn: &mut CdpConnection,
     cmd: &Cmd<'_>,
+    command_context: &crate::conn::CommandDispatchContext,
 ) -> Option<TargetCommandTaskStep> {
     let action = cmd.parse_action::<TargetAction>();
     if let Some(action) = action
@@ -511,10 +528,10 @@ pub(crate) fn try_start_target_command_dispatch(
         Some(TargetAction::DetachFromTarget) => {
             Some(attachment::start_detach_from_target_command(cmd))
         }
-        Some(TargetAction::CloseTarget) => Some(closing::start_close_target_command(conn, cmd)),
-        Some(TargetAction::DisposeBrowserContext) => {
-            Some(browser_context::start_dispose_browser_context_command(cmd))
-        }
+        Some(TargetAction::CloseTarget) => Some(lifecycle::start_close_target_command(conn, cmd)),
+        Some(TargetAction::DisposeBrowserContext) => Some(
+            browser_context::start_dispose_browser_context_command(conn, cmd, command_context),
+        ),
         Some(TargetAction::SendMessageToTarget) => {
             Some(attachment::start_send_message_to_target_command(cmd))
         }
@@ -734,7 +751,7 @@ pub(crate) async fn execute_devtools_target_command_async_with_protocol_events(
     }
 }
 
-async fn target_creation_response_plan_after_initial_document(
+fn created_target_response_plan_after_initial_document(
     conn: &mut CdpConnection,
     response_plan: CommandOutputPlan,
     creation_commit: creation::TargetCreationCommit,
@@ -748,12 +765,9 @@ async fn target_creation_response_plan_after_initial_document(
     {
         return CommandOutputPlan::from_devtools_error(error);
     }
-    popup::start_target_url_navigation_if_allowed_background_events_async(
-        conn,
-        &mut events,
-        &target_id,
-    )
-    .await;
+    if let Err(error) = lifecycle::publish_target_url_navigation_if_allowed(conn, &target_id) {
+        return CommandOutputPlan::error(-32000, error.to_string());
+    }
     for event in events {
         plan.push_background_event(event);
     }
@@ -769,7 +783,7 @@ pub(crate) async fn complete_pending_target_command(
     match completed.kind {
         CompletedTargetCommandKind::AttachToTarget {
             attached_session_id,
-            target_info,
+            target_snapshot,
             initial_document,
         } => {
             return TargetCommandTaskStep::Complete(
@@ -777,7 +791,7 @@ pub(crate) async fn complete_pending_target_command(
                     conn,
                     completed.session_id.as_deref(),
                     attached_session_id,
-                    target_info,
+                    target_snapshot,
                     initial_document,
                 )
                 .await,
@@ -855,15 +869,11 @@ pub(crate) async fn complete_pending_target_command(
                 }
                 None => {}
             }
-            TargetCommandTaskStep::Complete(
-                target_creation_response_plan_after_initial_document(
-                    conn,
-                    response_plan,
-                    creation_commit,
-                    activation_events,
-                )
-                .await,
-            )
+            TargetCommandTaskStep::Complete(created_target_response_plan_after_initial_document(
+                conn,
+                response_plan,
+                protocol_events,
+            ))
         }
         CompletedTargetCommandKind::DetachFromTarget {
             target_id,
@@ -885,29 +895,39 @@ pub(crate) async fn complete_pending_target_command(
                 closing::complete_close_target_command_async(conn, command, command_context).await,
             );
         }
-        CompletedTargetCommandKind::DisposeBrowserContext { browser_context_id } => {
-            return TargetCommandTaskStep::Complete(
-                browser_context::complete_dispose_browser_context_command_async(
-                    conn,
-                    browser_context_id,
-                    command_context,
-                )
-                .await,
-            );
+        CompletedTargetCommandKind::DisposeBrowserContext { completion } => {
+            TargetCommandTaskStep::Complete(match completion {
+                Ok(completed) => {
+                    let (plan, detached) = completed.into_parts();
+                    command_context.absorb_detached_participant_projection(detached);
+                    plan
+                }
+                Err(error) => CommandOutputPlan::error_without_session(-32000, error),
+            })
         }
-        CompletedTargetCommandKind::SendMessageToTarget {
+        CompletedTargetCommandKind::SendMessageToTargetStart {
             message,
             target_session_id,
         } => {
-            return TargetCommandTaskStep::Complete(
-                attachment::complete_send_message_to_target_command_async(
-                    conn,
-                    command_context,
-                    message,
-                    target_session_id,
-                )
-                .await,
-            );
+            return attachment::complete_send_message_to_target_command_start_async(
+                conn,
+                completed.command_id,
+                completed.session_id.as_deref(),
+                command_context,
+                message,
+                target_session_id,
+            )
+            .await;
+        }
+        CompletedTargetCommandKind::SendMessageToTargetContinuation(continuation) => {
+            return attachment::complete_send_message_to_target_command_continuation_async(
+                conn,
+                completed.command_id,
+                completed.session_id.as_deref(),
+                command_context,
+                continuation,
+            )
+            .await;
         }
     }
 }
@@ -973,12 +993,12 @@ fn pending_close_target_command(
 fn pending_dispose_browser_context_command(
     command_id: Option<u64>,
     session_id: Option<&str>,
-    browser_context_id: String,
+    pending: crate::conn::PendingBrowserOwnerContextDisposalCommand,
 ) -> TargetCommandTaskStep {
     TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
         command_id,
         session_id: session_id.map(str::to_owned),
-        kind: Box::new(PendingTargetCommandKind::DisposeBrowserContext { browser_context_id }),
+        kind: Box::new(PendingTargetCommandKind::DisposeBrowserContext { pending }),
     })
 }
 
@@ -991,10 +1011,24 @@ fn pending_send_message_to_target_command(
     TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
         command_id,
         session_id: session_id.map(str::to_owned),
-        kind: Box::new(PendingTargetCommandKind::SendMessageToTarget {
+        kind: Box::new(PendingTargetCommandKind::SendMessageToTargetStart {
             message,
             target_session_id,
         }),
+    })
+}
+
+fn pending_send_message_to_target_continuation(
+    command_id: Option<u64>,
+    session_id: Option<&str>,
+    pending: attachment::PendingSendMessageToTargetCommand,
+) -> TargetCommandTaskStep {
+    TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
+        command_id,
+        session_id: session_id.map(str::to_owned),
+        kind: Box::new(PendingTargetCommandKind::SendMessageToTargetContinuation(
+            pending,
+        )),
     })
 }
 
@@ -1109,7 +1143,7 @@ mod devtools_runtime_entry_tests {
         AutomationEvent, DevToolsActivateTargetCommand, DevToolsCloseTargetCommand,
         DevToolsCommand, DevToolsCommandContext, DevToolsCreateTargetCommand,
         DevToolsGetClientWindowsCommand, DevToolsGetTargetInfoCommand, DevToolsGetTargetsCommand,
-        DevToolsProtocol, DevToolsTargetId, DevToolsTargetKind,
+        DevToolsProtocol, DevToolsTargetId,
     };
     use serde_json::{Value, json};
 
@@ -1215,22 +1249,26 @@ mod devtools_runtime_entry_tests {
     #[tokio::test]
     async fn attach_to_target_completion_plan_preserves_typed_attached_sidecar() {
         let mut conn = CdpConnection::new();
+        let mut browser_context = BrowserContext::new("BID-child".to_owned());
+        browser_context.set_active_target_id("TID-child");
+        conn.insert_browser_context(browser_context);
+        assert!(
+            conn.browser_context
+                .as_mut()
+                .expect("browser context")
+                .assign_session_to_target("TID-child", "SID-child".to_owned())
+        );
+        let target_snapshot = conn
+            .capture_browser_top_level_target_snapshot()
+            .expect("exact Target should snapshot")
+            .target("TID-child")
+            .expect("snapshotted Target")
+            .clone();
         let plan = attachment::complete_attach_to_target_command_async(
             &mut conn,
             Some("SID-parent"),
             "SID-child".to_owned(),
-            DevToolsTargetInfo {
-                target_id: Some(DevToolsTargetId::from("TID-child")),
-                kind: DevToolsTargetKind::Page,
-                title: String::new(),
-                url: "about:blank".to_owned(),
-                attached: true,
-                opener_id: None,
-                opener_frame_id: None,
-                can_access_opener: false,
-                browser_context_id: None,
-                moli_popup_id: None,
-            },
+            target_snapshot,
             None,
         )
         .await;
@@ -1261,12 +1299,96 @@ mod devtools_runtime_entry_tests {
     }
 
     #[tokio::test]
-    async fn devtools_target_legacy_close_drains_runtime_ready_events_without_serializing_them() {
+    async fn attach_completion_stale_drops_reused_public_target_id() {
         let mut conn = CdpConnection::new();
+        let mut browser_context = BrowserContext::new("BID-stale-attach".to_owned());
+        browser_context.set_active_target_id("TID-active");
+        conn.insert_browser_context(browser_context);
+        let predecessor = crate::conn::BackgroundTarget::with_url(
+            "TID-reused".to_owned(),
+            None,
+            "about:blank#predecessor".to_owned(),
+        );
+        conn.register_background_target_projection(
+            "BID-stale-attach",
+            "TID-reused",
+            move |browser_context, target_handle, page_residence, session_storage_access| {
+                let mut target = predecessor;
+                target.replace_target_handle(target_handle);
+                target.replace_page_residence_handle(page_residence);
+                target.bind_session_storage_access(session_storage_access);
+                browser_context.background_targets.push(target);
+            },
+        )
+        .expect("predecessor should register");
+        let stale = conn
+            .capture_browser_top_level_target_snapshot()
+            .expect("predecessor should snapshot")
+            .target("TID-reused")
+            .expect("predecessor snapshot")
+            .clone();
+        assert!(
+            conn.browser_context
+                .as_mut()
+                .expect("browser context")
+                .assign_session_to_target("TID-reused", "SID-stale".to_owned())
+        );
+
+        conn.rollback_staged_background_target_projection("BID-stale-attach", "TID-reused")
+            .expect("predecessor should retire");
+        let successor = crate::conn::BackgroundTarget::with_url(
+            "TID-reused".to_owned(),
+            None,
+            "about:blank#successor".to_owned(),
+        );
+        conn.register_background_target_projection(
+            "BID-stale-attach",
+            "TID-reused",
+            move |browser_context, target_handle, page_residence, session_storage_access| {
+                let mut target = successor;
+                target.replace_target_handle(target_handle);
+                target.replace_page_residence_handle(page_residence);
+                target.bind_session_storage_access(session_storage_access);
+                browser_context.background_targets.push(target);
+            },
+        )
+        .expect("successor should reuse the public id");
+
+        let plan = attachment::complete_attach_to_target_command_async(
+            &mut conn,
+            None,
+            "SID-stale".to_owned(),
+            stale,
+            None,
+        )
+        .await;
+        let mut messages = Vec::new();
+        plan.emit_into(&mut messages, Some(501), None);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["id"], json!(501));
+        assert_eq!(messages[0]["error"]["code"], json!(-31998));
+        assert!(
+            !conn
+                .browser_context
+                .as_ref()
+                .expect("browser context")
+                .devtools_target_info("TID-reused")
+                .expect("successor target info")
+                .attached,
+            "stale attach completion must not bind or announce the successor"
+        );
+    }
+
+    #[tokio::test]
+    async fn devtools_target_frontend_close_keeps_runtime_ready_events_typed() {
+        let mut conn = CdpConnection::new();
+        let (_browser_host, browser_host_handle) =
+            moli_core::browser_host::BrowserHostActor::new(conn.browser_host_state());
+        conn.install_browser_host_handle(browser_host_handle);
         let mut browser_context = BrowserContext::new("BID-runtime-ready-close".to_owned());
         browser_context.set_active_target_id("TID-runtime-ready-close");
         browser_context.attach_active_session("SID-runtime-ready-close");
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
         let page = conn
             .load_page_via_runtime_async("data:text/html,<p>runtime ready close</p>")
             .await

@@ -5,13 +5,35 @@ use moli_shared_worker::SharedWorkerInstanceId;
 // Helper: quickly set up a browser context with a given id, optional
 // target_id, optional session_id, and optional url.
 pub(super) fn load_bc(ctx: &mut TestContext, bc_id: &str) {
-    ctx.conn.browser_context = Some(BrowserContext::new(bc_id.into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new(bc_id.into()));
 }
 
 pub(super) fn load_bc_with_target(ctx: &mut TestContext, bc_id: &str, target_id: &str) {
     let mut bc = BrowserContext::new(bc_id.into());
     bc.set_active_target_id(target_id);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
+}
+
+/// Installs a fixture Target that genuinely owns a pending initial empty
+/// Document. Tests that expect attachment to materialize a Page must use this
+/// instead of synthesizing only a target id.
+pub(super) fn load_bc_with_pending_initial_target(
+    ctx: &mut TestContext,
+    bc_id: &str,
+    target_id: &str,
+) {
+    let mut bc = BrowserContext::new(bc_id.into());
+    bc.set_active_target_id(target_id);
+    bc.set_target_url("about:blank".to_owned());
+    bc.mark_active_initial_document_page_build_pending();
+    ctx.conn.insert_browser_context(bc);
+    ctx.conn
+        .register_target_initial_empty_document_for_test(
+            &moli_core::browser_host::BrowserPageOwnerKey::new(bc_id, target_id),
+            moli_core::browser_host::BrowserInitialEmptyDocumentSeed::new("about:blank"),
+        )
+        .expect("registered Target should accept test metadata");
 }
 
 pub(super) fn tab_id_for_page(ctx: &TestContext, page_target_id: &str) -> String {
@@ -27,22 +49,56 @@ pub(super) fn push_background_target(
     url: &str,
     session_id: Option<&str>,
 ) {
-    let bc = ctx
+    let primary_session_id = session_id.map(str::to_owned);
+    let browser_context_id = ctx
         .conn
         .browser_context
-        .as_mut()
-        .expect("browser context must exist before adding background target");
-    bc.background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            target_id.to_owned(),
-            session_id.map(str::to_owned),
-            crate::conn::TargetIdentityState::new(
-                url.to_owned(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+        .as_ref()
+        .expect("browser context must exist before adding background target")
+        .id
+        .clone();
+    let target = crate::conn::BackgroundTarget::new_with_frontend_session(
+        target_id.to_owned(),
+        None,
+        crate::conn::TargetIdentityState::new(
+            url.to_owned(),
+            crate::conn::URL_BASE.into(),
+            "Secure".into(),
+        ),
+        crate::conn::TargetPageSlot::empty_for_test_fixture(),
+    );
+    ctx.conn
+        .register_background_target_projection(
+            &browser_context_id,
+            target_id,
+            move |browser_context, target_handle, page_residence, session_storage_access| {
+                let mut target = target;
+                target.replace_target_handle(target_handle.clone());
+                target.replace_page_residence_handle(page_residence);
+                target.bind_session_storage_access(session_storage_access);
+                browser_context
+                    .register_top_level_target_attachment(target_handle, primary_session_id);
+                browser_context.background_targets.push(target);
+            },
+        )
+        .expect("background Target projection should register");
+}
+
+pub(super) async fn install_navigation_for_target_without_session(
+    ctx: &mut TestContext,
+    target_id: &str,
+    url: &str,
+) {
+    let route = ctx
+        .conn
+        .target_session_route_for_target_id(target_id)
+        .expect("fixture Target route");
+    let previous = ctx
+        .conn
+        .replace_none_session_owner_route_override(Some(route));
+    ctx.install_navigation_fixture_for_session_owner(url, None)
+        .await;
+    ctx.conn.replace_none_session_owner_route_override(previous);
 }
 
 pub(super) fn loaded_page_for_target<'a>(
@@ -160,7 +216,7 @@ pub(super) async fn load_bc_with_titled_page_async(
         .conn
         .browser_context
         .as_mut()
-        .expect("loaded Target fixture must retain its BrowserContext owner");
+        .expect("loaded Target fixture BrowserContext must remain selected");
     bc.set_target_url(url);
     let _ = bc
         .active_target
@@ -173,10 +229,10 @@ pub(super) async fn load_bc_with_titled_page_async(
     // replaced this initial fixture.
     let page_owner = ctx
         .conn
-        .target_page_residence_identity_for_session(None)
-        .expect("loaded Target fixture must have an exact Page owner");
+        .target_page_owner_key_for_session(None)
+        .expect("loaded Target fixture must have an exact target owner");
     ctx.conn
-        .bind_renderer_page_output_owner(renderer_page, page_owner);
+        .bind_renderer_page_output_target(renderer_page, page_owner);
 }
 
 pub(super) fn enable_root_target_discovery_for_test(ctx: &mut TestContext) {

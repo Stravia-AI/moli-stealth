@@ -3,7 +3,10 @@ use std::{
     time::Instant,
 };
 
-use moli_core::{RendererOutputFence, RendererOutputTransportMessage};
+use moli_core::{
+    RendererOutputFence, RendererOutputStreamIdentity, RendererOutputTransportMessage,
+    browser_host::BrowserFactSequence,
+};
 use moli_protocol::{
     BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpSchedulerEvent,
     CommandDispatchContext, CompletedCdpCommandDispatch, CompletedPageScreencastCapture,
@@ -22,12 +25,12 @@ use crate::{
 
 use super::frontend_control::CdpFrontendControlState;
 use super::{
-    CdpBackgroundEventReceiver, CdpBackgroundNavigationCompletionReceiver, CdpCookieSnapshot,
-    CdpOwnerActorLifecycle, CdpRendererPublicationReceiver, CdpScheduler,
-    CdpSchedulerEventReceivers, CommandDispatchState, CommandDispatchStepOutput,
-    CommandOutputReleasePermit, CommandStartAction, CommandTaskStep, CommandTurnOutput,
-    ProtocolAdapterScheduler, ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput,
-    ProtocolOutputSequence,
+    BrowserHostExecutionLane, BrowserHostExecutionWake, CdpBackgroundEventReceiver,
+    CdpBackgroundNavigationCompletionReceiver, CdpOwnerActorLifecycle,
+    CdpRendererPublicationReceiver, CdpScheduler, CdpSchedulerEventReceivers, CommandDispatchState,
+    CommandDispatchStepOutput, CommandOutputReleasePermit, CommandStartAction, CommandTaskStep,
+    CommandTurnOutput, NavigationRendererPublicationBuffer, ProtocolAdapterScheduler,
+    ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput, ProtocolOutputSequence,
 };
 
 struct PendingRuntimeDeferredReplyState {
@@ -54,6 +57,7 @@ struct InFlightCommandState {
     dispatch: CommandDispatchState,
     output_release_permit: CommandOutputReleasePermit,
     command_context: CommandDispatchContext,
+    holds_navigation_renderer_publication_gate: bool,
     pending_turn: u64,
 }
 
@@ -79,31 +83,46 @@ fn page_javascript_owner_is_blocked(
             .any(|state| state.metadata.executes_page_javascript)
 }
 
+fn pending_command_navigation_renderer_gate_open(in_flight_commands: &InFlightCommands) -> bool {
+    in_flight_commands
+        .values()
+        .any(|state| state.holds_navigation_renderer_publication_gate)
+}
+
 enum SchedulerInput {
+    BrowserFactWake(BrowserFactSequence),
     BackgroundNavigationCompletion(BackgroundNavigationCompletion),
     BackgroundEvent(BackgroundProtocolEvent),
-    RendererPublication(RendererOutputTransportMessage),
+    RendererPublication {
+        publication: RendererOutputTransportMessage,
+        navigation_gate_open: bool,
+    },
     DeferredRuntimeInspectorResponse(Box<RuntimeInspectorResponseReady>),
     AdapterScheduler(ProtocolAdapterSchedulerInput),
 }
 
 struct SchedulerInputReceivers {
+    browser_fact_wake_rx: moli_core::browser_host::BrowserFactWakeSubscriber,
     background_event_rx: CdpBackgroundEventReceiver,
     background_navigation_completion_rx: CdpBackgroundNavigationCompletionReceiver,
     renderer_publication_rx: CdpRendererPublicationReceiver,
-    buffered_renderer_publications: VecDeque<RendererOutputTransportMessage>,
+    navigation_renderer_publications: NavigationRendererPublicationBuffer,
     ready_background_inputs_before_runtime_response: VecDeque<SchedulerInput>,
 }
 
 impl SchedulerInputReceivers {
-    fn new(receivers: CdpSchedulerEventReceivers) -> Self {
-        Self {
-            background_event_rx: receivers.background_event_rx,
-            background_navigation_completion_rx: receivers.background_navigation_completion_rx,
-            renderer_publication_rx: receivers.renderer_publication_rx,
-            buffered_renderer_publications: VecDeque::new(),
-            ready_background_inputs_before_runtime_response: VecDeque::new(),
-        }
+    fn new(receivers: CdpSchedulerEventReceivers) -> (Self, BrowserHostExecutionLane) {
+        (
+            Self {
+                browser_fact_wake_rx: receivers.browser_fact_wake_rx,
+                background_event_rx: receivers.background_event_rx,
+                background_navigation_completion_rx: receivers.background_navigation_completion_rx,
+                renderer_publication_rx: receivers.renderer_publication_rx,
+                navigation_renderer_publications: receivers.navigation_renderer_publications,
+                ready_background_inputs_before_runtime_response: VecDeque::new(),
+            },
+            receivers.browser_host,
+        )
     }
 
     fn queue_ready_background_inputs_before_runtime_response(
@@ -123,6 +142,10 @@ impl SchedulerInputReceivers {
             self.ready_background_inputs_before_runtime_response
                 .push_back(SchedulerInput::BackgroundNavigationCompletion(completion));
         }
+        if let Ok(sequence) = self.browser_fact_wake_rx.try_recv() {
+            self.ready_background_inputs_before_runtime_response
+                .push_back(SchedulerInput::BrowserFactWake(sequence));
+        }
         while let Ok(event) = self.background_event_rx.try_recv() {
             self.ready_background_inputs_before_runtime_response
                 .push_back(SchedulerInput::BackgroundEvent(event));
@@ -137,11 +160,19 @@ impl SchedulerInputReceivers {
     /// cursor fence.
     ///
     /// The transport contains only typed stream controls and concrete
-    /// publications. Every message is safe to admit while a Page JavaScript
-    /// stack is blocked because protocol never re-enters renderer state to
-    /// discover its payload.
-    async fn recv_concrete_renderer_transport(&mut self) -> Option<RendererOutputTransportMessage> {
-        if let Some(publication) = self.buffered_renderer_publications.pop_front() {
+    /// publications. A crossing command fence may admit controls and
+    /// unrelated streams, but a stream whose `MainDocumentCommit` precedes
+    /// Browser commit stays move-owned in `navigation_renderer_publications`
+    /// until the exact navigation boundary releases it.
+    async fn recv_concrete_renderer_transport(
+        &mut self,
+        predecessor_stream: RendererOutputStreamIdentity,
+        releases_navigation_stream: bool,
+    ) -> Option<RendererOutputTransportMessage> {
+        if let Some(publication) = self
+            .navigation_renderer_publications
+            .take_for_predecessor(predecessor_stream, releases_navigation_stream)
+        {
             return Some(publication);
         }
         self.renderer_publication_rx.recv().await
@@ -149,8 +180,25 @@ impl SchedulerInputReceivers {
 }
 
 impl SchedulerInputReceivers {
-    fn take_buffered_renderer_publication(&mut self) -> Option<RendererOutputTransportMessage> {
-        self.buffered_renderer_publications.pop_front()
+    fn take_buffered_renderer_publication(
+        &mut self,
+        navigation_gate_open: bool,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.navigation_renderer_publications
+            .take_releasable(navigation_gate_open)
+    }
+
+    fn admit_or_buffer_navigation_renderer_publication(
+        &mut self,
+        publication: RendererOutputTransportMessage,
+        navigation_gate_open: bool,
+        released_navigation_stream: Option<RendererOutputStreamIdentity>,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.navigation_renderer_publications.admit_or_buffer(
+            publication,
+            navigation_gate_open,
+            released_navigation_stream,
+        )
     }
 
     async fn recv(
@@ -159,6 +207,7 @@ impl SchedulerInputReceivers {
         has_pending_runtime_deferred_reply: bool,
         adapter_scheduler: &mut ProtocolAdapterScheduler<CommandDispatchState>,
         page_javascript_blocked: bool,
+        navigation_gate_open: bool,
     ) -> Option<SchedulerInput> {
         if let Some(input) = self
             .ready_background_inputs_before_runtime_response
@@ -166,8 +215,11 @@ impl SchedulerInputReceivers {
         {
             return Some(input);
         }
-        if let Some(publication) = self.take_buffered_renderer_publication() {
-            return Some(SchedulerInput::RendererPublication(publication));
+        if let Some(publication) = self.take_buffered_renderer_publication(navigation_gate_open) {
+            return Some(SchedulerInput::RendererPublication {
+                publication,
+                navigation_gate_open,
+            });
         }
         if has_pending_runtime_deferred_reply {
             tokio::select! {
@@ -180,11 +232,17 @@ impl SchedulerInputReceivers {
                 maybe_completion = self.background_navigation_completion_rx.recv() => {
                     maybe_completion.map(SchedulerInput::BackgroundNavigationCompletion)
                 }
+                wake = self.browser_fact_wake_rx.recv() => {
+                    wake.ok().map(SchedulerInput::BrowserFactWake)
+                }
                 maybe_event = self.background_event_rx.recv() => {
                     maybe_event.map(SchedulerInput::BackgroundEvent)
                 }
                 maybe_publication = self.renderer_publication_rx.recv() => {
-                    maybe_publication.map(SchedulerInput::RendererPublication)
+                    maybe_publication.map(|publication| SchedulerInput::RendererPublication {
+                        publication,
+                        navigation_gate_open,
+                    })
                 }
                 input = adapter_scheduler.recv_input(), if !page_javascript_blocked => {
                     Some(SchedulerInput::AdapterScheduler(input))
@@ -196,11 +254,17 @@ impl SchedulerInputReceivers {
                 maybe_completion = self.background_navigation_completion_rx.recv() => {
                     maybe_completion.map(SchedulerInput::BackgroundNavigationCompletion)
                 }
+                wake = self.browser_fact_wake_rx.recv() => {
+                    wake.ok().map(SchedulerInput::BrowserFactWake)
+                }
                 maybe_event = self.background_event_rx.recv() => {
                     maybe_event.map(SchedulerInput::BackgroundEvent)
                 }
                 maybe_publication = self.renderer_publication_rx.recv() => {
-                    maybe_publication.map(SchedulerInput::RendererPublication)
+                    maybe_publication.map(|publication| SchedulerInput::RendererPublication {
+                        publication,
+                        navigation_gate_open,
+                    })
                 }
                 maybe_response = deferred_runtime_response_rx.recv() => {
                     maybe_response.map(|response| SchedulerInput::DeferredRuntimeInspectorResponse(Box::new(response)))
@@ -219,7 +283,7 @@ pub(crate) fn spawn_cdp_scheduler_actor(
     frontend_router: CdpFrontendRouter,
     frontend_receivers: CdpFrontendReceivers,
     owner_lifecycle: Option<CdpOwnerActorLifecycle>,
-) -> JoinHandle<CdpCookieSnapshot> {
+) -> JoinHandle<()> {
     tokio::task::spawn_local(run_cdp_scheduler_actor(
         scheduler,
         receivers,
@@ -235,12 +299,12 @@ async fn run_cdp_scheduler_actor(
     frontend_router: CdpFrontendRouter,
     mut frontend_receivers: CdpFrontendReceivers,
     owner_lifecycle: Option<CdpOwnerActorLifecycle>,
-) -> CdpCookieSnapshot {
-    let mut scheduler_input_rx = SchedulerInputReceivers::new(receivers);
+) {
+    let (mut scheduler_input_rx, mut browser_host) = SchedulerInputReceivers::new(receivers);
     let (deferred_runtime_response_tx, mut deferred_runtime_response_rx) =
         mpsc::unbounded_channel();
     scheduler
-        .conn
+        .host_adapter
         .set_runtime_inspector_response_ready_sender(deferred_runtime_response_tx.clone());
     let mut adapter_scheduler = ProtocolAdapterScheduler::<CommandDispatchState>::default();
     let mut pending_runtime_deferred_replies: VecDeque<PendingRuntimeDeferredReplyState> =
@@ -255,15 +319,63 @@ async fn run_cdp_scheduler_actor(
     let mut frontend_control = CdpFrontendControlState::default();
 
     loop {
-        if scheduler_input_rx.renderer_publication_rx.is_closed() {
-            break;
+        if adapter_scheduler.load_projection_precedes_browser_owner(&scheduler) {
+            let Some(input) = adapter_scheduler
+                .recv_load_projection_predecessor_input(&scheduler)
+                .await
+            else {
+                break;
+            };
+            if !handle_adapter_scheduler_input(
+                &frontend_router,
+                &mut scheduler,
+                &mut adapter_scheduler,
+                &mut pending_runtime_deferred_replies,
+                input,
+            )
+            .await
+            {
+                break;
+            }
+            continue;
         }
         let page_javascript_blocked =
             page_javascript_owner_is_blocked(&scheduler, &in_flight_commands);
+        let navigation_gate_open = scheduler.has_inflight_background_navigation()
+            || pending_command_navigation_renderer_gate_open(&in_flight_commands);
         adapter_scheduler.schedule_turn_if_needed(&scheduler, page_javascript_blocked);
         let page_screencast_deadline = scheduler.next_page_screencast_deadline();
         tokio::select! {
             biased;
+            wake = browser_host.recv_wake() => {
+                let output = match wake {
+                    BrowserHostExecutionWake::TurnSelected => {
+                        scheduler.complete_next_browser_owner_input(&mut browser_host)
+                    }
+                    BrowserHostExecutionWake::ParticipantCompleted(completed) => {
+                        scheduler
+                            .complete_browser_host_participant(&mut browser_host, *completed)
+                            .await
+                    }
+                    BrowserHostExecutionWake::DetachedNavigationCompleted(_) => {
+                        tracing::error!(
+                            "actor scheduler received a direct-frontend navigation completion"
+                        );
+                        ProtocolOutputSequence::empty()
+                    }
+                    BrowserHostExecutionWake::Closed => break,
+                };
+                if !flush_protocol_output_with_runtime_deferred_reply_routing(
+                    &frontend_router,
+                    &mut scheduler,
+                    &mut pending_runtime_deferred_replies,
+                    output,
+                )
+                .await
+                {
+                    break;
+                }
+            }
             maybe_completion = pending_command_completion_rx.recv(), if !in_flight_commands.is_empty() => {
                 let Some(completion) = maybe_completion else {
                     break;
@@ -389,6 +501,7 @@ async fn run_cdp_scheduler_actor(
                 !pending_runtime_deferred_replies.is_empty(),
                 &mut adapter_scheduler,
                 page_javascript_blocked,
+                navigation_gate_open,
             ) => {
                 let Some(input) = maybe_input else {
                     break;
@@ -414,7 +527,6 @@ async fn run_cdp_scheduler_actor(
             }
         }
     }
-    CdpCookieSnapshot::from_profile_backed_cookies(scheduler.snapshot_profile_backed_cookies())
 }
 
 async fn wait_for_page_screencast_deadline(deadline: Option<TokioInstant>) {
@@ -447,6 +559,27 @@ async fn handle_scheduler_input(
         );
     }
     let ok = match input {
+        SchedulerInput::BrowserFactWake(sequence) => {
+            let output = match scheduler.complete_browser_fact_wake(sequence) {
+                Ok(output) => output,
+                Err(failure) => {
+                    let (_, error) = failure.into_parts();
+                    tracing::error!(
+                        error = %error.message,
+                        browser_fact_sequence = sequence.get(),
+                        "terminating frontend after Browser fact ingress failure"
+                    );
+                    return false;
+                }
+            };
+            flush_protocol_output_with_runtime_deferred_reply_routing(
+                frontend_router,
+                scheduler,
+                pending_runtime_deferred_replies,
+                output,
+            )
+            .await
+        }
         SchedulerInput::BackgroundNavigationCompletion(_) => {
             if !flush_background_completion_input(
                 frontend_router,
@@ -493,6 +626,7 @@ async fn handle_scheduler_input(
                 pending_runtime_deferred_replies,
                 adapter_scheduler,
                 renderer_output_predecessor.as_ref(),
+                false,
             )
             .await
             {
@@ -507,7 +641,19 @@ async fn handle_scheduler_input(
             )
             .await
         }
-        SchedulerInput::RendererPublication(publication) => {
+        SchedulerInput::RendererPublication {
+            publication,
+            navigation_gate_open,
+        } => {
+            let Some(publication) = scheduler_input_rx
+                .admit_or_buffer_navigation_renderer_publication(
+                    publication,
+                    navigation_gate_open,
+                    None,
+                )
+            else {
+                return true;
+            };
             ingest_and_flush_renderer_publication(
                 frontend_router,
                 scheduler,
@@ -547,16 +693,28 @@ async fn flush_renderer_publication_predecessor(
     pending_runtime_deferred_replies: &mut VecDeque<PendingRuntimeDeferredReplyState>,
     adapter_scheduler: &mut ProtocolAdapterScheduler<CommandDispatchState>,
     predecessor: Option<&RendererOutputFence>,
+    releases_navigation_stream: bool,
 ) -> bool {
     let Some(predecessor) = predecessor else {
         return true;
     };
     while !scheduler
-        .conn
+        .host_adapter
         .renderer_output_cursor_is_projected(predecessor.cursor())
     {
-        let Some(publication) = scheduler_input_rx.recv_concrete_renderer_transport().await else {
+        let predecessor_stream = predecessor.cursor().stream();
+        let Some(publication) = scheduler_input_rx
+            .recv_concrete_renderer_transport(predecessor_stream, releases_navigation_stream)
+            .await
+        else {
             return false;
+        };
+        let Some(publication) = scheduler_input_rx.admit_or_buffer_navigation_renderer_publication(
+            publication,
+            scheduler.has_inflight_background_navigation(),
+            releases_navigation_stream.then_some(predecessor_stream),
+        ) else {
+            continue;
         };
         if !ingest_and_flush_renderer_publication(
             frontend_router,
@@ -634,6 +792,7 @@ async fn flush_background_completion_input(
         pending_runtime_deferred_replies,
         adapter_scheduler,
         renderer_output_predecessor.as_ref(),
+        true,
     )
     .await
     {
@@ -695,7 +854,7 @@ impl RuntimeDeferredReplyCompletion {
         if let Some(predecessor) = self.output.take_renderer_output_predecessor() {
             assert!(
                 scheduler
-                    .conn
+                    .host_adapter
                     .renderer_output_cursor_is_projected(predecessor.cursor()),
                 "a deferred Runtime response must not cross its renderer owner edge before its command-turn cursor is projected"
             );
@@ -954,7 +1113,7 @@ async fn fail_runtime_deferred_reply_for_loose_protocol_response(
     let output_session_id = pending.output_session_id;
     pending
         .pending
-        .forget_scheduler_deferred_inspector_reply(&mut scheduler.conn);
+        .forget_scheduler_deferred_inspector_reply(&mut scheduler.host_adapter);
     let command_output = pending
         .dispatch
         .complete_with_turn_output(CommandTurnOutput::new(
@@ -994,7 +1153,7 @@ async fn complete_runtime_deferred_reply_for_renderer_response(
         .expect("pending runtime deferred reply index came from position()");
     pending
         .pending
-        .route_scheduler_deferred_inspector_response(&mut scheduler.conn, response)
+        .route_scheduler_deferred_inspector_response(&mut scheduler.host_adapter, response)
         .await;
     Ok(
         complete_runtime_deferred_reply_state(scheduler, pending, renderer_output_predecessor)
@@ -1066,7 +1225,7 @@ async fn complete_runtime_deferred_reply_state(
     let session_id = pending.pending.session_id().map(str::to_owned);
     let completed = pending
         .pending
-        .complete_scheduler_deferred_inspector_reply(&mut scheduler.conn);
+        .complete_scheduler_deferred_inspector_reply(&mut scheduler.host_adapter);
     match scheduler
         .complete_pending_command_dispatch_with_context(completed, &mut pending.command_context)
         .await
@@ -1542,6 +1701,7 @@ async fn start_ready_command_dispatch(
                 adapter_scheduler,
                 &metadata,
                 output,
+                false,
             )
             .await;
             trace_in_flight_command(
@@ -1592,6 +1752,8 @@ async fn start_ready_command_dispatch(
         }
         CommandTaskStep::Pending(pending) => {
             trace_command(command, "command_dispatch_pending", None, None, None);
+            let holds_navigation_renderer_publication_gate =
+                pending.holds_navigation_renderer_publication_gate();
             let token = take_next_in_flight_command_token(next_in_flight_command_token);
             in_flight_commands.insert(
                 token,
@@ -1600,6 +1762,7 @@ async fn start_ready_command_dispatch(
                     dispatch: CommandDispatchState::pending_command(),
                     output_release_permit,
                     command_context,
+                    holds_navigation_renderer_publication_gate,
                     pending_turn: 0,
                 },
             );
@@ -1686,6 +1849,7 @@ async fn flush_completed_command_output(
     adapter_scheduler: &mut ProtocolAdapterScheduler<CommandDispatchState>,
     metadata: &InFlightCommandMetadata,
     mut output: CommandTurnOutput,
+    releases_navigation_stream: bool,
 ) -> bool {
     let renderer_output_predecessor = output.take_renderer_output_predecessor();
     if !flush_renderer_publication_predecessor(
@@ -1695,6 +1859,7 @@ async fn flush_completed_command_output(
         pending_runtime_deferred_replies,
         adapter_scheduler,
         renderer_output_predecessor.as_ref(),
+        releases_navigation_stream,
     )
     .await
     {
@@ -1760,6 +1925,7 @@ async fn flush_completed_command_output(
         pending_runtime_deferred_replies,
         adapter_scheduler,
         renderer_output_boundary.as_ref(),
+        releases_navigation_stream,
     )
     .await
     {
@@ -1927,6 +2093,8 @@ async fn handle_pending_command_completion(
                     pending_kind = pending.kind_name(),
                 );
             }
+            state.holds_navigation_renderer_publication_gate =
+                pending.holds_navigation_renderer_publication_gate();
             state.pending_turn = state.pending_turn.wrapping_add(1);
             let token = completion.token;
             in_flight_commands.insert(token, state);
@@ -1956,6 +2124,7 @@ async fn handle_pending_command_completion(
                 adapter_scheduler,
                 &state.metadata,
                 output,
+                state.holds_navigation_renderer_publication_gate,
             )
             .await;
             trace_in_flight_command(
@@ -2020,12 +2189,13 @@ fn trace_scheduler_input(input: &SchedulerInput, stage: &'static str) {
 
 fn scheduler_input_kind(input: &SchedulerInput) -> &'static str {
     match input {
+        SchedulerInput::BrowserFactWake(_) => "browser_fact_wake",
         SchedulerInput::BackgroundNavigationCompletion(_) => "background_navigation_completion",
         SchedulerInput::BackgroundEvent(_) => "background_event",
         SchedulerInput::DeferredRuntimeInspectorResponse(_) => {
             "deferred_runtime_inspector_response"
         }
-        SchedulerInput::RendererPublication(_) => "renderer_publication",
+        SchedulerInput::RendererPublication { .. } => "renderer_publication",
         SchedulerInput::AdapterScheduler(ProtocolAdapterSchedulerInput::Turn) => {
             "protocol_adapter_turn"
         }
@@ -2075,7 +2245,10 @@ fn trace_command(
 
 #[cfg(test)]
 mod tests {
-    use moli_core::RendererRuntimeInspectorAsyncCompletion;
+    use moli_core::{
+        PageId, RendererOutputStreamControl, RendererOutputStreamIdentity,
+        RendererOutputTransportMessage, RendererRuntimeInspectorAsyncCompletion,
+    };
     use moli_protocol::CdpConnection;
     use serde_json::json;
 
@@ -2090,16 +2263,23 @@ mod tests {
 
     #[tokio::test]
     async fn ready_background_events_precede_runtime_response_without_starving_it() {
-        let (background_event_tx, background_event_rx) = mpsc::unbounded_channel();
+        let (background_event_tx, background_event_rx) =
+            moli_protocol::browser_background_output_channel();
         let (_background_navigation_tx, background_navigation_completion_rx) =
             mpsc::unbounded_channel();
         let (_renderer_publication_tx, renderer_publication_rx) =
             moli_core::renderer_output_transport_channel();
-        let mut receivers = SchedulerInputReceivers::new(CdpSchedulerEventReceivers {
-            background_event_rx,
-            background_navigation_completion_rx,
-            renderer_publication_rx,
-        });
+        let (_scheduler, browser_host_actor, browser_fact_wake_rx) =
+            CdpScheduler::new(CdpConnection::new());
+        let (mut receivers, _browser_host) =
+            SchedulerInputReceivers::new(CdpSchedulerEventReceivers {
+                browser_host: BrowserHostExecutionLane::new(browser_host_actor),
+                browser_fact_wake_rx,
+                background_event_rx,
+                background_navigation_completion_rx,
+                renderer_publication_rx,
+                navigation_renderer_publications: NavigationRendererPublicationBuffer::default(),
+            });
         let (runtime_response_tx, mut runtime_response_rx) = mpsc::unbounded_channel();
         let mut adapter_scheduler = ProtocolAdapterScheduler::default();
 
@@ -2123,6 +2303,7 @@ mod tests {
                 true,
                 &mut adapter_scheduler,
                 false,
+                false,
             )
             .await
             .expect("ready background event should be received");
@@ -2140,6 +2321,7 @@ mod tests {
                 true,
                 &mut adapter_scheduler,
                 false,
+                false,
             )
             .await
             .expect("snapshotted runtime response should be received");
@@ -2154,15 +2336,85 @@ mod tests {
                 false,
                 &mut adapter_scheduler,
                 false,
+                false,
             )
             .await
             .expect("later background event should remain queued");
         assert!(matches!(third, SchedulerInput::BackgroundEvent(_)));
     }
 
+    #[tokio::test]
+    async fn navigation_gate_keeps_receiving_renderer_stream_controls() {
+        let (background_event_tx, background_event_rx) =
+            moli_protocol::browser_background_output_channel();
+        let (_background_navigation_tx, background_navigation_completion_rx) =
+            mpsc::unbounded_channel();
+        let (renderer_publication_tx, renderer_publication_rx) =
+            moli_core::renderer_output_transport_channel();
+        let (_scheduler, browser_host_actor, browser_fact_wake_rx) =
+            CdpScheduler::new(CdpConnection::new());
+        let (mut receivers, _browser_host) =
+            SchedulerInputReceivers::new(CdpSchedulerEventReceivers {
+                browser_host: BrowserHostExecutionLane::new(browser_host_actor),
+                browser_fact_wake_rx,
+                background_event_rx,
+                background_navigation_completion_rx,
+                renderer_publication_rx,
+                navigation_renderer_publications: NavigationRendererPublicationBuffer::default(),
+            });
+        let (_runtime_response_tx, mut runtime_response_rx) = mpsc::unbounded_channel();
+        let mut adapter_scheduler = ProtocolAdapterScheduler::default();
+        let stream =
+            RendererOutputStreamIdentity::new_page_for_protocol_test(PageId::new_for_testing(731));
+        renderer_publication_tx
+            .send(RendererOutputStreamControl::Opened { stream }.into())
+            .expect("renderer publication receiver should be alive");
+
+        let selected = receivers
+            .recv(
+                &mut runtime_response_rx,
+                false,
+                &mut adapter_scheduler,
+                false,
+                true,
+            )
+            .await
+            .expect("an open navigation gate should still receive renderer controls");
+        assert!(matches!(
+            selected,
+            SchedulerInput::RendererPublication {
+                publication: RendererOutputTransportMessage::StreamControl(
+                    RendererOutputStreamControl::Opened { stream: selected_stream }
+                ),
+                navigation_gate_open: true,
+            } if selected_stream == stream
+        ));
+
+        background_event_tx
+            .send(BackgroundProtocolEvent::immediate(json!({
+                "method": "Network.responseReceived",
+                "params": {}
+            })))
+            .expect("background event receiver should be alive");
+        assert!(matches!(
+            receivers
+                .recv(
+                    &mut runtime_response_rx,
+                    false,
+                    &mut adapter_scheduler,
+                    false,
+                    true,
+                )
+                .await
+                .expect("background event should remain observable through the gate"),
+            SchedulerInput::BackgroundEvent(_)
+        ));
+    }
+
     #[test]
     fn unmatched_runtime_inspector_response_is_not_downgraded_to_protocol_output() {
-        let mut scheduler = CdpScheduler::new(CdpConnection::new());
+        let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+            CdpScheduler::new(CdpConnection::new());
 
         let output = route_unmatched_runtime_inspector_response(
             &mut scheduler,

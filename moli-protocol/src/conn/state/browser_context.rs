@@ -7,6 +7,10 @@ use moli_cookie_jar::{
     BrowserCookieStore, CookieSource, NetworkCookieRequestContext, SharedBrowserCookieStore,
     StoredCookie, StoredCookieQueryReport, new_shared_browser_cookie_store,
 };
+use moli_core::browser_host::{
+    BrowserContextHandle, BrowserPageResidenceHandle, BrowserTargetHandle,
+    BrowserTargetSessionStorageAccess, EmulatedGeolocationOverrideState, EmulatedNetworkConditions,
+};
 use moli_core::network::{SharedWebStorageStore, new_shared_web_storage_store};
 use moli_core::runtime::{
     NavigationPageStorageHandles, NavigationResourceStorageHandles, RendererBrowserContextRuntime,
@@ -24,26 +28,22 @@ use super::{
     DevToolsSessionState,
     dedicated_worker_target::DedicatedWorkerTargetState,
     devtools_sessions_have_pending_inspector_awaits,
-    devtools_sessions_pending_inspector_await_count,
-    emulation::{
-        EmulatedDeviceMetrics, EmulatedGeolocationOverrideState, EmulatedMediaOverrides,
-        EmulatedNetworkConditions,
-    },
+    emulation::{EmulatedDeviceMetrics, EmulatedMediaOverrides},
     identity::TargetIdentityState,
     javascript_dialog::TargetPreparedJavaScriptDialog,
-    page_slot::{DocumentNavigationToken, DocumentStartScript},
-    parking::{TargetOwnerState, TargetParkingStateStore},
+    page_slot::DocumentStartScript,
+    parking::TargetParkingStateStore,
     service_worker_target::ServiceWorkerTargetState,
     session::{ActiveTargetState, TargetNetworkPolicyState},
     shared_worker_target::SharedWorkerTargetState,
+    target_attachment::TopLevelTargetFrontendSessionRegistry,
 };
 
 pub struct BrowserContext {
     pub id: String,
+    browser_context_handle: BrowserContextHandle,
     storage_partition: BrowserContextStoragePartition,
-    target_id: Option<String>,
-    session_id: Option<String>,
-    pub auxiliary_target_sessions: HashMap<String, String>,
+    target_frontend_sessions: TopLevelTargetFrontendSessionRegistry,
     // Chromium exposes the live creator target, immutable creator frame, and
     // window.opener access as three independent TargetInfo properties.
     pub target_opener_ids: HashMap<String, String>,
@@ -63,10 +63,12 @@ pub struct BrowserContext {
     pub(crate) service_worker_targets: BTreeMap<u64, ServiceWorkerTargetState>,
     pub(crate) service_worker_domain_sessions: BTreeSet<Option<String>>,
     target_identity: TargetIdentityState,
-    pub(crate) devtools_session_state: DevToolsSessionState,
-    pub(crate) auxiliary_devtools_session_states: HashMap<String, DevToolsSessionState>,
     pub(crate) network_policy: TargetNetworkPolicyState,
     pub(crate) default_extra_headers: Vec<(String, String)>,
+    // Applied projections of BrowserHostPolicyState for this physical runtime.
+    // BrowserHostState remains authoritative; these copies exist only because
+    // Page/worker update participants have not yet moved into the Host
+    // executor and must never be written back on frontend teardown.
     pub(crate) global_extra_headers: Vec<(String, String)>,
     pub(crate) default_browser_identity_override:
         Option<moli_browser_profile::BrowserIdentityProfile>,
@@ -106,9 +108,12 @@ pub struct BrowserContext {
     pub(crate) storage_quota_overrides: HashMap<String, f64>,
     pub(crate) http_cache_root: Option<PathBuf>,
     pub(crate) http_cache_max_bytes: Option<u64>,
-    // Keep the sole strong per-context network owner last. Protocol teardown
-    // must drop pages and NavigationEngines before this field is released.
-    pub(crate) renderer_runtime_owner: Option<RendererBrowserContextRuntimeOwner>,
+    // Non-owning access to the Browser Host-owned renderer/network runtime.
+    // A newly constructed, not-yet-registered Context temporarily carries the
+    // unique candidate root below; successful Core registration moves it into
+    // BrowserHostState before this projection becomes visible.
+    renderer_runtime_access: RendererBrowserContextRuntimeOwnerAccess,
+    renderer_runtime_owner_for_registration: Option<RendererBrowserContextRuntimeOwner>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -218,6 +223,7 @@ impl BrowserContextStoragePartitionIdentity {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn kind(&self) -> BrowserContextStoragePartitionKind {
         self.kind
     }
@@ -284,15 +290,10 @@ impl BrowserContextStoragePartitionHandles {
         )
     }
 
-    pub(crate) fn from_storage_partition(
-        initial_cookies: impl IntoIterator<Item = StoredCookie>,
-        storage_partition: &StoragePartitionState,
-    ) -> Self {
-        let cookie_store = new_shared_browser_cookie_store();
-        seed_initial_cookies(&cookie_store, initial_cookies);
+    pub(crate) fn from_storage_partition(storage_partition: &StoragePartitionState) -> Self {
         let shared_storage = storage_partition.shared_storage_handles();
         Self::from_initial_storage_partition(
-            cookie_store,
+            shared_storage.cookie_store(),
             shared_storage.web_storage_store(),
             shared_storage.indexed_db_manager(),
             shared_storage.storage_bucket_store(),
@@ -370,9 +371,10 @@ impl std::fmt::Debug for BrowserContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserContext")
             .field("id", &self.id)
+            .field("browser_context_handle", &self.browser_context_handle)
             .field("storage_partition", &self.storage_partition)
-            .field("target_id", &self.target_id)
-            .field("session_id", &self.session_id)
+            .field("target_handle", &self.active_target.target_handle)
+            .field("session_id", &self.active_session_id())
             .field("has_loaded_page", &self.has_loaded_page())
             .finish_non_exhaustive()
     }
@@ -383,6 +385,22 @@ fn usize_to_u64_saturating(value: usize) -> u64 {
 }
 
 impl BrowserContext {
+    pub(crate) fn adopt_browser_network_artifact_store(
+        &mut self,
+        browser_artifacts: moli_core::browser_host::BrowserNetworkArtifactStore,
+    ) {
+        self.active_target
+            .runtime_slot
+            .adopt_browser_network_artifact_store(browser_artifacts.clone());
+        for target in &mut self.background_targets {
+            target
+                .runtime_slot
+                .adopt_browser_network_artifact_store(browser_artifacts.clone());
+        }
+        self.target_parking
+            .adopt_browser_network_artifact_store(browser_artifacts);
+    }
+
     /// Parks a dialog only until the matching lightweight-popup target obtains
     /// a concrete protocol attachment.
     ///
@@ -497,13 +515,15 @@ impl BrowserContext {
         identity: BrowserContextStoragePartitionIdentity,
     ) -> Self {
         let storage_partition = BrowserContextStoragePartition::new(identity, partition);
+        let browser_context_handle = BrowserContextHandle::staged(id.clone());
+        let renderer_runtime_owner = RendererBrowserContextRuntime::new();
+        let renderer_runtime_access = renderer_runtime_owner.owner_access();
 
         Self {
             id,
+            browser_context_handle,
             storage_partition,
-            target_id: None,
-            session_id: None,
-            auxiliary_target_sessions: HashMap::new(),
+            target_frontend_sessions: TopLevelTargetFrontendSessionRegistry::default(),
             target_opener_ids: HashMap::new(),
             target_opener_frame_ids: HashMap::new(),
             target_can_access_opener: HashSet::new(),
@@ -516,8 +536,6 @@ impl BrowserContext {
             service_worker_targets: BTreeMap::new(),
             service_worker_domain_sessions: BTreeSet::new(),
             target_identity: TargetIdentityState::about_blank(),
-            devtools_session_state: DevToolsSessionState::default(),
-            auxiliary_devtools_session_states: HashMap::new(),
             network_policy: TargetNetworkPolicyState::default(),
             default_extra_headers: Vec::new(),
             global_extra_headers: Vec::new(),
@@ -557,10 +575,24 @@ impl BrowserContext {
             storage_quota_overrides: HashMap::new(),
             http_cache_root,
             http_cache_max_bytes,
-            renderer_runtime_owner: Some(RendererBrowserContextRuntime::new()),
+            renderer_runtime_access,
+            renderer_runtime_owner_for_registration: Some(renderer_runtime_owner),
         }
     }
 
+    pub(crate) fn browser_context_handle(&self) -> &BrowserContextHandle {
+        &self.browser_context_handle
+    }
+
+    #[cfg(test)]
+    pub(crate) fn replace_browser_context_handle(
+        &mut self,
+        handle: BrowserContextHandle,
+    ) -> BrowserContextHandle {
+        std::mem::replace(&mut self.browser_context_handle, handle)
+    }
+
+    #[cfg(test)]
     pub(crate) fn is_profile_backed_storage_partition(&self) -> bool {
         self.storage_partition.identity().kind()
             == BrowserContextStoragePartitionKind::ProfileBacked
@@ -584,6 +616,17 @@ impl BrowserContext {
         self.storage_partition
             .handles
             .page_storage_handles(self.active_target.session_storage_namespace.store().clone())
+    }
+
+    pub(crate) fn target_session_storage_store(
+        &self,
+        target_id: &str,
+    ) -> Option<SharedWebStorageStore> {
+        if self.is_active_target(target_id) {
+            return Some(self.active_target.session_storage_namespace.store().clone());
+        }
+        self.background_target(target_id)
+            .map(|target| target.session_storage_store().clone())
     }
 
     pub(crate) fn page_storage_handles_for_target(
@@ -712,23 +755,22 @@ impl BrowserContext {
     }
 
     pub(crate) fn renderer_runtime(&self) -> RendererBrowserContextRuntime {
-        self.renderer_runtime_owner
-            .as_ref()
-            .expect("BrowserContext renderer owner was already taken for teardown")
-            .handle()
+        self.renderer_runtime_access.runtime()
     }
 
     pub(crate) fn renderer_runtime_owner_access(&self) -> RendererBrowserContextRuntimeOwnerAccess {
-        self.renderer_runtime_owner
-            .as_ref()
-            .expect("BrowserContext renderer owner was already taken for teardown")
-            .owner_access()
+        self.renderer_runtime_access.clone()
     }
 
-    pub(crate) fn take_renderer_runtime_owner_for_teardown(
+    pub(crate) fn take_renderer_runtime_owner_for_host_registration(
         &mut self,
     ) -> Option<RendererBrowserContextRuntimeOwner> {
-        self.renderer_runtime_owner.take()
+        self.renderer_runtime_owner_for_registration.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn carries_renderer_runtime_registration_owner_for_test(&self) -> bool {
+        self.renderer_runtime_owner_for_registration.is_some()
     }
 
     pub(crate) fn routes_renderer_browser_context_runtime(
@@ -746,7 +788,7 @@ impl BrowserContext {
             .loaded_page()
             .is_some_and(|page| page.renderer_owner_local_host_id() == owner_local_host_id)
         {
-            return self.target_id.clone();
+            return self.active_target_id_owned();
         }
         self.background_targets.iter().find_map(|target| {
             target
@@ -772,20 +814,20 @@ impl BrowserContext {
         let service_worker_target_pending_inspector_await_count =
             self.service_worker_target_pending_inspector_await_count_for_diagnostics();
         let auxiliary_devtools_pending_inspector_await_count: usize = self
-            .auxiliary_devtools_session_states
+            .auxiliary_devtools_session_states()
             .values()
             .map(DevToolsSessionState::pending_inspector_await_count)
             .sum();
         let runtime_session_diagnostics = json!({
-            "runtimeEnabled": self.devtools_session_state.runtime_session_state.runtime_frontend_enabled,
-            "inspectorEnabled": self.devtools_session_state.runtime_session_state.inspector_enabled,
-            "inspectorTargetCrashedDelivered": self.devtools_session_state.runtime_session_state.inspector_target_crashed_delivered(),
+            "runtimeEnabled": self.devtools_session_state().runtime_session_state.runtime_frontend_enabled,
+            "inspectorEnabled": self.devtools_session_state().runtime_session_state.inspector_enabled,
+            "inspectorTargetCrashedDelivered": self.devtools_session_state().runtime_session_state.inspector_target_crashed_delivered(),
             "profilerCommandStateSource": "renderer-v8-inspector-agent",
-            "v8InspectorStateBytes": self.devtools_session_state.inspector_session_state.v8_state.as_ref().map_or(0, |state| state.len()),
-            "auxiliaryDevToolsSessionStateCount": self.auxiliary_devtools_session_states.len(),
-            "pendingInspectorAwaitCount": self.devtools_session_state.pending_inspector_await_count()
+            "v8InspectorStateBytes": self.devtools_session_state().inspector_session_state.v8_state.as_ref().map_or(0, |state| state.len()),
+            "auxiliaryDevToolsSessionStateCount": self.auxiliary_devtools_session_states().len(),
+            "pendingInspectorAwaitCount": self.devtools_session_state().pending_inspector_await_count()
                 + auxiliary_devtools_pending_inspector_await_count,
-            "primaryPendingInspectorAwaitCount": self.devtools_session_state.pending_inspector_await_count(),
+            "primaryPendingInspectorAwaitCount": self.devtools_session_state().pending_inspector_await_count(),
             "auxiliaryPendingInspectorAwaitCount": auxiliary_devtools_pending_inspector_await_count,
         });
         json!({
@@ -813,7 +855,7 @@ impl BrowserContext {
                 .iter()
                 .filter(|info| info.attached)
                 .count(),
-            "auxiliaryTargetSessionCount": self.auxiliary_target_sessions.len(),
+            "auxiliaryTargetSessionCount": self.target_frontend_sessions.auxiliary_session_count(),
             "targetOpenerCount": self.target_opener_ids.len(),
             "targetOpenerFrameCount": self.target_opener_frame_ids.len(),
             "targetCanAccessOpenerCount": self.target_can_access_opener.len(),
@@ -846,21 +888,21 @@ impl BrowserContext {
             },
             "runtimeSession": runtime_session_diagnostics,
             "pageSession": {
-                "pageLifecycleEvents": self.devtools_session_state.page_session_state.page_lifecycle_events,
-                "logEnabled": self.devtools_session_state.page_session_state.log_enabled,
-                "consoleEnabled": self.devtools_session_state.console_output_session_state.console_enabled,
+                "pageLifecycleEvents": self.devtools_session_state().page_session_state.page_lifecycle_events,
+                "logEnabled": self.devtools_session_state().page_session_state.log_enabled,
+                "consoleEnabled": self.devtools_session_state().console_output_session_state.console_enabled,
                 "performanceEnabled": self
-                    .devtools_session_state
+                    .devtools_session_state()
                     .page_session_state
                     .performance
                     .enabled(),
                 "performanceTimeDomain": self
-                    .devtools_session_state
+                    .devtools_session_state()
                     .page_session_state
                     .performance
                     .time_domain()
                     .as_str(),
-                "pageFontFamilyCount": self.devtools_session_state.page_session_state.page_font_families.len(),
+                "pageFontFamilyCount": self.devtools_session_state().page_session_state.page_font_families.len(),
             },
             "activeRuntimeSlot": self.active_target.runtime_slot.moli_memory_diagnostics(),
             "activeFetch": self.active_target.fetch_owner.moli_memory_diagnostics(),
@@ -927,52 +969,6 @@ impl BrowserContext {
         })
     }
 
-    pub(crate) fn assert_target_materialized_initial_empty_document_has_page(
-        &self,
-        target_id: &str,
-    ) -> Result<(), String> {
-        if self.active_target_id() == Some(target_id) {
-            return materialized_initial_empty_document_missing_page_error(
-                target_id,
-                &self.active_target.owner_state,
-                self.has_loaded_page(),
-            )
-            .map_or(Ok(()), Err);
-        }
-
-        let Some(target) = self.background_target(target_id) else {
-            return Ok(());
-        };
-        let Some(owner_state) = self.parked_target_owner_state(target_id) else {
-            return Ok(());
-        };
-        materialized_initial_empty_document_missing_page_error(
-            target_id,
-            owner_state,
-            target.has_loaded_page(),
-        )
-        .map_or(Ok(()), Err)
-    }
-
-    pub(crate) fn can_install_current_initial_empty_document_page(&self, target_id: &str) -> bool {
-        if self.active_target_id() == Some(target_id) {
-            return !self.has_loaded_page()
-                && self
-                    .active_target
-                    .owner_state
-                    .can_install_current_initial_empty_document_page();
-        }
-
-        let Some(target) = self.background_target(target_id) else {
-            return false;
-        };
-        if target.has_loaded_page() {
-            return false;
-        }
-        self.parked_target_owner_state(target_id)
-            .is_none_or(TargetOwnerState::can_install_current_initial_empty_document_page)
-    }
-
     pub(crate) fn loaded_document_renderer_owner_ids_for_diagnostics(&self) -> HashSet<u64> {
         let mut owner_ids = HashSet::new();
         if let Some(page) = self.loaded_page() {
@@ -998,13 +994,13 @@ impl BrowserContext {
 
     pub(crate) fn dedicated_worker_running_worker_isolate_count_for_diagnostics(&self) -> usize {
         self.loaded_pages_for_diagnostics()
-            .map(
-                moli_core::page::Page::dedicated_worker_running_worker_isolate_count_for_diagnostics,
-            )
+            .map(|page| page.dedicated_worker_running_worker_isolate_count_for_diagnostics())
             .sum()
     }
 
-    fn loaded_pages_for_diagnostics(&self) -> impl Iterator<Item = &moli_core::page::Page> {
+    fn loaded_pages_for_diagnostics(
+        &self,
+    ) -> impl Iterator<Item = moli_core::browser_host::BrowserPageRuntimeLease> + '_ {
         self.loaded_page().into_iter().chain(
             self.background_targets
                 .iter()
@@ -1013,35 +1009,76 @@ impl BrowserContext {
     }
 
     pub(crate) fn page_target_pending_inspector_await_count_for_diagnostics(&self) -> usize {
-        devtools_sessions_pending_inspector_await_count(
-            &self.devtools_session_state,
-            &self.auxiliary_devtools_session_states,
-        ) + self.target_parking.pending_inspector_await_count()
+        self.target_frontend_sessions
+            .session_states()
+            .map(DevToolsSessionState::pending_inspector_await_count)
+            .sum()
     }
 
     pub(crate) fn has_pending_javascript_dialog(&self) -> bool {
-        !self
-            .devtools_session_state
-            .page_session_state
-            .javascript_dialog_state
-            .is_empty()
-            || self
-                .auxiliary_devtools_session_states
-                .values()
-                .any(|session| {
-                    !session
-                        .page_session_state
-                        .javascript_dialog_state
-                        .is_empty()
-                })
-            || self.target_parking.has_pending_javascript_dialog()
+        self.target_frontend_sessions
+            .session_states()
+            .any(|session| {
+                !session
+                    .page_session_state
+                    .javascript_dialog_state
+                    .is_empty()
+            })
     }
 
     pub(crate) fn page_target_with_pending_inspector_await_count_for_diagnostics(&self) -> usize {
-        usize::from(devtools_sessions_have_pending_inspector_awaits(
-            &self.devtools_session_state,
-            &self.auxiliary_devtools_session_states,
-        )) + self.target_parking.pending_inspector_await_target_count()
+        let bound_target_count = self
+            .target_frontend_sessions
+            .target_entries()
+            .filter(|(_, primary, auxiliary)| {
+                devtools_sessions_have_pending_inspector_awaits(primary, auxiliary)
+            })
+            .count();
+        bound_target_count
+            + if self.has_active_target() {
+                0
+            } else {
+                usize::from(devtools_sessions_have_pending_inspector_awaits(
+                    self.devtools_session_state(),
+                    self.auxiliary_devtools_session_states(),
+                ))
+            }
+    }
+
+    pub(crate) fn has_page_domain_enabled_session(&self) -> bool {
+        self.target_frontend_sessions
+            .session_states()
+            .any(|state| state.page_session_state.page_domain_enabled)
+    }
+
+    pub(crate) fn has_runtime_remote_object_id_in_top_level_target(&self, object_id: &str) -> bool {
+        self.target_frontend_sessions
+            .session_states()
+            .any(|state| state.has_runtime_remote_object_id(object_id))
+    }
+
+    pub(crate) fn runtime_remote_object_id_known_for_different_top_level_owner(
+        &self,
+        target_id: &str,
+        devtools_session_id: Option<&str>,
+        object_id: &str,
+    ) -> bool {
+        let current_target = self.top_level_target_handle(target_id);
+        self.target_frontend_sessions
+            .target_entries()
+            .any(|(target, primary, auxiliary)| {
+                if Some(target) != current_target {
+                    return primary.has_runtime_remote_object_id(object_id)
+                        || auxiliary
+                            .values()
+                            .any(|state| state.has_runtime_remote_object_id(object_id));
+                }
+                (devtools_session_id.is_some() && primary.has_runtime_remote_object_id(object_id))
+                    || auxiliary.iter().any(|(session_id, state)| {
+                        Some(session_id.as_str()) != devtools_session_id
+                            && state.has_runtime_remote_object_id(object_id)
+                    })
+            })
     }
 
     pub(crate) fn shared_worker_target_pending_inspector_await_count_for_diagnostics(
@@ -1087,233 +1124,10 @@ impl BrowserContext {
             .shared_worker_runtime_diagnostics_for_diagnostics()
     }
 
-    #[cfg(test)]
-    pub(crate) fn start_document_navigation_for_active_target(
-        &mut self,
-        loader_id: String,
-    ) -> Option<DocumentNavigationToken> {
-        let target_id = self.active_target_id()?.to_owned();
-        let token = self
-            .active_target
-            .runtime_slot
-            .start_document_navigation(target_id.clone(), loader_id);
-        self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
-        Some(token)
-    }
-
-    pub(crate) fn start_document_navigation_for_target(
-        &mut self,
-        target_id: &str,
-        loader_id: String,
-    ) -> Option<DocumentNavigationToken> {
-        if self.active_target_id() == Some(target_id) {
-            let target_id = target_id.to_owned();
-            let token = self
-                .active_target
-                .runtime_slot
-                .start_document_navigation(target_id.clone(), loader_id);
-            self.mark_target_initial_empty_document_pending_cross_document_navigation(&target_id);
-            return Some(token);
-        }
-        let target = self.background_target_mut(target_id)?;
-        let token = target
-            .runtime_slot
-            .start_document_navigation(target_id.to_owned(), loader_id);
-        self.mark_target_initial_empty_document_pending_cross_document_navigation(target_id);
-        Some(token)
-    }
-
-    pub(crate) fn accepts_pending_document_navigation_event(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .accepts_pending_document_navigation_event(token);
-        }
-        self.background_target(&token.target_id)
-            .is_some_and(|target| {
-                target
-                    .runtime_slot()
-                    .accepts_pending_document_navigation_event(token)
-            })
-    }
-
-    pub(crate) fn document_navigation_cancellation_handle(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> Option<moli_fetch::FetchCancelHandle> {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .document_navigation_cancellation_handle(token);
-        }
-        self.background_target(&token.target_id).and_then(|target| {
-            target
-                .runtime_slot()
-                .document_navigation_cancellation_handle(token)
-        })
-    }
-
-    pub(crate) fn arm_background_navigation_completion(
-        &mut self,
-        token: &DocumentNavigationToken,
-        additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
-    ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .arm_background_navigation_completion(token, additional_cancellation);
-        }
-        let Some(target) = self.background_target_mut(&token.target_id) else {
-            if let Some(cancellation) = additional_cancellation {
-                cancellation.cancel();
-            }
-            return false;
-        };
-        target
-            .runtime_slot
-            .arm_background_navigation_completion(token, additional_cancellation)
-    }
-
-    pub(crate) fn settle_background_navigation_completion(
-        &mut self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .settle_background_navigation_completion(token);
-        }
-        self.background_target_mut(&token.target_id)
-            .is_some_and(|target| {
-                target
-                    .runtime_slot
-                    .settle_background_navigation_completion(token)
-            })
-    }
-
-    pub(crate) fn has_inflight_background_navigation(&self) -> bool {
+    pub(crate) fn clear_renderer_document_protocol_state_for_active_target(&mut self) {
         self.active_target
             .runtime_slot
-            .has_inflight_background_navigation()
-            || self
-                .background_targets
-                .iter()
-                .any(|target| target.runtime_slot().has_inflight_background_navigation())
-    }
-
-    pub(crate) fn has_inflight_background_navigation_for_target(&self, target_id: &str) -> bool {
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .has_inflight_background_navigation();
-        }
-        self.background_target(target_id)
-            .is_some_and(|target| target.runtime_slot().has_inflight_background_navigation())
-    }
-
-    pub(crate) fn accepts_document_body_completion_event(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            return self
-                .active_target
-                .runtime_slot
-                .accepts_document_body_completion_event(token);
-        }
-        self.background_target(&token.target_id)
-            .is_some_and(|target| {
-                target
-                    .runtime_slot()
-                    .accepts_document_body_completion_event(token)
-            })
-    }
-
-    pub(crate) fn has_pending_document_navigation_for_target(
-        &self,
-        target_id: Option<&str>,
-    ) -> bool {
-        let Some(target_id) = target_id else {
-            return false;
-        };
-        if self.active_target_id() == Some(target_id) {
-            return self
-                .active_target
-                .runtime_slot
-                .has_pending_document_navigation();
-        }
-        self.background_target(target_id)
-            .is_some_and(|target| target.runtime_slot().has_pending_document_navigation())
-    }
-
-    pub(crate) fn clear_pending_document_navigation_for_target_if_loader_matches(
-        &mut self,
-        target_id: Option<&str>,
-        loader_id: &str,
-    ) {
-        let Some(target_id) = target_id else {
-            return;
-        };
-        if self.active_target_id() == Some(target_id) {
-            let cleared = self
-                .active_target
-                .runtime_slot
-                .clear_pending_document_navigation_if_loader_matches(loader_id);
-            if cleared {
-                self.clear_target_initial_empty_document_pending_cross_document_navigation(
-                    target_id,
-                );
-            }
-            return;
-        }
-        if let Some(target) = self.background_target_mut(target_id) {
-            let cleared = target
-                .runtime_slot
-                .clear_pending_document_navigation_if_loader_matches(loader_id);
-            if cleared {
-                self.clear_target_initial_empty_document_pending_cross_document_navigation(
-                    target_id,
-                );
-            }
-        }
-    }
-
-    pub(crate) fn commit_document_navigation_if_matches(
-        &mut self,
-        token: &DocumentNavigationToken,
-    ) {
-        if self.active_target_id() == Some(token.target_id.as_str()) {
-            let committed = self
-                .active_target
-                .runtime_slot
-                .commit_pending_document_navigation_if_matches(token);
-            if committed {
-                self.mark_target_initial_empty_document_exited(&token.target_id);
-            }
-            return;
-        }
-        if let Some(target) = self.background_target_mut(&token.target_id) {
-            let committed = target
-                .runtime_slot
-                .commit_pending_document_navigation_if_matches(token);
-            if committed {
-                self.mark_target_initial_empty_document_exited(&token.target_id);
-            }
-        }
-    }
-
-    pub(crate) fn clear_document_navigation_state_for_active_target(&mut self) {
-        self.active_target
-            .runtime_slot
-            .clear_document_navigation_state();
+            .clear_renderer_document_protocol_state();
     }
 
     pub(crate) fn clear_indexed_db_origin(&self, origin: &str) -> Result<(), String> {
@@ -1523,11 +1337,399 @@ impl BrowserContext {
     }
 
     pub(crate) fn active_target_id(&self) -> Option<&str> {
-        self.target_id.as_deref()
+        self.active_target
+            .target_handle
+            .as_ref()
+            .map(BrowserTargetHandle::target_id)
     }
 
     pub(crate) fn active_target_id_owned(&self) -> Option<String> {
-        self.target_id.clone()
+        self.active_target_id().map(str::to_owned)
+    }
+
+    pub(crate) fn active_target_handle(&self) -> Option<&BrowserTargetHandle> {
+        self.active_target.target_handle.as_ref()
+    }
+
+    pub(crate) fn top_level_target_handle(&self, target_id: &str) -> Option<&BrowserTargetHandle> {
+        if self.is_active_target(target_id) {
+            return self.active_target_handle();
+        }
+        self.background_targets
+            .iter()
+            .find(|target| target.is_target(target_id))
+            .map(super::parking::BackgroundTarget::target_handle)
+    }
+
+    /// Primary/root frontend state for the current exact active Target.
+    ///
+    /// While no active Target is registered this addresses the unbound root
+    /// candidate; binding the next new active Target adopts the candidate.
+    pub(crate) fn devtools_session_state(&self) -> &DevToolsSessionState {
+        self.target_frontend_sessions
+            .primary_state_or_unbound(self.active_target_handle())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn devtools_session_state_mut(&mut self) -> &mut DevToolsSessionState {
+        let target = self.active_target_handle().cloned();
+        self.target_frontend_sessions
+            .primary_state_or_unbound_mut(target.as_ref())
+    }
+
+    pub(crate) fn auxiliary_devtools_session_states(
+        &self,
+    ) -> &HashMap<String, DevToolsSessionState> {
+        self.target_frontend_sessions
+            .auxiliary_states_or_unbound(self.active_target_handle())
+    }
+
+    pub(crate) fn devtools_session_states_mut(
+        &mut self,
+    ) -> (
+        &mut DevToolsSessionState,
+        &mut HashMap<String, DevToolsSessionState>,
+    ) {
+        let target = self.active_target_handle().cloned();
+        self.target_frontend_sessions
+            .states_or_unbound_mut(target.as_ref())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_frontend_and_policy_state_mut(
+        &mut self,
+    ) -> (
+        &mut DevToolsSessionState,
+        &mut TargetNetworkPolicyState,
+        &mut Option<bool>,
+    ) {
+        let target = self.active_target_handle().cloned();
+        let session_state = self
+            .target_frontend_sessions
+            .primary_state_or_unbound_mut(target.as_ref());
+        (
+            session_state,
+            &mut self.network_policy,
+            &mut self.tls_verify_host_override,
+        )
+    }
+
+    pub(crate) fn devtools_session_states_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<(
+        &DevToolsSessionState,
+        &HashMap<String, DevToolsSessionState>,
+    )> {
+        let target = self.top_level_target_handle(target_id)?;
+        Some((
+            self.target_frontend_sessions.primary_state(target)?,
+            self.target_frontend_sessions.auxiliary_states(target)?,
+        ))
+    }
+
+    pub(crate) fn devtools_session_states_for_target_mut(
+        &mut self,
+        target_id: &str,
+    ) -> Option<(
+        &mut DevToolsSessionState,
+        &mut HashMap<String, DevToolsSessionState>,
+    )> {
+        let target = self.top_level_target_handle(target_id)?.clone();
+        self.target_frontend_sessions.states_mut(&target)
+    }
+
+    pub(crate) fn devtools_session_state_for_target(
+        &self,
+        target_id: &str,
+        is_auxiliary: bool,
+        session_id: Option<&str>,
+    ) -> Option<&DevToolsSessionState> {
+        let target = self.top_level_target_handle(target_id)?;
+        self.target_frontend_sessions
+            .session_state(target, is_auxiliary, session_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn primary_devtools_session_state_for_target(
+        &self,
+        target_id: &str,
+    ) -> Option<&DevToolsSessionState> {
+        self.devtools_session_state_for_target(target_id, false, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn primary_devtools_session_state_for_target_mut(
+        &mut self,
+        target_id: &str,
+    ) -> Option<&mut DevToolsSessionState> {
+        let target = self.top_level_target_handle(target_id)?.clone();
+        self.target_frontend_sessions.primary_state_mut(&target)
+    }
+
+    pub(crate) fn mutate_devtools_session_state_for_target<T>(
+        &mut self,
+        target_id: &str,
+        is_auxiliary: bool,
+        session_id: Option<&str>,
+        mutate: impl FnOnce(&mut DevToolsSessionState) -> T,
+    ) -> Option<T> {
+        let target = self.top_level_target_handle(target_id)?.clone();
+        self.target_frontend_sessions
+            .session_state_mut(&target, is_auxiliary, session_id)
+            .map(mutate)
+    }
+
+    pub(crate) fn mutate_target_frontend_and_policy_state<T>(
+        &mut self,
+        target_id: &str,
+        is_auxiliary: bool,
+        session_id: Option<&str>,
+        mutate: impl FnOnce(
+            Option<(
+                &mut DevToolsSessionState,
+                &mut TargetNetworkPolicyState,
+                &mut Option<bool>,
+            )>,
+        ) -> T,
+    ) -> T {
+        let Some(target) = self.top_level_target_handle(target_id).cloned() else {
+            return mutate(None);
+        };
+        if self.active_target_handle() == Some(&target) {
+            let Some(session_state) =
+                self.target_frontend_sessions
+                    .session_state_mut(&target, is_auxiliary, session_id)
+            else {
+                return mutate(None);
+            };
+            return mutate(Some((
+                session_state,
+                &mut self.network_policy,
+                &mut self.tls_verify_host_override,
+            )));
+        }
+
+        // Resolve the frontend projection before removing the parked policy
+        // payload. A stale/missing session route must not make the physical
+        // Target state disappear while the frontend falls back to NoLoaded.
+        if self
+            .target_frontend_sessions
+            .session_state(&target, is_auxiliary, session_id)
+            .is_none()
+        {
+            return mutate(None);
+        }
+
+        let mut parked = self.target_parking.take_page_session_state(target_id);
+        let Some(session_state) =
+            self.target_frontend_sessions
+                .session_state_mut(&target, is_auxiliary, session_id)
+        else {
+            self.target_parking
+                .replace_page_session_state(target_id.to_owned(), parked);
+            return mutate(None);
+        };
+        let result = mutate(Some((
+            session_state,
+            &mut parked.network_policy,
+            &mut parked.tls_verify_host_override,
+        )));
+        self.target_parking
+            .replace_page_session_state(target_id.to_owned(), parked);
+        result
+    }
+
+    pub(crate) fn mutate_active_frontend_and_policy_state<T>(
+        &mut self,
+        is_auxiliary: bool,
+        session_id: Option<&str>,
+        mutate: impl FnOnce(
+            Option<(
+                &mut DevToolsSessionState,
+                &mut TargetNetworkPolicyState,
+                &mut Option<bool>,
+            )>,
+        ) -> T,
+    ) -> T {
+        if let Some(target) = self.active_target_handle().cloned() {
+            let Some(session_state) =
+                self.target_frontend_sessions
+                    .session_state_mut(&target, is_auxiliary, session_id)
+            else {
+                return mutate(None);
+            };
+            return mutate(Some((
+                session_state,
+                &mut self.network_policy,
+                &mut self.tls_verify_host_override,
+            )));
+        }
+        if is_auxiliary {
+            return mutate(None);
+        }
+
+        // Before the first active Target exists, root/browser-session
+        // commands still configure the unbound candidate. The first newly
+        // registered active Target adopts this state atomically.
+        let session_state = self
+            .target_frontend_sessions
+            .primary_state_or_unbound_mut(None);
+        mutate(Some((
+            session_state,
+            &mut self.network_policy,
+            &mut self.tls_verify_host_override,
+        )))
+    }
+
+    pub(crate) fn reset_primary_devtools_session_state_for_target(
+        &mut self,
+        target_id: &str,
+    ) -> bool {
+        let Some(target) = self.top_level_target_handle(target_id).cloned() else {
+            return false;
+        };
+        self.target_frontend_sessions.reset_primary_state(&target)
+    }
+
+    pub(crate) fn primary_session_id_for_target(&self, target_id: &str) -> Option<&str> {
+        let target = self.top_level_target_handle(target_id)?;
+        self.target_frontend_sessions.primary_session_id(target)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn primary_session_id_for_exact_target(
+        &self,
+        target: &BrowserTargetHandle,
+    ) -> Option<&str> {
+        self.target_frontend_sessions.primary_session_id(target)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn primary_devtools_session_state_for_exact_target(
+        &self,
+        target: &BrowserTargetHandle,
+    ) -> Option<&DevToolsSessionState> {
+        self.target_frontend_sessions.primary_state(target)
+    }
+
+    pub(crate) fn register_top_level_target_attachment(
+        &mut self,
+        target: BrowserTargetHandle,
+        primary_session_id: Option<String>,
+    ) {
+        self.target_frontend_sessions
+            .register_target(target.clone());
+        if primary_session_id.is_some() {
+            self.target_frontend_sessions
+                .replace_primary_session(&target, primary_session_id);
+        }
+    }
+
+    /// Converts legacy constructor input used by old tests into the exact
+    /// attachment registry used by production commands. This runs only after
+    /// Core has replaced staged handles with the registered Target handles.
+    #[cfg(test)]
+    pub(crate) fn adopt_background_target_fixture_attachments(&mut self) {
+        let attachments = self
+            .background_targets
+            .iter_mut()
+            .map(|target| {
+                (
+                    target.target_handle().clone(),
+                    target.take_fixture_primary_session_id(),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (target, session_id) in attachments {
+            self.register_top_level_target_attachment(target, session_id);
+        }
+    }
+
+    pub(crate) fn remove_top_level_target_attachment(
+        &mut self,
+        target: &BrowserTargetHandle,
+    ) -> (Option<String>, Vec<String>) {
+        self.target_frontend_sessions.remove_target(target)
+    }
+
+    pub(crate) fn take_top_level_target_attachment_for_target(
+        &mut self,
+        target_id: &str,
+    ) -> (Option<String>, Vec<String>) {
+        let Some(target) = self.top_level_target_handle(target_id).cloned() else {
+            return (None, Vec::new());
+        };
+        self.target_frontend_sessions.remove_target(&target)
+    }
+
+    pub(crate) fn primary_attachment_target_id_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<&str> {
+        let target = self
+            .target_frontend_sessions
+            .primary_target_for_session(session_id)?;
+        self.top_level_target_handle(target.target_id())
+            .filter(|current| *current == target)
+            .map(BrowserTargetHandle::target_id)
+    }
+
+    pub(crate) fn replace_primary_session_for_target(
+        &mut self,
+        target_id: &str,
+        session_id: Option<String>,
+    ) -> Option<String> {
+        let target = self.top_level_target_handle(target_id)?.clone();
+        self.target_frontend_sessions
+            .replace_primary_session(&target, session_id)
+    }
+
+    pub(crate) fn attach_auxiliary_session_for_target(
+        &mut self,
+        target_id: &str,
+        session_id: String,
+    ) -> bool {
+        let Some(target) = self.top_level_target_handle(target_id).cloned() else {
+            return false;
+        };
+        self.target_frontend_sessions
+            .attach_auxiliary_session(&target, session_id);
+        true
+    }
+
+    pub(crate) fn auxiliary_attachment_target_id_for_session(
+        &self,
+        session_id: &str,
+    ) -> Option<&str> {
+        let target = self
+            .target_frontend_sessions
+            .target_for_session(session_id)?;
+        let current = self.top_level_target_handle(target.target_id())?;
+        (current == target
+            && self
+                .target_frontend_sessions
+                .is_auxiliary_session_for_target(target, session_id))
+        .then(|| target.target_id())
+    }
+
+    pub(crate) fn auxiliary_attachment_session_ids_for_target(
+        &self,
+        target_id: &str,
+    ) -> Vec<String> {
+        self.top_level_target_handle(target_id)
+            .map(|target| self.target_frontend_sessions.auxiliary_session_ids(target))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn remove_auxiliary_attachment_session(
+        &mut self,
+        session_id: &str,
+    ) -> Option<String> {
+        self.auxiliary_attachment_target_id_for_session(session_id)?;
+        self.target_frontend_sessions
+            .remove_auxiliary_session(session_id)
+            .map(|target| target.target_id().to_owned())
     }
 
     pub(crate) fn effective_active_browser_identity_override(
@@ -1604,46 +1806,134 @@ impl BrowserContext {
     }
 
     pub(crate) fn has_active_target(&self) -> bool {
-        self.target_id.is_some()
+        self.active_target.target_handle.is_some()
     }
 
     pub(crate) fn is_active_target(&self, target_id: &str) -> bool {
         self.active_target_id() == Some(target_id)
     }
 
+    pub(crate) fn stage_active_target_for_browser_context_registration(
+        &mut self,
+        target_id: impl Into<String>,
+    ) {
+        assert!(
+            self.active_target_handle().is_none(),
+            "BrowserContext registration may only stage its initial active Target"
+        );
+        self.bind_new_active_target_handles(
+            BrowserTargetHandle::staged(target_id),
+            BrowserPageResidenceHandle::default(),
+        );
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_active_target_id(&mut self, target_id: impl Into<String>) {
         let target_id = target_id.into();
-        let target_changed = self.target_id.as_deref() != Some(target_id.as_str());
-        if target_changed && !self.has_loaded_page() {
-            self.active_target
-                .runtime_slot
-                .prepare_renderer_channel_for_new_target();
+        if self.active_target_id() == Some(target_id.as_str()) {
+            return;
         }
-        if self
-            .target_id
-            .as_deref()
-            .is_some_and(|current_target_id| current_target_id != target_id)
+        self.bind_new_active_target_handles(
+            BrowserTargetHandle::staged(target_id),
+            BrowserPageResidenceHandle::default(),
+        );
+    }
+
+    /// Binds a newly registered Browser Core Target and its exact Page slot.
+    ///
+    /// Promotion uses `set_active_target_handle` because the runtime slot (and
+    /// therefore its Page capability) moves with the Target. New Target
+    /// creation must instead install the capability allocated by Core.
+    pub(crate) fn bind_new_active_target_handles(
+        &mut self,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+    ) {
+        debug_assert!(
+            !self.has_loaded_page(),
+            "a newly registered Target cannot replace a loaded Page slot in place"
+        );
+        if let Some(previous_target) = self.active_target.target_handle.as_ref()
+            && previous_target != &target_handle
         {
+            self.target_frontend_sessions.remove_target(previous_target);
             self.active_target.session_storage_namespace = Default::default();
         }
-        self.target_id = Some(target_id);
+        self.active_target
+            .runtime_slot
+            .prepare_renderer_channel_for_new_target(page_residence);
+        self.target_frontend_sessions
+            .register_new_active_target(target_handle.clone());
+        self.active_target.target_handle = Some(target_handle);
+    }
+
+    pub(crate) fn bind_new_active_target_registration(
+        &mut self,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+        session_storage_access: BrowserTargetSessionStorageAccess,
+    ) {
+        debug_assert_eq!(
+            session_storage_access.target_handle(),
+            &target_handle,
+            "one Target registration must bind its own exact sessionStorage access"
+        );
+        self.bind_new_active_target_handles(target_handle, page_residence);
+        self.active_target
+            .session_storage_namespace
+            .bind_browser_access(session_storage_access);
+    }
+
+    pub(crate) fn bind_target_session_storage_access(
+        &mut self,
+        access: BrowserTargetSessionStorageAccess,
+    ) -> bool {
+        let target_id = access.target_handle().target_id().to_owned();
+        if self.active_target_handle() == Some(access.target_handle()) {
+            self.active_target
+                .session_storage_namespace
+                .bind_browser_access(access);
+            return true;
+        }
+        let Some(target) = self.background_target_mut(&target_id) else {
+            return false;
+        };
+        if target.target_handle() != access.target_handle() {
+            return false;
+        }
+        target.bind_session_storage_access(access);
+        true
+    }
+
+    pub(crate) fn set_active_target_handle(&mut self, target_handle: BrowserTargetHandle) {
+        let target_changed = self.active_target.target_handle.as_ref() != Some(&target_handle);
+        if target_changed && self.active_target.target_handle.is_some() {
+            self.active_target.session_storage_namespace = Default::default();
+        }
+        self.target_frontend_sessions
+            .register_new_active_target(target_handle.clone());
+        self.active_target.target_handle = Some(target_handle);
     }
 
     pub(crate) fn clear_active_target_id(&mut self) {
-        self.target_id = None;
+        if let Some(target) = self.active_target.target_handle.take() {
+            self.target_frontend_sessions
+                .retire_target_to_unbound(&target);
+        }
         self.active_target.session_storage_namespace = Default::default();
     }
 
     pub(crate) fn active_session_id(&self) -> Option<&str> {
-        self.session_id.as_deref()
+        let target = self.active_target_handle()?;
+        self.target_frontend_sessions.primary_session_id(target)
     }
 
     pub(crate) fn active_session_id_owned(&self) -> Option<String> {
-        self.session_id.clone()
+        self.active_session_id().map(str::to_owned)
     }
 
     pub(crate) fn has_active_session(&self) -> bool {
-        self.session_id.is_some()
+        self.active_session_id().is_some()
     }
 
     pub(crate) fn active_target_is_unclaimed_default_placeholder(
@@ -1659,16 +1949,27 @@ impl BrowserContext {
             && self.service_worker_targets.is_empty()
     }
 
+    #[cfg(test)]
     pub(crate) fn attach_active_session(&mut self, session_id: impl Into<String>) {
-        self.session_id = Some(session_id.into());
+        let Some(target) = self.active_target_handle().cloned() else {
+            return;
+        };
+        self.target_frontend_sessions
+            .replace_primary_session(&target, Some(session_id.into()));
     }
 
     pub(crate) fn replace_active_session(&mut self, session_id: Option<String>) {
-        self.session_id = session_id;
+        let Some(target) = self.active_target_handle().cloned() else {
+            return;
+        };
+        self.target_frontend_sessions
+            .replace_primary_session(&target, session_id);
     }
 
     pub(crate) fn detach_active_session(&mut self) -> Option<String> {
-        self.session_id.take()
+        let target = self.active_target_handle()?.clone();
+        self.target_frontend_sessions
+            .replace_primary_session(&target, None)
     }
 
     pub(crate) fn target_url(&self) -> &str {
@@ -1713,19 +2014,6 @@ impl BrowserContext {
     }
 }
 
-fn materialized_initial_empty_document_missing_page_error(
-    target_id: &str,
-    owner_state: &TargetOwnerState,
-    has_loaded_page: bool,
-) -> Option<String> {
-    if owner_state.has_materialized_current_initial_empty_document() && !has_loaded_page {
-        return Some(format!(
-            "TargetInitialEmptyDocumentMissingPage: target {target_id} has materialized current initial empty document without loaded Page"
-        ));
-    }
-    None
-}
-
 pub(crate) fn seed_initial_cookies(
     cookie_store: &SharedBrowserCookieStore,
     initial_cookies: impl IntoIterator<Item = StoredCookie>,
@@ -1733,5 +2021,39 @@ pub(crate) fn seed_initial_cookies(
     let mut store = cookie_store.lock();
     for cookie in initial_cookies {
         let _ = store.upsert_with_request_url_report(cookie, None, CookieSource::Cdp);
+    }
+}
+
+#[cfg(test)]
+mod attachment_projection_tests {
+    use super::*;
+
+    #[test]
+    fn stale_exact_attachment_routes_cannot_authorize_same_public_target_id() {
+        let predecessor = BrowserTargetHandle::staged("TID-reused");
+        let successor = BrowserTargetHandle::staged("TID-reused");
+        let mut context = BrowserContext::new("BID-1".to_owned());
+        context
+            .target_frontend_sessions
+            .register_target(predecessor.clone());
+        context
+            .target_frontend_sessions
+            .replace_primary_session(&predecessor, Some("SID-old".to_owned()));
+        context
+            .target_frontend_sessions
+            .attach_auxiliary_session(&predecessor, "SID-old-aux".to_owned());
+        context
+            .target_frontend_sessions
+            .register_target(successor.clone());
+        context.active_target.target_handle = Some(successor);
+
+        assert_eq!(
+            context.primary_attachment_target_id_for_session("SID-old"),
+            None
+        );
+        assert_eq!(
+            context.auxiliary_attachment_target_id_for_session("SID-old-aux"),
+            None
+        );
     }
 }

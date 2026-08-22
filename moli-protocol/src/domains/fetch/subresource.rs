@@ -692,11 +692,8 @@ mod tests {
     fn prepared_subresource_fetch_pause_pairs_emit_network_then_fetch_per_item() {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new("BID-1".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        browser_context.set_active_target_id("TID-1");
+        conn.insert_browser_context(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
@@ -770,11 +767,8 @@ mod tests {
     fn fetch_pause_does_not_synthesize_cookie_extra_info() {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new("BID-1".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        browser_context.set_active_target_id("TID-1");
+        conn.insert_browser_context(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
@@ -814,11 +808,8 @@ mod tests {
     fn prepared_subresource_fetch_pause_does_not_emit_after_page_replacement() {
         let mut conn = CdpConnection::default();
         let mut browser_context = BrowserContext::new("BID-1".to_owned());
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        browser_context.set_active_target_id("TID-1");
+        conn.insert_browser_context(browser_context);
         let page_owner = conn
             .target_page_residence_identity_for_session(None)
             .expect("active test target should expose a Page residence identity");
@@ -827,7 +818,7 @@ mod tests {
             .expect("browser context should remain installed")
             .active_target
             .runtime_slot
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(page_owner.loaded_page_generation() + 1);
 
         let mut events = Vec::new();
         super::emit_subresource_fetch_pause_outputs(
@@ -863,16 +854,12 @@ mod tests {
     fn prepared_subresource_fetch_pause_can_emit_for_background_owner() {
         let mut conn = CdpConnection::default();
         let mut bc = BrowserContext::new("BID-1".to_owned());
-        let target = BackgroundTarget::with_url(
+        bc.background_targets.push(BackgroundTarget::with_url(
             "TID-background".to_owned(),
             Some("SID-background".to_owned()),
             "https://example.test/background".to_owned(),
-        );
-        bc.background_targets.push(target);
-        conn.browser_context = Some(bc);
-        conn.runtime_session_owner_slot_mut(Some("SID-background"))
-            .expect("background test target runtime slot")
-            .set_page_attachment_id_for_test(1);
+        ));
+        conn.insert_browser_context(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-background"))
             .expect("background test target should expose a Page residence identity");

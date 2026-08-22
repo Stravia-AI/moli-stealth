@@ -156,7 +156,7 @@ pub(super) fn try_start_search_in_resource_command(
             let Some(page) = loaded_page(conn, cmd.session_id) else {
                 return complete_error(CONTENT_UNAVAILABLE);
             };
-            select_subresource(page, &root_frame_id, true, &params.url, materialize_limit)
+            select_subresource(&page, &root_frame_id, true, &params.url, materialize_limit)
         };
         return start_selected_resource_search(conn, cmd.id, cmd.session_id, params, selected);
     }
@@ -192,7 +192,7 @@ pub(super) fn complete_search_in_resource_command(
     completed: CompletedSearchInResourceCommand,
 ) -> PageCommandTaskStep {
     let materialize_limit = conn.response_body_materialize_limit();
-    let Some(page) = loaded_page(conn, session_id) else {
+    let Some(mut page) = loaded_page(conn, session_id) else {
         return complete_error(CONTENT_UNAVAILABLE);
     };
     let completion = match completed.completed {
@@ -219,12 +219,13 @@ pub(super) fn complete_search_in_resource_command(
             RendererResourceTextSearchOutcome::ResourceNotFound,
         ) => {
             let selected = select_subresource(
-                page,
+                &page,
                 &completed.params.frame_id,
                 false,
                 &completed.params.url,
                 materialize_limit,
             );
+            drop(page);
             start_selected_resource_search(conn, command_id, session_id, completed.params, selected)
         }
     }
@@ -294,7 +295,10 @@ fn complete_error(message: impl Into<String>) -> PageCommandTaskStep {
     PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, message))
 }
 
-fn loaded_page<'a>(conn: &'a mut CdpConnection, session_id: Option<&str>) -> Option<&'a mut Page> {
+fn loaded_page(
+    conn: &mut CdpConnection,
+    session_id: Option<&str>,
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.runtime_session_owner_slot_mut(session_id)
         .ok()?
         .loaded_page_mut()

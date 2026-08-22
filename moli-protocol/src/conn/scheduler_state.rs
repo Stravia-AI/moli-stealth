@@ -7,8 +7,114 @@ use serde_json::{Value, json};
 
 const RECENT_ACTIVITY_TRACE_LIMIT: usize = 128;
 
+/// Transport cancellation authority for one exact background main-resource
+/// navigation.
+///
+/// The protocol scheduler keeps this beside the navigation gate so starting a
+/// replacement in the same frame can abort the superseded fetch immediately,
+/// matching the lifetime of Chromium's frame-owned `NavigationRequest`.
+#[derive(Clone, Debug, Default)]
+pub struct BackgroundNavigationCancellation {
+    handle: moli_fetch::FetchCancelHandle,
+}
+
+impl BackgroundNavigationCancellation {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn cancel(&self) {
+        self.handle.cancel();
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.handle.is_cancelled()
+    }
+
+    pub(crate) fn fetch_cancel_handle(&self) -> moli_fetch::FetchCancelHandle {
+        self.handle.clone()
+    }
+
+    pub(crate) fn from_fetch_cancel_handle(handle: moli_fetch::FetchCancelHandle) -> Self {
+        Self { handle }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct BackgroundNavigationGateKey {
+    target_id: Option<String>,
+    session_id: Option<String>,
+    frame_id: String,
+    loader_id: String,
+    navigation_request_id: Option<u64>,
+}
+
+impl BackgroundNavigationGateKey {
+    pub(crate) fn for_navigation(
+        token: &super::state::DocumentNavigationToken,
+        state: &super::state::NavigationDispatchState,
+    ) -> Self {
+        // Keep this key limited to fields that are stable from background task
+        // spawn through lifecycle completion. `navigate_id` is intentionally
+        // excluded because early Page.navigate replies clear it before the
+        // completion is sent.
+        // Frontend correlation remains in protocol dispatch state; the
+        // browser-owned token deliberately contains no session identity.
+        Self {
+            target_id: Some(token.target_id().to_owned()),
+            session_id: state
+                .session_id
+                .clone()
+                .or_else(|| state.navigate_session_id.clone()),
+            frame_id: state.frame_id.clone(),
+            loader_id: token.loader_id().to_owned(),
+            navigation_request_id: Some(token.request_id().get()),
+        }
+    }
+
+    /// Whether a newly-started navigation owns the same browsing-context
+    /// lane as an older in-flight navigation.
+    ///
+    /// Session identity is intentionally not part of a target-backed lane:
+    /// two DevTools sessions can address the same frame, but a cross-document
+    /// navigation from either session still supersedes the frame's previous
+    /// navigation. The exact loader/request fields remain part of equality so
+    /// a late completion cannot retire the replacement gate.
+    pub fn supersedes(&self, pending: &Self) -> bool {
+        if self.frame_id != pending.frame_id {
+            return false;
+        }
+        match (&self.target_id, &pending.target_id) {
+            (Some(target_id), Some(pending_target_id)) => target_id == pending_target_id,
+            (None, None) => self.session_id == pending.session_id,
+            (Some(_), None) | (None, Some(_)) => false,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn from_test_parts(
+        target_id: Option<String>,
+        session_id: Option<String>,
+        frame_id: String,
+        loader_id: String,
+        navigation_request_id: Option<u64>,
+    ) -> Self {
+        Self {
+            target_id,
+            session_id,
+            frame_id,
+            loader_id,
+            navigation_request_id,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum CdpSchedulerEvent {
+    BackgroundNavigationStarted {
+        key: BackgroundNavigationGateKey,
+        cancellation: BackgroundNavigationCancellation,
+    },
     ProtocolWorkPublished {
         work: crate::domains::activity::ProtocolSchedulerWork,
     },
@@ -227,10 +333,72 @@ impl CdpRendererOwnerTurnOutcome {
     }
 }
 
+impl From<CdpTurnOutcome> for CdpRendererOwnerTurnOutcome {
+    fn from(turn: CdpTurnOutcome) -> Self {
+        Self {
+            turn,
+            renderer_output_predecessor: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conn::NavigationResultProjection;
+    use crate::conn::state::{
+        DocumentNavigationToken, NavigationDispatchState, NavigationRequestLoadPolicy,
+        NavigationSourceDocumentSecurityContext,
+    };
     use crate::devtools_runtime::AutomationEvent;
+    use url::Url;
+
+    fn navigation_dispatch_state(
+        navigate_session_id: Option<&str>,
+        event_session_id: Option<&str>,
+    ) -> NavigationDispatchState {
+        NavigationDispatchState {
+            navigate_id: Some(7),
+            navigate_session_id: navigate_session_id.map(str::to_owned),
+            result_projection: NavigationResultProjection::Cdp(Value::Null),
+            frame_id: "frame-1".to_owned(),
+            session_id: event_session_id.map(str::to_owned),
+            request_id: None,
+            loader_id: "loader-1".to_owned(),
+            request_announced: false,
+            requested_url: Url::parse("https://example.test/").unwrap(),
+            request_method: "GET".to_owned(),
+            request_body: None,
+            request_body_bytes: None,
+            request_headers: Vec::new(),
+            request_load_policy: NavigationRequestLoadPolicy::BrowserInitiated,
+            timestamp: 1.0,
+            source_document_security: NavigationSourceDocumentSecurityContext::default(),
+        }
+    }
+
+    #[test]
+    fn background_gate_keeps_frontend_session_outside_browser_request_identity() {
+        let token = DocumentNavigationToken::new("target-1", "loader-1");
+        let event_state = navigation_dispatch_state(Some("SID-command"), Some("SID-event"));
+        let event_key = BackgroundNavigationGateKey::for_navigation(&token, &event_state);
+
+        assert_eq!(event_key.target_id.as_deref(), Some("target-1"));
+        assert_eq!(event_key.loader_id, "loader-1");
+        assert_eq!(event_key.session_id.as_deref(), Some("SID-event"));
+        assert_eq!(
+            event_key.navigation_request_id,
+            Some(token.request_id().get())
+        );
+
+        let command_state = navigation_dispatch_state(Some("SID-command"), None);
+        let command_key = BackgroundNavigationGateKey::for_navigation(&token, &command_state);
+        assert_eq!(command_key.session_id.as_deref(), Some("SID-command"));
+        assert_eq!(
+            command_key.navigation_request_id,
+            event_key.navigation_request_id
+        );
+    }
 
     #[test]
     fn turn_outcome_raw_protocol_messages_regain_typed_sidecars() {
@@ -266,6 +434,19 @@ mod tests {
                     && event.mode == "selectSingle"
         ));
     }
+
+    #[test]
+    fn frontend_projection_sequence_is_monotonic_and_not_protocol_work_order() {
+        let mut state = CdpConnectionSchedulerState::default();
+
+        assert_eq!(state.allocate_frontend_projection_sequence(), 1);
+        assert_eq!(
+            state.allocate_protocol_work_publish_sequence().get(),
+            1,
+            "protocol work uses an independent order domain"
+        );
+        assert_eq!(state.allocate_frontend_projection_sequence(), 2);
+    }
 }
 
 #[derive(Default)]
@@ -273,6 +454,7 @@ pub(super) struct CdpConnectionSchedulerState {
     pending_navigation_background_events: Vec<NavigationBackgroundEvent>,
     next_deferred_main_document_load_observation_id: u64,
     next_protocol_work_publish_sequence: u64,
+    next_frontend_projection_sequence: u64,
     pub(super) renderer_output_ingress: crate::domains::activity::OrderedRendererOutputIngress,
     scheduler_events: Vec<CdpSchedulerEvent>,
     recent_activity_traces: VecDeque<Value>,
@@ -280,6 +462,14 @@ pub(super) struct CdpConnectionSchedulerState {
 }
 
 impl CdpConnectionSchedulerState {
+    pub(super) fn allocate_frontend_projection_sequence(&mut self) -> u64 {
+        self.next_frontend_projection_sequence = self
+            .next_frontend_projection_sequence
+            .checked_add(1)
+            .expect("frontend projection sequence exhausted");
+        self.next_frontend_projection_sequence
+    }
+
     pub(super) fn allocate_protocol_work_publish_sequence(
         &mut self,
     ) -> crate::domains::activity::ProtocolWorkPublishSequence {

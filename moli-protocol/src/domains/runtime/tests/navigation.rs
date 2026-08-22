@@ -9,7 +9,7 @@ async fn enable_with_background_event_sender_defers_initial_document_page_build(
     bc.set_target_url("about:blank".into());
     ctx.conn.browser_context = Some(bc);
 
-    let (background_tx, _) = tokio::sync::mpsc::unbounded_channel();
+    let (background_tx, _) = crate::conn::browser_background_output_channel();
     let (completion_tx, _) =
         tokio::sync::mpsc::unbounded_channel::<BackgroundNavigationCompletion>();
     ctx.conn.set_background_event_sender(background_tx);
@@ -427,18 +427,36 @@ async fn evaluate_history_api_navigation_emits_navigated_within_document() {
     );
     ctx.sent.clear();
 
-    ctx.process_async(json!({
+    let page_before_traversal = ctx
+        .conn
+        .renderer_page_residence_identity_for_session_owner(Some("SID-1"));
+    let raw = json!({
         "id": 37,
         "method": "Page.navigateToHistoryEntry",
         "sessionId": "SID-1",
         "params": { "entryId": initial_entry_id }
-    }))
-    .await;
-    take_response_by_id(&mut ctx, 37);
-    // Chromium acknowledges Page.navigateToHistoryEntry before the history
-    // traversal task emits Page.navigatedWithinDocument. Observe the real
-    // renderer publication instead of making the command helper drain a later
-    // Page turn synchronously.
+    })
+    .to_string();
+    let CdpCommandTaskStep::Pending(frontend_wait) = ctx.conn.start_command_dispatch(&raw) else {
+        panic!("same-Document history traversal should await Browser Owner admission");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _scheduler_events) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages
+            .iter()
+            .all(|message| message["id"] != json!(37)),
+        "Browser Host must retain the live frontend response projection"
+    );
+    // Deliberately leave the command receiver unpolled while renderer output
+    // publishes the same-Document traversal. Chromium may acknowledge this
+    // command before Page.navigatedWithinDocument, but a slow frontend must not
+    // become the browser action's progress predecessor.
     wait_until_message(
         &mut ctx,
         Some("SID-1"),
@@ -451,6 +469,26 @@ async fn evaluate_history_api_navigation_emits_navigated_within_document() {
         },
     )
     .await;
+    assert_eq!(
+        ctx.conn
+            .renderer_page_residence_identity_for_session_owner(Some("SID-1")),
+        page_before_traversal,
+        "Core classification must preserve the exact Document residence"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("frontend should receive the terminal history projection");
+    };
+    let (messages, _scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(37))
+        .expect("same-Document history response should retain command correlation");
+    assert_eq!(response["sessionId"], json!("SID-1"));
+    assert_eq!(response["result"], json!({}));
 
     ctx.process_async(json!({
         "id": 38,

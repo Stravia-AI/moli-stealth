@@ -13,20 +13,21 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::SinkExt;
-use moli_cookie_jar::StoredCookie;
-use moli_core::{RendererOutputTransportMessage, runtime::NavigationRuntimeConfig};
+use moli_core::{
+    RendererOutputTransportMessage,
+    browser_host::BrowserNavigateCommandOutcome,
+    runtime::{NavigationRuntimeConfig, storage_partition::StoragePartitionState},
+};
 use moli_protocol::{
-    BackgroundCommandResponsePayload, BackgroundProtocolEvent, CdpInitialStoragePartition,
+    BackgroundProtocolEvent, CdpInitialStoragePartition,
     conn::RuntimeInspectorResponseReady,
     devtools_runtime::{
         AutomationEvent, DevToolsCommand, DevToolsCommandContext, DevToolsCommandResult,
         DevToolsDomObjectReferenceCommand, DevToolsDomObjectReferenceOperation, DevToolsError,
-        DevToolsErrorKind, DevToolsFrameId, DevToolsGetBrowserContextsCommand,
-        DevToolsGetFrameTreesCommand, DevToolsGetLayoutMetricsCommand, DevToolsGetRealmsCommand,
-        DevToolsGetTargetInfoCommand, DevToolsNavigationWait, DevToolsProtocol,
-        DevToolsRemoteHandleId, DevToolsSessionId, DevToolsSetFileInputFilesCommand,
-        DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind, NavigationFrameEvent,
-        NavigationFrameEventKind, NavigationLifecycleEvent, TargetLifecycleEvent,
+        DevToolsErrorKind, DevToolsGetBrowserContextsCommand, DevToolsGetFrameTreesCommand,
+        DevToolsGetLayoutMetricsCommand, DevToolsGetRealmsCommand, DevToolsGetTargetInfoCommand,
+        DevToolsNavigationWait, DevToolsProtocol, DevToolsRemoteHandleId, DevToolsSessionId,
+        DevToolsSetFileInputFilesCommand, DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind,
         webdriver_bidi_navigation_id_from_loader_id,
     },
 };
@@ -49,28 +50,27 @@ use tokio::time::sleep;
 use tracing::warn;
 
 use crate::cdp_scheduler::{
-    CdpScheduler, CdpSchedulerEventReceivers, DevToolsRuntimeCommandProgress,
-    PendingDevToolsRuntimeDeferredReplyExecution, ProtocolAdapterScheduler,
-    ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput, ProtocolOutputSequence,
-    RendererOutputTransportFailure,
+    CdpScheduler, CdpSchedulerEventReceivers, CdpSchedulerProgressFailure,
+    DevToolsRuntimeCommandProgress, PendingDevToolsRuntimeDeferredReplyExecution,
+    ProtocolAdapterScheduler, ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput,
+    ProtocolOutputSequence,
 };
 
 use super::webdriver_files::selected_files_from_paths;
 use super::{
-    AppState, CookieProfileCommit, SharedCookieProfile,
-    protocol_local_executor::spawn_protocol_local_task,
+    AppState,
+    devtools_host_service::{BidiFrontendSession, DevToolsHostServiceHandle},
+    flush_storage_partition_profile,
 };
 
 pub(super) async fn ws_bidi_session_upgrade_handler(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
 ) -> Response {
-    let initial_cookies = state.cookie_profile.snapshot();
-    let initial_cookie_snapshot = initial_cookies.clone();
-    let initial_storage_partition = state.initial_storage_partition(initial_cookies);
+    let initial_storage_partition = state.initial_storage_partition();
     let web_socket_url = state.bidi_ws_url;
     let session_registry = state.bidi_session_registry;
-    let cookie_profile = state.cookie_profile;
+    let storage_partition = state.storage_partition;
     let navigation_runtime_config = NavigationRuntimeConfig::new(
         state.fetch_config,
         state.optional_resource_fetch_mask,
@@ -82,8 +82,7 @@ pub(super) async fn ws_bidi_session_upgrade_handler(
             socket,
             web_socket_url,
             session_registry,
-            cookie_profile,
-            initial_cookie_snapshot,
+            storage_partition,
             initial_storage_partition,
             navigation_runtime_config,
         )
@@ -133,133 +132,32 @@ async fn handle_bidi_session_socket(
     socket: WebSocket,
     web_socket_url: String,
     session_registry: SharedBidiSessionRegistry,
-    cookie_profile: SharedCookieProfile,
-    initial_cookie_snapshot: Vec<StoredCookie>,
+    storage_partition: Arc<StoragePartitionState>,
     initial_storage_partition: CdpInitialStoragePartition,
     navigation_runtime_config: NavigationRuntimeConfig,
 ) {
-    let cookie_commit = spawn_protocol_local_task("bidi-socket", move || {
-        handle_bidi_session_socket_local(
+    let (host, host_finished) =
+        DevToolsHostServiceHandle::spawn(initial_storage_partition, navigation_runtime_config);
+    match host
+        .attach_bidi(
             socket,
             web_socket_url,
+            BidiFrontendSession::Standalone,
             session_registry,
-            initial_cookie_snapshot,
-            initial_storage_partition,
-            navigation_runtime_config,
         )
-    })
-    .await;
-    match cookie_commit {
-        Ok(cookie_commit) => {
-            if let Err(error) = cookie_profile.commit_and_save(cookie_commit) {
-                warn!(?error, "failed to persist BiDi cookie profile");
-            }
-        }
-        Err(error) => warn!(
+        .await
+    {
+        Some(frontend) => frontend.wait().await,
+        None => warn!("failed to attach standalone WebDriver BiDi frontend"),
+    }
+    host.shutdown().await;
+    if let Err(error) = host_finished.await {
+        warn!(
             ?error,
-            "BiDi socket worker failed before cookie profile writeback"
-        ),
+            "DevTools Host stopped before standalone BiDi teardown completed"
+        );
     }
-}
-
-async fn handle_bidi_session_socket_local(
-    socket: WebSocket,
-    web_socket_url: String,
-    session_registry: SharedBidiSessionRegistry,
-    initial_cookie_snapshot: Vec<StoredCookie>,
-    initial_storage_partition: CdpInitialStoragePartition,
-    navigation_runtime_config: NavigationRuntimeConfig,
-) -> CookieProfileCommit {
-    let mut actor = BidiSocketActor::new(socket, web_socket_url);
-    let (mut scheduler, mut receivers) = CdpScheduler::new_with_initial_state_runtime_config(
-        initial_storage_partition,
-        navigation_runtime_config,
-    );
-    actor.install_runtime_response_ready_sender(&mut scheduler);
-    let mut adapter_scheduler = ProtocolAdapterScheduler::<()>::default();
-    loop {
-        let page_javascript_blocked = scheduler.has_pending_javascript_dialog();
-        adapter_scheduler.schedule_turn_if_needed(&scheduler, page_javascript_blocked);
-        tokio::select! {
-            biased;
-            maybe_message = actor.socket.recv() => {
-                let Some(message) = maybe_message else {
-                    break;
-                };
-                if !actor.handle_socket_message(
-                    &mut scheduler,
-                    &mut receivers,
-                    &session_registry,
-                    message,
-                ).await {
-                    break;
-                }
-            }
-            maybe_completion = receivers.background_navigation_completion_rx.recv() => {
-                let Some(completion) = maybe_completion else {
-                    break;
-                };
-                if !actor.handle_background_navigation_completion(
-                    &mut scheduler,
-                    &mut receivers,
-                    completion,
-                ).await {
-                    break;
-                }
-            }
-            maybe_event = receivers.background_event_rx.recv() => {
-                let Some(event) = maybe_event else {
-                    break;
-                };
-                let output = scheduler.route_background_event_around_inflight_navigation(event);
-                if !actor
-                    .send_or_route_protocol_output(&mut scheduler, &mut receivers, output, None)
-                    .await
-                {
-                    break;
-                }
-            }
-            maybe_publication = receivers.renderer_publication_rx.recv(), if !page_javascript_blocked => {
-                let Some(publication) = maybe_publication else {
-                    break;
-                };
-                if !actor.handle_renderer_publication(
-                    &mut adapter_scheduler,
-                    &mut scheduler,
-                    &mut receivers,
-                    publication,
-                ).await {
-                    break;
-                }
-            }
-            maybe_response = actor.runtime_response_ready_rx.recv() => {
-                let Some(response) = maybe_response else {
-                    break;
-                };
-                if !actor.handle_runtime_response_ready(&mut scheduler, &mut receivers, response).await {
-                    break;
-                }
-            }
-            input = adapter_scheduler.recv_input(), if !page_javascript_blocked => {
-                if !actor.handle_adapter_scheduler_input(
-                    &mut adapter_scheduler,
-                    &mut scheduler,
-                    &mut receivers,
-                    input,
-                ).await {
-                    break;
-                }
-            }
-        }
-    }
-    actor
-        .release_event_sources(&mut scheduler, &mut receivers)
-        .await;
-    actor.release_session(&mut session_registry.lock());
-    CookieProfileCommit::from_optional_profile_backed_snapshot(
-        initial_cookie_snapshot,
-        scheduler.snapshot_profile_backed_cookies(),
-    )
+    flush_storage_partition_profile(storage_partition, "webdriver-bidi").await;
 }
 
 pub(in crate::protocol_server) struct BidiSocketActor {
@@ -267,6 +165,7 @@ pub(in crate::protocol_server) struct BidiSocketActor {
     bidi: BidiConnectionState,
     input_action_states: BTreeMap<String, ClassicActionState>,
     pending_navigation_response: Option<BidiPendingNavigationResponse>,
+    pending_target_close_responses: Vec<BidiPendingTargetCloseResponse>,
     pending_runtime_command: Option<BidiPendingRuntimeCommand>,
     runtime_response_ready_tx: mpsc::UnboundedSender<RuntimeInspectorResponseReady>,
     runtime_response_ready_rx: mpsc::UnboundedReceiver<RuntimeInspectorResponseReady>,
@@ -286,18 +185,20 @@ impl BidiSocketActor {
             bidi: BidiConnectionState::with_web_socket_url(web_socket_url),
             input_action_states: BTreeMap::new(),
             pending_navigation_response: None,
+            pending_target_close_responses: Vec::new(),
             pending_runtime_command: None,
             runtime_response_ready_tx,
             runtime_response_ready_rx,
         }
     }
 
-    pub(in crate::protocol_server) fn install_runtime_response_ready_sender(
+    pub(in crate::protocol_server) fn install_frontend_scheduler_hooks(
         &self,
         scheduler: &mut CdpScheduler,
     ) {
         scheduler
             .set_runtime_inspector_response_ready_sender(self.runtime_response_ready_tx.clone());
+        scheduler.enable_webdriver_bidi_target_lifecycle_projection();
     }
 
     pub(in crate::protocol_server) fn attach_existing_session(
@@ -339,6 +240,7 @@ impl BidiSocketActor {
             &mut events,
         )
         .await;
+        scheduler.disable_webdriver_bidi_target_lifecycle_projection();
     }
 
     fn release_pending_runtime_command_state(&mut self, scheduler: &mut CdpScheduler) {
@@ -392,6 +294,7 @@ impl BidiSocketActor {
             &mut self.input_action_states,
             session_registry,
             &mut self.pending_navigation_response,
+            &mut self.pending_target_close_responses,
             &mut self.pending_runtime_command,
             &self.runtime_response_ready_tx,
             message,
@@ -503,6 +406,7 @@ impl BidiSocketActor {
                 output,
                 owner_context,
                 &mut self.pending_navigation_response,
+                &mut self.pending_target_close_responses,
             )
             .await;
         }
@@ -525,6 +429,7 @@ impl BidiSocketActor {
                 output,
                 None,
                 &mut self.pending_navigation_response,
+                &mut self.pending_target_close_responses,
             )
             .await;
         };
@@ -555,6 +460,7 @@ impl BidiSocketActor {
                 output,
                 None,
                 &mut self.pending_navigation_response,
+                &mut self.pending_target_close_responses,
             )
             .await;
         };
@@ -589,6 +495,7 @@ impl BidiSocketActor {
                     receivers,
                     &mut self.bidi,
                     &mut self.pending_navigation_response,
+                    &mut self.pending_target_close_responses,
                     pending_command,
                     *execution,
                 )
@@ -607,6 +514,7 @@ impl BidiSocketActor {
                     protocol_output,
                     None,
                     &mut self.pending_navigation_response,
+                    &mut self.pending_target_close_responses,
                 )
                 .await;
                 self.pending_runtime_command = Some(pending_command);
@@ -624,6 +532,7 @@ async fn handle_bidi_socket_message(
     input_action_states: &mut BTreeMap<String, ClassicActionState>,
     session_registry: &SharedBidiSessionRegistry,
     pending_navigation_response: &mut Option<BidiPendingNavigationResponse>,
+    pending_target_close_responses: &mut Vec<BidiPendingTargetCloseResponse>,
     pending_runtime_command: &mut Option<BidiPendingRuntimeCommand>,
     runtime_response_ready_tx: &mpsc::UnboundedSender<RuntimeInspectorResponseReady>,
     message: Result<Message, axum::Error>,
@@ -740,6 +649,9 @@ async fn handle_bidi_socket_message(
     let pending_navigation_candidate = devtools_command.as_ref().and_then(|dispatch| {
         pending_navigation_response_for_dispatch(dispatch, command_channel.as_deref())
     });
+    let pending_target_close_candidate = devtools_command
+        .as_ref()
+        .and_then(pending_target_close_response_target_for_dispatch);
     let command_start = if pending_runtime_command.is_some()
         && (devtools_command.is_some() || input_command.is_some())
     {
@@ -809,6 +721,10 @@ async fn handle_bidi_socket_message(
             pending.pending_navigation_candidate = pending_navigation_candidate;
             let initial_sources =
                 std::mem::take(&mut pending.completion.event_sources).into_sources();
+            let pending_close_responses = take_pending_target_close_responses_from_sources(
+                pending_target_close_responses,
+                &initial_sources,
+            );
             let mut bidi_events = subscribed_bidi_events_from_devtools_event_sources(
                 Some(&*scheduler),
                 bidi,
@@ -829,6 +745,9 @@ async fn handle_bidi_socket_message(
             if !send_bidi_json_events(socket, bidi_events).await {
                 return false;
             }
+            if !send_bidi_json_events(socket, pending_close_responses).await {
+                return false;
+            }
             *pending_runtime_command = Some(pending);
             return true;
         }
@@ -841,14 +760,24 @@ async fn handle_bidi_socket_message(
         command_params.as_ref(),
         &command_output.response,
     );
-    let defer_current_response = pending_navigation_candidate.is_some()
+    let defer_navigation_response = pending_navigation_candidate.is_some()
         && pending_navigation_response.is_none()
         && bidi_response_is_missing_devtools_command_result(&command_output.response)
         && sources_include_auth_required_pause(&command_output.event_sources);
-    if defer_current_response {
+    if defer_navigation_response {
         *pending_navigation_response = pending_navigation_candidate;
     }
-    let pending_response_from_event_sources = (!defer_current_response)
+    let defer_target_close_response = pending_target_close_candidate.is_some()
+        && command_output.response["type"] == json!("success");
+    if let Some(target_id) = pending_target_close_candidate
+        && defer_target_close_response
+    {
+        pending_target_close_responses.push(BidiPendingTargetCloseResponse {
+            target_id,
+            response: command_output.response.clone(),
+        });
+    }
+    let pending_response_from_event_sources = (!defer_navigation_response)
         .then(|| {
             take_pending_navigation_response_from_sources(
                 pending_navigation_response,
@@ -856,7 +785,7 @@ async fn handle_bidi_socket_message(
             )
         })
         .flatten();
-    let pending_response_from_post_response_event_sources = (!defer_current_response)
+    let pending_response_from_post_response_event_sources = (!defer_navigation_response)
         .then(|| {
             take_pending_navigation_response_from_sources(
                 pending_navigation_response,
@@ -864,6 +793,16 @@ async fn handle_bidi_socket_message(
             )
         })
         .flatten();
+    let pending_target_close_responses_from_event_sources =
+        take_pending_target_close_responses_from_sources(
+            pending_target_close_responses,
+            &command_output.event_sources,
+        );
+    let pending_target_close_responses_from_post_response_event_sources =
+        take_pending_target_close_responses_from_sources(
+            pending_target_close_responses,
+            &command_output.post_response_event_sources,
+        );
     let mut bidi_events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
@@ -943,7 +882,11 @@ async fn handle_bidi_socket_message(
     if !send_bidi_json_events(socket, bidi_events).await {
         return false;
     }
-    if !defer_current_response
+    if !send_bidi_json_events(socket, pending_target_close_responses_from_event_sources).await {
+        return false;
+    }
+    if !defer_navigation_response
+        && !defer_target_close_response
         && socket
             .send(Message::Text(command_output.response.to_string().into()))
             .await
@@ -960,6 +903,14 @@ async fn handle_bidi_socket_message(
         return false;
     }
     if !send_bidi_json_events(socket, post_response_bidi_events).await {
+        return false;
+    }
+    if !send_bidi_json_events(
+        socket,
+        pending_target_close_responses_from_post_response_event_sources,
+    )
+    .await
+    {
         return false;
     }
     if let Some(response) = pending_response_from_post_response_event_sources
@@ -979,6 +930,7 @@ async fn handle_bidi_socket_message(
             receivers,
             bidi,
             pending_navigation_response,
+            pending_target_close_responses,
             command_output.event_context.as_deref(),
         )
         .await
@@ -1011,6 +963,7 @@ async fn complete_and_send_bidi_pending_runtime_command(
     receivers: &mut CdpSchedulerEventReceivers,
     bidi: &mut BidiConnectionState,
     pending_navigation_response: &mut Option<BidiPendingNavigationResponse>,
+    pending_target_close_responses: &mut Vec<BidiPendingTargetCloseResponse>,
     pending: BidiPendingRuntimeCommand,
     execution: crate::cdp_scheduler::DevToolsCommandExecution,
 ) -> bool {
@@ -1055,6 +1008,16 @@ async fn complete_and_send_bidi_pending_runtime_command(
             )
         })
         .flatten();
+    let pending_target_close_responses_from_event_sources =
+        take_pending_target_close_responses_from_sources(
+            pending_target_close_responses,
+            &command_output.event_sources,
+        );
+    let pending_target_close_responses_from_post_response_event_sources =
+        take_pending_target_close_responses_from_sources(
+            pending_target_close_responses,
+            &command_output.post_response_event_sources,
+        );
     let mut bidi_events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
@@ -1107,6 +1070,9 @@ async fn complete_and_send_bidi_pending_runtime_command(
     if !send_bidi_json_events(socket, bidi_events).await {
         return false;
     }
+    if !send_bidi_json_events(socket, pending_target_close_responses_from_event_sources).await {
+        return false;
+    }
     if !defer_current_response
         && socket
             .send(Message::Text(command_output.response.to_string().into()))
@@ -1126,6 +1092,14 @@ async fn complete_and_send_bidi_pending_runtime_command(
     if !send_bidi_json_events(socket, post_response_bidi_events).await {
         return false;
     }
+    if !send_bidi_json_events(
+        socket,
+        pending_target_close_responses_from_post_response_event_sources,
+    )
+    .await
+    {
+        return false;
+    }
     if let Some(response) = pending_response_from_post_response_event_sources
         && socket
             .send(Message::Text(response.to_string().into()))
@@ -1143,6 +1117,7 @@ async fn complete_and_send_bidi_pending_runtime_command(
             receivers,
             bidi,
             pending_navigation_response,
+            pending_target_close_responses,
             command_output.event_context.as_deref(),
         )
         .await
@@ -1165,6 +1140,7 @@ async fn drain_and_send_bidi_navigation_after_response(
     receivers: &mut CdpSchedulerEventReceivers,
     bidi: &mut BidiConnectionState,
     pending_navigation_response: &mut Option<BidiPendingNavigationResponse>,
+    pending_target_close_responses: &mut Vec<BidiPendingTargetCloseResponse>,
     event_context: Option<&str>,
 ) -> bool {
     let (background_navigation_sources, transport_is_live) =
@@ -1183,6 +1159,10 @@ async fn drain_and_send_bidi_navigation_after_response(
             )
         })
         .flatten();
+    let pending_close_responses = take_pending_target_close_responses_from_sources(
+        pending_target_close_responses,
+        &background_navigation_sources,
+    );
     let mut background_navigation_events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
@@ -1202,6 +1182,9 @@ async fn drain_and_send_bidi_navigation_after_response(
         return false;
     }
     if !send_bidi_json_events(socket, background_navigation_events).await {
+        return false;
+    }
+    if !send_bidi_json_events(socket, pending_close_responses).await {
         return false;
     }
     if let Some(response) = pending_response
@@ -1401,7 +1384,7 @@ fn materialize_bidi_event_source_hook_output(
     scheduler: &CdpScheduler,
     bidi: &mut BidiConnectionState,
     events: &mut Vec<Value>,
-    result: Result<ProtocolOutputSequence, RendererOutputTransportFailure>,
+    result: Result<ProtocolOutputSequence, CdpSchedulerProgressFailure>,
     owner_context: Option<&str>,
 ) -> Result<ProtocolOutputSequence, DevToolsError> {
     match result {
@@ -1428,6 +1411,7 @@ async fn send_bidi_protocol_output(
     output: ProtocolOutputSequence,
     owner_context: Option<&str>,
     pending_navigation_response: &mut Option<BidiPendingNavigationResponse>,
+    pending_target_close_responses: &mut Vec<BidiPendingTargetCloseResponse>,
 ) -> bool {
     if output.is_empty() {
         return true;
@@ -1435,6 +1419,8 @@ async fn send_bidi_protocol_output(
     let sources = BidiDevToolsEventSources::from_protocol_output(output).into_sources();
     let pending_response =
         take_pending_navigation_response_from_sources(pending_navigation_response, &sources);
+    let pending_close_responses =
+        take_pending_target_close_responses_from_sources(pending_target_close_responses, &sources);
     let mut events = subscribed_bidi_events_from_devtools_event_sources(
         Some(&*scheduler),
         bidi,
@@ -1448,6 +1434,9 @@ async fn send_bidi_protocol_output(
         return false;
     }
     if !send_bidi_json_events(socket, events).await {
+        return false;
+    }
+    if !send_bidi_json_events(socket, pending_close_responses).await {
         return false;
     }
     if let Some(response) = pending_response
@@ -1495,12 +1484,8 @@ struct BidiPendingRuntimeCommand {
 
 struct BidiDevToolsCommandCompletion {
     id: u64,
-    session_id: String,
     event_sources: BidiDevToolsEventSources,
     event_context: Option<String>,
-    close_target_event: Option<TargetLifecycleEvent>,
-    create_target_browser_context_id:
-        Option<moli_protocol::devtools_runtime::DevToolsBrowserContextId>,
     observe_browsing_context_load: bool,
     script_may_create_targets: bool,
     previous_target_discovery: Option<bool>,
@@ -1526,6 +1511,12 @@ struct BidiPendingNavigationResponse {
     background_command_id: u64,
 }
 
+#[derive(Debug, Clone)]
+struct BidiPendingTargetCloseResponse {
+    target_id: String,
+    response: serde_json::Value,
+}
+
 enum BidiDevToolsEventSource {
     ProtocolMessage(serde_json::Value),
     ProtocolMessageWithAutomationEvent {
@@ -1534,9 +1525,8 @@ enum BidiDevToolsEventSource {
     },
     CommandResponse {
         command_id: Option<u64>,
-        response: BackgroundCommandResponsePayload,
+        browser_navigate_outcome: Option<BrowserNavigateCommandOutcome>,
     },
-    AutomationEvent(Box<AutomationEvent>),
 }
 
 #[derive(Default)]
@@ -1544,15 +1534,15 @@ struct BidiDevToolsEventSources {
     sources: Vec<BidiDevToolsEventSource>,
 }
 
-struct BidiRendererOutputTransportFailure {
+struct BidiSchedulerProgressFailure {
     event_sources: BidiDevToolsEventSources,
     error: DevToolsError,
 }
 
-impl BidiRendererOutputTransportFailure {
-    fn from_renderer(
+impl BidiSchedulerProgressFailure {
+    fn from_scheduler(
         mut event_sources: BidiDevToolsEventSources,
-        failure: crate::cdp_scheduler::RendererOutputTransportFailure,
+        failure: crate::cdp_scheduler::CdpSchedulerProgressFailure,
     ) -> Self {
         let (output, error) = failure.into_parts();
         event_sources.extend_protocol_output(output);
@@ -1571,7 +1561,7 @@ fn bidi_command_output_from_renderer_transport_failure(
     id: u64,
     event_context: Option<String>,
     mut preceding_sources: BidiDevToolsEventSources,
-    failure: BidiRendererOutputTransportFailure,
+    failure: BidiSchedulerProgressFailure,
 ) -> BidiDevToolsCommandOutput {
     let (failure_sources, error) = failure.into_parts();
     preceding_sources.append(failure_sources);
@@ -1597,17 +1587,15 @@ impl BidiDevToolsEventSources {
         }
     }
 
-    fn push_automation_event(&mut self, event: AutomationEvent) {
-        self.sources
-            .push(BidiDevToolsEventSource::AutomationEvent(Box::new(event)));
-    }
-
     fn push_background_event(&mut self, event: BackgroundProtocolEvent) {
+        let browser_navigate_outcome = event
+            .browser_navigate_command_outcome()
+            .map(|(_, outcome)| outcome.clone());
         let event = match event.into_command_response_payload() {
-            Ok((command_id, _, response)) => {
+            Ok((command_id, _, _response)) => {
                 self.sources.push(BidiDevToolsEventSource::CommandResponse {
                     command_id,
-                    response,
+                    browser_navigate_outcome,
                 });
                 return;
             }
@@ -1629,27 +1617,6 @@ impl BidiDevToolsEventSources {
 
     fn append(&mut self, mut other: Self) {
         self.sources.append(&mut other.sources);
-    }
-
-    fn push_initial_load_events_for_script_created_targets(&mut self) {
-        let load_events = self
-            .sources
-            .iter()
-            .filter_map(|source| match source {
-                BidiDevToolsEventSource::ProtocolMessage(message) => {
-                    initial_load_events_for_target_created_message(message)
-                }
-                BidiDevToolsEventSource::ProtocolMessageWithAutomationEvent { message, .. } => {
-                    initial_load_events_for_target_created_message(message)
-                }
-                BidiDevToolsEventSource::CommandResponse { .. } => None,
-                BidiDevToolsEventSource::AutomationEvent(_) => None,
-            })
-            .flatten()
-            .collect::<Vec<_>>();
-        for event in load_events {
-            self.push_automation_event(event);
-        }
     }
 
     fn into_sources(self) -> Vec<BidiDevToolsEventSource> {
@@ -1675,6 +1642,56 @@ fn pending_navigation_response_for_dispatch(
     })
 }
 
+fn pending_target_close_response_target_for_dispatch(
+    dispatch: &BidiDevToolsCommandDispatch,
+) -> Option<String> {
+    let DevToolsCommand::CloseTarget(command) = &dispatch.command else {
+        return None;
+    };
+    Some(command.target_id.as_str().to_owned())
+}
+
+fn source_target_destroyed_id(source: &BidiDevToolsEventSource) -> Option<&str> {
+    let automation_event = match source {
+        BidiDevToolsEventSource::ProtocolMessageWithAutomationEvent {
+            automation_event, ..
+        } => automation_event.as_ref(),
+        BidiDevToolsEventSource::ProtocolMessage(_)
+        | BidiDevToolsEventSource::CommandResponse { .. } => return None,
+    };
+    let AutomationEvent::TargetDestroyed(event) = automation_event else {
+        return None;
+    };
+    Some(event.target_id.as_str())
+}
+
+fn take_pending_target_close_responses_from_sources(
+    pending: &mut Vec<BidiPendingTargetCloseResponse>,
+    sources: &[BidiDevToolsEventSource],
+) -> Vec<serde_json::Value> {
+    if pending.is_empty() {
+        return Vec::new();
+    }
+    let destroyed_target_ids = sources
+        .iter()
+        .filter_map(source_target_destroyed_id)
+        .collect::<BTreeSet<_>>();
+    if destroyed_target_ids.is_empty() {
+        return Vec::new();
+    }
+    let mut released = Vec::new();
+    let mut retained = Vec::new();
+    for pending_response in std::mem::take(pending) {
+        if destroyed_target_ids.contains(pending_response.target_id.as_str()) {
+            released.push(pending_response.response);
+        } else {
+            retained.push(pending_response);
+        }
+    }
+    *pending = retained;
+    released
+}
+
 fn bidi_response_is_missing_devtools_command_result(response: &serde_json::Value) -> bool {
     response["type"] == json!("error")
         && response["message"].as_str() == Some("MissingDevToolsCommandResult")
@@ -1682,9 +1699,6 @@ fn bidi_response_is_missing_devtools_command_result(response: &serde_json::Value
 
 fn sources_include_auth_required_pause(sources: &[BidiDevToolsEventSource]) -> bool {
     sources.iter().any(|source| match source {
-        BidiDevToolsEventSource::AutomationEvent(event) => {
-            matches!(event.as_ref(), AutomationEvent::NetworkAuthRequired(_))
-        }
         BidiDevToolsEventSource::CommandResponse { .. } => false,
         BidiDevToolsEventSource::ProtocolMessage(message) => {
             message["method"] == json!("Fetch.authRequired")
@@ -1706,46 +1720,39 @@ fn take_pending_navigation_response_from_sources(
     sources: &[BidiDevToolsEventSource],
 ) -> Option<serde_json::Value> {
     let pending_response = pending.as_ref()?;
-    let response = sources
-        .iter()
-        .find_map(|source| match source {
-            BidiDevToolsEventSource::CommandResponse {
-                command_id,
-                response,
-            } => pending_navigation_response_from_command_response(
-                pending_response,
-                *command_id,
-                response,
-            ),
-            BidiDevToolsEventSource::ProtocolMessage(_)
-            | BidiDevToolsEventSource::ProtocolMessageWithAutomationEvent { .. }
-            | BidiDevToolsEventSource::AutomationEvent(_) => None,
-        })
-        .or_else(|| {
-            sources.iter().find_map(|source| match source {
-                BidiDevToolsEventSource::ProtocolMessage(message)
-                | BidiDevToolsEventSource::ProtocolMessageWithAutomationEvent { message, .. } => {
-                    pending_navigation_response_from_protocol_message(pending_response, message)
-                }
-                BidiDevToolsEventSource::CommandResponse { .. }
-                | BidiDevToolsEventSource::AutomationEvent(_) => None,
-            })
-        })?;
+    let response = sources.iter().find_map(|source| match source {
+        BidiDevToolsEventSource::CommandResponse {
+            command_id,
+            browser_navigate_outcome: Some(outcome),
+        } => {
+            pending_navigation_response_from_browser_outcome(pending_response, *command_id, outcome)
+        }
+        BidiDevToolsEventSource::ProtocolMessage(_)
+        | BidiDevToolsEventSource::ProtocolMessageWithAutomationEvent { .. }
+        | BidiDevToolsEventSource::CommandResponse {
+            browser_navigate_outcome: None,
+            ..
+        } => None,
+    })?;
     *pending = None;
     Some(response)
 }
 
-fn pending_navigation_response_from_command_response(
+fn pending_navigation_response_from_browser_outcome(
     pending: &BidiPendingNavigationResponse,
     command_id: Option<u64>,
-    response: &BackgroundCommandResponsePayload,
+    outcome: &BrowserNavigateCommandOutcome,
 ) -> Option<serde_json::Value> {
     if command_id != Some(pending.background_command_id) {
         return None;
     }
-    match response {
-        BackgroundCommandResponsePayload::Success { result } => {
-            let navigation = bidi_navigation_value_from_command_result(result);
+    match outcome {
+        BrowserNavigateCommandOutcome::Completed(result) => {
+            let navigation = result
+                .loader_id()
+                .map(webdriver_bidi_navigation_id_from_loader_id)
+                .map(|navigation_id| json!(navigation_id.into_string()))
+                .unwrap_or(serde_json::Value::Null);
             Some(bidi_message_with_channel(
                 success_response(
                     pending.id,
@@ -1757,104 +1764,15 @@ fn pending_navigation_response_from_command_response(
                 pending.channel.as_deref(),
             ))
         }
-        BackgroundCommandResponsePayload::Error { message, .. } => Some(bidi_message_with_channel(
+        BrowserNavigateCommandOutcome::Rejected(error) => Some(bidi_message_with_channel(
             error_response(
                 Some(pending.id),
                 BidiErrorCode::UnsupportedOperation,
-                message,
+                error.message(),
             ),
             pending.channel.as_deref(),
         )),
     }
-}
-
-fn pending_navigation_response_from_protocol_message(
-    pending: &BidiPendingNavigationResponse,
-    message: &serde_json::Value,
-) -> Option<serde_json::Value> {
-    if message.get("id").and_then(serde_json::Value::as_u64) != Some(pending.background_command_id)
-    {
-        return None;
-    }
-    if let Some(result) = message.get("result") {
-        let navigation = bidi_navigation_value_from_command_result(result);
-        return Some(bidi_message_with_channel(
-            success_response(
-                pending.id,
-                json!({
-                    "navigation": navigation,
-                    "url": pending.url,
-                }),
-            ),
-            pending.channel.as_deref(),
-        ));
-    }
-    let error = message.get("error")?;
-    let error_message = error
-        .get("message")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("navigation command failed");
-    Some(bidi_message_with_channel(
-        error_response(
-            Some(pending.id),
-            BidiErrorCode::UnsupportedOperation,
-            error_message,
-        ),
-        pending.channel.as_deref(),
-    ))
-}
-
-fn bidi_navigation_value_from_command_result(result: &serde_json::Value) -> serde_json::Value {
-    if let Some(navigation) = result.get("navigation") {
-        return navigation.clone();
-    }
-    result
-        .get("loaderId")
-        .and_then(serde_json::Value::as_str)
-        .map(webdriver_bidi_navigation_id_from_loader_id)
-        .map(|navigation_id| json!(navigation_id.into_string()))
-        .unwrap_or(serde_json::Value::Null)
-}
-
-fn initial_load_events_for_target_created_message(
-    message: &serde_json::Value,
-) -> Option<Vec<AutomationEvent>> {
-    if message.get("method").and_then(serde_json::Value::as_str) != Some("Target.targetCreated") {
-        return None;
-    }
-    let target_info = &message["params"]["targetInfo"];
-    if target_info.get("type").and_then(serde_json::Value::as_str) != Some("page") {
-        return None;
-    }
-    let target_id = target_info.get("targetId")?.as_str()?;
-    let url = target_info
-        .get("url")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    let target_id = DevToolsTargetId::from(target_id);
-    let frame_id = DevToolsFrameId::from(target_id.as_str());
-    Some(vec![
-        AutomationEvent::NavigationFrame(NavigationFrameEvent {
-            target_id: target_id.clone(),
-            frame_id: frame_id.clone(),
-            parent_frame_id: None,
-            loader_id: None,
-            url: url.clone(),
-            kind: NavigationFrameEventKind::Navigated,
-            frame_name: None,
-            security_origin: None,
-            secure_context_type: None,
-        }),
-        AutomationEvent::Load(NavigationLifecycleEvent {
-            target_id,
-            frame_id,
-            navigation_id: None,
-            loader_id: None,
-            url,
-            timestamp: 0.0,
-        }),
-    ])
 }
 
 fn subscribed_bidi_events_from_devtools_event_sources(
@@ -1891,13 +1809,6 @@ fn subscribed_bidi_events_from_devtools_event_sources(
                 );
             }
             BidiDevToolsEventSource::CommandResponse { .. } => {}
-            BidiDevToolsEventSource::AutomationEvent(event) => {
-                events.extend(
-                    bidi.subscribed_bidi_events_from_automation_events(std::iter::once(
-                        event.as_ref(),
-                    )),
-                );
-            }
         }
     }
     events
@@ -1936,7 +1847,7 @@ fn bidi_protocol_message_owner_context(
 async fn enable_bidi_runtime_protocol_sources(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
+) -> Result<ProtocolOutputSequence, CdpSchedulerProgressFailure> {
     scheduler
         .execute_internal_protocol_message(
             receivers,
@@ -1952,7 +1863,7 @@ async fn enable_bidi_runtime_protocol_sources(
 async fn disable_bidi_runtime_protocol_sources(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
+) -> Result<ProtocolOutputSequence, CdpSchedulerProgressFailure> {
     scheduler
         .execute_internal_protocol_message(
             receivers,
@@ -1968,7 +1879,7 @@ async fn disable_bidi_runtime_protocol_sources(
 async fn enable_bidi_network_protocol_sources(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<ProtocolOutputSequence, RendererOutputTransportFailure> {
+) -> Result<ProtocolOutputSequence, CdpSchedulerProgressFailure> {
     scheduler
         .execute_internal_protocol_message(
             receivers,
@@ -2083,10 +1994,6 @@ async fn start_bidi_devtools_command(
             bidi.file_prompt_handler_for_script_commands(),
         );
     let event_context = bidi_event_context_from_devtools_command(&dispatch.command);
-    let close_target_id = match &dispatch.command {
-        DevToolsCommand::CloseTarget(command) => Some(command.target_id.as_str().to_owned()),
-        _ => None,
-    };
     let script_may_create_targets = matches!(
         &dispatch.command,
         DevToolsCommand::EvaluateScript(_) | DevToolsCommand::CallFunction(_)
@@ -2110,11 +2017,6 @@ async fn start_bidi_devtools_command(
             .complete_ready_protocol_residences_after_command()
             .await,
     );
-    let close_target_event = if let Some(target_id) = close_target_id.as_deref() {
-        bidi_target_lifecycle_event_for_target(scheduler, &dispatch.session_id, target_id).await
-    } else {
-        None
-    };
     if let Some(error) =
         validate_bidi_top_level_context_command(scheduler, &dispatch.session_id, &dispatch.command)
             .await
@@ -2127,20 +2029,16 @@ async fn start_bidi_devtools_command(
             event_context,
         });
     }
-    let previous_target_discovery = ((observe_context_created || observe_browsing_context_load)
-        && script_may_create_targets)
+    // Target discovery owns contextCreated visibility only. DCL/load consume
+    // the independent automation sidecars authorized by exact Document
+    // lifecycle facts; a lifecycle subscription must not make Target output
+    // the occurrence authority again.
+    let previous_target_discovery = (observe_context_created && script_may_create_targets)
         .then(|| scheduler.replace_target_discovery_enabled(true));
-    let create_target_browser_context_id = match &dispatch.command {
-        DevToolsCommand::CreateTarget(command) => command.browser_context_id.clone(),
-        _ => None,
-    };
     let completion = BidiDevToolsCommandCompletion {
         id: dispatch.id,
-        session_id: dispatch.session_id.clone(),
         event_sources,
         event_context,
-        close_target_event,
-        create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
         previous_target_discovery,
@@ -2201,11 +2099,8 @@ async fn complete_bidi_devtools_command_execution(
 ) -> BidiDevToolsCommandOutput {
     let BidiDevToolsCommandCompletion {
         id,
-        session_id,
         mut event_sources,
         event_context,
-        close_target_event,
-        create_target_browser_context_id,
         observe_browsing_context_load,
         script_may_create_targets,
         previous_target_discovery,
@@ -2225,42 +2120,11 @@ async fn complete_bidi_devtools_command_execution(
             );
         }
     }
-    let created_target_id = match &execution.result {
-        Ok(DevToolsCommandResult::CreateTarget(result)) => {
-            Some(result.target_id.as_str().to_owned())
-        }
-        _ => None,
-    };
-    let close_succeeded = matches!(&execution.result, Ok(DevToolsCommandResult::CloseTarget(_)));
-    if let Some(target_id) = created_target_id.as_deref() {
-        let mut event =
-            match bidi_target_lifecycle_event_for_target(scheduler, &session_id, target_id).await {
-                Some(event) => event,
-                None => TargetLifecycleEvent {
-                    target_id: DevToolsTargetId::from(target_id),
-                    browser_context_id: create_target_browser_context_id.clone(),
-                    kind: DevToolsTargetKind::Page,
-                    url: "about:blank".to_owned(),
-                    target_info: None,
-                },
-            };
-        if let Some(browser_context_id) = create_target_browser_context_id {
-            event.browser_context_id = Some(browser_context_id);
-            event.target_info = None;
-        }
-        event_sources.push_automation_event(AutomationEvent::TargetCreated(event));
-    }
-    if close_succeeded && let Some(event) = close_target_event {
-        event_sources.push_automation_event(AutomationEvent::TargetDestroyed(event));
-    }
-    if observe_browsing_context_load && script_may_create_targets {
-        event_sources.push_initial_load_events_for_script_created_targets();
-    }
     let response = match execution.result {
         Ok(result) => bidi_response_from_devtools_result(id, result),
         Err(error) => bidi_response_from_devtools_error(id, error),
     };
-    let mut post_response_event_sources =
+    let post_response_event_sources =
         match complete_bidi_post_response_protocol_residences(scheduler, receivers).await {
             Ok(sources) => sources,
             Err(failure) => {
@@ -2275,9 +2139,6 @@ async fn complete_bidi_devtools_command_execution(
                 );
             }
         };
-    if observe_browsing_context_load && script_may_create_targets {
-        post_response_event_sources.push_initial_load_events_for_script_created_targets();
-    }
     if let Some(previous_target_discovery) = previous_target_discovery {
         scheduler.replace_target_discovery_enabled(previous_target_discovery);
     }
@@ -3097,15 +2958,6 @@ fn frame_tree_contains_target(frame_tree: &serde_json::Value, target_id: &str) -
             .any(|child| frame_tree_contains_target(child, target_id))
 }
 
-async fn bidi_target_lifecycle_event_for_target(
-    scheduler: &mut CdpScheduler,
-    session_id: &str,
-    target_id: &str,
-) -> Option<TargetLifecycleEvent> {
-    let result = bidi_target_info_for_target(scheduler, session_id, target_id).await?;
-    target_lifecycle_event_from_target_info(result)
-}
-
 async fn bidi_target_info_for_target(
     scheduler: &mut CdpScheduler,
     session_id: &str,
@@ -3129,19 +2981,6 @@ async fn bidi_target_info_for_target(
     Some(result.target_info)
 }
 
-fn target_lifecycle_event_from_target_info(
-    info: DevToolsTargetInfo,
-) -> Option<TargetLifecycleEvent> {
-    let target_id = info.target_id.clone()?;
-    Some(TargetLifecycleEvent {
-        target_id,
-        browser_context_id: info.browser_context_id.clone(),
-        kind: info.kind,
-        url: info.url.clone(),
-        target_info: Some(info),
-    })
-}
-
 fn bidi_event_context_from_devtools_command(command: &DevToolsCommand) -> Option<String> {
     match command {
         DevToolsCommand::Navigate(command) => command.context.target_id.as_ref(),
@@ -3157,7 +2996,7 @@ fn bidi_event_context_from_devtools_command(command: &DevToolsCommand) -> Option
 async fn complete_bidi_post_response_protocol_residences(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<BidiDevToolsEventSources, BidiRendererOutputTransportFailure> {
+) -> Result<BidiDevToolsEventSources, BidiSchedulerProgressFailure> {
     let mut event_sources = BidiDevToolsEventSources::from_protocol_output(
         scheduler
             .complete_ready_protocol_residences_after_command()
@@ -3170,7 +3009,7 @@ async fn complete_bidi_post_response_protocol_residences(
 async fn drain_bidi_background_navigation_before_command(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<BidiDevToolsEventSources, BidiRendererOutputTransportFailure> {
+) -> Result<BidiDevToolsEventSources, BidiSchedulerProgressFailure> {
     let mut event_sources = drain_ready_bidi_background_navigation(scheduler, receivers).await?;
     while scheduler.has_inflight_background_navigation() {
         let Some(completion) = receivers.background_navigation_completion_rx.recv().await else {
@@ -3182,7 +3021,7 @@ async fn drain_bidi_background_navigation_before_command(
         {
             Ok(output) => event_sources.extend_protocol_output(output),
             Err(failure) => {
-                return Err(BidiRendererOutputTransportFailure::from_renderer(
+                return Err(BidiSchedulerProgressFailure::from_scheduler(
                     event_sources,
                     failure,
                 ));
@@ -3196,7 +3035,7 @@ async fn drain_bidi_background_navigation_before_command(
 async fn drain_ready_bidi_background_navigation(
     scheduler: &mut CdpScheduler,
     receivers: &mut CdpSchedulerEventReceivers,
-) -> Result<BidiDevToolsEventSources, BidiRendererOutputTransportFailure> {
+) -> Result<BidiDevToolsEventSources, BidiSchedulerProgressFailure> {
     let mut event_sources = BidiDevToolsEventSources::default();
     event_sources.extend_protocol_output(
         scheduler
@@ -3209,7 +3048,7 @@ async fn drain_ready_bidi_background_navigation(
         {
             Ok(output) => event_sources.extend_protocol_output(output),
             Err(failure) => {
-                return Err(BidiRendererOutputTransportFailure::from_renderer(
+                return Err(BidiSchedulerProgressFailure::from_scheduler(
                     event_sources,
                     failure,
                 ));
@@ -3234,10 +3073,50 @@ impl SharedBidiSessionRegistry {
 
 #[cfg(test)]
 mod tests {
-    use moli_protocol::devtools_runtime::RuntimeConsoleEvent;
+    use moli_core::browser_host::BrowserNavigateCommandResult;
+    use moli_protocol::devtools_runtime::{
+        DevToolsBrowserContextId, DevToolsTargetKind, RuntimeConsoleEvent, TargetLifecycleEvent,
+    };
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn pending_target_close_response_requires_exact_destroyed_target() {
+        let mut pending = vec![
+            BidiPendingTargetCloseResponse {
+                target_id: "TID-a".to_owned(),
+                response: json!({"type": "success", "id": 7_u64, "result": {}}),
+            },
+            BidiPendingTargetCloseResponse {
+                target_id: "TID-b".to_owned(),
+                response: json!({"type": "success", "id": 8_u64, "result": {}}),
+            },
+        ];
+        let output = ProtocolOutputSequence::from_background_event(
+            BackgroundProtocolEvent::immediate_automation_event(
+                json!({"method": "Moli.automationOnly", "params": {}}),
+                AutomationEvent::TargetDestroyed(TargetLifecycleEvent {
+                    target_id: DevToolsTargetId::from("TID-b"),
+                    browser_context_id: Some(DevToolsBrowserContextId::from("BID-b")),
+                    kind: DevToolsTargetKind::Page,
+                    url: "https://example.test/b".to_owned(),
+                    target_info: None,
+                }),
+            ),
+        );
+        let sources = BidiDevToolsEventSources::from_protocol_output(output).into_sources();
+
+        let released = take_pending_target_close_responses_from_sources(&mut pending, &sources);
+
+        assert_eq!(
+            released,
+            vec![json!({"type": "success", "id": 8_u64, "result": {}})]
+        );
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].target_id, "TID-a");
+        assert_eq!(pending[0].response["id"], json!(7_u64));
+    }
 
     #[test]
     fn protocol_output_hook_prefers_automation_sidecar_over_protocol_message_parse() {
@@ -3297,7 +3176,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_navigation_response_consumes_typed_command_response() {
+    fn pending_navigation_response_consumes_exact_browser_outcome() {
         let mut pending = Some(BidiPendingNavigationResponse {
             id: 5,
             url: "https://example.test/auth".to_owned(),
@@ -3313,11 +3192,15 @@ mod tests {
             })),
             BidiDevToolsEventSource::CommandResponse {
                 command_id: Some(42),
-                response: BackgroundCommandResponsePayload::Success {
-                    result: json!({
-                        "navigation": "navigation-from-typed-command-response",
-                    }),
-                },
+                browser_navigate_outcome: Some(BrowserNavigateCommandOutcome::Completed(
+                    BrowserNavigateCommandResult::new(
+                        "https://example.test/auth",
+                        None,
+                        Some("LOADER-typed-outcome".to_owned()),
+                        None,
+                        None,
+                    ),
+                )),
             },
         ];
 
@@ -3330,7 +3213,7 @@ mod tests {
         assert_eq!(response["goog:channel"], json!("chan"));
         assert_eq!(
             response["result"]["navigation"],
-            json!("navigation-from-typed-command-response")
+            json!("navigation-LOADER-typed-outcome")
         );
         assert_eq!(
             response["result"]["url"],
@@ -3339,7 +3222,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_navigation_response_falls_back_to_raw_protocol_error() {
+    fn pending_navigation_response_ignores_raw_protocol_error_without_typed_outcome() {
         let mut pending = Some(BidiPendingNavigationResponse {
             id: 7,
             url: "https://example.test/error".to_owned(),
@@ -3354,17 +3237,9 @@ mod tests {
             }
         }))];
 
-        let response = take_pending_navigation_response_from_sources(&mut pending, &sources)
-            .expect("raw protocol error should complete pending navigation as a fallback");
+        let response = take_pending_navigation_response_from_sources(&mut pending, &sources);
 
-        assert!(pending.is_none());
-        assert_eq!(response["type"], json!("error"));
-        assert_eq!(response["id"], json!(7_u64));
-        assert_eq!(response["goog:channel"], json!("chan"));
-        assert_eq!(response["error"], json!("unsupported operation"));
-        assert_eq!(
-            response["message"],
-            json!("navigation failed before typed response")
-        );
+        assert!(response.is_none());
+        assert!(pending.is_some());
     }
 }

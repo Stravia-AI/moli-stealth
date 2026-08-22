@@ -811,8 +811,92 @@ impl PausedDocumentTransfer {
         &self.fetch_request_id
     }
 
+    pub(crate) fn navigation(&self) -> &NavigationDispatchState {
+        match &self.state {
+            PausedDocumentTransferState::Pending { navigation, .. }
+            | PausedDocumentTransferState::ActiveBodyStream {
+                stream: ActiveDocumentBodyStreamState { navigation, .. },
+                ..
+            } => navigation,
+        }
+    }
+
     pub(crate) fn is_pending(&self) -> bool {
         matches!(self.state, PausedDocumentTransferState::Pending { .. })
+    }
+
+    pub(crate) fn into_pending_navigation_parts(
+        self,
+    ) -> Result<
+        (
+            Option<DocumentNavigationToken>,
+            NavigationDispatchState,
+            DocumentBodySource,
+        ),
+        Box<Self>,
+    > {
+        let Self {
+            fetch_request_id,
+            state,
+        } = self;
+        match state {
+            PausedDocumentTransferState::Pending {
+                document_navigation_token,
+                navigation,
+                body,
+            } => Ok((document_navigation_token, navigation, body)),
+            state => Err(Box::new(Self {
+                fetch_request_id,
+                state,
+            })),
+        }
+    }
+
+    pub(crate) fn into_synthetic_navigation_parts(
+        self,
+    ) -> (
+        Option<DocumentNavigationToken>,
+        NavigationDispatchState,
+        Url,
+        Option<moli_cookie_jar::StoredCookieQueryReport>,
+        MainDocumentBodyProgressSource,
+    ) {
+        match self.state {
+            PausedDocumentTransferState::Pending {
+                document_navigation_token,
+                navigation,
+                body,
+            } => {
+                let final_url = navigation.requested_url.clone();
+                let request_cookie_report = body.request_cookie_report().cloned();
+                let body_progress_source = body.body_progress_source();
+                (
+                    document_navigation_token,
+                    navigation,
+                    final_url,
+                    request_cookie_report,
+                    body_progress_source,
+                )
+            }
+            PausedDocumentTransferState::ActiveBodyStream { stream, .. } => {
+                let ActiveDocumentBodyStreamState {
+                    document_navigation_token,
+                    navigation,
+                    response,
+                    body_progress_source,
+                    ..
+                } = stream;
+                let final_url = response.final_url.clone();
+                let request_cookie_report = response.request_cookie_report.clone();
+                (
+                    document_navigation_token,
+                    navigation,
+                    final_url,
+                    request_cookie_report,
+                    body_progress_source,
+                )
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2056,7 +2140,7 @@ impl CdpConnection {
         intercept_response: bool,
         handle_auth_requests: bool,
     ) -> Result<PendingSubresourceContinueOutcome, String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2088,7 +2172,7 @@ impl CdpConnection {
         internal_id: u64,
         auth: SubresourceAuthCredentials,
     ) -> Result<PendingSubresourceContinueOutcome, String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2112,7 +2196,7 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2136,7 +2220,7 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2170,7 +2254,7 @@ impl CdpConnection {
         response_headers: Vec<(String, String)>,
         response_body: moli_core::page::RendererSyntheticResponseBody,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2206,7 +2290,7 @@ impl CdpConnection {
         response_code: Option<u16>,
         response_headers: Option<Vec<(String, String)>>,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2238,7 +2322,7 @@ impl CdpConnection {
         internal_id: u64,
         error_text: String,
     ) -> Result<Option<moli_core::RendererOutputFence>, String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2272,7 +2356,7 @@ impl CdpConnection {
         response_headers: Vec<(String, String)>,
         response_body: moli_core::page::RendererSyntheticResponseBody,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2301,7 +2385,7 @@ impl CdpConnection {
         socket_id: u64,
         data: String,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2325,7 +2409,7 @@ impl CdpConnection {
         socket_id: u64,
         data: Vec<u8>,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
@@ -2353,7 +2437,7 @@ impl CdpConnection {
         code: Option<u16>,
         reason: String,
     ) -> Result<(), String> {
-        let page = self
+        let mut page = self
             .runtime_session_owner_slot_mut(session_id)?
             .loaded_page_mut()
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;

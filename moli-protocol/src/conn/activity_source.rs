@@ -1,7 +1,4 @@
-use moli_core::{
-    page::{CompletedPageCommand, PendingPageCommand, RendererPageDiagnosticsSnapshot},
-    runtime::NavigationEngine,
-};
+use moli_core::page::{CompletedPageCommand, PendingPageCommand, RendererPageDiagnosticsSnapshot};
 use std::time::Instant;
 
 use super::{BrowserContext, CdpConnection, CdpSessionRoute, TargetRuntimeSlot};
@@ -46,146 +43,62 @@ fn browser_context_by_id_mut_from_parts<'a>(
         .find(|bc| bc.id == browser_context_id)
 }
 
-fn runtime_slot_for_route_mut_from_parts<'a>(
-    browser_context: &'a mut Option<BrowserContext>,
-    inactive_browser_contexts: &'a mut [BrowserContext],
-    route: &CdpSessionRoute,
-) -> Option<&'a mut TargetRuntimeSlot> {
-    let context = match route {
-        CdpSessionRoute::Browser => browser_context.as_mut()?,
-        CdpSessionRoute::ActiveTarget {
-            browser_context_id, ..
-        }
-        | CdpSessionRoute::AuxiliaryTarget {
-            browser_context_id, ..
-        }
-        | CdpSessionRoute::BackgroundTarget {
-            browser_context_id, ..
-        } => browser_context_by_id_mut_from_parts(
-            browser_context,
-            inactive_browser_contexts,
-            browser_context_id,
-        )?,
-        CdpSessionRoute::TabTarget { .. }
-        | CdpSessionRoute::SharedWorkerTarget { .. }
-        | CdpSessionRoute::DedicatedWorkerTarget { .. }
-        | CdpSessionRoute::ServiceWorkerTarget { .. } => return None,
-    };
-    match route {
-        CdpSessionRoute::AuxiliaryTarget { target_id, .. } => {
-            if let Some(index) = context
-                .background_targets
-                .iter()
-                .position(|target| target.is_target(target_id))
-            {
-                return Some(&mut context.background_targets[index].runtime_slot);
-            }
-            Some(&mut context.active_target.runtime_slot)
-        }
-        CdpSessionRoute::BackgroundTarget { target_id, .. } => {
-            Some(&mut context.background_target_mut(target_id)?.runtime_slot)
-        }
-        CdpSessionRoute::Browser | CdpSessionRoute::ActiveTarget { .. } => {
-            Some(&mut context.active_target.runtime_slot)
-        }
-        CdpSessionRoute::TabTarget { .. }
-        | CdpSessionRoute::SharedWorkerTarget { .. }
-        | CdpSessionRoute::DedicatedWorkerTarget { .. }
-        | CdpSessionRoute::ServiceWorkerTarget { .. } => None,
-    }
-}
-
 impl CdpConnection {
-    fn activity_source_engine_and_runtime_slot_mut(
+    fn activity_source_runtime_slot_mut(
         &mut self,
         session_id: Option<&str>,
-    ) -> Option<(&mut NavigationEngine, &mut TargetRuntimeSlot)> {
+    ) -> Option<&mut TargetRuntimeSlot> {
         let route = match session_id {
             Some(_) => self.session_route(session_id)?,
             None => self
                 .none_session_owner_route_override()
                 .unwrap_or(CdpSessionRoute::Browser),
         };
-        let primary_engine = match &route {
-            CdpSessionRoute::Browser => true,
+        let browser_context = match route {
+            CdpSessionRoute::Browser => self.browser_context.as_mut()?,
             CdpSessionRoute::ActiveTarget {
-                browser_context_id,
-                target_id,
-            } => self.browser_context.as_ref().is_some_and(|context| {
-                context.id == *browser_context_id
-                    && target_id
-                        .as_deref()
-                        .is_none_or(|target_id| context.active_target_id() == Some(target_id))
-            }),
+                browser_context_id, ..
+            } => browser_context_by_id_mut_from_parts(
+                &mut self.browser_context,
+                &mut self.inactive_browser_contexts,
+                &browser_context_id,
+            )?,
             CdpSessionRoute::AuxiliaryTarget {
                 browser_context_id,
                 target_id,
-            } => self.browser_context.as_ref().is_some_and(|context| {
-                context.id == *browser_context_id
-                    && context.background_target(target_id).is_none()
-                    && context.active_target_id() == Some(target_id)
-            }),
-            CdpSessionRoute::BackgroundTarget { .. }
-            | CdpSessionRoute::TabTarget { .. }
-            | CdpSessionRoute::SharedWorkerTarget { .. }
-            | CdpSessionRoute::DedicatedWorkerTarget { .. }
-            | CdpSessionRoute::ServiceWorkerTarget { .. } => false,
-        };
-        if primary_engine {
-            let CdpConnection {
-                engine,
-                browser_context,
-                inactive_browser_contexts,
-                ..
-            } = self;
-            let slot = runtime_slot_for_route_mut_from_parts(
-                browser_context,
-                inactive_browser_contexts,
-                &route,
-            )?;
-            return Some((engine, slot));
-        }
-
-        let (browser_context_id, target_id) = match &route {
-            CdpSessionRoute::ActiveTarget {
-                browser_context_id,
-                target_id,
-            } => (
-                browser_context_id.clone(),
-                target_id.clone().or_else(|| {
-                    self.browser_context_by_id(browser_context_id)
-                        .and_then(BrowserContext::active_target_id)
-                        .map(str::to_owned)
-                })?,
-            ),
-            CdpSessionRoute::AuxiliaryTarget {
-                browser_context_id,
-                target_id,
+            } => {
+                let browser_context = browser_context_by_id_mut_from_parts(
+                    &mut self.browser_context,
+                    &mut self.inactive_browser_contexts,
+                    &browser_context_id,
+                )?;
+                if let Some(index) = browser_context
+                    .background_targets
+                    .iter()
+                    .position(|target| target.is_target(&target_id))
+                {
+                    return Some(&mut browser_context.background_targets[index].runtime_slot);
+                }
+                browser_context
             }
-            | CdpSessionRoute::BackgroundTarget {
+            CdpSessionRoute::BackgroundTarget {
                 browser_context_id,
                 target_id,
-            } => (browser_context_id.clone(), target_id.clone()),
-            CdpSessionRoute::Browser
-            | CdpSessionRoute::TabTarget { .. }
+            } => {
+                let browser_context = browser_context_by_id_mut_from_parts(
+                    &mut self.browser_context,
+                    &mut self.inactive_browser_contexts,
+                    &browser_context_id,
+                )?;
+                let target = browser_context.background_target_mut(&target_id)?;
+                return Some(&mut target.runtime_slot);
+            }
+            CdpSessionRoute::TabTarget { .. }
             | CdpSessionRoute::SharedWorkerTarget { .. }
             | CdpSessionRoute::DedicatedWorkerTarget { .. }
             | CdpSessionRoute::ServiceWorkerTarget { .. } => return None,
         };
-        let CdpConnection {
-            retained_background_navigation_engines,
-            browser_context,
-            inactive_browser_contexts,
-            ..
-        } = self;
-        let engine =
-            retained_background_navigation_engines.get_mut(&(browser_context_id, target_id))?;
-        let slot = runtime_slot_for_route_mut_from_parts(
-            browser_context,
-            inactive_browser_contexts,
-            &route,
-        )?;
-        Some((engine, slot))
+        Some(&mut browser_context.active_target.runtime_slot)
     }
 
     pub(crate) fn start_child_frame_lifecycle_work_for_session_owner(
@@ -196,17 +109,18 @@ impl CdpConnection {
         let storage = self
             .navigation_load_inputs_for_session_owner(session_id)
             .resource_storage_handles();
-        let Some((engine, slot)) = self.activity_source_engine_and_runtime_slot_mut(session_id)
-        else {
+        let browser_host_state = self.browser_host_state.clone();
+        let Some(slot) = self.activity_source_runtime_slot_mut(session_id) else {
             return Err("NoDocumentLoaded".to_owned());
         };
         let Some(page) = slot.loaded_page() else {
             return Err("NoDocumentLoaded".to_owned());
         };
-        let pending = engine
-            .start_page_child_frame_lifecycle_work_with_storage_best_effort(
+        let pending = browser_host_state
+            .navigation_owner_mut()
+            .start_active_page_child_frame_lifecycle_work(
                 storage.into_navigation_storage(),
-                page,
+                &page,
                 timeout,
             )
             .map_err(|error| error.to_string())?;
@@ -221,15 +135,16 @@ impl CdpConnection {
         pending: CompletedChildFrameLifecycleWork,
     ) -> Result<(bool, moli_core::page::RendererCommandTurnOutput), String> {
         let session_id = pending.session_id.as_deref();
-        let Some((engine, slot)) = self.activity_source_engine_and_runtime_slot_mut(session_id)
-        else {
+        let browser_host_state = self.browser_host_state.clone();
+        let Some(slot) = self.activity_source_runtime_slot_mut(session_id) else {
             return Err("NoDocumentLoaded".to_owned());
         };
-        let Some(page) = slot.loaded_page_mut() else {
+        let Some(mut page) = slot.loaded_page_mut() else {
             return Err("NoDocumentLoaded".to_owned());
         };
-        let completed = engine
-            .complete_page_child_frame_lifecycle_work_best_effort(page, pending.completion)
+        let completed = browser_host_state
+            .navigation_owner_mut()
+            .complete_active_page_child_frame_lifecycle_work(&mut page, pending.completion)
             .map_err(|error| error.to_string())?;
         let _ = slot.ingest_owner_page_observable_output_updates();
         Ok(completed)
@@ -254,8 +169,7 @@ impl CdpConnection {
             session_id,
             trace_started,
         );
-        let Some((_engine, slot)) = self.activity_source_engine_and_runtime_slot_mut(session_id)
-        else {
+        let Some(slot) = self.activity_source_runtime_slot_mut(session_id) else {
             trace_activity_source_stage(
                 "conn_page_diagnostics_snapshot_missing_owner",
                 session_id,
@@ -263,7 +177,7 @@ impl CdpConnection {
             );
             return Ok(RendererPageDiagnosticsSnapshot::default());
         };
-        let Some(page) = slot.loaded_page_mut() else {
+        let Some(mut page) = slot.loaded_page_mut() else {
             trace_activity_source_stage(
                 "conn_page_diagnostics_snapshot_missing_page",
                 session_id,

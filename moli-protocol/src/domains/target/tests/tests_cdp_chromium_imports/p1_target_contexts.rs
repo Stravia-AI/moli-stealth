@@ -282,12 +282,18 @@ async fn rust_cdp_chromium_target_dispose_active_context_promotes_remaining_cont
 async fn rust_cdp_chromium_target_dispose_context_clears_context_scoped_download_behavior() {
     let mut ctx = TestContext::new_with_target_discovery(false);
     let browser_context_id = create_browser_context(&mut ctx, 261_016).await;
-    ctx.conn.download_behavior.set_browser_context(
-        browser_context_id.clone(),
-        "allow".into(),
-        Some("/tmp/moli-target-contexts".into()),
-        true,
+    ctx.conn.apply_browser_download_policy_update(
+        moli_core::browser_host::BrowserDownloadPolicyUpdate::SetBrowserContext {
+            browser_context_id: browser_context_id.clone(),
+            behavior: moli_core::browser_host::BrowserDownloadBehavior::Allow,
+            download_path: Some("/tmp/moli-target-contexts".into()),
+        },
     );
+    ctx.conn
+        .set_automation_download_events_enabled_for_browser_context(
+            Some(&browser_context_id),
+            true,
+        );
 
     ctx.process_async(json!({
         "id": 261_017,
@@ -297,9 +303,15 @@ async fn rust_cdp_chromium_target_dispose_context_clears_context_scoped_download
     .await;
 
     ctx.expect_result(261_017, json!({}), None);
-    assert_eq!(
-        ctx.conn.download_behavior,
-        crate::conn::BrowserDownloadBehavior::default()
+    assert!(
+        ctx.conn
+            .browser_download_policy_snapshot()
+            .browser_context_override(&browser_context_id)
+            .is_none()
+    );
+    assert!(
+        !ctx.conn
+            .automation_download_events_enabled_for_browser_context(Some(&browser_context_id))
     );
 }
 
@@ -614,9 +626,12 @@ async fn rust_cdp_chromium_target_named_popup_reuse_keeps_browser_context_id() {
         }
     }))
     .await;
-    let messages = ctx.take_all();
-
-    let changed = event(&messages, "Target.targetInfoChanged");
+    let changed = ctx
+        .wait_for_scheduler_message("named popup successor targetInfoChanged", |message| {
+            message["method"] == json!("Target.targetInfoChanged")
+                && message["params"]["targetInfo"]["url"] == json!("https://example.com/second")
+        })
+        .await;
     assert_eq!(
         changed["params"]["targetInfo"]["browserContextId"],
         "BID-named-context"

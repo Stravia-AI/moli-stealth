@@ -89,20 +89,29 @@ async fn dispose_browser_context_wrong_id() {
 async fn dispose_browser_context_success() {
     let mut ctx = TestContext::new();
     load_bc(&mut ctx, "BID-20");
-    ctx.conn.download_behavior.set_browser_context(
-        "BID-20".into(),
-        "allow".into(),
-        Some("/tmp/downloads".into()),
-        true,
+    ctx.conn.apply_browser_download_policy_update(
+        moli_core::browser_host::BrowserDownloadPolicyUpdate::SetBrowserContext {
+            browser_context_id: "BID-20".into(),
+            behavior: moli_core::browser_host::BrowserDownloadBehavior::Allow,
+            download_path: Some("/tmp/downloads".into()),
+        },
     );
+    ctx.conn
+        .set_automation_download_events_enabled_for_browser_context(Some("BID-20"), true);
     ctx.process_async(json!({"id": 9, "method": "Target.disposeBrowserContext",
                        "params": {"browserContextId": "BID-20"}}))
         .await;
     ctx.expect_result(9, json!({}), None);
     assert!(ctx.conn.browser_context.is_none());
-    assert_eq!(
-        ctx.conn.download_behavior,
-        crate::conn::BrowserDownloadBehavior::default()
+    assert!(
+        ctx.conn
+            .browser_download_policy_snapshot()
+            .browser_context_override("BID-20")
+            .is_none()
+    );
+    assert!(
+        !ctx.conn
+            .automation_download_events_enabled_for_browser_context(Some("BID-20"))
     );
 }
 
@@ -112,10 +121,10 @@ async fn dispose_browser_context_emits_detached_events_for_attached_target() {
     let mut bc = BrowserContext::new("BID-20".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-000000000A");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({"id": 10, "method": "Target.disposeBrowserContext",
                        "params": {"browserContextId": "BID-20"}}))
@@ -784,13 +793,13 @@ async fn dispose_browser_context_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 20,
@@ -869,7 +878,7 @@ async fn dispose_browser_context_aborts_root_session_navigation_without_target_s
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 23,
@@ -957,7 +966,7 @@ async fn dispose_browser_context_aborts_paused_runtime_fetch_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn

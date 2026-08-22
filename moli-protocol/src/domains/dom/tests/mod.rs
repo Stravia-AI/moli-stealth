@@ -249,11 +249,15 @@ fn assert_non_empty_geometry_quads(value: &Value) {
 
 async fn complete_pending_command_task_for_test(
     ctx: &mut TestContext,
-    pending: PendingCdpCommandDispatch,
+    mut pending: PendingCdpCommandDispatch,
 ) -> Vec<Value> {
-    ctx.complete_command_task_step_for_test(CdpCommandTaskStep::Pending(Box::new(pending)))
-        .await
-        .0
+    loop {
+        let completed = Box::pin(pending.wait()).await;
+        match Box::pin(ctx.conn.complete_pending_command_dispatch(completed)).await {
+            CdpCommandTaskStep::Pending(next) => pending = *next,
+            CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
+        }
+    }
 }
 
 async fn complete_command_dispatch_without_legacy_fallback_for_test(
@@ -262,8 +266,12 @@ async fn complete_command_dispatch_without_legacy_fallback_for_test(
     _expectation: &str,
 ) -> Vec<Value> {
     let raw = command.to_string();
-    let step = ctx.conn.start_command_dispatch(&raw);
-    ctx.complete_command_task_step_for_test(step).await.0
+    match ctx.conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Complete(outcome) => outcome.into_parts().0,
+        CdpCommandTaskStep::Pending(pending) => {
+            complete_pending_command_task_for_test(ctx, *pending).await
+        }
+    }
 }
 
 fn child_element_by_node_name<'a>(node: &'a Value, node_name: &str) -> &'a Value {

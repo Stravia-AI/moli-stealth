@@ -1,5 +1,5 @@
 use crate::conn::{BackgroundProtocolEvent, CdpSessionRoute};
-use crate::devtools_runtime::DevToolsTargetInfo;
+use crate::devtools_runtime::{DevToolsTargetId, DevToolsTargetInfo, TargetLifecycleEvent};
 
 use super::{CommittedAttachSession, DetachedTargetSession, TargetHostDelta};
 
@@ -76,6 +76,15 @@ impl TargetEventPlan {
         self.detached_sessions.extend(other.detached_sessions);
         self.rolled_back_session_ids
             .extend(other.rolled_back_session_ids);
+    }
+
+    pub(crate) fn without_target_lifecycle_automation_sidecars(mut self) -> Self {
+        self.events = self
+            .events
+            .into_iter()
+            .map(BackgroundProtocolEvent::without_target_lifecycle_automation_sidecar)
+            .collect();
+        self
     }
 
     #[cfg(test)]
@@ -174,6 +183,27 @@ impl PreparedTargetHostClosure {
 
     pub(crate) fn into_parts(self) -> (Vec<PreparedTargetHostDelta>, Vec<PreparedTargetHostDelta>) {
         (self.detached_info_deltas, self.destroyed_deltas)
+    }
+
+    pub(crate) fn destroyed_target_lifecycle_event(
+        &self,
+        target_id: &str,
+    ) -> Option<TargetLifecycleEvent> {
+        let target_info = self.destroyed_deltas.iter().find_map(|prepared| {
+            (prepared.target_id() == target_id)
+                .then_some(prepared.snapshot.as_ref())
+                .flatten()
+        })?;
+        Some(TargetLifecycleEvent {
+            target_id: target_info
+                .target_id
+                .clone()
+                .unwrap_or_else(|| DevToolsTargetId::from(target_id)),
+            browser_context_id: target_info.browser_context_id.clone(),
+            kind: target_info.kind,
+            url: target_info.url.clone(),
+            target_info: Some(target_info.clone()),
+        })
     }
 }
 

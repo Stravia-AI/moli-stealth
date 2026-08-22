@@ -502,7 +502,7 @@ mod tests {
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
         conn
     }
 
@@ -641,30 +641,30 @@ mod tests {
             .any(|message| message["method"] == "Page.frameStartedNavigating")
     }
 
+    fn install_browser_host_for_test(
+        conn: &mut CdpConnection,
+    ) -> moli_core::browser_host::BrowserHostActor {
+        let (actor, handle) =
+            moli_core::browser_host::BrowserHostActor::new(conn.browser_host_state());
+        conn.install_browser_host_handle(handle);
+        actor
+    }
+
     async fn complete_published_top_level_navigation(
         conn: &mut CdpConnection,
+        browser_host: &mut moli_core::browser_host::BrowserHostActor,
         command_context: &mut CommandDispatchContext,
     ) {
-        let [event]: [crate::conn::CdpSchedulerEvent; 1] = conn
-            .take_scheduler_events()
-            .try_into()
-            .expect("barrier release should publish one concrete navigation action");
-        let crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { work } = event else {
-            panic!("barrier release must publish concrete protocol work");
-        };
-        assert!(work.is_top_level_location_navigation_owner_action());
-        let (events, nested_scheduler_events) = conn
-            .complete_ready_protocol_scheduler_work_turn(work)
+        let dispatch = browser_host
+            .complete_next_turn(conn)
+            .expect("barrier release should execute one concrete Browser Host turn");
+        let (events, _nested_scheduler_events, renderer_output_predecessor) = conn
+            .finish_browser_host_turn_for_test(dispatch)
             .await
             .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(
-            !nested_scheduler_events.iter().any(|event| {
-                matches!(
-                    event,
-                    crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { work }
-                        if work.is_top_level_location_navigation_owner_action()
-                )
-            }),
+            !browser_host.has_ready_input(),
             "executing the concrete navigation must not republish its own owner action"
         );
         command_context.protocol_events_mut().extend(events);
@@ -780,6 +780,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn output_is_owned_by_one_exact_command_not_every_command_on_the_page() {
         let mut conn = connection_with_loaded_page().await;
+        let mut browser_host = install_browser_host_for_test(&mut conn);
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let first = admit_registered_command(&mut conn, &mut barriers, 11);
         let second = admit_registered_command(&mut conn, &mut barriers, 12);
@@ -820,7 +821,8 @@ mod tests {
             !contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "barrier release must publish, not execute, its concrete owner action"
         );
-        complete_published_top_level_navigation(&mut conn, &mut command_context).await;
+        complete_published_top_level_navigation(&mut conn, &mut browser_host, &mut command_context)
+            .await;
         assert!(
             contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "the exact command response should release its held output for one scheduler turn"
@@ -830,6 +832,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn canceling_an_unrelated_command_does_not_downgrade_held_output() {
         let mut conn = connection_with_loaded_page().await;
+        let mut browser_host = install_browser_host_for_test(&mut conn);
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let first = admit_registered_command(&mut conn, &mut barriers, 15);
         let second = admit_registered_command(&mut conn, &mut barriers, 16);
@@ -870,7 +873,8 @@ mod tests {
             !contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "barrier release must publish, not execute, the retained owner action"
         );
-        complete_published_top_level_navigation(&mut conn, &mut command_context).await;
+        complete_published_top_level_navigation(&mut conn, &mut browser_host, &mut command_context)
+            .await;
         assert!(
             contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "the exact command must retain and release its full protocol output after an unrelated cancel"
@@ -909,6 +913,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn concrete_runtime_navigation_cause_survives_an_earlier_untagged_wake() {
         let mut conn = connection_with_loaded_page().await;
+        let mut browser_host = install_browser_host_for_test(&mut conn);
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let permit = admit_registered_command(&mut conn, &mut barriers, 14);
         let cause = renderer_cause_for_permit(&conn, &permit);
@@ -954,7 +959,8 @@ mod tests {
             !contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "barrier release must publish, not execute, the concrete navigation action"
         );
-        complete_published_top_level_navigation(&mut conn, &mut command_context).await;
+        complete_published_top_level_navigation(&mut conn, &mut browser_host, &mut command_context)
+            .await;
         assert!(
             contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "the exact response permit must release the concrete navigation for its scheduler turn"
@@ -966,9 +972,12 @@ mod tests {
         let mut conn = connection_with_loaded_page().await;
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let permit = admit_registered_command(&mut conn, &mut barriers, 21);
+        let source_owner = conn
+            .target_page_residence_identity_for_session(Some(SESSION_ID))
+            .expect("source Page should have an exact residence");
         conn.runtime_session_owner_slot_mut(Some(SESSION_ID))
             .expect("runtime slot should remain installed")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(source_owner.loaded_page_generation() + 1);
         let mut command_context = CommandDispatchContext::default();
 
         route_same_document_navigation(
@@ -1002,8 +1011,12 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn replacement_after_capture_retires_held_old_page_output() {
         let mut conn = connection_with_loaded_page().await;
+        let mut browser_host = install_browser_host_for_test(&mut conn);
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let permit = admit_registered_command(&mut conn, &mut barriers, 30);
+        let source_owner = conn
+            .target_page_residence_identity_for_session(Some(SESSION_ID))
+            .expect("source Page should have an exact residence");
         let mut command_context = CommandDispatchContext::default();
 
         route_top_level_navigation_for_command(
@@ -1018,7 +1031,7 @@ mod tests {
 
         conn.runtime_session_owner_slot_mut(Some(SESSION_ID))
             .expect("runtime slot should remain installed")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(source_owner.loaded_page_generation() + 1);
         assert_eq!(
             barriers
                 .release(&mut conn, permit, &mut command_context)
@@ -1026,7 +1039,8 @@ mod tests {
             RuntimeCommandOutputBarrierTerminal::Superseded
         );
         assert_eq!(barriers.held_output_count(), 0);
-        complete_published_top_level_navigation(&mut conn, &mut command_context).await;
+        complete_published_top_level_navigation(&mut conn, &mut browser_host, &mut command_context)
+            .await;
         assert!(
             !contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "a held old-Page navigation action must not project into the replacement Page"
@@ -1036,6 +1050,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn explicit_cancel_consumes_the_barrier_once() {
         let mut conn = connection_with_loaded_page().await;
+        let mut browser_host = install_browser_host_for_test(&mut conn);
         let mut barriers = RuntimeCommandOutputBarriers::default();
         let permit = admit_registered_command(&mut conn, &mut barriers, 31);
         let mut command_context = CommandDispatchContext::default();
@@ -1061,7 +1076,8 @@ mod tests {
             !contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "cancel must publish, not execute, the already-produced owner action"
         );
-        complete_published_top_level_navigation(&mut conn, &mut command_context).await;
+        complete_published_top_level_navigation(&mut conn, &mut browser_host, &mut command_context)
+            .await;
         assert!(
             contains_top_level_navigation(&protocol_messages(&mut command_context)),
             "canceling the protocol command must still settle its already-produced browser-owner action"

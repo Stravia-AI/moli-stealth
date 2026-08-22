@@ -7,6 +7,7 @@
 
 mod cdp_projection;
 pub mod conn;
+mod devtools_host_adapter;
 pub mod devtools_runtime;
 pub mod domains;
 #[cfg(feature = "test-support")]
@@ -15,35 +16,50 @@ pub mod test_support;
 pub mod testing;
 pub mod version;
 
+pub use devtools_host_adapter::DevToolsHostAdapter;
 pub use devtools_runtime::*;
 
 pub use conn::{
-    BackgroundCommandResponsePayload, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
-    CdpInitialStoragePartition, CdpRendererCommandAccess, CdpRendererCommandReplacement,
-    CdpRendererCommandReplayDispatch, CdpRendererOwnerTurnOutcome, CdpSchedulerEvent,
+    BackgroundCommandResponsePayload, BackgroundEventSender, BackgroundNavigationCancellation,
+    BackgroundNavigationGateKey, BackgroundOutputClosed, BackgroundProtocolEvent,
+    BrowserBackgroundOutputReceiver, BrowserHostTurnDispatch, BrowserHostTurnExecutorOwner,
+    CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition, CdpRendererCommandAccess,
+    CdpRendererCommandReplacement, CdpRendererCommandReplayDispatch, CdpSchedulerEvent,
     CdpTargetHostLifecycleDelta, CdpTargetHostLifecycleObserver, CdpTurnOutcome,
     CommandDispatchContext, CommandResponseFlushContext, CommandResponseFlushPermit,
-    CompletedCdpCommandDispatch, CompletedDeferredMainDocumentLoadCompletion,
-    CompletedRuntimeProtocolMessageDispatch, DEFAULT_CDP_PAGE_TARGET_ID, DEFAULT_CDP_TAB_TARGET_ID,
+    CompletedBrowserHostTurn, CompletedCdpCommandDispatch,
+    CompletedDeferredMainDocumentLoadCompletion, CompletedRuntimeProtocolMessageDispatch,
     DeferredMainDocumentLoadCompletionOutputAction,
-    DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadObservationId,
-    DeferredMainDocumentLoadPredecessorCandidate, DevToolsCommandDispatchOutcome,
-    DevToolsDocumentLifecycleWaitKey, DevToolsDocumentLifecycleWaitState,
-    DevToolsDocumentNavigationState, DevToolsPageResidenceIdentity, ParsedCdpCommand,
+    DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadCompletionReadiness,
+    DeferredMainDocumentLoadObservationId, DeferredMainDocumentLoadPredecessorCandidate,
+    DevToolsCommandDispatchOutcome, DevToolsDocumentLifecycleWaitKey,
+    DevToolsDocumentLifecycleWaitState, DevToolsDocumentNavigationState,
+    DevToolsPageResidenceIdentity, ParsedCdpCommand, PendingBrowserHostTurn,
     PendingCdpCommandDispatch, PendingDeferredMainDocumentLoadCompletion,
-    PendingRuntimeProtocolMessageDispatch,
+    PendingRuntimeProtocolMessageDispatch, browser_background_output_channel,
 };
 pub use domains::activity::{
     ProtocolSchedulerWork, ProtocolSchedulerWorkKind, ProtocolWorkPublishSequence,
     RuntimeCommandOutputBarrierCompletion, RuntimeCommandOutputBarrierPermit,
     RuntimeCommandOutputBarrierTerminal, RuntimeCommandOutputBarriers,
 };
+pub use domains::fetch::{
+    CompletedDevToolsFetchCommand, DevToolsFetchCommandTaskStep, PendingDevToolsFetchCommand,
+};
 pub use domains::page::{
-    BackgroundNavigationCompletion, CompletedPageScreencastCapture,
+    BackgroundNavigationCompletion, BackgroundNavigationParticipantCompletion,
+    BackgroundNavigationTurnDisposition, CompletedDevToolsBrowserOwnerNavigationCommand,
+    CompletedPageScreencastCapture, DevToolsBrowserOwnerNavigationCommandTaskStep,
     PageScreencastCaptureCompletion, PageScreencastCaptureStart, PageScreencastRegistration,
-    PageScreencastSubscriptionStatus, PendingPageScreencastCapture, build_default_raster_pdf,
+    PageScreencastSubscriptionStatus, PendingDevToolsBrowserOwnerNavigationCommand,
+    PendingPageScreencastCapture, build_default_raster_pdf,
 };
 pub use domains::runtime::{
     CompletedDevToolsRuntimeCommandDispatch, DevToolsRuntimeCommandTaskStep,
     PendingDevToolsRuntimeCommandDispatch,
+};
+pub use domains::target::{
+    CompletedDevToolsBrowserOwnerContextDisposalCommand,
+    DevToolsBrowserOwnerContextDisposalCommandTaskStep,
+    PendingDevToolsBrowserOwnerContextDisposalCommand,
 };

@@ -64,6 +64,116 @@ async fn wait_for_profile_lock_release(paths: &BrowserProfilePaths) {
     }
 }
 
+async fn bidi_new_session_and_context(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+) -> String {
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 1_u64,
+                "method": "session.new",
+                "params": {}
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send session.new");
+    let session = recv_ws_json(socket).await;
+    assert_eq!(session["type"], json!("success"), "{session:?}");
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 2_u64,
+                "method": "browsingContext.create",
+                "params": { "type": "tab" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send browsingContext.create");
+    let created = recv_ws_json(socket).await;
+    assert_eq!(created["type"], json!("success"), "{created:?}");
+    created["result"]["context"]
+        .as_str()
+        .expect("created context id")
+        .to_owned()
+}
+
+async fn bidi_set_profile_cookie(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    context: &str,
+    value: &str,
+) {
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": id,
+                "method": "storage.setCookie",
+                "params": {
+                    "cookie": {
+                        "name": "sid",
+                        "value": { "type": "string", "value": value },
+                        "domain": "example.test",
+                        "path": "/"
+                    },
+                    "partition": { "type": "context", "context": context }
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send storage.setCookie");
+    let response = recv_ws_json(socket).await;
+    assert_eq!(response["id"], json!(id), "{response:?}");
+    assert_eq!(response["type"], json!("success"), "{response:?}");
+}
+
+async fn bidi_profile_cookie_value(
+    socket: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    id: u64,
+    context: &str,
+) -> String {
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": id,
+                "method": "storage.getCookies",
+                "params": {
+                    "filter": {
+                        "name": "sid",
+                        "domain": "example.test",
+                        "path": "/"
+                    },
+                    "partition": { "type": "context", "context": context }
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send storage.getCookies");
+    let response = recv_ws_json(socket).await;
+    assert_eq!(response["id"], json!(id), "{response:?}");
+    assert_eq!(response["type"], json!("success"), "{response:?}");
+    response["result"]["cookies"]
+        .as_array()
+        .and_then(|cookies| cookies.first())
+        .and_then(|cookie| cookie["value"]["value"].as_str())
+        .unwrap_or_else(|| panic!("expected sid cookie value: {response:?}"))
+        .to_owned()
+}
+
 #[derive(Clone, Copy)]
 enum ProfileCookieDeleteCommand {
     NetworkClearBrowserCookies,
@@ -462,6 +572,53 @@ async fn websocket_cdp_imported_cookies_with_profile_dir_persist_across_server_r
     abort_test_cdp_server(cdp_server).await;
     wait_for_profile_lock_release(&paths).await;
     fixture_server.abort();
+}
+
+#[tokio::test]
+async fn websocket_bidi_profile_cookie_state_is_live_and_stale_close_cannot_overwrite() {
+    let profile = TempDir::new("bidi-live-cookie-profile");
+    let paths = BrowserProfilePaths::new(&profile.path);
+    let (cdp_addr, protocol_server) =
+        spawn_profiled_test_protocol_server(profile.path.clone()).await;
+    let (mut first, _) = connect_async(format!("ws://{cdp_addr}/session"))
+        .await
+        .expect("connect first profiled BiDi frontend");
+    let (mut second, _) = connect_async(format!("ws://{cdp_addr}/session"))
+        .await
+        .expect("connect second profiled BiDi frontend");
+    let first_context = bidi_new_session_and_context(&mut first).await;
+    let second_context = bidi_new_session_and_context(&mut second).await;
+
+    bidi_set_profile_cookie(&mut first, 3, &first_context, "old").await;
+    assert_eq!(
+        bidi_profile_cookie_value(&mut second, 3, &second_context).await,
+        "old",
+        "a concurrent frontend must observe the application-owned live cookie store"
+    );
+    bidi_set_profile_cookie(&mut second, 4, &second_context, "newer").await;
+
+    let _ = first.close(None).await;
+    let persisted = wait_for_cookie_profile(&paths.cookies_path, |cookies| {
+        cookies
+            .iter()
+            .any(|cookie| cookie.name == "sid" && cookie.value == "newer")
+    })
+    .await;
+    assert!(
+        persisted
+            .iter()
+            .any(|cookie| cookie.name == "sid" && cookie.value == "newer"),
+        "closing a frontend with an older view must flush current Browser state: {persisted:?}"
+    );
+    assert_eq!(
+        bidi_profile_cookie_value(&mut second, 5, &second_context).await,
+        "newer",
+        "closing another frontend must not roll live Browser state back"
+    );
+
+    let _ = second.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    wait_for_profile_lock_release(&paths).await;
 }
 
 #[tokio::test]
@@ -2537,20 +2694,11 @@ async fn websocket_cdp_replacement_retires_hanging_precommit_navigation() {
         .iter()
         .find(|message| message["id"] == json!(6_u64))
         .expect("superseded Page.navigate response");
-    assert!(
-        superseded_response.get("error").is_none(),
-        "Chromium reports a superseded Page.navigate as a successful command: {superseded_response:#?}"
-    );
+    assert_eq!(superseded_response["error"]["code"], json!(-32000));
     assert_eq!(
-        superseded_response["result"]["frameId"],
-        json!(session.target_id)
+        superseded_response["error"]["message"],
+        json!("Navigation aborted")
     );
-    assert_eq!(
-        superseded_response["result"]["errorText"],
-        json!("net::ERR_ABORTED")
-    );
-    assert_eq!(superseded_response["result"]["isDownload"], json!(false));
-    assert!(superseded_response["result"].get("loaderId").is_none());
     let replacement_document = cdp_runtime_evaluate_string(
         &mut socket,
         &session.session_id,
@@ -3858,8 +4006,26 @@ document.addEventListener('readystatechange', () => {
                 "method": "Runtime.evaluate",
                 "sessionId": session.session_id,
                 "params": {
-                    "expression": "JSON.stringify({ marker: globalThis.blockedDeferProtocolMarker, ready: document.readyState, deferExecuted: globalThis.blockedDeferExecuted === true })",
-                    "returnByValue": true
+                    "expression": r#"new Promise((resolve) => {
+                        const snapshot = () => JSON.stringify({
+                            marker: globalThis.blockedDeferProtocolMarker,
+                            ready: document.readyState,
+                            deferExecuted: globalThis.blockedDeferExecuted === true
+                        });
+                        if (document.readyState === 'interactive') {
+                            resolve(snapshot());
+                            return;
+                        }
+                        const onReadyStateChange = () => {
+                            if (document.readyState === 'interactive') {
+                                document.removeEventListener('readystatechange', onReadyStateChange);
+                                resolve(snapshot());
+                            }
+                        };
+                        document.addEventListener('readystatechange', onReadyStateChange);
+                    })"#,
+                    "returnByValue": true,
+                    "awaitPromise": true
                 }
             })
             .to_string()
@@ -4185,6 +4351,225 @@ async fn websocket_cdp_parser_script_navigation_progresses_without_followup_comm
         }),
         "replacement frame and DOMContentLoaded must use the same loader: {replacement_messages:#?}"
     );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    drop(fixture_server);
+}
+
+#[tokio::test]
+async fn websocket_cdp_ready_source_load_precedes_renderer_replacement() {
+    const PASSIVE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn source_page() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            r#"<!doctype html><main>source</main><script>
+addEventListener('load', () => {
+  location.href = '/load-handler-replacement';
+}, {once: true});
+</script>"#,
+        )
+    }
+
+    let replacement_requested = Arc::new(tokio::sync::Notify::new());
+    let requested_for_replacement = Arc::clone(&replacement_requested);
+    let fixture_app = Router::new()
+        .route("/load-handler-source", get(source_page))
+        .route(
+            "/load-handler-replacement",
+            get(move || {
+                let requested_for_replacement = Arc::clone(&requested_for_replacement);
+                async move {
+                    requested_for_replacement.notify_one();
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                        "<!doctype html><main>replacement</main>",
+                    )
+                }
+            }),
+        );
+    let (fixture_addr, fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "load-handler-navigation-order");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let session = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+    let _ = send_cdp_command(
+        &mut socket,
+        3,
+        "Page.enable",
+        Some(&session.session_id),
+        json!({}),
+    )
+    .await;
+    let _ = send_cdp_command(
+        &mut socket,
+        4,
+        "Page.setLifecycleEventsEnabled",
+        Some(&session.session_id),
+        json!({ "enabled": true }),
+    )
+    .await;
+
+    let source_url = format!("http://{fixture_addr}/load-handler-source");
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 5_u64,
+                "method": "Page.navigate",
+                "sessionId": session.session_id,
+                "params": { "url": source_url }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send source Page.navigate");
+
+    timeout(PASSIVE_PROGRESS_TIMEOUT, replacement_requested.notified())
+        .await
+        .expect("load handler replacement must start without a follow-up CDP command");
+    let replacement_url = format!("http://{fixture_addr}/load-handler-replacement");
+    let messages = timeout(
+        PASSIVE_PROGRESS_TIMEOUT,
+        recv_until_match(&mut socket, |message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.frameNavigated")
+                && message["params"]["frame"]["url"].as_str() == Some(replacement_url.as_str())
+        }),
+    )
+    .await
+    .expect("replacement frame must arrive");
+    let source_loader_id = messages
+        .iter()
+        .find(|message| message["id"] == json!(5_u64))
+        .and_then(|message| message["result"]["loaderId"].as_str())
+        .expect("source Page.navigate loaderId");
+    let source_load_index = messages
+        .iter()
+        .position(|message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.lifecycleEvent")
+                && message["params"]["name"] == json!("load")
+                && message["params"]["loaderId"].as_str() == Some(source_loader_id)
+        })
+        .expect("the already-reached source load fact must be projected");
+    let replacement_frame_index = messages
+        .iter()
+        .position(|message| {
+            message["sessionId"].as_str() == Some(session.session_id.as_str())
+                && message["method"] == json!("Page.frameNavigated")
+                && message["params"]["frame"]["url"].as_str() == Some(replacement_url.as_str())
+        })
+        .expect("replacement frame must be projected");
+    assert!(
+        source_load_index < replacement_frame_index,
+        "an authoritative source load terminal must not be overtaken by replacement selection: {messages:#?}"
+    );
+
+    let _ = socket.close(None).await;
+    abort_test_cdp_server(protocol_server).await;
+    drop(fixture_server);
+}
+
+#[tokio::test]
+async fn websocket_cdp_parser_script_navigation_progresses_with_page_domain_disabled() {
+    const PASSIVE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+
+    async fn source_page() -> impl IntoResponse {
+        (
+            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+            r#"<!doctype html><script src="/navigate-disabled.js"></script><main>source</main>"#,
+        )
+    }
+
+    let script_requested = Arc::new(tokio::sync::Notify::new());
+    let release_script = Arc::new(tokio::sync::Notify::new());
+    let replacement_requested = Arc::new(tokio::sync::Notify::new());
+    let requested_for_script = Arc::clone(&script_requested);
+    let release_for_script = Arc::clone(&release_script);
+    let requested_for_replacement = Arc::clone(&replacement_requested);
+    let fixture_app = Router::new()
+        .route("/source-disabled", get(source_page))
+        .route(
+            "/navigate-disabled.js",
+            get(move || {
+                let requested_for_script = Arc::clone(&requested_for_script);
+                let release_for_script = Arc::clone(&release_for_script);
+                async move {
+                    requested_for_script.notify_one();
+                    release_for_script.notified().await;
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/javascript")],
+                        "location.href = '/replacement-disabled';",
+                    )
+                }
+            }),
+        )
+        .route(
+            "/replacement-disabled",
+            get(move || {
+                let requested_for_replacement = Arc::clone(&requested_for_replacement);
+                async move {
+                    requested_for_replacement.notify_one();
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                        "<!doctype html><main>replacement</main>",
+                    )
+                }
+            }),
+        );
+    let (fixture_addr, fixture_server) =
+        spawn_dedicated_fixture_server(fixture_app, "page-disabled-parser-navigation");
+
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, _) = connect_async(format!(
+        "ws://{cdp_addr}/devtools/browser/{DEFAULT_BROWSER_ID}"
+    ))
+    .await
+    .expect("connect to cdp websocket");
+    let browser_context_id = cdp_create_browser_context(&mut socket, 1).await;
+    let session = cdp_create_attached_target(&mut socket, 2, &browser_context_id).await;
+
+    let source_url = format!("http://{fixture_addr}/source-disabled");
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 3_u64,
+                "method": "Page.navigate",
+                "sessionId": session.session_id,
+                "params": { "url": source_url }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send source Page.navigate without enabling Page");
+    timeout(PASSIVE_PROGRESS_TIMEOUT, script_requested.notified())
+        .await
+        .expect("parser-blocking navigation script request should start");
+    let navigate_messages = timeout(PASSIVE_PROGRESS_TIMEOUT, recv_until_id(&mut socket, 3))
+        .await
+        .expect("Page.navigate should respond while the parser script is blocked");
+    assert!(
+        navigate_messages
+            .iter()
+            .any(|message| message["id"] == json!(3_u64) && message.get("result").is_some()),
+        "Page.navigate should succeed without Page.enable: {navigate_messages:#?}"
+    );
+
+    // Reading the response above is observational. No command or Page-domain
+    // subscription follows it; Browser Owner must still start the replacement.
+    release_script.notify_one();
+    timeout(PASSIVE_PROGRESS_TIMEOUT, replacement_requested.notified())
+        .await
+        .expect("replacement request must start while the Page domain is disabled");
 
     let _ = socket.close(None).await;
     abort_test_cdp_server(protocol_server).await;

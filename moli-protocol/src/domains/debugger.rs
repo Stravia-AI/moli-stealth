@@ -32,25 +32,14 @@ mod tests {
     use crate::testing::TestContext;
 
     async fn with_loaded_document(ctx: &mut TestContext) {
-        ctx.conn
-            .insert_browser_context(BrowserContext::new("BID-debugger".into()));
-        ctx.conn
-            .browser_context
-            .as_mut()
-            .expect("browser context")
-            .set_active_target_id("TID-debugger");
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<body>debugger</body>")
-            .await
-            .expect("load debugger test page");
-        ctx.conn
-            .browser_context
-            .as_mut()
-            .expect("browser context")
-            .active_target
-            .runtime_slot
-            .replace_loaded_page(Some(page));
+        let mut browser_context = BrowserContext::new("BID-debugger".into());
+        browser_context.set_active_target_id("TID-debugger");
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<body>debugger</body>",
+            None,
+        )
+        .await;
     }
 
     async fn command(ctx: &mut TestContext, message: Value, command_id: u64) -> Value {
@@ -184,10 +173,20 @@ mod tests {
         let _ = ctx
             .conn
             .finish_renderer_document_navigation_for_session_owner(None, &navigation);
+        assert!(
+            ctx.conn
+                .fail_document_navigation_for_session_owner_if_matches(
+                    None,
+                    &navigation,
+                    moli_core::browser_host::BrowserNavigationFailure::Canceled {
+                        error_text: "debugger interrupt test cleanup".to_owned(),
+                    },
+                )
+        );
         ctx.conn
-            .clear_pending_document_navigation_for_session_owner_if_loader_matches(
+            .clear_document_navigation_protocol_tail_for_session_owner_if_loader_matches(
                 None,
-                &navigation.loader_id,
+                navigation.loader_id(),
             );
     }
 
@@ -349,18 +348,28 @@ mod tests {
         assert!(breakpoint.get("error").is_none(), "{breakpoint:?}");
         ctx.sent.clear();
 
-        let navigate = command(
-            &mut ctx,
-            json!({
+        // Keep the renderer's post-commit parser continuation behind the
+        // production response-flush boundary. Releasing it eagerly lets the
+        // instrumentation breakpoint pause the replacement renderer before
+        // Page.navigate can expose its response, a state the wire actor never
+        // creates.
+        let response_flush = ctx
+            .process_command_holding_response_flush_for_test(json!({
                 "id": 37,
                 "method": "Page.navigate",
                 "params": {
                     "url": "data:text/html,<script>globalThis.__instrumentedNavigation = true</script>"
                 }
-            }),
-            37,
-        )
-        .await;
+            }))
+            .await;
+        let navigate = ctx
+            .sent
+            .iter()
+            .position(|message| message["id"] == json!(37))
+            .map(|position| ctx.sent.remove(position))
+            .expect("Page.navigate response");
+        ctx.finish_held_command_response_flush_for_test(response_flush)
+            .await;
         assert!(
             navigate["result"]["frameId"].as_str().is_some(),
             "{navigate:?}"
@@ -377,6 +386,10 @@ mod tests {
                 },
             )
             .await;
+        ctx.wait_for_scheduler_message("replacement instrumentation pause", |message| {
+            message["method"] == json!("Debugger.paused")
+        })
+        .await;
 
         let created = ctx
             .sent
@@ -389,6 +402,13 @@ mod tests {
             json!("data:text/html,<script>globalThis.__instrumentedNavigation = true</script>"),
             "the instrumented replacement script must reach V8"
         );
+
+        let resume = command(&mut ctx, json!({"id": 38, "method": "Debugger.resume"}), 38).await;
+        assert_eq!(resume["result"], json!({}), "{resume:?}");
+        ctx.wait_for_scheduler_message("replacement Debugger.resumed", |message| {
+            message["method"] == json!("Debugger.resumed")
+        })
+        .await;
     }
 
     #[tokio::test]

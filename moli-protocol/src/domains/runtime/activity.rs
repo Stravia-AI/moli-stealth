@@ -392,7 +392,7 @@ fn push_runtime_inspector_messages_for_session(
     }
 }
 
-pub(in crate::domains) fn push_routed_renderer_runtime_inspector_message_batch_background_events(
+pub(crate) fn push_routed_renderer_runtime_inspector_message_batch_background_events(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
     batches: Vec<RendererRuntimeInspectorMessageBatch>,
@@ -475,7 +475,7 @@ mod tests {
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
     }
 
     fn runtime_binding_attachment_fixture() -> (
@@ -486,11 +486,7 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-1".to_owned());
         browser_context.set_active_target_id("TID-1");
         browser_context.attach_active_session("SID-1");
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
         let attachment = conn
             .target_page_protocol_attachment_identity_for_session(Some("SID-1"))
             .expect("exact Runtime binding attachment");
@@ -624,11 +620,13 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_session_state.page_session_state.log_enabled = true;
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
+            .page_session_state
+            .log_enabled = true;
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         ctx.conn
@@ -675,12 +673,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn runtime_binding_drain_discards_a_replaced_page_attachment() {
+    async fn runtime_binding_drain_discards_a_replaced_page_generation() {
         let (mut conn, attachment) = runtime_binding_attachment_fixture();
         let mut prepared = prepared_runtime_binding_calls(attachment);
         conn.runtime_session_owner_slot_mut(Some("SID-1"))
             .expect("Runtime binding target")
-            .replace_page_attachment_id_for_test();
+            .bump_loaded_page_generation();
         let mut command_context = CommandDispatchContext::default();
         let mut context = ProtocolOutputProjectionContext {
             session_id: Some("SID-1"),
@@ -696,7 +694,7 @@ mod tests {
 
         assert!(
             context.command.take_protocol_events().is_empty(),
-            "a binding call captured from the old Page must not leak through a replacement attachment"
+            "a binding call captured from the old Page must not leak through a replacement generation"
         );
     }
 
@@ -706,7 +704,7 @@ mod tests {
         let mut outputs = runtime_binding_outputs(retired_attachment, "retired-page");
         conn.runtime_session_owner_slot_mut(Some("SID-1"))
             .expect("Runtime binding target")
-            .replace_page_attachment_id_for_test();
+            .bump_loaded_page_generation();
         let current_attachment = conn
             .target_page_protocol_attachment_identity_for_session(Some("SID-1"))
             .expect("replacement Runtime binding attachment");
@@ -821,12 +819,12 @@ mod tests {
         );
         conn.runtime_session_owner_slot_mut(Some("SID-1"))
             .expect("Runtime inspector target")
-            .replace_page_attachment_id_for_test();
+            .bump_loaded_page_generation();
         let events = drain_runtime_inspector_outputs(&mut conn, outputs, Some("SID-1")).await;
 
         assert!(
             events.is_empty(),
-            "an inspector response captured from an old Page attachment must not reach its replacement"
+            "an inspector response captured from an old Page generation must not reach its replacement"
         );
     }
 
@@ -905,7 +903,7 @@ mod tests {
         );
         conn.runtime_session_owner_slot_mut(Some("SID-1"))
             .expect("Runtime inspector target")
-            .replace_page_attachment_id_for_test();
+            .bump_loaded_page_generation();
         outputs.extend(renderer_inspector_outputs(
             &mut conn,
             Some("SID-1"),

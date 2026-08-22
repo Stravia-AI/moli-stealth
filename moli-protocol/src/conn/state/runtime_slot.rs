@@ -1,3 +1,7 @@
+use moli_core::browser_host::{
+    BrowserNetworkArtifactStore as ConnectionNetworkRequestIdAllocator, BrowserPageResidenceHandle,
+    BrowserPageRuntimeLease,
+};
 use moli_core::page::{
     Page, RendererAgentAttachmentId, RendererDevToolsAgentToken, RendererDocumentLifecycleIdentity,
     RendererRuntimeInspectorMessageBatch, ScriptNetworkOutputItem, SubresourceNetworkRequestHandle,
@@ -7,7 +11,7 @@ use moli_core::page::{RendererPageDiagnosticsSnapshot, RendererRuntimeObservable
 use serde_json::{Value, json};
 
 use crate::{
-    conn::{CapturedBody, ConnectionNetworkRequestIdAllocator},
+    conn::CapturedBody,
     domains::{
         log_output_state::{TargetLogOutputQueueState, TargetNetworkLogEntry},
         network::{
@@ -23,13 +27,10 @@ use crate::{
 };
 
 use super::devtools_renderer_channel::{DevToolsRendererChannel, RendererAgentDetachReason};
-use super::page_slot::{
-    DocumentNavigationToken, InitialDocumentPageBuildWaiter, TargetPageAbsenceReason,
-    TargetPageSlot,
-};
+use super::page_slot::{InitialDocumentPageBuildWaiter, TargetPageAbsenceReason, TargetPageSlot};
 use super::{
     CommittedRendererAgentAttachment, CommittedRendererDocumentBinding,
-    DevToolsRendererChannelError, PreparedRendererAgentAttachment,
+    DevToolsRendererChannelError, DocumentNavigationToken, PreparedRendererAgentAttachment,
     PreparedRendererCallReplacements, RendererAgentAttachment, RendererPageResidenceIdentity,
     TargetJavaScriptDialogScope, TargetJavaScriptDialogScopeObserver, TargetPageAttachmentId,
 };
@@ -42,7 +43,6 @@ pub(crate) struct FinishedRendererDocumentNavigation {
 #[derive(Debug)]
 struct RetiringRendererDocumentOutput {
     renderer_page: RendererPageResidenceIdentity,
-    page_attachment_id: TargetPageAttachmentId,
     binding: CommittedRendererDocumentBinding,
     network_agent: RetiringTargetNetworkAgentState,
 }
@@ -105,13 +105,6 @@ impl TargetNetworkRequestIdAllocator<'_> {
         let network_request_id = network_request_id_allocator.allocate_request_id();
         (request_id, network_request_id)
     }
-
-    #[cfg(test)]
-    pub(crate) fn allocate_network_request_id(&mut self) -> String {
-        self.runtime_slot
-            .network_agent
-            .allocate_network_request_id()
-    }
 }
 
 impl TargetRuntimeSlot {
@@ -133,8 +126,12 @@ impl TargetRuntimeSlot {
         &mut self.page_slot
     }
 
-    pub(crate) fn loaded_page(&self) -> Option<&Page> {
+    pub(crate) fn loaded_page(&self) -> Option<BrowserPageRuntimeLease> {
         self.page_slot.loaded_page()
+    }
+
+    pub(crate) fn loaded_renderer_page_residence(&self) -> Option<RendererPageResidenceIdentity> {
+        self.page_slot.loaded_renderer_page_residence()
     }
 
     pub(crate) fn committed_renderer_document_binding(
@@ -143,12 +140,19 @@ impl TargetRuntimeSlot {
         self.page_slot.renderer_document_lifecycle_binding()
     }
 
-    pub(crate) fn loaded_page_mut(&mut self) -> Option<&mut Page> {
+    pub(crate) fn loaded_page_mut(&mut self) -> Option<BrowserPageRuntimeLease> {
         self.page_slot.loaded_page_mut()
     }
 
     pub(crate) fn has_loaded_page(&self) -> bool {
         self.page_slot.has_loaded_page()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loaded_page_runtime_access_for_test(
+        &self,
+    ) -> Option<moli_core::browser_host::BrowserPageRuntimeAccess> {
+        self.page_slot.loaded_page_runtime_access_for_test()
     }
 
     pub(crate) fn has_pending_initial_document_page_build(&self) -> bool {
@@ -206,29 +210,13 @@ impl TargetRuntimeSlot {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
         self.javascript_dialog_scope.retire();
         let mut page = page;
-        let retiring_document = self
-            .page_slot
-            .loaded_page()
-            .zip(self.page_slot.renderer_document_lifecycle_binding())
-            .map(|(loaded_page, binding)| {
-                (
-                    RendererPageResidenceIdentity::from_page(loaded_page),
-                    binding.page_attachment_id,
-                    binding.clone(),
-                )
-            });
+        let retiring_renderer_page = self.loaded_renderer_page_residence();
         let retiring_document =
-            retiring_document.map(|(renderer_page, page_attachment_id, binding)| {
-                RetiringRendererDocumentOutput {
-                    renderer_page,
-                    page_attachment_id,
-                    binding,
-                    network_agent: self.network_agent.rotate_document_for_replacement(),
-                }
-            });
+            self.prepare_retiring_renderer_document_output(retiring_renderer_page);
         self.ensure_renderer_attachment_for_replacement(page.as_mut());
         let previous = self.page_slot.replace_loaded_page(page);
         if let Some(retiring_document) = retiring_document {
@@ -242,6 +230,88 @@ impl TargetRuntimeSlot {
         previous
     }
 
+    pub(crate) fn project_loaded_page_after_browser_owner_commit(
+        &mut self,
+        replacement: &moli_core::browser_host::BrowserPageReplacement,
+        retiring_renderer_page: Option<RendererPageResidenceIdentity>,
+    ) {
+        self.javascript_dialog_scope.retire();
+        let retiring_document =
+            self.prepare_retiring_renderer_document_output(retiring_renderer_page);
+        self.page_slot
+            .project_loaded_page_after_browser_owner_commit(replacement);
+        self.ensure_loaded_page_renderer_attachment();
+        if let Some(retiring_document) = retiring_document {
+            self.retiring_renderer_document_outputs
+                .push(retiring_document);
+            self.reset_replacement_document_output_state();
+        } else {
+            self.reset_document_output_state();
+        }
+        self.ingest_owner_page_observable_output_updates();
+    }
+
+    fn prepare_retiring_renderer_document_output(
+        &mut self,
+        renderer_page: Option<RendererPageResidenceIdentity>,
+    ) -> Option<RetiringRendererDocumentOutput> {
+        let renderer_page = renderer_page?;
+        let binding = self
+            .page_slot
+            .renderer_document_lifecycle_binding()?
+            .clone();
+        Some(RetiringRendererDocumentOutput {
+            renderer_page,
+            binding,
+            network_agent: self.network_agent.rotate_document_for_replacement(),
+        })
+    }
+
+    pub(crate) fn project_initial_document_page_after_browser_owner_commit(
+        &mut self,
+        transition: &moli_core::browser_host::BrowserPageResidenceTransition,
+    ) {
+        self.javascript_dialog_scope.retire();
+        self.page_slot
+            .project_initial_document_page_after_browser_owner_commit(transition);
+        self.ensure_loaded_page_renderer_attachment();
+        self.reset_document_output_state();
+        self.ingest_owner_page_observable_output_updates();
+    }
+
+    pub(crate) fn project_failed_navigation_page_absence_after_browser_owner_commit(
+        &mut self,
+        transition: &moli_core::browser_host::BrowserPageResidenceTransition,
+    ) -> Option<Page> {
+        self.javascript_dialog_scope.retire();
+        self.page_slot
+            .project_failed_navigation_page_absence_after_browser_owner_commit(transition);
+        self.transition_renderer_channel_for_page_absence(
+            TargetPageAbsenceReason::NavigationFailed,
+        );
+        self.reset_document_output_state();
+        self.ingest_owner_page_observable_output_updates();
+        None
+    }
+
+    pub(crate) fn project_target_termination_after_browser_owner_commit(
+        &mut self,
+        reason: TargetPageAbsenceReason,
+        termination: &moli_core::browser_host::BrowserTargetTermination,
+    ) -> Option<Page> {
+        self.javascript_dialog_scope.retire();
+        self.page_slot
+            .project_page_absence_after_browser_owner_termination(
+                reason,
+                termination.terminal_page(),
+            );
+        self.transition_renderer_channel_for_page_absence(reason);
+        self.reset_document_output_state();
+        self.ingest_owner_page_observable_output_updates();
+        None
+    }
+
+    #[cfg(test)]
     pub(crate) fn clear_loaded_page_with_reason(
         &mut self,
         reason: TargetPageAbsenceReason,
@@ -282,6 +352,17 @@ impl TargetRuntimeSlot {
         self.transition_renderer_channel_for_page_absence(reason);
     }
 
+    pub(crate) fn retire_page_projection_after_browser_owner_forget(&mut self) -> Option<Page> {
+        self.javascript_dialog_scope.retire();
+        let previous = self
+            .page_slot
+            .retire_page_projection_after_browser_owner_forget();
+        self.transition_renderer_channel_for_page_absence(TargetPageAbsenceReason::TargetClosed);
+        self.reset_document_output_state();
+        self.ingest_owner_page_observable_output_updates();
+        previous
+    }
+
     #[cfg(test)]
     pub(crate) fn set_loaded_page_for_test(&mut self, page: Page) {
         let _ = self.replace_loaded_page(Some(page));
@@ -291,47 +372,34 @@ impl TargetRuntimeSlot {
         self.page_slot.page_attachment_id()
     }
 
-    pub(crate) fn pending_page_attachment_id(&self) -> Option<TargetPageAttachmentId> {
-        self.page_slot.pending_page_attachment_id()
-    }
-
-    pub(crate) fn reserve_renderer_page_attachment(
-        &mut self,
-        renderer_page: RendererPageResidenceIdentity,
-    ) -> TargetPageAttachmentId {
-        self.page_slot
-            .reserve_renderer_page_attachment(renderer_page)
-    }
-
     #[cfg(test)]
     pub(crate) fn set_page_attachment_id_for_test(&mut self, raw: u64) -> TargetPageAttachmentId {
-        let attachment_changed = self
-            .page_slot
-            .page_attachment_id()
-            .map(TargetPageAttachmentId::get)
-            != Some(raw);
-        if attachment_changed {
-            self.javascript_dialog_scope.retire();
-        }
         self.page_slot.set_page_attachment_id_for_test(raw)
     }
 
     #[cfg(test)]
-    pub(crate) fn replace_page_attachment_id_for_test(&mut self) -> TargetPageAttachmentId {
-        self.javascript_dialog_scope.retire();
-        self.page_slot.replace_page_attachment_id_for_test()
+    pub(crate) fn loaded_page_generation(&self) -> u64 {
+        self.page_slot.loaded_page_generation()
+    }
+
+    pub(crate) fn page_residence_handle(
+        &self,
+    ) -> &moli_core::browser_host::BrowserPageResidenceHandle {
+        self.page_slot.page_residence_handle()
     }
 
     #[cfg(test)]
-    pub(crate) fn install_page_attachment_id_for_test(
-        &mut self,
-        attachment_id: TargetPageAttachmentId,
-    ) {
-        if self.page_slot.page_attachment_id() != Some(attachment_id) {
+    pub(crate) fn bump_loaded_page_generation(&mut self) {
+        self.javascript_dialog_scope.retire();
+        self.page_slot.bump_loaded_page_generation();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_loaded_page_generation(&mut self, generation: u64) {
+        if self.page_slot.loaded_page_generation() != generation {
             self.javascript_dialog_scope.retire();
         }
-        self.page_slot
-            .install_page_attachment_id_for_test(attachment_id);
+        self.page_slot.set_loaded_page_generation(generation);
     }
 
     pub(crate) fn javascript_dialog_scope_observer(&self) -> TargetJavaScriptDialogScopeObserver {
@@ -349,31 +417,15 @@ impl TargetRuntimeSlot {
         self.javascript_dialog_scope.retire();
     }
 
-    pub(crate) fn start_document_navigation(
+    pub(crate) fn begin_document_navigation_protocol_state(
         &mut self,
-        target_id: String,
-        loader_id: String,
-    ) -> DocumentNavigationToken {
+        token: DocumentNavigationToken,
+    ) {
         self.devtools_renderer_channel.reopen_after_target_crash();
-        let token = self
-            .page_slot
-            .start_document_navigation(target_id, loader_id);
+        self.page_slot.begin_document_navigation_protocol_state();
         self.devtools_renderer_channel
-            .navigation_started(token.clone())
+            .navigation_started(token)
             .expect("an open target runtime slot must accept a new document navigation");
-        token
-    }
-
-    #[cfg(test)]
-    pub(crate) fn prepare_renderer_agent_candidate(
-        &self,
-        token: &DocumentNavigationToken,
-        page: &mut Page,
-    ) -> Result<PreparedRendererAgentAttachment, DevToolsRendererChannelError> {
-        let candidate = self
-            .prepare_renderer_agent_candidate_token(token, page.renderer_devtools_agent_token())?;
-        page.bind_renderer_agent_attachment(candidate.id());
-        Ok(candidate)
     }
 
     pub(crate) fn prepare_renderer_agent_candidate_token(
@@ -402,7 +454,7 @@ impl TargetRuntimeSlot {
             .commit_candidate_transaction(candidate)?;
         if self
             .page_slot
-            .bind_pending_document_navigation_renderer_page(transaction.navigation(), renderer_page)
+            .bind_document_navigation_renderer_page(transaction.navigation(), renderer_page)
         {
             return Ok(transaction);
         }
@@ -411,15 +463,23 @@ impl TargetRuntimeSlot {
         Err(DevToolsRendererChannelError::CommittedCandidateMismatch)
     }
 
+    pub(crate) fn validate_renderer_agent_candidate_commit(
+        &self,
+        candidate: &PreparedRendererAgentAttachment,
+    ) -> Result<(), DevToolsRendererChannelError> {
+        self.devtools_renderer_channel
+            .validate_candidate_commit(candidate)
+    }
+
     pub(crate) fn rollback_committed_renderer_agent_candidate(
         &mut self,
         transaction: CommittedRendererAgentAttachment,
     ) -> Result<(), DevToolsRendererChannelError> {
-        let loader_id = transaction.navigation().loader_id.clone();
+        let loader_id = transaction.navigation().loader_id().to_owned();
         self.devtools_renderer_channel
             .rollback_committed_candidate(transaction)?;
         self.page_slot
-            .clear_pending_document_navigation_if_loader_matches(&loader_id);
+            .clear_pending_renderer_page_if_loader_matches(&loader_id);
         Ok(())
     }
 
@@ -491,23 +551,20 @@ impl TargetRuntimeSlot {
         self.devtools_renderer_channel.current()
     }
 
-    pub(crate) fn routes_current_renderer_page_owner(
+    pub(crate) fn routes_renderer_page(
         &self,
         renderer_page: RendererPageResidenceIdentity,
-        page_attachment_id: TargetPageAttachmentId,
     ) -> bool {
-        self.page_slot.page_attachment_id() == Some(page_attachment_id)
-            && self.page_slot.routes_renderer_page(renderer_page)
+        self.page_slot.routes_renderer_page(renderer_page)
     }
 
-    pub(crate) fn routes_retiring_renderer_page_owner(
+    pub(crate) fn routes_retiring_renderer_page(
         &self,
         renderer_page: RendererPageResidenceIdentity,
-        page_attachment_id: TargetPageAttachmentId,
     ) -> bool {
-        self.retiring_renderer_document_outputs.iter().any(|entry| {
-            entry.renderer_page == renderer_page && entry.page_attachment_id == page_attachment_id
-        })
+        self.retiring_renderer_document_outputs
+            .iter()
+            .any(|entry| entry.renderer_page == renderer_page)
     }
 
     pub(crate) fn finish_renderer_page_output_retirement(
@@ -548,54 +605,6 @@ impl TargetRuntimeSlot {
         Ok(previous)
     }
 
-    pub(crate) fn accepts_pending_document_navigation_event(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        self.page_slot
-            .accepts_pending_document_navigation_event(token)
-    }
-
-    pub(crate) fn document_navigation_cancellation_handle(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> Option<moli_fetch::FetchCancelHandle> {
-        self.page_slot
-            .document_navigation_cancellation_handle(token)
-    }
-
-    pub(crate) fn arm_background_navigation_completion(
-        &mut self,
-        token: &DocumentNavigationToken,
-        additional_cancellation: Option<moli_fetch::FetchCancelHandle>,
-    ) -> bool {
-        self.page_slot
-            .arm_background_navigation_completion(token, additional_cancellation)
-    }
-
-    pub(crate) fn settle_background_navigation_completion(
-        &mut self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        self.page_slot
-            .settle_background_navigation_completion(token)
-    }
-
-    pub(crate) fn has_inflight_background_navigation(&self) -> bool {
-        self.page_slot.has_inflight_background_navigation()
-    }
-
-    pub(crate) fn accepts_document_body_completion_event(
-        &self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        self.page_slot.accepts_document_body_completion_event(token)
-    }
-
-    pub(crate) fn has_pending_document_navigation(&self) -> bool {
-        self.page_slot.has_pending_document_navigation()
-    }
-
     pub(crate) fn moli_memory_diagnostics(&self) -> Value {
         json!({
             "hasLoadedPage": self.has_loaded_page(),
@@ -604,7 +613,6 @@ impl TargetRuntimeSlot {
                 .loaded_page_absence_reason()
                 .map(TargetPageAbsenceReason::label),
             "pageAttachmentId": self.page_attachment_id().map(TargetPageAttachmentId::get),
-            "hasPendingDocumentNavigation": self.has_pending_document_navigation(),
             "rendererChannelClosed": self.devtools_renderer_channel.is_closed(),
             "rendererChannelHasCurrentAttachment":
                 self.devtools_renderer_channel.current().is_some(),
@@ -654,53 +662,53 @@ impl TargetRuntimeSlot {
             .claim_completed_subresource_request_id(request_id)
     }
 
-    pub(crate) fn current_document_loader_id(&self) -> Option<&str> {
-        self.page_slot.current_document_loader_id()
-    }
-
-    pub(crate) fn committed_document_loader_id(&self) -> Option<&str> {
-        self.page_slot.committed_document_loader_id()
-    }
-
-    pub(crate) fn commit_pending_document_navigation_if_matches(
-        &mut self,
-        token: &DocumentNavigationToken,
-    ) -> bool {
-        self.page_slot
-            .commit_pending_document_navigation_if_matches(token)
-    }
-
-    pub(crate) fn clear_pending_document_navigation_if_loader_matches(
+    pub(crate) fn clear_pending_renderer_page_if_loader_matches(
         &mut self,
         loader_id: &str,
     ) -> bool {
         self.page_slot
-            .clear_pending_document_navigation_if_loader_matches(loader_id)
+            .clear_pending_renderer_page_if_loader_matches(loader_id)
     }
 
-    pub(crate) fn clear_document_navigation_state(&mut self) {
+    pub(crate) fn clear_renderer_document_protocol_state(&mut self) {
         self.javascript_dialog_scope.retire();
-        self.page_slot.clear_document_navigation_state();
+        self.page_slot.clear_renderer_document_protocol_state();
     }
 
     fn ensure_loaded_page_renderer_attachment(&mut self) {
-        let Some(page) = self.page_slot.loaded_page_mut() else {
+        let Some(mut page) = self.page_slot.loaded_page_mut() else {
             return;
         };
-        let agent_token = page.renderer_devtools_agent_token();
-        let attachment = self
-            .devtools_renderer_channel
-            .attach_current(agent_token)
-            .expect("a loaded page cannot be attached to a closed renderer channel");
-        debug_assert!(attachment.is_none());
-        let current = self
+        if self.devtools_renderer_channel.current().is_none() {
+            let agent_token = page.renderer_devtools_agent_token();
+            if let Err(error) = self.devtools_renderer_channel.attach_current(agent_token) {
+                tracing::warn!(
+                    %error,
+                    page_id = page.page_id(),
+                    "could not project Browser-owned Page into a closed renderer channel"
+                );
+                return;
+            }
+        }
+        let Some(attachment_id) = self
             .devtools_renderer_channel
             .current()
-            .expect("a loaded page must have a renderer attachment");
-        page.bind_renderer_agent_attachment(current.id());
+            .map(|attachment| attachment.id())
+        else {
+            tracing::warn!(
+                page_id = page.page_id(),
+                "Browser-owned Page projection has no renderer attachment"
+            );
+            return;
+        };
+        page.bind_renderer_agent_attachment(attachment_id);
     }
 
-    pub(crate) fn prepare_renderer_channel_for_new_target(&mut self) {
+    pub(crate) fn prepare_renderer_channel_for_new_target(
+        &mut self,
+        page_residence: BrowserPageResidenceHandle,
+    ) {
+        self.page_slot.prepare_for_new_target(page_residence);
         if self.devtools_renderer_channel.is_closed() {
             self.devtools_renderer_channel = DevToolsRendererChannel::default();
         }
@@ -735,6 +743,7 @@ impl TargetRuntimeSlot {
         }
     }
 
+    #[cfg(test)]
     fn ensure_renderer_attachment_for_replacement(&mut self, page: Option<&mut Page>) {
         if self.devtools_renderer_channel.current().is_some() {
             return;
@@ -774,6 +783,7 @@ impl TargetRuntimeSlot {
         let current_renderer_page = self
             .page_slot
             .loaded_page()
+            .as_deref()
             .map(RendererPageResidenceIdentity::from_page);
         if let Some(binding) = self.page_slot.renderer_document_lifecycle_binding()
             && binding.renderer_document_identity() == source_document
@@ -907,11 +917,11 @@ impl TargetRuntimeSlot {
     }
 
     pub(crate) fn ingest_owner_page_observable_output_updates(&mut self) -> bool {
-        let Some(page) = self.page_slot.loaded_page_mut() else {
+        let Some(mut page) = self.page_slot.loaded_page_mut() else {
             self.observable_queue.reset_output_queue();
             return false;
         };
-        Self::ingest_page_observable_output_update(&mut self.observable_queue, page);
+        Self::ingest_page_observable_output_update(&mut self.observable_queue, &mut page);
         true
     }
 
@@ -1167,12 +1177,26 @@ impl TargetRuntimeSlot {
             .record_pending_response_body(request_id, session_ids);
     }
 
-    pub(crate) fn captured_response_body(&self, request_id: &str) -> Option<&CapturedResponseBody> {
+    pub(crate) fn captured_response_body(&self, request_id: &str) -> Option<CapturedResponseBody> {
         self.network_agent.captured_response_body(request_id)
     }
 
-    pub(crate) fn captured_request_body(&self, request_id: &str) -> Option<&CapturedRequestBody> {
+    pub(crate) fn captured_request_body(&self, request_id: &str) -> Option<CapturedRequestBody> {
         self.network_agent.captured_request_body(request_id)
+    }
+
+    pub(crate) fn adopt_browser_network_artifact_store(
+        &mut self,
+        browser_artifacts: moli_core::browser_host::BrowserNetworkArtifactStore,
+    ) {
+        self.network_agent
+            .adopt_browser_network_artifact_store(browser_artifacts);
+    }
+
+    pub(crate) fn browser_network_artifact_store(
+        &self,
+    ) -> moli_core::browser_host::BrowserNetworkArtifactStore {
+        self.network_agent.browser_network_artifact_store()
     }
 
     pub(crate) fn collected_network_data_artifacts(
@@ -1306,17 +1330,6 @@ impl TargetRuntimeSlot {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_next_network_request_sequence_for_test(&mut self, sequence: u64) {
-        self.network_agent
-            .set_next_network_request_sequence_for_test(sequence);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_network_request_sequence_for_test(&self) -> u64 {
-        self.network_agent.next_network_request_sequence_for_test()
-    }
-
-    #[cfg(test)]
     pub(crate) fn io_streams_empty_for_test(&self) -> bool {
         self.network_agent.io_streams_empty()
     }
@@ -1434,7 +1447,7 @@ mod tests {
             "the old target cannot reopen its terminal renderer channel"
         );
 
-        slot.prepare_renderer_channel_for_new_target();
+        slot.prepare_renderer_channel_for_new_target(BrowserPageResidenceHandle::default());
         assert!(
             slot.devtools_renderer_channel
                 .attach_current(RendererDevToolsAgentToken::allocate())
@@ -1481,7 +1494,6 @@ mod tests {
                     moli_core::RendererOwnerLocalHostId::new_for_testing(3),
                     page_id,
                 ),
-                page_attachment_id: TargetPageAttachmentId::from_raw_for_test(1),
                 binding: CommittedRendererDocumentBinding {
                     renderer_frame: RendererFrameToken { page_id },
                     renderer_document: RendererDocumentToken::new_for_testing(page_id, 1),

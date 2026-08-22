@@ -1,4 +1,5 @@
 use super::*;
+use moli_core::browser_host::{BrowserInitialEmptyDocumentSeed, BrowserPageOwnerKey};
 
 async fn complete_child_frame_lifecycle(ctx: &mut TestContext) {
     let pending = ctx
@@ -70,11 +71,13 @@ async fn get_frame_tree_reports_the_current_committed_document_loader() {
         "SID-FRAME-TREE-LOADER",
         "about:blank",
     );
+    let owner = BrowserPageOwnerKey::new("BID-FRAME-TREE-LOADER", "TID-FRAME-TREE-LOADER");
     ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .begin_active_target_initial_empty_document("about:blank".to_owned());
+        .register_target_initial_empty_document_for_test(
+            &owner,
+            BrowserInitialEmptyDocumentSeed::new("about:blank"),
+        )
+        .expect("registered Target should accept test metadata");
 
     ctx.process_async(json!({
         "id": 1101,
@@ -130,9 +133,17 @@ async fn get_frame_tree_without_a_current_document_reports_an_empty_loader_id() 
         session_id,
         "about:blank",
     );
-    let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-    browser_context.begin_active_target_initial_empty_document("about:blank".to_owned());
-    browser_context.mark_target_initial_empty_document_exited(target_id);
+    let owner = BrowserPageOwnerKey::new("BID-FRAME-TREE-NO-DOCUMENT", target_id);
+    ctx.conn
+        .register_target_initial_empty_document_for_test(
+            &owner,
+            BrowserInitialEmptyDocumentSeed::new("about:blank"),
+        )
+        .expect("registered Target should accept test metadata");
+    assert!(
+        ctx.conn
+            .mark_target_initial_empty_document_exited_for_session_owner(Some(session_id))
+    );
 
     ctx.process_async(json!({
         "id": 1104,
@@ -564,7 +575,7 @@ async fn get_frame_tree_targets_loaded_background_owner_without_promotion() {
     bc.attach_active_session("SID-active".to_owned());
     bc.set_target_url("data:text/html,<body>active</body>".to_owned());
     bc.background_targets.push(background);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-background"))
         .await;
     ctx.sent.clear();
@@ -605,7 +616,7 @@ async fn get_frame_tree_targets_inactive_loaded_owner_without_activation() {
     inactive.set_active_target_id("TID-inactive".to_owned());
     inactive.attach_active_session("SID-inactive".to_owned());
     inactive.set_target_url("about:blank".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.insert_inactive_browser_context_fixture(inactive);
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
         .await;
     ctx.sent.clear();
@@ -626,7 +637,7 @@ async fn get_frame_tree_targets_inactive_loaded_owner_without_activation() {
         json!("inactive-child")
     );
     assert!(
-        ctx.conn.browser_context.is_none(),
+        ctx.inactive_browser_context_fixture_remains_unselected(),
         "inactive Page.getFrameTree should not activate its browser context"
     );
 }

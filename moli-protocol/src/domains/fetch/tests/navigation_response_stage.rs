@@ -1,6 +1,247 @@
 use super::*;
 use base64::Engine as _;
 
+async fn pause_html_navigation_at_response_stage(
+    ctx: &mut TestContext,
+    command_id_base: u64,
+    body: &'static str,
+) -> (tokio::task::JoinHandle<()>, String) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut request = [0u8; 2048];
+        let _ = stream.read(&mut request).await.unwrap();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        let _ = stream.shutdown().await;
+    });
+
+    let mut browser_context = attached_browser_context();
+    browser_context
+        .active_target
+        .runtime_slot
+        .enable_primary_network_events();
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.process_async(json!({
+        "id": command_id_base,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1",
+        "params": {
+            "patterns": [{
+                "urlPattern": "*",
+                "requestStage": "Response",
+                "resourceType": "Document"
+            }]
+        }
+    }))
+    .await;
+    ctx.expect_result(command_id_base, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": command_id_base + 1,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": format!("http://{addr}/page") }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("response-stage request id")
+        .to_owned();
+    (server, request_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_response_main_document_is_selected_by_exact_browser_owner_after_frontend_drop() {
+    let mut ctx = TestContext::new();
+    let (server, request_id) = pause_html_navigation_at_response_stage(
+        &mut ctx,
+        36_800,
+        "<!doctype html><main>response-owner-finished</main>",
+    )
+    .await;
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("response-paused navigation Page owner");
+    let raw = json!({
+        "id": 36_802,
+        "method": "Fetch.continueResponse",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document continueResponse must await Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("response-stage navigation participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page),
+        "Browser Host must retain the exact Page captured at response admission"
+    );
+    drop(frontend_wait);
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(host_messages.iter().all(|message| message["id"] != 36_802));
+    let navigation_completed_in_host_turn =
+        host_messages.iter().any(|message| message["id"] == 36_801);
+    if !navigation_completed_in_host_turn {
+        wait_until_message(
+            &mut ctx,
+            "SID-1",
+            "response-stage navigation after frontend drop",
+            |message| message["id"] == 36_801,
+        )
+        .await;
+    }
+    assert!(
+        navigation_completed_in_host_turn || ctx.sent.iter().any(|message| message["id"] == 36_801),
+        "dropping the Fetch frontend wait must not stop the accepted Browser action"
+    );
+    assert!(
+        loaded_page_html_for_test(&mut ctx)
+            .await
+            .contains("response-owner-finished")
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopped_browser_host_restores_continue_response_transfer_without_direct_fallback() {
+    let mut ctx = TestContext::new();
+    let (server, request_id) = pause_html_navigation_at_response_stage(
+        &mut ctx,
+        36_810,
+        "<!doctype html><main>must-remain-paused</main>",
+    )
+    .await;
+    ctx.take_all();
+    ctx.stop_browser_host_for_test();
+
+    let raw = json!({
+        "id": 36_812,
+        "method": "Fetch.continueResponse",
+        "sessionId": "SID-1",
+        "params": {
+            "requestId": request_id,
+            "responseCode": 201,
+            "responseHeaders": [{ "name": "Content-Type", "value": "text/plain" }]
+        }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) = ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("stopped Browser Host must reject without a fallback wait");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(messages.iter().any(|message| {
+        message["id"] == 36_812
+            && message["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Browser Host stopped"))
+    }));
+    let fetch_owner = &ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("browser context")
+        .active_target
+        .fetch_owner;
+    assert!(fetch_owner.has_pending_fetch_request_id_for_test(&request_id));
+    assert!(fetch_owner.pending_fetch_response_transfer_is_pending_for_test(&request_id));
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| browser_context.loaded_page())
+            .is_none(),
+        "publication failure must not apply response overrides or commit the paused Document"
+    );
+    server.await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fail_response_main_document_is_selected_by_exact_browser_owner_after_frontend_drop() {
+    let mut ctx = TestContext::new();
+    let (server, request_id) = pause_html_navigation_at_response_stage(
+        &mut ctx,
+        36_820,
+        "<!doctype html><main>must-not-commit</main>",
+    )
+    .await;
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("response-paused navigation Page owner");
+    let raw = json!({
+        "id": 36_822,
+        "method": "Fetch.failRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "errorReason": "Aborted" }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("response-stage failRequest must await Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("response failure participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page),
+        "Browser Host must retain the exact Page captured at response failure admission"
+    );
+    drop(frontend_wait);
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(messages.iter().all(|message| message["id"] != 36_822));
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == 36_821 && message["error"]["message"] == "Aborted" })
+    );
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| browser_context.loaded_page())
+            .is_none(),
+        "dropping the Fetch frontend must not turn the accepted response failure into a commit"
+    );
+    server.await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn response_stage_pause_happens_before_navigation_body_eof() {
     let (tail_tx, tail_rx) = tokio::sync::oneshot::channel::<()>();
@@ -31,7 +272,7 @@ async fn response_stage_pause_happens_before_navigation_body_eof() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -231,6 +472,7 @@ async fn assert_empty_http_error_response_stage(ctx: &mut TestContext, url: &str
         .and_then(|bc| bc.loaded_page())
         .expect("browser-owned HTTP error Document should commit");
     assert_eq!(page.final_url().as_str(), NETWORK_ERROR_PAGE_URL);
+    drop(page);
     assert_eq!(
         ctx.conn
             .browser_context
@@ -275,7 +517,7 @@ async fn empty_http_error_response_stage_commits_browser_error_document_after_co
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_background_navigation_scheduler_for_test();
     let url = format!("http://{addr}/empty-429");
@@ -316,7 +558,7 @@ lateBinding("author-script");
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let initial_page = ctx
         .conn
         .load_page_via_runtime_async("data:text/html,<title>initial</title>")
@@ -503,7 +745,7 @@ async fn response_stage_xml_commit_uses_live_configuration_before_first_author_s
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let initial_page = ctx
         .conn
         .load_page_via_runtime_async("data:text/html,<title>initial</title>")
@@ -694,7 +936,7 @@ async fn response_stage_xml_commit_uses_live_configuration_before_first_author_s
 #[tokio::test(flavor = "multi_thread")]
 async fn fulfill_request_commit_uses_configuration_added_while_paused_before_author_script() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let initial_page = ctx
         .conn
         .load_page_via_runtime_async("data:text/html,<title>initial</title>")
@@ -889,7 +1131,7 @@ async fn interleaved_response_heads_only_commit_the_current_prepared_document() 
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 364,
@@ -969,8 +1211,8 @@ async fn interleaved_response_heads_only_commit_the_current_prepared_document() 
     let superseded = take_response_by_id(&mut ctx, 365);
     assert_eq!(superseded["error"]["code"], -32000);
     assert_eq!(
-        superseded["error"]["message"],
-        "renderer channel navigation was superseded by a newer navigation"
+        superseded["error"]["message"], "Navigation aborted",
+        "Browser Owner must reject the superseded request before its prepared renderer candidate can commit"
     );
     assert_eq!(
         ctx.conn
@@ -1028,7 +1270,7 @@ async fn response_stage_continue_request_rejects_data_url_override_without_consu
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let data_url = "data:text/html,<html><body><main>data response stage</main></body></html>";
 
     ctx.process_async(json!({
@@ -1094,7 +1336,7 @@ async fn response_stage_continue_request_rejects_file_url_override_without_consu
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.process_async(json!({
         "id": 395,
         "method": "Fetch.enable",
@@ -1173,8 +1415,8 @@ async fn response_stage_continue_response_streams_network_events_through_backgro
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
-    let (background_tx, mut background_rx) = tokio::sync::mpsc::unbounded_channel();
+    ctx.conn.insert_browser_context(bc);
+    let (background_tx, mut background_rx) = crate::conn::browser_background_output_channel();
     ctx.conn.set_background_event_sender(background_tx);
     let url = format!("http://{addr}/page");
 
@@ -1293,7 +1535,7 @@ async fn continue_response_can_override_status_and_headers() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -1422,7 +1664,7 @@ async fn continue_response_header_override_keeps_streaming_parser_body() {
                 let request = String::from_utf8_lossy(&request);
                 if request.starts_with("GET /gate.js ") {
                     script_requested.store(true, Ordering::SeqCst);
-                    release_tail.notify_waiters();
+                    release_tail.notify_one();
                     let body = b"window.__gateScriptRan = true;";
                     let response = format!(
                         concat!(
@@ -1468,7 +1710,7 @@ async fn continue_response_header_override_keeps_streaming_parser_body() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -1526,6 +1768,7 @@ async fn continue_response_header_override_keeps_streaming_parser_body() {
         json!({ "frameId": "TID-1", "loaderId": LOADER_ID }),
         Some("SID-1"),
     );
+    wait_until_renderer_document_load(&mut ctx, Some("SID-1"), "TID-1", LOADER_ID).await;
 
     let page = ctx
         .conn
@@ -1542,6 +1785,7 @@ async fn continue_response_header_override_keeps_streaming_parser_body() {
         script_requested.load(Ordering::SeqCst),
         "parser should request the external script before the main body EOF"
     );
+    drop(page);
     assert!(
         loaded_page_html_for_test(&mut ctx)
             .await
@@ -1578,7 +1822,7 @@ async fn response_stage_navigation_request_paused_includes_synthesized_cookie_he
             &[("set-cookie".to_owned(), "sid=nav; Path=/page".to_owned())],
         );
     }
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 3_530,
@@ -1664,7 +1908,7 @@ async fn continue_response_with_binary_response_headers_overrides_headers() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -1757,7 +2001,7 @@ async fn fail_request_at_response_stage_aborts_navigation() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -1859,7 +2103,7 @@ async fn fulfill_request_at_response_stage_replaces_the_network_candidate_once()
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 369,
@@ -1973,7 +2217,7 @@ async fn take_response_body_as_stream_at_response_stage_returns_stream_and_keeps
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2101,7 +2345,7 @@ async fn continue_response_rejects_while_response_body_stream_is_active() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2224,7 +2468,7 @@ async fn io_close_cancels_active_response_body_stream_and_request_id() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2323,7 +2567,7 @@ async fn get_response_body_does_not_consume_active_response_body_stream() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2477,7 +2721,7 @@ async fn fulfill_request_cancels_active_response_body_stream_and_uses_synthetic_
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2580,7 +2824,7 @@ async fn fail_request_cancels_active_response_body_stream_and_fails_navigation()
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2670,7 +2914,7 @@ async fn clear_browser_cache_cancels_active_response_body_stream_without_stale_r
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2771,7 +3015,7 @@ async fn fail_request_finishes_pending_navigation_with_error() {
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -2818,7 +3062,7 @@ async fn fulfill_request_completes_navigation_with_synthetic_response() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
 
@@ -2911,7 +3155,7 @@ async fn fulfill_request_navigation_get_response_body_preserves_binary_bytes() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 44_001,
@@ -2989,7 +3233,7 @@ async fn fulfill_request_document_body_uses_phase_one_parser_semantics() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 390,
@@ -3059,7 +3303,7 @@ async fn fulfill_request_accepts_binary_response_headers() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 40,
@@ -3150,7 +3394,7 @@ async fn continue_request_applies_url_method_headers_and_post_data() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
 

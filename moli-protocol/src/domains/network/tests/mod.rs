@@ -26,7 +26,6 @@ use crate::{
     },
     domains::page::LOADER_ID,
 };
-use moli_core::{OptionalResourceFetchMask, runtime::NavigationEngine};
 use moli_fetch::{FetchConfig, RawResponse, ResponseHead};
 use parking_lot::Mutex;
 use serde_json::json;

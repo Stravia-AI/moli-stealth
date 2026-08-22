@@ -1,22 +1,50 @@
+#[cfg(test)]
+use super::super::state::TargetPageAbsenceReason;
 use super::super::state::{
-    CommittedRendererAgentAttachment, PreparedRendererAgentAttachment, TargetPageAbsenceReason,
-    TargetPageAttachmentId, prepare_renderer_call_replacements_for_devtools_sessions,
-    runtime_bindings_for_renderer,
+    CommittedRendererAgentAttachment, PreparedRendererAgentAttachment, TargetPageAttachmentId,
+    prepare_renderer_call_replacements_for_devtools_sessions, runtime_bindings_for_renderer,
 };
-use super::super::{BackgroundTarget, BrowserContext, TargetRuntimeSlot};
-use crate::conn::TargetPageResidenceIdentity;
-use moli_core::page::{Page, RendererPageCommandPostResponseContinuation};
-use url::Url;
-
-pub(crate) struct LoadedNavigationPageCommit {
-    pub(crate) replaced_page_owner: Option<TargetPageResidenceIdentity>,
-    pub(crate) committed_document_post_response_continuation:
-        Option<RendererPageCommandPostResponseContinuation>,
-}
+use super::super::{
+    BackgroundTarget, BrowserContext, RendererPageResidenceIdentity, TargetRuntimeSlot,
+};
+use moli_core::{
+    browser_host::{
+        BrowserPageReplacement, BrowserPageResidenceTransition, BrowserPageRuntimeLease,
+        BrowserPageRuntimeOwner,
+    },
+    page::Page,
+};
 
 pub(crate) enum LoadedNavigationRendererAttachmentCommit {
     Prepare(Option<PreparedRendererAgentAttachment>),
     AlreadyCommitted(CommittedRendererAgentAttachment),
+}
+
+/// Renderer/protocol participant state prepared before Browser Core commits
+/// an authoritative Page replacement.
+pub(crate) struct PreparedLoadedNavigationPageCommit {
+    page: Page,
+    retiring_renderer_page: Option<RendererPageResidenceIdentity>,
+}
+
+impl PreparedLoadedNavigationPageCommit {
+    pub(crate) fn new(
+        page: Page,
+        retiring_renderer_page: Option<RendererPageResidenceIdentity>,
+    ) -> Self {
+        Self {
+            page,
+            retiring_renderer_page,
+        }
+    }
+
+    pub(crate) fn retiring_renderer_page(&self) -> Option<RendererPageResidenceIdentity> {
+        self.retiring_renderer_page
+    }
+
+    pub(crate) fn into_page_runtime_owner(self) -> BrowserPageRuntimeOwner {
+        BrowserPageRuntimeOwner::new(self.page)
+    }
 }
 
 impl BrowserContext {
@@ -24,7 +52,7 @@ impl BrowserContext {
         let _ = page.close_async().await;
     }
 
-    pub(crate) fn loaded_page(&self) -> Option<&Page> {
+    pub(crate) fn loaded_page(&self) -> Option<BrowserPageRuntimeLease> {
         self.active_target.runtime_slot.loaded_page()
     }
 
@@ -36,25 +64,31 @@ impl BrowserContext {
         self.active_target.runtime_slot.page_attachment_id()
     }
 
-    fn clear_active_target_session_scoped_state_fields(&mut self) {
-        let retained_runtime_bindings = runtime_bindings_for_renderer(
-            &self.devtools_session_state,
-            &self.auxiliary_devtools_session_states,
-        );
-        self.devtools_session_state
-            .page_session_state
-            .page_lifecycle_events = false;
-        self.devtools_session_state = Default::default();
-        self.auxiliary_devtools_session_states.clear();
-        self.devtools_session_state.runtime_bindings = retained_runtime_bindings;
-        self.devtools_session_state.page_session_state.log_enabled = false;
-        self.devtools_session_state
-            .console_output_session_state
-            .console_enabled = false;
-        self.devtools_session_state
-            .page_session_state
-            .performance
-            .disable();
+    pub(crate) fn clear_active_target_session_scoped_state_fields(&mut self) {
+        {
+            let (primary, auxiliary) = self.devtools_session_states_mut();
+            let retained_runtime_bindings = runtime_bindings_for_renderer(primary, auxiliary);
+            primary.page_session_state.page_lifecycle_events = false;
+            *primary = Default::default();
+            // Auxiliary map membership is the exact attachment route. Reset
+            // session-scoped contents without deleting those still-live
+            // routes; detach owns structural removal.
+            for state in auxiliary.values_mut() {
+                *state = Default::default();
+            }
+            primary.runtime_bindings = retained_runtime_bindings;
+            primary.page_session_state.log_enabled = false;
+            primary.console_output_session_state.console_enabled = false;
+            primary.page_session_state.performance.disable();
+            primary.page_session_state.page_bypass_csp_enabled = false;
+            primary.page_session_state.page_font_families.clear();
+            primary
+                .page_session_state
+                .page_file_chooser_opened_event_enabled = false;
+            primary
+                .page_session_state
+                .page_intercept_file_chooser_dialog_enabled = false;
+        }
         self.active_target
             .runtime_slot
             .disable_primary_network_events();
@@ -69,19 +103,6 @@ impl BrowserContext {
         self.emulated_media = Default::default();
         self.emulated_device_metrics = None;
         self.cpu_throttling_rate = 1.0;
-        self.devtools_session_state
-            .page_session_state
-            .page_bypass_csp_enabled = false;
-        self.devtools_session_state
-            .page_session_state
-            .page_font_families
-            .clear();
-        self.devtools_session_state
-            .page_session_state
-            .page_file_chooser_opened_event_enabled = false;
-        self.devtools_session_state
-            .page_session_state
-            .page_intercept_file_chooser_dialog_enabled = false;
         self.touch_emulation_enabled = false;
         self.emit_touch_events_for_mouse = false;
         self.focus_emulation_enabled = false;
@@ -99,11 +120,12 @@ impl BrowserContext {
             .clear_observable_output_state();
     }
 
-    fn clear_active_target_loaded_document_session_state(&mut self) {
-        self.devtools_session_state
+    pub(crate) fn clear_active_target_loaded_document_session_state(&mut self) {
+        let (primary, auxiliary) = self.devtools_session_states_mut();
+        primary
             .page_session_state
             .clear_loaded_document_context_state();
-        for state in self.auxiliary_devtools_session_states.values_mut() {
+        for state in auxiliary.values_mut() {
             state
                 .page_session_state
                 .clear_loaded_document_context_state();
@@ -111,13 +133,14 @@ impl BrowserContext {
     }
 
     pub(crate) fn clear_active_target_runtime_remote_object_tracking(&mut self) {
-        self.devtools_session_state
-            .clear_runtime_remote_object_tracking();
-        for state in self.auxiliary_devtools_session_states.values_mut() {
+        let (primary, auxiliary) = self.devtools_session_states_mut();
+        primary.clear_runtime_remote_object_tracking();
+        for state in auxiliary.values_mut() {
             state.clear_runtime_remote_object_tracking();
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
         let previous = self.active_target.runtime_slot.replace_loaded_page(page);
         self.ingest_active_target_output_updates();
@@ -128,6 +151,7 @@ impl BrowserContext {
         previous
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_loaded_page_with_reason(
         &mut self,
         reason: TargetPageAbsenceReason,
@@ -142,71 +166,6 @@ impl BrowserContext {
             .clear_loaded_document_context_state();
         self.clear_active_target_loaded_document_session_state();
         previous
-    }
-
-    pub(crate) fn mark_next_navigation_history_replace_current(&mut self) {
-        self.active_target
-            .owner_state
-            .mark_next_navigation_history_replace_current();
-    }
-
-    pub(crate) fn mark_next_navigation_history_traverse_to_entry(&mut self, entry_id: i32) {
-        self.active_target
-            .owner_state
-            .mark_next_navigation_history_traverse_to_entry(entry_id);
-    }
-
-    pub(crate) fn clear_pending_navigation_history_update(&mut self) {
-        self.active_target
-            .owner_state
-            .clear_pending_navigation_history_update();
-    }
-
-    pub(crate) fn navigation_history_entry_url(&mut self, entry_id: i32) -> Option<String> {
-        let target_url = self.target_url().to_owned();
-        let page_snapshot = self
-            .loaded_page()
-            .map(|page| (target_url, page.document_title()));
-        self.active_target
-            .owner_state
-            .navigation_history_entry_url(page_snapshot, entry_id)
-    }
-
-    fn record_loaded_page_navigation_history(&mut self, page: &Page, history_url: &Url) {
-        let previous_title = self
-            .active_target
-            .owner_state
-            .committed_document_title()
-            .map(str::to_owned)
-            .or_else(|| self.loaded_page().map(Page::document_title));
-        if let Some(previous_title) = previous_title {
-            self.active_target
-                .owner_state
-                .refresh_current_navigation_history_title(previous_title);
-        }
-        self.active_target
-            .owner_state
-            .record_loaded_page_navigation_history((
-                history_url.to_string(),
-                page.document_title(),
-            ));
-    }
-
-    pub(crate) fn record_same_document_navigation_history(
-        &mut self,
-        url: String,
-        history_update: moli_core::page::SameDocumentHistoryUpdate,
-    ) {
-        let page_snapshot = self
-            .loaded_page()
-            .map(|page| (self.target_url().to_owned(), page.document_title()));
-        let title = page_snapshot
-            .as_ref()
-            .map(|(_, title)| title.clone())
-            .unwrap_or_default();
-        self.active_target
-            .owner_state
-            .record_same_document_navigation_history(page_snapshot, url, title, history_update);
     }
 
     #[cfg(test)]
@@ -233,8 +192,12 @@ impl BrowserContext {
             .ingest_owner_page_observable_output_updates()
     }
 
+    #[cfg(test)]
     async fn close_loaded_page_async(&mut self) -> bool {
-        let page = self.clear_loaded_page_with_reason(TargetPageAbsenceReason::TargetClosed);
+        let page = self
+            .active_target
+            .runtime_slot
+            .retire_page_projection_after_browser_owner_forget();
         let had_page = page.is_some();
         if let Some(page) = page {
             Self::close_page_best_effort(page).await;
@@ -242,25 +205,15 @@ impl BrowserContext {
         had_page
     }
 
-    pub(crate) async fn commit_loaded_navigation_page_async(
+    pub(crate) fn prepare_loaded_navigation_page_commit(
         &mut self,
         mut page: Page,
         renderer_attachment_commit: LoadedNavigationRendererAttachmentCommit,
-        history_url: &Url,
-    ) -> anyhow::Result<LoadedNavigationPageCommit> {
-        let committed_document_post_response_continuation =
-            page.take_committed_document_post_response_continuation();
-        let previous_page_owner =
-            self.active_target
-                .runtime_slot
-                .page_attachment_id()
-                .map(|page_attachment_id| {
-                    TargetPageResidenceIdentity::new(
-                        self.id.clone(),
-                        self.active_target_id_owned(),
-                        page_attachment_id,
-                    )
-                });
+    ) -> anyhow::Result<PreparedLoadedNavigationPageCommit> {
+        let retiring_renderer_page = self
+            .active_target
+            .runtime_slot
+            .loaded_renderer_page_residence();
         let primary_session_id = self.active_session_id_owned();
         let previous_attachment = match renderer_attachment_commit {
             LoadedNavigationRendererAttachmentCommit::Prepare(renderer_agent_candidate) => self
@@ -283,10 +236,11 @@ impl BrowserContext {
         if let Some(previous_attachment) = previous_attachment
             && previous_attachment.id() != new_attachment_id
         {
+            let (primary, auxiliary) = self.devtools_session_states_mut();
             let replacements = prepare_renderer_call_replacements_for_devtools_sessions(
                 primary_session_id.as_deref(),
-                &mut self.devtools_session_state,
-                &mut self.auxiliary_devtools_session_states,
+                primary,
+                auxiliary,
                 previous_attachment.id(),
                 new_attachment_id,
             )?;
@@ -294,26 +248,61 @@ impl BrowserContext {
                 .runtime_slot
                 .install_pending_renderer_call_replacements(replacements);
         }
-        let committed_document_title = page.document_title();
-        self.record_loaded_page_navigation_history(&page, history_url);
-        let previous = self.replace_loaded_page(Some(page));
+        Ok(PreparedLoadedNavigationPageCommit::new(
+            page,
+            retiring_renderer_page,
+        ))
+    }
+
+    pub(crate) fn project_loaded_navigation_page_after_browser_owner_commit(
+        &mut self,
+        replacement: &BrowserPageReplacement,
+        retiring_renderer_page: Option<RendererPageResidenceIdentity>,
+    ) {
+        self.active_target
+            .runtime_slot
+            .project_loaded_page_after_browser_owner_commit(replacement, retiring_renderer_page);
+        self.ingest_active_target_output_updates();
+        self.active_target
+            .owner_state
+            .clear_loaded_document_context_state();
+        self.clear_active_target_loaded_document_session_state();
         self.reset_subresource_network_cursor();
         self.clear_websocket_network_artifacts();
         self.active_target
             .owner_state
             .clear_committed_document_navigation_state();
+        self.clear_active_target_runtime_remote_object_tracking();
+    }
+
+    pub(crate) fn project_initial_document_page_after_browser_owner_commit(
+        &mut self,
+        transition: &BrowserPageResidenceTransition,
+    ) {
+        self.active_target
+            .runtime_slot
+            .project_initial_document_page_after_browser_owner_commit(transition);
+        self.ingest_active_target_output_updates();
         self.active_target
             .owner_state
-            .commit_document_title(committed_document_title);
-        self.clear_active_target_runtime_remote_object_tracking();
-        let replaced_page_owner = previous.as_ref().and(previous_page_owner);
-        if let Some(page) = previous {
-            Self::close_page_best_effort(page).await;
-        }
-        Ok(LoadedNavigationPageCommit {
-            replaced_page_owner,
-            committed_document_post_response_continuation,
-        })
+            .clear_loaded_document_context_state();
+        self.clear_active_target_loaded_document_session_state();
+    }
+
+    pub(crate) fn project_failed_navigation_page_absence_after_browser_owner_commit(
+        &mut self,
+        transition: &BrowserPageResidenceTransition,
+    ) -> Option<Page> {
+        let previous = self
+            .active_target
+            .runtime_slot
+            .project_failed_navigation_page_absence_after_browser_owner_commit(transition);
+        self.ingest_active_target_output_updates();
+        self.active_target
+            .owner_state
+            .clear_loaded_document_context_state();
+        self.clear_active_target_loaded_document_session_state();
+        previous
     }
 
     pub(crate) async fn clear_active_target_session_scoped_state_async(
@@ -321,7 +310,7 @@ impl BrowserContext {
     ) -> Result<(), String> {
         self.clear_active_target_session_scoped_state_fields();
         let emulated_media: moli_core::page::EmulatedMediaOverrides = (&self.emulated_media).into();
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
             page.set_extra_http_headers_async(&[])
                 .await
                 .map_err(|error| format!("failed to clear page extra headers: {error}"))?;
@@ -354,48 +343,7 @@ impl BrowserContext {
         self.clear_active_target_session_scoped_state_fields();
     }
 
-    pub(crate) async fn mark_active_target_crashed_async(&mut self) {
-        self.active_target
-            .owner_state
-            .target_crash_state
-            .mark_crashed();
-        self.clear_document_navigation_state_for_active_target();
-        let page = self.clear_loaded_page_with_reason(TargetPageAbsenceReason::TargetCrashed);
-        if let Some(page) = page {
-            Self::close_page_best_effort(page).await;
-        }
-        self.clear_pending_fetch_state();
-        self.active_target
-            .owner_state
-            .navigation_history_state
-            .clear();
-        self.clear_session_scoped_network_observation_artifacts();
-    }
-
-    pub(crate) async fn close_active_target_after_page_close_async(&mut self) {
-        if let Some(target_id) = self.active_target_id_owned() {
-            self.forget_target_opener_references_for_target(&target_id);
-            self.forget_target_window_names_for_target(&target_id);
-            self.forget_target_popup_id_for_target(&target_id);
-        }
-        self.clear_active_target_session_scoped_state_fields();
-        self.active_target.owner_state.target_crash_state.clear();
-        self.clear_active_target_id();
-        self.clear_document_navigation_state_for_active_target();
-        self.detach_active_session();
-        self.close_loaded_page_async().await;
-        self.active_target.owner_state.clear_page_local_state();
-        self.reset_target_identity_to_about_blank();
-        self.reset_target_scoped_network_artifacts();
-        self.active_target
-            .owner_state
-            .clear_observable_output_state();
-        self.active_target
-            .runtime_slot
-            .request_id_allocator()
-            .reset_subresource_fetch_request_counter();
-    }
-
+    #[cfg(test)]
     pub(crate) async fn reset_active_target_slot_to_empty_async(&mut self) {
         self.clear_active_target_session_scoped_state_fields();
         self.active_target.owner_state.target_crash_state.clear();
@@ -406,7 +354,7 @@ impl BrowserContext {
         }
         self.detach_active_session();
         self.clear_active_target_id();
-        self.clear_document_navigation_state_for_active_target();
+        self.clear_renderer_document_protocol_state_for_active_target();
         self.close_loaded_page_async().await;
         self.clear_pending_fetch_state();
         self.active_target.owner_state.clear_page_local_state();
@@ -423,11 +371,31 @@ impl BrowserContext {
             .reset_subresource_fetch_request_counter();
     }
 
-    pub(crate) async fn close_all_pages_async(&mut self) {
-        self.close_loaded_page_async().await;
-        for target in &mut self.background_targets {
-            target.close_page_async().await;
+    /// Transfers any residual renderer Pages after authoritative whole-
+    /// Context removal.
+    ///
+    /// A correct disposal chain has already closed every registered Target,
+    /// so this is normally empty. Returning concrete Pages lets Browser Host
+    /// expose real cleanup participants if physical projection drift left a
+    /// residual Page, without awaiting an always-ready compatibility drain.
+    pub(crate) fn take_residual_pages_for_browser_context_disposal(&mut self) -> Vec<Page> {
+        let mut pages = Vec::new();
+        if let Some(page) = self
+            .active_target
+            .runtime_slot
+            .retire_page_projection_after_browser_owner_forget()
+        {
+            pages.push(page);
         }
+        for target in &mut self.background_targets {
+            if let Some(page) = target
+                .runtime_slot
+                .retire_page_projection_after_browser_owner_forget()
+            {
+                pages.push(page);
+            }
+        }
+        pages
     }
 }
 
@@ -457,11 +425,11 @@ impl BackgroundTarget {
         &self.runtime_slot
     }
 
-    pub(crate) fn loaded_page(&self) -> Option<&Page> {
+    pub(crate) fn loaded_page(&self) -> Option<BrowserPageRuntimeLease> {
         self.runtime_slot.loaded_page()
     }
 
-    pub(crate) fn loaded_page_mut(&mut self) -> Option<&mut Page> {
+    pub(crate) fn loaded_page_mut(&mut self) -> Option<BrowserPageRuntimeLease> {
         self.runtime_slot.loaded_page_mut()
     }
 
@@ -469,8 +437,42 @@ impl BackgroundTarget {
         self.loaded_page().is_some()
     }
 
+    #[cfg(test)]
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
         let previous = self.runtime_slot.replace_loaded_page(page);
+        self.runtime_slot
+            .ingest_owner_page_observable_output_updates();
+        previous
+    }
+
+    pub(crate) fn project_loaded_page_after_browser_owner_commit(
+        &mut self,
+        replacement: &BrowserPageReplacement,
+        retiring_renderer_page: Option<RendererPageResidenceIdentity>,
+    ) {
+        self.runtime_slot
+            .project_loaded_page_after_browser_owner_commit(replacement, retiring_renderer_page);
+        self.runtime_slot
+            .ingest_owner_page_observable_output_updates();
+    }
+
+    pub(crate) fn project_initial_document_page_after_browser_owner_commit(
+        &mut self,
+        transition: &BrowserPageResidenceTransition,
+    ) {
+        self.runtime_slot
+            .project_initial_document_page_after_browser_owner_commit(transition);
+        self.runtime_slot
+            .ingest_owner_page_observable_output_updates();
+    }
+
+    pub(crate) fn project_failed_navigation_page_absence_after_browser_owner_commit(
+        &mut self,
+        transition: &BrowserPageResidenceTransition,
+    ) -> Option<Page> {
+        let previous = self
+            .runtime_slot
+            .project_failed_navigation_page_absence_after_browser_owner_commit(transition);
         self.runtime_slot
             .ingest_owner_page_observable_output_updates();
         previous
@@ -484,7 +486,7 @@ impl BackgroundTarget {
     pub(crate) async fn close_page_async(&mut self) {
         if let Some(page) = self
             .runtime_slot
-            .clear_loaded_page_with_reason(TargetPageAbsenceReason::TargetClosed)
+            .retire_page_projection_after_browser_owner_forget()
         {
             BrowserContext::close_page_best_effort(page).await;
         }

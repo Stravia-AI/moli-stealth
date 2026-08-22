@@ -191,7 +191,7 @@ pub(super) fn complete_perform_search_live(
     out: &mut DomCommandOutput,
 ) -> DomCommandTaskStep {
     let search = {
-        let Some(page) = super::loaded_page_mut_for_session(conn, session_id) else {
+        let Some(mut page) = super::loaded_page_mut_for_session(conn, session_id) else {
             out.push_error(-32000, "NoDocumentLoaded");
             return DomCommandTaskStep::Complete;
         };
@@ -217,7 +217,7 @@ pub(super) fn complete_get_search_results_live(
     out: &mut DomCommandOutput,
 ) -> DomCommandTaskStep {
     let resolution = {
-        let Some(page) = super::loaded_page_mut_for_session(conn, session_id) else {
+        let Some(mut page) = super::loaded_page_mut_for_session(conn, session_id) else {
             out.push_error(-32000, "NoDocumentLoaded");
             return DomCommandTaskStep::Complete;
         };
@@ -255,7 +255,7 @@ pub(super) fn complete_discard_search_results_live(
     completion: CompletedPageCommand,
     out: &mut DomCommandOutput,
 ) -> DomCommandTaskStep {
-    let Some(page) = super::loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = super::loaded_page_mut_for_session(conn, session_id) else {
         out.push_success();
         return DomCommandTaskStep::Complete;
     };

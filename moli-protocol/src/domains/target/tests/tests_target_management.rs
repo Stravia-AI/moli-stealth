@@ -1,5 +1,4 @@
 use super::*;
-use crate::conn::ParkedPageSessionState;
 
 /// cdp.target: closeTarget – no browser context
 #[tokio::test(flavor = "multi_thread")]
@@ -39,13 +38,13 @@ async fn close_target_success() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
@@ -67,7 +66,6 @@ async fn close_target_success() {
         .push_extra_header(("X-Test".into(), "1".into()));
     bc.set_target_security_origin("https://old.example".into());
     bc.set_target_secure_context_type("InsecureScheme".into());
-    bc.set_next_network_request_sequence_for_test(41);
     bc.set_subresource_network_emitted_record_count_for_test(12);
     bc.set_next_io_stream_sequence_for_test(7);
     bc.active_target
@@ -90,7 +88,6 @@ async fn close_target_success() {
     assert!(!bc.active_target.owner_state.target_crash_state.is_crashed());
     assert_eq!(bc.target_security_origin(), crate::conn::URL_BASE);
     assert_eq!(bc.target_secure_context_type(), "Secure");
-    assert_eq!(bc.next_network_request_sequence_for_test(), 0);
     assert_eq!(bc.subresource_network_emitted_record_count_for_test(), 0);
     assert_eq!(bc.next_io_stream_sequence_for_test(), 0);
     assert_eq!(
@@ -100,17 +97,17 @@ async fn close_target_success() {
         0
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .page_session_state
             .page_lifecycle_events
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
     assert!(
-        !bc.devtools_session_state
+        !bc.devtools_session_state()
             .runtime_session_state
             .inspector_enabled
     );
@@ -342,7 +339,7 @@ async fn close_target_emits_detached_events() {
     let bc = ctx.conn.browser_context.as_mut().unwrap();
     bc.attach_active_session(session_id.clone());
     assert!(bc.assign_auxiliary_session_to_target("TID-000000000A", "SID-aux".into()));
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
 
@@ -389,7 +386,7 @@ async fn close_target_without_inspector_enabled_emits_inspector_detached_event()
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 29,
@@ -423,7 +420,7 @@ async fn close_target_invalidates_runtime_context_and_object_without_active_page
         "about:blank".to_owned(),
     );
     bc.background_targets.push(background_target);
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(
         "data:text/html,<html><body><script>globalThis.__lm_closed_target_marker = 'active-clean';</script>active</body></html>",
         Some("SID-active"),
@@ -562,19 +559,10 @@ async fn close_background_target_emits_detached_events_and_clears_attached_sessi
     );
     let bc = ctx.conn.browser_context.as_mut().unwrap();
     assert!(bc.assign_auxiliary_session_to_target("TID-000000000B", "SID-aux".into()));
-    bc.replace_parked_page_session_state(
-        "TID-000000000B".into(),
-        ParkedPageSessionState {
-            devtools_session_state: crate::conn::DevToolsSessionState {
-                runtime_session_state: crate::conn::TargetRuntimeSessionState {
-                    inspector_enabled: true,
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-            ..Default::default()
-        },
-    );
+    bc.primary_devtools_session_state_for_target_mut("TID-000000000B")
+        .expect("background Target frontend state")
+        .runtime_session_state
+        .inspector_enabled = true;
 
     ctx.process_async(json!({
         "id": 121,
@@ -633,13 +621,13 @@ async fn close_target_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 20,
@@ -732,7 +720,7 @@ async fn close_target_aborts_paused_runtime_fetch_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -865,7 +853,7 @@ async fn close_target_aborts_paused_response_stage_runtime_xhr_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -1033,7 +1021,7 @@ async fn close_target_aborts_paused_runtime_xhr_auth_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -1265,17 +1253,12 @@ async fn get_targets_reports_pending_initial_document_page_target_info() {
         "<main>loaded</main>",
     )
     .await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .stage_background_target(
-            "TID-pending-targets".to_owned(),
-            None,
-            "about:blank#pending-targets".to_owned(),
-            None,
-            None,
-        );
+    push_background_target(
+        &mut ctx,
+        "TID-pending-targets",
+        "about:blank#pending-targets",
+        None,
+    );
 
     ctx.process_async(json!({"id": 20120, "method": "Target.getTargets"}))
         .await;
@@ -1362,17 +1345,12 @@ async fn get_target_info_reports_pending_initial_document_page_target_info() {
         "<main>loaded</main>",
     )
     .await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .stage_background_target(
-            "TID-pending-info".to_owned(),
-            None,
-            "about:blank#pending-info".to_owned(),
-            None,
-            None,
-        );
+    push_background_target(
+        &mut ctx,
+        "TID-pending-info",
+        "about:blank#pending-info",
+        None,
+    );
 
     ctx.process_async(json!({"id": 20121, "method": "Target.getTargetInfo",
                        "params": {"targetId": "TID-pending-info"}}))
@@ -1436,17 +1414,12 @@ async fn set_discover_targets_reports_pending_initial_document_page_target_creat
     )
     .await;
     ctx.conn.set_root_target_discovery_enabled(false);
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .stage_background_target(
-            "TID-pending-discover".to_owned(),
-            None,
-            "about:blank#pending-discover".to_owned(),
-            None,
-            None,
-        );
+    push_background_target(
+        &mut ctx,
+        "TID-pending-discover",
+        "about:blank#pending-discover",
+        None,
+    );
 
     ctx.process_async(json!({
         "id": 20122,
@@ -1537,6 +1510,38 @@ async fn send_message_to_target_wraps_nested_result_in_received_message_event() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn send_message_to_target_wraps_nested_parse_error_in_received_message_event() {
+    let mut ctx = TestContext::new();
+    load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .attach_active_session("SID-9");
+
+    ctx.process_async(json!({
+        "id": 1400,
+        "method": "Target.sendMessageToTarget",
+        "params": {
+            "message": "{",
+            "sessionId": "SID-9"
+        }
+    }))
+    .await;
+
+    ctx.expect_result(1400, json!({}), None);
+    let event = ctx.take_one();
+    assert_eq!(event["method"], "Target.receivedMessageFromTarget");
+    assert_eq!(event["params"]["sessionId"], "SID-9");
+    let nested: serde_json::Value =
+        serde_json::from_str(event["params"]["message"].as_str().expect("nested message"))
+            .expect("nested parse error should be valid JSON");
+    assert_eq!(nested["id"], json!(null));
+    assert_eq!(nested["error"]["code"], json!(-32700));
+    assert_eq!(nested["error"]["message"], json!("Parse error"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn async_send_message_to_target_wraps_nested_page_navigation() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
@@ -1584,7 +1589,7 @@ async fn async_send_message_to_target_wraps_nested_page_navigation() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_to_target_preserves_nested_scheduler_events() {
+async fn send_message_to_target_exposes_nested_navigation_to_browser_owner() {
     let mut ctx = TestContext::new();
     load_bc_with_target(&mut ctx, "BID-9", "TID-000000000A");
     ctx.conn
@@ -1593,6 +1598,7 @@ async fn send_message_to_target_preserves_nested_scheduler_events() {
         .unwrap()
         .attach_active_session("SID-9");
 
+    let url = "data:text/html,<html><body>nested scheduler event</body></html>";
     let raw = json!({
         "id": 1402,
         "method": "Target.sendMessageToTarget",
@@ -1601,7 +1607,7 @@ async fn send_message_to_target_preserves_nested_scheduler_events() {
                 "id": 7702,
                 "method": "Page.navigate",
                 "params": {
-                    "url": "data:text/html,<html><body>nested scheduler event</body></html>"
+                    "url": url
                 }
             }))
             .expect("nested message json"),
@@ -1610,43 +1616,39 @@ async fn send_message_to_target_preserves_nested_scheduler_events() {
     })
     .to_string();
 
-    let outcome = ctx.conn.process_message_with_turn_outcome_async(&raw).await;
-    let (messages, scheduler_events) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let crate::conn::CdpCommandTaskStep::Pending(outer_start) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("Target.sendMessageToTarget should expose its start participant");
+    };
+    let completed_outer_start = outer_start.wait().await;
+    let crate::conn::CdpCommandTaskStep::Pending(nested_owner_wait) = ctx
+        .conn
+        .complete_pending_command_dispatch(completed_outer_start)
+        .await
+    else {
+        panic!("nested Page.navigate should wait for Browser Owner selection");
+    };
 
-    assert!(
-        messages
-            .iter()
-            .any(|message| message["id"] == json!(1402) && message["result"] == json!({})),
-        "outer Target.sendMessageToTarget response should be present: {messages:?}"
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    assert_ne!(
+        ctx.conn
+            .runtime_session_owner_target_url(Some("SID-9"))
+            .as_deref(),
+        Some(url),
+        "the nested frontend adapter must not start navigation before owner selection"
     );
-    assert!(
-        messages.iter().any(|message| {
-            if message["method"] != json!("Target.receivedMessageFromTarget") {
-                return false;
-            }
-            let Some(nested_raw) = message["params"]["message"].as_str() else {
-                return false;
-            };
-            let Ok(nested) = serde_json::from_str::<serde_json::Value>(nested_raw) else {
-                return false;
-            };
-            nested["id"] == json!(7702) && nested.get("result").is_some()
-        }),
-        "nested Page.navigate result should be wrapped in a Target event: {messages:?}"
-    );
-    assert!(
-        scheduler_events.iter().any(|event| matches!(
-            event,
-            crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { work }
-                if work.kind()
-                    == crate::domains::activity::ProtocolSchedulerWorkKind::MainDocumentLoadOwnerAction
-        )),
-        "nested Page.navigate deferred scheduler event should be returned to the outer turn: {scheduler_events:?}"
-    );
+    ctx.complete_one_ready_scheduler_input_for_test().await;
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 0);
+    let completed =
+        tokio::time::timeout(std::time::Duration::from_secs(1), nested_owner_wait.wait())
+            .await
+            .expect("Browser Owner selection should release the exact nested start participant");
+    drop(completed);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn send_message_to_target_without_target_errors() {
+async fn send_message_to_target_without_target_rejects_unbound_session() {
     let mut ctx = TestContext::new();
     load_bc(&mut ctx, "BID-9");
     ctx.conn
@@ -1665,5 +1667,5 @@ async fn send_message_to_target_without_target_errors() {
     }))
     .await;
 
-    ctx.expect_error(15, -31998, "TargetNotLoaded");
+    ctx.expect_error(15, -31998, "InvalidSessionId");
 }

@@ -161,7 +161,7 @@ mod tests {
         bc.set_target_url("data:text/html,console-test".to_owned());
         bc.set_active_target_id("TID-1".to_owned());
         bc.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),
@@ -200,7 +200,7 @@ mod tests {
         let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
             !browser_context
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
             "transitional observable-output enabled bit should track Console.disable"
@@ -222,7 +222,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should exist")
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
             "transitional Console projection must not flip before V8 Console.enable succeeds"
@@ -246,7 +246,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should exist")
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
             "transitional Console projection should flip after V8 Console.enable succeeds"
@@ -323,7 +323,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
         assert_eq!(
@@ -547,17 +547,14 @@ mod tests {
         let active = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled
         );
         assert!(
             active
-                .parked_page_session_state("TID-background")
-                .is_some_and(|state| state
-                    .devtools_session_state
-                    .console_output_session_state
-                    .console_enabled),
+                .primary_devtools_session_state_for_target("TID-background")
+                .is_some_and(|state| state.console_output_session_state.console_enabled),
             "background target should stage Console.enable"
         );
     }

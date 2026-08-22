@@ -9,7 +9,7 @@ const INPUT_HIT_Y: u32 = 20;
 async fn with_loaded_document(ctx: &mut TestContext, html: &str) {
     let mut bc = BrowserContext::new("BID-I".into());
     bc.set_active_target_id("TID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let data_url = format!("data:text/html,{html}");
     // Input commands can execute JS and therefore publish concrete renderer
     // output. Install the fixture through the same Page-owner transaction as
@@ -1507,7 +1507,7 @@ async fn coordinate_mouse_event_completes_through_pending_layout_dispatch() {
             .conn
             .complete_pending_command_dispatch(pending.wait().await)
             .await;
-        let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
+        let (messages, scheduler_events) = outcome.into_parts();
 
         assert!(
             scheduler_events.is_empty(),
@@ -1553,7 +1553,7 @@ async fn dispatch_key_event_can_complete_through_pending_command_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
+    let (messages, scheduler_events) = outcome.into_parts();
 
     assert!(
         scheduler_events.is_empty(),
@@ -1596,7 +1596,7 @@ async fn insert_text_can_complete_through_pending_command_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
+    let (messages, scheduler_events) = outcome.into_parts();
 
     assert!(
         scheduler_events.is_empty(),
@@ -1654,7 +1654,7 @@ async fn coordinate_touch_commands_complete_through_pending_layout_dispatch() {
             .conn
             .complete_pending_command_dispatch(pending.wait().await)
             .await;
-        let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
+        let (messages, scheduler_events) = outcome.into_parts();
 
         assert!(
             scheduler_events.is_empty(),
@@ -1751,7 +1751,7 @@ async fn coordinate_drag_event_completes_through_pending_layout_dispatch() {
         .conn
         .complete_pending_command_dispatch(pending.wait().await)
         .await;
-    let (messages, scheduler_events) = ctx.complete_command_task_step_for_test(outcome).await;
+    let (messages, scheduler_events) = outcome.into_parts();
     assert!(
         scheduler_events.is_empty(),
         "drag event dispatch should not enqueue scheduler work"

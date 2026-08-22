@@ -404,11 +404,13 @@ impl TargetSessionOwnerMut<'_> {
                 } => browser_context
                     .background_target(target_id)
                     .filter(|target| target.has_loaded_page())
-                    .and_then(|target| {
+                    .and_then(|_target| {
                         let replay_session_id = if *is_auxiliary_target_session {
                             session_id.clone()
                         } else {
-                            target.session_id().map(str::to_owned)
+                            browser_context
+                                .primary_session_id_for_target(target_id)
+                                .map(str::to_owned)
                         }?;
                         Some(PageLifecycleReplayTarget {
                             session_id: replay_session_id,
@@ -545,14 +547,7 @@ fn devtools_session_page_domain_enabled(state: &DevToolsSessionState) -> bool {
 }
 
 fn browser_context_has_page_domain_enabled_session(browser_context: &BrowserContext) -> bool {
-    devtools_session_page_domain_enabled(&browser_context.devtools_session_state)
-        || browser_context
-            .auxiliary_devtools_session_states
-            .values()
-            .any(devtools_session_page_domain_enabled)
-        || browser_context
-            .target_parking
-            .has_page_domain_enabled_session()
+    browser_context.has_page_domain_enabled_session()
 }
 
 impl CdpConnection {
@@ -639,9 +634,8 @@ impl CdpConnection {
         body: Option<crate::conn::CapturedBody>,
     ) -> bool {
         if self
-            .runtime_session_owner_slot(session_id)
-            .ok()
-            .and_then(TargetRuntimeSlot::committed_document_loader_id)
+            .committed_document_loader_id_for_session_owner(session_id)
+            .as_deref()
             != Some(loader_id.as_str())
         {
             return false;
@@ -663,11 +657,7 @@ impl CdpConnection {
         &self,
         session_id: Option<&str>,
     ) -> Option<MainDocumentResourceSnapshot> {
-        let loader_id = self
-            .runtime_session_owner_slot(session_id)
-            .ok()?
-            .committed_document_loader_id()?
-            .to_owned();
+        let loader_id = self.committed_document_loader_id_for_session_owner(session_id)?;
         self.target_owner_state_for_session(session_id)?
             .page_resource_store
             .main_document_for_loader(&loader_id)
@@ -1009,16 +999,21 @@ mod tests {
     use crate::conn::ParkedPageSessionState;
 
     fn active_session_state_mut(browser_context: &mut BrowserContext) -> TargetSessionStateMut<'_> {
+        let (devtools_session_state, network_policy, tls_verify_host_override) =
+            browser_context.active_frontend_and_policy_state_mut();
         TargetSessionStateMut::Active {
-            devtools_session_state: &mut browser_context.devtools_session_state,
-            network_policy: &mut browser_context.network_policy,
-            tls_verify_host_override: &mut browser_context.tls_verify_host_override,
+            devtools_session_state,
+            network_policy,
+            tls_verify_host_override,
         }
     }
 
-    fn parked_session_state_mut(state: &mut ParkedPageSessionState) -> TargetSessionStateMut<'_> {
+    fn parked_session_state_mut<'a>(
+        state: &'a mut ParkedPageSessionState,
+        devtools_session_state: &'a mut DevToolsSessionState,
+    ) -> TargetSessionStateMut<'a> {
         TargetSessionStateMut::Parked {
-            devtools_session_state: &mut state.devtools_session_state,
+            devtools_session_state,
             network_policy: &mut state.network_policy,
             tls_verify_host_override: &mut state.tls_verify_host_override,
         }
@@ -1043,95 +1038,84 @@ mod tests {
 
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled
         );
-        assert!(active.devtools_session_state.page_session_state.log_enabled);
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
+                .page_session_state
+                .log_enabled
+        );
+        assert!(
+            active
+                .devtools_session_state()
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_bypass_csp_enabled
         );
         assert_eq!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_font_families,
             font_families
         );
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled
         );
         assert!(
             active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .performance
                 .enabled()
         );
 
         let mut parked = ParkedPageSessionState::default();
-        parked_session_state_mut(&mut parked).set_console_enabled(true);
-        parked_session_state_mut(&mut parked).set_log_enabled(true);
-        parked_session_state_mut(&mut parked).set_page_file_chooser_opened_event_enabled(true);
-        parked_session_state_mut(&mut parked).set_page_bypass_csp_enabled(true);
-        parked_session_state_mut(&mut parked).set_page_font_families(font_families.clone());
-        parked_session_state_mut(&mut parked).set_page_intercept_file_chooser_dialog_enabled(true);
+        let mut parked_devtools = DevToolsSessionState::default();
+        parked_session_state_mut(&mut parked, &mut parked_devtools).set_console_enabled(true);
+        parked_session_state_mut(&mut parked, &mut parked_devtools).set_log_enabled(true);
+        parked_session_state_mut(&mut parked, &mut parked_devtools)
+            .set_page_file_chooser_opened_event_enabled(true);
+        parked_session_state_mut(&mut parked, &mut parked_devtools)
+            .set_page_bypass_csp_enabled(true);
+        parked_session_state_mut(&mut parked, &mut parked_devtools)
+            .set_page_font_families(font_families.clone());
+        parked_session_state_mut(&mut parked, &mut parked_devtools)
+            .set_page_intercept_file_chooser_dialog_enabled(true);
         assert!(
-            parked_session_state_mut(&mut parked)
+            parked_session_state_mut(&mut parked, &mut parked_devtools)
                 .enable_performance(PerformanceTimeDomain::TimeTicks)
         );
 
+        assert!(parked_devtools.console_output_session_state.console_enabled);
+        assert!(parked_devtools.page_session_state.log_enabled);
         assert!(
-            parked
-                .devtools_session_state
-                .console_output_session_state
-                .console_enabled
-        );
-        assert!(parked.devtools_session_state.page_session_state.log_enabled);
-        assert!(
-            parked
-                .devtools_session_state
+            parked_devtools
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );
-        assert!(
-            parked
-                .devtools_session_state
-                .page_session_state
-                .page_bypass_csp_enabled
-        );
+        assert!(parked_devtools.page_session_state.page_bypass_csp_enabled);
         assert_eq!(
-            parked
-                .devtools_session_state
-                .page_session_state
-                .page_font_families,
+            parked_devtools.page_session_state.page_font_families,
             font_families
         );
         assert!(
-            parked
-                .devtools_session_state
+            parked_devtools
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled
         );
-        assert!(
-            parked
-                .devtools_session_state
-                .page_session_state
-                .performance
-                .enabled()
-        );
+        assert!(parked_devtools.page_session_state.performance.enabled());
 
         TargetSessionStateMut::NoLoaded.set_console_enabled(true);
         TargetSessionStateMut::NoLoaded.set_log_enabled(true);
@@ -1187,8 +1171,10 @@ mod tests {
 
     #[test]
     fn file_dialog_opened_target_listener_can_be_disabled_after_enable() {
-        let mut conn = CdpConnection::default();
-        conn.browser_context = Some(BrowserContext::new("BID-file-dialog".to_owned()));
+        let mut conn = CdpConnection {
+            browser_context: Some(BrowserContext::new("BID-file-dialog".to_owned())),
+            ..Default::default()
+        };
         conn.browser_context
             .as_mut()
             .expect("browser context")
@@ -1199,7 +1185,7 @@ mod tests {
             conn.browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );
@@ -1210,7 +1196,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );

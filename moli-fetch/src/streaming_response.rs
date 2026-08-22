@@ -349,22 +349,19 @@ impl Drop for StreamingRawResponse {
         if self.completion.is_some() {
             self.cancel_handle.cancel();
         }
-        // Release the exact transport owner before dropping the completion
-        // receiver makes stream termination observable to other tasks.
+        // Dropping the completion receiver can wake an owner that immediately
+        // tries to reap the exact transport runtime. Release that runtime's
+        // lease first instead of relying on the declaration-order destruction
+        // of this struct's fields.
         self.lifetime_lease = None;
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        future::Future,
-        sync::{
-            Arc,
-            atomic::{AtomicBool, Ordering},
-        },
-        task::Poll,
-    };
+    use std::{future::Future, sync::Arc, task::Poll};
+
+    use parking_lot::Mutex;
 
     use super::*;
 
@@ -379,22 +376,6 @@ mod tests {
             redirect_chain: Vec::new(),
             from_cache: false,
             negotiated_http_version: None,
-        }
-    }
-
-    struct CompletionOrderLease {
-        completion_tx: Option<oneshot::Sender<Result<()>>>,
-        dropped_before_completion_closed: Arc<AtomicBool>,
-    }
-
-    impl Drop for CompletionOrderLease {
-        fn drop(&mut self) {
-            let completion_tx = self
-                .completion_tx
-                .as_ref()
-                .expect("test completion sender should remain installed");
-            self.dropped_before_completion_closed
-                .store(!completion_tx.is_closed(), Ordering::SeqCst);
         }
     }
 
@@ -469,27 +450,47 @@ mod tests {
     }
 
     #[test]
-    fn streaming_raw_response_drops_lifetime_lease_before_completion_receiver() {
+    fn dropping_raw_response_releases_lifetime_lease_before_completion_receiver() {
+        struct CompletionMustRemainOpenOnDrop {
+            completion_tx: Arc<Mutex<Option<oneshot::Sender<Result<()>>>>>,
+        }
+
+        impl Drop for CompletionMustRemainOpenOnDrop {
+            fn drop(&mut self) {
+                let completion_tx = self.completion_tx.lock();
+                assert!(
+                    !completion_tx
+                        .as_ref()
+                        .expect("completion sender should remain present")
+                        .is_closed(),
+                    "the runtime lease must be released before completion observers are woken"
+                );
+            }
+        }
+
         let (body_tx, body_rx) = mpsc::unbounded_channel();
         drop(body_tx);
         let (completion_tx, completion_rx) = oneshot::channel();
-        let dropped_before_completion_closed = Arc::new(AtomicBool::new(false));
-        let response = StreamingRawResponse::new_with_head(
+        let completion_tx = Arc::new(Mutex::new(Some(completion_tx)));
+        let stream = StreamingRawResponse::new_with_head(
             sample_response_head(),
             body_rx,
             FetchCancelHandle::new(),
             completion_rx,
         )
-        .with_lifetime_lease(CompletionOrderLease {
-            completion_tx: Some(completion_tx),
-            dropped_before_completion_closed: Arc::clone(&dropped_before_completion_closed),
+        .with_lifetime_lease(CompletionMustRemainOpenOnDrop {
+            completion_tx: Arc::clone(&completion_tx),
         });
 
-        drop(response);
+        drop(stream);
 
         assert!(
-            dropped_before_completion_closed.load(Ordering::SeqCst),
-            "the exact transport owner must be released before completion receiver closure is observable"
+            completion_tx
+                .lock()
+                .as_ref()
+                .expect("completion sender should remain present")
+                .is_closed(),
+            "response destruction should still close its completion receiver"
         );
     }
 }

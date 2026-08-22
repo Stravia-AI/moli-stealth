@@ -1185,12 +1185,16 @@ pub(in crate::domains) fn release_failed_dedicated_worker_target_after_debugger_
         renderer_instance_id,
         DedicatedWorkerRetirementCause::OwnerRetired,
     );
-    Some(commit_failed_dedicated_worker_retirement_sync(
-        conn, outputs,
-    ))
+    Some(commit_dedicated_worker_retirement_sync(conn, outputs))
 }
 
-pub(in crate::domains) async fn retire_dedicated_worker_targets_for_replaced_page_async(
+/// Retires every DedicatedWorker owned by an exact, already-replaced Page.
+///
+/// Preparation and commit deliberately remain in one owner apply turn. The
+/// remaining protocol worker/session state has no asynchronous teardown
+/// operation, so routing this through the generic async target cleanup path
+/// would create a false scheduler boundary after Page replacement.
+pub(in crate::domains) fn retire_dedicated_worker_targets_for_replaced_page(
     conn: &mut CdpConnection,
     replaced_page_owner: &TargetPageResidenceIdentity,
 ) -> Vec<BackgroundProtocolEvent> {
@@ -1214,17 +1218,7 @@ pub(in crate::domains) async fn retire_dedicated_worker_targets_for_replaced_pag
             renderer_instance_id,
             DedicatedWorkerRetirementCause::OwnerRetired,
         );
-        for output in outputs.worker_target_lifecycle_outputs {
-            match commit_dedicated_worker_retirement_output_async(conn, output).await {
-                Ok(output_events) => events.extend(output_events),
-                Err(output) => {
-                    debug_assert!(
-                        false,
-                        "Page replacement DedicatedWorker retirement contained non-terminal output: {output:?}"
-                    );
-                }
-            }
-        }
+        events.extend(commit_dedicated_worker_retirement_sync(conn, outputs));
     }
     events
 }
@@ -1283,7 +1277,11 @@ async fn commit_dedicated_worker_retirement_output_async(
     Ok(events)
 }
 
-fn commit_failed_dedicated_worker_retirement_sync(
+/// Commits a prepared terminal retirement without an async binding-cleanup
+/// round trip. Removing the protocol worker target state first makes every
+/// prepared session detach a pure frontend projection while preserving the observable
+/// `targetInfoChanged -> detachedFromTarget -> targetDestroyed` order.
+fn commit_dedicated_worker_retirement_sync(
     conn: &mut CdpConnection,
     outputs: TargetPreparedOutputs,
 ) -> Vec<BackgroundProtocolEvent> {
@@ -1350,7 +1348,7 @@ fn commit_failed_dedicated_worker_retirement_sync(
             output => {
                 debug_assert!(
                     false,
-                    "failed DedicatedWorker retirement contained non-terminal output: {output:?}"
+                    "synchronous DedicatedWorker retirement contained non-terminal output: {output:?}"
                 );
             }
         }
@@ -2235,11 +2233,11 @@ fn remove_service_worker_target_with_reason(
     outputs
 }
 
-pub(super) async fn close_browser_context_worker_targets_for_dispose_async(
+pub(super) fn prepare_browser_context_worker_targets_for_dispose(
     conn: &mut CdpConnection,
     browser_context_id: &str,
     reason: &'static str,
-) -> Vec<BackgroundProtocolEvent> {
+) -> TargetPreparedOutputs {
     let Some((renderer_runtime, shared_worker_ids, service_worker_ids)) = conn
         .browser_context_by_id(browser_context_id)
         .map(|context| {
@@ -2258,7 +2256,7 @@ pub(super) async fn close_browser_context_worker_targets_for_dispose_async(
             )
         })
     else {
-        return Vec::new();
+        return TargetPreparedOutputs::default();
     };
 
     let mut outputs = TargetPreparedOutputs::default();
@@ -2288,23 +2286,122 @@ pub(super) async fn close_browser_context_worker_targets_for_dispose_async(
         ));
     }
 
-    worker_target_removal_background_events_async(conn, outputs).await
+    outputs
 }
 
-async fn worker_target_removal_background_events_async(
+/// Projects the closed SharedWorker/ServiceWorker targets prepared by whole
+/// BrowserContext disposal without introducing a synthetic async boundary.
+///
+/// The preparation routine above emits only the variants matched here. None
+/// requires renderer execution: workers have already been stopped and their
+/// exact attachment/version retirement capabilities carry the remaining
+/// connection-local cleanup.
+pub(super) fn browser_context_worker_target_removal_background_events(
     conn: &mut CdpConnection,
     outputs: TargetPreparedOutputs,
 ) -> Vec<BackgroundProtocolEvent> {
-    let mut command_context = crate::conn::CommandDispatchContext::default();
-    let mut prepared_outputs =
-        ProtocolOutputPayloads::from_slot(TargetPreparedOutputSlot::from_outputs(outputs));
-    emit_target_lifecycle_events(
-        conn,
-        &mut ProtocolOutputProjectionContext::new(None, &mut command_context),
-        Some(&mut prepared_outputs),
-    )
-    .await;
-    command_context.take_protocol_events()
+    let mut side_effects = events::TargetProtocolSideEffects::default();
+    for output in outputs.worker_target_lifecycle_outputs {
+        match output {
+            WorkerTargetLifecycleOutput::SharedWorkerAttachmentEvents { attachment, events } => {
+                if attachment.is_current() {
+                    side_effects.extend_background_events(events);
+                }
+            }
+            WorkerTargetLifecycleOutput::ServiceWorkerVersionEvents { version, events } => {
+                if version.is_current() {
+                    side_effects.extend_background_events(events);
+                }
+            }
+            WorkerTargetLifecycleOutput::ServiceWorkerAttachmentEvents { attachment, events } => {
+                if attachment.is_current() {
+                    side_effects.extend_background_events(events);
+                }
+            }
+            WorkerTargetLifecycleOutput::SharedWorkerDetached {
+                retirement,
+                cleanup_plan,
+            } => {
+                if !retirement.is_current() {
+                    continue;
+                }
+                if cleanup_plan.target_id() != retirement.identity().target_id()
+                    || cleanup_plan.session_id() != retirement.identity().session_id()
+                {
+                    tracing::warn!(
+                        target_id = cleanup_plan.target_id(),
+                        session_id = cleanup_plan.session_id(),
+                        "shared-worker disposal attachment retirement did not match its cleanup plan"
+                    );
+                    continue;
+                }
+                side_effects.extend_background_events(
+                    conn.detach_worker_session_with_binding_cleanup_event_plan(cleanup_plan),
+                );
+                retirement.retire();
+            }
+            WorkerTargetLifecycleOutput::ServiceWorkerDetached {
+                retirement,
+                cleanup_plan,
+            } => {
+                if !retirement.is_current() {
+                    continue;
+                }
+                if cleanup_plan.target_id() != retirement.identity().target_id()
+                    || cleanup_plan.session_id() != retirement.identity().session_id()
+                {
+                    tracing::warn!(
+                        target_id = cleanup_plan.target_id(),
+                        session_id = cleanup_plan.session_id(),
+                        "service-worker disposal attachment retirement did not match its cleanup plan"
+                    );
+                    continue;
+                }
+                side_effects.extend_background_events(
+                    conn.detach_worker_session_with_binding_cleanup_event_plan(cleanup_plan),
+                );
+                retirement.retire();
+            }
+            WorkerTargetLifecycleOutput::SharedWorkerDestroyed { target_delta } => {
+                side_effects.extend_background_events(
+                    conn.prepared_target_host_delta_event_plan(target_delta),
+                );
+            }
+            WorkerTargetLifecycleOutput::ServiceWorkerRunRetired { retirement } => {
+                if retirement.is_current() {
+                    retirement.retire();
+                }
+            }
+            WorkerTargetLifecycleOutput::ServiceWorkerDestroyed {
+                retirement,
+                target_delta,
+            } => {
+                if !retirement.is_current() {
+                    continue;
+                }
+                if let Some(target_delta) = target_delta {
+                    if target_delta.target_id() != retirement.identity().target_id() {
+                        tracing::warn!(
+                            target_id = target_delta.target_id(),
+                            "service-worker disposal retirement did not match its Target delta"
+                        );
+                        continue;
+                    }
+                    side_effects.extend_background_events(
+                        conn.prepared_target_host_delta_event_plan(target_delta),
+                    );
+                }
+                retirement.retire();
+            }
+            unexpected => {
+                tracing::error!(
+                    ?unexpected,
+                    "BrowserContext worker disposal produced an unsupported lifecycle output"
+                );
+            }
+        }
+    }
+    side_effects.into_background_events()
 }
 
 pub(super) async fn close_shared_worker_target_for_target_close_async(
@@ -3711,16 +3808,10 @@ mod tests {
         let mut conn = CdpConnection::default();
         let mut context = BrowserContext::new("BID-1".to_owned());
         context.set_active_target_id("TID-page");
-        let page_attachment_id = context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        let owner_page = TargetPageResidenceIdentity::new(
-            "BID-1".to_owned(),
-            Some("TID-page".to_owned()),
-            page_attachment_id,
-        );
-        conn.browser_context = Some(context);
+        conn.insert_browser_context(context);
+        let owner_page = conn
+            .target_page_residence_identity_for_session(None)
+            .expect("dedicated worker fixture Page must be registered in Browser Core");
         let owner_renderer_page = RendererPageResidenceIdentity::new(
             moli_core::RendererOwnerLocalHostId::new_for_testing(17),
             moli_core::PageId::new_for_testing(23),
@@ -4644,7 +4735,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn page_replacement_retires_only_its_owned_dedicated_workers() {
+    async fn page_replacement_retires_only_its_owned_dedicated_workers_synchronously() {
         let (mut conn, owner_page, owner_renderer_page) = dedicated_worker_fixture();
         conn.set_target_discovery_for_owner(None, CdpTargetFilter::default_target_discovery());
         enable_dedicated_worker_auto_attach_for_owner_page(&mut conn, false);
@@ -4673,7 +4764,7 @@ mod tests {
         let _ = drain_target_lifecycle_events_for_test(&mut conn, loaded).await;
 
         let retained_target_id = "TID-other-worker".to_owned();
-        let retained_owner = TargetPageResidenceIdentity::new_for_test(
+        let retained_owner = TargetPageResidenceIdentity::new(
             "BID-1".to_owned(),
             Some("TID-other-page".to_owned()),
             7,
@@ -4696,10 +4787,11 @@ mod tests {
             .unwrap()
             .active_target
             .runtime_slot
-            .replace_page_attachment_id_for_test();
-        let messages = protocol_messages(
-            &retire_dedicated_worker_targets_for_replaced_page_async(&mut conn, &owner_page).await,
-        );
+            .bump_loaded_page_generation();
+        let messages = protocol_messages(&retire_dedicated_worker_targets_for_replaced_page(
+            &mut conn,
+            &owner_page,
+        ));
 
         assert_eq!(
             messages

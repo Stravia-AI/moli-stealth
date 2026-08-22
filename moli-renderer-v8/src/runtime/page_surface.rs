@@ -10,7 +10,7 @@ use crate::protocol_types::{
 use crate::types::{ScriptObservableOutput, ScriptObservableOutputItem};
 use anyhow::bail;
 pub use moli_page_types::{
-    DevToolsSessionKey, DocumentNodeObjectSnapshot, DocumentNodeSnapshot,
+    BrowserActionId, DevToolsSessionKey, DocumentNodeObjectSnapshot, DocumentNodeSnapshot,
     RendererAgentAttachmentId, RendererDevToolsAgentToken,
     RendererDomDebuggerEventListenerBreakpoint, RendererDomDebuggerXhrBreakpoint,
     RendererInspectorProtocolConfiguration, RendererInspectorProtocolConfigurationCommand,
@@ -305,6 +305,7 @@ impl RendererDocumentSourcedSameDocumentNavigation {
 /// to remain current.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererDocumentSourcedTopLevelLocationNavigation {
+    browser_action_id: BrowserActionId,
     source_document: RendererDocumentLifecycleIdentity,
     request: Box<RendererTopLevelNavigationRequest>,
     runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
@@ -349,7 +350,9 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
         runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
     ) -> Self {
-        Self {
+        let browser_action_id = BrowserActionId::allocate();
+        let navigation = Self {
+            browser_action_id,
             source_document,
             request: Box::new(RendererTopLevelNavigationRequest {
                 url,
@@ -359,7 +362,30 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
                 browser_navigation_kind,
             }),
             runtime_command_cause,
+        };
+        if moli_trace::browser_owner_trace_enabled() {
+            moli_trace::emit_browser_owner_trace_record(
+                &moli_trace::BrowserOwnerTraceRecord::new(
+                    "renderer_intent_published",
+                    "renderer-intent",
+                    "renderer-task",
+                    "renderer-output",
+                )
+                .with_document_lifecycle_identity(Some(
+                    super::document_lifecycle::machine_trace_document(source_document),
+                ))
+                .with_browser_action_id(Some(browser_action_id.get()))
+                .with_navigation_origin(Some("renderer-intent")),
+            );
+            if moli_trace::browser_owner_human_trace_enabled() {
+                trace_top_level_location_navigation_human(source_document, browser_action_id);
+            }
         }
+        navigation
+    }
+
+    pub fn browser_action_id(&self) -> BrowserActionId {
+        self.browser_action_id
     }
 
     pub fn source_document(&self) -> RendererDocumentLifecycleIdentity {
@@ -388,6 +414,62 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
 
     pub fn runtime_command_cause(&self) -> Option<&RendererRuntimeCommandCausalIdentity> {
         self.runtime_command_cause.as_ref()
+    }
+}
+
+fn trace_top_level_location_navigation_human(
+    source_document: RendererDocumentLifecycleIdentity,
+    browser_action_id: BrowserActionId,
+) {
+    tracing::info!(
+        target: "moli_browser_owner",
+        browser_instance_id = ?Option::<u64>::None,
+        browser_context_id = ?Option::<&str>::None,
+        target_id = ?Option::<&str>::None,
+        page_residence_generation = ?Option::<u64>::None,
+        navigation_request_id = ?Option::<u64>::None,
+        renderer_agent_attachment_id = ?Option::<u64>::None,
+        document_lifecycle_identity = ?Some(source_document),
+        browser_action_id = browser_action_id.get(),
+        browser_fact_sequence = ?Option::<u64>::None,
+        source = "renderer-intent",
+        navigation_origin = "renderer-intent",
+        owner_state_before = "renderer-task",
+        owner_state_after = "renderer-output",
+        frontend_projection_sequence = ?Option::<u64>::None,
+        renderer_lifecycle_sequence = ?Option::<u64>::None,
+        stage = "renderer_intent_published",
+        "browser navigation owner trace"
+    );
+}
+
+#[cfg(test)]
+mod top_level_location_navigation_identity_tests {
+    use super::*;
+
+    fn source_document() -> RendererDocumentLifecycleIdentity {
+        let page_id = PageId::new_for_testing(17);
+        RendererDocumentLifecycleIdentity {
+            frame: RendererFrameToken { page_id },
+            document: RendererDocumentToken::new_for_testing(page_id, 3),
+            epoch: RendererLifecycleEpoch(5),
+        }
+    }
+
+    #[test]
+    fn action_identity_is_allocated_once_and_survives_transport_clone() {
+        let first = RendererDocumentSourcedTopLevelLocationNavigation::new(
+            source_document(),
+            "https://first.test/".to_owned(),
+        );
+        let transported = first.clone();
+        let second = RendererDocumentSourcedTopLevelLocationNavigation::new(
+            source_document(),
+            "https://first.test/".to_owned(),
+        );
+
+        assert_eq!(first.browser_action_id(), transported.browser_action_id());
+        assert_ne!(first.browser_action_id(), second.browser_action_id());
     }
 }
 

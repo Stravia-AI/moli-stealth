@@ -2366,6 +2366,7 @@ name = "moli-core"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "moli-bounded-buffer",
  "moli-browser-profile",
  "moli-cookie-jar",
  "moli-dom",
@@ -2377,6 +2378,7 @@ dependencies = [
  "moli-storage-key",
  "moli-storage-service",
  "moli-test-support",
+ "moli-trace",
  "moli-url",
  "moli-web-mime",
  "moli-wpt-compat",
@@ -2707,7 +2709,6 @@ dependencies = [
  "data-url",
  "http",
  "indexmap",
- "moli-bounded-buffer",
  "moli-browser-profile",
  "moli-cookie-jar",
  "moli-core",
@@ -3037,6 +3038,11 @@ dependencies = [
 [[package]]
 name = "moli-trace"
 version = "0.1.0"
+dependencies = [
+ "parking_lot",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "moli-url"

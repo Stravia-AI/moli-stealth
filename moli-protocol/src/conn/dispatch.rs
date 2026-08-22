@@ -215,6 +215,28 @@ impl PendingCdpCommandDispatch {
         }
     }
 
+    /// Whether this exact pending command owns a Browser navigation whose raw
+    /// renderer commit publication must remain parked until the command's
+    /// renderer insertion boundary is consumed.
+    pub fn holds_navigation_renderer_publication_gate(&self) -> bool {
+        match &self.inner {
+            PendingCdpCommandDispatchKind::Fetch(pending) => {
+                pending.holds_navigation_renderer_publication_gate()
+            }
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn owns_runtime_protocol_message_normalization_for_test(&self) -> bool {
+        match &self.inner {
+            PendingCdpCommandDispatchKind::Runtime(pending) => {
+                pending.owns_protocol_message_normalization_for_test()
+            }
+            _ => false,
+        }
+    }
+
     pub fn runtime_deferred_reply_page_owner_access_allowed(&self) -> bool {
         match &self.inner {
             PendingCdpCommandDispatchKind::Runtime(pending) => {
@@ -490,38 +512,43 @@ impl CdpConnection {
         }
     }
 
-    /// Compatibility/test entry point for direct command dispatch.
+    /// Parses one raw command into the caller-owned output context.
     ///
-    /// The WebSocket scheduler must use `start_parsed_command_dispatch_with_context`
-    /// so pending command continuations keep the same command-local output
-    /// buffers and response-flush gate across await points.
-    #[cfg(test)]
-    pub(crate) fn start_command_dispatch(&mut self, raw: &str) -> CdpCommandTaskStep {
-        let command = match ParsedCdpCommand::parse_str(raw.to_owned()) {
+    /// Compatibility direct dispatch and legacy `Target.sendMessageToTarget`
+    /// share this parse-error boundary. The WebSocket scheduler already parses
+    /// at ingress and uses `start_parsed_command_dispatch_with_context`.
+    pub(crate) fn start_raw_command_dispatch_with_context(
+        &mut self,
+        raw: impl Into<String>,
+        command_context: &mut CommandDispatchContext,
+    ) -> (Option<String>, CdpCommandTaskStep) {
+        let command = match ParsedCdpCommand::parse_str(raw) {
             Ok(command) => command,
             Err(error) => {
-                let mut command_context = CommandDispatchContext::default();
-                return self.complete_with_output_plan(
-                    &mut command_context,
-                    CommandOutputPlan::error_without_session(
-                        error.response_code(),
-                        error.response_message(),
-                    ),
-                    error.command_id(),
+                return (
                     None,
+                    self.complete_with_output_plan(
+                        command_context,
+                        CommandOutputPlan::error_without_session(
+                            error.response_code(),
+                            error.response_message(),
+                        ),
+                        error.command_id(),
+                        None,
+                    ),
                 );
             }
         };
-        self.start_parsed_command_dispatch(&command)
+        let output_session_id = command.command_output_session_id().map(str::to_owned);
+        let step = self.start_parsed_command_dispatch_with_context(&command, command_context);
+        (output_session_id, step)
     }
 
     #[cfg(test)]
-    pub(crate) fn start_parsed_command_dispatch(
-        &mut self,
-        command: &ParsedCdpCommand,
-    ) -> CdpCommandTaskStep {
+    pub(crate) fn start_command_dispatch(&mut self, raw: &str) -> CdpCommandTaskStep {
         let mut command_context = CommandDispatchContext::default();
-        self.start_parsed_command_dispatch_with_context(command, &mut command_context)
+        self.start_raw_command_dispatch_with_context(raw.to_owned(), &mut command_context)
+            .1
     }
 
     pub fn start_parsed_command_dispatch_with_context(
@@ -726,15 +753,17 @@ impl CdpConnection {
                 },
             ),
             "Target" => {
-                crate::domains::target::try_start_target_command_dispatch(self, &cmd).map(|step| {
-                    match step {
-                        crate::domains::target::TargetCommandTaskStep::Pending(pending) => {
-                            self.pending_step(PendingCdpCommandDispatchKind::Target(pending))
-                        }
-                        crate::domains::target::TargetCommandTaskStep::Complete(plan) => {
-                            self.complete_with_output_plan(command_context, plan, cmd.id, cmd.session_id)
-                        }
+                crate::domains::target::try_start_target_command_dispatch(
+                    self,
+                    &cmd,
+                    command_context,
+                )
+                .map(|step| match step {
+                    crate::domains::target::TargetCommandTaskStep::Pending(pending) => {
+                        self.pending_step(PendingCdpCommandDispatchKind::Target(pending))
                     }
+                    crate::domains::target::TargetCommandTaskStep::Complete(plan) => self
+                        .complete_with_output_plan(command_context, plan, cmd.id, cmd.session_id),
                 })
             }
             "Tracing" => Some(
@@ -764,7 +793,12 @@ impl CdpConnection {
                 })
             }
             "Page" => {
-                crate::domains::page::try_start_page_command_dispatch(self, &cmd).map(|step| {
+                crate::domains::page::try_start_page_command_dispatch(
+                    self,
+                    &cmd,
+                    command_context,
+                )
+                .map(|step| {
                     match step {
                         crate::domains::page::PageCommandTaskStep::Pending(pending) => {
                             self.pending_step(PendingCdpCommandDispatchKind::Page(pending))
@@ -1325,17 +1359,6 @@ impl CdpConnection {
             .await
     }
 
-    pub(crate) async fn process_message_with_command_reply_turn_outcome_async(
-        &mut self,
-        raw: &str,
-    ) -> CdpRendererOwnerTurnOutcome {
-        self.process_message_with_terminal_response_delivery_async(
-            raw,
-            Some(moli_page_types::RendererInspectorResponseDelivery::CommandReply),
-        )
-        .await
-    }
-
     async fn process_message_with_terminal_response_delivery_async(
         &mut self,
         raw: &str,
@@ -1371,6 +1394,7 @@ impl CdpConnection {
     /// events cannot be dropped accidentally.
     #[cfg(test)]
     pub async fn process_message_messages_only_for_test(&mut self, raw: &str) -> Vec<Value> {
+        self.adopt_direct_browser_context_fixture_attachments();
         let outcome = self
             .process_message_through_command_dispatch_async(raw, None)
             .await;
@@ -1382,61 +1406,27 @@ impl CdpConnection {
         raw: &str,
         response_delivery_override: Option<moli_page_types::RendererInspectorResponseDelivery>,
     ) -> CdpRendererOwnerTurnOutcome {
-        let command = ParsedCdpCommand::parse_str(raw.to_owned());
-        let output_session_id = command
-            .as_ref()
-            .ok()
-            .and_then(ParsedCdpCommand::command_output_session_id)
-            .map(str::to_owned);
-        let mut protocol_events = Vec::new();
-        let mut post_renderer_output_events = Vec::new();
-        let mut renderer_output_boundary = None;
         let mut scheduler_events = Vec::new();
-        let mut renderer_output_predecessor: Option<moli_core::RendererOutputFence> = None;
         let mut command_context = CommandDispatchContext::default();
         if let Some(response_delivery) = response_delivery_override {
             command_context.set_terminal_response_delivery_override(response_delivery);
         }
-        let mut step = match command.as_ref() {
-            Ok(command) => {
-                self.start_parsed_command_dispatch_with_context(command, &mut command_context)
-            }
-            Err(error) => self.complete_with_output_plan(
-                &mut command_context,
-                CommandOutputPlan::error_without_session(
-                    error.response_code(),
-                    error.response_message(),
-                ),
-                error.command_id(),
-                None,
-            ),
-        };
+        let (output_session_id, mut step) =
+            self.start_raw_command_dispatch_with_context(raw.to_owned(), &mut command_context);
         loop {
             match step {
                 CdpCommandTaskStep::Complete(outcome) => {
-                    let (
-                        mut complete_protocol_events,
-                        mut complete_post_renderer_output_events,
-                        complete_renderer_output_boundary,
-                        mut complete_post_response_events,
-                        mut complete_events,
-                        complete_renderer_output_predecessor,
-                    ) = outcome.into_renderer_owner_turn_parts();
-                    assert!(
-                        renderer_output_boundary.is_none(),
-                        "one direct command cannot complete multiple renderer insertion boundaries"
-                    );
-                    renderer_output_boundary = complete_renderer_output_boundary;
-                    protocol_events.append(&mut complete_protocol_events);
-                    post_renderer_output_events.append(&mut complete_post_renderer_output_events);
-                    post_renderer_output_events.append(&mut complete_post_response_events);
-                    scheduler_events.append(&mut complete_events);
-                    if let Some(predecessor) = complete_renderer_output_predecessor {
-                        predecessor.merge_into_same_stream_tail(&mut renderer_output_predecessor);
-                    }
-                    break;
+                    return self
+                        .settle_direct_command_turn_outcome(
+                            output_session_id.as_deref(),
+                            command_context,
+                            scheduler_events,
+                            outcome,
+                        )
+                        .await;
                 }
-                CdpCommandTaskStep::Pending(pending) => {
+                CdpCommandTaskStep::Pending(mut pending) => {
+                    scheduler_events.extend(pending.take_scheduler_events());
                     let completed = Box::pin(pending.wait()).await;
                     step = Box::pin(self.complete_pending_command_dispatch_with_context(
                         completed,
@@ -1446,10 +1436,35 @@ impl CdpConnection {
                 }
             }
         }
+    }
+
+    /// Settles protocol-local projection around one completed direct command.
+    ///
+    /// Compatibility adapters may expose a pending participant to the
+    /// application actor and call this only after that participant completes.
+    /// Sharing this boundary preserves the renderer insertion and scheduler
+    /// event ordering of the older direct-drain helper.
+    pub(crate) async fn settle_direct_command_turn_outcome(
+        &mut self,
+        output_session_id: Option<&str>,
+        mut command_context: CommandDispatchContext,
+        mut scheduler_events: Vec<CdpSchedulerEvent>,
+        outcome: CdpRendererOwnerTurnOutcome,
+    ) -> CdpRendererOwnerTurnOutcome {
+        let (
+            protocol_events,
+            mut post_renderer_output_events,
+            renderer_output_boundary,
+            mut outcome_post_response_events,
+            mut complete_scheduler_events,
+            renderer_output_predecessor,
+        ) = outcome.into_renderer_owner_turn_parts();
+        post_renderer_output_events.append(&mut outcome_post_response_events);
+        scheduler_events.append(&mut complete_scheduler_events);
         Box::pin(
             crate::domains::activity::project_protocol_local_command_outputs(
                 self,
-                output_session_id.as_deref(),
+                output_session_id,
                 &mut command_context,
             ),
         )
@@ -1478,6 +1493,41 @@ impl CdpConnection {
         CdpTurnOutcome::new_with_protocol_events(protocol_events, scheduler_events)
             .with_renderer_output_boundary(renderer_output_boundary, post_renderer_output_events)
             .with_renderer_output_predecessor(renderer_output_predecessor)
+    }
+
+    /// Projects only browser-visible side effects from a command whose
+    /// frontend completion receiver disappeared.
+    ///
+    /// Browser Host has already completed the action and must not lose its
+    /// events or renderer ordering fences. The abandoned command response is
+    /// removed before the remaining projection enters the application loop.
+    pub(crate) fn settle_detached_command_projection(
+        &mut self,
+        mut command_context: CommandDispatchContext,
+        plan: CommandOutputPlan,
+        scheduler_events: Vec<CdpSchedulerEvent>,
+    ) -> CdpRendererOwnerTurnOutcome {
+        let mut protocol_events = Vec::new();
+        append_command_output_plan(
+            &mut protocol_events,
+            &mut command_context,
+            plan.into_composite_command_prefix(),
+            None,
+            None,
+        );
+        let (protocol_events, renderer_output_boundary, post_renderer_output_events) =
+            command_context.take_renderer_fenced_protocol_events();
+        let post_response_events = command_context.take_post_response_events();
+        self.record_tracing_protocol_events(&protocol_events);
+        self.record_tracing_protocol_events(&post_renderer_output_events);
+        self.record_tracing_protocol_events(&post_response_events);
+        CdpTurnOutcome::new_with_protocol_and_post_response_events(
+            protocol_events,
+            post_response_events,
+            scheduler_events,
+        )
+        .with_renderer_output_boundary(renderer_output_boundary, post_renderer_output_events)
+        .with_renderer_output_predecessor(command_context.take_renderer_output_predecessor())
     }
 }
 

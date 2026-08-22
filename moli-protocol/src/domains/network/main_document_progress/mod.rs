@@ -387,14 +387,14 @@ pub(crate) fn materialize_navigation_failure_preserving_committed_document(
     conn: &mut CdpConnection,
     state: &NavigationDispatchState,
     error_text: String,
-) -> MaterializedNavigationLoadOutcome {
-    MaterializedNavigationLoadOutcome::Failed(materialize_failed_navigation_progress(
+) -> MaterializedFailedDocumentProgress {
+    materialize_failed_navigation_progress(
         conn,
         state,
         error_text,
         FailedNavigationDocumentPolicy::PreserveCommittedDocument,
         FailedNavigationResponseMode::ProtocolError,
-    ))
+    )
 }
 
 fn materialize_download_navigation_progress(

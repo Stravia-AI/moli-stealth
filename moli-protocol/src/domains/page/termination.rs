@@ -1,110 +1,94 @@
 use crate::conn::{
-    BackgroundProtocolEvent, CdpConnection, Cmd, CommandOwnerScope, DEFAULT_LOADER_ID,
-    DocumentNavigationToken, NavigationDispatchState, PendingFetchNavigation,
+    BackgroundProtocolEvent, BrowserPageTargetTerminationStart, BrowserTargetCloseStart,
+    BrowserTargetTerminationProjection, CdpConnection, Cmd, DEFAULT_LOADER_ID,
+    PendingBrowserPageTargetTermination, PendingBrowserTargetClose, PendingFetchNavigation,
     PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
-    PendingSubresourceFetchResponseRequest, monotonic_timestamp_seconds,
+    PendingSubresourceFetchResponseRequest, PreparedTargetHostClosure, monotonic_timestamp_seconds,
 };
-use crate::domains::{activity, network};
+use crate::devtools_runtime::AutomationEvent;
 use moli_core::RendererOutputFence;
+use moli_core::browser_host::{
+    BrowserOwnerInput, BrowserTargetTerminationKind, BrowserTargetTerminationRequest,
+};
 
-use super::{PageCommandTaskStep, complete_materialized_navigation_into_buffer_async};
-use crate::domains::command_output::{CommandOutputBuffer, CommandOutputPlan};
+use super::PageCommandTaskStep;
+use crate::domains::command_output::CommandOutputPlan;
+use crate::domains::network;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PageTargetTerminationKind {
-    PageClose,
-    TargetClose,
+pub(crate) use crate::conn::BrowserTargetTerminationProjectionKind as PageTargetTerminationKind;
+
+pub(crate) enum PageTargetTerminationOwnerTaskStep {
+    Complete(crate::conn::CdpTurnOutcome),
+    Pending(Box<PendingPageTargetTerminationOwnerTask>),
 }
 
-#[derive(Debug)]
-pub(crate) struct PageTargetTerminationOwnerAction {
-    owner_scope: CommandOwnerScope,
-    target_id: String,
-    kind: PageTargetTerminationKind,
+pub(crate) struct PendingPageTargetTerminationOwnerTask {
+    pending: PendingBrowserPageTargetTermination,
+    completion: TargetTerminationCompletion,
 }
 
-impl PageTargetTerminationOwnerAction {
-    pub(crate) fn new(
-        owner_scope: CommandOwnerScope,
-        target_id: String,
-        kind: PageTargetTerminationKind,
-    ) -> Self {
-        Self {
-            owner_scope,
-            target_id,
-            kind,
+impl PendingPageTargetTerminationOwnerTask {
+    pub(crate) async fn wait(self) -> CompletedPageTargetTerminationOwnerTask {
+        CompletedPageTargetTerminationOwnerTask {
+            projection: self.pending.wait().await,
+            completion: self.completion,
         }
     }
+}
 
-    pub(crate) fn owner_scope(&self) -> &CommandOwnerScope {
-        &self.owner_scope
-    }
+pub(crate) struct CompletedPageTargetTerminationOwnerTask {
+    projection: BrowserTargetTerminationProjection,
+    completion: TargetTerminationCompletion,
+}
 
-    pub(crate) fn target_id(&self) -> &str {
-        &self.target_id
-    }
+pub(crate) enum TargetCloseOwnerTaskStep {
+    Complete(crate::conn::CdpTurnOutcome),
+    Pending(Box<PendingTargetCloseOwnerTask>),
+}
 
-    pub(crate) fn kind(&self) -> PageTargetTerminationKind {
-        self.kind
-    }
+pub(crate) struct PendingTargetCloseOwnerTask {
+    pending: PendingBrowserTargetClose,
+    completion: TargetTerminationCompletion,
+}
 
-    fn into_parts(self) -> (CommandOwnerScope, String, PageTargetTerminationKind) {
-        (self.owner_scope, self.target_id, self.kind)
+impl PendingTargetCloseOwnerTask {
+    pub(crate) async fn wait(self) -> CompletedTargetCloseOwnerTask {
+        CompletedTargetCloseOwnerTask {
+            completed: self.pending.wait().await,
+            completion: self.completion,
+        }
     }
 }
 
-fn complete_success_with_background_events(
+pub(crate) struct CompletedTargetCloseOwnerTask {
+    completed: crate::conn::CompletedBrowserTargetClose,
+    completion: TargetTerminationCompletion,
+}
+
+struct TargetTerminationCompletion {
+    expected_target_id: String,
+    kind: PageTargetTerminationKind,
+    out: Vec<BackgroundProtocolEvent>,
+    target_host_closure: Option<PreparedTargetHostClosure>,
+}
+
+fn complete_page_termination_admission(
+    conn: &CdpConnection,
     events: Vec<BackgroundProtocolEvent>,
+    termination: BrowserTargetTerminationRequest,
 ) -> PageCommandTaskStep {
-    let mut plan = CommandOutputPlan::success();
+    let mut plan =
+        match conn.publish_browser_owner_input(BrowserOwnerInput::page_termination(termination)) {
+            Ok(()) => CommandOutputPlan::success(),
+            Err(error) => CommandOutputPlan::error_without_session(
+                -32000,
+                format!("BrowserHostPageTerminationAdmissionFailed: {error}"),
+            ),
+        };
     for event in events {
         plan.push_background_event(event);
     }
     PageCommandTaskStep::Complete(plan)
-}
-
-async fn complete_tokened_materialized_navigation_background_events_async(
-    conn: &mut CdpConnection,
-    out: &mut Vec<BackgroundProtocolEvent>,
-    token: Option<DocumentNavigationToken>,
-    navigation_state: NavigationDispatchState,
-    navigation: network::MaterializedNavigationLoadOutcome,
-) -> Option<RendererOutputFence> {
-    let command_id = navigation_state.navigate_id;
-    let command_session_id = navigation_state.navigate_session_id.clone();
-    let Some(token) = token else {
-        out.extend(
-            CommandOutputPlan::error(-32000, "Navigation aborted")
-                .into_background_events(command_id, command_session_id.as_deref()),
-        );
-        return None;
-    };
-    let mut output = CommandOutputBuffer::default();
-    let mut command_context = crate::conn::CommandDispatchContext::default();
-    complete_materialized_navigation_into_buffer_async(
-        conn,
-        &mut output,
-        token,
-        navigation_state,
-        navigation,
-        &mut command_context,
-    )
-    .await;
-    let mut plan = output.into_plan();
-    let predecessor = command_context
-        .take_renderer_output_predecessor()
-        .or_else(|| plan.take_renderer_output_predecessor());
-    out.extend(plan.into_background_events(command_id, command_session_id.as_deref()));
-    predecessor
-}
-
-fn merge_renderer_output_predecessor(
-    current: &mut Option<RendererOutputFence>,
-    next: Option<RendererOutputFence>,
-) {
-    if let Some(next) = next {
-        next.merge_into_same_stream_tail(current);
-    }
 }
 
 pub(crate) fn take_pending_fetch_state(
@@ -146,140 +130,29 @@ pub(crate) async fn fail_pending_fetch_state_background_events_async(
         crate::conn::PendingSubresourceFetchResponseRequest,
     )>,
 ) -> Option<RendererOutputFence> {
-    let mut renderer_output_predecessor = None;
-    for pending in pending_navigations {
-        let token = pending.document_navigation_token;
-        let navigation_state = pending.navigation;
-        let navigation = network::materialize_navigation_failure_preserving_committed_document(
-            conn,
-            &navigation_state,
-            error_text.to_owned(),
-        );
-        let predecessor = complete_tokened_materialized_navigation_background_events_async(
-            conn,
-            out,
-            token,
-            navigation_state,
-            navigation,
-        )
-        .await;
-        merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-    }
-    for pending in pending_auth_navigations {
-        let token = pending.document_navigation_token;
-        let navigation_state = pending.navigation;
-        let navigation = network::materialize_navigation_failure_preserving_committed_document(
-            conn,
-            &navigation_state,
-            error_text.to_owned(),
-        );
-        let predecessor = complete_tokened_materialized_navigation_background_events_async(
-            conn,
-            out,
-            token,
-            navigation_state,
-            navigation,
-        )
-        .await;
-        merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-    }
-    for pending in pending_response_navigations {
-        let (token, navigation, _) = pending.fail(error_text.to_owned());
-        let result = network::materialize_navigation_failure_preserving_committed_document(
-            conn,
-            &navigation,
-            error_text.to_owned(),
-        );
-        let predecessor = complete_tokened_materialized_navigation_background_events_async(
-            conn, out, token, navigation, result,
-        )
-        .await;
-        merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-    }
-    for (_, pending) in pending_subresource_fetches {
-        if !conn.pending_subresource_fetch_request_residence_is_current(session_id, &pending) {
-            continue;
-        }
-        match conn
-            .fail_pending_subresource_fetch_for_session_owner_async(
-                session_id,
-                pending.internal_id,
-                error_text.to_owned(),
-            )
-            .await
-        {
-            Ok(predecessor) => {
-                merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-                activity::flush_post_subresource_fetch_request_activity_background_events_async(
-                    conn, out, session_id, &pending,
-                )
-                .await
-            }
-            Err(message) if message == "NoDocumentLoaded" => {}
-            Err(_) => {}
-        }
-    }
-    for (_, pending) in pending_subresource_auths {
-        if !conn
-            .target_page_residence_identity_is_current_for_session(session_id, &pending.page_owner)
-        {
-            continue;
-        }
-        match conn
-            .fail_pending_subresource_auth_for_session_owner_async(
-                session_id,
-                pending.internal_id,
-                error_text.to_owned(),
-            )
-            .await
-        {
-            Ok(predecessor) => {
-                merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-                activity::flush_post_subresource_auth_activity_background_events_async(
-                    conn, out, session_id, &pending,
-                )
-                .await
-            }
-            Err(message) if message == "NoDocumentLoaded" => {}
-            Err(_) => {}
-        }
-    }
-    for (_, pending) in pending_subresource_responses {
-        if !conn
-            .target_page_residence_identity_is_current_for_session(session_id, &pending.page_owner)
-        {
-            continue;
-        }
-        match conn
-            .fail_pending_subresource_response_for_session_owner_async(
-                session_id,
-                pending.internal_id,
-                error_text.to_owned(),
-            )
-            .await
-        {
-            Ok(predecessor) => {
-                merge_renderer_output_predecessor(&mut renderer_output_predecessor, predecessor);
-                activity::flush_post_subresource_response_activity_background_events_async(
-                    conn, out, session_id, &pending,
-                )
-                .await
-            }
-            Err(message) if message == "NoDocumentLoaded" => {}
-            Err(_) => {}
-        }
-    }
-    renderer_output_predecessor
+    super::fetch_cancellation::drain_pending_fetch_state_cancellation_async(
+        conn,
+        out,
+        session_id,
+        error_text,
+        pending_navigations,
+        pending_auth_navigations,
+        pending_response_navigations,
+        pending_subresource_fetches,
+        pending_subresource_auths,
+        pending_subresource_responses,
+    )
+    .await
 }
 
 /// Completes protocol-owned subresource pauses after the renderer has crashed.
 ///
-/// A normal Fetch failure is first applied to the Page owner and then projected
-/// from its network backlog. `Page.crash` cannot use that path: the Page owner
-/// may be blocked in JavaScript, and the IO termination which unblocks it also
-/// retires the Page residence. The pending Fetch residences were already
-/// claimed by [`take_pending_fetch_state`], so emitting their terminal network
-/// state here is both race-free and independent of the renderer owner.
+/// Normal Fetch cancellation first applies failure to the Page owner and then
+/// projects its network backlog. `Page.crash` cannot use that path: the Page
+/// owner may be blocked in JavaScript, and the IO termination which unblocks it
+/// also retires the Page residence. The pending Fetch residences were already
+/// claimed by [`take_pending_fetch_state`], so their terminal network state can
+/// be emitted without returning to the renderer owner.
 fn fail_crashed_subresource_fetches_background_events(
     conn: &CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
@@ -336,90 +209,6 @@ fn fail_crashed_subresource_fetches_background_events(
             &pending.frame_id,
             pending.resource_type,
         );
-    }
-}
-
-pub(super) fn try_start_stop_loading_command_dispatch(
-    conn: &CdpConnection,
-    cmd: &Cmd<'_>,
-) -> PageCommandTaskStep {
-    PageCommandTaskStep::Pending(super::PendingPageCommandDispatch {
-        command_id: cmd.id,
-        owner_scope: crate::conn::CommandOwnerScope::capture(conn, cmd.session_id),
-        kind: Box::new(super::PendingPageCommandKind::StopLoading),
-    })
-}
-
-pub(super) async fn complete_stop_loading_command_dispatch(
-    conn: &mut CdpConnection,
-    _command_id: Option<u64>,
-    session_id: Option<&str>,
-) -> PageCommandTaskStep {
-    let mut out = Vec::new();
-    let restore_browser_context_id = conn.browser_context.as_ref().map(|bc| bc.id.clone());
-    if let Some(session_id) = session_id
-        && !conn
-            .activate_browser_context_for_session_async(session_id)
-            .await
-    {
-        return PageCommandTaskStep::Complete(CommandOutputPlan::error_without_session(
-            -32001,
-            "Unknown sessionId",
-        ));
-    }
-    if let Ok(slot) = conn.runtime_session_owner_slot_mut(session_id)
-        && let Some(page) = slot.loaded_page_mut()
-        && let Err(error) = page.stop_document_lifecycle_async().await
-    {
-        tracing::debug!(%error, "failed to stop renderer document lifecycle");
-    }
-    let (
-        pending_navigations,
-        pending_auth_navigations,
-        pending_response_navigations,
-        pending_subresource_fetches,
-        pending_subresource_auths,
-        pending_subresource_responses,
-    ) = take_pending_fetch_state(conn, session_id);
-
-    let renderer_output_predecessor = fail_pending_fetch_state_background_events_async(
-        conn,
-        &mut out,
-        session_id,
-        "Navigation stopped",
-        pending_navigations,
-        pending_auth_navigations,
-        pending_response_navigations,
-        pending_subresource_fetches,
-        pending_subresource_auths,
-        pending_subresource_responses,
-    )
-    .await;
-    restore_stop_loading_browser_context_async(conn, restore_browser_context_id.as_deref()).await;
-    let mut plan = CommandOutputPlan::success();
-    for event in out {
-        plan.push_background_event(event);
-    }
-    if let Some(predecessor) = renderer_output_predecessor {
-        plan.set_renderer_output_predecessor(predecessor);
-    }
-    PageCommandTaskStep::Complete(plan)
-}
-
-async fn restore_stop_loading_browser_context_async(
-    conn: &mut CdpConnection,
-    browser_context_id: Option<&str>,
-) {
-    if let Some(browser_context_id) = browser_context_id
-        && conn.has_browser_context_id(browser_context_id)
-        && conn
-            .browser_context
-            .as_ref()
-            .is_none_or(|bc| bc.id != browser_context_id)
-    {
-        let _ = conn
-            .activate_browser_context_by_id_async(browser_context_id)
-            .await;
     }
 }
 
@@ -482,11 +271,10 @@ pub(super) async fn complete_crash_command_dispatch(
         page.crash_devtools_target_from_io();
     }
 
-    // Page.crash retires the target, not merely the DevTools session which
-    // issued the command. Settle every attached session before dropping the
-    // Page; otherwise a late completion from (for example) the primary
-    // session can wait forever on a response sender owned by the retired
-    // renderer while the crash was issued by an auxiliary session.
+    // A crash retires the target, not just the DevTools session which issued
+    // the command. Settle every attached session before the renderer Page is
+    // removed, otherwise a late completion can retain a sender owned by the
+    // retired target.
     let target_inspector_session_ids = conn.page_event_session_ids_for_session_owner(session_id);
     let mut pending_await_events = Vec::new();
     for inspector_session_id in &target_inspector_session_ids {
@@ -525,39 +313,17 @@ pub(super) async fn complete_crash_command_dispatch(
         command_context.set_renderer_output_predecessor(predecessor);
     }
 
-    out.extend(
-        mark_page_target_crashed_background_events_async(conn, session_id, &target_id).await,
-    );
-    complete_success_with_background_events(out)
-}
-
-async fn mark_page_target_crashed_background_events_async(
-    conn: &mut CdpConnection,
-    session_id: Option<&str>,
-    target_id: &str,
-) -> Vec<BackgroundProtocolEvent> {
-    let inspector_session_ids = conn.page_event_session_ids_for_session_owner(session_id);
-    for inspector_session_id in &inspector_session_ids {
-        let _ = conn.with_target_devtools_session_state_for_session_mut(
-            inspector_session_id.as_deref(),
-            |state| {
-                state
-                    .runtime_session_state
-                    .record_inspector_target_crashed();
-            },
-        );
-    }
-    let _ = conn
-        .mark_target_crashed_for_session_owner_async(session_id)
-        .await;
-    let mut out = inspector_session_ids
-        .into_iter()
-        .map(|inspector_session_id| {
-            BackgroundProtocolEvent::inspector_target_crashed(inspector_session_id.as_deref())
-        })
-        .collect::<Vec<_>>();
-    out.extend(conn.target_crashed_events_for_all_discovery_owners(target_id, "crashed", 1));
-    out
+    // Browser Core still owns the terminal transition and its fact. The
+    // frontend only admits that exact request after all protocol-owned
+    // cancellation records above have been frozen.
+    let termination = conn
+        .capture_browser_target_termination_for_session_owner(
+            session_id,
+            PageTargetTerminationKind::Crash,
+        )
+        .expect("validated Page.crash target must expose an exact Browser residence");
+    debug_assert_eq!(termination.owner().target_id(), target_id);
+    complete_page_termination_admission(conn, out, termination)
 }
 
 pub(super) fn try_start_close_command_dispatch(
@@ -634,81 +400,254 @@ pub(super) async fn complete_close_command_dispatch(
     // Publish a concrete protocol-owner continuation instead. The command
     // fence first admits every renderer record produced above, then the
     // scheduler sends the Page.close response and runs this teardown action.
-    conn.publish_page_target_termination_owner_action(PageTargetTerminationOwnerAction::new(
-        CommandOwnerScope::capture(conn, session_id),
-        target_id,
-        PageTargetTerminationKind::PageClose,
-    ));
-    complete_success_with_background_events(out)
+    let termination = conn
+        .capture_browser_target_termination_for_session_owner(
+            session_id,
+            PageTargetTerminationKind::PageClose,
+        )
+        .expect("validated Page.close target must expose an exact Browser residence");
+    debug_assert_eq!(termination.owner().target_id(), target_id);
+    complete_page_termination_admission(conn, out, termination)
 }
 
-pub(crate) async fn complete_page_target_termination_owner_action_async(
+/// Starts one actor-selected Page.crash/Page.close terminal action.
+///
+/// Browser Core commit and physical Page absence are synchronous. Destruction
+/// of a retired renderer Page, when present, becomes a move-owned participant
+/// and resumes through the Browser Host completion mailbox.
+pub(crate) fn start_page_target_termination_owner_task(
     conn: &mut CdpConnection,
-    action: PageTargetTerminationOwnerAction,
-) -> crate::conn::CdpTurnOutcome {
-    let (owner_scope, expected_target_id, kind) = action.into_parts();
-    let mut route_scope = owner_scope.enter(conn);
-    let conn = route_scope.conn_mut();
+    termination: BrowserTargetTerminationRequest,
+) -> PageTargetTerminationOwnerTaskStep {
+    let expected_target_id = termination.owner().target_id().to_owned();
+    let (kind, close_reason) = match termination.kind() {
+        BrowserTargetTerminationKind::Crash => (PageTargetTerminationKind::Crash, "Page crashed"),
+        BrowserTargetTerminationKind::Close => {
+            (PageTargetTerminationKind::PageClose, "Page closed")
+        }
+    };
+    let target_host_closure = (kind == PageTargetTerminationKind::PageClose)
+        .then(|| conn.prepare_target_host_closure(&expected_target_id));
     let mut out = Vec::new();
-    let current_target_id = conn
-        .target_owner_identity_for_session(owner_scope.session_id())
-        .and_then(|(_, target_id)| target_id);
-    if current_target_id.as_deref() != Some(expected_target_id.as_str()) {
-        return crate::conn::CdpTurnOutcome::new_with_protocol_events(
-            out,
-            conn.take_scheduler_events(),
-        );
+    let completion = TargetTerminationCompletion {
+        expected_target_id,
+        kind,
+        out: Vec::new(),
+        target_host_closure,
+    };
+    match conn.start_browser_page_target_termination(termination, kind, &mut out, close_reason) {
+        Some(BrowserPageTargetTerminationStart::Complete(projection)) => {
+            let mut completion = completion;
+            completion.out = out;
+            PageTargetTerminationOwnerTaskStep::Complete(finish_page_target_termination_projection(
+                conn, projection, completion,
+            ))
+        }
+        Some(BrowserPageTargetTerminationStart::Pending(pending)) => {
+            let mut completion = completion;
+            completion.out = out;
+            PageTargetTerminationOwnerTaskStep::Pending(Box::new(
+                PendingPageTargetTerminationOwnerTask {
+                    pending,
+                    completion,
+                },
+            ))
+        }
+        None => PageTargetTerminationOwnerTaskStep::Complete(
+            crate::conn::CdpTurnOutcome::new_with_protocol_events(
+                out,
+                conn.take_scheduler_events(),
+            ),
+        ),
     }
-    let target_host_closure = conn.prepare_target_host_closure(&expected_target_id);
-    let closed = match kind {
-        PageTargetTerminationKind::PageClose => {
-            conn.close_page_target_for_session_owner_async(owner_scope.session_id())
-                .await
-        }
-        PageTargetTerminationKind::TargetClose => {
-            let is_active_target = conn
-                .browser_context
-                .as_ref()
-                .is_some_and(|browser_context| {
-                    browser_context.is_active_target(&expected_target_id)
-                });
-            if is_active_target {
-                conn.close_active_page_target_for_target_close_async(&mut out)
-                    .await
-            } else {
-                conn.close_background_page_target_for_target_close_async(
-                    &expected_target_id,
-                    &mut out,
-                    "Target closed",
-                )
-                .await
-            }
-        }
+}
+
+pub(crate) fn complete_page_target_termination_owner_task(
+    conn: &mut CdpConnection,
+    completed: CompletedPageTargetTerminationOwnerTask,
+) -> crate::conn::CdpTurnOutcome {
+    finish_page_target_termination_projection(conn, completed.projection, completed.completion)
+}
+
+pub(crate) fn start_target_close_owner_task(
+    conn: &mut CdpConnection,
+    termination: BrowserTargetTerminationRequest,
+) -> TargetCloseOwnerTaskStep {
+    let expected_target_id = termination.owner().target_id().to_owned();
+    let mut out = Vec::new();
+    let completion = TargetTerminationCompletion {
+        target_host_closure: Some(conn.prepare_target_host_closure(&expected_target_id)),
+        expected_target_id,
+        kind: PageTargetTerminationKind::TargetClose,
+        out: Vec::new(),
     };
-    let Some(closed) = closed else {
+    match conn.start_browser_target_close(termination, &mut out, "Target closed") {
+        Some(BrowserTargetCloseStart::Complete(projection)) => {
+            let mut completion = completion;
+            completion.out = out;
+            TargetCloseOwnerTaskStep::Complete(finish_page_target_termination_projection(
+                conn, projection, completion,
+            ))
+        }
+        Some(BrowserTargetCloseStart::Pending(pending)) => {
+            let mut completion = completion;
+            completion.out = out;
+            TargetCloseOwnerTaskStep::Pending(Box::new(PendingTargetCloseOwnerTask {
+                pending,
+                completion,
+            }))
+        }
+        None => TargetCloseOwnerTaskStep::Complete(
+            crate::conn::CdpTurnOutcome::new_with_protocol_events(
+                out,
+                conn.take_scheduler_events(),
+            ),
+        ),
+    }
+}
+
+pub(crate) fn complete_target_close_owner_task(
+    conn: &mut CdpConnection,
+    completed: CompletedTargetCloseOwnerTask,
+) -> TargetCloseOwnerTaskStep {
+    match conn.continue_browser_target_close(completed.completed) {
+        BrowserTargetCloseStart::Complete(projection) => TargetCloseOwnerTaskStep::Complete(
+            finish_page_target_termination_projection(conn, projection, completed.completion),
+        ),
+        BrowserTargetCloseStart::Pending(pending) => {
+            TargetCloseOwnerTaskStep::Pending(Box::new(PendingTargetCloseOwnerTask {
+                pending,
+                completion: completed.completion,
+            }))
+        }
+    }
+}
+
+fn finish_page_target_termination_projection(
+    conn: &mut CdpConnection,
+    projection: BrowserTargetTerminationProjection,
+    completion: TargetTerminationCompletion,
+) -> crate::conn::CdpTurnOutcome {
+    let TargetTerminationCompletion {
+        expected_target_id,
+        kind,
+        mut out,
+        target_host_closure,
+    } = completion;
+    let closed = match projection {
+        BrowserTargetTerminationProjection::Crashed {
+            inspector_session_ids,
+            browser_fact,
+        } => {
+            if let Some(browser_fact) = browser_fact {
+                tracing::trace!(
+                    browser_fact_sequence = browser_fact.envelope().sequence().get(),
+                    target_id = expected_target_id,
+                    "projecting Target crash from exact Browser fact"
+                );
+                for inspector_session_id in inspector_session_ids {
+                    out.push(BackgroundProtocolEvent::inspector_target_crashed(
+                        inspector_session_id.as_deref(),
+                    ));
+                }
+                out.extend(conn.target_crashed_events_for_all_discovery_owners(
+                    &expected_target_id,
+                    "crashed",
+                    1,
+                ));
+            } else {
+                tracing::error!(
+                    target_id = expected_target_id,
+                    "suppressing Target crash events without an exact Browser fact"
+                );
+            }
+            return crate::conn::CdpTurnOutcome::new_with_protocol_events(
+                out,
+                conn.take_scheduler_events(),
+            );
+        }
+        BrowserTargetTerminationProjection::Closed {
+            closed,
+            browser_fact,
+        } => (closed, browser_fact),
+    };
+    let (closed, browser_fact) = closed;
+    let Some(target_host_closure) = target_host_closure else {
+        tracing::error!(
+            target_id = expected_target_id,
+            ?kind,
+            "closed Target projection lost its prepared host closure"
+        );
         return crate::conn::CdpTurnOutcome::new_with_protocol_events(
             out,
             conn.take_scheduler_events(),
         );
     };
+    let target_destroyed_lifecycle =
+        target_host_closure.destroyed_target_lifecycle_event(&expected_target_id);
+    let project_bidi_lifecycle = conn.webdriver_bidi_target_lifecycle_projection_enabled();
     let closed_target_id = closed.target_id.clone();
     let (target_detached_info_deltas, target_destroyed_deltas) = target_host_closure.into_parts();
+    let mut terminal_events = Vec::new();
     for sid in closed.inspector_detached_session_ids() {
-        out.push(BackgroundProtocolEvent::inspector_detached(
+        terminal_events.push(BackgroundProtocolEvent::inspector_detached(
             Some(sid),
             "Render process gone.",
         ));
     }
-    out.extend(conn.prepared_target_host_deltas_event_plan(target_detached_info_deltas));
-    out.extend(conn.detach_target_closure_cleanup_event_plan(
+    if project_bidi_lifecycle {
+        terminal_events.extend(
+            conn.prepared_top_level_target_host_deltas_event_plan(target_detached_info_deltas),
+        );
+    } else {
+        terminal_events
+            .extend(conn.prepared_target_host_deltas_event_plan(target_detached_info_deltas));
+    }
+    terminal_events.extend(conn.detach_target_closure_cleanup_event_plan(
         closed.into_detach_cleanup_plan(Some("Render process gone.")),
         None,
     ));
-    out.extend(conn.detach_closed_top_level_target_sessions_event_plan(
+    terminal_events.extend(conn.detach_closed_top_level_target_sessions_event_plan(
         &closed_target_id,
         Some("Render process gone."),
     ));
-    out.extend(conn.prepared_target_host_deltas_event_plan(target_destroyed_deltas));
+    if project_bidi_lifecycle {
+        terminal_events
+            .extend(conn.prepared_top_level_target_host_deltas_event_plan(target_destroyed_deltas));
+    } else {
+        terminal_events
+            .extend(conn.prepared_target_host_deltas_event_plan(target_destroyed_deltas));
+    }
+    if let Some(browser_fact) = browser_fact {
+        tracing::trace!(
+            browser_fact_sequence = browser_fact.envelope().sequence().get(),
+            target_id = closed_target_id,
+            "projecting Target close from exact Browser fact"
+        );
+        out.extend(terminal_events);
+        if project_bidi_lifecycle {
+            if let Some(event) = target_destroyed_lifecycle {
+                out.push(BackgroundProtocolEvent::automation_only(
+                    AutomationEvent::TargetDestroyed(event),
+                ));
+            } else {
+                tracing::error!(
+                    target_id = closed_target_id,
+                    "exact Target close lost its frozen lifecycle snapshot"
+                );
+            }
+        } else if target_destroyed_lifecycle.is_none() {
+            tracing::error!(
+                target_id = closed_target_id,
+                "exact Target close lost its frozen lifecycle snapshot"
+            );
+        }
+    } else {
+        tracing::error!(
+            target_id = closed_target_id,
+            "suppressing Target close events without an exact Browser fact"
+        );
+    }
     conn.release_idle_navigation_engine_memory_after_target_close();
     crate::conn::CdpTurnOutcome::new_with_protocol_events(out, conn.take_scheduler_events())
 }

@@ -948,19 +948,15 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<(String, String), String> {
-        let mut network_request_id_allocator =
-            std::mem::take(&mut self.network_request_id_allocator);
-        let result = self
-            .runtime_session_owner_slot_mut(session_id)
+        let mut network_request_id_allocator = self.browser_host_state.network_artifacts();
+        self.runtime_session_owner_slot_mut(session_id)
             .map(|runtime_slot| {
                 runtime_slot
                     .request_id_allocator()
                     .allocate_pending_subresource_fetch_request_ids(
                         &mut network_request_id_allocator,
                     )
-            });
-        self.network_request_id_allocator = network_request_id_allocator;
-        result
+            })
     }
 
     pub(crate) fn allocate_fetch_navigation_request_id_for_session_owner(

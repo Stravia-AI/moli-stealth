@@ -5,7 +5,7 @@
 //! include resolved computed styles plus lightweight geometry for automation clients.
 
 use moli_core::page::{
-    CompletedPageCommand, Page, PendingPageCommand, RendererDomSnapshotCaptureOptions,
+    CompletedPageCommand, PendingPageCommand, RendererDomSnapshotCaptureOptions,
 };
 use serde::Deserialize;
 
@@ -153,7 +153,7 @@ pub(crate) fn complete_pending_dom_snapshot_command(
     completed: CompletedDomSnapshotCommandDispatch,
 ) -> DomSnapshotCommandDispatchStep {
     let session_id = completed.session_id.as_deref();
-    let Some(page) = loaded_page_mut_for_session(conn, session_id) else {
+    let Some(mut page) = loaded_page_mut_for_session(conn, session_id) else {
         return DomSnapshotCommandDispatchStep::Complete(CommandOutputPlan::error(
             -32000,
             "NoDocumentLoaded",
@@ -187,10 +187,10 @@ pub(crate) fn complete_pending_dom_snapshot_command(
     ))
 }
 
-fn loaded_page_mut_for_session<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_session(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
-) -> Option<&'a mut Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.loaded_page_mut_for_protocol_access(session_id).ok()
 }
 
@@ -212,7 +212,7 @@ mod tests {
     async fn load_document(ctx: &mut TestContext, html: &str) {
         let mut bc = BrowserContext::new("BID-1".to_owned());
         bc.set_active_target_id("TID-1".to_owned());
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
         ctx.install_navigation_fixture_for_session_owner(&format!("data:text/html,{html}"), None)
             .await;
         wait_until_renderer_document_load(ctx, None, "TID-1", LOADER_ID).await;
@@ -225,18 +225,35 @@ mod tests {
 
     async fn process_via_command_dispatch(ctx: &mut TestContext, msg: serde_json::Value) {
         let raw = serde_json::to_string(&msg).expect("test command should serialize");
-        let step = ctx.conn.start_command_dispatch(&raw);
-        let (messages, _) = ctx.complete_command_task_step_for_test(step).await;
-        ctx.sent.extend(messages);
+        let mut step = ctx.conn.start_command_dispatch(&raw);
+        loop {
+            match step {
+                CdpCommandTaskStep::Complete(outcome) => {
+                    let (messages, _) = outcome.into_parts();
+                    ctx.sent.extend(messages);
+                    break;
+                }
+                CdpCommandTaskStep::Pending(pending) => {
+                    step = ctx
+                        .conn
+                        .complete_pending_command_dispatch(pending.wait().await)
+                        .await;
+                }
+            }
+        }
     }
 
     async fn complete_pending_command_task_for_test(
         ctx: &mut TestContext,
-        pending: crate::conn::PendingCdpCommandDispatch,
+        mut pending: crate::conn::PendingCdpCommandDispatch,
     ) -> Vec<serde_json::Value> {
-        ctx.complete_command_task_step_for_test(CdpCommandTaskStep::Pending(Box::new(pending)))
-            .await
-            .0
+        loop {
+            let completed = pending.wait().await;
+            match ctx.conn.complete_pending_command_dispatch(completed).await {
+                CdpCommandTaskStep::Pending(next) => pending = *next,
+                CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
+            }
+        }
     }
 
     async fn wait_until_runtime_value(
@@ -1020,26 +1037,21 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn capture_snapshot_targets_loaded_background_owner_without_promotion() {
         let mut ctx = TestContext::new();
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><title>Background Snapshot</title></head><body><main>owner</main></body></html>",
-            )
-            .await
-            .expect("background page should load");
+        let page_url = "data:text/html,<html><head><title>Background Snapshot</title></head><body><main>owner</main></body></html>";
 
-        let mut background = BackgroundTarget::with_url(
+        let background = BackgroundTarget::with_url(
             "TID-background".to_owned(),
             Some("SID-background".to_owned()),
-            page.final_url().as_str().to_owned(),
+            "about:blank".to_owned(),
         );
-        background.replace_loaded_page(Some(page));
 
         let mut bc = BrowserContext::new("BID-DS-BG".to_owned());
         bc.set_active_target_id("TID-active".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         bc.background_targets.push(background);
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
+        ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-background"))
+            .await;
 
         ctx.process_async(json!({
             "id": 101,
@@ -1079,25 +1091,20 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn capture_snapshot_targets_inactive_owner_without_activation() {
         let mut ctx = TestContext::new();
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async(
-                "data:text/html,<html><head><title>Inactive Snapshot</title></head><body><section>inactive</section></body></html>",
-            )
-            .await
-            .expect("inactive page should load");
+        let page_url = "data:text/html,<html><head><title>Inactive Snapshot</title></head><body><section>inactive</section></body></html>";
 
         let mut active = BrowserContext::new("BID-active".to_owned());
         active.set_active_target_id("TID-active".to_owned());
         active.attach_active_session("SID-active".to_owned());
-        ctx.conn.browser_context = Some(active);
+        ctx.conn.insert_browser_context(active);
 
         let mut inactive = BrowserContext::new("BID-inactive".to_owned());
         inactive.set_active_target_id("TID-inactive".to_owned());
-        inactive.set_target_url(page.final_url().as_str().to_owned());
+        inactive.set_target_url("about:blank".to_owned());
         inactive.attach_active_session("SID-inactive".to_owned());
-        inactive.replace_loaded_page(Some(page));
-        ctx.conn.inactive_browser_contexts.push(inactive);
+        ctx.conn.insert_browser_context(inactive);
+        ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-inactive"))
+            .await;
 
         ctx.process_async(json!({
             "id": 111,

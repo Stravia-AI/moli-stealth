@@ -86,7 +86,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );
@@ -99,7 +99,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );
@@ -109,6 +109,7 @@ mod tests {
     async fn inspector_enable_replays_target_crashed_for_crashed_target() {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new("BID-1".into());
+        bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
         bc.active_target
             .owner_state
@@ -196,9 +197,8 @@ mod tests {
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(bc.active_target_id(), Some("TID-active"));
         assert!(
-            bc.parked_page_session_state("TID-background")
+            bc.primary_devtools_session_state_for_target("TID-background")
                 .is_some_and(|state| state
-                    .devtools_session_state
                     .runtime_session_state
                     .inspector_target_crashed_delivered())
         );
@@ -257,11 +257,11 @@ mod tests {
     async fn inspector_enable_and_disable_stage_background_target_session_state() {
         let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new("BID-1".into());
-        bc.attach_active_session("SID-active");
         bc.set_active_target_id("TID-A");
+        bc.attach_active_session("SID-active");
         bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-B".into(),
+            .push(crate::conn::BackgroundTarget::new_with_frontend_session(
+                "TID-B",
                 Some("SID-B".into()),
                 crate::conn::TargetIdentityState::new(
                     "about:blank#background".into(),
@@ -288,16 +288,14 @@ mod tests {
         {
             let bc = ctx.conn.browser_context.as_ref().expect("browser context");
             assert!(
-                !bc.devtools_session_state
+                !bc.devtools_session_state()
                     .runtime_session_state
                     .inspector_enabled
             );
-            assert!(bc.parked_page_session_state("TID-B").is_some_and(|state| {
-                state
-                    .devtools_session_state
-                    .runtime_session_state
-                    .inspector_enabled
-            }));
+            assert!(
+                bc.primary_devtools_session_state_for_target("TID-B")
+                    .is_some_and(|state| state.runtime_session_state.inspector_enabled)
+            );
         }
 
         ctx.process_async(json!({"id": 5, "method": "Inspector.disable", "sessionId": "SID-B"}))
@@ -305,7 +303,7 @@ mod tests {
         ctx.expect_result(5, json!({}), Some("SID-B"));
         let bc = ctx.conn.browser_context.as_ref().expect("browser context");
         assert!(
-            !bc.devtools_session_state
+            !bc.devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );

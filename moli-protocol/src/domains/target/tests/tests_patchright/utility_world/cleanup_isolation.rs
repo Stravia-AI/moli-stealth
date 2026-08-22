@@ -231,7 +231,7 @@ async fn patchright_over_cdp_auto_attach_sweep_rehydrates_existing_targets_witho
     );
     assert!(
         first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -256,7 +256,7 @@ async fn patchright_over_cdp_auto_attach_sweep_rehydrates_existing_targets_witho
     );
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -581,7 +581,7 @@ async fn patchright_over_cdp_auto_attach_sweep_cleanup_stays_isolated_per_browse
         .expect("first browser context should still exist");
     assert!(
         !first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -607,7 +607,7 @@ async fn patchright_over_cdp_auto_attach_sweep_cleanup_stays_isolated_per_browse
         .expect("second browser context should still exist");
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -1087,7 +1087,7 @@ async fn patchright_over_cdp_auto_attach_sweep_page_binding_cleanup_with_same_na
         .expect("first browser context should still exist");
     assert!(
         !first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -1104,7 +1104,7 @@ async fn patchright_over_cdp_auto_attach_sweep_page_binding_cleanup_with_same_na
         .expect("second browser context should still exist");
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -1496,7 +1496,7 @@ async fn patchright_over_cdp_auto_attach_sweep_page_binding_rejection_with_same_
         .expect("first browser context should still exist");
     assert!(
         !first_context
-            .devtools_session_state
+            .devtools_session_state()
 
             .runtime_bindings
             .iter()
@@ -1514,7 +1514,7 @@ async fn patchright_over_cdp_auto_attach_sweep_page_binding_rejection_with_same_
         .expect("second browser context should still exist");
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
 
             .runtime_bindings
             .iter()
@@ -2068,7 +2068,7 @@ async fn patchright_over_cdp_auto_attach_sweep_handle_page_binding_cleanup_with_
         .expect("first browser context should still exist");
     assert!(
         !first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -2085,7 +2085,7 @@ async fn patchright_over_cdp_auto_attach_sweep_handle_page_binding_cleanup_with_
         .expect("second browser context should still exist");
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -2547,7 +2547,7 @@ async fn run_patchright_over_cdp_auto_attach_sweep_handle_page_binding_rejection
         .expect("first browser context should still exist");
     assert!(
         !first_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -2564,7 +2564,7 @@ async fn run_patchright_over_cdp_auto_attach_sweep_handle_page_binding_rejection
         .expect("second browser context should still exist");
     assert!(
         second_context
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {

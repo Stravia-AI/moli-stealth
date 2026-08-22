@@ -1,3 +1,4 @@
+use crate::conn::{BrowserBackgroundOutputReceiver, browser_background_output_channel};
 use crate::devtools_runtime::{AutomationEvent, DevToolsNetworkResourceType};
 use moli_cookie_jar::{
     StoredCookieQueryReport, StoredCookieSetRejectionReason, StoredCookieSetStatus,
@@ -7,7 +8,6 @@ use moli_fetch::{
     NetworkRequestObservation, NetworkResponseObservation, RedirectInfo,
 };
 use serde_json::{Value, json};
-use tokio::sync::mpsc::unbounded_channel;
 use url::Url;
 
 use super::gate::{
@@ -65,9 +65,9 @@ fn completed_progress_context() -> CompletedMainDocumentProgressContext {
 
 fn live_progress_source() -> (
     MainDocumentLiveNetworkProgressSource,
-    tokio::sync::mpsc::UnboundedReceiver<crate::conn::BackgroundProtocolEvent>,
+    BrowserBackgroundOutputReceiver,
 ) {
-    let (sender, receiver) = unbounded_channel();
+    let (sender, receiver) = browser_background_output_channel();
     (
         MainDocumentLiveNetworkProgressSource {
             sender: Some(sender),
@@ -285,7 +285,7 @@ fn pending_document_progress_transfer_keeps_body_unmaterialized() {
 
 #[test]
 fn progress_output_target_serializes_background_targets_consistently() {
-    let (sender, mut receiver) = unbounded_channel();
+    let (sender, mut receiver) = browser_background_output_channel();
     let mut background = MainDocumentProgressOutputTarget::background_sender(&sender);
     background.emit_batch(response_progress_batch_for_output_target());
     drop(sender);
@@ -344,7 +344,7 @@ fn progress_output_target_serializes_background_targets_consistently() {
 fn progress_output_target_background_raw_events_stay_sidecar_free_without_classifier_bridge() {
     let report = StoredCookieQueryReport::default();
 
-    let (sender, mut receiver) = unbounded_channel();
+    let (sender, mut receiver) = browser_background_output_channel();
     let mut background = MainDocumentProgressOutputTarget::background_sender(&sender);
     super::emit::emit_request_will_be_sent_extra_info(
         &mut background,

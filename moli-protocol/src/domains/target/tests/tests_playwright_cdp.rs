@@ -6144,13 +6144,12 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
         .as_ref()
         .expect("active browser context");
     assert!(active.script_execution_disabled);
-    let script_runs = active
+    let page = active
         .active_target
         .runtime_slot
         .loaded_page()
-        .expect("loaded page should exist")
-        .script_execution()
-        .runs();
+        .expect("loaded page should exist");
+    let script_runs = page.script_execution().runs();
     assert!(
         script_runs.iter().any(|run| matches!(
             run.outcome(),
@@ -6158,6 +6157,7 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
         )),
         "expected at least one skipped page script when script execution is disabled"
     );
+    drop(page);
 
     ctx.process_async(json!({
             "id": 247,

@@ -117,9 +117,9 @@ impl BrowserContext {
         if !mutate(&mut self.document_cookie_manager_surface) {
             return false;
         }
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
             self.document_cookie_manager_surface
-                .apply_to_page_async(page)
+                .apply_to_page_async(&mut page)
                 .await;
         }
         true
@@ -131,15 +131,16 @@ impl BrowserContext {
         self.document_cookie_manager_surface.snapshot()
     }
 
+    #[cfg(test)]
     pub(crate) async fn restore_raw_cookie_manager_surface_async(
         &mut self,
         snapshot: BrowserContextCookieManagerSurfaceSnapshot,
     ) {
         self.restore_raw_cookie_manager_surface_without_loaded_page_sync(snapshot);
         #[cfg(test)]
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
             self.document_cookie_manager_surface
-                .apply_to_page_async(page)
+                .apply_to_page_async(&mut page)
                 .await;
         }
     }
@@ -152,6 +153,17 @@ impl BrowserContext {
             super::super::cookie_manager_surface::BrowserContextCookieManagerSurface::from_snapshot(
                 snapshot,
             );
+    }
+
+    #[cfg(test)]
+    pub(in crate::conn) async fn synchronize_raw_cookie_manager_surface_to_loaded_page_async(
+        &mut self,
+    ) {
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
+            self.document_cookie_manager_surface
+                .apply_to_page_async(&mut page)
+                .await;
+        }
     }
 
     pub fn document_start_script_descriptors(&self) -> Vec<DocumentStartScript> {
@@ -622,7 +634,7 @@ impl BrowserContext {
         let Some(script) = self.generated_surface_override_script() else {
             return Ok(());
         };
-        let Some(page) = self.active_target.runtime_slot.loaded_page_mut() else {
+        let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() else {
             return Ok(());
         };
         page.run_page_surface_override_script_async(&script.source)

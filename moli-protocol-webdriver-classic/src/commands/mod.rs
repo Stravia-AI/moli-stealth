@@ -38,8 +38,8 @@ pub use elements::{
 };
 pub use errors::classic_error_from_devtools_error;
 pub use navigation::{
-    current_url_command, history_traversal_entry, navigate_command, navigation_history_command,
-    page_source_command, refresh_command, title_command, traverse_history_command,
+    current_url_command, navigate_command, page_source_command, refresh_command, title_command,
+    traverse_history_command,
 };
 pub use script::{execute_async_command, execute_sync_command};
 pub use window::{

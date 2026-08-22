@@ -34,8 +34,8 @@ use std::fmt;
 use std::sync::Arc;
 
 use crate::renderer::{
-    RendererPageCommand, RendererPageCommandPending, RendererPageHandle, RendererPageReply,
-    RendererPageState,
+    RendererPageClientHandle, RendererPageCommand, RendererPageCommandPending, RendererPageHandle,
+    RendererPageReply, RendererPageState,
 };
 use anyhow::Result;
 pub use command_dispatch::{
@@ -188,10 +188,38 @@ pub use crate::renderer::{
 
 pub struct Page {
     page_state: PageStateCache,
-    handle: RendererPageHandle,
+    handle: RendererPageClientHandle,
+    renderer_lifetime_owner: Option<RendererPageLifetimeOwner>,
     renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
     renderer_devtools_command_session_id: Option<String>,
     page_creation_artifacts: Option<Box<RendererPageCreationArtifacts>>,
+}
+
+/// Unique lifetime authority for one exact renderer Page.
+///
+/// A protocol `Page` projection only needs the cloneable command capability.
+/// Browser Host takes this value when the corresponding Page residence
+/// commits, so dropping a frontend projection cannot close the renderer Page.
+pub struct RendererPageLifetimeOwner {
+    handle: Box<RendererPageHandle>,
+}
+
+impl fmt::Debug for RendererPageLifetimeOwner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RendererPageLifetimeOwner")
+            .field("page_id", &self.handle.page_id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl RendererPageLifetimeOwner {
+    pub fn page_id(&self) -> u64 {
+        self.handle.page_id()
+    }
+
+    pub async fn close_async(mut self) -> Result<()> {
+        self.handle.close_async().await
+    }
 }
 
 impl fmt::Debug for Page {
@@ -211,9 +239,13 @@ impl Page {
         handle: RendererPageHandle,
         page_state: Arc<RendererPageState>,
     ) -> Self {
+        let client = handle.client_handle();
         Self {
             page_state: PageStateCache::new(page_state),
-            handle,
+            handle: client,
+            renderer_lifetime_owner: Some(RendererPageLifetimeOwner {
+                handle: Box::new(handle),
+            }),
             renderer_agent_attachment_id: None,
             renderer_devtools_command_session_id: None,
             page_creation_artifacts: None,
@@ -225,9 +257,13 @@ impl Page {
         page_state: Arc<RendererPageState>,
         page_creation_artifacts: RendererPageCreationArtifacts,
     ) -> Self {
+        let client = handle.client_handle();
         Self {
             page_state: PageStateCache::new(page_state),
-            handle,
+            handle: client,
+            renderer_lifetime_owner: Some(RendererPageLifetimeOwner {
+                handle: Box::new(handle),
+            }),
             renderer_agent_attachment_id: None,
             renderer_devtools_command_session_id: None,
             page_creation_artifacts: Some(Box::new(page_creation_artifacts)),
@@ -274,20 +310,50 @@ impl Page {
         self.renderer_agent_attachment_id = Some(id);
     }
 
+    /// Detaches the unique renderer Page lifetime authority from this command
+    /// projection. Browser Host consumes it only after an exact residence
+    /// commit; a rejected commit must restore it before deterministic cleanup.
+    #[doc(hidden)]
+    pub fn take_renderer_lifetime_owner(&mut self) -> Option<RendererPageLifetimeOwner> {
+        self.renderer_lifetime_owner.take()
+    }
+
+    /// Restores a candidate owner after Browser Host rejected its residence
+    /// transition. A mismatched or already-owned Page leaves the candidate
+    /// untouched for the caller to close.
+    #[doc(hidden)]
+    pub fn try_restore_renderer_lifetime_owner(
+        &mut self,
+        owner: RendererPageLifetimeOwner,
+    ) -> Result<(), RendererPageLifetimeOwner> {
+        if self.renderer_lifetime_owner.is_some() || owner.page_id() != self.handle.page_id() {
+            return Err(owner);
+        }
+        self.renderer_lifetime_owner = Some(owner);
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub fn take_committed_document_post_response_continuation(
         &mut self,
     ) -> Option<RendererPageCommandPostResponseContinuation> {
-        self.handle
-            .take_committed_document_post_response_continuation()
+        self.renderer_lifetime_owner.as_mut().and_then(|owner| {
+            owner
+                .handle
+                .take_committed_document_post_response_continuation()
+        })
     }
 
     /// Deterministically releases this page from the renderer owner.
     ///
-    /// Dropping `Page` also schedules a detached best-effort cleanup, but code
-    /// that needs teardown acknowledgement should await `close_async()` instead.
+    /// A freshly created standalone `Page` still owns that lifetime and closes
+    /// it here. After Browser Host adoption this value is a command projection,
+    /// so closing or dropping it cannot retire the Browser-owned renderer Page.
     pub async fn close_async(mut self) -> Result<()> {
-        self.handle.close_async().await
+        match self.renderer_lifetime_owner.take() {
+            Some(owner) => owner.close_async().await,
+            None => Ok(()),
+        }
     }
 
     // Synchronous Page methods below must stay local: they read the cached
@@ -295,7 +361,7 @@ impl Page {
     // owner goes through an explicit async method.
     #[cfg(test)]
     pub(crate) fn handle_for_testing(&self) -> RendererPageTestingHandle {
-        RendererPageTestingHandle::new_for_testing(&self.handle)
+        RendererPageTestingHandle::new_for_client_for_testing(&self.handle)
     }
 
     #[cfg(all(test, debug_assertions))]

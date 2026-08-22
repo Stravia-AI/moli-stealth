@@ -1,6 +1,7 @@
 use super::super::cookie_manager_surface::BrowserContextCookieManagerSurfaceSnapshot;
 use super::super::state::{
-    TargetPageAbsenceReason, TargetSessionStorageNamespace, runtime_bindings_for_renderer,
+    StagedBackgroundTargetSlot, TargetPageAbsenceReason, TargetSessionStorageNamespace,
+    runtime_bindings_for_renderer,
 };
 use super::super::{
     BackgroundTarget, BrowserContext, DedicatedWorkerTargetState, IsolatedWorldDefinition,
@@ -8,11 +9,13 @@ use super::super::{
     ParkedTargetOwnerState, ServiceWorkerTargetState, SharedWorkerTargetState, TargetIdentityState,
     TargetInitialEmptyDocumentCreator, TargetSlotState,
 };
-use crate::conn::state::{DevToolsSessionState, TargetFetchConfig, TargetNetworkPolicyState};
+use crate::conn::state::{TargetFetchConfig, TargetNetworkPolicyState};
 use crate::devtools_runtime::{
     DevToolsBrowserContextId, DevToolsTargetId, DevToolsTargetInfo, DevToolsTargetKind,
 };
-use moli_core::network::SharedWebStorageStore;
+use moli_core::browser_host::{
+    BrowserPageResidenceHandle, BrowserTargetHandle, BrowserTargetSessionStorageAccess,
+};
 
 impl BrowserContext {
     pub fn remove_background_target(&mut self, target_id: &str) -> Option<BackgroundTarget> {
@@ -23,51 +26,69 @@ impl BrowserContext {
         Some(self.background_targets.swap_remove(index))
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_background_target(
         &mut self,
-        target_id: String,
+        target_handle: impl Into<BrowserTargetHandle>,
         session_id: Option<String>,
         url: String,
-        initial_empty_document_url: Option<String>,
+        _initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
     ) {
         let session_storage_namespace =
             self.deep_cloned_session_storage_namespace_for_creator(creator.as_ref());
         self.stage_background_target_with_session_storage_namespace(
-            target_id,
+            target_handle.into(),
+            BrowserPageResidenceHandle::default(),
             session_id,
             url,
-            initial_empty_document_url,
+            creator,
+            session_storage_namespace,
+            None,
+        );
+    }
+
+    pub(crate) fn stage_background_target_with_browser_handles(
+        &mut self,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+        session_storage_access: BrowserTargetSessionStorageAccess,
+        session_id: Option<String>,
+        url: String,
+        creator: Option<TargetInitialEmptyDocumentCreator>,
+    ) {
+        self.stage_background_target_with_session_storage_namespace(
+            target_handle,
+            page_residence,
+            session_id,
+            url,
             creator,
             None,
-            session_storage_namespace,
+            Some(session_storage_access),
         );
     }
 
     pub(crate) fn stage_popup_background_target(
         &mut self,
-        target_id: String,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+        session_storage_access: BrowserTargetSessionStorageAccess,
         session_id: Option<String>,
         url: String,
-        initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
-        session_storage_store: Option<SharedWebStorageStore>,
-        initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
     ) {
-        let session_storage_namespace = session_storage_store
-            .map(TargetSessionStorageNamespace::from_store)
-            .or_else(|| self.deep_cloned_session_storage_namespace_for_creator(creator.as_ref()));
         self.stage_background_target_with_session_storage_namespace(
-            target_id,
+            target_handle,
+            page_residence,
             session_id,
             url,
-            initial_empty_document_url,
             creator,
-            initial_empty_document_storage_key,
-            session_storage_namespace,
+            None,
+            Some(session_storage_access),
         );
     }
 
+    #[cfg(test)]
     fn deep_cloned_session_storage_namespace_for_creator(
         &self,
         creator: Option<&TargetInitialEmptyDocumentCreator>,
@@ -83,49 +104,97 @@ impl BrowserContext {
 
     fn stage_background_target_with_session_storage_namespace(
         &mut self,
-        target_id: String,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
         session_id: Option<String>,
         url: String,
-        initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
-        initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
         session_storage_namespace: Option<TargetSessionStorageNamespace>,
+        session_storage_access: Option<BrowserTargetSessionStorageAccess>,
     ) {
         let target_identity = background_target_identity_for_initial_url(&url, creator.as_ref());
-        self.mutate_parked_target_owner_state(&target_id, |owner_state| {
-            owner_state.begin_initial_empty_document(
-                target_id.clone(),
-                initial_empty_document_url.unwrap_or_else(|| url.clone()),
-                creator,
-                initial_empty_document_storage_key,
-            );
-        });
-        let mut target = BackgroundTarget::with_identity(target_id, session_id, target_identity);
+        let mut target =
+            BackgroundTarget::with_identity(target_handle.clone(), page_residence, target_identity);
         if let Some(namespace) = session_storage_namespace {
             target.replace_session_storage_namespace(namespace);
         }
+        if let Some(access) = session_storage_access {
+            target.bind_session_storage_access(access);
+        }
+        self.register_top_level_target_attachment(target_handle, session_id);
         self.background_targets.push(target);
     }
 
+    #[cfg(test)]
     pub(crate) fn stage_active_target_demoting_current(
         &mut self,
-        target_id: String,
+        target_handle: impl Into<BrowserTargetHandle>,
         session_id: Option<String>,
         url: String,
-        initial_empty_document_url: Option<String>,
+        _initial_empty_document_url: Option<String>,
     ) {
+        self.stage_active_target_demoting_current_with_optional_registration(
+            target_handle.into(),
+            BrowserPageResidenceHandle::default(),
+            None,
+            session_id,
+            url,
+        );
+    }
+
+    pub(crate) fn stage_active_target_demoting_current_with_browser_handles(
+        &mut self,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+        session_storage_access: BrowserTargetSessionStorageAccess,
+        session_id: Option<String>,
+        url: String,
+    ) {
+        self.stage_active_target_demoting_current_with_optional_registration(
+            target_handle,
+            page_residence,
+            Some(session_storage_access),
+            session_id,
+            url,
+        );
+    }
+
+    fn stage_active_target_demoting_current_with_optional_registration(
+        &mut self,
+        target_handle: BrowserTargetHandle,
+        page_residence: BrowserPageResidenceHandle,
+        session_storage_access: Option<BrowserTargetSessionStorageAccess>,
+        session_id: Option<String>,
+        url: String,
+    ) {
+        // Root frontend bindings are browser-context defaults for successor
+        // Documents. The predecessor exact Target keeps its own copy when it
+        // becomes background, while the newly created active Target receives
+        // the same cleaned pre-document configuration.
+        let inherited_runtime_bindings = runtime_bindings_for_renderer(
+            self.devtools_session_state(),
+            self.auxiliary_devtools_session_states(),
+        );
         let previous_active_slot = self.take_active_target_slot_state();
-        self.set_active_target_id(target_id.clone());
+        if let Some(session_storage_access) = session_storage_access {
+            self.bind_new_active_target_registration(
+                target_handle,
+                page_residence,
+                session_storage_access,
+            );
+        } else {
+            self.bind_new_active_target_handles(target_handle, page_residence);
+        }
         self.replace_active_session(session_id);
         self.replace_target_identity(TargetIdentityState::with_url(url.clone()));
         self.clear_active_target_session_scoped_state_without_loaded_page();
+        if let Some(target_id) = self.active_target_id_owned() {
+            let _ =
+                self.mutate_devtools_session_state_for_target(&target_id, false, None, |state| {
+                    state.runtime_bindings = inherited_runtime_bindings
+                });
+        }
         self.active_target.owner_state.clear_page_local_state();
-        self.active_target.owner_state.begin_initial_empty_document(
-            target_id,
-            initial_empty_document_url.unwrap_or(url),
-            None,
-            None,
-        );
         self.reset_target_scoped_network_artifacts();
         self.active_target
             .owner_state
@@ -245,37 +314,12 @@ impl BrowserContext {
         }
     }
 
-    pub(crate) fn update_target_url(&mut self, target_id: &str, url: String) -> bool {
-        if self.is_active_target(target_id) {
-            self.set_target_url(url);
-            self.active_target.owner_state.target_crash_state.clear();
-            return true;
-        }
-        if let Some(target) = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_target(target_id))
-        {
-            target.set_target_url(url);
-            return true;
-        }
-        false
-    }
-
     pub(crate) fn assign_session_to_target(&mut self, target_id: &str, session_id: String) -> bool {
-        if self.is_active_target(target_id) {
-            self.attach_active_session(session_id);
-            true
-        } else if let Some(target) = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_target(target_id))
-        {
-            target.attach_session(session_id);
-            true
-        } else {
-            false
+        if self.top_level_target_handle(target_id).is_none() {
+            return false;
         }
+        self.replace_primary_session_for_target(target_id, Some(session_id));
+        true
     }
 
     pub(crate) fn assign_auto_attached_session_to_target(
@@ -283,26 +327,13 @@ impl BrowserContext {
         target_id: &str,
         session_id: String,
     ) -> bool {
-        if self.is_active_target(target_id) {
-            if self.has_active_session() {
-                self.assign_auxiliary_session_to_target(target_id, session_id)
-            } else {
-                self.attach_active_session(session_id);
-                true
-            }
-        } else if let Some(target) = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_target(target_id))
-        {
-            if target.has_session() {
-                self.assign_auxiliary_session_to_target(target_id, session_id)
-            } else {
-                target.attach_session(session_id);
-                true
-            }
-        } else {
+        if self.top_level_target_handle(target_id).is_none() {
             false
+        } else if self.primary_session_id_for_target(target_id).is_some() {
+            self.assign_auxiliary_session_to_target(target_id, session_id)
+        } else {
+            self.replace_primary_session_for_target(target_id, Some(session_id));
+            true
         }
     }
 
@@ -311,42 +342,23 @@ impl BrowserContext {
         target_id: &str,
         session_id: String,
     ) -> bool {
-        if self.is_active_target(target_id)
-            || self
-                .background_targets
-                .iter()
-                .any(|target| target.is_target(target_id))
-        {
-            self.auxiliary_target_sessions
-                .insert(session_id, target_id.to_owned());
-            true
-        } else {
-            false
-        }
+        self.attach_auxiliary_session_for_target(target_id, session_id)
     }
 
     pub(crate) fn auxiliary_target_id_for_session(&self, session_id: &str) -> Option<&str> {
-        self.auxiliary_target_sessions
-            .get(session_id)
-            .map(String::as_str)
+        self.auxiliary_attachment_target_id_for_session(session_id)
     }
 
     pub(crate) fn auxiliary_session_ids_for_target(&self, target_id: &str) -> Vec<String> {
-        let mut session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|&(_session_id, session_target_id)| session_target_id == target_id)
-            .map(|(session_id, _session_target_id)| session_id.clone())
-            .collect::<Vec<_>>();
-        session_ids.sort();
-        session_ids
+        self.auxiliary_attachment_session_ids_for_target(target_id)
     }
 
     pub(crate) fn devtools_session_ids_for_target(&self, target_id: &str) -> Vec<String> {
-        let mut session_ids = if self.is_active_target(target_id) {
-            self.active_session_id_owned().into_iter().collect()
-        } else if let Some(target) = self.background_target(target_id) {
-            target.session_id().map(str::to_owned).into_iter().collect()
+        let mut session_ids = if self.top_level_target_handle(target_id).is_some() {
+            self.primary_session_id_for_target(target_id)
+                .map(str::to_owned)
+                .into_iter()
+                .collect()
         } else if let Some(target) = self.shared_worker_target(target_id) {
             target.session_ids()
         } else if let Some(target) = self.service_worker_target(target_id) {
@@ -367,15 +379,13 @@ impl BrowserContext {
         self.active_target
             .fetch_owner
             .remove_fetch_session(Some(session_id));
-        self.auxiliary_devtools_session_states.remove(session_id);
-        let target_id = self.auxiliary_target_sessions.remove(session_id)?;
+        let target_id = self.remove_auxiliary_attachment_session(session_id)?;
         if let Some(target) = self.background_target_mut(&target_id) {
             target
                 .runtime_slot
                 .remove_auxiliary_network_session(session_id);
         }
         self.mutate_parked_page_session_state(&target_id, |state| {
-            state.auxiliary_devtools_session_states.remove(session_id);
             state.fetch_config.remove_fetch_session(Some(session_id));
         });
         if self
@@ -391,12 +401,7 @@ impl BrowserContext {
     }
 
     pub(crate) fn remove_auxiliary_sessions_for_target(&mut self, target_id: &str) -> Vec<String> {
-        let session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|&(_session_id, session_target_id)| session_target_id == target_id)
-            .map(|(session_id, _session_target_id)| session_id.clone())
-            .collect::<Vec<_>>();
+        let session_ids = self.auxiliary_session_ids_for_target(target_id);
         for session_id in &session_ids {
             let _ = self.remove_auxiliary_session(session_id);
         }
@@ -408,52 +413,48 @@ impl BrowserContext {
         session_id: &str,
     ) -> Result<Option<String>, String> {
         let Some(target_id) = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_session(session_id))
-            .map(|target| {
-                target.detach_session();
-                let target_id = target.target_id().to_owned();
-                target.runtime_slot.disable_primary_network_events();
-                target
-                    .runtime_slot
-                    .clear_session_scoped_network_observation_artifacts();
-                target
-                    .runtime_slot
-                    .request_id_allocator()
-                    .reset_fetch_navigation_request_counter();
-                target
-                    .runtime_slot
-                    .request_id_allocator()
-                    .reset_subresource_fetch_request_counter();
-                target_id
-            })
+            .primary_attachment_target_id_for_session(session_id)
+            .filter(|target_id| !self.is_active_target(target_id))
+            .map(str::to_owned)
         else {
+            return Ok(None);
+        };
+        self.replace_primary_session_for_target(&target_id, None);
+        let Some(()) = self.background_target_mut(&target_id).map(|target| {
+            target.runtime_slot.disable_primary_network_events();
+            target
+                .runtime_slot
+                .clear_session_scoped_network_observation_artifacts();
+            target
+                .runtime_slot
+                .request_id_allocator()
+                .reset_fetch_navigation_request_counter();
+            target
+                .runtime_slot
+                .request_id_allocator()
+                .reset_subresource_fetch_request_counter();
+        }) else {
             return Ok(None);
         };
 
         let retained_runtime_bindings = self
-            .parked_page_session_state(&target_id)
-            .map(|state| {
-                runtime_bindings_for_renderer(
-                    &state.devtools_session_state,
-                    &state.auxiliary_devtools_session_states,
-                )
-            })
+            .devtools_session_states_for_target(&target_id)
+            .map(|(primary, auxiliary)| runtime_bindings_for_renderer(primary, auxiliary))
             .unwrap_or_default();
-        let mut cleared_page_session_state = ParkedPageSessionState::default();
+        let cleared_page_session_state = ParkedPageSessionState::default();
         let cleared_emulated_media: moli_core::page::EmulatedMediaOverrides =
             (&cleared_page_session_state.emulated_media).into();
-        cleared_page_session_state
-            .devtools_session_state
-            .runtime_bindings = retained_runtime_bindings;
+        self.reset_primary_devtools_session_state_for_target(&target_id);
+        self.mutate_devtools_session_state_for_target(&target_id, false, None, |state| {
+            state.runtime_bindings = retained_runtime_bindings
+        });
         self.replace_parked_page_session_state(target_id.clone(), cleared_page_session_state);
         self.replace_parked_fetch_state(target_id.clone(), Default::default());
         self.mutate_parked_network_artifacts(&target_id, |artifacts| {
             artifacts.remove_session_observation_cursor(Some(session_id));
         });
 
-        if let Some(page) = self
+        if let Some(mut page) = self
             .background_target_mut(&target_id)
             .and_then(|target| target.runtime_slot.loaded_page_mut())
         {
@@ -487,32 +488,29 @@ impl BrowserContext {
         session_id: &str,
     ) -> Option<String> {
         let target_id = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_session(session_id))
-            .map(|target| {
-                target.detach_session();
-                let target_id = target.target_id().to_owned();
-                target.runtime_slot.disable_primary_network_events();
-                target
-                    .runtime_slot
-                    .clear_session_scoped_network_observation_artifacts();
-                target
-                    .runtime_slot
-                    .request_id_allocator()
-                    .reset_fetch_navigation_request_counter();
-                target
-                    .runtime_slot
-                    .request_id_allocator()
-                    .reset_subresource_fetch_request_counter();
-                target_id
-            })?;
+            .primary_attachment_target_id_for_session(session_id)
+            .filter(|target_id| !self.is_active_target(target_id))
+            .map(str::to_owned)?;
+        self.replace_primary_session_for_target(&target_id, None);
+        let target = self.background_target_mut(&target_id)?;
+        target.runtime_slot.disable_primary_network_events();
+        target
+            .runtime_slot
+            .clear_session_scoped_network_observation_artifacts();
+        target
+            .runtime_slot
+            .request_id_allocator()
+            .reset_fetch_navigation_request_counter();
+        target
+            .runtime_slot
+            .request_id_allocator()
+            .reset_subresource_fetch_request_counter();
         self.mutate_parked_page_session_state(&target_id, |state| {
-            state.devtools_session_state = DevToolsSessionState::default();
             state.network_enabled = false;
             state.network_policy = TargetNetworkPolicyState::default();
             state.fetch_config = TargetFetchConfig::default();
         });
+        self.reset_primary_devtools_session_state_for_target(&target_id);
         self.mutate_parked_network_artifacts(&target_id, |artifacts| {
             artifacts.remove_session_observation_cursor(Some(session_id));
         });
@@ -640,15 +638,11 @@ impl BrowserContext {
         &mut self,
     ) -> Result<(), String> {
         let target_id = self.active_target_id_owned();
-        let auxiliary_inspector_session_ids = self
-            .auxiliary_target_sessions
-            .iter()
-            .filter(|(_session_id, session_target_id)| {
-                target_id.as_deref() == Some(session_target_id.as_str())
-            })
-            .map(|(session_id, _session_target_id)| session_id.clone())
-            .collect::<Vec<_>>();
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        let auxiliary_inspector_session_ids = target_id
+            .as_deref()
+            .map(|target_id| self.auxiliary_session_ids_for_target(target_id))
+            .unwrap_or_default();
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
             for session_id in &auxiliary_inspector_session_ids {
                 page.detach_runtime_inspector_session_async(Some(session_id))
                     .await
@@ -666,7 +660,7 @@ impl BrowserContext {
             .await?;
         self.detach_active_session();
         for session_id in auxiliary_inspector_session_ids {
-            self.auxiliary_target_sessions.remove(&session_id);
+            self.remove_auxiliary_attachment_session(&session_id);
             self.active_target
                 .runtime_slot
                 .remove_auxiliary_network_session(&session_id);
@@ -698,15 +692,18 @@ impl BrowserContext {
             self.detach_active_session();
             return true;
         }
-        let Some(target) = self
-            .background_targets
-            .iter_mut()
-            .find(|target| target.is_session(session_id))
+        let Some(target_id) = self
+            .primary_attachment_target_id_for_session(session_id)
+            .filter(|target_id| !self.is_active_target(target_id))
+            .map(str::to_owned)
         else {
             return false;
         };
+        self.replace_primary_session_for_target(&target_id, None);
+        let Some(target) = self.background_target_mut(&target_id) else {
+            return false;
+        };
         target.runtime_slot.disable_primary_network_events();
-        target.detach_session();
         true
     }
 
@@ -728,14 +725,6 @@ impl BrowserContext {
             .await
     }
 
-    pub(crate) async fn promote_last_background_target_to_active_async(
-        &mut self,
-    ) -> Option<BackgroundTarget> {
-        let promoted = self.last_promotable_background_target_id()?;
-        self.promote_selected_background_target_to_active_async(promoted)
-            .await
-    }
-
     pub(crate) fn last_promotable_background_target_id(&self) -> Option<String> {
         self.background_targets
             .iter()
@@ -748,6 +737,7 @@ impl BrowserContext {
             })
     }
 
+    #[cfg(test)]
     async fn promote_selected_background_target_to_active_async(
         &mut self,
         promoted: String,
@@ -771,36 +761,51 @@ impl BrowserContext {
         Some(target)
     }
 
+    #[cfg(test)]
     pub(crate) async fn promote_background_target_to_active_slot_async(
         &mut self,
         target_id: &str,
     ) -> Result<bool, String> {
-        if self.is_active_target(target_id) {
-            return Ok(true);
-        }
-        let synchronize_loaded_page = !self.has_pending_javascript_dialog();
-        let Some(promoted_slot) = self.take_background_target_slot(target_id) else {
+        let Some(synchronize_loaded_page) =
+            self.project_background_target_to_active_slot_after_browser_owner_commit(target_id)
+        else {
             return Ok(false);
         };
+        if synchronize_loaded_page {
+            self.synchronize_active_target_after_topology_projection_async()
+                .await?;
+        }
+        Ok(true)
+    }
+
+    /// Applies only the physical active/background payload swap after Browser
+    /// Core has committed the matching Target topology and engine handoff.
+    ///
+    /// This operation is synchronous and infallible for an exact projection;
+    /// renderer/DevTools state synchronization happens afterward so no
+    /// authoritative/physical topology mismatch crosses an await.
+    #[cfg(test)]
+    pub(in crate::conn) fn project_background_target_to_active_slot_after_browser_owner_commit(
+        &mut self,
+        target_id: &str,
+    ) -> Option<bool> {
+        if self.is_active_target(target_id) {
+            return Some(false);
+        }
+        let synchronize_loaded_page = !self.has_pending_javascript_dialog();
+        let promoted_slot = self.take_background_target_slot(target_id)?;
         let previous_active = self.take_active_target_slot_state();
         let (mut target, aux_state) = promoted_slot.into_parts();
         std::mem::swap(
             &mut self.active_target.runtime_slot,
             &mut target.runtime_slot,
         );
-        if synchronize_loaded_page {
-            self.clear_active_target_session_scoped_state_async()
-                .await?;
-        } else {
-            self.clear_active_target_session_scoped_state_without_loaded_page();
-        }
+        self.clear_active_target_session_scoped_state_without_loaded_page();
         self.active_target.owner_state.target_crash_state.clear();
-        Box::pin(self.apply_promoted_background_target_state_async(
+        self.apply_promoted_background_target_state_without_loaded_page_sync(
             &mut target,
             aux_state,
-            synchronize_loaded_page,
-        ))
-        .await?;
+        );
         if let Some(previous_active_slot) = previous_active {
             Box::pin(
                 self.park_demoted_active_target_async(
@@ -810,7 +815,74 @@ impl BrowserContext {
             )
             .await;
         }
-        Ok(true)
+        Some(synchronize_loaded_page)
+    }
+
+    /// Removes one exact physical background Target before entering the Core
+    /// topology transaction. Rejection can restore the payload at the same
+    /// index; success consumes it without another fallible Target lookup.
+    pub(in crate::conn) fn stage_background_target_slot_projection(
+        &mut self,
+        target_id: &str,
+    ) -> Option<StagedBackgroundTargetSlot> {
+        let index = self
+            .background_targets
+            .iter()
+            .position(|target| target.is_target(target_id))?;
+        let mut target = self.background_targets.remove(index);
+        let mut aux_state = self.take_parked_target_aux_state(target.target_id());
+        aux_state
+            .network_artifacts
+            .drain_from_background_target(&mut target);
+        Some(StagedBackgroundTargetSlot::new(
+            index,
+            TargetSlotState::new(target, aux_state),
+        ))
+    }
+
+    pub(in crate::conn) fn restore_staged_background_target_slot_projection(
+        &mut self,
+        staged: StagedBackgroundTargetSlot,
+    ) {
+        let (index, slot) = staged.into_parts();
+        self.replace_background_target_slot_at(index, slot);
+    }
+
+    /// Publishes the physical half of an already accepted Core activation.
+    /// The promoted payload was staged before the Core call, so this path has
+    /// no lookup or recoverable failure after the authoritative commit.
+    pub(in crate::conn) fn project_staged_background_target_to_active_slot_after_browser_owner_commit(
+        &mut self,
+        staged: StagedBackgroundTargetSlot,
+    ) {
+        let (_, promoted_slot) = staged.into_parts();
+        let previous_active = self.take_active_target_slot_state();
+        let (mut target, aux_state) = promoted_slot.into_parts();
+        std::mem::swap(
+            &mut self.active_target.runtime_slot,
+            &mut target.runtime_slot,
+        );
+        self.clear_active_target_session_scoped_state_without_loaded_page();
+        self.active_target.owner_state.target_crash_state.clear();
+        self.apply_promoted_background_target_state_without_loaded_page_sync(
+            &mut target,
+            aux_state,
+        );
+        if let Some(previous_active_slot) = previous_active {
+            self.replace_background_target_slot(*previous_active_slot);
+        }
+    }
+
+    #[cfg(test)]
+    pub(in crate::conn) async fn synchronize_active_target_after_topology_projection_async(
+        &mut self,
+    ) -> Result<(), String> {
+        self.synchronize_page_session_state_to_loaded_page_async()
+            .await?;
+        #[cfg(test)]
+        self.synchronize_raw_cookie_manager_surface_to_loaded_page_async()
+            .await;
+        Ok(())
     }
 
     async fn park_demoted_active_target_async(
@@ -864,6 +936,7 @@ impl BrowserContext {
         Ok(true)
     }
 
+    #[cfg(test)]
     pub(crate) fn take_background_target_slot(
         &mut self,
         target_id: &str,
@@ -875,6 +948,7 @@ impl BrowserContext {
         self.take_background_target_slot_by_index(index)
     }
 
+    #[cfg(test)]
     fn take_background_target_slot_by_index(&mut self, index: usize) -> Option<TargetSlotState> {
         if index >= self.background_targets.len() {
             return None;
@@ -888,6 +962,11 @@ impl BrowserContext {
     }
 
     fn replace_background_target_slot(&mut self, slot: TargetSlotState) {
+        let index = self.background_targets.len();
+        self.replace_background_target_slot_at(index, slot);
+    }
+
+    fn replace_background_target_slot_at(&mut self, index: usize, slot: TargetSlotState) {
         let target_id = slot.target_id().to_owned();
         let (mut target, mut aux_state) = slot.into_parts();
         target
@@ -897,24 +976,31 @@ impl BrowserContext {
             .network_artifacts
             .drain_into_background_target(&mut target);
         self.replace_parked_target_aux_state(target_id, aux_state);
-        self.background_targets.push(target);
+        let insert_index = index.min(self.background_targets.len());
+        debug_assert_eq!(
+            insert_index, index,
+            "staged background Target slot must restore within the unchanged vector"
+        );
+        self.background_targets.insert(insert_index, target);
     }
 
     fn take_active_target_slot_state(&mut self) -> Option<Box<TargetSlotState>> {
         let aux_state = self.snapshot_active_target_aux_state();
         let session_storage_namespace =
             std::mem::take(&mut self.active_target.session_storage_namespace);
-        self.active_target_id_owned().map(|target_id| {
-            let runtime_slot = std::mem::take(&mut self.active_target.runtime_slot);
-            Box::new(TargetSlotState::from_active_snapshot(
-                target_id,
-                self.active_session_id_owned(),
-                self.target_identity().clone(),
-                runtime_slot,
-                session_storage_namespace,
-                aux_state,
-            ))
-        })
+        self.active_target
+            .target_handle
+            .take()
+            .map(|target_handle| {
+                let runtime_slot = std::mem::take(&mut self.active_target.runtime_slot);
+                Box::new(TargetSlotState::from_active_snapshot(
+                    target_handle,
+                    self.target_identity().clone(),
+                    runtime_slot,
+                    session_storage_namespace,
+                    aux_state,
+                ))
+            })
     }
 
     pub fn take_parked_isolated_worlds(&mut self, target_id: &str) -> Vec<IsolatedWorldDefinition> {
@@ -1038,75 +1124,10 @@ impl BrowserContext {
         result
     }
 
-    pub(crate) fn begin_active_target_initial_empty_document(&mut self, initial_url: String) {
-        self.begin_active_target_initial_empty_document_with_storage_key(initial_url, None);
-    }
-
-    pub(crate) fn begin_active_target_initial_empty_document_with_storage_key(
-        &mut self,
-        initial_url: String,
-        storage_key: Option<moli_storage_key::MoliStorageKey>,
-    ) {
-        let Some(target_id) = self.active_target_id_owned() else {
-            return;
-        };
+    pub(crate) fn mark_active_initial_document_page_build_pending(&mut self) {
         self.active_target
             .runtime_slot
             .mark_loaded_page_absent(TargetPageAbsenceReason::InitialDocumentPageBuildPending);
-        self.active_target.owner_state.begin_initial_empty_document(
-            target_id,
-            initial_url,
-            None,
-            storage_key,
-        );
-    }
-
-    pub(crate) fn mark_target_initial_empty_document_materialized(&mut self, target_id: &str) {
-        self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
-            owner_state.mark_initial_empty_document_materialized();
-        });
-    }
-
-    pub(crate) fn mark_target_initial_url_replaces_empty_document(&mut self, target_id: &str) {
-        self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
-            owner_state.mark_next_navigation_history_replace_initial_empty_document();
-        });
-    }
-
-    pub(crate) fn mark_target_initial_empty_document_pending_cross_document_navigation(
-        &mut self,
-        target_id: &str,
-    ) {
-        self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
-            owner_state.mark_initial_empty_document_pending_cross_document_navigation();
-        });
-    }
-
-    pub(crate) fn clear_target_initial_empty_document_pending_cross_document_navigation(
-        &mut self,
-        target_id: &str,
-    ) {
-        self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
-            owner_state.clear_initial_empty_document_pending_cross_document_navigation();
-        });
-    }
-
-    pub(crate) fn mark_target_initial_empty_document_exited(&mut self, target_id: &str) {
-        self.mutate_target_owner_state_by_target_id(target_id, |owner_state| {
-            owner_state.mark_initial_empty_document_exited();
-        });
-    }
-
-    fn mutate_target_owner_state_by_target_id<T>(
-        &mut self,
-        target_id: &str,
-        mutate: impl FnOnce(&mut ParkedTargetOwnerState) -> T,
-    ) -> Option<T> {
-        if self.is_active_target(target_id) {
-            return Some(mutate(&mut self.active_target.owner_state));
-        }
-        self.background_target(target_id)?;
-        Some(self.mutate_parked_target_owner_state(target_id, mutate))
     }
 
     fn take_parked_target_owner_state(&mut self, target_id: &str) -> ParkedTargetOwnerState {
@@ -1172,6 +1193,7 @@ impl BrowserContext {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn restore_active_target_aux_state_async(
         &mut self,
         state: ParkedTargetAuxState,
@@ -1199,15 +1221,28 @@ impl BrowserContext {
         self.restore_target_owner_state(state.target_owner_state);
     }
 
+    #[cfg(test)]
     pub(crate) async fn apply_promoted_background_target_state_async(
         &mut self,
         promoted: &mut BackgroundTarget,
         state: ParkedTargetAuxState,
         synchronize_loaded_page: bool,
     ) -> Result<(), String> {
-        let has_pending_dialog = state.has_pending_javascript_dialog();
-        self.set_active_target_id(promoted.target_id());
-        self.replace_active_session(promoted.session_id().map(str::to_owned));
+        let has_pending_dialog = self
+            .devtools_session_states_for_target(promoted.target_id())
+            .is_some_and(|(primary, auxiliary)| {
+                !primary
+                    .page_session_state
+                    .javascript_dialog_state
+                    .is_empty()
+                    || auxiliary.values().any(|session| {
+                        !session
+                            .page_session_state
+                            .javascript_dialog_state
+                            .is_empty()
+                    })
+            });
+        self.set_active_target_handle(promoted.target_handle().clone());
         self.replace_target_identity(promoted.target_identity().clone());
         self.active_target.session_storage_namespace = promoted.take_session_storage_namespace();
         if has_pending_dialog || !synchronize_loaded_page {
@@ -1218,10 +1253,19 @@ impl BrowserContext {
         }
     }
 
+    fn apply_promoted_background_target_state_without_loaded_page_sync(
+        &mut self,
+        promoted: &mut BackgroundTarget,
+        state: ParkedTargetAuxState,
+    ) {
+        self.set_active_target_handle(promoted.target_handle().clone());
+        self.replace_target_identity(promoted.target_identity().clone());
+        self.active_target.session_storage_namespace = promoted.take_session_storage_namespace();
+        self.restore_active_target_aux_state_without_loaded_page_sync(state);
+    }
+
     fn snapshot_page_session_state(&self) -> ParkedPageSessionState {
         ParkedPageSessionState {
-            devtools_session_state: self.devtools_session_state.clone(),
-            auxiliary_devtools_session_states: self.auxiliary_devtools_session_states.clone(),
             network_enabled: self
                 .active_target
                 .runtime_slot
@@ -1246,11 +1290,18 @@ impl BrowserContext {
         }
     }
 
+    #[cfg(test)]
     async fn restore_page_session_state_async(
         &mut self,
         state: ParkedPageSessionState,
     ) -> Result<(), String> {
         self.restore_page_session_state_without_loaded_page_sync(state);
+        self.synchronize_page_session_state_to_loaded_page_async()
+            .await
+    }
+
+    #[cfg(test)]
+    async fn synchronize_page_session_state_to_loaded_page_async(&mut self) -> Result<(), String> {
         let effective_headers = self.effective_extra_headers();
         let network_offline = self.network_policy.network_offline();
         let bypass_service_worker = self.network_policy.bypass_service_worker();
@@ -1261,7 +1312,7 @@ impl BrowserContext {
             .active_target
             .fetch_owner
             .subresource_interception_config();
-        if let Some(page) = self.active_target.runtime_slot.loaded_page_mut() {
+        if let Some(mut page) = self.active_target.runtime_slot.loaded_page_mut() {
             page.set_extra_http_headers_async(&effective_headers)
                 .await
                 .map_err(|error| format!("failed to restore page extra headers: {error}"))?;
@@ -1299,8 +1350,6 @@ impl BrowserContext {
         &mut self,
         state: ParkedPageSessionState,
     ) {
-        self.devtools_session_state = state.devtools_session_state;
-        self.auxiliary_devtools_session_states = state.auxiliary_devtools_session_states;
         self.active_target
             .runtime_slot
             .set_primary_network_events_enabled(state.network_enabled);
@@ -1420,7 +1469,9 @@ impl BrowserContext {
         }
 
         let target = self.background_target(target_id)?;
-        let attached = target.has_session()
+        let attached = self
+            .primary_session_id_for_target(target.target_id())
+            .is_some()
             || !self
                 .auxiliary_session_ids_for_target(target.target_id())
                 .is_empty();
@@ -1470,6 +1521,12 @@ impl BrowserContext {
                 .iter()
                 .filter_map(|target| self.devtools_target_info(target.target_id())),
         );
+        infos.extend(self.devtools_worker_target_infos());
+        infos
+    }
+
+    pub(crate) fn devtools_worker_target_infos(&self) -> Vec<DevToolsTargetInfo> {
+        let mut infos = Vec::new();
         infos.extend(
             self.shared_worker_targets
                 .values()
@@ -1609,19 +1666,19 @@ impl BrowserContext {
         if expected.browser_context_id() != self.id {
             return false;
         }
-        let current_attachment = match expected.target_id() {
+        let current_residence = match expected.target_id() {
             Some(target_id) if self.is_active_target(target_id) => {
-                self.active_target.runtime_slot.page_attachment_id()
+                Some(self.active_target.runtime_slot.page_residence_handle())
             }
             Some(target_id) => self
                 .background_target(target_id)
-                .and_then(|target| target.runtime_slot.page_attachment_id()),
+                .map(|target| target.runtime_slot.page_residence_handle()),
             None if self.active_target_id().is_none() => {
-                self.active_target.runtime_slot.page_attachment_id()
+                Some(self.active_target.runtime_slot.page_residence_handle())
             }
             None => None,
         };
-        current_attachment == Some(expected.page_attachment_id())
+        current_residence.is_some_and(|residence| residence.is_current(expected))
     }
 
     pub(crate) fn dedicated_worker_target_id_for_renderer_instance(
@@ -2120,7 +2177,7 @@ mod tests {
     }
 
     #[test]
-    fn background_target_slot_take_and_replace_moves_aux_state_together() {
+    fn background_target_slot_take_and_replace_leaves_frontend_state_in_exact_registry() {
         let mut context = BrowserContext::new("BC-1".to_owned());
         context.stage_background_target(
             "TID-bg".to_owned(),
@@ -2137,19 +2194,11 @@ mod tests {
                 grant_universal_access: true,
             }],
         );
-        context.replace_parked_page_session_state(
-            "TID-bg".to_owned(),
-            ParkedPageSessionState {
-                devtools_session_state: DevToolsSessionState {
-                    runtime_session_state: TargetRuntimeSessionState {
-                        runtime_frontend_enabled: true,
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                },
-                ..Default::default()
-            },
-        );
+        context
+            .primary_devtools_session_state_for_target_mut("TID-bg")
+            .expect("background Target frontend state")
+            .runtime_session_state
+            .runtime_frontend_enabled = true;
 
         let slot = context
             .take_background_target_slot("TID-bg")
@@ -2161,7 +2210,7 @@ mod tests {
             context.take_parked_document_start_script_counter("TID-bg"),
             0
         );
-        assert_eq!(slot.target().target_id, "TID-bg");
+        assert_eq!(slot.target().target_id(), "TID-bg");
         assert_eq!(
             slot.aux_state()
                 .target_owner_state
@@ -2174,11 +2223,12 @@ mod tests {
             "utility"
         );
         assert!(
-            slot.aux_state()
-                .page_session_state
-                .devtools_session_state
+            context
+                .primary_devtools_session_state_for_exact_target(slot.target().target_handle())
+                .expect("staged exact Target frontend state")
                 .runtime_session_state
-                .runtime_frontend_enabled
+                .runtime_frontend_enabled,
+            "staging the physical slot must not move frontend state into its aux payload"
         );
 
         context.replace_background_target_slot(slot);
@@ -2187,11 +2237,8 @@ mod tests {
         assert_eq!(context.background_targets[0].target_id(), "TID-bg");
         assert!(
             context
-                .parked_page_session_state("TID-bg")
-                .is_some_and(|state| state
-                    .devtools_session_state
-                    .runtime_session_state
-                    .runtime_frontend_enabled)
+                .primary_devtools_session_state_for_target("TID-bg")
+                .is_some_and(|state| state.runtime_session_state.runtime_frontend_enabled)
         );
         assert_eq!(
             context.take_parked_document_start_script_counter("TID-bg"),
@@ -2254,11 +2301,11 @@ mod tests {
             .runtime_slot
             .set_page_attachment_id_for_test(42);
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .runtime_session_state
             .inspector_enabled = true;
         context
@@ -2292,8 +2339,11 @@ mod tests {
             .take_active_target_slot_state()
             .expect("active target slot should be present");
 
-        assert_eq!(slot.target().target_id, "TID-active");
-        assert_eq!(slot.target().session_id(), Some("SID-active"));
+        assert_eq!(slot.target().target_id(), "TID-active");
+        assert_eq!(
+            context.primary_session_id_for_exact_target(slot.target().target_handle()),
+            Some("SID-active")
+        );
         assert_eq!(slot.target().target_url(), "https://active.test/");
         assert_eq!(
             slot.target().target_identity().security_origin(),
@@ -2316,17 +2366,16 @@ mod tests {
                 .len(),
             1
         );
+        let staged_frontend_state = context
+            .primary_devtools_session_state_for_exact_target(slot.target().target_handle())
+            .expect("staged exact Target frontend state");
         assert!(
-            slot.aux_state()
-                .page_session_state
-                .devtools_session_state
+            staged_frontend_state
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         assert!(
-            slot.aux_state()
-                .page_session_state
-                .devtools_session_state
+            staged_frontend_state
                 .runtime_session_state
                 .inspector_enabled
         );
@@ -2361,38 +2410,38 @@ mod tests {
         context.attach_active_session("SID-demote".to_owned());
         context.set_target_url(active_page.final_url().as_str().to_owned());
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .runtime_session_state
             .inspector_enabled = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .log_enabled = true;
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state_mut()
                 .page_session_state
                 .performance
                 .enable(PerformanceTimeDomain::ThreadTicks)
         );
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .page_lifecycle_events = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .page_file_chooser_opened_event_enabled = true;
         context
-            .devtools_session_state
+            .devtools_session_state_mut()
             .page_session_state
             .page_intercept_file_chooser_dialog_enabled = true;
         context
@@ -2447,7 +2496,10 @@ mod tests {
         assert_eq!(context.background_targets.len(), 1);
         let parked = &context.background_targets[0];
         assert_eq!(parked.target_id(), "TID-demote");
-        assert_eq!(parked.session_id(), Some("SID-demote"));
+        assert_eq!(
+            context.primary_session_id_for_target("TID-demote"),
+            Some("SID-demote")
+        );
         assert_eq!(
             parked.target_url(),
             "data:text/html,<title>demote-active</title>"
@@ -2477,55 +2529,44 @@ mod tests {
         );
         assert!(
             context
-                .parked_page_session_state("TID-demote")
-                .is_some_and(|state| state
-                    .devtools_session_state
-                    .runtime_session_state
-                    .runtime_frontend_enabled),
-            "session-scoped Runtime.enable state should be parked with the target"
+                .primary_devtools_session_state_for_target("TID-demote")
+                .is_some_and(|state| state.runtime_session_state.runtime_frontend_enabled),
+            "session-scoped Runtime.enable state should remain keyed by the exact Target"
         );
-        let parked_page_session_state = context
-            .parked_page_session_state("TID-demote")
-            .expect("demoted target should retain parked page session state");
+        let frontend_session_state = context
+            .primary_devtools_session_state_for_target("TID-demote")
+            .expect("demoted target should retain exact frontend state");
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .runtime_session_state
                 .runtime_frontend_enabled,
-            "Runtime.enable state should move with the demoted target"
+            "Runtime.enable state should remain with the exact Target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .runtime_session_state
                 .inspector_enabled,
-            "Inspector.enable state should move with the demoted target"
+            "Inspector.enable state should remain with the exact Target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .console_output_session_state
                 .console_enabled,
-            "Console.enable state should move with the demoted target"
+            "Console.enable state should remain with the exact Target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
-                .page_session_state
-                .log_enabled,
-            "Log.enable state should move with the demoted target"
+            frontend_session_state.page_session_state.log_enabled,
+            "Log.enable state should remain with the exact Target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .page_session_state
                 .performance
                 .enabled(),
             "Performance.enable state should move with the demoted target"
         );
         assert_eq!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .page_session_state
                 .performance
                 .time_domain(),
@@ -2533,22 +2574,19 @@ mod tests {
             "Performance time domain should move with the demoted target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .page_session_state
                 .page_lifecycle_events,
             "Page lifecycle listener state should move with the demoted target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .page_session_state
                 .page_file_chooser_opened_event_enabled,
             "file chooser opened listener state should move with the demoted target"
         );
         assert!(
-            parked_page_session_state
-                .devtools_session_state
+            frontend_session_state
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled,
             "file chooser interception state should move with the demoted target"
@@ -2611,7 +2649,7 @@ mod tests {
         assert_eq!(context.background_targets.len(), 1);
         assert_eq!(context.background_targets[0].target_id(), "TID-existing-bg");
         assert_eq!(
-            context.background_targets[0].session_id(),
+            context.primary_session_id_for_target("TID-existing-bg"),
             Some("SID-existing-bg")
         );
     }
@@ -2621,7 +2659,7 @@ mod tests {
         let mut context = BrowserContext::new("BC-demote-pending".to_owned());
         context.set_active_target_id("TID-old-active");
         context.set_target_url("about:blank#old".to_owned());
-        context.begin_active_target_initial_empty_document("about:blank#old".to_owned());
+        context.mark_active_initial_document_page_build_pending();
 
         context.stage_active_target_demoting_current(
             "TID-new-active".to_owned(),
@@ -2774,6 +2812,14 @@ mod tests {
             None,
             None,
         );
+        assert!(context.assign_auxiliary_session_to_target(
+            "TID-active-route",
+            "SID-active-route-aux".to_owned()
+        ));
+        assert!(context.assign_auxiliary_session_to_target(
+            "TID-background-route",
+            "SID-background-route-aux".to_owned()
+        ));
         context
             .background_target_mut("TID-background-route")
             .expect("background target")
@@ -2809,6 +2855,19 @@ mod tests {
                 .and_then(|target| target.runtime_slot().current_renderer_attachment())
                 .map(|attachment| attachment.id()),
             Some(active_attachment.id())
+        );
+        assert_eq!(context.active_session_id(), Some("SID-background-route"));
+        assert_eq!(
+            context.primary_session_id_for_target("TID-active-route"),
+            Some("SID-active-route")
+        );
+        assert_eq!(
+            context.auxiliary_target_id_for_session("SID-background-route-aux"),
+            Some("TID-background-route")
+        );
+        assert_eq!(
+            context.auxiliary_target_id_for_session("SID-active-route-aux"),
+            Some("TID-active-route")
         );
     }
 
@@ -2846,13 +2905,9 @@ mod tests {
         devtools_session_state
             .console_output_session_state
             .console_enabled = true;
-        context.replace_parked_page_session_state(
-            "TID-bg".to_owned(),
-            ParkedPageSessionState {
-                devtools_session_state,
-                ..Default::default()
-            },
-        );
+        *context
+            .primary_devtools_session_state_for_target_mut("TID-bg")
+            .expect("background Target frontend state") = devtools_session_state;
         let mut network_artifacts = ParkedNetworkArtifacts::default();
         network_artifacts.set_session_observation_cursor_at_counts(None, 4, 5);
         context.replace_parked_network_artifacts("TID-bg".to_owned(), network_artifacts);
@@ -2867,13 +2922,13 @@ mod tests {
         assert_eq!(context.active_target_id(), Some("TID-bg"));
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );
@@ -2895,32 +2950,32 @@ mod tests {
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_lifecycle_events
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .log_enabled
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .console_enabled
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .performance
                 .enabled()
         );
         assert_eq!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .performance
                 .time_domain(),
@@ -2928,13 +2983,13 @@ mod tests {
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_file_chooser_opened_event_enabled
         );
         assert!(
             context
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled
         );

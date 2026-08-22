@@ -1,6 +1,6 @@
 use super::target_session_owner::{TargetSessionOwnerMut, TargetSessionStateMut};
 use super::*;
-use crate::CdpRendererOwnerTurnOutcome;
+use crate::conn::CdpRendererOwnerTurnOutcome;
 use moli_core::page::V8InspectorSessionState;
 use serde_json::json;
 

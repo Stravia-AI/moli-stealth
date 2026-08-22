@@ -49,7 +49,7 @@ self.addEventListener("fetch", event => {
     let mut browser_context = BrowserContext::new("BID-1".to_owned());
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
 
     ctx.process_async(json!({
         "id": 80_001,

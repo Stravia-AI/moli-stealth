@@ -142,7 +142,7 @@ pub(super) fn complete_get_app_manifest_command(
             };
             let preparation = match conn
                 .loaded_page_mut_for_protocol_access(session_id)
-                .and_then(|page| {
+                .and_then(|mut page| {
                     page.finish_prepare_app_manifest_load(completion)
                         .map_err(|error| error.to_string())
                 }) {
@@ -213,7 +213,7 @@ pub(super) fn complete_get_app_manifest_command(
             };
             let output = match conn
                 .loaded_page_mut_for_protocol_access(session_id)
-                .and_then(|page| {
+                .and_then(|mut page| {
                     page.finish_publish_app_manifest_load(completion)
                         .map_err(|error| error.to_string())
                 }) {

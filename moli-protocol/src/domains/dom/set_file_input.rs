@@ -82,7 +82,7 @@ pub(super) fn start_cdp_set_file_input_files_by_node_reference(
     let page = loaded_page_mut_for_session(conn, cmd.session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     start_set_file_input_files_preflight_dispatch(
-        page,
+        &page,
         cmd.id,
         cmd.session_id,
         reference,
@@ -351,7 +351,7 @@ fn start_set_file_input_files_after_bidi_binding_resolution(
             let page = loaded_page_mut_for_session(conn, session_id)
                 .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
             start_set_file_input_files_for_reference_dispatch(
-                page,
+                &page,
                 command_id,
                 session_id,
                 DevToolsDomNodeReference::BackendNodeId(backend_node_id),
@@ -381,7 +381,7 @@ fn start_set_file_input_files_after_frontend_binding_resolution(
     let page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     start_set_file_input_files_preflight_dispatch(
-        page, command_id, session_id, reference, file_paths, append,
+        &page, command_id, session_id, reference, file_paths, append,
     )
 }
 
@@ -390,7 +390,7 @@ fn finish_renderer_bidi_node_binding(
     session_id: Option<&str>,
     completion: CompletedPageCommand,
 ) -> Result<RendererDomBidiNodeBindingResolution, PendingDomCommandStartError> {
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     page.finish_document_bidi_node_binding(completion)
         .map_err(|error| {
@@ -406,9 +406,9 @@ fn finish_renderer_frontend_node_binding(
     completion: CompletedPageCommand,
     _frontend_node_id: u32,
 ) -> Result<DevToolsDomNodeReference, PendingDomCommandStartError> {
-    let page = loaded_page_mut_for_session(conn, session_id)
+    let mut page = loaded_page_mut_for_session(conn, session_id)
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
-    super::frontend_binding::finish_reference(page, completion)
+    super::frontend_binding::finish_reference(&mut page, completion)
         .map_err(PendingDomCommandStartError::renderer_error)
 }
 
@@ -454,7 +454,7 @@ fn start_set_file_input_files_for_remote_reference(
         .ok_or_else(PendingDomCommandStartError::no_document_loaded)?;
     let object_id = reference;
     start_set_file_input_files_for_runtime_object(
-        page,
+        &page,
         command_id,
         command_session_id,
         renderer_inspector_session_id,

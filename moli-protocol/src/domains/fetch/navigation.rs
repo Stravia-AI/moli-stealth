@@ -22,7 +22,7 @@ use super::{
     },
 };
 
-fn prepare_navigation_response_stage(
+pub(super) fn prepare_navigation_response_stage(
     conn: &CdpConnection,
     pending: &mut PendingFetchNavigation,
     final_url: &Url,
@@ -404,7 +404,7 @@ pub(super) async fn complete_tokened_materialized_navigation_into_buffer_async(
 ) {
     let Some(token) = token else {
         if navigation_state.navigate_id.is_some() {
-            page::push_superseded_navigation_result(out, &navigation_state);
+            out.push_error_after_messages(-32000, "Navigation aborted");
         } else {
             tracing::warn!(
                 session_id = navigation_state.navigate_session_id.as_deref(),
@@ -527,36 +527,18 @@ async fn handle_streaming_response_head_for_navigation_into_buffer_async(
         return;
     }
 
-    let response_status = response_head.status;
-    let final_url = response_head.final_url.clone();
-    let response_headers = response_head.headers.clone();
-    let request_cookie_report = response_head.request_cookie_report.clone();
-    let network_observation_journal = response.observation_journal();
-    let network_extra_info_available = !network_observation_journal.is_empty();
-    let body_progress_source = network::response_stage_main_document_navigation_network_progress(
+    let (body_progress_source, response_extra_info_events) = streaming_response_stage_extra_info(
         conn,
-        &pending.navigation,
-        pending.request_cookie_report.as_ref(),
-    );
-    let mut response_extra_info_events = Vec::new();
-    body_progress_source.emit_response_extra_info_before_pause(
-        &mut response_extra_info_events,
-        &pending.navigation.request_method,
-        &pending.navigation.request_headers,
-        request_cookie_report.as_ref(),
-        &response_head.redirect_chain,
-        response_status,
-        &response_headers,
-        &response_head.cookie_set_reports,
-        network_observation_journal,
-        network_extra_info_available,
+        &pending,
+        response.response(),
+        response.observation_journal(),
     );
     out.extend_background_events_after_messages(response_extra_info_events);
     let prepared_document = match conn
         .prepare_paused_streaming_response_navigation_async(
             &pending.navigation,
             response.response(),
-            network_observation_journal,
+            response.observation_journal(),
             body_progress_source.clone(),
         )
         .await
@@ -573,6 +555,59 @@ async fn handle_streaming_response_head_for_navigation_into_buffer_async(
             return;
         }
     };
+    pause_streaming_raw_response_stage_navigation_into_buffer(
+        conn,
+        out,
+        pending,
+        response,
+        body_progress_source,
+        prepared_document,
+    );
+}
+
+pub(super) fn streaming_response_stage_extra_info(
+    conn: &CdpConnection,
+    pending: &PendingFetchNavigation,
+    response_head: &StreamingRawResponse,
+    network_observation_journal: &NetworkObservationJournal,
+) -> (
+    network::MainDocumentBodyProgressSource,
+    Vec<crate::conn::BackgroundProtocolEvent>,
+) {
+    let network_extra_info_available = !network_observation_journal.is_empty();
+    let body_progress_source = network::response_stage_main_document_navigation_network_progress(
+        conn,
+        &pending.navigation,
+        pending.request_cookie_report.as_ref(),
+    );
+    let mut response_extra_info_events = Vec::new();
+    body_progress_source.emit_response_extra_info_before_pause(
+        &mut response_extra_info_events,
+        &pending.navigation.request_method,
+        &pending.navigation.request_headers,
+        response_head.request_cookie_report.as_ref(),
+        &response_head.redirect_chain,
+        response_head.status,
+        &response_head.headers,
+        &response_head.cookie_set_reports,
+        network_observation_journal,
+        network_extra_info_available,
+    );
+    (body_progress_source, response_extra_info_events)
+}
+
+pub(super) fn pause_streaming_raw_response_stage_navigation_into_buffer(
+    conn: &mut CdpConnection,
+    out: &mut CommandOutputBuffer,
+    pending: PendingFetchNavigation,
+    response: NetworkFetchResult<StreamingRawResponse>,
+    body_progress_source: network::MainDocumentBodyProgressSource,
+    prepared_document: Option<crate::conn::PausedResponsePreparedDocument>,
+) {
+    let response_status = response.response().status;
+    let final_url = response.response().final_url.clone();
+    let response_headers = response.response().headers.clone();
+    let request_cookie_report = response.response().request_cookie_report.clone();
     let (response, network_observation_journal) = response.into_parts_with_observation_journal();
     conn.register_pending_fetch_response_navigation_for_session_owner(
         pending.navigation.navigate_session_id.as_deref(),
@@ -638,7 +673,7 @@ async fn complete_or_pause_response_stage_into_buffer_async(
     }
 }
 
-fn pause_data_url_response_stage_navigation_into_buffer(
+pub(super) fn pause_data_url_response_stage_navigation_into_buffer(
     conn: &mut CdpConnection,
     out: &mut CommandOutputBuffer,
     pending: PendingFetchNavigation,
@@ -672,7 +707,7 @@ fn pause_data_url_response_stage_navigation_into_buffer(
     );
 }
 
-fn pause_buffered_raw_response_stage_navigation_into_buffer(
+pub(super) fn pause_buffered_raw_response_stage_navigation_into_buffer(
     conn: &mut CdpConnection,
     out: &mut CommandOutputBuffer,
     pending: PendingFetchNavigation,
@@ -833,7 +868,7 @@ fn routable_stage_owner_session_id(
     fallback_session_id.map(str::to_owned)
 }
 
-fn register_navigation_auth_required_event(
+pub(super) fn register_navigation_auth_required_event(
     conn: &mut CdpConnection,
     pending: &PendingFetchNavigation,
     challenge: FetchAuthChallenge,

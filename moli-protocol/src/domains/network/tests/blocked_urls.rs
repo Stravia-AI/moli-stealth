@@ -14,7 +14,8 @@ async fn set_blocked_urls_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_blocked_urls_rejects_invalid_params() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({
         "id": 2801,
         "method": "Network.setBlockedURLs",
@@ -26,7 +27,8 @@ async fn set_blocked_urls_rejects_invalid_params() {
 #[tokio::test(flavor = "multi_thread")]
 async fn set_blocked_urls_updates_browser_context_state() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 2802,
@@ -74,7 +76,7 @@ async fn set_blocked_urls_navigation_fails_with_blocked_by_client() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2804,
@@ -115,7 +117,7 @@ async fn set_blocked_urls_runtime_fetch_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2806,
@@ -247,10 +249,11 @@ async fn background_set_blocked_urls_updates_loaded_owner_page_without_promotion
     let page_url = format!("http://{addr}/page");
     let api_url = format!("http://{addr}/api");
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = None;
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-selected".to_owned()));
     ctx.sent.clear();
 
-    let background = BackgroundTarget::new(
+    let background = BackgroundTarget::new_with_frontend_session(
         "TID-background".to_owned(),
         Some("SID-background".to_owned()),
         TargetIdentityState::about_blank(),
@@ -258,7 +261,7 @@ async fn background_set_blocked_urls_updates_loaded_owner_page_without_promotion
     );
     let mut inactive = BrowserContext::new("BID-background".to_owned());
     inactive.background_targets.push(background);
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-background"))
         .await;
 
@@ -342,7 +345,10 @@ async fn background_set_blocked_urls_updates_loaded_owner_page_without_promotion
             .contains("net::ERR_BLOCKED_BY_CLIENT")
     );
     assert!(
-        ctx.conn.browser_context.is_none(),
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .is_some_and(|context| context.id == "BID-selected"),
         "direct background Network policy should not promote the owner"
     );
 
@@ -357,7 +363,7 @@ async fn set_blocked_urls_worker_fetch_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2811,
@@ -496,7 +502,7 @@ async fn set_blocked_urls_worker_xhr_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2816,
@@ -631,7 +637,7 @@ async fn set_blocked_urls_worker_websocket_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2822,
@@ -787,7 +793,7 @@ async fn emulate_network_conditions_offline_worker_fetch_emits_loading_failed() 
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2821,
@@ -903,7 +909,7 @@ async fn emulate_network_conditions_offline_worker_xhr_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2826,
@@ -1015,7 +1021,7 @@ async fn set_blocked_urls_runtime_xhr_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2811,
@@ -1103,7 +1109,7 @@ async fn set_blocked_urls_runtime_websocket_emits_loading_failed() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 2816,
@@ -1217,7 +1223,8 @@ async fn emulate_network_conditions_requires_browser_context() {
 #[tokio::test(flavor = "multi_thread")]
 async fn emulate_network_conditions_rejects_invalid_params() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
     ctx.process_async(json!({
         "id": 29,
         "method": "Network.emulateNetworkConditions",
@@ -1229,7 +1236,8 @@ async fn emulate_network_conditions_rejects_invalid_params() {
 #[tokio::test(flavor = "multi_thread")]
 async fn emulate_network_conditions_updates_browser_context_state() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
+    ctx.conn
+        .insert_browser_context(BrowserContext::new("BID-1".into()));
 
     ctx.process_async(json!({
         "id": 30,
@@ -1264,7 +1272,7 @@ async fn emulate_network_conditions_offline_navigation_fails_before_completion_e
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 31,
@@ -1306,7 +1314,7 @@ async fn emulate_network_conditions_offline_runtime_fetch_emits_loading_failed()
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 33,
@@ -1420,7 +1428,7 @@ globalThis.__lm_after_blocked_parser_script = true;
     let mut bc = BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 70_010,

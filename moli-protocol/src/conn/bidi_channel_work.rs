@@ -22,7 +22,7 @@ impl BidiChannelPageOwner {
     ///
     /// Callers using the implicit `None` session must invoke this while the
     /// target's owner-route override is installed. `owner_scope` freezes that
-    /// route, while `attachment` freezes the target Page residence and exact
+    /// route, while `attachment` freezes the target Page generation and exact
     /// protocol session.
     pub(crate) fn capture(conn: &CdpConnection, session_id: Option<&str>) -> Option<Self> {
         Some(Self {
@@ -33,10 +33,6 @@ impl BidiChannelPageOwner {
 
     pub(crate) fn session_id(&self) -> Option<&str> {
         self.attachment.session_id()
-    }
-
-    pub(crate) fn target_id(&self) -> Option<&str> {
-        self.attachment.page_owner().target_id()
     }
 
     pub(crate) fn enter<'a>(
@@ -172,23 +168,21 @@ mod tests {
         let mut browser_context = BrowserContext::new("BID-owner".to_owned());
         browser_context.set_active_target_id("TID-owner");
         browser_context.attach_active_session("SID-owner".to_owned());
-        conn.browser_context = Some(browser_context);
-        conn.runtime_session_owner_slot_mut(Some("SID-owner"))
-            .expect("test runtime slot")
-            .set_page_attachment_id_for_test(1);
+        conn.insert_browser_context(browser_context);
         conn
     }
 
     #[test]
-    fn page_owner_rejects_replacement_attachment() {
+    fn page_owner_rejects_replacement_generation() {
         let mut conn = connection_with_page_session();
         let owner =
             BidiChannelPageOwner::capture(&conn, Some("SID-owner")).expect("test Page attachment");
         assert!(owner.is_current(&conn));
 
+        let next_generation = owner.attachment.page_owner().loaded_page_generation() + 1;
         conn.runtime_session_owner_slot_mut(Some("SID-owner"))
             .expect("test runtime slot")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(next_generation);
 
         assert!(
             !owner.is_current(&conn),

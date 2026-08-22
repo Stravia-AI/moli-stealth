@@ -2,13 +2,12 @@ use moli_protocol::devtools_runtime::{
     DevToolsCaptureScreenshotClip, DevToolsCommand, DevToolsDomBoxModel,
     DevToolsDomGeometryOperation, DevToolsDomGeometryResult, DevToolsDomNodeReference,
     DevToolsDomQuad, DevToolsError, DevToolsErrorKind, DevToolsGetAttributesResult,
-    DevToolsGetCookiesResult, DevToolsGetNavigationHistoryResult, DevToolsGetPropertyResult,
-    DevToolsGetTargetsResult, DevToolsGetTextResult, DevToolsHistoryTraversalDestination,
-    DevToolsKeyEventType, DevToolsLocateNodesLocator, DevToolsLocateNodesTextMatch,
-    DevToolsMouseEventType, DevToolsNavigationWait, DevToolsPointerType,
-    DevToolsPrintToPdfTransferMode, DevToolsProtocol, DevToolsRemoteHandleId,
-    DevToolsResultOwnership, DevToolsSessionId, DevToolsTargetId, DevToolsTargetKind,
-    DevToolsTouchEventType, DevToolsViewportSetting, DevToolsWindowState,
+    DevToolsGetCookiesResult, DevToolsGetPropertyResult, DevToolsGetTargetsResult,
+    DevToolsGetTextResult, DevToolsHistoryTraversalDestination, DevToolsKeyEventType,
+    DevToolsLocateNodesLocator, DevToolsLocateNodesTextMatch, DevToolsMouseEventType,
+    DevToolsNavigationWait, DevToolsPointerType, DevToolsPrintToPdfTransferMode, DevToolsProtocol,
+    DevToolsRemoteHandleId, DevToolsResultOwnership, DevToolsSessionId, DevToolsTargetId,
+    DevToolsTargetKind, DevToolsTouchEventType, DevToolsViewportSetting, DevToolsWindowState,
 };
 use serde_json::json;
 
@@ -3336,59 +3335,13 @@ fn maps_refresh_and_history_traversal_to_shared_devtools_commands() {
         Some("TID-1")
     );
 
-    let history_command = navigation_history_command(&context);
-    let DevToolsCommand::GetNavigationHistory(history_command) = history_command else {
-        panic!("expected GetNavigationHistory command");
-    };
-    assert_eq!(
-        history_command
-            .context
-            .target_id
-            .as_ref()
-            .map(DevToolsTargetId::as_str),
-        Some("TID-1")
-    );
-
-    let history = DevToolsGetNavigationHistoryResult {
-        current_index: 1,
-        entries: vec![
-            moli_protocol::devtools_runtime::DevToolsNavigationHistoryEntry {
-                id: 7,
-                url: "https://example.test/first".to_owned(),
-                user_typed_url: "https://example.test/first".to_owned(),
-                title: "first".to_owned(),
-                transition_type: "typed".to_owned(),
-            },
-            moli_protocol::devtools_runtime::DevToolsNavigationHistoryEntry {
-                id: 8,
-                url: "https://example.test/second".to_owned(),
-                user_typed_url: "https://example.test/second".to_owned(),
-                title: "second".to_owned(),
-                transition_type: "typed".to_owned(),
-            },
-        ],
-    };
-    assert_eq!(
-        history_traversal_entry(&history, -1),
-        Some((7, "https://example.test/first".to_owned()))
-    );
-    assert_eq!(history_traversal_entry(&history, 1), None);
-
-    let traverse = traverse_history_command(
-        &context,
-        7,
-        "https://example.test/first",
-        DevToolsNavigationWait::Load,
-    );
+    let traverse = traverse_history_command(&context, -1, DevToolsNavigationWait::Load);
     let DevToolsCommand::TraverseHistory(traverse) = traverse else {
         panic!("expected TraverseHistory command");
     };
     assert_eq!(
         traverse.destination,
-        DevToolsHistoryTraversalDestination::Entry {
-            entry_id: 7,
-            url: "https://example.test/first".to_owned(),
-        }
+        DevToolsHistoryTraversalDestination::Delta(-1)
     );
     assert_eq!(traverse.wait, DevToolsNavigationWait::Load);
     assert_eq!(

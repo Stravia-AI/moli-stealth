@@ -1,13 +1,6 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{collections::BTreeMap, fs, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::extract::ws::WebSocket;
-use moli_cookie_jar::StoredCookie;
 use moli_core::{page::RendererDocumentLifecycleMilestone, runtime::NavigationRuntimeConfig};
 use moli_protocol::{
     CdpInitialStoragePartition, DevToolsPageResidenceIdentity,
@@ -29,15 +22,11 @@ use moli_protocol_webdriver_classic::{
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cdp_scheduler::{
-    CdpScheduler, CdpSchedulerEventReceivers, DevToolsCommandExecution,
-    DevToolsPageCommandExecution, ProtocolAdapterScheduler,
+use super::super::{
+    devtools_host_service::{BidiFrontendSession, DevToolsHostServiceHandle},
+    protocol_local_executor::spawn_protocol_local_task,
+    webdriver_bidi::SharedBidiSessionRegistry,
 };
-
-use super::super::webdriver_bidi::{
-    BidiSocketActor, BidiSocketActorInput, SharedBidiSessionRegistry,
-};
-use super::super::{CookieProfileCommit, protocol_local_executor::spawn_protocol_local_task};
 
 const CLASSIC_SCRIPT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -45,7 +34,6 @@ const CLASSIC_SCRIPT_TERMINATION_TIMEOUT: Duration = Duration::from_secs(5);
 pub(in crate::protocol_server) struct SharedClassicSessionRegistry {
     inner: Arc<Mutex<ClassicSessionManager>>,
 }
-
 impl SharedClassicSessionRegistry {
     pub(super) fn lock(&self) -> parking_lot::MutexGuard<'_, ClassicSessionManager> {
         self.inner.lock()
@@ -477,18 +465,14 @@ pub(in crate::protocol_server) struct ClassicSessionRuntimeHandle {
 
 impl ClassicSessionRuntimeHandle {
     pub(super) fn spawn(
-        initial_cookie_snapshot: Vec<StoredCookie>,
         initial_storage_partition: CdpInitialStoragePartition,
         navigation_runtime_config: NavigationRuntimeConfig,
     ) -> Self {
+        let (host, host_finished) =
+            DevToolsHostServiceHandle::spawn(initial_storage_partition, navigation_runtime_config);
         let (tx, rx) = mpsc::unbounded_channel();
         let _runtime_finished_rx = spawn_protocol_local_task("classic-session", move || {
-            classic_session_runtime_loop(
-                rx,
-                initial_cookie_snapshot,
-                initial_storage_partition,
-                navigation_runtime_config,
-            )
+            classic_session_frontend_loop(rx, host, host_finished)
         });
         Self { tx }
     }
@@ -807,18 +791,16 @@ impl ClassicSessionRuntimeHandle {
         })?
     }
 
-    pub(super) async fn shutdown(self) -> CookieProfileCommit {
+    pub(super) async fn shutdown(self) {
         let (response_tx, response_rx) = oneshot::channel();
         if self
             .tx
             .send(ClassicSessionRuntimeRequest::Shutdown { response_tx })
             .is_err()
         {
-            return CookieProfileCommit::unchanged();
+            return;
         }
-        response_rx
-            .await
-            .unwrap_or_else(|_| CookieProfileCommit::unchanged())
+        let _ = response_rx.await;
     }
 
     pub(in crate::protocol_server) async fn attach_bidi_socket(
@@ -917,41 +899,19 @@ enum ClassicSessionRuntimeRequest {
         response_tx: oneshot::Sender<Result<(), DevToolsError>>,
     },
     Shutdown {
-        response_tx: oneshot::Sender<CookieProfileCommit>,
+        response_tx: oneshot::Sender<()>,
     },
 }
 
-struct ClassicAttachedBidiSocket {
-    actor: BidiSocketActor,
-    session_registry: SharedBidiSessionRegistry,
-}
-
-impl ClassicAttachedBidiSocket {
-    async fn release_session(
-        &mut self,
-        scheduler: &mut CdpScheduler,
-        receivers: &mut CdpSchedulerEventReceivers,
-    ) {
-        self.actor.release_event_sources(scheduler, receivers).await;
-        self.actor
-            .release_session(&mut self.session_registry.lock());
-    }
-}
-
-enum ClassicSessionRuntimeRequestOutcome {
+enum ClassicSessionFrontendRequestOutcome {
     Continue,
-    AttachedBidi(Box<ClassicAttachedBidiSocket>),
-    DetachBidi,
-    Shutdown(CookieProfileCommit),
+    Shutdown(oneshot::Sender<()>),
 }
 
-async fn handle_classic_session_runtime_request(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
-    initial_cookie_snapshot: &[StoredCookie],
+async fn handle_classic_session_frontend_request(
+    host: &DevToolsHostServiceHandle,
     request: ClassicSessionRuntimeRequest,
-    mut attached_bidi: Option<&mut ClassicAttachedBidiSocket>,
-) -> ClassicSessionRuntimeRequestOutcome {
+) -> ClassicSessionFrontendRequestOutcome {
     match request {
         ClassicSessionRuntimeRequest::Execute {
             command,
@@ -961,81 +921,46 @@ async fn handle_classic_session_runtime_request(
             expected_page,
             response_tx,
         } => {
-            if expected_page.as_ref().is_some_and(|expected| {
-                scheduler.page_residence_identity_for_devtools_context(command.context())
-                    != Some(expected.clone())
-            }) {
-                let _ = response_tx.send(ClassicSessionRuntimeCommandExecution::error(
-                    DevToolsError::new(
-                        DevToolsErrorKind::NoSuchNode,
-                        "DOM reference belongs to a replaced Page",
-                    ),
-                ));
-                return ClassicSessionRuntimeRequestOutcome::Continue;
-            }
             let termination_context = command.context().clone();
-            let mut execution = execute_classic_devtools_command_with_pending_navigation_retry(
-                scheduler,
-                receivers,
-                *command,
-                timeout,
-                pending_navigation_timeout,
-                expected_page.as_ref(),
-            )
-            .await;
+            let execution = host
+                .execute_with_page_residence(
+                    *command,
+                    timeout,
+                    pending_navigation_timeout,
+                    expected_page,
+                )
+                .await;
             if terminate_execution_on_timeout
                 && matches!(
-                    execution.execution.result,
-                    Err(ref error) if error.kind == DevToolsErrorKind::Timeout
+                    &execution.result,
+                    Err(error) if error.kind == DevToolsErrorKind::Timeout
                 )
             {
                 // Finish the IO-side termination before the HTTP handler
                 // releases argument handles or admits the next Classic
                 // command on this session.
-                let termination = execute_classic_devtools_command_once(
-                    scheduler,
-                    receivers,
-                    DevToolsCommand::TerminateExecution(DevToolsTerminateExecutionCommand {
-                        context: termination_context,
-                    }),
-                    Some(CLASSIC_SCRIPT_TERMINATION_TIMEOUT),
-                    execution.page_residence.as_ref(),
-                )
-                .await;
-                if let Err(error) = &termination.execution.result {
+                let termination = host
+                    .execute_with_page_residence(
+                        DevToolsCommand::TerminateExecution(DevToolsTerminateExecutionCommand {
+                            context: termination_context,
+                        }),
+                        Some(CLASSIC_SCRIPT_TERMINATION_TIMEOUT),
+                        None,
+                        execution.page_residence.clone(),
+                    )
+                    .await;
+                if let Err(error) = &termination.result {
                     tracing::warn!(
                         ?error,
                         "failed to terminate timed-out WebDriver Classic script execution"
                     );
                 }
-                execution
-                    .execution
-                    .protocol_output
-                    .append(termination.execution.protocol_output);
             }
-            let result = execution.execution.result;
-            let keep_attached = if let Some(attached) = attached_bidi.as_mut() {
-                attached
-                    .actor
-                    .send_or_route_protocol_output(
-                        scheduler,
-                        receivers,
-                        execution.execution.protocol_output,
-                        None,
-                    )
-                    .await
-            } else {
-                true
-            };
             let _ = response_tx.send(ClassicSessionRuntimeCommandExecution {
-                result,
+                result: execution.result,
                 page_residence: execution.page_residence,
             });
-            if keep_attached {
-                ClassicSessionRuntimeRequestOutcome::Continue
-            } else {
-                ClassicSessionRuntimeRequestOutcome::DetachBidi
-            }
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::WaitForDocumentLifecycle {
             context,
@@ -1043,31 +968,11 @@ async fn handle_classic_session_runtime_request(
             timeout,
             response_tx,
         } => {
-            let execution = scheduler
-                .wait_for_devtools_context_document_lifecycle(
-                    receivers, &context, milestone, timeout,
-                )
+            let result = host
+                .wait_for_document_lifecycle(context, milestone, timeout)
                 .await;
-            let result = execution.result.map(|_| ());
-            let keep_attached = if let Some(attached) = attached_bidi.as_mut() {
-                attached
-                    .actor
-                    .send_or_route_protocol_output(
-                        scheduler,
-                        receivers,
-                        execution.protocol_output,
-                        None,
-                    )
-                    .await
-            } else {
-                true
-            };
             let _ = response_tx.send(result);
-            if keep_attached {
-                ClassicSessionRuntimeRequestOutcome::Continue
-            } else {
-                ClassicSessionRuntimeRequestOutcome::DetachBidi
-            }
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::AttachBidiSocket {
             socket,
@@ -1077,26 +982,20 @@ async fn handle_classic_session_runtime_request(
             session_registry,
             response_tx,
         } => {
-            if attached_bidi.is_some() {
-                let _ = response_tx.send(false);
-                return ClassicSessionRuntimeRequestOutcome::Continue;
-            }
-            let mut actor = BidiSocketActor::new(*socket, web_socket_url);
-            let attached = {
-                let mut registry = session_registry.lock();
-                actor.attach_existing_session(session_id, &mut registry)
-            };
-            if !attached {
-                let _ = response_tx.send(false);
-                return ClassicSessionRuntimeRequestOutcome::Continue;
-            }
-            actor.install_runtime_response_ready_sender(scheduler);
-            actor.set_file_prompt_handler_for_script_commands(file_prompt_handler.as_deref());
-            let _ = response_tx.send(true);
-            ClassicSessionRuntimeRequestOutcome::AttachedBidi(Box::new(ClassicAttachedBidiSocket {
-                actor,
-                session_registry,
-            }))
+            let attached = host
+                .attach_bidi(
+                    *socket,
+                    web_socket_url,
+                    BidiFrontendSession::Existing {
+                        session_id,
+                        file_prompt_handler,
+                    },
+                    session_registry,
+                )
+                .await
+                .is_some();
+            let _ = response_tx.send(attached);
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::FrameIdForIndex {
             session_id,
@@ -1106,8 +1005,7 @@ async fn handle_classic_session_runtime_request(
             response_tx,
         } => {
             let result = resolve_classic_frame_id_for_index(
-                scheduler,
-                receivers,
+                host,
                 &session_id,
                 &target_id,
                 current_frame_id.as_deref(),
@@ -1115,7 +1013,7 @@ async fn handle_classic_session_runtime_request(
             )
             .await;
             let _ = response_tx.send(result);
-            ClassicSessionRuntimeRequestOutcome::Continue
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::FrameIdForElement {
             session_id,
@@ -1126,8 +1024,7 @@ async fn handle_classic_session_runtime_request(
             response_tx,
         } => {
             let result = resolve_classic_frame_id_for_element(
-                scheduler,
-                receivers,
+                host,
                 &session_id,
                 &target_id,
                 current_frame_id.as_deref(),
@@ -1136,7 +1033,7 @@ async fn handle_classic_session_runtime_request(
             )
             .await;
             let _ = response_tx.send(result);
-            ClassicSessionRuntimeRequestOutcome::Continue
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::ParentFrameId {
             session_id,
@@ -1144,16 +1041,11 @@ async fn handle_classic_session_runtime_request(
             current_frame_id,
             response_tx,
         } => {
-            let result = resolve_classic_parent_frame_id(
-                scheduler,
-                receivers,
-                &session_id,
-                &target_id,
-                &current_frame_id,
-            )
-            .await;
+            let result =
+                resolve_classic_parent_frame_id(host, &session_id, &target_id, &current_frame_id)
+                    .await;
             let _ = response_tx.send(result);
-            ClassicSessionRuntimeRequestOutcome::Continue
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::BrowsingContextExists {
             session_id,
@@ -1162,426 +1054,57 @@ async fn handle_classic_session_runtime_request(
             response_tx,
         } => {
             let result = resolve_classic_browsing_context_exists(
-                scheduler,
-                receivers,
+                host,
                 &session_id,
                 &target_id,
                 frame_id.as_deref(),
             )
             .await;
             let _ = response_tx.send(result);
-            ClassicSessionRuntimeRequestOutcome::Continue
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::SetJavaScriptDialogHandlerEnabled {
             enabled,
             response_tx,
         } => {
-            let result = scheduler
-                .set_automation_javascript_dialog_handler_enabled(enabled)
-                .then_some(())
-                .ok_or_else(|| {
-                    DevToolsError::new(
-                        DevToolsErrorKind::NoSuchTarget,
-                        "Classic session has no browser context",
-                    )
-                });
+            let result = host.set_javascript_dialog_handler_enabled(enabled).await;
             let _ = response_tx.send(result);
-            ClassicSessionRuntimeRequestOutcome::Continue
+            ClassicSessionFrontendRequestOutcome::Continue
         }
         ClassicSessionRuntimeRequest::Shutdown { response_tx } => {
-            let cookie_commit = CookieProfileCommit::from_optional_profile_backed_snapshot(
-                initial_cookie_snapshot.to_vec(),
-                scheduler.snapshot_profile_backed_cookies(),
-            );
-            let _ = response_tx.send(cookie_commit.clone());
-            ClassicSessionRuntimeRequestOutcome::Shutdown(cookie_commit)
+            ClassicSessionFrontendRequestOutcome::Shutdown(response_tx)
         }
     }
 }
 
-async fn execute_classic_devtools_command_with_pending_navigation_retry(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
-    command: DevToolsCommand,
-    timeout: Option<Duration>,
-    pending_navigation_timeout: Option<Duration>,
-    expected_page: Option<&DevToolsPageResidenceIdentity>,
-) -> ClassicDevToolsCommandExecution {
-    let mut execution = execute_classic_devtools_command_once(
-        scheduler,
-        receivers,
-        command.clone(),
-        timeout,
-        expected_page,
-    )
-    .await;
-
-    let Some(pending_navigation_timeout) = pending_navigation_timeout else {
-        return execution;
-    };
-    let started = Instant::now();
-    loop {
-        if !classic_runtime_result_is_navigation_changing_document(&execution.execution.result) {
-            return execution;
-        }
-        let Some(remaining) = pending_navigation_timeout.checked_sub(started.elapsed()) else {
-            execution.execution.result = Err(classic_pending_navigation_timeout_error());
-            return execution;
-        };
-        let mut progress = scheduler
-            .complete_ready_protocol_residences_for_external_load_wait()
-            .await;
-        if progress.is_empty() {
-            let input = match tokio::time::timeout(remaining, receivers.recv_interleaved_input())
-                .await
-            {
-                Ok(Some(input)) => input,
-                Ok(None) => {
-                    execution.execution.result = Err(DevToolsError::new(
-                        DevToolsErrorKind::NoSuchSession,
-                        "Classic session runtime stopped while waiting for navigation",
-                    ));
-                    return execution;
-                }
-                Err(_) => {
-                    execution.execution.result = Err(classic_pending_navigation_timeout_error());
-                    return execution;
-                }
-            };
-            // Once selected, finish the move-owned input outside the timeout
-            // race. In particular, an admitted renderer publication must not
-            // disappear merely because the navigation deadline expires while
-            // its protocol projection is awaiting an owner action.
-            progress = match scheduler
-                .complete_interleaved_scheduler_input(receivers, input)
-                .await
-            {
-                Ok(progress) => progress,
-                Err(failure) => {
-                    let (progress, error) = failure.into_parts();
-                    execution.execution.protocol_output.append(progress);
-                    execution.execution.result = Err(error);
-                    return execution;
-                }
-            };
-        }
-        execution.execution.protocol_output.append(progress);
-
-        let retry_timeout = match timeout {
-            Some(timeout) => {
-                let Some(remaining) = pending_navigation_timeout.checked_sub(started.elapsed())
-                else {
-                    execution.execution.result = Err(classic_pending_navigation_timeout_error());
-                    return execution;
-                };
-                Some(timeout.min(remaining))
-            }
-            None => None,
-        };
-        let retry = execute_classic_devtools_command_once(
-            scheduler,
-            receivers,
-            command.clone(),
-            retry_timeout,
-            expected_page,
-        )
-        .await;
-        execution
-            .execution
-            .protocol_output
-            .append(retry.execution.protocol_output);
-        execution.execution.result = retry.execution.result;
-        execution.page_residence = retry.page_residence;
-    }
-}
-
-async fn execute_classic_devtools_command_once(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
-    command: DevToolsCommand,
-    timeout: Option<Duration>,
-    expected_page: Option<&DevToolsPageResidenceIdentity>,
-) -> ClassicDevToolsCommandExecution {
-    let DevToolsPageCommandExecution {
-        execution,
-        page_residence,
-    } = scheduler
-        .execute_devtools_command_with_external_load_wait_and_page_residence(
-            receivers,
-            command,
-            timeout,
-            expected_page,
-        )
-        .await;
-    ClassicDevToolsCommandExecution {
-        execution,
-        page_residence,
-    }
-}
-
-struct ClassicDevToolsCommandExecution {
-    execution: DevToolsCommandExecution,
-    page_residence: Option<DevToolsPageResidenceIdentity>,
-}
-
-fn classic_runtime_result_is_navigation_changing_document(
-    result: &Result<DevToolsCommandResult, DevToolsError>,
-) -> bool {
-    matches!(
-        result,
-        Err(error) if error.kind == DevToolsErrorKind::NavigationChangingDocument
-    )
-}
-
-fn classic_pending_navigation_timeout_error() -> DevToolsError {
-    DevToolsError::new(DevToolsErrorKind::Timeout, "navigation wait timed out")
-}
-
-async fn classic_session_runtime_loop(
+async fn classic_session_frontend_loop(
     mut rx: mpsc::UnboundedReceiver<ClassicSessionRuntimeRequest>,
-    initial_cookie_snapshot: Vec<StoredCookie>,
-    initial_storage_partition: CdpInitialStoragePartition,
-    navigation_runtime_config: NavigationRuntimeConfig,
-) -> CookieProfileCommit {
-    let (mut scheduler, mut receivers) = CdpScheduler::new_with_initial_state_runtime_config(
-        initial_storage_partition,
-        navigation_runtime_config,
-    );
-    let mut attached_bidi: Option<ClassicAttachedBidiSocket> = None;
-    let mut adapter_scheduler = ProtocolAdapterScheduler::<()>::default();
-    loop {
-        if receivers.renderer_publication_rx.is_closed() {
-            break;
-        }
-        if attached_bidi.is_some() {
-            let mut detach_bidi = false;
-            let mut shutdown_cookies = None;
-            {
-                let attached = attached_bidi.as_mut().expect("attached BiDi socket");
-                let page_javascript_blocked = scheduler.has_pending_javascript_dialog();
-                adapter_scheduler.schedule_turn_if_needed(&scheduler, page_javascript_blocked);
-                tokio::select! {
-                    biased;
-                    completion = receivers.background_navigation_completion_rx.recv() => {
-                        let Some(completion) = completion else {
-                            break;
-                        };
-                        if !attached.actor.handle_background_navigation_completion(
-                                &mut scheduler,
-                                &mut receivers,
-                                completion,
-                            ).await
-                        {
-                            detach_bidi = true;
-                        }
-                    }
-                    event = receivers.background_event_rx.recv() => {
-                        let Some(event) = event else {
-                            break;
-                        };
-                        let output = scheduler.route_background_event_around_inflight_navigation(event);
-                        if !attached.actor.send_or_route_protocol_output(
-                                &mut scheduler,
-                                &mut receivers,
-                                output,
-                                None,
-                            ).await
-                        {
-                            detach_bidi = true;
-                        }
-                    }
-                    publication = receivers.renderer_publication_rx.recv(), if !page_javascript_blocked => {
-                        let Some(publication) = publication else {
-                            break;
-                        };
-                        if !attached.actor.handle_renderer_publication(
-                                &mut adapter_scheduler,
-                                &mut scheduler,
-                                &mut receivers,
-                                publication,
-                            ).await
-                        {
-                            detach_bidi = true;
-                        }
-                    }
-                    actor_input = attached.actor.recv_attached_input(
-                        &mut adapter_scheduler,
-                        page_javascript_blocked,
-                    ) => {
-                        match actor_input {
-                            BidiSocketActorInput::Socket(Some(message)) => {
-                                if !attached.actor.handle_socket_message(
-                                        &mut scheduler,
-                                        &mut receivers,
-                                        &attached.session_registry,
-                                        message,
-                                    ).await
-                                {
-                                    detach_bidi = true;
-                                }
-                            }
-                            BidiSocketActorInput::Socket(None) => {
-                                detach_bidi = true;
-                            }
-                            BidiSocketActorInput::AdapterScheduler(input) => {
-                                if !attached.actor.handle_adapter_scheduler_input(
-                                        &mut adapter_scheduler,
-                                        &mut scheduler,
-                                        &mut receivers,
-                                        input,
-                                    ).await
-                                {
-                                    detach_bidi = true;
-                                }
-                            }
-                            BidiSocketActorInput::RuntimeResponseReady(Some(response)) => {
-                                if !attached
-                                    .actor
-                                    .handle_runtime_response_ready(
-                                        &mut scheduler,
-                                        &mut receivers,
-                                        *response,
-                                    )
-                                    .await
-                                {
-                                    detach_bidi = true;
-                                }
-                            }
-                            BidiSocketActorInput::RuntimeResponseReady(None) => {
-                                detach_bidi = true;
-                            }
-                        }
-                    }
-                    request = rx.recv() => {
-                        let Some(request) = request else {
-                            break;
-                        };
-                        match handle_classic_session_runtime_request(
-                            &mut scheduler,
-                            &mut receivers,
-                            &initial_cookie_snapshot,
-                            request,
-                            Some(attached),
-                        )
-                        .await
-                        {
-                            ClassicSessionRuntimeRequestOutcome::Continue => {}
-                            ClassicSessionRuntimeRequestOutcome::AttachedBidi(mut duplicate) => {
-                                duplicate
-                                    .release_session(&mut scheduler, &mut receivers)
-                                    .await;
-                            }
-                            ClassicSessionRuntimeRequestOutcome::DetachBidi => {
-                                detach_bidi = true;
-                            }
-                            ClassicSessionRuntimeRequestOutcome::Shutdown(cookies) => {
-                                attached
-                                    .release_session(&mut scheduler, &mut receivers)
-                                    .await;
-                                shutdown_cookies = Some(cookies);
-                            }
-                        }
-                    }
-                }
-            }
-            if let Some(cookies) = shutdown_cookies {
-                return cookies;
-            }
-            if detach_bidi && let Some(mut attached) = attached_bidi.take() {
-                attached
-                    .release_session(&mut scheduler, &mut receivers)
-                    .await;
-            }
-        } else {
-            let page_javascript_blocked = scheduler.has_pending_javascript_dialog();
-            adapter_scheduler.schedule_turn_if_needed(&scheduler, page_javascript_blocked);
-            tokio::select! {
-                biased;
-                completion = receivers.background_navigation_completion_rx.recv() => {
-                    let Some(completion) = completion else {
-                        break;
-                    };
-                    if scheduler
-                        .drain_background_navigation_completion_with_progress_barrier(
-                            completion,
-                            &mut receivers,
-                        )
-                        .await
-                        .is_err()
-                    {
-                        // No frontend is attached in this branch, but a
-                        // renderer-output terminal still retires the shared
-                        // protocol owner. Continuing the loop would let later
-                        // Classic commands observe a half-delivered runtime.
-                        break;
-                    }
-                }
-                event = receivers.background_event_rx.recv() => {
-                    let Some(event) = event else {
-                        break;
-                    };
-                    let _ = scheduler.route_background_event_around_inflight_navigation(event);
-                }
-                publication = receivers.renderer_publication_rx.recv(), if !page_javascript_blocked => {
-                    let Some(publication) = publication else {
-                        break;
-                    };
-                    let _ = adapter_scheduler
-                        .ingest_renderer_publication(&mut scheduler, publication)
-                        .await;
-                }
-                input = adapter_scheduler.recv_input(), if !page_javascript_blocked => {
-                    let _ = adapter_scheduler
-                        .advance_input(&mut scheduler, input, || ())
-                        .await;
-                }
-                request = rx.recv() => {
-                    let Some(request) = request else {
-                        break;
-                    };
-                    match handle_classic_session_runtime_request(
-                        &mut scheduler,
-                        &mut receivers,
-                        &initial_cookie_snapshot,
-                        request,
-                        None,
-                    )
-                    .await
-                    {
-                        ClassicSessionRuntimeRequestOutcome::Continue => {}
-                        ClassicSessionRuntimeRequestOutcome::AttachedBidi(attached) => {
-                            attached_bidi = Some(*attached);
-                        }
-                        ClassicSessionRuntimeRequestOutcome::DetachBidi => {}
-                        ClassicSessionRuntimeRequestOutcome::Shutdown(cookies) => return cookies,
-                    }
-                    if attached_bidi.is_none() {
-                        classic_session_ingest_ready_renderer_publications(
-                            &mut adapter_scheduler,
-                            &mut scheduler,
-                            &mut receivers,
-                        )
-                        .await;
-                    }
-                }
+    host: DevToolsHostServiceHandle,
+    host_finished: oneshot::Receiver<()>,
+) {
+    while let Some(request) = rx.recv().await {
+        match handle_classic_session_frontend_request(&host, request).await {
+            ClassicSessionFrontendRequestOutcome::Continue => {}
+            ClassicSessionFrontendRequestOutcome::Shutdown(response_tx) => {
+                host.shutdown().await;
+                let _ = host_finished.await;
+                let _ = response_tx.send(());
+                return;
             }
         }
     }
-    CookieProfileCommit::from_optional_profile_backed_snapshot(
-        initial_cookie_snapshot,
-        scheduler.snapshot_profile_backed_cookies(),
-    )
+    host.shutdown().await;
+    let _ = host_finished.await;
 }
 
 async fn resolve_classic_frame_id_for_index(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     current_frame_id: Option<&str>,
     index: usize,
 ) -> Result<String, DevToolsError> {
-    let frame_tree = classic_frame_tree(scheduler, receivers, session_id, target_id).await?;
+    let frame_tree = classic_frame_tree(host, session_id, target_id).await?;
     let siblings = match current_frame_id {
         Some(frame_id) => {
             classic_child_frames_for_frame_id(&frame_tree, frame_id).ok_or_else(|| {
@@ -1601,17 +1124,14 @@ async fn resolve_classic_frame_id_for_index(
 }
 
 async fn resolve_classic_frame_id_for_element(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     current_frame_id: Option<&str>,
     expected_page: &DevToolsPageResidenceIdentity,
     element_reference: DevToolsDomNodeReference,
 ) -> Result<String, DevToolsError> {
-    let frame_tree =
-        classic_frame_tree_on_page(scheduler, receivers, session_id, target_id, expected_page)
-            .await?;
+    let frame_tree = classic_frame_tree_on_page(host, session_id, target_id, expected_page).await?;
     let candidate_frames = match current_frame_id {
         Some(frame_id) => {
             classic_child_frames_for_frame_id(&frame_tree, frame_id).ok_or_else(|| {
@@ -1628,8 +1148,7 @@ async fn resolve_classic_frame_id_for_element(
             continue;
         };
         let owner = classic_frame_owner_reference_on_page(
-            scheduler,
-            receivers,
+            host,
             session_id,
             target_id,
             frame_id,
@@ -1647,8 +1166,7 @@ async fn resolve_classic_frame_id_for_element(
 }
 
 async fn classic_frame_owner_reference_on_page(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     frame_id: &str,
@@ -1660,16 +1178,18 @@ async fn classic_frame_owner_reference_on_page(
         target_id: Some(DevToolsTargetId::from(target_id)),
         browser_context_id: None,
     };
-    ensure_classic_command_page_is_current(scheduler, &context, expected_page)?;
-    match scheduler
-        .execute_devtools_command_with_external_load_wait(
-            receivers,
+    match host
+        .execute_with_page_residence(
             DevToolsCommand::GetFrameOwner(DevToolsGetFrameOwnerCommand {
                 context,
                 frame_id: DevToolsFrameId::new(frame_id),
             }),
+            None,
+            None,
+            Some(expected_page.clone()),
         )
         .await
+        .result
     {
         Ok(DevToolsCommandResult::GetFrameOwner(owner)) => Ok(owner),
         Ok(_) => Err(DevToolsError::new(
@@ -1693,13 +1213,12 @@ fn classic_frame_owner_matches_reference(
 }
 
 async fn resolve_classic_parent_frame_id(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     current_frame_id: &str,
 ) -> Result<Option<String>, DevToolsError> {
-    let frame_tree = classic_frame_tree(scheduler, receivers, session_id, target_id).await?;
+    let frame_tree = classic_frame_tree(host, session_id, target_id).await?;
     if classic_frame_exists(&frame_tree, current_frame_id) {
         let parent_frame_id = classic_parent_frame_id_for_frame_id(&frame_tree, current_frame_id);
         Ok(parent_frame_id.filter(|parent_frame_id| parent_frame_id != target_id))
@@ -1712,19 +1231,17 @@ async fn resolve_classic_parent_frame_id(
 }
 
 async fn resolve_classic_browsing_context_exists(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     frame_id: Option<&str>,
 ) -> Result<bool, DevToolsError> {
-    let frame_tree = classic_frame_tree(scheduler, receivers, session_id, target_id).await?;
+    let frame_tree = classic_frame_tree(host, session_id, target_id).await?;
     Ok(frame_id.is_none_or(|frame_id| classic_frame_exists(&frame_tree, frame_id)))
 }
 
 async fn classic_frame_tree(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
 ) -> Result<serde_json::Value, DevToolsError> {
@@ -1734,13 +1251,14 @@ async fn classic_frame_tree(
         target_id: Some(DevToolsTargetId::from(target_id)),
         browser_context_id: None,
     };
-    match scheduler
-        .execute_devtools_command_with_external_load_wait(
-            receivers,
+    match host
+        .execute(
             DevToolsCommand::GetFrameTree(DevToolsGetFrameTreeCommand {
                 context,
                 max_depth: None,
             }),
+            None,
+            None,
         )
         .await
     {
@@ -1754,8 +1272,7 @@ async fn classic_frame_tree(
 }
 
 async fn classic_frame_tree_on_page(
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
+    host: &DevToolsHostServiceHandle,
     session_id: &str,
     target_id: &str,
     expected_page: &DevToolsPageResidenceIdentity,
@@ -1766,16 +1283,18 @@ async fn classic_frame_tree_on_page(
         target_id: Some(DevToolsTargetId::from(target_id)),
         browser_context_id: None,
     };
-    ensure_classic_command_page_is_current(scheduler, &context, expected_page)?;
-    match scheduler
-        .execute_devtools_command_with_external_load_wait(
-            receivers,
+    match host
+        .execute_with_page_residence(
             DevToolsCommand::GetFrameTree(DevToolsGetFrameTreeCommand {
                 context,
                 max_depth: None,
             }),
+            None,
+            None,
+            Some(expected_page.clone()),
         )
         .await
+        .result
     {
         Ok(DevToolsCommandResult::GetFrameTree(result)) => Ok(result.frame_tree),
         Ok(_) => Err(DevToolsError::new(
@@ -1783,23 +1302,6 @@ async fn classic_frame_tree_on_page(
             "UnexpectedFrameTreeResult",
         )),
         Err(error) => Err(error),
-    }
-}
-
-fn ensure_classic_command_page_is_current(
-    scheduler: &mut CdpScheduler,
-    context: &DevToolsCommandContext,
-    expected_page: &DevToolsPageResidenceIdentity,
-) -> Result<(), DevToolsError> {
-    if scheduler.page_residence_identity_for_devtools_context(context)
-        == Some(expected_page.clone())
-    {
-        Ok(())
-    } else {
-        Err(DevToolsError::new(
-            DevToolsErrorKind::NoSuchNode,
-            "DOM reference belongs to a replaced Page",
-        ))
     }
 }
 
@@ -1873,17 +1375,6 @@ impl ValueExt for serde_json::Value {
     }
 }
 
-async fn classic_session_ingest_ready_renderer_publications(
-    adapter_scheduler: &mut ProtocolAdapterScheduler<()>,
-    scheduler: &mut CdpScheduler,
-    receivers: &mut CdpSchedulerEventReceivers,
-) {
-    while let Ok(publication) = receivers.renderer_publication_rx.try_recv() {
-        let _ = adapter_scheduler
-            .ingest_renderer_publication(scheduler, publication)
-            .await;
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;

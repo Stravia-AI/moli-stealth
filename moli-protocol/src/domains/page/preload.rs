@@ -12,13 +12,25 @@ use serde_json::json;
 
 use crate::conn::{
     BackgroundProtocolEvent, BrowserContext, CdpConnection, CdpSessionRoute, Cmd,
-    CommandDispatchContext, DocumentStartScript,
+    CommandDispatchContext, DocumentStartScript, PendingBrowserOwnerInitialTargetNavigationCommand,
 };
 use crate::domains::command_output::CommandOutputPlan;
-use crate::domains::runtime::bidi_preload_function_declaration_source;
+use crate::domains::runtime::{
+    BidiPreloadListenerSetupStep, CompletedBidiPreloadListenerSetup,
+    PendingBidiPreloadListenerSetup, bidi_preload_function_declaration_source,
+    complete_bidi_preload_listener_setup, start_bidi_preload_listener_setup,
+};
 
 use super::{PageCommandTaskStep, PendingPageCommandDispatch, PendingPageCommandKind};
 use moli_core::page::{CompletedPageCommand, PendingPageCommand, RendererAgentAttachmentId};
+
+mod add_command;
+
+pub(super) use add_command::{
+    CompletedAddScriptToEvaluateOnNewDocumentCommand,
+    PendingAddScriptToEvaluateOnNewDocumentCommand,
+    complete_pending_command as complete_pending_add_script_to_evaluate_on_new_document_command,
+};
 
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -44,14 +56,6 @@ pub(super) struct CompletedCreateIsolatedWorldCommand {
     completed: CompletedCreateIsolatedWorldPhase,
 }
 
-pub(super) struct PendingAddScriptToEvaluateOnNewDocumentCommand {
-    command: DevToolsAddPreloadScriptCommand,
-}
-
-pub(super) struct CompletedAddScriptToEvaluateOnNewDocumentCommand {
-    command: DevToolsAddPreloadScriptCommand,
-}
-
 struct RecordedDocumentStartScript {
     identifier: String,
     script: DocumentStartScript,
@@ -59,19 +63,17 @@ struct RecordedDocumentStartScript {
 }
 
 enum PendingCreateIsolatedWorldPhase {
-    InitialDocumentNavigation(Box<super::navigation::PendingNavigateLoadCommand>),
-    InitialDocumentNavigationContinue(
-        Box<super::navigation::PendingContinueNavigationWithoutRequestPauseCommand>,
-    ),
+    InitialTargetNavigation(PendingBrowserOwnerInitialTargetNavigationCommand),
     RendererPageCommand(PendingPageCommand),
+    PreloadListeners(Box<PendingBidiPreloadListenerSetup>),
 }
 
 enum CompletedCreateIsolatedWorldPhase {
-    InitialDocumentNavigation(Box<super::navigation::CompletedNavigateLoadCommand>),
-    InitialDocumentNavigationContinue(
-        Box<super::navigation::CompletedContinueNavigationWithoutRequestPauseCommand>,
+    InitialTargetNavigation(
+        Result<crate::conn::CompletedBrowserOwnerInitialTargetNavigationCommand, String>,
     ),
     RendererPageCommand(Box<Result<CompletedPageCommand, String>>),
+    PreloadListeners(Box<CompletedBidiPreloadListenerSetup>),
 }
 
 struct CreateIsolatedWorldCommandTask {
@@ -80,45 +82,37 @@ struct CreateIsolatedWorldCommandTask {
     has_bidi_channel_argument: bool,
     prefix_output: CommandOutputPlan,
     pending_renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
+    created_execution_context_id: Option<i64>,
     phase: CreateIsolatedWorldPhase,
 }
 
 #[derive(Clone)]
 enum CreateIsolatedWorldPhase {
-    InitialDocumentNavigation,
+    InitialTargetNavigation,
     RuntimeActivity,
+    PreloadListeners,
 }
 
 impl PendingCreateIsolatedWorldCommand {
     pub(super) async fn wait(self) -> CompletedCreateIsolatedWorldCommand {
         let completed = match self.pending {
-            PendingCreateIsolatedWorldPhase::InitialDocumentNavigation(pending) => {
-                CompletedCreateIsolatedWorldPhase::InitialDocumentNavigation(Box::new(
-                    pending.wait().await,
-                ))
-            }
-            PendingCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(pending) => {
-                CompletedCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(Box::new(
-                    pending.wait().await,
-                ))
+            PendingCreateIsolatedWorldPhase::InitialTargetNavigation(pending) => {
+                CompletedCreateIsolatedWorldPhase::InitialTargetNavigation(pending.wait().await)
             }
             PendingCreateIsolatedWorldPhase::RendererPageCommand(pending) => {
                 CompletedCreateIsolatedWorldPhase::RendererPageCommand(Box::new(
                     pending.wait().await.map_err(|error| error.to_string()),
                 ))
             }
+            PendingCreateIsolatedWorldPhase::PreloadListeners(pending) => {
+                CompletedCreateIsolatedWorldPhase::PreloadListeners(Box::new(
+                    (*pending).wait().await,
+                ))
+            }
         };
         CompletedCreateIsolatedWorldCommand {
             task: self.task,
             completed,
-        }
-    }
-}
-
-impl PendingAddScriptToEvaluateOnNewDocumentCommand {
-    pub(super) async fn wait(self) -> CompletedAddScriptToEvaluateOnNewDocumentCommand {
-        CompletedAddScriptToEvaluateOnNewDocumentCommand {
-            command: self.command,
         }
     }
 }
@@ -131,7 +125,7 @@ async fn append_loaded_page_document_start_script_for_session_async(
     let renderer_runtime_inspector_session_id =
         conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
     let slot = conn.runtime_session_owner_slot_mut(session_id)?;
-    if let Some(page) = slot.loaded_page_mut() {
+    if let Some(mut page) = slot.loaded_page_mut() {
         page.add_document_start_script_runtime_activity_async(
             renderer_runtime_inspector_session_id.as_deref(),
             script,
@@ -149,7 +143,7 @@ async fn remove_loaded_page_document_start_script_for_session_async(
     registry_key: &str,
 ) -> Result<(), String> {
     let slot = conn.runtime_session_owner_slot_mut(session_id)?;
-    if let Some(page) = slot.loaded_page_mut() {
+    if let Some(mut page) = slot.loaded_page_mut() {
         page.remove_document_start_script_by_registry_key_async(registry_key)
             .await
             .map_err(|error| error.to_string())?;
@@ -498,7 +492,7 @@ async fn execute_devtools_single_route_add_preload_script_command(
             return Err(preload_missing_owner_error(conn));
         }
         let mut side_effects = CommandOutputPlan::default();
-        let identifier = add_script_to_evaluate_on_new_document_direct_async(
+        let identifier = add_command::execute_direct_async(
             conn,
             None,
             command,
@@ -552,11 +546,12 @@ async fn append_default_document_start_script_direct_async(
             false,
         )
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
+    drop(page);
     let completion = pending
         .wait()
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
-    let Some(page) = conn
+    let Some(mut page) = conn
         .runtime_session_owner_slot_mut(session_id)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
@@ -624,11 +619,12 @@ async fn remove_document_start_script_direct_async(
     let pending = page
         .start_remove_document_start_script_by_registry_key(&registry_key)
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
+    drop(page);
     let completion = pending
         .wait()
         .await
         .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
-    let Some(page) = conn
+    let Some(mut page) = conn
         .runtime_session_owner_slot_mut(session_id)
         .ok()
         .and_then(|slot| slot.loaded_page_mut())
@@ -702,7 +698,7 @@ fn resolve_bidi_preload_browser_context_ids(
                 .collect::<Vec<_>>();
             if default_context_ids.is_empty() {
                 let id = conn.default_browser_context_id().to_owned();
-                conn.insert_browser_context(conn.new_browser_context(id.clone()));
+                conn.try_insert_browser_context(conn.new_browser_context(id.clone()))?;
                 default_context_ids.push(id);
             }
             resolved.extend(default_context_ids);
@@ -876,7 +872,7 @@ fn default_add_preload_command_route(
     if conn.browser_context.is_none() {
         let browser_context =
             conn.new_browser_context(conn.default_browser_context_id().to_owned());
-        conn.insert_browser_context(browser_context);
+        conn.try_insert_browser_context(browser_context)?;
     }
     let browser_context = conn
         .browser_context
@@ -1005,28 +1001,14 @@ fn start_devtools_add_preload_script_command(
         }
     };
     if !is_bidi_default_preload_command(&command) {
-        if conn
-            .target_owner_identity_for_session(command_session_id)
-            .is_none()
-        {
-            if conn.browser_context.is_none() {
-                return PageCommandTaskStep::Complete(CommandOutputPlan::error(
-                    -31998,
-                    "BrowserContextNotLoaded",
-                ));
-            }
-            return PageCommandTaskStep::Complete(CommandOutputPlan::error(
-                -31998,
-                "TargetNotLoaded",
-            ));
-        }
-        return PageCommandTaskStep::Pending(PendingPageCommandDispatch {
+        let run_immediately = command.run_immediately;
+        return add_command::start_page_command(
+            conn,
             command_id,
-            owner_scope: crate::conn::CommandOwnerScope::capture(conn, command_session_id),
-            kind: Box::new(PendingPageCommandKind::AddScriptToEvaluateOnNewDocument(
-                PendingAddScriptToEvaluateOnNewDocumentCommand { command },
-            )),
-        });
+            command_session_id,
+            script,
+            run_immediately,
+        );
     }
 
     let Some(browser_context) = conn.browser_context.as_mut() else {
@@ -1203,7 +1185,7 @@ pub(super) fn try_start_create_isolated_world_command(
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, "NoDocumentLoaded"));
     }
 
-    start_create_isolated_world_initial_navigation_or_renderer_phase(
+    start_create_isolated_world_initial_target_prerequisite_or_renderer_phase(
         conn,
         cmd.id,
         cmd.session_id,
@@ -1233,6 +1215,7 @@ fn prepare_create_isolated_world_task(
         has_bidi_channel_argument,
         prefix_output: CommandOutputPlan::default(),
         pending_renderer_agent_attachment_id: None,
+        created_execution_context_id: None,
         phase: CreateIsolatedWorldPhase::RuntimeActivity,
     })
 }
@@ -1253,73 +1236,28 @@ fn pending_create_isolated_world_command_for_session(
     })
 }
 
-fn start_create_isolated_world_initial_navigation_or_renderer_phase(
+fn start_create_isolated_world_initial_target_prerequisite_or_renderer_phase(
     conn: &mut CdpConnection,
     command_id: Option<u64>,
     session_id: Option<&str>,
     mut task: CreateIsolatedWorldCommandTask,
 ) -> PageCommandTaskStep {
-    let should_start_target_url_navigation =
-        conn.runtime_session_owner_should_start_initial_document_navigation(session_id);
-    if !should_start_target_url_navigation {
-        return start_create_isolated_world_frame_or_world_phase(
-            conn, command_id, session_id, task,
-        );
-    }
-
-    let start = match super::navigation::start_initial_document_navigation_for_session_owner(
-        conn,
-        None,
-        session_id,
-        json!({}),
-    ) {
-        Ok(start) => start,
-        Err(plan) => return PageCommandTaskStep::Complete(plan),
-    };
-    match start {
-        super::navigation::NavigateCommandStart::CompleteImmediate(plan) => {
-            if let Err(plan) = append_page_command_step_output(
-                &mut task.prefix_output,
-                PageCommandTaskStep::Complete(plan),
-            ) {
-                return PageCommandTaskStep::Complete(plan);
-            }
+    match conn.publish_initial_target_navigation_prerequisite_for_session_owner(session_id) {
+        Ok(Some(pending)) => {
+            task.phase = CreateIsolatedWorldPhase::InitialTargetNavigation;
+            pending_create_isolated_world_command_for_session(
+                conn,
+                command_id,
+                session_id,
+                task,
+                PendingCreateIsolatedWorldPhase::InitialTargetNavigation(pending),
+            )
+        }
+        Ok(None) => {
             start_create_isolated_world_frame_or_world_phase(conn, command_id, session_id, task)
         }
-        super::navigation::NavigateCommandStart::CompletePlan(plan) => {
-            PageCommandTaskStep::Complete(plan)
-        }
-        super::navigation::NavigateCommandStart::PendingLoad(pending) => {
-            task.phase = CreateIsolatedWorldPhase::InitialDocumentNavigation;
-            pending_create_isolated_world_command_for_session(
-                conn,
-                command_id,
-                session_id,
-                task,
-                PendingCreateIsolatedWorldPhase::InitialDocumentNavigation(pending),
-            )
-        }
-        super::navigation::NavigateCommandStart::PendingChildFrame(_) => {
-            PageCommandTaskStep::Complete(CommandOutputPlan::error(
-                -32000,
-                "UnexpectedChildFrameNavigation",
-            ))
-        }
-        super::navigation::NavigateCommandStart::PendingSameDocument(_) => {
-            PageCommandTaskStep::Complete(CommandOutputPlan::error(
-                -32000,
-                "UnexpectedSameDocumentNavigation",
-            ))
-        }
-        super::navigation::NavigateCommandStart::PendingContinueWithoutRequestPause(pending) => {
-            task.phase = CreateIsolatedWorldPhase::InitialDocumentNavigation;
-            pending_create_isolated_world_command_for_session(
-                conn,
-                command_id,
-                session_id,
-                task,
-                PendingCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(pending),
-            )
+        Err(error) => {
+            PageCommandTaskStep::Complete(CommandOutputPlan::error(-32000, error.to_string()))
         }
     }
 }
@@ -1361,11 +1299,11 @@ fn start_create_isolated_world_frame_or_world_phase(
     }
 }
 
-fn loaded_page_mut_for_create_isolated_world_renderer_command<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_create_isolated_world_renderer_command(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
     task: &mut CreateIsolatedWorldCommandTask,
-) -> Result<&'a mut moli_core::page::Page, CommandOutputPlan> {
+) -> Result<moli_core::browser_host::BrowserPageRuntimeLease, CommandOutputPlan> {
     let slot = conn
         .runtime_session_owner_slot_mut(session_id)
         .map_err(|error| CommandOutputPlan::error(-32000, error))?;
@@ -1467,22 +1405,15 @@ pub(super) async fn complete_pending_create_isolated_world_command(
     command_context: &mut CommandDispatchContext,
 ) -> PageCommandTaskStep {
     match completed.task.phase.clone() {
-        CreateIsolatedWorldPhase::InitialDocumentNavigation => {
-            let navigation_step = match completed.completed {
-                CompletedCreateIsolatedWorldPhase::InitialDocumentNavigation(completed) => {
-                    super::navigation::complete_pending_navigate_load_command(
-                        conn,
-                        *completed,
-                        command_context,
-                    )
-                    .await
+        CreateIsolatedWorldPhase::InitialTargetNavigation => {
+            let navigation_plan = match completed.completed {
+                CompletedCreateIsolatedWorldPhase::InitialTargetNavigation(Ok(completed)) => {
+                    completed.into_plan()
                 }
-                CompletedCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(completed) => {
-                    super::navigation::complete_pending_continue_navigation_without_request_pause_command(
-                        conn,
-                        *completed,
-                    )
-                    .await
+                CompletedCreateIsolatedWorldPhase::InitialTargetNavigation(Err(message)) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000, message,
+                    ));
                 }
                 CompletedCreateIsolatedWorldPhase::RendererPageCommand(_) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -1490,10 +1421,17 @@ pub(super) async fn complete_pending_create_isolated_world_command(
                         "Invalid createIsolatedWorld initial navigation completion",
                     ));
                 }
+                CompletedCreateIsolatedWorldPhase::PreloadListeners(_) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        "Invalid createIsolatedWorld initial navigation continuation",
+                    ));
+                }
             };
-            if let Err(plan) =
-                append_page_command_step_output(&mut completed.task.prefix_output, navigation_step)
-            {
+            if let Err(plan) = append_page_command_step_output(
+                &mut completed.task.prefix_output,
+                PageCommandTaskStep::Complete(navigation_plan),
+            ) {
                 return PageCommandTaskStep::Complete(plan);
             }
             start_create_isolated_world_frame_or_world_phase(
@@ -1531,8 +1469,8 @@ pub(super) async fn complete_pending_create_isolated_world_command(
                         }
                     }
                 }
-                CompletedCreateIsolatedWorldPhase::InitialDocumentNavigation(_)
-                | CompletedCreateIsolatedWorldPhase::InitialDocumentNavigationContinue(_) => {
+                CompletedCreateIsolatedWorldPhase::InitialTargetNavigation(_)
+                | CompletedCreateIsolatedWorldPhase::PreloadListeners(_) => {
                     return PageCommandTaskStep::Complete(CommandOutputPlan::error(
                         -32000,
                         "Invalid createIsolatedWorld runtime-activity completion",
@@ -1540,7 +1478,7 @@ pub(super) async fn complete_pending_create_isolated_world_command(
                 }
             };
             let completed_world = {
-                let Some(page) = conn
+                let Some(mut page) = conn
                     .runtime_session_owner_slot_mut(session_id)
                     .ok()
                     .and_then(|slot| slot.loaded_page_mut())
@@ -1562,13 +1500,33 @@ pub(super) async fn complete_pending_create_isolated_world_command(
                 }
             };
             command_context.consume_renderer_command_turn_output(output);
-            complete_create_isolated_world_task(
+            completed.task.created_execution_context_id = Some(execution_context_id);
+            start_create_isolated_world_preload_listeners(
                 conn,
+                command_id,
                 session_id,
                 completed.task,
-                execution_context_id,
             )
-            .await
+        }
+        CreateIsolatedWorldPhase::PreloadListeners => {
+            let completed_listeners = match completed.completed {
+                CompletedCreateIsolatedWorldPhase::PreloadListeners(completed) => *completed,
+                CompletedCreateIsolatedWorldPhase::InitialTargetNavigation(_)
+                | CompletedCreateIsolatedWorldPhase::RendererPageCommand(_) => {
+                    return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        "Invalid createIsolatedWorld preload-listener completion",
+                    ));
+                }
+            };
+            let step = complete_bidi_preload_listener_setup(conn, completed_listeners);
+            continue_create_isolated_world_preload_listeners(
+                conn,
+                command_id,
+                session_id,
+                completed.task,
+                step,
+            )
         }
     }
 }
@@ -1592,145 +1550,63 @@ fn append_page_command_step_output(
     }
 }
 
-async fn complete_create_isolated_world_task(
+fn start_create_isolated_world_preload_listeners(
     conn: &mut CdpConnection,
+    command_id: Option<u64>,
     session_id: Option<&str>,
     task: CreateIsolatedWorldCommandTask,
-    execution_context_id: i64,
 ) -> PageCommandTaskStep {
-    let CreateIsolatedWorldCommandTask {
-        target_id: _,
-        params: _,
-        mut prefix_output,
-        has_bidi_channel_argument,
-        ..
-    } = task;
-    let mut preload_channel_listener_events = Vec::new();
-    if has_bidi_channel_argument {
-        Box::pin(
-            crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
-                conn,
-                session_id,
-                execution_context_id,
-                &mut preload_channel_listener_events,
-            ),
-        )
-        .await;
+    if !task.has_bidi_channel_argument {
+        return finish_create_isolated_world_task(task, Vec::new());
     }
-    push_background_events(&mut prefix_output, preload_channel_listener_events);
-    prefix_output.push_result(json!({ "executionContextId": execution_context_id }));
-    PageCommandTaskStep::Complete(prefix_output)
-}
-
-pub(super) async fn complete_pending_add_script_to_evaluate_on_new_document_command(
-    conn: &mut CdpConnection,
-    _command_id: Option<u64>,
-    session_id: Option<&str>,
-    completed: CompletedAddScriptToEvaluateOnNewDocumentCommand,
-    command_context: &mut CommandDispatchContext,
-) -> PageCommandTaskStep {
-    let mut plan = CommandOutputPlan::default();
-    match add_script_to_evaluate_on_new_document_direct_async(
-        conn,
-        session_id,
-        completed.command,
-        &mut plan,
-        command_context,
-    )
-    .await
-    {
-        Ok(identifier) => {
-            plan.extend(add_preload_script_result_plan(identifier));
-            PageCommandTaskStep::Complete(plan)
-        }
-        Err(error) => {
-            plan.extend(CommandOutputPlan::from_devtools_error(error));
-            PageCommandTaskStep::Complete(plan)
-        }
-    }
-}
-
-async fn add_script_to_evaluate_on_new_document_direct_async(
-    conn: &mut CdpConnection,
-    session_id: Option<&str>,
-    command: DevToolsAddPreloadScriptCommand,
-    side_effects: &mut CommandOutputPlan,
-    command_context: &mut CommandDispatchContext,
-) -> Result<String, DevToolsError> {
-    let script = document_start_script_from_add_preload_command(&command)?;
-    let target_id = conn
-        .target_owner_identity_for_session(session_id)
-        .and_then(|(_, target_id)| target_id);
-    let Some(recorded) = conn.with_target_owner_state_for_session_mut(session_id, |owner_state| {
-        record_document_start_script(owner_state, target_id.as_deref(), &script)
-    }) else {
-        return Err(preload_missing_owner_error(conn));
+    let Some(execution_context_id) = task.created_execution_context_id else {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+            -32000,
+            "Missing createIsolatedWorld execution context",
+        ));
     };
-    let identifier = recorded.identifier.clone();
-    let script = recorded.script;
-    if !recorded.inserted {
-        return Ok(identifier);
-    }
-    let pending_run_immediately = {
-        let renderer_runtime_inspector_session_id =
-            conn.target_renderer_runtime_inspector_session_id_for_session(session_id);
-        let slot = match conn.runtime_session_owner_slot_mut(session_id) {
-            Ok(slot) => slot,
-            Err(error) => return Err(devtools_preload_internal_error(error)),
-        };
-        if let Some(page) = slot.loaded_page_mut() {
-            Some(
-                page.start_add_document_start_script_runtime_activity(
-                    renderer_runtime_inspector_session_id.as_deref(),
-                    &script,
-                    command.run_immediately,
-                )
-                .map_err(|error| devtools_preload_internal_error(error.to_string()))?,
+    let step = start_bidi_preload_listener_setup(conn, session_id, execution_context_id);
+    continue_create_isolated_world_preload_listeners(conn, command_id, session_id, task, step)
+}
+
+fn continue_create_isolated_world_preload_listeners(
+    conn: &CdpConnection,
+    command_id: Option<u64>,
+    session_id: Option<&str>,
+    mut task: CreateIsolatedWorldCommandTask,
+    step: BidiPreloadListenerSetupStep,
+) -> PageCommandTaskStep {
+    match step {
+        BidiPreloadListenerSetupStep::Pending(pending) => {
+            task.phase = CreateIsolatedWorldPhase::PreloadListeners;
+            pending_create_isolated_world_command_for_session(
+                conn,
+                command_id,
+                session_id,
+                task,
+                PendingCreateIsolatedWorldPhase::PreloadListeners(pending),
             )
-        } else {
-            None
         }
-    };
-    let run_immediately_result = match pending_run_immediately {
-        Some(pending) => {
-            // The pending command owns the renderer turn. Reacquire the
-            // session-owned Page after the wait so no mutable protocol owner
-            // is retained across this asynchronous boundary.
-            let completion = pending
-                .wait()
-                .await
-                .map_err(|error| devtools_preload_internal_error(error.to_string()))?;
-            let (result, output) = {
-                let slot = conn
-                    .runtime_session_owner_slot_mut(session_id)
-                    .map_err(devtools_preload_internal_error)?;
-                let page = slot.loaded_page_mut().ok_or_else(|| {
-                    devtools_preload_internal_error("NoDocumentLoaded".to_owned())
-                })?;
-                page.finish_document_start_script_result_command_turn(completion)
-                    .map_err(|error| devtools_preload_internal_error(error.to_string()))?
-            };
-            command_context.consume_renderer_command_turn_output(output);
-            result
+        BidiPreloadListenerSetupStep::Complete(events) => {
+            finish_create_isolated_world_task(task, events)
         }
-        None => None,
-    };
-    if script.has_bidi_channel_argument
-        && let Some((execution_context_id, _)) = run_immediately_result
-    {
-        let mut preload_channel_listener_events = Vec::new();
-        Box::pin(
-            crate::domains::runtime::start_bidi_preload_channel_listeners_for_execution_context_background_events_async(
-                conn,
-                session_id,
-                execution_context_id,
-                &mut preload_channel_listener_events,
-            ),
-        )
-        .await;
-        push_background_events(side_effects, preload_channel_listener_events);
     }
-    Ok(identifier)
+}
+
+fn finish_create_isolated_world_task(
+    mut task: CreateIsolatedWorldCommandTask,
+    preload_channel_listener_events: Vec<BackgroundProtocolEvent>,
+) -> PageCommandTaskStep {
+    let Some(execution_context_id) = task.created_execution_context_id else {
+        return PageCommandTaskStep::Complete(CommandOutputPlan::error(
+            -32000,
+            "Missing createIsolatedWorld execution context",
+        ));
+    };
+    push_background_events(&mut task.prefix_output, preload_channel_listener_events);
+    task.prefix_output
+        .push_result(json!({ "executionContextId": execution_context_id }));
+    PageCommandTaskStep::Complete(task.prefix_output)
 }
 
 #[cfg(test)]
@@ -2048,5 +1924,238 @@ mod protocol_neutral_tests {
         plan.emit_into(&mut out, cmd.id, cmd.session_id);
         assert_eq!(out[0]["id"], json!(43));
         assert_eq!(out[0]["error"]["message"], json!("BrowserContextNotLoaded"));
+    }
+}
+
+#[cfg(test)]
+mod create_isolated_world_participant_tests {
+    use moli_page_types::BidiPreloadChannelHandoff;
+    use serde_json::{Value, json};
+
+    use super::{
+        PendingCreateIsolatedWorldCommand, PendingCreateIsolatedWorldPhase,
+        complete_pending_create_isolated_world_command, try_start_create_isolated_world_command,
+    };
+    use crate::conn::{BrowserContext, Cmd, CommandDispatchContext, DocumentStartScript};
+    use crate::domains::page::{PageCommandTaskStep, PendingPageCommandKind};
+    use crate::domains::runtime::BidiPreloadListenerSetupOperationKind;
+    use crate::testing::TestContext;
+
+    async fn context_with_isolated_world_channel_preload() -> TestContext {
+        let mut ctx = TestContext::new();
+        let mut browser_context = BrowserContext::new("BID-isolated-participant".to_owned());
+        browser_context.set_active_target_id("TID-isolated-participant".to_owned());
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<!doctype html><body>isolated participant</body>",
+            None,
+        )
+        .await;
+        ctx.conn
+            .with_target_owner_state_for_session_mut(None, |owner_state| {
+                owner_state.document_start_scripts.push((
+                    "channel-preload".to_owned(),
+                    DocumentStartScript {
+                        registry_key: None,
+                        source: String::new(),
+                        world_name: Some("utility".to_owned()),
+                        has_bidi_channel_argument: true,
+                        bidi_channel_handoffs: vec![BidiPreloadChannelHandoff {
+                            handoff_id: "__lmIsolatedParticipant".to_owned(),
+                            token: "isolated-participant-token".to_owned(),
+                            channel: "isolated-participant-channel".to_owned(),
+                            ownership: None,
+                            serialization_options: None,
+                        }],
+                    },
+                ));
+            })
+            .expect("the test target owner should remain resident");
+        ctx
+    }
+
+    fn start_create_isolated_world(ctx: &mut TestContext) -> PendingCreateIsolatedWorldCommand {
+        let params = json!({
+            "frameId": "TID-isolated-participant",
+            "worldName": "utility",
+        });
+        let command = Cmd::for_test(
+            Some(71),
+            "Page.createIsolatedWorld",
+            &params,
+            None,
+            r#"{"id":71,"method":"Page.createIsolatedWorld"}"#,
+        );
+        take_create_isolated_world_pending(try_start_create_isolated_world_command(
+            &mut ctx.conn,
+            &command,
+        ))
+    }
+
+    fn take_create_isolated_world_pending(
+        step: PageCommandTaskStep,
+    ) -> PendingCreateIsolatedWorldCommand {
+        let PageCommandTaskStep::Pending(pending) = step else {
+            panic!("createIsolatedWorld should expose its next move-owned participant");
+        };
+        let PendingPageCommandKind::CreateIsolatedWorld(pending) = *pending.kind else {
+            panic!("createIsolatedWorld must remain on its exact Page command task");
+        };
+        pending
+    }
+
+    fn create_isolated_world_response(
+        plan: crate::domains::command_output::CommandOutputPlan,
+    ) -> Value {
+        plan.into_background_events(Some(71), None)
+            .into_iter()
+            .find(|event| event.protocol_message_id() == Some(71))
+            .expect("createIsolatedWorld should produce its command response")
+            .into_parts()
+            .0
+    }
+
+    #[tokio::test]
+    async fn create_isolated_world_channel_listener_advances_through_owned_participants() {
+        let mut ctx = context_with_isolated_world_channel_preload().await;
+        let pending_world = start_create_isolated_world(&mut ctx);
+        assert!(matches!(
+            &pending_world.pending,
+            PendingCreateIsolatedWorldPhase::RendererPageCommand(_)
+        ));
+        let completed_world = pending_world.wait().await;
+        let mut command_context = CommandDispatchContext::default();
+        let pending_realms = take_create_isolated_world_pending(
+            complete_pending_create_isolated_world_command(
+                &mut ctx.conn,
+                Some(71),
+                None,
+                completed_world,
+                &mut command_context,
+            )
+            .await,
+        );
+        let PendingCreateIsolatedWorldPhase::PreloadListeners(setup) = &pending_realms.pending
+        else {
+            panic!("realm inventory must stay inside the reusable listener setup participant");
+        };
+        assert_eq!(
+            setup.operation_kind(),
+            BidiPreloadListenerSetupOperationKind::RealmInventory
+        );
+
+        let completed_realms = pending_realms.wait().await;
+        let mut step = complete_pending_create_isolated_world_command(
+            &mut ctx.conn,
+            Some(71),
+            None,
+            completed_realms,
+            &mut command_context,
+        )
+        .await;
+        let mut saw_listener_participant = false;
+        for _ in 0..32 {
+            match step {
+                PageCommandTaskStep::Pending(pending) => {
+                    let PendingPageCommandKind::CreateIsolatedWorld(pending) = *pending.kind else {
+                        panic!("preload listener work must remain on createIsolatedWorld");
+                    };
+                    let PendingCreateIsolatedWorldPhase::PreloadListeners(setup) = &pending.pending
+                    else {
+                        panic!("listener work must stay inside the reusable setup participant");
+                    };
+                    saw_listener_participant |= setup.operation_kind()
+                        == BidiPreloadListenerSetupOperationKind::ListenerBatch;
+                    let completed = pending.wait().await;
+                    step = complete_pending_create_isolated_world_command(
+                        &mut ctx.conn,
+                        Some(71),
+                        None,
+                        completed,
+                        &mut command_context,
+                    )
+                    .await;
+                }
+                PageCommandTaskStep::Complete(plan) => {
+                    assert!(saw_listener_participant);
+                    let response = create_isolated_world_response(plan);
+                    assert!(response["result"]["executionContextId"].as_i64().is_some());
+                    return;
+                }
+            }
+        }
+        panic!("createIsolatedWorld preload listener participant did not terminate");
+    }
+
+    #[tokio::test]
+    async fn stale_realm_inventory_does_not_enter_replacement_page() {
+        let mut ctx = context_with_isolated_world_channel_preload().await;
+        let old_attachment = ctx
+            .conn
+            .current_renderer_agent_attachment_id_for_session_owner(None)
+            .expect("the old Page should have an exact renderer attachment");
+        let pending_world = start_create_isolated_world(&mut ctx);
+        let completed_world = pending_world.wait().await;
+        let mut command_context = CommandDispatchContext::default();
+        let pending_realms = take_create_isolated_world_pending(
+            complete_pending_create_isolated_world_command(
+                &mut ctx.conn,
+                Some(71),
+                None,
+                completed_world,
+                &mut command_context,
+            )
+            .await,
+        );
+        let PendingCreateIsolatedWorldPhase::PreloadListeners(setup) = &pending_realms.pending
+        else {
+            panic!("realm inventory must stay inside the reusable listener setup participant");
+        };
+        assert_eq!(
+            setup.operation_kind(),
+            BidiPreloadListenerSetupOperationKind::RealmInventory
+        );
+        let completed_realms = pending_realms.wait().await;
+
+        let replacement = ctx
+            .conn
+            .load_page_via_runtime_async("data:text/html,<!doctype html><body>replacement</body>")
+            .await
+            .expect("replacement Page should load");
+        let old_page = ctx
+            .conn
+            .runtime_session_owner_slot_mut(None)
+            .expect("the target should remain resident")
+            .clear_loaded_page_for_test_fixture();
+        drop(old_page);
+        ctx.conn
+            .runtime_session_owner_slot_mut(None)
+            .expect("the replacement target should remain resident")
+            .set_loaded_page_for_test(replacement);
+        let replacement_attachment = ctx
+            .conn
+            .current_renderer_agent_attachment_id_for_session_owner(None)
+            .expect("the replacement Page should have an exact renderer attachment");
+        assert_ne!(old_attachment, replacement_attachment);
+
+        let PageCommandTaskStep::Complete(plan) = complete_pending_create_isolated_world_command(
+            &mut ctx.conn,
+            Some(71),
+            None,
+            completed_realms,
+            &mut command_context,
+        )
+        .await
+        else {
+            panic!("stale realm inventory must not start work on the replacement Page");
+        };
+        let response = create_isolated_world_response(plan);
+        assert!(response["result"]["executionContextId"].as_i64().is_some());
+        assert_eq!(
+            ctx.conn
+                .current_renderer_agent_attachment_id_for_session_owner(None),
+            Some(replacement_attachment)
+        );
+        assert!(!ctx.conn.has_pending_inspector_awaits());
     }
 }

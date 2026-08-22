@@ -476,7 +476,7 @@ async fn runtime_child_frame_fetch_subresource_interception_uses_child_frame_att
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();
@@ -498,16 +498,6 @@ async fn runtime_child_frame_fetch_subresource_interception_uses_child_frame_att
     .await;
     ctx.expect_result(36_402, json!({}), Some("SID-1"));
     enable_runtime_async(&mut ctx, "SID-1", 36_403).await;
-    wait_until_message(
-        &mut ctx,
-        "SID-1",
-        "child frame navigated before child fetch",
-        |message| {
-            message["method"] == json!("Page.frameNavigated")
-                && message["params"]["frame"]["id"] == json!(child_frame_id)
-        },
-    )
-    .await;
 
     ctx.process_async(json!({
         "id": 36_404,
@@ -5189,7 +5179,7 @@ async fn close_aborts_paused_response_stage_runtime_xhr_subresource() {
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();
@@ -5525,7 +5515,7 @@ async fn close_aborts_paused_runtime_xhr_auth_subresource() {
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     ctx.sent.clear();

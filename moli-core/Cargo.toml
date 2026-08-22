@@ -7,7 +7,9 @@ edition = "2024"
 [features]
 default = []
 # Compile renderer-only testing and diagnostic projections. This is not part of
-# normal browser behavior and must stay disabled in production builds.
+# normal browser behavior and must stay disabled in production builds. The
+# feature also enables narrow fixture-only Page residence mutation helpers in
+# this crate; production builds must not expose a second Page lifetime owner.
 test-support = ["moli-renderer-v8/test-support"]
 # Forward the renderer's WPT-only test harness globals. This must stay opt-in:
 # normal Moli pages should not expose `window.webdriver` / `window.WebDriver`.
@@ -16,6 +18,7 @@ wpt-extensions = ["moli-renderer-v8/wpt-extensions"]
 [dependencies]
 anyhow = "1.0.100"
 moli-browser-profile = { path = "../moli-browser-profile" }
+moli-bounded-buffer = { path = "../moli-bounded-buffer" }
 moli-dom = { path = "../moli-dom" }
 moli-parser = { path = "../moli-parser" }
 moli-page-types = { path = "../moli-page-types" }
@@ -24,6 +27,7 @@ moli-selector = { path = "../moli-selector" }
 moli-storage-key = { path = "../moli-storage-key" }
 moli-storage-service = { path = "../moli-storage-service" }
 moli-url = { path = "../moli-url" }
+moli-trace = { path = "../moli-trace" }
 moli-web-mime = { path = "../moli-web-mime" }
 moli-cookie-jar = { path = "../moli-cookie-jar" }
 moli-fetch = { path = "../moli-fetch" }

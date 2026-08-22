@@ -2,28 +2,37 @@ use super::*;
 
 async fn install_document_content_test_page(ctx: &mut TestContext, url: &str) {
     load_bc_with_session(ctx, "BID-set-content", "TID-1", "SID-1", "about:blank");
-    let committed_document = {
-        let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-        browser_context.set_target_url(url.to_owned());
-        browser_context
-            .start_document_navigation_for_active_target(LOADER_ID.to_owned())
-            .expect("document-content test navigation should start")
-    };
     let mut navigation = ctx
         .conn
-        .load_navigation_via_runtime_for_session_owner_async(Some("SID-1"), url)
+        .load_navigation_via_runtime_async(url)
         .await
         .expect("document-content test page should load");
     let navigation_engine = navigation.navigation_engine.take();
     let artifacts = navigation.page_creation_artifacts;
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .expect("browser context")
+        .set_target_url(url.to_owned());
+    let committed_document = ctx
+        .conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), LOADER_ID.to_owned())
+        .expect("document-content test navigation should start");
+    let renderer_agent_candidate = ctx
+        .conn
+        .prepare_renderer_agent_candidate_for_session_owner(
+            Some("SID-1"),
+            &committed_document,
+            &mut navigation.page,
+        )
+        .expect("document-content test renderer candidate should attach");
+    ctx.conn
+        .commit_document_navigation_for_session_owner_if_matches(
+            Some("SID-1"),
+            &committed_document,
+        );
     {
         let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-        let renderer_agent_candidate = browser_context
-            .active_target
-            .runtime_slot
-            .prepare_renderer_agent_candidate(&committed_document, &mut navigation.page)
-            .expect("document-content test renderer candidate should attach");
-        browser_context.commit_document_navigation_if_matches(&committed_document);
         browser_context
             .active_target
             .runtime_slot
@@ -36,17 +45,18 @@ async fn install_document_content_test_page(ctx: &mut TestContext, url: &str) {
             .active_target
             .runtime_slot
             .set_loaded_page_for_test(navigation.page);
-        assert!(
-            browser_context
-                .active_target
-                .runtime_slot
-                .finish_renderer_document_navigation(&committed_document)
-                .expect("document-content test renderer navigation should finish")
-                .released_output
-                .is_empty(),
-            "the fixture should not leave buffered Inspector output behind"
-        );
     }
+    assert!(
+        ctx.conn
+            .finish_renderer_document_navigation_for_session_owner(
+                Some("SID-1"),
+                &committed_document,
+            )
+            .expect("document-content test renderer navigation should finish")
+            .released_output
+            .is_empty(),
+        "the fixture should not leave buffered Inspector output behind"
+    );
     let (binding, _) = ctx.conn.bind_renderer_document_lifecycle_for_session_owner(
         Some("SID-1"),
         artifacts,
@@ -4929,10 +4939,7 @@ async fn set_document_content_reports_chromium_errors_without_mutating_the_docum
     );
 
     ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("pending navigation should start");
     ctx.process_async(json!({
         "id": 44,

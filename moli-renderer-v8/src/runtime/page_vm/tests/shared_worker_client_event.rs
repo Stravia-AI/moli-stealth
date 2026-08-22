@@ -374,16 +374,9 @@ fn shared_worker_error_rejects_a_real_page_vm_replacement() {
     run_page_vm_large_stack_async_test(
         "shared-worker-client-event-page-vm-replacement",
         || async move {
-            let (base_url, server) = spawn_path_response_http_server(vec![(
-                "/replacement.html",
-                "HTTP/1.1 200 OK",
-                "<!doctype html><body>replacement</body>".to_owned(),
-                Duration::ZERO,
-            )])
-            .await;
             let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default())
                 .expect("loader");
-            let document_url = Url::parse(&format!("{base_url}/initial.html")).unwrap();
+            let document_url = Url::parse("https://shared-worker-turn.test/initial.html").unwrap();
             let (page_vm, _resource_source, mut page_wake_rx) =
                 page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
             let local_executor = page_vm.local_executor.clone();
@@ -416,7 +409,11 @@ fn shared_worker_error_rejects_a_real_page_vm_replacement() {
                     .await?;
                     let retired_root = page_vm.document_lifecycle.identity().document;
 
-                    let replacement_url = format!("{base_url}/replacement.html");
+                    // This test owns the stale PageVm event boundary, not HTTP
+                    // phase-one scheduling. Use a materialized response so one
+                    // owner turn deterministically commits the replacement.
+                    let replacement_url =
+                        "data:text/html,%3C!doctype%20html%3E%3Cbody%3Ereplacement%3C/body%3E";
                     page_vm
                         .vm_mut()
                         .eval(&format!("location.href = {replacement_url:?}; 'queued'"))?;
@@ -485,9 +482,6 @@ Promise.resolve().then(() => {
                 })
                 .await
                 .expect("SharedWorker PageVm replacement should reject the retired event");
-            server
-                .await
-                .expect("SharedWorker replacement server should finish");
         },
     );
 }

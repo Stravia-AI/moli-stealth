@@ -370,7 +370,7 @@ mod tests {
             .browser_context
             .as_mut()
             .expect("browser context should be loaded");
-        let page = bc
+        let mut page = bc
             .active_target
             .runtime_slot
             .loaded_page_mut()
@@ -407,10 +407,12 @@ mod tests {
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
-        bc.devtools_session_state.page_session_state.log_enabled = true;
+        bc.devtools_session_state_mut()
+            .page_session_state
+            .log_enabled = true;
         ctx.conn.browser_context = Some(bc);
 
         let queue = TargetObservableOutputQueue::for_test(vec![
@@ -426,13 +428,13 @@ mod tests {
             bc.target_url(),
             bc.page_attachment_id()
                 .expect("loaded Page must have an attachment id"),
-            bc.devtools_session_state
+            bc.devtools_session_state()
                 .console_output_session_state
                 .console_enabled,
-            bc.devtools_session_state.page_session_state.log_enabled,
+            bc.devtools_session_state().page_session_state.log_enabled,
             true,
             &bc.active_target.owner_state,
-            &bc.devtools_session_state.console_output_session_state,
+            &bc.devtools_session_state().console_output_session_state,
             Some("SID-1"),
         );
         let mut duplicate_slot =
@@ -491,7 +493,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context should be loaded")
-                .devtools_session_state
+                .devtools_session_state()
                 .console_output_session_state
                 .log_lifecycle_entries
                 == 1,
@@ -540,7 +542,7 @@ mod tests {
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -602,7 +604,7 @@ mod tests {
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -655,6 +657,7 @@ mod tests {
         bc.set_target_url(page_url.to_owned());
         bc.set_active_target_id("TID-1".to_owned());
         bc.attach_active_session("SID-1".to_owned());
+        ctx.conn.insert_browser_context(bc);
         let first_page = ctx
             .conn
             .load_page_via_runtime_async(
@@ -662,11 +665,17 @@ mod tests {
             )
             .await
             .expect("first test page should load");
-        let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_session_state
-            .console_output_session_state
-            .console_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        {
+            let bc = ctx
+                .conn
+                .browser_context
+                .as_mut()
+                .expect("browser context should be registered");
+            let _ = bc.replace_loaded_page(Some(first_page));
+            bc.devtools_session_state_mut()
+                .console_output_session_state
+                .console_enabled = true;
+        }
 
         let mut prepared_slot =
             observable_backlog_activity_outputs(&ctx.conn, None).into_prepared_slot();
@@ -685,7 +694,7 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_session_state
+            bc.devtools_session_state_mut()
                 .console_output_session_state
                 .console_enabled = true;
         }
@@ -732,22 +741,23 @@ mod tests {
         bc.set_active_target_id("TID-active".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         let _ = bc.replace_loaded_page(Some(active_page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
-        bc.background_targets.push(BackgroundTarget::new(
-            "TID-background".to_owned(),
-            Some("SID-background".to_owned()),
-            TargetIdentityState::with_url("data:text/html,background-owner".to_owned()),
-            TargetPageSlot::with_loaded_page_for_test(background_page),
-        ));
-        bc.mutate_parked_page_session_state("TID-background", |state| {
-            state
-                .devtools_session_state
-                .console_output_session_state
-                .console_enabled = true;
-        });
+        bc.background_targets
+            .push(BackgroundTarget::new_with_frontend_session(
+                "TID-background".to_owned(),
+                Some("SID-background".to_owned()),
+                TargetIdentityState::with_url("data:text/html,background-owner".to_owned()),
+                TargetPageSlot::with_loaded_page_for_test(background_page),
+            ));
+        bc.adopt_background_target_fixture_attachments();
+        bc.primary_devtools_session_state_for_target_mut("TID-background")
+            .expect("background Target frontend state")
+            .console_output_session_state
+            .console_enabled = true;
         ctx.conn.browser_context = Some(bc);
+        ctx.conn.adopt_direct_browser_context_fixture_attachments();
 
         assert_eq!(
             observable_backlog_activity_outputs(&ctx.conn, Some("SID-background"))
@@ -821,21 +831,21 @@ mod tests {
         bc.set_active_target_id("TID-active".to_owned());
         bc.attach_active_session("SID-active".to_owned());
         let _ = bc.replace_loaded_page(Some(active_page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .console_enabled = true;
-        bc.background_targets.push(BackgroundTarget::new(
-            "TID-promoted".to_owned(),
-            Some("SID-promoted".to_owned()),
-            TargetIdentityState::with_url("data:text/html,promoted-owner".to_owned()),
-            TargetPageSlot::with_loaded_page_for_test(promoted_page),
-        ));
-        bc.mutate_parked_page_session_state("TID-promoted", |state| {
-            state
-                .devtools_session_state
-                .console_output_session_state
-                .console_enabled = true;
-        });
+        bc.background_targets
+            .push(BackgroundTarget::new_with_frontend_session(
+                "TID-promoted".to_owned(),
+                Some("SID-promoted".to_owned()),
+                TargetIdentityState::with_url("data:text/html,promoted-owner".to_owned()),
+                TargetPageSlot::with_loaded_page_for_test(promoted_page),
+            ));
+        bc.adopt_background_target_fixture_attachments();
+        bc.primary_devtools_session_state_for_target_mut("TID-promoted")
+            .expect("promoted Target frontend state")
+            .console_output_session_state
+            .console_enabled = true;
         ctx.conn.browser_context = Some(bc);
 
         let (old_active_attachment, promoted_attachment) = {
@@ -942,7 +952,7 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -1000,7 +1010,7 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -1055,7 +1065,7 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -1109,10 +1119,10 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .console_output_session_state
             .renderer_runtime_agent_owns_page_console_api_events = true;
         ctx.conn.browser_context = Some(bc);
@@ -1185,7 +1195,7 @@ mod tests {
             .await
             .expect("test page should load");
         let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
         ctx.conn.browser_context = Some(bc);
@@ -1215,16 +1225,23 @@ mod tests {
         bc.set_target_url(page_url.to_owned());
         bc.set_active_target_id("TID-1".to_owned());
         bc.attach_active_session("SID-1".to_owned());
+        ctx.conn.insert_browser_context(bc);
         let first_page = ctx
             .conn
             .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
             .await
             .expect("first test page should load");
-        let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_session_state
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        {
+            let bc = ctx
+                .conn
+                .browser_context
+                .as_mut()
+                .expect("browser context should be registered");
+            let _ = bc.replace_loaded_page(Some(first_page));
+            bc.devtools_session_state_mut()
+                .runtime_session_state
+                .runtime_frontend_enabled = true;
+        }
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(
@@ -1249,7 +1266,7 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_session_state
+            bc.devtools_session_state_mut()
                 .runtime_session_state
                 .runtime_frontend_enabled = true;
         }
@@ -1275,16 +1292,23 @@ mod tests {
         bc.set_target_url(page_url.to_owned());
         bc.set_active_target_id("TID-1".to_owned());
         bc.attach_active_session("SID-1".to_owned());
+        ctx.conn.insert_browser_context(bc);
         let first_page = ctx
             .conn
             .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
             .await
             .expect("first test page should load");
-        let _ = bc.replace_loaded_page(Some(first_page));
-        bc.devtools_session_state
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        {
+            let bc = ctx
+                .conn
+                .browser_context
+                .as_mut()
+                .expect("browser context should be registered");
+            let _ = bc.replace_loaded_page(Some(first_page));
+            bc.devtools_session_state_mut()
+                .runtime_session_state
+                .runtime_frontend_enabled = true;
+        }
         ctx.sent.clear();
         ctx.conn
             .evaluate_runtime_expression_with_await_async("console.warn('runtime old')", false)
@@ -1309,7 +1333,7 @@ mod tests {
                 .expect("browser context should remain loaded");
             let _ = bc.replace_loaded_page(Some(second_page));
             bc.set_target_url(page_url.to_owned());
-            bc.devtools_session_state
+            bc.devtools_session_state_mut()
                 .runtime_session_state
                 .runtime_frontend_enabled = true;
         }

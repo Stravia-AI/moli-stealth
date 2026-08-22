@@ -8,26 +8,22 @@ use moli_core::page::SubresourceResourceType;
 
 async fn context_with_loaded_fetch_page() -> TestContext {
     let mut ctx = TestContext::new();
-    let page = ctx
-        .conn
-        .load_page_via_runtime_async("data:text/html,<title>fetch correlation</title>")
-        .await
-        .expect("fetch correlation page should load");
-    let mut browser_context = attached_browser_context();
-    browser_context
-        .active_target
-        .runtime_slot
-        .replace_loaded_page(Some(page));
-    ctx.conn.browser_context = Some(browser_context);
+    insert_browser_context_with_navigation(
+        &mut ctx,
+        attached_browser_context(),
+        "data:text/html,<title>fetch correlation</title>",
+        Some("SID-1"),
+    )
+    .await;
     ctx
 }
 
 fn pending_request(
-    page_owner: &crate::conn::TargetPageResidenceIdentity,
+    page_owner: crate::conn::TargetPageResidenceIdentity,
     internal_id: u64,
 ) -> PendingSubresourceFetchRequest {
     PendingSubresourceFetchRequest {
-        residence: crate::conn::PendingSubresourceFetchResidence::InstalledPage(page_owner.clone()),
+        residence: crate::conn::PendingSubresourceFetchResidence::InstalledPage(page_owner),
         owner_session_id: Some("SID-1".to_owned()),
         action_session_id: Some("SID-1".to_owned()),
         owner_kind: PendingSubresourceFetchOwnerKind::Fetch,
@@ -43,7 +39,7 @@ fn pending_request(
 }
 
 fn pending_auth(
-    page_owner: &crate::conn::TargetPageResidenceIdentity,
+    page_owner: crate::conn::TargetPageResidenceIdentity,
     internal_id: u64,
 ) -> PendingSubresourceFetchAuthRequest {
     let pending = pending_request(page_owner, internal_id);
@@ -80,7 +76,7 @@ fn pending_auth(
 }
 
 fn pending_response(
-    page_owner: &crate::conn::TargetPageResidenceIdentity,
+    page_owner: crate::conn::TargetPageResidenceIdentity,
     internal_id: u64,
 ) -> PendingSubresourceFetchResponseRequest {
     let pending = pending_request(page_owner, internal_id);
@@ -155,12 +151,13 @@ async fn continue_request_registers_correlation_before_renderer_completion() {
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("test Page residence should exist");
+    let pending = pending_request(page_owner, 61);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_request_for_session_owner(
                 Some("SID-1"),
                 "INT-61".to_owned(),
-                pending_request(&page_owner, 61),
+                pending,
             )
     );
 
@@ -180,25 +177,26 @@ async fn continue_request_registers_correlation_before_renderer_completion() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_fetch_command_state_is_bound_to_page_attachment() {
+async fn pending_fetch_command_state_is_bound_to_loaded_page_generation() {
     let mut ctx = context_with_loaded_fetch_page().await;
-    let initial_owner = ctx
+    let page_owner = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("initial Page residence should exist");
+    let pending = pending_request(page_owner, 71);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_request_for_session_owner(
                 Some("SID-1"),
                 "INT-collision".to_owned(),
-                pending_request(&initial_owner, 71),
+                pending,
             )
     );
 
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .replace_page_attachment_id_for_test();
+        .bump_loaded_page_generation();
     assert!(
         ctx.conn
             .take_pending_subresource_fetch_request_for_action_session_owner(
@@ -214,7 +212,7 @@ async fn pending_fetch_command_state_is_bound_to_page_attachment() {
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("replacement Page residence should exist");
-    let mut replacement = pending_request(&replacement_owner, 71);
+    let mut replacement = pending_request(replacement_owner, 71);
     replacement.network_request_id = "NETWORK-replacement".to_owned();
     assert!(
         ctx.conn
@@ -244,12 +242,13 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("test Page residence should exist");
+    let pending = pending_request(page_owner.clone(), 74);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_request_for_session_owner(
                 Some("SID-1"),
                 "INT-pending-completion".to_owned(),
-                pending_request(&page_owner, 74),
+                pending,
             )
     );
 
@@ -287,12 +286,12 @@ async fn completed_continue_atomically_claims_a_pause_still_pending_publication(
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .replace_page_attachment_id_for_test();
+        .bump_loaded_page_generation();
     let replacement_owner = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("replacement Page residence should exist");
-    let replacement = pending_request(&replacement_owner, 75);
+    let replacement = pending_request(replacement_owner, 75);
     assert!(
         ctx.conn
             .register_in_flight_subresource_fetch_request_for_session_owner(
@@ -328,12 +327,14 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("initial Page residence should exist");
+    let retired_in_flight = pending_request(retired_owner.clone(), 76);
+    let retired_pending = pending_request(retired_owner.clone(), 77);
     assert!(
         ctx.conn
             .register_in_flight_subresource_fetch_request_for_session_owner(
                 Some("SID-1"),
                 Some("INT-retired-in-flight".to_owned()),
-                pending_request(&retired_owner, 76),
+                retired_in_flight,
             )
     );
     assert!(
@@ -341,14 +342,14 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
             .register_pending_subresource_fetch_request_for_session_owner(
                 Some("SID-1"),
                 "INT-retired-pending".to_owned(),
-                pending_request(&retired_owner, 77),
+                retired_pending,
             )
     );
 
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .replace_page_attachment_id_for_test();
+        .bump_loaded_page_generation();
     let replacement_owner = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
@@ -380,7 +381,7 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .install_page_attachment_id_for_test(retired_owner.page_attachment_id());
+        .set_loaded_page_generation(retired_owner.loaded_page_generation());
     let ClaimedSubresourceContinueRequest::InFlight(in_flight) = ctx
         .conn
         .claim_subresource_continue_request_for_session_owner(
@@ -414,25 +415,26 @@ async fn continuation_claim_preserves_state_owned_by_a_different_page_residence(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
+async fn pending_fetch_auth_state_is_bound_to_loaded_page_generation() {
     let mut ctx = context_with_loaded_fetch_page().await;
-    let initial_owner = ctx
+    let page_owner = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("initial Page residence should exist");
+    let pending = pending_auth(page_owner, 72);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_auth_request_for_session_owner(
                 Some("SID-1"),
                 "AUTH-collision".to_owned(),
-                pending_auth(&initial_owner, 72),
+                pending,
             )
     );
 
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .replace_page_attachment_id_for_test();
+        .bump_loaded_page_generation();
     assert!(
         ctx.conn
             .take_pending_subresource_fetch_auth_request_for_action_session_owner(
@@ -448,7 +450,7 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("replacement Page residence should exist");
-    let mut replacement = pending_auth(&replacement_owner, 72);
+    let mut replacement = pending_auth(replacement_owner, 72);
     replacement.network_request_id = "NETWORK-auth-replacement".to_owned();
     assert!(
         ctx.conn
@@ -472,25 +474,26 @@ async fn pending_fetch_auth_state_is_bound_to_page_attachment() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn pending_fetch_response_state_is_bound_to_page_attachment() {
+async fn pending_fetch_response_state_is_bound_to_loaded_page_generation() {
     let mut ctx = context_with_loaded_fetch_page().await;
-    let initial_owner = ctx
+    let page_owner = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("initial Page residence should exist");
+    let pending = pending_response(page_owner, 73);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_response_request_for_session_owner(
                 Some("SID-1"),
                 "RESPONSE-collision".to_owned(),
-                pending_response(&initial_owner, 73),
+                pending,
             )
     );
 
     ctx.conn
         .runtime_session_owner_slot_mut(Some("SID-1"))
         .expect("runtime owner should remain addressable")
-        .replace_page_attachment_id_for_test();
+        .bump_loaded_page_generation();
     assert!(
         ctx.conn
             .take_pending_subresource_fetch_response_request_for_action_session_owner(
@@ -506,7 +509,7 @@ async fn pending_fetch_response_state_is_bound_to_page_attachment() {
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("replacement Page residence should exist");
-    let mut replacement = pending_response(&replacement_owner, 73);
+    let mut replacement = pending_response(replacement_owner, 73);
     replacement.network_request_id = "NETWORK-response-replacement".to_owned();
     assert!(
         ctx.conn
@@ -536,12 +539,13 @@ async fn continue_with_auth_registers_retry_correlation_before_renderer_completi
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
         .expect("test Page residence should exist");
+    let pending = pending_auth(page_owner, 62);
     assert!(
         ctx.conn
             .register_pending_subresource_fetch_auth_request_for_session_owner(
                 Some("SID-1"),
                 "INT-62".to_owned(),
-                pending_auth(&page_owner, 62),
+                pending,
             )
     );
 

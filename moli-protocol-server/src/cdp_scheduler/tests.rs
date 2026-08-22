@@ -4,37 +4,40 @@ use moli_core::{
     RendererOutputRecord, RendererOutputStreamControl, RendererOutputStreamIdentity,
     RendererOutputTransportMessage, RendererProtocolObservation,
     RendererRuntimeInspectorAsyncCompletion,
+    browser_host::{
+        BrowserContextSelectionProjection, BrowserNavigationOwner, BrowserOwnerInput,
+        BrowserPageResidenceHandle, BrowserSelectedTargetEngineDisposition, BrowserTargetHandle,
+        BrowserTargetSlotProjection, BrowserTargetTopologyProjection, PageResidenceIdentity,
+    },
     page::{
         RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
-        RendererDocumentLifecycleMilestone, RendererDocumentToken, RendererFrameToken,
-        RendererLifecycleEpoch,
+        RendererDocumentLifecycleMilestone, RendererDocumentSourcedTopLevelLocationNavigation,
+        RendererDocumentToken, RendererFrameToken, RendererLifecycleEpoch,
     },
+    runtime::NavigationEngine,
 };
 use moli_protocol::{
-    BackgroundProtocolEvent, CdpConnection, CdpSchedulerEvent,
-    DeferredMainDocumentLoadCompletionOutputAction,
+    BackgroundNavigationCancellation, BackgroundNavigationGateKey, BackgroundProtocolEvent,
+    CdpConnection, CdpSchedulerEvent, DeferredMainDocumentLoadCompletionOutputAction,
     DeferredMainDocumentLoadCompletionOutputInterest, DeferredMainDocumentLoadPredecessorCandidate,
     ProtocolSchedulerWork,
     conn::RuntimeInspectorResponseReady,
     devtools_runtime::{
-        AutomationEvent, BrowserDownloadWillBeginEvent, DevToolsCommand, DevToolsCommandContext,
-        DevToolsCommandResult, DevToolsCreateTargetCommand, DevToolsFrameId, DevToolsLoaderId,
-        DevToolsNavigationWait, DevToolsNetworkResourceType, DevToolsProtocol, DevToolsRequestId,
-        DevToolsSessionId, DevToolsTargetId, NavigationFrameEvent, NavigationFrameEventKind,
-        NetworkRequestEvent,
+        AutomationEvent, BrowserDownloadWillBeginEvent, DevToolsFrameId, DevToolsLoaderId,
+        DevToolsNavigationWait, DevToolsNetworkResourceType, DevToolsRequestId, DevToolsTargetId,
+        NavigationFrameEvent, NavigationFrameEventKind, NetworkRequestEvent,
     },
     test_support::{
-        arm_background_navigation_request, arm_background_navigation_request_for_target,
+        background_navigation_gate_key as make_background_navigation_gate_key,
         deferred_main_document_load_observation_id, deferred_main_document_load_output_interest,
         root_frame_stopped_loading_work as make_root_frame_stopped_loading_work,
-        root_frame_stopped_loading_work_for_target, settle_background_navigation_request,
     },
 };
 use serde_json::json;
 
 use super::{
-    CdpScheduler, ForegroundNavigationNetworkBarrier, ProtocolOutputSequence,
-    ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
+    BackgroundNavigationGate, CdpScheduler, ForegroundNavigationNetworkBarrier,
+    ProtocolOutputSequence, ProtocolSchedulerResidence, ProtocolSchedulerStep, SchedulerQueues,
     devtools_navigation_lifecycle_milestone, drain_pending_background_events,
     next_page_screencast_deadline, page_screencast_interval,
 };
@@ -90,6 +93,39 @@ fn navigation_started_automation_event() -> AutomationEvent {
         security_origin: None,
         secure_context_type: None,
     })
+}
+
+fn browser_fact_wake_source() -> (
+    BrowserNavigationOwner,
+    PageResidenceIdentity,
+    moli_core::browser_host::BrowserFactWakeSubscriber,
+) {
+    let key =
+        moli_core::browser_host::BrowserPageOwnerKey::new("context-fact-wake", "target-fact-wake");
+    let mut owner = BrowserNavigationOwner::new(NavigationEngine::new());
+    owner
+        .register_browser_context(
+            key.browser_context_id(),
+            BrowserTargetTopologyProjection::new(
+                key.browser_context_id(),
+                Some(BrowserTargetSlotProjection::new(
+                    BrowserTargetHandle::staged(key.target_id()),
+                    BrowserPageResidenceHandle::default(),
+                )),
+                Vec::<BrowserTargetSlotProjection>::new(),
+            ),
+            BrowserContextSelectionProjection::new(
+                None,
+                BrowserSelectedTargetEngineDisposition::Unbound,
+            ),
+            NavigationEngine::new,
+        )
+        .expect("fact wake source Target should register");
+    let page = owner
+        .capture_page_residence(key.browser_context_id(), key.target_id())
+        .expect("fact wake source should expose its Page");
+    let wake = owner.subscribe_browser_fact_wake();
+    (owner, page, wake)
 }
 
 #[test]
@@ -172,7 +208,7 @@ fn navigation_download_observation_ignores_output_before_command_boundary() {
 
 #[test]
 fn drain_pending_background_events_preserves_typed_sidecar() {
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (tx, mut rx) = moli_protocol::browser_background_output_channel();
     let message = json!({
         "method": "Page.frameStartedNavigating",
         "params": {
@@ -269,14 +305,6 @@ fn network_response_event(
     resource_type: DevToolsNetworkResourceType,
     request_id: &str,
 ) -> BackgroundProtocolEvent {
-    network_response_event_for_target(resource_type, request_id, "TID-nav")
-}
-
-fn network_response_event_for_target(
-    resource_type: DevToolsNetworkResourceType,
-    request_id: &str,
-    target_id: &str,
-) -> BackgroundProtocolEvent {
     let message = json!({
         "method": "Network.responseReceived",
         "params": {
@@ -290,7 +318,7 @@ fn network_response_event_for_target(
         }
     });
     let automation_event = AutomationEvent::NetworkResponseStarted(NetworkRequestEvent {
-        target_id: DevToolsTargetId::from(target_id),
+        target_id: DevToolsTargetId::from("TID-nav"),
         frame_id: Some(DevToolsFrameId::from("FRAME-nav")),
         request_id: DevToolsRequestId::from(request_id),
         loader_id: Some(DevToolsLoaderId::from("LOADER-nav")),
@@ -326,13 +354,12 @@ fn network_response_event_for_target(
     BackgroundProtocolEvent::immediate_automation_event(message, automation_event)
 }
 
-fn network_request_event_for_target(
+fn network_request_event(
     resource_type: DevToolsNetworkResourceType,
     request_id: &str,
-    target_id: &str,
 ) -> BackgroundProtocolEvent {
     let (_, Some(AutomationEvent::NetworkResponseStarted(mut network_event))) =
-        network_response_event_for_target(resource_type, request_id, target_id).into_parts()
+        network_response_event(resource_type, request_id).into_parts()
     else {
         unreachable!("network response fixture should retain its typed sidecar")
     };
@@ -355,13 +382,12 @@ fn network_request_event_for_target(
     )
 }
 
-fn network_finished_event_for_target(
+fn network_finished_event(
     resource_type: DevToolsNetworkResourceType,
     request_id: &str,
-    target_id: &str,
 ) -> BackgroundProtocolEvent {
     let (_, Some(AutomationEvent::NetworkResponseStarted(network_event))) =
-        network_response_event_for_target(resource_type, request_id, target_id).into_parts()
+        network_response_event(resource_type, request_id).into_parts()
     else {
         unreachable!("network response fixture should retain its typed sidecar")
     };
@@ -376,34 +402,6 @@ fn network_finished_event_for_target(
         }),
         AutomationEvent::NetworkResponseCompleted(network_event),
     )
-}
-
-#[test]
-fn mixed_owner_protocol_output_keeps_the_conservative_global_gate() {
-    let mut conn = CdpConnection::new();
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-known");
-    let target_id = navigation.target_id().to_owned();
-    let known = network_response_event_for_target(
-        DevToolsNetworkResourceType::Xhr,
-        "REQ-known",
-        &target_id,
-    );
-    assert_eq!(
-        ProtocolOutputSequence::from_background_event(known.clone())
-            .navigation_gate_target_ids(&conn),
-        [target_id]
-    );
-
-    let unresolved = BackgroundProtocolEvent::immediate(json!({
-        "method": "Runtime.consoleAPICalled",
-        "sessionId": "SID-missing",
-        "params": {}
-    }));
-    let mixed = ProtocolOutputSequence::from_background_events(vec![known, unresolved]);
-    assert!(
-        mixed.navigation_gate_target_ids(&conn).is_empty(),
-        "an atomic batch with any unresolved owner must remain connection-gated"
-    );
 }
 
 fn output_request_ids(output: ProtocolOutputSequence) -> Vec<String> {
@@ -485,6 +483,26 @@ fn root_document_lifecycle_identity(
         document: RendererDocumentToken::new_for_testing(page_id, identity_value),
         epoch: RendererLifecycleEpoch(identity_value),
     }
+}
+
+fn background_navigation_gate_key() -> BackgroundNavigationGateKey {
+    background_navigation_gate_key_for("TID-nav", "SID-nav", "FRAME-nav", "LOADER-nav", 1)
+}
+
+fn background_navigation_gate_key_for(
+    target_id: &str,
+    session_id: &str,
+    frame_id: &str,
+    loader_id: &str,
+    navigation_request_id: u64,
+) -> BackgroundNavigationGateKey {
+    make_background_navigation_gate_key(
+        Some(target_id.to_owned()),
+        Some(session_id.to_owned()),
+        frame_id.to_owned(),
+        loader_id.to_owned(),
+        Some(navigation_request_id),
+    )
 }
 
 fn root_frame_stopped_loading_work(publish_sequence: u64, frame_id: &str) -> ProtocolSchedulerWork {
@@ -605,7 +623,8 @@ fn concrete_renderer_output_precedes_work_published_by_the_same_ingress() {
 #[test]
 fn protocol_work_published_by_held_ingress_inherits_exact_load_predecessor() {
     let load = deferred_main_document_load_observation_id(1);
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.apply_scheduler_events_with_load_predecessors(
         vec![CdpSchedulerEvent::ProtocolWorkPublished {
             work: root_frame_stopped_loading_work(1, "FRAME-1"),
@@ -654,7 +673,7 @@ fn newly_published_load_binds_every_residence_from_deferred_renderer_ingress() {
     assert_eq!(
         queues.bind_main_document_load_predecessor(load, &interest),
         0,
-        "the load owner action must be inserted before every residence produced by the ingress"
+        "the load fact projection must be inserted before every residence produced by the ingress"
     );
     assert!(matches!(
         queues.protocol_residences.front(),
@@ -834,7 +853,8 @@ async fn runtime_response_releases_its_frozen_renderer_publication_predecessor()
     let publication = post_load_renderer_publication(PageId::new_for_testing(1), 1);
     let candidate = future_load_candidate(&publication);
     let cursor = publication_cursor(&publication);
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({
@@ -863,7 +883,8 @@ async fn runtime_response_cannot_release_renderer_output_with_an_exact_load_pred
     let publication = post_load_renderer_publication(PageId::new_for_testing(1), 1);
     let load = deferred_main_document_load_observation_id(1);
     let cursor = publication_cursor(&publication);
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({
@@ -919,7 +940,9 @@ async fn specialized_wait_yield_closes_candidate_retained_in_the_main_fifo() {
     let candidate = future_load_candidate(&publication);
     let interest = load_interest_for_publication(&publication);
     let unrelated_later_load = deferred_main_document_load_observation_id(1);
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
+    let mut browser_host = super::BrowserHostExecutionLane::new(browser_host_actor);
     scheduler.queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({"method": "Runtime.consoleAPICalled"})]),
@@ -931,7 +954,7 @@ async fn specialized_wait_yield_closes_candidate_retained_in_the_main_fifo() {
     }]);
 
     let _ = scheduler
-        .complete_ready_protocol_residences_for_external_load_wait()
+        .complete_ready_owner_and_protocol_residences_for_external_load_wait(&mut browser_host)
         .await;
 
     assert_eq!(
@@ -948,7 +971,8 @@ fn scheduler_holds_concrete_renderer_output_until_its_exact_load_predecessor_fin
     let publication = post_load_renderer_publication(PageId::new_for_testing(7), 1);
     let cursor = publication_cursor(&publication);
     let load = deferred_main_document_load_observation_id(1);
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({"method": "Runtime.consoleAPICalled"})]),
@@ -977,7 +1001,8 @@ async fn renderer_stream_control_is_consumed_without_protocol_residence() {
         )),
     }
     .into();
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     let output = scheduler.ingest_renderer_publication_now(control).await;
 
     assert!(output.is_empty());
@@ -990,21 +1015,26 @@ async fn renderer_stream_control_is_consumed_without_protocol_residence() {
 
 #[tokio::test]
 async fn closed_renderer_transport_fails_an_unprojected_command_fence() {
-    let (_background_event_tx, background_event_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (_background_event_tx, background_event_rx) =
+        moli_protocol::browser_background_output_channel();
     let (_navigation_tx, background_navigation_completion_rx) =
         tokio::sync::mpsc::unbounded_channel();
     let (renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
     drop(renderer_tx);
+    let (mut scheduler, browser_host_actor, browser_fact_wake_rx) =
+        CdpScheduler::new(CdpConnection::new());
     let mut receivers = super::CdpSchedulerEventReceivers {
+        browser_host: super::BrowserHostExecutionLane::new(browser_host_actor),
+        browser_fact_wake_rx,
         background_event_rx,
         background_navigation_completion_rx,
         renderer_publication_rx,
+        navigation_renderer_publications: super::NavigationRendererPublicationBuffer::default(),
     };
     let stream =
         RendererOutputStreamIdentity::new_page_for_protocol_test(PageId::new_for_testing(90));
     let predecessor =
         RendererOutputFence::new_for_test(RendererOutputCursor::new_for_test(stream, 1));
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
 
     let failure = scheduler
         .project_renderer_output_predecessor_before_devtools_result(&mut receivers, &predecessor)
@@ -1021,7 +1051,8 @@ async fn closed_renderer_transport_fails_an_unprojected_command_fence() {
 
 #[test]
 fn concrete_protocol_output_waits_for_its_client_turn_predecessor() {
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
         work: root_frame_stopped_loading_work(1, "FRAME-1"),
     }]);
@@ -1048,9 +1079,267 @@ fn concrete_protocol_output_waits_for_its_client_turn_predecessor() {
     );
 }
 
+#[tokio::test]
+async fn browser_host_mailbox_wakes_independently_of_protocol_client_turn_predecessor() {
+    let page_id = PageId::new_for_testing(71);
+    let source_document = RendererDocumentLifecycleIdentity {
+        frame: RendererFrameToken { page_id },
+        document: RendererDocumentToken::new_for_testing(page_id, 1),
+        epoch: RendererLifecycleEpoch(1),
+    };
+    let input = BrowserOwnerInput::renderer_top_level_location_navigation(
+        PageResidenceIdentity::new(
+            "context-browser-owner-lane".to_owned(),
+            Some("target-browser-owner-lane".to_owned()),
+            1,
+        ),
+        RendererDocumentSourcedTopLevelLocationNavigation::new(
+            source_document,
+            "https://example.test/browser-owner-lane".to_owned(),
+        ),
+        None,
+    );
+    let (mut scheduler, browser_host_actor, browser_fact_wake_rx) =
+        CdpScheduler::new(CdpConnection::new());
+    let (_background_event_tx, background_event_rx) =
+        moli_protocol::browser_background_output_channel();
+    let (_navigation_tx, background_navigation_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let (_renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
+    let mut receivers = super::CdpSchedulerEventReceivers {
+        browser_host: super::BrowserHostExecutionLane::new(browser_host_actor),
+        browser_fact_wake_rx,
+        background_event_rx,
+        background_navigation_completion_rx,
+        renderer_publication_rx,
+        navigation_renderer_publications: super::NavigationRendererPublicationBuffer::default(),
+    };
+    scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
+        work: root_frame_stopped_loading_work(1, "FRAME-1"),
+    }]);
+    let (selected, ()) = tokio::join!(receivers.recv_interleaved_input(false), async {
+        scheduler.publish_browser_owner_input_for_test(input);
+    });
+    let selected = selected.expect("Browser Host publication should wake the idle input wait");
+    assert!(matches!(
+        &selected,
+        super::CdpSchedulerInterleavedInput::BrowserHostTurn
+    ));
+
+    assert!(receivers.browser_host.has_ready_input());
+    assert_eq!(scheduler.queues.protocol_residence_len(), 1);
+    assert_eq!(
+        scheduler.next_protocol_scheduler_step(),
+        ProtocolSchedulerStep::SatisfyClientTurnPredecessor
+    );
+
+    let output = scheduler
+        .complete_interleaved_scheduler_input(&mut receivers, selected)
+        .await;
+    let output = match output {
+        Ok(output) => output,
+        Err(_) => panic!("live renderer transport should accept the selected Host turn"),
+    };
+    assert!(
+        output.is_empty(),
+        "the synthetic exact Page residence is intentionally stale"
+    );
+    assert!(!receivers.browser_host.has_ready_input());
+    assert_eq!(
+        scheduler.next_protocol_scheduler_step(),
+        ProtocolSchedulerStep::SatisfyClientTurnPredecessor,
+        "Browser Owner progress must not satisfy or enter the protocol frontend queue"
+    );
+}
+
+#[tokio::test]
+async fn browser_fact_wakes_idle_scheduler_even_while_renderer_ingress_is_gated() {
+    let (mut fact_owner, page, browser_fact_wake_rx) = browser_fact_wake_source();
+    let target_creation_sequence = fact_owner
+        .browser_fact_snapshot()
+        .last()
+        .expect("fact source registration should publish TargetCreated")
+        .sequence()
+        .get();
+    let (_background_event_tx, background_event_rx) =
+        moli_protocol::browser_background_output_channel();
+    let (_navigation_tx, background_navigation_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let (_renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
+    let (_scheduler, browser_host_actor, _unused_scheduler_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
+    let mut receivers = super::CdpSchedulerEventReceivers {
+        browser_host: super::BrowserHostExecutionLane::new(browser_host_actor),
+        browser_fact_wake_rx,
+        background_event_rx,
+        background_navigation_completion_rx,
+        renderer_publication_rx,
+        navigation_renderer_publications: super::NavigationRendererPublicationBuffer::default(),
+    };
+    let page_id = PageId::new_for_testing(791);
+    let lifecycle = RendererDocumentLifecycleEvent {
+        frame: RendererFrameToken { page_id },
+        document: RendererDocumentToken::new_for_testing(page_id, 1),
+        epoch: RendererLifecycleEpoch(1),
+        sequence: 1,
+        timestamp_micros: 10,
+        kind: RendererDocumentLifecycleEventKind::Milestone(
+            RendererDocumentLifecycleMilestone::Load,
+        ),
+    };
+
+    fact_owner
+        .record_document_lifecycle_facts(&page, &[lifecycle])
+        .expect("Browser Owner should publish without waiting for a frontend");
+    let selected = receivers
+        .recv_interleaved_input(true)
+        .await
+        .expect("Browser fact publication should wake an idle scheduler");
+
+    assert!(matches!(
+        selected,
+        super::CdpSchedulerInterleavedInput::BrowserFactWake(sequence)
+            if sequence.get() == target_creation_sequence + 1
+    ));
+}
+
+#[tokio::test]
+async fn interleaved_navigation_gate_keeps_receiving_renderer_stream_controls() {
+    let (background_event_tx, background_event_rx) =
+        moli_protocol::browser_background_output_channel();
+    let (_navigation_tx, background_navigation_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let (renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
+    let (_scheduler, browser_host_actor, browser_fact_wake_rx) =
+        CdpScheduler::new(CdpConnection::new());
+    let mut receivers = super::CdpSchedulerEventReceivers {
+        browser_host: super::BrowserHostExecutionLane::new(browser_host_actor),
+        browser_fact_wake_rx,
+        background_event_rx,
+        background_navigation_completion_rx,
+        renderer_publication_rx,
+        navigation_renderer_publications: super::NavigationRendererPublicationBuffer::default(),
+    };
+    let stream =
+        RendererOutputStreamIdentity::new_page_for_protocol_test(PageId::new_for_testing(732));
+    renderer_tx
+        .send(RendererOutputStreamControl::Opened { stream }.into())
+        .expect("renderer publication receiver should be alive");
+
+    let selected = receivers
+        .recv_interleaved_input(true)
+        .await
+        .expect("an open navigation gate should still receive renderer controls");
+    assert!(matches!(
+        selected,
+        super::CdpSchedulerInterleavedInput::RendererPublication {
+            publication: RendererOutputTransportMessage::StreamControl(
+                RendererOutputStreamControl::Opened { stream: selected_stream }
+            ),
+            navigation_gate_open: true,
+        } if selected_stream == stream
+    ));
+
+    background_event_tx
+        .send(BackgroundProtocolEvent::immediate(json!({
+            "method": "Network.responseReceived",
+            "params": {}
+        })))
+        .expect("background event receiver should be alive");
+    assert!(matches!(
+        receivers
+            .recv_interleaved_input(true)
+            .await
+            .expect("background event should remain observable through the gate"),
+        super::CdpSchedulerInterleavedInput::BackgroundEvent(_)
+    ));
+}
+
+#[tokio::test]
+async fn detached_frontend_navigation_wait_gates_only_its_exact_commit_stream() {
+    let (background_event_tx, background_event_rx) =
+        moli_protocol::browser_background_output_channel();
+    let (_navigation_tx, background_navigation_completion_rx) =
+        tokio::sync::mpsc::unbounded_channel();
+    let (renderer_tx, renderer_publication_rx) = moli_core::renderer_output_transport_channel();
+    let (_scheduler, browser_host_actor, browser_fact_wake_rx) =
+        CdpScheduler::new(CdpConnection::new());
+    let mut receivers = super::CdpSchedulerEventReceivers {
+        browser_host: super::BrowserHostExecutionLane::new(browser_host_actor),
+        browser_fact_wake_rx,
+        background_event_rx,
+        background_navigation_completion_rx,
+        renderer_publication_rx,
+        navigation_renderer_publications: super::NavigationRendererPublicationBuffer::default(),
+    };
+    receivers
+        .browser_host
+        .detach_navigation_completion(Box::pin(std::future::pending::<
+            moli_protocol::CompletedDevToolsBrowserOwnerNavigationCommand,
+        >()));
+    assert!(receivers.renderer_navigation_gate_open(false));
+
+    let stream =
+        RendererOutputStreamIdentity::new_page_for_protocol_test(PageId::new_for_testing(733));
+    let commit_publication: RendererOutputTransportMessage =
+        RendererOutputPublication::new_for_test(
+            RendererOutputCursor::new_for_test(stream, 1),
+            vec![RendererOutputRecord::new_for_test(
+                RendererOutputItem::Observation(RendererProtocolObservation::MainDocumentCommit(
+                    moli_core::page::RendererMainDocumentCommit {
+                        frame_id: "FRAME-detached-navigation-gate".to_owned(),
+                        loader_id: "LOADER-detached-navigation-gate".to_owned(),
+                        url: "https://example.test/detached-navigation-gate".to_owned(),
+                        unreachable_url: None,
+                        security_origin: "https://example.test".to_owned(),
+                        secure_context_type: "Secure".to_owned(),
+                        timestamp: 1.0,
+                    },
+                )),
+            )],
+        )
+        .into();
+    renderer_tx
+        .send(commit_publication.clone())
+        .expect("renderer publication receiver should be alive");
+    let selected = receivers
+        .recv_interleaved_input(false)
+        .await
+        .expect("detached navigation should keep receiving concrete renderer transport");
+    let super::CdpSchedulerInterleavedInput::RendererPublication {
+        publication: selected,
+        navigation_gate_open,
+    } = selected
+    else {
+        panic!("renderer transport should win while it is the only ready input");
+    };
+    assert!(navigation_gate_open);
+    assert!(
+        receivers
+            .admit_or_buffer_navigation_renderer_publication(selected, true, None)
+            .is_none(),
+        "the exact main-Document commit must remain behind the detached navigation gate"
+    );
+
+    background_event_tx
+        .send(BackgroundProtocolEvent::immediate(json!({
+            "method": "Network.responseReceived",
+            "params": {}
+        })))
+        .expect("background event receiver should be alive");
+    assert!(matches!(
+        receivers
+            .recv_interleaved_input(false)
+            .await
+            .expect("background event should wake the detached navigation wait"),
+        super::CdpSchedulerInterleavedInput::BackgroundEvent(_)
+    ));
+}
+
 #[test]
 fn concrete_protocol_output_preserves_protocol_publish_order() {
-    let mut scheduler = CdpScheduler::new(CdpConnection::new());
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
     scheduler.apply_scheduler_events(vec![
         CdpSchedulerEvent::ProtocolWorkPublished {
             work: root_frame_stopped_loading_work(1, "FRAME-1"),
@@ -1103,176 +1392,102 @@ fn concrete_protocol_output_rejects_missing_earlier_publication() {
     );
 }
 
-#[tokio::test]
-async fn background_navigation_blocks_only_its_target_protocol_residences() {
-    let mut conn = CdpConnection::new();
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
-    let navigation_target_id = navigation.target_id().to_owned();
-    let browser_context_id = conn.default_browser_context_id().to_owned();
-    let mut scheduler = CdpScheduler::new(conn);
-    scheduler.apply_scheduler_events(vec![
-        CdpSchedulerEvent::ProtocolWorkPublished {
-            work: root_frame_stopped_loading_work_for_target(
-                1,
-                vec![Some("SID-A".to_owned())],
-                browser_context_id.clone(),
-                navigation_target_id,
-                "FRAME-A".to_owned(),
-                "LOADER-A".to_owned(),
-            ),
-        },
-        CdpSchedulerEvent::ProtocolWorkPublished {
-            work: root_frame_stopped_loading_work_for_target(
-                2,
-                vec![Some("SID-B".to_owned())],
-                browser_context_id,
-                "TID-independent".to_owned(),
-                "FRAME-B".to_owned(),
-                "LOADER-B".to_owned(),
-            ),
-        },
-    ]);
+#[test]
+fn background_navigation_blocks_concrete_protocol_residence_not_renderer_ingress() {
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
+    scheduler
+        .background_navigation_gate
+        .note_navigation_started(
+            background_navigation_gate_key(),
+            BackgroundNavigationCancellation::new(),
+        );
+    scheduler.apply_scheduler_events(vec![CdpSchedulerEvent::ProtocolWorkPublished {
+        work: root_frame_stopped_loading_work(1, "FRAME-1"),
+    }]);
 
     assert_eq!(
         scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::SatisfyClientTurnPredecessor,
-        "the independent target must advance around target A's navigation"
+        ProtocolSchedulerStep::Wait
     );
-    scheduler.satisfy_front_protocol_residence_client_turn_predecessor();
-    assert_eq!(
-        scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::CompleteReadyResidence
-    );
-    assert!(
-        scheduler
-            .complete_next_protocol_residence()
-            .await
-            .is_empty()
-    );
-    let remaining_sequences = scheduler
-        .queues
-        .protocol_residences
-        .iter()
-        .map(|residence| match residence {
-            ProtocolSchedulerResidence::ProtocolWork { work, .. } => work.publish_sequence().get(),
-            _ => panic!("test enqueued protocol work only"),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(remaining_sequences, [1]);
-    assert_eq!(
-        scheduler.next_protocol_scheduler_step(),
-        ProtocolSchedulerStep::Wait,
-        "target A's own residence must remain gated"
-    );
-}
-
-#[tokio::test]
-async fn protocol_residence_snapshot_skips_another_targets_navigation_gate() {
-    let mut conn = CdpConnection::new();
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-A");
-    let target_a = navigation.target_id().to_owned();
-    let browser_context_id = conn.default_browser_context_id().to_owned();
-    let mut scheduler = CdpScheduler::new(conn);
-    scheduler.apply_scheduler_events(vec![
-        CdpSchedulerEvent::ProtocolWorkPublished {
-            work: root_frame_stopped_loading_work_for_target(
-                1,
-                vec![Some("SID-A".to_owned())],
-                browser_context_id.clone(),
-                target_a,
-                "FRAME-A".to_owned(),
-                "LOADER-A".to_owned(),
-            ),
-        },
-        CdpSchedulerEvent::ProtocolWorkPublished {
-            work: root_frame_stopped_loading_work_for_target(
-                2,
-                vec![Some("SID-B".to_owned())],
-                browser_context_id,
-                "TID-B".to_owned(),
-                "FRAME-B".to_owned(),
-                "LOADER-B".to_owned(),
-            ),
-        },
-    ]);
-    let snapshot = std::mem::take(&mut scheduler.queues.protocol_residences);
-
-    assert!(
-        scheduler
-            .complete_protocol_residence_snapshot(snapshot)
-            .await
-            .is_empty()
-    );
-    let remaining_sequences = scheduler
-        .queues
-        .protocol_residences
-        .iter()
-        .map(|residence| match residence {
-            ProtocolSchedulerResidence::ProtocolWork { work, .. } => work.publish_sequence().get(),
-            _ => panic!("test enqueued protocol work only"),
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(remaining_sequences, [1]);
 }
 
 #[test]
-fn replacement_navigation_cancels_and_exactly_settles_the_target_owned_request() {
-    let mut conn = CdpConnection::new();
-    let source = arm_background_navigation_request(&mut conn, "LOADER-source");
-    let replacement = arm_background_navigation_request(&mut conn, "LOADER-replacement");
-    assert!(source.is_cancelled());
-    assert!(!replacement.is_cancelled());
-
-    assert!(!settle_background_navigation_request(&mut conn, &source));
-    assert!(
-        conn.has_inflight_background_navigation(),
-        "a stale completion must not clear the replacement request"
+fn replacement_navigation_retires_only_the_superseded_frame_gate() {
+    let mut gate = BackgroundNavigationGate::default();
+    let source = background_navigation_gate_key_for(
+        "TID-nav",
+        "SID-source",
+        "FRAME-nav",
+        "LOADER-source",
+        1,
     );
-    assert!(settle_background_navigation_request(
-        &mut conn,
-        &replacement
-    ));
-    assert!(!conn.has_inflight_background_navigation());
+    let replacement = background_navigation_gate_key_for(
+        "TID-nav",
+        "SID-replacement",
+        "FRAME-nav",
+        "LOADER-replacement",
+        2,
+    );
+    let unrelated = background_navigation_gate_key_for(
+        "TID-other",
+        "SID-other",
+        "FRAME-other",
+        "LOADER-other",
+        3,
+    );
+    let source_cancellation = BackgroundNavigationCancellation::new();
+    let replacement_cancellation = BackgroundNavigationCancellation::new();
+    let unrelated_cancellation = BackgroundNavigationCancellation::new();
+
+    gate.note_navigation_started(source.clone(), source_cancellation.clone());
+    gate.note_navigation_started(unrelated.clone(), unrelated_cancellation.clone());
+    gate.note_navigation_started(replacement.clone(), replacement_cancellation.clone());
+    assert!(source_cancellation.is_cancelled());
+    assert!(!replacement_cancellation.is_cancelled());
+    assert!(!unrelated_cancellation.is_cancelled());
+
+    gate.note_navigation_completion_drained(&source);
+    assert!(
+        gate.has_inflight_navigation(),
+        "a stale completion must not clear either live navigation gate"
+    );
+    gate.note_navigation_completion_drained(&replacement);
+    assert!(
+        gate.has_inflight_navigation(),
+        "replacing one frame must not clear an unrelated target's gate"
+    );
+    gate.note_navigation_completion_drained(&unrelated);
+    assert!(!gate.has_inflight_navigation());
 }
 
 #[test]
 fn scheduler_defers_subresource_network_events_until_background_navigation_gate_clears() {
-    let mut conn = CdpConnection::new();
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
-    let target_id = navigation.target_id().to_owned();
-    let mut scheduler = CdpScheduler::new(conn);
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
+    let key = background_navigation_gate_key();
+    scheduler
+        .background_navigation_gate
+        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
 
     let document_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event_for_target(
-            DevToolsNetworkResourceType::Document,
-            "REQ-document",
-            &target_id,
-        ),
+        network_response_event(DevToolsNetworkResourceType::Document, "REQ-document"),
     );
     assert_eq!(output_request_ids(document_output), ["REQ-document"]);
 
     let script_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event_for_target(
-            DevToolsNetworkResourceType::Script,
-            "REQ-script",
-            &target_id,
-        ),
+        network_response_event(DevToolsNetworkResourceType::Script, "REQ-script"),
     );
     assert!(script_output.is_empty());
     let script_terminal = scheduler.route_background_event_around_inflight_navigation(
-        network_finished_event_for_target(
-            DevToolsNetworkResourceType::Script,
-            "REQ-script",
-            &target_id,
-        ),
+        network_finished_event(DevToolsNetworkResourceType::Script, "REQ-script"),
     );
     assert!(script_terminal.is_empty());
     assert_eq!(scheduler.pending_navigation_background_events.len(), 2);
 
-    assert!(settle_background_navigation_request(
-        &mut scheduler.conn,
-        &navigation
-    ));
+    scheduler
+        .background_navigation_gate
+        .note_navigation_completion_drained(&key);
     let released = scheduler.drain_pending_navigation_background_events();
     let released = released
         .into_background_events()
@@ -1300,124 +1515,35 @@ fn scheduler_defers_subresource_network_events_until_background_navigation_gate_
     );
 }
 
-#[tokio::test]
-async fn target_a_navigation_does_not_defer_target_b_network_events() {
-    let mut conn = CdpConnection::new();
-    conn.install_default_browser_target();
-    let context = DevToolsCommandContext {
-        protocol: DevToolsProtocol::WebDriverBidi,
-        session_id: Some(DevToolsSessionId::from("bidi-test")),
-        target_id: None,
-        browser_context_id: None,
-    };
-    let create_target = |context: DevToolsCommandContext| {
-        DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
-            context,
-            url: "about:blank".to_owned(),
-            browser_context_id: None,
-            activate: false,
-        })
-    };
-    let first_create = conn
-        .execute_devtools_command(create_target(context.clone()))
-        .await;
-    let (first_result, _) = first_create.into_parts();
-    let DevToolsCommandResult::CreateTarget(first_result) =
-        first_result.expect("first target should be created")
-    else {
-        panic!("expected create-target result")
-    };
-    let first_target_id = first_result.target_id.into_string();
-    let second_create = conn.execute_devtools_command(create_target(context)).await;
-    let (second_result, _) = second_create.into_parts();
-    let DevToolsCommandResult::CreateTarget(second_result) =
-        second_result.expect("second target should be created")
-    else {
-        panic!("expected create-target result")
-    };
-    let second_target_id = second_result.target_id.into_string();
-    assert_ne!(first_target_id, second_target_id);
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-A");
-    let target_a = navigation.target_id().to_owned();
-    let target_b = if target_a == second_target_id {
-        first_target_id
-    } else {
-        second_target_id
-    };
-    assert!(conn.has_inflight_background_navigation_for_target(&target_a));
-    assert!(!conn.has_inflight_background_navigation_for_target(&target_b));
-
-    let mut scheduler = CdpScheduler::new(conn);
-    let target_b_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event_for_target(DevToolsNetworkResourceType::Xhr, "REQ-B", &target_b),
-    );
-    assert_eq!(output_request_ids(target_b_output), ["REQ-B"]);
-
-    let navigation_b =
-        arm_background_navigation_request_for_target(&mut scheduler.conn, &target_b, "LOADER-B");
-    let target_b_held = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event_for_target(
-            DevToolsNetworkResourceType::Xhr,
-            "REQ-B-held",
-            &target_b,
-        ),
-    );
-    assert!(target_b_held.is_empty());
-    let target_a_output = scheduler.route_background_event_around_inflight_navigation(
-        network_response_event_for_target(DevToolsNetworkResourceType::Xhr, "REQ-A", &target_a),
-    );
-    assert!(target_a_output.is_empty());
-    assert_eq!(scheduler.pending_navigation_background_events.len(), 2);
-
-    assert!(settle_background_navigation_request(
-        &mut scheduler.conn,
-        &navigation
-    ));
-    assert_eq!(
-        output_request_ids(scheduler.drain_pending_navigation_background_events()),
-        ["REQ-A"],
-        "settling target A must not release target B's held event"
-    );
-    assert_eq!(scheduler.pending_navigation_background_events.len(), 1);
-    assert!(settle_background_navigation_request(
-        &mut scheduler.conn,
-        &navigation_b
-    ));
-    assert_eq!(
-        output_request_ids(scheduler.drain_pending_navigation_background_events()),
-        ["REQ-B-held"]
-    );
-}
-
 #[test]
 fn navigation_gate_release_precedes_later_renderer_boundary_network_output() {
-    let mut conn = CdpConnection::new();
-    let navigation = arm_background_navigation_request(&mut conn, "LOADER-nav");
-    let target_id = navigation.target_id().to_owned();
-    let mut scheduler = CdpScheduler::new(conn);
+    let (mut scheduler, _browser_host_actor, _browser_fact_wake) =
+        CdpScheduler::new(CdpConnection::new());
+    let key = background_navigation_gate_key();
+    scheduler
+        .background_navigation_gate
+        .note_navigation_started(key.clone(), BackgroundNavigationCancellation::new());
 
     let request_id = "REQ-boundary-race";
     assert!(
         scheduler
-            .route_background_event_around_inflight_navigation(network_request_event_for_target(
+            .route_background_event_around_inflight_navigation(network_request_event(
                 DevToolsNetworkResourceType::Xhr,
                 request_id,
-                &target_id,
             ))
             .is_empty()
     );
 
-    assert!(settle_background_navigation_request(
-        &mut scheduler.conn,
-        &navigation
-    ));
+    scheduler
+        .background_navigation_gate
+        .note_navigation_completion_drained(&key);
     let mut output = ProtocolOutputSequence::empty();
     scheduler.append_navigation_gate_release_before_renderer_boundary(&mut output);
     output.append(ProtocolOutputSequence::from_background_event(
-        network_response_event_for_target(DevToolsNetworkResourceType::Xhr, request_id, &target_id),
+        network_response_event(DevToolsNetworkResourceType::Xhr, request_id),
     ));
     output.append(ProtocolOutputSequence::from_background_event(
-        network_finished_event_for_target(DevToolsNetworkResourceType::Xhr, request_id, &target_id),
+        network_finished_event(DevToolsNetworkResourceType::Xhr, request_id),
     ));
 
     let methods = output

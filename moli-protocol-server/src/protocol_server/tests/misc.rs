@@ -38,154 +38,6 @@ fn protocol_server_constructor_preserves_subframe_loading_policy() {
 }
 
 #[test]
-fn merge_cookie_profiles_replaces_existing_cookie_by_storage_key() {
-    let mut cookies = vec![stored_cookie("sid", "old"), stored_cookie("theme", "dark")];
-
-    merge_cookie_profiles(
-        &mut cookies,
-        vec![stored_cookie("sid", "new"), stored_cookie("extra", "1")],
-    );
-
-    assert_eq!(cookies.len(), 3);
-    assert_eq!(
-        cookies
-            .iter()
-            .find(|cookie| cookie.name == "sid")
-            .map(|cookie| cookie.value.as_str()),
-        Some("new")
-    );
-    assert_eq!(
-        cookies
-            .iter()
-            .find(|cookie| cookie.name == "theme")
-            .map(|cookie| cookie.value.as_str()),
-        Some("dark")
-    );
-    assert_eq!(
-        cookies
-            .iter()
-            .find(|cookie| cookie.name == "extra")
-            .map(|cookie| cookie.value.as_str()),
-        Some("1")
-    );
-}
-
-#[test]
-fn commit_cookie_profile_removes_initial_cookie_missing_from_final_snapshot() {
-    let deleted = stored_cookie("sid", "old");
-    let mut cookies = vec![deleted.clone(), stored_cookie("theme", "dark")];
-
-    commit_cookie_profile(
-        &mut cookies,
-        CookieProfileCommit::new(vec![deleted], vec![stored_cookie("theme", "dark")]),
-    );
-
-    assert_eq!(cookies.len(), 1);
-    assert_eq!(cookies[0].name, "theme");
-}
-
-#[test]
-fn commit_cookie_profile_preserves_concurrent_update_when_session_deleted_stale_cookie() {
-    let initial = stored_cookie("sid", "old");
-    let concurrent = stored_cookie("sid", "newer");
-    let mut cookies = vec![concurrent];
-
-    commit_cookie_profile(
-        &mut cookies,
-        CookieProfileCommit::new(vec![initial], Vec::new()),
-    );
-
-    assert_eq!(cookies.len(), 1);
-    assert_eq!(cookies[0].name, "sid");
-    assert_eq!(cookies[0].value, "newer");
-}
-
-#[test]
-fn commit_cookie_profile_merges_final_updates_and_drops_expired_cookies() {
-    let mut expired = stored_cookie("expired", "gone");
-    expired.expires = Some(time::OffsetDateTime::now_utc() - time::Duration::days(1));
-    let mut cookies = vec![
-        stored_cookie("sid", "old"),
-        stored_cookie("theme", "dark"),
-        expired.clone(),
-    ];
-
-    commit_cookie_profile(
-        &mut cookies,
-        CookieProfileCommit::new(
-            vec![stored_cookie("sid", "old")],
-            vec![
-                stored_cookie("sid", "new"),
-                stored_cookie("extra", "1"),
-                expired,
-            ],
-        ),
-    );
-
-    assert_eq!(
-        cookies
-            .iter()
-            .find(|cookie| cookie.name == "sid")
-            .map(|cookie| cookie.value.as_str()),
-        Some("new")
-    );
-    assert_eq!(
-        cookies
-            .iter()
-            .find(|cookie| cookie.name == "theme")
-            .map(|cookie| cookie.value.as_str()),
-        Some("dark")
-    );
-    assert!(cookies.iter().any(|cookie| cookie.name == "extra"));
-    assert!(!cookies.iter().any(|cookie| cookie.name == "expired"));
-}
-
-#[test]
-fn shared_cookie_profile_merge_and_save_writes_cache_file() -> anyhow::Result<()> {
-    let path = std::env::temp_dir().join(format!(
-        "moli-cdp-cookie-profile-{}-{}.json",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let profile = SharedCookieProfile::new(vec![stored_cookie("sid", "old")], vec![path.clone()]);
-
-    profile.merge_and_save(vec![stored_cookie("sid", "new")])?;
-
-    let loaded = cookie_cache::load_cookie_cache(&path)?;
-    let _ = std::fs::remove_file(&path);
-    assert_eq!(loaded.len(), 1);
-    assert_eq!(loaded[0].name, "sid");
-    assert_eq!(loaded[0].value, "new");
-    Ok(())
-}
-
-#[test]
-fn shared_cookie_profile_partition_backing_uses_storage_partition() -> anyhow::Result<()> {
-    let profile = TempDir::new("shared-cookie-profile-partition");
-    let paths = BrowserProfilePaths::new(&profile.path);
-    let partition = Arc::new(StoragePartitionState::open(Some(&profile.path))?);
-    partition.import_cookies(vec![stored_cookie("sid", "old")])?;
-    let profile = SharedCookieProfile::from_storage_partition(partition.clone());
-
-    let initial_cookies = profile.snapshot();
-    profile.commit_and_save(CookieProfileCommit::new(
-        initial_cookies,
-        vec![stored_cookie("sid", "new")],
-    ))?;
-
-    let partition_cookies = partition.cookies()?;
-    assert_eq!(partition_cookies.len(), 1);
-    assert_eq!(partition_cookies[0].value, "new");
-    let persisted = cookie_cache::load_cookie_cache(&paths.cookies_path)?;
-    assert_eq!(persisted.len(), 1);
-    assert_eq!(persisted[0].value, "new");
-    Ok(())
-}
-
-#[test]
 fn app_state_storage_partition_backing_derives_initial_partition_from_owner() -> anyhow::Result<()>
 {
     let partition = Arc::new(StoragePartitionState::open(None)?);
@@ -196,14 +48,14 @@ fn app_state_storage_partition_backing_derives_initial_partition_from_owner() ->
         OptionalResourceFetchMask::NONE,
         true,
     )?;
-    let initial_storage_partition =
-        state.initial_storage_partition(vec![stored_cookie("owner-cookie", "owner-value")]);
+    partition.import_cookies([stored_cookie("owner-cookie", "owner-value")])?;
+    let initial_storage_partition = state.initial_storage_partition();
     let mut conn =
         moli_protocol::CdpConnection::new_with_initial_storage_partition(initial_storage_partition);
 
-    assert!(conn.snapshot_profile_backed_cookies().is_none());
+    assert!(conn.snapshot_cookies().is_empty());
     conn.install_default_browser_target();
-    let cookies = conn.snapshot_profile_backed_cookies().unwrap();
+    let cookies = conn.snapshot_cookies();
     assert_eq!(cookies.len(), 1);
     assert_eq!(cookies[0].name, "owner-cookie");
     assert_eq!(cookies[0].value, "owner-value");

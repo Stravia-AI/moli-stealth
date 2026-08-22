@@ -1,6 +1,8 @@
 use std::sync::OnceLock;
 
 pub const ENV_CDP_NAV_TIMING: &str = "MOLI_CDP_NAV_TIMING";
+pub const ENV_BROWSER_OWNER_TRACE: &str = "MOLI_BROWSER_OWNER_TRACE";
+pub const ENV_BROWSER_OWNER_TRACE_JSONL: &str = "MOLI_BROWSER_OWNER_TRACE_JSONL";
 pub const ENV_CDP_RUNTIME_TRACE: &str = "MOLI_CDP_RUNTIME_TRACE";
 pub const ENV_CMD_PROBE: &str = "MOLI_CMD_PROBE";
 pub const ENV_V8_EXCEPTION_PROBE: &str = "MOLI_V8_EXCEPTION_PROBE";
@@ -17,6 +19,19 @@ pub const ENV_DISABLE_PARSER_MODULE_DEPENDENCY_PREWARM: &str =
 pub fn cdp_nav_timing_enabled() -> bool {
     static FLAG: OnceLock<bool> = OnceLock::new();
     *FLAG.get_or_init(|| env_flag_present(ENV_CDP_NAV_TIMING))
+}
+
+pub fn browser_owner_trace_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        browser_owner_human_trace_enabled()
+            || std::env::var_os(ENV_BROWSER_OWNER_TRACE_JSONL).is_some_and(|path| !path.is_empty())
+    })
+}
+
+pub fn browser_owner_human_trace_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| env_flag_present(ENV_BROWSER_OWNER_TRACE))
 }
 
 pub fn cdp_runtime_trace_enabled() -> bool {

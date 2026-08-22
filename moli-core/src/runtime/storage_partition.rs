@@ -10,8 +10,7 @@ use moli_browser_profile::{
     save_cookie_cache as save_profile_cookie_cache,
 };
 use moli_cookie_jar::{
-    BrowserCookieStore, CookieSource, SharedBrowserCookieStore, StoredCookie,
-    new_shared_browser_cookie_store,
+    CookieSource, SharedBrowserCookieStore, StoredCookie, new_shared_browser_cookie_store,
 };
 use moli_renderer_v8::{
     SharedIndexedDbManager, SharedServiceWorkerResourceStore, downgrade_indexed_db_manager,
@@ -21,6 +20,7 @@ use moli_storage_service::{
     new_shared_json_storage_bucket_store_with_storage_service,
     new_shared_storage_bucket_store_with_storage_service_and_indexed_db_manager,
 };
+use parking_lot::Mutex;
 
 use crate::{
     network::{
@@ -47,10 +47,12 @@ pub struct StoragePartitionState {
     service_worker_resource_store: SharedServiceWorkerResourceStore,
     http_cache_root: Option<PathBuf>,
     profile: Option<Arc<BrowserProfile>>,
+    profile_flush_lock: Mutex<()>,
 }
 
 #[derive(Clone)]
 pub struct StoragePartitionSharedStorageHandles {
+    cookie_store: SharedBrowserCookieStore,
     web_storage_store: SharedWebStorageStore,
     indexed_db_manager: SharedIndexedDbManager,
     storage_bucket_store: SharedStorageBucketStore,
@@ -58,6 +60,10 @@ pub struct StoragePartitionSharedStorageHandles {
 }
 
 impl StoragePartitionSharedStorageHandles {
+    pub fn cookie_store(&self) -> SharedBrowserCookieStore {
+        self.cookie_store.clone()
+    }
+
     pub fn web_storage_store(&self) -> SharedWebStorageStore {
         self.web_storage_store.clone()
     }
@@ -222,6 +228,7 @@ impl StoragePartitionState {
             service_worker_resource_store,
             http_cache_root,
             profile,
+            profile_flush_lock: Mutex::new(()),
         })
     }
 
@@ -255,6 +262,7 @@ impl StoragePartitionState {
 
     pub fn shared_storage_handles(&self) -> StoragePartitionSharedStorageHandles {
         StoragePartitionSharedStorageHandles {
+            cookie_store: self.cookie_store.clone(),
             web_storage_store: self.web_storage_store.clone(),
             indexed_db_manager: self.indexed_db_manager.clone(),
             storage_bucket_store: self.storage_bucket_store.clone(),
@@ -290,25 +298,14 @@ impl StoragePartitionState {
         import_cookies_into_store(&self.cookie_store, cookies)
     }
 
-    pub fn commit_cookie_delta(
-        &self,
-        initial_cookies: &[StoredCookie],
-        final_cookies: Option<Vec<StoredCookie>>,
-    ) -> Result<()> {
-        let Some(final_cookies) = final_cookies else {
-            return Ok(());
-        };
-        {
-            let mut cookie_store = self.cookie_store.lock();
-            commit_cookie_delta_to_store(&mut cookie_store, initial_cookies, final_cookies)?;
-        }
-        self.flush()
-    }
-
     pub fn flush(&self) -> Result<()> {
         let Some(profile) = self.profile.as_ref() else {
             return Ok(());
         };
+        // Several Browser/frontend lifetimes may request a checkpoint at the
+        // same time. Serialize the snapshot and write at the application-owned
+        // partition so an older writer cannot finish after a newer checkpoint.
+        let _flush_guard = self.profile_flush_lock.lock();
         let cookies_path = profile.default_partition().cookies_path();
         save_profile_cookie_cache(cookies_path, self.cookies()?).with_context(|| {
             anyhow!(
@@ -340,53 +337,6 @@ pub(crate) fn import_cookies_into_store(
         }
     }
     Ok(accepted)
-}
-
-fn commit_cookie_delta_to_store(
-    cookie_store: &mut BrowserCookieStore,
-    initial_cookies: &[StoredCookie],
-    final_cookies: Vec<StoredCookie>,
-) -> Result<()> {
-    let final_cookies = final_cookies
-        .into_iter()
-        .filter(|cookie| !cookie.is_expired())
-        .collect::<Vec<_>>();
-    let current_cookies = cookie_store.cookies();
-
-    for initial in initial_cookies.iter().filter(|cookie| !cookie.is_expired()) {
-        let cookie_still_exists_in_session = final_cookies
-            .iter()
-            .any(|cookie| same_cookie_key(cookie, initial));
-        if cookie_still_exists_in_session {
-            continue;
-        }
-        let current_still_matches_initial = current_cookies
-            .iter()
-            .any(|cookie| same_cookie_key(cookie, initial) && cookie == initial);
-        if current_still_matches_initial {
-            cookie_store.delete_cookies(
-                Some(initial.name.as_str()),
-                Some(initial.domain.as_str()),
-                Some(initial.path.as_str()),
-                None,
-            );
-        }
-    }
-
-    for cookie in final_cookies {
-        let report = cookie_store.upsert_with_request_url_report(cookie, None, CookieSource::Cdp);
-        if !report.is_accepted() {
-            return Err(anyhow!("failed to commit cookie into storage partition"));
-        }
-    }
-    Ok(())
-}
-
-fn same_cookie_key(left: &StoredCookie, right: &StoredCookie) -> bool {
-    left.name == right.name
-        && left.domain == right.domain
-        && left.path == right.path
-        && left.partition_key == right.partition_key
 }
 
 #[cfg(test)]
@@ -631,78 +581,6 @@ mod tests {
             Some("profile-backed")
         );
         assert_eq!(session_store.lock().get_item(origin, "session"), None);
-        Ok(())
-    }
-
-    #[test]
-    fn profile_partition_commit_cookie_delta_persists_deletions() -> Result<()> {
-        let profile_dir = TempProfileDir::new("commit-delete");
-        let paths = BrowserProfilePaths::new(&profile_dir.path);
-        let partition = StoragePartitionState::open(Some(&profile_dir.path))?;
-        let initial_cookies = vec![stored_cookie("sid", "old"), stored_cookie("theme", "dark")];
-
-        partition.import_cookies(initial_cookies.clone())?;
-        partition
-            .commit_cookie_delta(&initial_cookies, Some(vec![stored_cookie("theme", "dark")]))?;
-
-        let cookies = load_profile_cookie_cache(&paths.cookies_path)?;
-        assert_eq!(cookies.len(), 1);
-        assert_eq!(cookies[0].name, "theme");
-        assert_eq!(cookies[0].value, "dark");
-        Ok(())
-    }
-
-    #[test]
-    fn profile_partition_commit_cookie_delta_uses_full_cookie_key() -> Result<()> {
-        let profile_dir = TempProfileDir::new("commit-cookie-key");
-        let paths = BrowserProfilePaths::new(&profile_dir.path);
-        let partition = StoragePartitionState::open(Some(&profile_dir.path))?;
-        let root = scoped_cookie("sid", "root", "example.com", "/");
-        let app = scoped_cookie("sid", "app", "example.com", "/app");
-        let subdomain = scoped_cookie("sid", "sub", "sub.example.com", "/");
-        let initial_cookies = vec![root.clone(), app.clone(), subdomain.clone()];
-
-        partition.import_cookies(initial_cookies.clone())?;
-        partition.commit_cookie_delta(
-            &initial_cookies,
-            Some(vec![
-                app.clone(),
-                scoped_cookie("sid", "sub-new", "sub.example.com", "/"),
-            ]),
-        )?;
-
-        let cookies = load_profile_cookie_cache(&paths.cookies_path)?;
-        assert!(
-            find_cookie(&cookies, "sid", "example.com", "/").is_none(),
-            "missing root-path cookie should be deleted"
-        );
-        assert_eq!(
-            find_cookie(&cookies, "sid", "example.com", "/app").map(|cookie| cookie.value.as_str()),
-            Some("app")
-        );
-        assert_eq!(
-            find_cookie(&cookies, "sid", "sub.example.com", "/")
-                .map(|cookie| cookie.value.as_str()),
-            Some("sub-new")
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn profile_partition_commit_cookie_delta_preserves_concurrent_update() -> Result<()> {
-        let profile_dir = TempProfileDir::new("commit-concurrent");
-        let paths = BrowserProfilePaths::new(&profile_dir.path);
-        let partition = StoragePartitionState::open(Some(&profile_dir.path))?;
-        let initial_cookies = vec![stored_cookie("sid", "old")];
-
-        partition.import_cookies(initial_cookies.clone())?;
-        partition.import_cookies(vec![stored_cookie("sid", "newer")])?;
-        partition.commit_cookie_delta(&initial_cookies, Some(Vec::new()))?;
-
-        let cookies = load_profile_cookie_cache(&paths.cookies_path)?;
-        assert_eq!(cookies.len(), 1);
-        assert_eq!(cookies[0].name, "sid");
-        assert_eq!(cookies[0].value, "newer");
         Ok(())
     }
 }

@@ -175,7 +175,7 @@ fn resolve_devtools_opener(
         tracing::debug!(
             browser_context_id = page_owner.browser_context_id(),
             target_id = page_owner.target_id(),
-            page_attachment_id = page_owner.page_attachment_id().get(),
+            loaded_page_generation = page_owner.loaded_page_generation(),
             ?root_document,
             ?window,
             "popup action retained after its exact opener browsing context disappeared"
@@ -209,7 +209,7 @@ mod tests {
     use super::*;
 
     fn page_owner(browser_context_id: &str, target_id: &str) -> TargetPageResidenceIdentity {
-        TargetPageResidenceIdentity::new_for_test(
+        TargetPageResidenceIdentity::new(
             browser_context_id.to_owned(),
             Some(target_id.to_owned()),
             7,
@@ -270,9 +270,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn popup_uses_captured_context_and_opener_after_another_context_becomes_active() {
         let mut conn = CdpConnection::default();
-        conn.inactive_browser_contexts
-            .push(context("BID-source", "TID-source", "SID-source"));
-        conn.browser_context = Some(context("BID-current", "TID-current", "SID-current"));
+        conn.insert_browser_context(context("BID-current", "TID-current", "SID-current"));
+        conn.insert_browser_context(context("BID-source", "TID-source", "SID-source"));
 
         emit(
             &mut conn,
@@ -315,7 +314,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn noopener_popup_retains_devtools_creator_without_dom_opener_access() {
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(context("BID-1", "TID-opener", "SID-1"));
+        conn.insert_browser_context(context("BID-1", "TID-opener", "SID-1"));
 
         emit(
             &mut conn,
@@ -347,7 +346,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn removed_opener_downgrades_access_without_rebinding_to_current_target() {
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(context("BID-1", "TID-current", "SID-1"));
+        conn.insert_browser_context(context("BID-1", "TID-current", "SID-1"));
 
         emit(
             &mut conn,
@@ -373,7 +372,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn child_window_popup_preserves_its_exact_opener_frame() {
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(context("BID-1", "TID-root", "SID-1"));
+        conn.insert_browser_context(context("BID-1", "TID-root", "SID-1"));
 
         emit(
             &mut conn,
@@ -408,7 +407,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn fifo_popup_batch_resolves_a_lightweight_popup_as_the_next_opener() {
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(context("BID-1", "TID-root", "SID-1"));
+        conn.insert_browser_context(context("BID-1", "TID-root", "SID-1"));
         let owner = page_owner("BID-1", "TID-root");
 
         emit(
@@ -451,7 +450,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn removed_captured_context_does_not_fall_back_to_the_active_context() {
         let mut conn = CdpConnection::default();
-        conn.browser_context = Some(context("BID-current", "TID-current", "SID-current"));
+        conn.insert_browser_context(context("BID-current", "TID-current", "SID-current"));
 
         emit(
             &mut conn,

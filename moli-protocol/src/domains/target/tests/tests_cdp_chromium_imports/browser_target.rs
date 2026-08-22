@@ -108,14 +108,18 @@ async fn rust_cdp_capability_browser_download_behavior_contract() {
     }))
     .await;
     ctx.expect_result(102_005, json!({}), None);
-    assert_eq!(ctx.conn.download_behavior.behavior, "allowAndName");
+    let policy = ctx.conn.browser_download_policy_snapshot();
+    assert_eq!(policy.global().behavior().as_str(), "allowAndName");
     assert_eq!(
-        ctx.conn.download_behavior.download_path.as_deref(),
+        policy.global().download_path(),
         Some("/tmp/moli-chromium-import-downloads")
     );
-    assert!(!ctx.conn.download_behavior.automation_events_enabled);
+    assert!(
+        !ctx.conn
+            .automation_download_events_enabled_for_browser_context(None)
+    );
     assert_eq!(
-        ctx.conn.download_behavior.browser_event_session_ids(),
+        ctx.conn.browser_download_event_session_ids_for_test(),
         vec![None]
     );
 }
@@ -228,7 +232,10 @@ async fn rust_cdp_puppeteer_browser_target_session_contract() {
     .await;
     ctx.expect_result(102_104, json!({}), Some(&browser_session_id));
     assert_eq!(
-        ctx.conn.download_behavior.download_path.as_deref(),
+        ctx.conn
+            .browser_download_policy_snapshot()
+            .global()
+            .download_path(),
         Some("/tmp/moli-puppeteer-downloads")
     );
 }

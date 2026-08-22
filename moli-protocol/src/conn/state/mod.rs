@@ -1,10 +1,8 @@
 mod attachment_identity;
-mod bounds;
 mod browser_context;
 mod dedicated_worker_target;
 mod devtools_renderer_channel;
 mod devtools_session;
-mod document_lifecycle_observer;
 mod emulation;
 mod fetch;
 mod identity;
@@ -25,18 +23,19 @@ mod session;
 mod session_storage;
 mod shared_worker_attachment;
 mod shared_worker_target;
+mod target_attachment;
 #[cfg(test)]
 mod tests;
 
 // Re-export everything so `use super::state::*` paths continue to work.
 
-pub(crate) use attachment_identity::{NavigationRequestId, TargetPageAttachmentId};
-pub use identity::TargetPageResidenceIdentity as DevToolsPageResidenceIdentity;
+pub(crate) use attachment_identity::TargetPageAttachmentId;
 pub use identity::URL_BASE;
 pub(crate) use identity::{
     RendererPageResidenceIdentity, TargetIdentityState, TargetPageProtocolAttachmentIdentity,
     TargetPageResidenceIdentity, TargetRootDocumentProtocolAttachmentIdentity,
 };
+pub use moli_core::browser_host::PageResidenceIdentity as DevToolsPageResidenceIdentity;
 
 pub(crate) use devtools_renderer_channel::{
     CommittedRendererAgentAttachment, DevToolsRendererChannelError,
@@ -50,24 +49,21 @@ pub(crate) use devtools_session::{
     DevToolsConsoleOutputSessionState, DevToolsLogViolationThreshold, DevToolsSessionState,
     PreparedRendererCallReplacements, SessionRendererCallReplay, SessionRendererCallTermination,
     devtools_sessions_have_pending_inspector_awaits,
-    devtools_sessions_pending_inspector_await_count,
     drain_pending_inspector_awaits_for_devtools_sessions,
     page_bypass_csp_enabled_for_devtools_sessions,
     prepare_renderer_call_replacements_for_devtools_sessions, runtime_bindings_for_renderer,
 };
-pub(crate) use document_lifecycle_observer::{
-    RendererDocumentLifecycleObservation, RendererDocumentLifecycleObserver,
+pub use moli_core::browser_host::{
+    BrowserWindowBounds, EmulatedGeolocationOverride, EmulatedGeolocationOverrideState,
 };
 pub(crate) use page_residence_token::{TargetPageResidenceObservation, TargetPageResidenceToken};
 
-pub use bounds::BrowserWindowBounds;
-
+pub(crate) use moli_core::browser_host::BrowserDocumentNavigation as DocumentNavigationToken;
 pub(crate) use page_resource::MainDocumentResourceSnapshot;
 #[cfg(test)]
 pub(crate) use page_slot::TargetPageSlot;
 pub(crate) use page_slot::{
-    CommittedRendererDocumentBinding, DocumentNavigationToken, InitialDocumentPageBuildWaiter,
-    RendererDocumentLifecycleWaiterId, TargetPageAbsenceReason,
+    CommittedRendererDocumentBinding, InitialDocumentPageBuildWaiter, TargetPageAbsenceReason,
 };
 pub use page_slot::{DocumentStartScript, IsolatedWorldDefinition, RuntimeBindingDefinition};
 
@@ -120,20 +116,17 @@ pub(crate) use browser_context::{
 
 pub use navigation::{PageNavigationHistoryEntry, PendingNavigationHistoryUpdate};
 
+pub(crate) use moli_core::browser_host::BrowserInitialEmptyDocumentCreator as TargetInitialEmptyDocumentCreator;
 pub use parking::{BackgroundTarget, ParkedNetworkArtifacts, ParkedPageSessionState};
 pub(crate) use parking::{
     ParkedTargetAuxState, ParkedTargetOwnerState, PendingBidiChannelListener,
-    PendingInspectorAwait, TargetInitialEmptyDocumentCreator, TargetOwnerState, TargetSlotState,
+    PendingInspectorAwait, StagedBackgroundTargetSlot, TargetOwnerState, TargetSlotState,
     TargetWindowSurfaceState,
 };
 
-pub use emulation::{
-    EmulatedDeviceMetrics, EmulatedGeolocationOverride, EmulatedGeolocationOverrideState,
-    EmulatedMediaOverrides,
-};
-pub(crate) use emulation::{
-    EmulatedNetworkConditions, EmulatedViewportSurface, viewport_surface_install_script,
-};
+pub use emulation::{EmulatedDeviceMetrics, EmulatedMediaOverrides};
+pub(crate) use emulation::{EmulatedViewportSurface, viewport_surface_install_script};
+pub(crate) use moli_core::browser_host::EmulatedNetworkConditions;
 
 pub(crate) use navigation_outcome::{CompletedDownloadBody, CompletedDownloadBodyArtifact};
 pub use navigation_outcome::{

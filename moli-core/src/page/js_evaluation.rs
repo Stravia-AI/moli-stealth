@@ -241,11 +241,25 @@ impl Page {
     }
 
     pub async fn ensure_isolated_worlds_attached_to_inspector_async(&mut self) -> Result<()> {
-        self.dispatch_unit_page_command_async(
-            RendererPageCommand::EnsureIsolatedWorldsAttachedToInspector,
+        let pending = self.start_ensure_isolated_worlds_attached_to_inspector()?;
+        self.finish_ensure_isolated_worlds_attached_to_inspector(pending.wait().await?)
+    }
+
+    pub fn start_ensure_isolated_worlds_attached_to_inspector(&self) -> Result<PendingPageCommand> {
+        self.start_page_command(RendererPageCommand::EnsureIsolatedWorldsAttachedToInspector)
+    }
+
+    pub fn finish_ensure_isolated_worlds_attached_to_inspector(
+        &mut self,
+        completion: CompletedPageCommand,
+    ) -> Result<()> {
+        let reply = self.finish_page_command(completion);
+        expect_page_reply!(
+            reply,
             "ensure isolated worlds attached to inspector",
+            "a unit reply",
+            RendererPageReply::Unit => Ok(()),
         )
-        .await
     }
 
     pub async fn inspector_execution_context_id_for_isolated_context_async(
@@ -271,13 +285,27 @@ impl Page {
         &mut self,
         execution_context_id: i64,
     ) -> Result<Option<i64>> {
-        let reply = self
-            .dispatch_page_command_async(
-                RendererPageCommand::IsolatedExecutionContextIdForInspectorContext(
-                    execution_context_id,
-                ),
-            )
-            .await?;
+        let pending =
+            self.start_isolated_execution_context_id_for_inspector_context(execution_context_id)?;
+        self.finish_isolated_execution_context_id_for_inspector_context(pending.wait().await?)
+    }
+
+    pub fn start_isolated_execution_context_id_for_inspector_context(
+        &self,
+        execution_context_id: i64,
+    ) -> Result<PendingPageCommand> {
+        self.start_page_command(
+            RendererPageCommand::IsolatedExecutionContextIdForInspectorContext(
+                execution_context_id,
+            ),
+        )
+    }
+
+    pub fn finish_isolated_execution_context_id_for_inspector_context(
+        &mut self,
+        completion: CompletedPageCommand,
+    ) -> Result<Option<i64>> {
+        let reply = self.finish_page_command(completion);
         expect_page_reply!(
             reply,
             "synthetic isolated context id page command",
@@ -287,9 +315,19 @@ impl Page {
     }
 
     pub async fn runtime_realm_inventory_async(&mut self) -> Result<Vec<RendererRuntimeRealmInfo>> {
-        let reply = self
-            .dispatch_page_command_async(RendererPageCommand::RuntimeRealmInventory)
-            .await?;
+        let pending = self.start_runtime_realm_inventory()?;
+        self.finish_runtime_realm_inventory(pending.wait().await?)
+    }
+
+    pub fn start_runtime_realm_inventory(&self) -> Result<PendingPageCommand> {
+        self.start_page_command(RendererPageCommand::RuntimeRealmInventory)
+    }
+
+    pub fn finish_runtime_realm_inventory(
+        &mut self,
+        completion: CompletedPageCommand,
+    ) -> Result<Vec<RendererRuntimeRealmInfo>> {
+        let reply = self.finish_page_command(completion);
         expect_page_reply!(
             reply,
             "runtime realm inventory page command",
@@ -1183,6 +1221,28 @@ impl Page {
             "run page surface override script",
         )
         .await
+    }
+
+    pub fn start_run_page_surface_override_script(
+        &self,
+        source: &str,
+    ) -> Result<PendingPageCommand> {
+        self.start_page_command(RendererPageCommand::RunPageSurfaceOverrideScript {
+            source: source.to_owned(),
+        })
+    }
+
+    pub fn finish_run_page_surface_override_script(
+        &mut self,
+        completion: CompletedPageCommand,
+    ) -> Result<()> {
+        let reply = self.finish_page_command(completion);
+        expect_page_reply!(
+            reply,
+            "run page surface override script",
+            "a unit reply",
+            RendererPageReply::Unit => Ok(()),
+        )
     }
 
     pub fn finish_document_start_script_result(

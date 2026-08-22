@@ -580,10 +580,7 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
             .expect("test target should expose a Page residence identity");
@@ -679,10 +676,7 @@ mod tests {
         let mut bc = BrowserContext::new("BID-collision".into());
         bc.set_active_target_id("TID-collision");
         bc.attach_active_session("SID-collision");
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
 
         let old_owner = conn
             .target_page_residence_identity_for_session(Some("SID-collision"))
@@ -721,7 +715,7 @@ mod tests {
 
         conn.runtime_session_owner_slot_mut(Some("SID-collision"))
             .expect("runtime owner should remain addressable")
-            .replace_page_attachment_id_for_test();
+            .set_loaded_page_generation(1);
         let replacement_owner = conn
             .target_page_residence_identity_for_session(Some("SID-collision"))
             .expect("replacement Page residence should exist");
@@ -764,10 +758,7 @@ mod tests {
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
         assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         assert!(conn.enable_network_listener_for_session_owner(Some("FETCH-SID")));
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
@@ -829,10 +820,7 @@ mod tests {
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
         assert!(bc.assign_auxiliary_session_to_target("TID-1", "FETCH-SID".to_owned()));
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(bc);
+        conn.insert_browser_context(bc);
         let page_owner = conn
             .target_page_residence_identity_for_session(Some("SID-1"))
             .expect("test target should expose a Page residence identity");
@@ -925,7 +913,7 @@ mod tests {
             Some("SID-background".to_owned()),
             page_url.clone(),
         ));
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
 
         for (id, session_id) in [(1, "SID-active"), (2, "SID-background")] {
             ctx.process_async(serde_json::json!({
@@ -1013,7 +1001,7 @@ mod tests {
         let mut bc = BrowserContext::new("BID-1".into());
         bc.set_active_target_id("TID-1");
         bc.attach_active_session("SID-1");
-        ctx.conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
         ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
             .await;
         ctx.process_async(serde_json::json!({

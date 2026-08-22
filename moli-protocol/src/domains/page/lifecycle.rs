@@ -4,6 +4,9 @@ use crate::devtools_runtime::{
 };
 
 use crate::conn::{BackgroundProtocolEvent, CdpConnection, CommittedRendererDocumentBinding};
+use moli_core::browser_host::{
+    BrowserNavigationTraceContext, BrowserNavigationTraceEvent, BrowserNavigationTraceSource,
+};
 use moli_core::page::{
     RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
     RendererDocumentLifecycleMilestone, RendererLifecycleStartReason,
@@ -11,7 +14,6 @@ use moli_core::page::{
 
 enum CdpPageAutomationEvent {
     NavigationFrame(NavigationFrameEvent),
-    DomContentLoaded(NavigationLifecycleEvent),
     PageLifecycle(PageLifecycleEvent),
 }
 
@@ -148,21 +150,26 @@ fn emit_renderer_navigation_domcontentloaded_background_events(
     out: &mut Vec<BackgroundProtocolEvent>,
     session_id: Option<&str>,
     lifecycle_enabled: bool,
+    renderer_document: moli_core::page::RendererDocumentToken,
+    renderer_epoch: moli_core::page::RendererLifecycleEpoch,
     frame_id: &str,
     loader_id: &str,
     timestamp: f64,
 ) {
-    emit_cdp_page_background_automation_event(
-        out,
-        CdpPageAutomationEvent::DomContentLoaded(NavigationLifecycleEvent {
-            target_id: DevToolsTargetId::from(frame_id),
-            frame_id: DevToolsFrameId::from(frame_id),
-            navigation_id: None,
-            loader_id: Some(DevToolsLoaderId::from(loader_id)),
-            url: String::new(),
-            timestamp,
-        }),
-        session_id,
+    out.push(
+        BackgroundProtocolEvent::page_dom_content_loaded_for_renderer_document(
+            session_id,
+            NavigationLifecycleEvent {
+                target_id: DevToolsTargetId::from(frame_id),
+                frame_id: DevToolsFrameId::from(frame_id),
+                navigation_id: None,
+                loader_id: Some(DevToolsLoaderId::from(loader_id)),
+                url: String::new(),
+                timestamp,
+            },
+            renderer_document,
+            renderer_epoch,
+        ),
     );
     if lifecycle_enabled {
         emit_cdp_page_lifecycle_marker_background_event(
@@ -183,6 +190,22 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
     binding: &CommittedRendererDocumentBinding,
     events: &[RendererDocumentLifecycleEvent],
 ) {
+    let mut lifecycle_facts = match conn.take_visible_renderer_document_lifecycle_facts(
+        owner_session_id,
+        binding,
+        events,
+    ) {
+        Ok(facts) => std::collections::VecDeque::from(facts),
+        Err(error) => {
+            tracing::error!(
+                %error,
+                frame_id = binding.frame_id,
+                loader_id = binding.loader_id,
+                "refusing to project renderer lifecycle without an exact Browser fact"
+            );
+            std::collections::VecDeque::new()
+        }
+    };
     let session_ids = conn.page_event_session_ids_for_session_owner(owner_session_id);
     for event in events {
         if event.frame != binding.renderer_frame || event.document != binding.renderer_document {
@@ -193,6 +216,36 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
             RendererDocumentLifecycleEventKind::Milestone(
                 RendererDocumentLifecycleMilestone::DomContentLoaded,
             ) => {
+                let Some(projection) = lifecycle_facts.pop_front() else {
+                    continue;
+                };
+                let Some((document, milestone, stamp)) = projection.reached() else {
+                    tracing::error!(
+                        browser_fact_sequence = projection.envelope().sequence().get(),
+                        "CDP lifecycle projector returned a non-reached Browser fact"
+                    );
+                    continue;
+                };
+                if milestone != RendererDocumentLifecycleMilestone::DomContentLoaded {
+                    tracing::error!(
+                        browser_fact_sequence = projection.envelope().sequence().get(),
+                        ?milestone,
+                        "CDP lifecycle projector returned a reordered Browser milestone"
+                    );
+                    continue;
+                }
+                let projected_binding = projection.binding().clone();
+                let browser_fact_sequence = projection.envelope().sequence();
+                let timestamp = stamp.timestamp_micros as f64 / 1_000_000.0;
+                let trace = trace_bound_renderer_lifecycle_observation(
+                    conn,
+                    owner_session_id,
+                    &projected_binding,
+                    document,
+                    stamp,
+                    browser_fact_sequence,
+                    "browser_domcontentloaded_observed",
+                );
                 for session_id in &session_ids {
                     if crate::domains::dom::dom_agent_enabled_for_session(
                         conn,
@@ -202,8 +255,8 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                             out,
                             navigation_frame_event(
                                 NavigationFrameEventKind::DocumentUpdated,
-                                &binding.frame_id,
-                                Some(&binding.loader_id),
+                                &projected_binding.frame_id,
+                                Some(&projected_binding.loader_id),
                                 "",
                             ),
                             session_id.as_deref(),
@@ -215,15 +268,56 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                         out,
                         session_id.as_deref(),
                         lifecycle_enabled,
-                        &binding.frame_id,
-                        &binding.loader_id,
+                        document.document,
+                        document.epoch,
+                        &projected_binding.frame_id,
+                        &projected_binding.loader_id,
                         timestamp,
+                    );
+                    trace_frontend_lifecycle_projection(
+                        conn,
+                        trace.as_ref(),
+                        &projected_binding,
+                        document,
+                        stamp,
+                        browser_fact_sequence,
+                        "frontend_domcontentloaded_projected",
                     );
                 }
             }
             RendererDocumentLifecycleEventKind::Milestone(
                 RendererDocumentLifecycleMilestone::Load,
             ) => {
+                let Some(projection) = lifecycle_facts.pop_front() else {
+                    continue;
+                };
+                let Some((document, milestone, stamp)) = projection.reached() else {
+                    tracing::error!(
+                        browser_fact_sequence = projection.envelope().sequence().get(),
+                        "CDP lifecycle projector returned a non-reached Browser fact"
+                    );
+                    continue;
+                };
+                if milestone != RendererDocumentLifecycleMilestone::Load {
+                    tracing::error!(
+                        browser_fact_sequence = projection.envelope().sequence().get(),
+                        ?milestone,
+                        "CDP lifecycle projector returned a reordered Browser milestone"
+                    );
+                    continue;
+                }
+                let projected_binding = projection.binding().clone();
+                let browser_fact_sequence = projection.envelope().sequence();
+                let timestamp = stamp.timestamp_micros as f64 / 1_000_000.0;
+                let trace = trace_bound_renderer_lifecycle_observation(
+                    conn,
+                    owner_session_id,
+                    &projected_binding,
+                    document,
+                    stamp,
+                    browser_fact_sequence,
+                    "browser_load_observed",
+                );
                 for session_id in &session_ids {
                     let lifecycle_enabled =
                         page_lifecycle_events_enabled_for_session(conn, session_id.as_deref());
@@ -231,11 +325,20 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
                         out,
                         session_id.as_deref(),
                         lifecycle_enabled,
-                        event.document,
-                        event.epoch,
-                        &binding.frame_id,
-                        &binding.loader_id,
+                        document.document,
+                        document.epoch,
+                        &projected_binding.frame_id,
+                        &projected_binding.loader_id,
                         timestamp,
+                    );
+                    trace_frontend_lifecycle_projection(
+                        conn,
+                        trace.as_ref(),
+                        &projected_binding,
+                        document,
+                        stamp,
+                        browser_fact_sequence,
+                        "frontend_load_projected",
                     );
                 }
             }
@@ -280,6 +383,72 @@ pub(crate) fn emit_bound_renderer_document_lifecycle_background_events(
             | RendererDocumentLifecycleEventKind::Terminated { .. } => {}
         }
     }
+}
+
+fn trace_bound_renderer_lifecycle_observation(
+    conn: &CdpConnection,
+    owner_session_id: Option<&str>,
+    binding: &CommittedRendererDocumentBinding,
+    document: moli_core::page::RendererDocumentLifecycleIdentity,
+    stamp: moli_core::page::RendererLifecycleEventStamp,
+    browser_fact_sequence: moli_core::browser_host::BrowserFactSequence,
+    stage: &'static str,
+) -> Option<BrowserNavigationTraceContext> {
+    let navigation = binding.navigation.as_ref()?;
+    let trace = conn.document_navigation_trace_context(navigation)?;
+    let attachment_id =
+        conn.current_renderer_agent_attachment_id_for_session_owner(owner_session_id);
+    let mut trace_event = BrowserNavigationTraceEvent::new(
+        stage,
+        BrowserNavigationTraceSource::Lifecycle,
+        "browser-fact-journal",
+        "lifecycle-observed",
+    )
+    .with_navigation(navigation)
+    .with_document(document)
+    .with_renderer_agent_attachment(attachment_id)
+    .with_renderer_lifecycle_sequence(stamp.sequence)
+    .with_browser_fact_sequence(browser_fact_sequence.get());
+    if let Some(page) = conn.current_page_residence_for_document_navigation(navigation) {
+        trace_event = trace_event.with_page(page);
+    }
+    trace.emit(trace_event);
+    Some(trace)
+}
+
+fn trace_frontend_lifecycle_projection(
+    conn: &mut CdpConnection,
+    trace: Option<&BrowserNavigationTraceContext>,
+    binding: &CommittedRendererDocumentBinding,
+    document: moli_core::page::RendererDocumentLifecycleIdentity,
+    stamp: moli_core::page::RendererLifecycleEventStamp,
+    browser_fact_sequence: moli_core::browser_host::BrowserFactSequence,
+    stage: &'static str,
+) {
+    let Some(trace) = trace else {
+        return;
+    };
+    let Some(navigation) = binding.navigation.as_ref() else {
+        return;
+    };
+    let Some(sequence) = conn.allocate_frontend_projection_trace_sequence() else {
+        return;
+    };
+    let mut trace_event = BrowserNavigationTraceEvent::new(
+        stage,
+        BrowserNavigationTraceSource::Lifecycle,
+        "browser-fact-journal",
+        "frontend-output-buffer",
+    )
+    .with_navigation(navigation)
+    .with_document(document)
+    .with_frontend_projection_sequence(sequence)
+    .with_renderer_lifecycle_sequence(stamp.sequence)
+    .with_browser_fact_sequence(browser_fact_sequence.get());
+    if let Some(page) = conn.current_page_residence_for_document_navigation(navigation) {
+        trace_event = trace_event.with_page(page);
+    }
+    trace.emit(trace_event);
 }
 
 fn page_lifecycle_events_enabled_for_session(
@@ -463,11 +632,6 @@ fn emit_cdp_page_background_automation_event(
     match event {
         CdpPageAutomationEvent::NavigationFrame(event) => {
             out.push(BackgroundProtocolEvent::page_navigation_frame(
-                session_id, event,
-            ));
-        }
-        CdpPageAutomationEvent::DomContentLoaded(event) => {
-            out.push(BackgroundProtocolEvent::page_dom_content_loaded(
                 session_id, event,
             ));
         }
@@ -850,6 +1014,11 @@ mod tests {
             &mut events,
             Some("SID-page"),
             true,
+            moli_core::page::RendererDocumentToken::new_for_testing(
+                moli_core::PageId::new_for_testing(1),
+                1,
+            ),
+            moli_core::page::RendererLifecycleEpoch(1),
             "FRAME-page",
             "LOADER-page",
             12.5,

@@ -266,7 +266,7 @@ mod tests {
             .active_target
             .runtime_slot
             .set_page_attachment_id_for_test(1);
-        conn.browser_context = Some(browser_context);
+        conn.insert_browser_context(browser_context);
 
         assert_eq!(
             renderer_owner_action_session_id(&conn, None, None).as_deref(),

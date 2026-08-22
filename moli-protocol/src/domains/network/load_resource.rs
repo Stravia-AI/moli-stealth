@@ -96,7 +96,7 @@ pub(super) fn complete_network_resource_preparation(
     };
     let preparation = match conn
         .loaded_page_mut_for_protocol_access(completed.session_id.as_deref())
-        .and_then(|page| {
+        .and_then(|mut page| {
             page.finish_prepare_network_resource_load(completion)
                 .map_err(|error| error.to_string())
         }) {

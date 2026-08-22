@@ -2,7 +2,6 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::conn::{BackgroundProtocolEvent, PreparedTargetAttach};
-use crate::devtools_runtime::DevToolsTargetInfo;
 
 use super::*;
 
@@ -136,19 +135,52 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
         return TargetCommandTaskStep::Complete(attach_browser_target(conn, cmd.session_id));
     }
     let attach_from_browser_session = conn.is_browser_session_id(cmd.session_id);
-    if conn
-        .primary_page_target_id_for_tab_target_id(target_id)
-        .is_some()
+    let browser_snapshot = match conn.capture_browser_top_level_target_snapshot() {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            return TargetCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(error));
+        }
+    };
+    if let Some(page_target_id) = conn
+        .page_target_id_for_tab_target_id(target_id)
+        .map(str::to_owned)
     {
+        let Some(page_snapshot) = browser_snapshot.target(&page_target_id) else {
+            return target_command_error_without_session(-31998, "UnknownTargetId");
+        };
+        if let Err(error) = conn.project_top_level_target_snapshot(page_snapshot) {
+            return TargetCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(error));
+        }
         return do_attach_tab_target(conn, cmd.session_id, target_id, attach_from_browser_session);
     }
+    if browser_snapshot.contexts().is_empty() {
+        return target_command_error_without_session(-31998, "BrowserContextNotLoaded");
+    }
+    let any_target = browser_snapshot
+        .contexts()
+        .iter()
+        .any(|context| !context.targets().is_empty())
+        || conn.browser_contexts().any(|context| {
+            context.has_any_shared_worker_targets()
+                || context.has_any_dedicated_worker_targets()
+                || context.has_any_service_worker_targets()
+        });
+    if !any_target {
+        return target_command_error_without_session(-31998, "TargetNotLoaded");
+    }
+    let top_level_target_snapshot = browser_snapshot.target(target_id).cloned();
     let restore_browser_context_id =
         attach_from_browser_session.then(|| previously_active_browser_context_id(conn));
-    if let Err(message) = select_browser_context_for_target(conn, target_id) {
+    let selected = if let Some(snapshot) = top_level_target_snapshot.as_ref() {
+        conn.activate_browser_context_by_id(snapshot.browser_context_id())
+    } else {
+        select_browser_context_for_target(conn, target_id).is_ok()
+    };
+    if !selected {
         if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
             restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
         }
-        return target_command_error_without_session(-31998, message);
+        return target_command_error_without_session(-31998, "UnknownTargetId");
     }
     let bc = match conn.browser_context.as_ref() {
         Some(bc) => bc,
@@ -171,6 +203,18 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
     if bc.has_service_worker_target(target_id) {
         return do_attach_service_worker_target(conn, cmd.session_id, target_id);
     }
+    let Some(target_snapshot) = top_level_target_snapshot else {
+        if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
+            restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
+        }
+        return target_command_error_without_session(-31998, "UnknownTargetId");
+    };
+    if let Err(error) = conn.project_top_level_target_snapshot(&target_snapshot) {
+        if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
+            restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
+        }
+        return TargetCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(error));
+    }
     if !bc.has_active_target() && bc.background_targets.is_empty() {
         if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
             restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
@@ -186,8 +230,7 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
             .as_ref()
             .is_some_and(|(_, session_id)| session_id.is_some())
     } else if bc.background_target(target_id).is_some() {
-        bc.background_target(target_id)
-            .is_some_and(|target| target.has_session())
+        bc.primary_session_id_for_target(target_id).is_some()
     } else {
         if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
             restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
@@ -222,10 +265,6 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
                 return target_command_error_without_session(-32000, message);
             }
         };
-    let bc = conn.browser_context.as_ref().unwrap();
-    let target_info = bc
-        .devtools_target_info(target_id)
-        .expect("attached target must be addressable");
     if let Some(restore_browser_context_id) = restore_browser_context_id.as_ref() {
         restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
     }
@@ -234,7 +273,7 @@ fn do_attach(conn: &mut CdpConnection, cmd: &Cmd<'_>, target_id: &str) -> Target
         session_id: cmd.session_id.map(str::to_owned),
         kind: Box::new(PendingTargetCommandKind::AttachToTarget {
             attached_session_id: session_id,
-            target_info,
+            target_snapshot,
             initial_document,
         }),
     })
@@ -267,7 +306,7 @@ pub(super) async fn complete_attach_to_target_command_async(
     conn: &mut CdpConnection,
     command_session_id: Option<&str>,
     attached_session_id: String,
-    target_info: DevToolsTargetInfo,
+    target_snapshot: moli_core::browser_host::BrowserTargetStateSnapshot,
     initial_document: Option<
         Result<
             Box<crate::conn::CompletedInitialDocumentPageBuild>,
@@ -280,6 +319,11 @@ pub(super) async fn complete_attach_to_target_command_async(
         command_session_id.map(str::to_owned),
         false,
     );
+    if !conn.browser_target_state_snapshot_is_current(&target_snapshot) {
+        conn.rollback_prepared_attach_session_without_event_async(&prepared_session)
+            .await;
+        return CommandOutputPlan::error_without_session(-31998, "UnknownTargetId");
+    }
     match initial_document {
         Some(Ok(completed_initial_document)) => {
             let completed_initial_document = *completed_initial_document;
@@ -311,20 +355,25 @@ pub(super) async fn complete_attach_to_target_command_async(
             "target attach renderer binding state apply failed"
         );
     }
+    if !conn.browser_target_state_snapshot_is_current(&target_snapshot) {
+        conn.rollback_prepared_attach_session_without_event_async(&prepared_session)
+            .await;
+        return CommandOutputPlan::error_without_session(-31998, "UnknownTargetId");
+    }
+    let target_info = match conn.project_top_level_target_snapshot(&target_snapshot) {
+        Ok(target_info) => target_info,
+        Err(error) => {
+            conn.rollback_prepared_attach_session_without_event_async(&prepared_session)
+                .await;
+            return CommandOutputPlan::from_devtools_error(error);
+        }
+    };
     if let Some(message) = super::transient_no_page_devtools_target_info_error(conn, &target_info) {
         conn.rollback_prepared_attach_session_without_event_async(&prepared_session)
             .await;
         return CommandOutputPlan::error_without_session(-32000, message);
     }
-    let Some(attached_target_id) = target_info
-        .target_id
-        .as_ref()
-        .map(|target_id| target_id.as_str().to_owned())
-    else {
-        conn.rollback_prepared_attach_session_without_event_async(&prepared_session)
-            .await;
-        return CommandOutputPlan::error_without_session(-32000, "MissingTargetId");
-    };
+    let attached_target_id = target_snapshot.target_id().to_owned();
     let event_plan = conn.commit_prepared_attach_event_plan(PreparedTargetAttach::new(
         &attached_target_id,
         target_info,
@@ -406,58 +455,188 @@ pub(super) fn start_send_message_to_target_command(cmd: &Cmd<'_>) -> TargetComma
     )
 }
 
-pub(super) async fn complete_send_message_to_target_command_async(
+pub(super) struct PendingSendMessageToTargetCommand {
+    pending: Box<crate::conn::PendingCdpCommandDispatch>,
+    nested_command_context: crate::conn::CommandDispatchContext,
+    nested_output_session_id: Option<String>,
+    target_session_id: Option<String>,
+    restore_browser_context_id: Option<String>,
+}
+
+pub(super) struct CompletedSendMessageToTargetCommand {
+    completed: Box<crate::conn::CompletedCdpCommandDispatch>,
+    nested_command_context: crate::conn::CommandDispatchContext,
+    nested_output_session_id: Option<String>,
+    target_session_id: Option<String>,
+    restore_browser_context_id: Option<String>,
+}
+
+impl PendingSendMessageToTargetCommand {
+    pub(super) async fn wait(self) -> CompletedSendMessageToTargetCommand {
+        CompletedSendMessageToTargetCommand {
+            completed: Box::new(self.pending.wait().await),
+            nested_command_context: self.nested_command_context,
+            nested_output_session_id: self.nested_output_session_id,
+            target_session_id: self.target_session_id,
+            restore_browser_context_id: self.restore_browser_context_id,
+        }
+    }
+}
+
+pub(super) async fn complete_send_message_to_target_command_start_async(
     conn: &mut CdpConnection,
+    outer_command_id: Option<u64>,
+    outer_session_id: Option<&str>,
     command_context: &mut crate::conn::CommandDispatchContext,
     message: String,
     target_session_id: Option<String>,
-) -> CommandOutputPlan {
-    let previously_active_browser_context_id = previously_active_browser_context_id(conn);
+) -> TargetCommandTaskStep {
+    let restore_browser_context_id = previously_active_browser_context_id(conn);
     let mut out = TargetCommandOutput::default();
-    send_message_to_target_inner_async(
+    if !select_send_message_to_target_owner(conn, &mut out, target_session_id.as_deref()) {
+        restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
+        return TargetCommandTaskStep::Complete(out.into_plan());
+    }
+
+    let mut nested_command_context = crate::conn::CommandDispatchContext::default();
+    nested_command_context.set_terminal_response_delivery_override(
+        moli_page_types::RendererInspectorResponseDelivery::CommandReply,
+    );
+    let (nested_output_session_id, step) =
+        conn.start_raw_command_dispatch_with_context(message, &mut nested_command_context);
+    advance_send_message_to_target_command(
+        conn,
+        outer_command_id,
+        outer_session_id,
+        command_context,
+        nested_command_context,
+        nested_output_session_id,
+        target_session_id,
+        restore_browser_context_id,
+        step,
+    )
+    .await
+}
+
+pub(super) async fn complete_send_message_to_target_command_continuation_async(
+    conn: &mut CdpConnection,
+    outer_command_id: Option<u64>,
+    outer_session_id: Option<&str>,
+    command_context: &mut crate::conn::CommandDispatchContext,
+    continuation: CompletedSendMessageToTargetCommand,
+) -> TargetCommandTaskStep {
+    let CompletedSendMessageToTargetCommand {
+        completed,
+        mut nested_command_context,
+        nested_output_session_id,
+        target_session_id,
+        restore_browser_context_id,
+    } = continuation;
+    let step =
+        Box::pin(conn.complete_pending_command_dispatch_with_context(
+            *completed,
+            &mut nested_command_context,
+        ))
+        .await;
+    advance_send_message_to_target_command(
+        conn,
+        outer_command_id,
+        outer_session_id,
+        command_context,
+        nested_command_context,
+        nested_output_session_id,
+        target_session_id,
+        restore_browser_context_id,
+        step,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn advance_send_message_to_target_command(
+    conn: &mut CdpConnection,
+    outer_command_id: Option<u64>,
+    outer_session_id: Option<&str>,
+    command_context: &mut crate::conn::CommandDispatchContext,
+    nested_command_context: crate::conn::CommandDispatchContext,
+    nested_output_session_id: Option<String>,
+    target_session_id: Option<String>,
+    restore_browser_context_id: Option<String>,
+    step: crate::conn::CdpCommandTaskStep,
+) -> TargetCommandTaskStep {
+    let outcome = match step {
+        crate::conn::CdpCommandTaskStep::Pending(mut pending) => {
+            // Publish nested scheduler work before yielding the outer Target
+            // command. Most importantly, Browser Host may now select a nested
+            // Page.navigate while this exact participant waits.
+            conn.extend_scheduler_events(pending.take_scheduler_events());
+            return super::pending_send_message_to_target_continuation(
+                outer_command_id,
+                outer_session_id,
+                PendingSendMessageToTargetCommand {
+                    pending,
+                    nested_command_context,
+                    nested_output_session_id,
+                    target_session_id,
+                    restore_browser_context_id,
+                },
+            );
+        }
+        crate::conn::CdpCommandTaskStep::Complete(outcome) => outcome,
+    };
+    let nested_outcome = conn
+        .settle_direct_command_turn_outcome(
+            nested_output_session_id.as_deref(),
+            nested_command_context,
+            Vec::new(),
+            outcome,
+        )
+        .await;
+    let mut out = TargetCommandOutput::default();
+    append_send_message_to_target_outcome(
         conn,
         command_context,
         &mut out,
-        SendMessageParams {
-            message,
-            session_id: target_session_id,
-        },
-    )
-    .await;
-    restore_previously_active_browser_context(
-        conn,
-        previously_active_browser_context_id.as_deref(),
+        target_session_id.as_deref(),
+        nested_outcome,
     );
-    out.into_plan()
+    restore_previously_active_browser_context(conn, restore_browser_context_id.as_deref());
+    TargetCommandTaskStep::Complete(out.into_plan())
 }
 
-async fn send_message_to_target_inner_async(
+fn select_send_message_to_target_owner(
     conn: &mut CdpConnection,
-    command_context: &mut crate::conn::CommandDispatchContext,
     out: &mut TargetCommandOutput,
-    params: SendMessageParams,
-) {
-    if let Some(session_id) = params.session_id.as_deref()
+    target_session_id: Option<&str>,
+) -> bool {
+    if let Some(session_id) = target_session_id
         && !conn.activate_browser_context_for_session(session_id)
     {
         out.push_error(-31998, "InvalidSessionId");
-        return;
+        return false;
     }
     let Some(bc) = conn.browser_context.as_ref() else {
         out.push_error(-31998, "BrowserContextNotLoaded");
-        return;
+        return false;
     };
     let Some((_, current_session_id)) = bc.active_target_identity() else {
         out.push_error(-31998, "TargetNotLoaded");
-        return;
+        return false;
     };
-    if current_session_id.as_deref() != params.session_id.as_deref() {
+    if current_session_id.as_deref() != target_session_id {
         out.push_error(-31998, "InvalidSessionId");
-        return;
+        return false;
     }
+    true
+}
 
-    let nested_outcome =
-        Box::pin(conn.process_message_with_command_reply_turn_outcome_async(&params.message)).await;
+fn append_send_message_to_target_outcome(
+    conn: &mut CdpConnection,
+    command_context: &mut crate::conn::CommandDispatchContext,
+    out: &mut TargetCommandOutput,
+    target_session_id: Option<&str>,
+    nested_outcome: crate::conn::CdpRendererOwnerTurnOutcome,
+) {
     let (
         nested_events,
         post_renderer_output_events,
@@ -471,7 +650,7 @@ async fn send_message_to_target_inner_async(
     }
     conn.extend_scheduler_events(nested_scheduler_events);
     out.push_success();
-    if let Some(session_id) = params.session_id.as_deref() {
+    if let Some(session_id) = target_session_id {
         for nested in nested_events {
             out.background_events_mut().push(
                 BackgroundProtocolEvent::target_received_message_from_target(session_id, nested),
@@ -784,10 +963,9 @@ async fn detach_from_target_inner_async(
     }
     if let Some(session_id) = params.session_id.as_deref() {
         let background_target_id = conn.browser_context.as_ref().and_then(|bc| {
-            bc.background_targets
-                .iter()
-                .find(|target| target.is_session(session_id))
-                .map(|target| target.target_id().to_owned())
+            bc.primary_attachment_target_id_for_session(session_id)
+                .filter(|target_id| !bc.is_active_target(target_id))
+                .map(str::to_owned)
         });
         if let Some(target_id) = background_target_id.as_deref() {
             if let Some(requested_target_id) = params.target_id.as_deref()

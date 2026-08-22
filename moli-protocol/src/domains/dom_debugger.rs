@@ -252,7 +252,7 @@ pub(crate) fn complete_pending_dom_debugger_command(
         CompletedDomDebuggerOperation::GetEventListeners => {
             let resolution = completed.completed.and_then(|completion| {
                 conn.loaded_page_mut_for_protocol_access(session_id.as_deref())
-                    .and_then(|page| {
+                    .and_then(|mut page| {
                         page.finish_dom_debugger_get_event_listeners(completion)
                             .map_err(|error| error.to_string())
                     })
@@ -273,7 +273,7 @@ pub(crate) fn complete_pending_dom_debugger_command(
         } => {
             let completion = completed.completed.and_then(|completion| {
                 conn.loaded_page_mut_for_protocol_access(session_id.as_deref())
-                    .and_then(|page| {
+                    .and_then(|mut page| {
                         page.finish_unit_runtime_page_command(
                             completion,
                             "DOMDebugger event listener breakpoint",
@@ -309,7 +309,7 @@ pub(crate) fn complete_pending_dom_debugger_command(
         } => {
             let completion = completed.completed.and_then(|completion| {
                 conn.loaded_page_mut_for_protocol_access(session_id.as_deref())
-                    .and_then(|page| {
+                    .and_then(|mut page| {
                         page.finish_unit_runtime_page_command(
                             completion,
                             "DOMDebugger XHR breakpoint",
@@ -338,7 +338,7 @@ pub(crate) fn complete_pending_dom_debugger_command(
         CompletedDomDebuggerOperation::ConfigureDomBreakpoint => {
             let resolution = completed.completed.and_then(|completion| {
                 conn.loaded_page_mut_for_protocol_access(session_id.as_deref())
-                    .and_then(|page| {
+                    .and_then(|mut page| {
                         page.finish_dom_debugger_configure_dom_breakpoint(completion)
                             .map_err(|error| error.to_string())
                     })
@@ -504,7 +504,7 @@ mod tests {
         browser_context.set_target_url("data:text/html,dom-debugger-test".to_owned());
         browser_context.set_active_target_id("TID-1".to_owned());
         browser_context.attach_active_session("SID-1".to_owned());
-        ctx.conn.browser_context = Some(browser_context);
+        ctx.conn.insert_browser_context(browser_context);
         ctx.install_navigation_fixture_for_session_owner(
             &format!("data:text/html,{html}"),
             Some("SID-1"),

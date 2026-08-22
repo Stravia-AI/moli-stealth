@@ -67,16 +67,14 @@ impl CdpConnection {
         }
     }
 
-    pub(crate) fn bind_renderer_page_output_owner(
+    pub(crate) fn bind_renderer_page_output_target(
         &mut self,
         renderer_page: super::RendererPageResidenceIdentity,
-        page_owner: super::TargetPageResidenceIdentity,
+        page_owner: moli_core::browser_host::BrowserPageOwnerKey,
     ) {
         let owner = crate::domains::activity::RendererPublicationOwner::PageTarget {
-            browser_context_id: page_owner.browser_context_id().to_owned(),
-            target_id: page_owner.target_id().map(str::to_owned),
-            renderer_page,
             page_owner,
+            renderer_page,
         };
         self.scheduler_state.renderer_output_ingress.bind_owner(
             moli_core::RendererOutputResidenceIdentity::Page {
@@ -167,7 +165,7 @@ impl CdpConnection {
                     Vec::new(),
                 )
             }
-            ReadyProtocolSchedulerWork::MainDocumentLoadOwnerAction(completion) => {
+            ReadyProtocolSchedulerWork::MainDocumentLoadFactProjection(completion) => {
                 self.complete_deferred_main_document_load_completion_for_scheduler(
                     super::CompletedDeferredMainDocumentLoadCompletion::new(*completion),
                 )
@@ -184,40 +182,6 @@ impl CdpConnection {
                     protocol_events,
                     self.take_scheduler_events(),
                 )
-            }
-            ReadyProtocolSchedulerWork::TopLevelLocationNavigationOwnerAction(action) => {
-                let (owner_scope, page_owner, navigation) = action.into_parts();
-                let session_id = owner_scope.session_id().map(str::to_owned);
-                let mut route_scope = owner_scope.enter(self);
-                let mut protocol_events = Vec::new();
-                crate::domains::page::navigate_page_owned_top_level_location_background_events_async(
-                    route_scope.conn_mut(),
-                    &mut protocol_events,
-                    session_id.as_deref(),
-                    &page_owner,
-                    navigation,
-                )
-                .await;
-                CdpTurnOutcome::new_with_protocol_events(
-                    protocol_events,
-                    route_scope.conn_mut().take_scheduler_events(),
-                )
-            }
-            ReadyProtocolSchedulerWork::PopupTargetNavigationOwnerAction(action) => {
-                crate::domains::target::complete_popup_target_navigation_owner_action_async(
-                    self, action,
-                )
-                .await
-            }
-            ReadyProtocolSchedulerWork::PopupTargetActivationAction(action) => {
-                crate::domains::target::complete_popup_target_activation_action_async(self, action)
-                    .await
-            }
-            ReadyProtocolSchedulerWork::PageTargetTerminationOwnerAction(action) => {
-                crate::domains::page::complete_page_target_termination_owner_action_async(
-                    self, action,
-                )
-                .await
             }
         }
     }

@@ -357,7 +357,7 @@ fn resolve_network_data_collector_browser_context_ids(
                 .collect::<Vec<_>>();
             if default_context_ids.is_empty() {
                 let id = conn.default_browser_context_id().to_owned();
-                conn.insert_browser_context(conn.new_browser_context(id.clone()));
+                conn.try_insert_browser_context(conn.new_browser_context(id.clone()))?;
                 default_context_ids.push(id);
             }
             resolved.extend(
@@ -625,7 +625,7 @@ fn complete_unit_page_network_command(
             return CommandOutputPlan::error(-32000, "InvalidNetworkCommandCompletion");
         }
     };
-    let page = match conn.loaded_page_mut_for_protocol_access(completed.session_id.as_deref()) {
+    let mut page = match conn.loaded_page_mut_for_protocol_access(completed.session_id.as_deref()) {
         Ok(page) => page,
         Err(message) if message == "NoDocumentLoaded" => {
             return CommandOutputPlan::success();

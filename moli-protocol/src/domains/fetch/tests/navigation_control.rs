@@ -1,6 +1,22 @@
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 use super::*;
+use crate::devtools_runtime::{
+    DevToolsCommand, DevToolsCommandContext, DevToolsCommandResult,
+    DevToolsFulfillInterceptedRequestCommand, DevToolsProtocol, DevToolsRequestId,
+    DevToolsSessionId, DevToolsTargetId,
+};
+
+async fn install_loaded_about_blank(ctx: &mut TestContext) {
+    ctx.conn.insert_browser_context(attached_browser_context());
+    ctx.install_navigation_fixture_for_session_owner("about:blank", Some("SID-1"))
+        .await;
+    ctx.sent.clear();
+    ctx.conn
+        .runtime_session_owner_slot_mut(Some("SID-1"))
+        .expect("Fetch fixture target")
+        .enable_primary_network_events();
+}
 
 #[test]
 fn parse_binary_response_headers_decodes_nul_separated_header_block() {
@@ -33,7 +49,7 @@ fn parse_binary_response_headers_rejects_invalid_header_value() {
 #[tokio::test]
 async fn continue_request_rejects_invalid_url_without_consuming_pending_navigation() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
 
     ctx.process_async(json!({
         "id": 62,
@@ -85,7 +101,7 @@ async fn continue_request_rejects_invalid_url_without_consuming_pending_navigati
 #[tokio::test]
 async fn continue_request_rejects_invalid_post_data_without_consuming_pending_navigation() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
 
     ctx.process_async(json!({
         "id": 65,
@@ -152,7 +168,7 @@ async fn request_paused_then_continue_request_resumes_main_document_navigation()
     });
 
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
     let url = format!("http://{addr}/page");
@@ -216,10 +232,239 @@ async fn request_paused_then_continue_request_resumes_main_document_navigation()
     server.abort();
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn continue_request_exact_owner_survives_frontend_wait_loss() {
+    async fn handler() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><html><body><main>owner continue</main></body></html>",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().route("/page", get(handler)))
+            .await
+            .unwrap();
+    });
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_200,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_200, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_201,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": format!("http://{addr}/page") }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("paused navigation Page owner");
+    let raw = json!({
+        "id": 30_202,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document continueRequest must await Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("paused navigation Continue participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page)
+    );
+    drop(frontend_wait);
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(messages.iter().all(|message| message["id"] != 30_202));
+    assert!(messages.iter().any(|message| {
+        message["id"] == 30_201
+            && message["sessionId"] == "SID-1"
+            && message["result"]["loaderId"] == LOADER_ID
+    }));
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_continue_request_owner_participant_cannot_load_successor_page() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_210,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_210, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_211,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/stale-owner-continue" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let raw = json!({
+        "id": 30_212,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document continueRequest must await Browser Host");
+    };
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("paused navigation Continue participant");
+    let captured_generation = participant
+        .paused_navigation_decision_page_owner_for_test()
+        .expect("participant Page identity")
+        .loaded_page_generation();
+    let residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-1"))
+        .expect("Page residence handle");
+    assert_eq!(
+        residence.advance_generation_for_test_fixture(),
+        captured_generation + 1
+    );
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let _ = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    let completed = frontend_wait.wait().await;
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("stale continueRequest projection should be terminal");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == 30_212 && message["result"] == json!({}) })
+    );
+    assert!(messages.iter().any(|message| {
+        message["id"] == 30_211 && message["error"]["message"] == "Navigation aborted"
+    }));
+    assert!(messages.iter().all(|message| {
+        message["method"] != "Network.responseReceived"
+            && message["method"] != "Page.frameNavigated"
+    }));
+    assert_eq!(residence.generation(), captured_generation + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopped_browser_host_restores_unmodified_continue_request_navigation() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_220,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_220, json!({}), Some("SID-1"));
+    let original_url = "http://example.test/original-owner-continue";
+    ctx.process_async(json!({
+        "id": 30_221,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": original_url }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+    ctx.stop_browser_host_for_test();
+
+    let raw = json!({
+        "id": 30_222,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-1",
+        "params": {
+            "requestId": request_id,
+            "url": "http://example.test/must-not-apply",
+            "method": "POST",
+            "postData": BASE64_STANDARD.encode("must-not-apply")
+        }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) = ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("stopped Browser Host must reject without a fallback wait");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(messages.iter().any(|message| {
+        message["id"] == 30_222
+            && message["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Browser Host stopped"))
+    }));
+    let pending = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("browser context")
+        .active_target
+        .fetch_owner
+        .pending_fetch_navigation_for_test(&request_id)
+        .expect("restored pending navigation");
+    assert_eq!(pending.navigation.requested_url.as_str(), original_url);
+    assert_eq!(pending.navigation.request_method, "GET");
+    assert!(pending.navigation.request_body.is_none());
+}
+
 #[tokio::test]
 async fn main_document_request_uses_loader_id_as_observed_network_request_id() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
 
     ctx.process_async(json!({
         "id": 301,
@@ -257,7 +502,7 @@ async fn fail_request_blocked_by_client_maps_main_document_navigation_to_net_err
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 303,
@@ -299,9 +544,531 @@ async fn fail_request_blocked_by_client_maps_main_document_navigation_to_net_err
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn fail_request_main_document_is_applied_by_exact_browser_owner_participant() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+
+    ctx.process_async(json!({
+        "id": 30_300,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_300, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_301,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/owner-fail" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("paused navigation Page owner");
+    let raw = json!({
+        "id": 30_302,
+        "method": "Fetch.failRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "errorReason": "BlockedByClient" }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document failRequest must await Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (start_outcome, participant) = dispatch.into_parts();
+    let (start_events, start_scheduler_events, start_predecessor) =
+        start_outcome.into_protocol_event_parts();
+    assert!(start_events.is_empty());
+    assert!(start_scheduler_events.is_empty());
+    assert!(start_predecessor.is_none());
+    let participant = participant.expect("paused navigation decision participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page),
+        "Browser Host must retain the exact Page captured at admission"
+    );
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (host_messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(
+        host_messages.is_empty(),
+        "a live frontend receiver owns the final projection"
+    );
+
+    let completed = frontend_wait.wait().await;
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("Browser Owner failRequest projection should be terminal");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    let fail_response = messages
+        .iter()
+        .position(|message| message["id"] == 30_302)
+        .expect("Fetch.failRequest response");
+    let loading_failed = messages
+        .iter()
+        .position(|message| message["method"] == "Network.loadingFailed")
+        .expect("navigation loadingFailed event");
+    let navigate_response = messages
+        .iter()
+        .position(|message| message["id"] == 30_301)
+        .expect("original Page.navigate response");
+    assert!(fail_response < loading_failed);
+    assert!(loading_failed < navigate_response);
+    assert_eq!(messages[fail_response]["result"], json!({}));
+    assert_eq!(
+        messages[loading_failed]["params"]["errorText"],
+        "net::ERR_BLOCKED_BY_CLIENT"
+    );
+    assert_eq!(
+        messages[navigate_response]["error"]["message"],
+        "net::ERR_BLOCKED_BY_CLIENT"
+    );
+    let facts = ctx.conn.browser_fact_snapshot_for_test();
+    let failed_navigation = facts
+        .iter()
+        .find(|fact| {
+            matches!(
+                fact.fact(),
+                moli_core::browser_host::BrowserFact::NavigationFailed {
+                    failure:
+                        moli_core::browser_host::BrowserNavigationFailure::Network {
+                            error_text,
+                        },
+                    ..
+                } if error_text == "net::ERR_BLOCKED_BY_CLIENT"
+            )
+        })
+        .expect("Fetch.failRequest should publish a failed navigation terminal");
+    let moli_core::browser_host::BrowserFact::NavigationFailed { previous_page, .. } =
+        failed_navigation.fact()
+    else {
+        unreachable!("the fact was selected as NavigationFailed")
+    };
+    assert_eq!(previous_page.as_ref(), Some(&expected_page));
+    assert_eq!(
+        failed_navigation.page_residence().loaded_page_generation(),
+        expected_page.loaded_page_generation() + 1
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_fail_request_owner_participant_cannot_invalidate_successor_page() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_310,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_310, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_311,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/stale-owner-fail" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let raw = json!({
+        "id": 30_312,
+        "method": "Fetch.failRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "errorReason": "Aborted" }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document failRequest must await Browser Host");
+    };
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("paused navigation decision participant");
+    let captured_generation = participant
+        .paused_navigation_decision_page_owner_for_test()
+        .expect("participant Page identity")
+        .loaded_page_generation();
+    let residence = ctx
+        .conn
+        .target_page_residence_handle_for_session(Some("SID-1"))
+        .expect("Page residence handle");
+    assert_eq!(
+        residence.advance_generation_for_test_fixture(),
+        captured_generation + 1
+    );
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let _ = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    let completed = frontend_wait.wait().await;
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) =
+        ctx.conn.complete_pending_command_dispatch(completed).await
+    else {
+        panic!("stale failRequest projection should be terminal");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == 30_312 && message["result"] == json!({}) })
+    );
+    assert!(messages.iter().any(|message| {
+        message["id"] == 30_311 && message["error"]["message"] == "Navigation aborted"
+    }));
+    assert!(
+        messages
+            .iter()
+            .all(|message| message["method"] != "Network.loadingFailed"),
+        "stale work must not project a failure through the successor Page"
+    );
+    assert_eq!(residence.generation(), captured_generation + 1);
+    assert!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .expect("browser context")
+            .has_loaded_page(),
+        "stale failure must not discard the successor physical Page"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_fail_request_frontend_wait_does_not_cancel_browser_decision() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_320,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_320, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_321,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/detached-owner-fail" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let raw = json!({
+        "id": 30_322,
+        "method": "Fetch.failRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "errorReason": "Aborted" }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document failRequest must await Browser Host");
+    };
+    drop(frontend_wait);
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(messages.iter().all(|message| message["id"] != 30_322));
+    assert!(
+        messages
+            .iter()
+            .any(|message| { message["id"] == 30_321 && message["error"]["message"] == "Aborted" })
+    );
+    assert!(messages.iter().any(|message| {
+        message["method"] == "Network.loadingFailed" && message["params"]["errorText"] == "Aborted"
+    }));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopped_browser_host_restores_fail_request_navigation_without_direct_fallback() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_330,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_330, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_331,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/stopped-host-owner-fail" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+    ctx.stop_browser_host_for_test();
+
+    let raw = json!({
+        "id": 30_332,
+        "method": "Fetch.failRequest",
+        "sessionId": "SID-1",
+        "params": { "requestId": request_id, "errorReason": "Aborted" }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Complete(outcome) = ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("stopped Browser Host must reject without a fallback wait");
+    };
+    let (messages, _) = ctx.route_completed_command_outcome_for_test(outcome).await;
+    assert!(messages.iter().any(|message| {
+        message["id"] == 30_332
+            && message["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("Browser Host stopped"))
+    }));
+    let fetch_owner = &ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .expect("browser context")
+        .active_target
+        .fetch_owner;
+    assert!(fetch_owner.has_pending_fetch_request_id_for_test(&request_id));
+    assert!(fetch_owner.has_pending_fetch_navigation_for_test(&request_id));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fulfill_request_main_document_is_selected_by_exact_browser_owner_after_frontend_drop() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_340,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_340, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_341,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/owner-fulfill" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("paused navigation Page owner");
+    let raw = json!({
+        "id": 30_342,
+        "method": "Fetch.fulfillRequest",
+        "sessionId": "SID-1",
+        "params": {
+            "requestId": request_id,
+            "responseCode": 201,
+            "responseHeaders": [{ "name": "content-type", "value": "text/html" }],
+            "body": "PCFkb2N0eXBlIGh0bWw+PG1haW4+b3duZXItZnVsZmlsbC1maW5pc2hlZDwvbWFpbj4="
+        }
+    })
+    .to_string();
+    let crate::conn::CdpCommandTaskStep::Pending(frontend_wait) =
+        ctx.conn.start_command_dispatch(&raw)
+    else {
+        panic!("main-Document fulfillRequest must await Browser Host");
+    };
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("synthetic navigation participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page),
+        "Browser Host must retain the exact Page captured at fulfill admission"
+    );
+    drop(frontend_wait);
+
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+    assert!(messages.iter().all(|message| message["id"] != 30_342));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == 30_341 && message["result"]["frameId"] == "TID-1"),
+        "dropping the Fetch frontend must not cancel the accepted synthetic navigation"
+    );
+    assert!(
+        loaded_page_html_for_test(&mut ctx)
+            .await
+            .contains("owner-fulfill-finished")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn typed_fulfill_request_exposes_owner_wait_without_borrowing_connection() {
+    let mut ctx = TestContext::new();
+    install_loaded_about_blank(&mut ctx).await;
+    ctx.process_async(json!({
+        "id": 30_350,
+        "method": "Fetch.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    ctx.expect_result(30_350, json!({}), Some("SID-1"));
+    ctx.process_async(json!({
+        "id": 30_351,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": { "url": "http://example.test/typed-owner-fulfill" }
+    }))
+    .await;
+    let paused = take_main_document_request_pause(&mut ctx).await;
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch request id")
+        .to_owned();
+    ctx.take_all();
+
+    let expected_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("paused navigation Page owner");
+    let command =
+        DevToolsCommand::FulfillInterceptedRequest(DevToolsFulfillInterceptedRequestCommand {
+            context: DevToolsCommandContext {
+                protocol: DevToolsProtocol::WebDriverBidi,
+                session_id: Some(DevToolsSessionId::from("SID-1")),
+                target_id: Some(DevToolsTargetId::from("TID-1")),
+                browser_context_id: None,
+            },
+            request_id: DevToolsRequestId::from(request_id.as_str()),
+            response_code: 202,
+            response_headers: vec![("content-type".to_owned(), "text/html".to_owned())],
+            body: Some(b"<!doctype html><main>typed-owner-finished</main>".to_vec()),
+            response_phrase: None,
+        });
+    let step = ctx
+        .conn
+        .try_start_devtools_fetch_command_task(command)
+        .await
+        .expect("typed terminal Fetch command must use its scheduler-facing task");
+    let crate::domains::fetch::DevToolsFetchCommandTaskStep::Pending(pending) = step else {
+        panic!("typed main-Document fulfill must await Browser Host");
+    };
+    assert!(pending.holds_navigation_renderer_publication_gate());
+    assert_eq!(ctx.browser_host_ready_len_for_test(), 1);
+
+    let dispatch = ctx.start_one_ready_browser_host_turn_for_test();
+    let (_, participant) = dispatch.into_parts();
+    let participant = participant.expect("typed synthetic navigation participant");
+    assert_eq!(
+        participant.paused_navigation_decision_page_owner_for_test(),
+        Some(&expected_page)
+    );
+    let dispatch = ctx
+        .conn
+        .complete_browser_host_turn(participant.wait().await)
+        .await;
+    let host_outcome = ctx.finish_browser_host_turn_for_test(dispatch).await;
+    let (mut messages, _) = ctx
+        .route_completed_command_outcome_for_test(host_outcome)
+        .await;
+
+    let completed = pending.wait().await;
+    let outcome = ctx
+        .conn
+        .complete_devtools_fetch_command_task(completed)
+        .await;
+    let (
+        result,
+        scheduler_events,
+        mut protocol_events,
+        renderer_output_boundary,
+        mut post_renderer_output_events,
+        mut post_response_events,
+        renderer_output_predecessor,
+    ) = outcome.into_fenced_complete_parts();
+    assert_eq!(
+        result.expect("typed fulfill should project an empty result"),
+        DevToolsCommandResult::Empty
+    );
+    assert!(scheduler_events.is_empty());
+    protocol_events.append(&mut post_renderer_output_events);
+    protocol_events.append(&mut post_response_events);
+    messages.extend(
+        protocol_events
+            .into_iter()
+            .map(crate::conn::BackgroundProtocolEvent::into_protocol_message),
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == 30_351 && message["result"]["frameId"] == "TID-1"),
+        "typed owner completion must settle the original navigation: {messages:?}"
+    );
+    assert!(renderer_output_boundary.is_none());
+    assert!(renderer_output_predecessor.is_none());
+    assert!(
+        loaded_page_html_for_test(&mut ctx)
+            .await
+            .contains("typed-owner-finished")
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn request_paused_then_continue_request_fails_when_network_offline() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(attached_browser_context());
+    ctx.conn.insert_browser_context(attached_browser_context());
 
     ctx.process_async(json!({
         "id": 16630,
@@ -395,7 +1162,7 @@ async fn response_stage_document_pattern_pauses_main_document_after_response() {
             &[("set-cookie".to_owned(), "sid=1; Path=/".to_owned())],
         );
     }
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
             "id": 33,
@@ -516,12 +1283,10 @@ async fn document_url_pattern_only_pauses_matching_main_document() {
     let plain_url = format!("http://{addr}/plain");
     let match_url = format!("http://{addr}/match");
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(BrowserContext::new("BID-1".into()));
-    {
-        let bc = ctx.conn.browser_context.as_mut().unwrap();
-        bc.attach_active_session("SID-1");
-        bc.set_active_target_id("TID-1");
-    }
+    let mut bc = BrowserContext::new("BID-1".into());
+    bc.set_active_target_id("TID-1");
+    bc.attach_active_session("SID-1");
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
             "id": 394,
@@ -588,7 +1353,7 @@ async fn continue_request_with_post_data_marks_network_request_as_having_post_da
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     let url = format!("http://{addr}/page");
 
     ctx.process_async(json!({
@@ -823,7 +1588,7 @@ async fn continue_request_with_intercept_response_pauses_after_response_until_co
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
     let url = format!("http://{addr}/page");
@@ -952,8 +1717,8 @@ async fn intercepted_navigation_start_events_stay_before_network_pause_with_back
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
-    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    ctx.conn.insert_browser_context(bc);
+    let (sender, mut receiver) = crate::conn::browser_background_output_channel();
     ctx.conn.set_background_event_sender(sender);
 
     ctx.process_async(json!({
@@ -1010,7 +1775,7 @@ async fn disable_aborts_paused_main_document_navigation() {
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 78,

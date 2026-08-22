@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use moli_bounded_buffer::{BoundedByteBuffer, ByteLimits, InsertOutcome};
+use moli_core::browser_host::{BrowserNetworkArtifactStore, BrowserNetworkResponseBody};
 use moli_core::page::{ScriptNetworkOutputItem, SubresourceNetworkRequestHandle};
 
-use crate::conn::{CapturedBody, ConnectionNetworkRequestIdAllocator};
+use crate::conn::CapturedBody;
 use crate::devtools_runtime::DevToolsNetworkDataType;
 
 use super::{
@@ -13,8 +13,7 @@ use super::{
     TargetNetworkBacklogRequestIdResolver, TargetNetworkOutputQueue, TargetSubresourcePlanOutput,
 };
 
-const RESPONSE_BODY_BUFFER_MAX_TOTAL_BYTES: usize = 20_000_000;
-const RESPONSE_BODY_BUFFER_MAX_ENTRY_BYTES: usize = 2_000_000;
+type ConnectionNetworkRequestIdAllocator = BrowserNetworkArtifactStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RendererSubresourceTeardownDisposition {
@@ -29,6 +28,7 @@ pub struct TargetNetworkAgentState {
     output_queue: TargetNetworkOutputQueue,
     active_renderer_subresource_requests:
         HashMap<SubresourceNetworkRequestHandle, RendererSubresourceTeardownDisposition>,
+    browser_artifacts: BrowserNetworkArtifactStore,
     artifacts: TargetNetworkArtifacts,
 }
 
@@ -177,6 +177,27 @@ impl NetworkBacklogPreferredRequestIdBudget {
 }
 
 impl TargetNetworkAgentState {
+    pub(crate) fn adopt_browser_network_artifact_store(
+        &mut self,
+        browser_artifacts: BrowserNetworkArtifactStore,
+    ) {
+        let request_ids = self
+            .artifacts
+            .body_artifacts
+            .request_ids()
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        browser_artifacts.adopt_entries_from(
+            &self.browser_artifacts,
+            request_ids.iter().map(String::as_str),
+        );
+        self.browser_artifacts = browser_artifacts;
+    }
+
+    pub(crate) fn browser_network_artifact_store(&self) -> BrowserNetworkArtifactStore {
+        self.browser_artifacts.clone()
+    }
+
     /// Moves the Document-owned live queue and request correlations into a
     /// short-lived predecessor state while retaining target/session policy and
     /// target-scoped body/stream artifacts for the replacement Document.
@@ -486,7 +507,8 @@ impl TargetNetworkAgentState {
     }
 
     pub(crate) fn collected_network_data_artifacts(&self) -> Vec<CollectedNetworkDataArtifact> {
-        self.artifacts.collected_network_data_artifacts()
+        self.artifacts
+            .collected_network_data_artifacts(&self.browser_artifacts)
     }
 
     pub(crate) fn record_subresource_request_id_for_handle_if_absent(
@@ -547,20 +569,19 @@ impl TargetNetworkAgentState {
     }
 
     #[cfg(test)]
-    pub(crate) fn allocate_network_request_id(&mut self) -> String {
-        self.artifacts.allocate_network_request_id()
-    }
-
-    #[cfg(test)]
     pub(crate) fn record_captured_response_body(
         &mut self,
         request_id: String,
         response_body: String,
         session_ids: impl IntoIterator<Item = Option<String>>,
     ) {
-        self.artifacts
-            .body_artifacts
-            .insert(request_id, response_body, session_ids);
+        self.record_captured_response_body_source_with_collector_scope(
+            request_id,
+            CapturedBody::from_string(response_body),
+            session_ids,
+            std::iter::empty::<String>(),
+            false,
+        );
     }
 
     pub(crate) fn record_captured_response_body_source_with_collector_scope(
@@ -574,6 +595,7 @@ impl TargetNetworkAgentState {
         self.artifacts
             .body_artifacts
             .insert_captured_body_with_collector_scope(
+                &self.browser_artifacts,
                 request_id,
                 response_body,
                 session_ids,
@@ -593,6 +615,7 @@ impl TargetNetworkAgentState {
         self.artifacts
             .body_artifacts
             .insert_request_body_with_collector_scope(
+                &self.browser_artifacts,
                 request_id,
                 request_body,
                 session_ids,
@@ -625,6 +648,7 @@ impl TargetNetworkAgentState {
         self.artifacts
             .body_artifacts
             .insert_pending_with_collector_scope(
+                &self.browser_artifacts,
                 request_id,
                 session_ids,
                 collector_ids,
@@ -643,6 +667,7 @@ impl TargetNetworkAgentState {
         self.artifacts
             .body_artifacts
             .insert_failed_with_collector_scope(
+                &self.browser_artifacts,
                 request_id,
                 error_text,
                 session_ids,
@@ -651,16 +676,16 @@ impl TargetNetworkAgentState {
             );
     }
 
-    pub(crate) fn captured_response_body(&self, request_id: &str) -> Option<&CapturedResponseBody> {
+    pub(crate) fn captured_response_body(&self, request_id: &str) -> Option<CapturedResponseBody> {
         self.artifacts
             .body_artifacts
-            .captured_response_body(request_id)
+            .captured_response_body(&self.browser_artifacts, request_id)
     }
 
-    pub(crate) fn captured_request_body(&self, request_id: &str) -> Option<&CapturedRequestBody> {
+    pub(crate) fn captured_request_body(&self, request_id: &str) -> Option<CapturedRequestBody> {
         self.artifacts
             .body_artifacts
-            .captured_request_body(request_id)
+            .captured_request_body(&self.browser_artifacts, request_id)
     }
 
     pub(crate) fn clear_captured_response_bodies(&mut self) {
@@ -856,18 +881,6 @@ impl TargetNetworkAgentState {
     }
 
     #[cfg(test)]
-    pub(crate) fn set_next_network_request_sequence_for_test(&mut self, sequence: u64) {
-        self.artifacts
-            .request_id_allocator
-            .set_next_sequence_for_test(sequence);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_network_request_sequence_for_test(&self) -> u64 {
-        self.artifacts.request_id_allocator.next_sequence_for_test()
-    }
-
-    #[cfg(test)]
     pub(crate) fn io_streams_empty(&self) -> bool {
         self.artifacts.body_artifacts.io_streams_empty()
     }
@@ -1021,157 +1034,72 @@ fn update_active_renderer_subresource_requests(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapturedResponseBody {
-    state: CapturedResponseBodyState,
-    session_ids: HashSet<Option<String>>,
-    collector_ids: HashSet<String>,
-    collection_was_gated: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum CapturedResponseBodyState {
-    Pending,
-    Ready(CapturedBody),
-    Failed(String),
-    Evicted,
+    artifact: BrowserNetworkResponseBody,
+    visibility: CapturedNetworkBodyVisibility,
 }
 
 impl CapturedResponseBody {
-    pub(crate) fn pending_with_collector_scope(
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
+    fn new(
+        artifact: BrowserNetworkResponseBody,
+        visibility: CapturedNetworkBodyVisibility,
     ) -> Self {
-        let collector_ids = collector_ids.into_iter().collect::<HashSet<_>>();
         Self {
-            state: CapturedResponseBodyState::Pending,
-            session_ids: session_ids.into_iter().collect(),
-            collection_was_gated: collection_was_gated || !collector_ids.is_empty(),
-            collector_ids,
-        }
-    }
-
-    pub(crate) fn from_captured_body_with_collector_scope(
-        body: CapturedBody,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) -> Self {
-        let collector_ids = collector_ids.into_iter().collect::<HashSet<_>>();
-        Self {
-            state: CapturedResponseBodyState::Ready(body),
-            session_ids: session_ids.into_iter().collect(),
-            collection_was_gated: collection_was_gated || !collector_ids.is_empty(),
-            collector_ids,
-        }
-    }
-
-    pub(crate) fn failed_with_collector_scope(
-        error_text: String,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) -> Self {
-        let collector_ids = collector_ids.into_iter().collect::<HashSet<_>>();
-        Self {
-            state: CapturedResponseBodyState::Failed(error_text),
-            session_ids: session_ids.into_iter().collect(),
-            collection_was_gated: collection_was_gated || !collector_ids.is_empty(),
-            collector_ids,
+            artifact,
+            visibility,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn body(&self) -> String {
-        match &self.state {
-            CapturedResponseBodyState::Ready(body) => {
-                body.materialize_lossy_string().unwrap_or_default()
-            }
-            CapturedResponseBodyState::Pending
-            | CapturedResponseBodyState::Failed(_)
-            | CapturedResponseBodyState::Evicted => String::new(),
-        }
+        self.artifact
+            .ready_body()
+            .and_then(|body| body.materialize_lossy_string().ok())
+            .unwrap_or_default()
     }
 
     pub(crate) fn body_bytes_limited(&self, limit: usize) -> anyhow::Result<Vec<u8>> {
-        match &self.state {
-            CapturedResponseBodyState::Ready(body) => body.materialize_bytes_limited(limit),
-            CapturedResponseBodyState::Pending => {
-                anyhow::bail!("No data found for resource with given identifier")
-            }
-            CapturedResponseBodyState::Failed(_) => {
-                anyhow::bail!("No data found for resource with given identifier")
-            }
-            CapturedResponseBodyState::Evicted => {
-                anyhow::bail!("Request content was evicted from inspector cache")
-            }
-        }
+        self.artifact.body_bytes_limited(limit)
     }
 
     pub(crate) fn is_visible_to_session(&self, session_id: Option<&str>) -> bool {
-        self.session_ids
-            .contains(&session_id.map(std::borrow::ToOwned::to_owned))
+        self.visibility.is_visible_to_session(session_id)
     }
 
     pub(crate) fn was_collected_by(&self, collector_id: &str) -> bool {
-        self.collector_ids.contains(collector_id)
+        self.visibility.was_collected_by(collector_id)
     }
 
     pub(crate) fn collector_ids(&self) -> &HashSet<String> {
-        &self.collector_ids
+        self.visibility.collector_ids()
     }
 
     fn collected_network_data_artifact(
         &self,
         request_id: &str,
     ) -> Option<CollectedNetworkDataArtifact> {
-        if self.collector_ids.is_empty() {
+        if self.visibility.collector_ids.is_empty() {
             return None;
         }
-        let CapturedResponseBodyState::Ready(body) = &self.state else {
-            return None;
-        };
+        let body = self.artifact.ready_body()?;
         Some(CollectedNetworkDataArtifact {
             request_id: request_id.to_owned(),
             data_type: DevToolsNetworkDataType::Response,
             body: body.clone(),
-            collector_ids: sorted_collector_ids(&self.collector_ids),
-            collection_was_gated: self.collection_was_gated,
+            collector_ids: sorted_collector_ids(&self.visibility.collector_ids),
+            collection_was_gated: self.visibility.collection_was_gated,
         })
-    }
-
-    pub(crate) fn remove_session_visibility(&mut self, session_id: Option<&str>) -> bool {
-        self.session_ids
-            .remove(&session_id.map(std::borrow::ToOwned::to_owned));
-        !self.session_ids.is_empty()
-    }
-
-    fn mark_evicted(&mut self) {
-        self.state = CapturedResponseBodyState::Evicted;
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CapturedRequestBody {
     body: CapturedBody,
-    session_ids: HashSet<Option<String>>,
-    collector_ids: HashSet<String>,
-    collection_was_gated: bool,
+    visibility: CapturedNetworkBodyVisibility,
 }
 
 impl CapturedRequestBody {
-    pub(crate) fn new_with_collector_scope(
-        body: Vec<u8>,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) -> Self {
-        let collector_ids = collector_ids.into_iter().collect::<HashSet<_>>();
-        Self {
-            body: CapturedBody::from_bytes(body),
-            session_ids: session_ids.into_iter().collect(),
-            collection_was_gated: collection_was_gated || !collector_ids.is_empty(),
-            collector_ids,
-        }
+    fn new(body: CapturedBody, visibility: CapturedNetworkBodyVisibility) -> Self {
+        Self { body, visibility }
     }
 
     pub(crate) fn body_bytes_limited(&self, limit: usize) -> anyhow::Result<Vec<u8>> {
@@ -1179,35 +1107,69 @@ impl CapturedRequestBody {
     }
 
     pub(crate) fn is_visible_to_session(&self, session_id: Option<&str>) -> bool {
-        self.session_ids
-            .contains(&session_id.map(std::borrow::ToOwned::to_owned))
+        self.visibility.is_visible_to_session(session_id)
     }
 
     pub(crate) fn was_collected_by(&self, collector_id: &str) -> bool {
-        self.collector_ids.contains(collector_id)
+        self.visibility.was_collected_by(collector_id)
     }
 
     pub(crate) fn collector_ids(&self) -> &HashSet<String> {
-        &self.collector_ids
+        self.visibility.collector_ids()
     }
 
     fn collected_network_data_artifact(
         &self,
         request_id: &str,
     ) -> Option<CollectedNetworkDataArtifact> {
-        if self.collector_ids.is_empty() {
+        if self.visibility.collector_ids.is_empty() {
             return None;
         }
         Some(CollectedNetworkDataArtifact {
             request_id: request_id.to_owned(),
             data_type: DevToolsNetworkDataType::Request,
             body: self.body.clone(),
-            collector_ids: sorted_collector_ids(&self.collector_ids),
-            collection_was_gated: self.collection_was_gated,
+            collector_ids: sorted_collector_ids(&self.visibility.collector_ids),
+            collection_was_gated: self.visibility.collection_was_gated,
         })
     }
+}
 
-    pub(crate) fn remove_session_visibility(&mut self, session_id: Option<&str>) -> bool {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CapturedNetworkBodyVisibility {
+    session_ids: HashSet<Option<String>>,
+    collector_ids: HashSet<String>,
+    collection_was_gated: bool,
+}
+
+impl CapturedNetworkBodyVisibility {
+    fn new(
+        session_ids: impl IntoIterator<Item = Option<String>>,
+        collector_ids: impl IntoIterator<Item = String>,
+        collection_was_gated: bool,
+    ) -> Self {
+        let collector_ids = collector_ids.into_iter().collect::<HashSet<_>>();
+        Self {
+            session_ids: session_ids.into_iter().collect(),
+            collection_was_gated: collection_was_gated || !collector_ids.is_empty(),
+            collector_ids,
+        }
+    }
+
+    fn is_visible_to_session(&self, session_id: Option<&str>) -> bool {
+        self.session_ids
+            .contains(&session_id.map(std::borrow::ToOwned::to_owned))
+    }
+
+    fn was_collected_by(&self, collector_id: &str) -> bool {
+        self.collector_ids.contains(collector_id)
+    }
+
+    fn collector_ids(&self) -> &HashSet<String> {
+        &self.collector_ids
+    }
+
+    fn remove_session_visibility(&mut self, session_id: Option<&str>) -> bool {
         self.session_ids
             .remove(&session_id.map(std::borrow::ToOwned::to_owned));
         !self.session_ids.is_empty()
@@ -1221,234 +1183,74 @@ fn sorted_collector_ids(collector_ids: &HashSet<String>) -> Vec<String> {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct CapturedRequestBodyStore {
-    bodies: HashMap<String, CapturedRequestBody>,
+struct CapturedBodyVisibilityStore {
+    bodies: HashMap<String, CapturedNetworkBodyVisibility>,
 }
 
-impl CapturedRequestBodyStore {
-    pub(crate) fn insert_with_collector_scope(
+impl CapturedBodyVisibilityStore {
+    fn insert_with_collector_scope(
         &mut self,
         request_id: String,
-        body: Vec<u8>,
         session_ids: impl IntoIterator<Item = Option<String>>,
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
         self.bodies.insert(
             request_id,
-            CapturedRequestBody::new_with_collector_scope(
-                body,
-                session_ids,
-                collector_ids,
-                collection_was_gated,
-            ),
+            CapturedNetworkBodyVisibility::new(session_ids, collector_ids, collection_was_gated),
         );
     }
 
-    pub(crate) fn get(&self, request_id: &str) -> Option<&CapturedRequestBody> {
+    fn insert_if_absent_with_collector_scope(
+        &mut self,
+        request_id: String,
+        session_ids: impl IntoIterator<Item = Option<String>>,
+        collector_ids: impl IntoIterator<Item = String>,
+        collection_was_gated: bool,
+    ) {
+        self.bodies.entry(request_id).or_insert_with(|| {
+            CapturedNetworkBodyVisibility::new(session_ids, collector_ids, collection_was_gated)
+        });
+    }
+
+    fn get(&self, request_id: &str) -> Option<&CapturedNetworkBodyVisibility> {
         self.bodies.get(request_id)
     }
 
-    fn collected_network_data_artifacts(&self) -> Vec<CollectedNetworkDataArtifact> {
-        self.bodies
-            .iter()
-            .filter_map(|(request_id, body)| body.collected_network_data_artifact(request_id))
-            .collect()
+    fn request_ids(&self) -> impl Iterator<Item = &str> {
+        self.bodies.keys().map(String::as_str)
     }
 
-    pub(crate) fn clear(&mut self) {
+    fn clear(&mut self) {
         self.bodies.clear();
     }
 
-    pub(crate) fn remove_session_visibility(&mut self, session_id: Option<&str>) {
+    fn remove_session_visibility(&mut self, session_id: Option<&str>) {
         self.bodies
             .retain(|_, body| body.remove_session_visibility(session_id));
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CapturedResponseBodyStore {
-    /// Terminal entries without retained payloads. Ready entries live only in
-    /// `buffered_bodies`, making the bounded buffer the single body owner.
-    bodies: HashMap<String, CapturedResponseBody>,
-    buffered_bodies: BoundedByteBuffer<String, CapturedResponseBody>,
-}
-
-impl Default for CapturedResponseBodyStore {
-    fn default() -> Self {
-        Self::with_limits(ByteLimits::new(
-            RESPONSE_BODY_BUFFER_MAX_TOTAL_BYTES,
-            RESPONSE_BODY_BUFFER_MAX_ENTRY_BYTES,
-        ))
-    }
-}
-
-impl CapturedResponseBodyStore {
-    fn with_limits(limits: ByteLimits) -> Self {
-        Self {
-            bodies: HashMap::new(),
-            buffered_bodies: BoundedByteBuffer::new(limits),
-        }
+    #[cfg(test)]
+    fn is_empty(&self) -> bool {
+        self.bodies.is_empty()
     }
 
     #[cfg(test)]
-    pub(crate) fn insert(
-        &mut self,
-        request_id: String,
-        body: String,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-    ) {
-        self.insert_captured_body_with_collector_scope(
-            request_id,
-            CapturedBody::from_string(body),
-            session_ids,
-            std::iter::empty::<String>(),
-            false,
-        );
-    }
-
-    pub(crate) fn insert_captured_body_with_collector_scope(
-        &mut self,
-        request_id: String,
-        body: CapturedBody,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) {
-        let byte_len = body.len();
-        let captured = CapturedResponseBody::from_captured_body_with_collector_scope(
-            body,
-            session_ids,
-            collector_ids,
-            collection_was_gated,
-        );
-        self.bodies.remove(&request_id);
-        match self.buffered_bodies.insert(request_id, captured, byte_len) {
-            InsertOutcome::Stored { evicted } => {
-                for (evicted_request_id, mut evicted_body) in evicted {
-                    evicted_body.mark_evicted();
-                    self.bodies.insert(evicted_request_id, evicted_body);
-                }
-            }
-            InsertOutcome::Rejected {
-                key: request_id,
-                value: mut rejected_body,
-            } => {
-                rejected_body.mark_evicted();
-                self.bodies.insert(request_id, rejected_body);
-            }
-        }
-    }
-
-    pub(crate) fn insert_pending_with_collector_scope(
-        &mut self,
-        request_id: String,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) {
-        if self.bodies.contains_key(&request_id)
-            || self.buffered_bodies.contains_key(request_id.as_str())
-        {
-            return;
-        }
-        self.bodies.insert(
-            request_id,
-            CapturedResponseBody::pending_with_collector_scope(
-                session_ids,
-                collector_ids,
-                collection_was_gated,
-            ),
-        );
-    }
-
-    pub(crate) fn insert_failed_with_collector_scope(
-        &mut self,
-        request_id: String,
-        error_text: String,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-        collector_ids: impl IntoIterator<Item = String>,
-        collection_was_gated: bool,
-    ) {
-        self.buffered_bodies.remove(&request_id);
-        self.bodies.insert(
-            request_id,
-            CapturedResponseBody::failed_with_collector_scope(
-                error_text,
-                session_ids,
-                collector_ids,
-                collection_was_gated,
-            ),
-        );
-    }
-
-    pub(crate) fn get(&self, request_id: &str) -> Option<&CapturedResponseBody> {
-        self.buffered_bodies
-            .get(request_id)
-            .or_else(|| self.bodies.get(request_id))
-    }
-
-    fn collected_network_data_artifacts(&self) -> Vec<CollectedNetworkDataArtifact> {
-        self.buffered_bodies
-            .iter()
-            .chain(self.bodies.iter())
-            .filter_map(|(request_id, body)| body.collected_network_data_artifact(request_id))
-            .collect()
-    }
-
-    pub(crate) fn clear(&mut self) {
-        self.bodies.clear();
-        self.buffered_bodies.clear();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.bodies.is_empty() && self.buffered_bodies.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn contains_key(&self, request_id: &str) -> bool {
-        self.bodies.contains_key(request_id) || self.buffered_bodies.contains_key(request_id)
-    }
-
-    pub(crate) fn remove_session_visibility(&mut self, session_id: Option<&str>) {
-        self.bodies
-            .retain(|_, body| body.remove_session_visibility(session_id));
-
-        let buffered_request_ids = self
-            .buffered_bodies
-            .iter()
-            .map(|(request_id, _)| request_id.clone())
-            .collect::<Vec<_>>();
-        for request_id in buffered_request_ids {
-            let retain = self
-                .buffered_bodies
-                .get_mut(request_id.as_str())
-                .is_some_and(|body| body.remove_session_visibility(session_id));
-            if !retain {
-                self.buffered_bodies.remove(request_id.as_str());
-            }
-        }
-    }
-
-    #[cfg(test)]
-    fn buffered_body_bytes(&self) -> usize {
-        self.buffered_bodies.used_bytes()
+    fn contains_key(&self, request_id: &str) -> bool {
+        self.bodies.contains_key(request_id)
     }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TargetNetworkArtifacts {
-    request_id_allocator: TargetNetworkRequestIdAllocator,
     body_artifacts: TargetNetworkBodyArtifacts,
     subresource_network_artifacts: SubresourceNetworkArtifacts,
     websocket_network_artifacts: WebSocketNetworkArtifacts,
 }
 
 impl TargetNetworkArtifacts {
-    #[cfg(test)]
-    pub(crate) fn allocate_network_request_id(&mut self) -> String {
-        self.request_id_allocator.allocate_request_id()
+    pub(crate) fn body_request_ids(&self) -> impl Iterator<Item = &str> {
+        self.body_artifacts.request_ids()
     }
 
     pub(crate) fn set_session_observation_cursor_at_counts(
@@ -1484,8 +1286,12 @@ impl TargetNetworkArtifacts {
         self.body_artifacts.clear_captured_response_bodies();
     }
 
-    pub(crate) fn collected_network_data_artifacts(&self) -> Vec<CollectedNetworkDataArtifact> {
-        self.body_artifacts.collected_network_data_artifacts()
+    pub(crate) fn collected_network_data_artifacts(
+        &self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
+    ) -> Vec<CollectedNetworkDataArtifact> {
+        self.body_artifacts
+            .collected_network_data_artifacts(browser_artifacts)
     }
 
     pub(crate) fn clear_websocket_request_ids(&mut self) {
@@ -1547,7 +1353,6 @@ impl TargetNetworkArtifacts {
     }
 
     pub(crate) fn reset_all_target_scoped_artifacts(&mut self) {
-        self.request_id_allocator.reset();
         self.body_artifacts.reset_all();
         self.subresource_network_artifacts.reset_cursor();
         self.subresource_network_artifacts.clear_request_ids();
@@ -1556,88 +1361,50 @@ impl TargetNetworkArtifacts {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct TargetNetworkRequestIdAllocator {
-    next_sequence: u64,
-}
-
-impl TargetNetworkRequestIdAllocator {
-    #[cfg(test)]
-    pub(crate) fn allocate_sequence(&mut self) -> u64 {
-        self.next_sequence = self
-            .next_sequence
-            .checked_add(1)
-            .expect("network request id sequence exhausted");
-        self.next_sequence
-    }
-
-    #[cfg(test)]
-    pub(crate) fn allocate_request_id(&mut self) -> String {
-        format!("REQ-{}", self.allocate_sequence())
-    }
-
-    pub(crate) fn reset(&mut self) {
-        self.next_sequence = 0;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn set_next_sequence_for_test(&mut self, sequence: u64) {
-        self.next_sequence = sequence;
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_sequence_for_test(&self) -> u64 {
-        self.next_sequence
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TargetNetworkBodyArtifacts {
-    captured_request_bodies: CapturedRequestBodyStore,
-    captured_response_bodies: CapturedResponseBodyStore,
+    captured_request_bodies: CapturedBodyVisibilityStore,
+    captured_response_bodies: CapturedBodyVisibilityStore,
     io_stream_artifacts: TargetIoStreamArtifacts,
 }
 
 impl TargetNetworkBodyArtifacts {
-    #[cfg(test)]
-    pub(crate) fn insert(
-        &mut self,
-        request_id: String,
-        response_body: String,
-        session_ids: impl IntoIterator<Item = Option<String>>,
-    ) {
-        self.captured_response_bodies
-            .insert(request_id, response_body, session_ids);
+    fn request_ids(&self) -> impl Iterator<Item = &str> {
+        self.captured_request_bodies
+            .request_ids()
+            .chain(self.captured_response_bodies.request_ids())
     }
 
     pub(crate) fn insert_captured_body_with_collector_scope(
         &mut self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
         request_id: String,
         response_body: CapturedBody,
         session_ids: impl IntoIterator<Item = Option<String>>,
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
-        self.captured_response_bodies
-            .insert_captured_body_with_collector_scope(
-                request_id,
-                response_body,
-                session_ids,
-                collector_ids,
-                collection_was_gated,
-            );
+        browser_artifacts.record_response_body(request_id.clone(), response_body);
+        self.captured_response_bodies.insert_with_collector_scope(
+            request_id,
+            session_ids,
+            collector_ids,
+            collection_was_gated,
+        );
     }
 
     pub(crate) fn insert_request_body_with_collector_scope(
         &mut self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
         request_id: String,
         request_body: Vec<u8>,
         session_ids: impl IntoIterator<Item = Option<String>>,
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
+        browser_artifacts
+            .record_request_body(request_id.clone(), CapturedBody::from_bytes(request_body));
         self.captured_request_bodies.insert_with_collector_scope(
             request_id,
-            request_body,
             session_ids,
             collector_ids,
             collection_was_gated,
@@ -1646,13 +1413,15 @@ impl TargetNetworkBodyArtifacts {
 
     pub(crate) fn insert_pending_with_collector_scope(
         &mut self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
         request_id: String,
         session_ids: impl IntoIterator<Item = Option<String>>,
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
+        browser_artifacts.record_pending_response_body(request_id.clone());
         self.captured_response_bodies
-            .insert_pending_with_collector_scope(
+            .insert_if_absent_with_collector_scope(
                 request_id,
                 session_ids,
                 collector_ids,
@@ -1662,38 +1431,63 @@ impl TargetNetworkBodyArtifacts {
 
     pub(crate) fn insert_failed_with_collector_scope(
         &mut self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
         request_id: String,
         error_text: String,
         session_ids: impl IntoIterator<Item = Option<String>>,
         collector_ids: impl IntoIterator<Item = String>,
         collection_was_gated: bool,
     ) {
-        self.captured_response_bodies
-            .insert_failed_with_collector_scope(
-                request_id,
-                error_text,
-                session_ids,
-                collector_ids,
-                collection_was_gated,
-            );
+        browser_artifacts.record_failed_response_body(request_id.clone(), error_text);
+        self.captured_response_bodies.insert_with_collector_scope(
+            request_id,
+            session_ids,
+            collector_ids,
+            collection_was_gated,
+        );
     }
 
-    pub(crate) fn captured_response_body(&self, request_id: &str) -> Option<&CapturedResponseBody> {
-        self.captured_response_bodies.get(request_id)
+    pub(crate) fn captured_response_body(
+        &self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
+        request_id: &str,
+    ) -> Option<CapturedResponseBody> {
+        let visibility = self.captured_response_bodies.get(request_id)?.clone();
+        let artifact = browser_artifacts.response_body(request_id)?;
+        Some(CapturedResponseBody::new(artifact, visibility))
     }
 
-    pub(crate) fn captured_request_body(&self, request_id: &str) -> Option<&CapturedRequestBody> {
-        self.captured_request_bodies.get(request_id)
+    pub(crate) fn captured_request_body(
+        &self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
+        request_id: &str,
+    ) -> Option<CapturedRequestBody> {
+        let visibility = self.captured_request_bodies.get(request_id)?.clone();
+        let body = browser_artifacts.request_body(request_id)?;
+        Some(CapturedRequestBody::new(body, visibility))
     }
 
-    pub(crate) fn collected_network_data_artifacts(&self) -> Vec<CollectedNetworkDataArtifact> {
+    pub(crate) fn collected_network_data_artifacts(
+        &self,
+        browser_artifacts: &BrowserNetworkArtifactStore,
+    ) -> Vec<CollectedNetworkDataArtifact> {
         let mut artifacts = self
             .captured_request_bodies
-            .collected_network_data_artifacts();
-        artifacts.extend(
-            self.captured_response_bodies
-                .collected_network_data_artifacts(),
-        );
+            .bodies
+            .iter()
+            .filter_map(|(request_id, visibility)| {
+                let body = browser_artifacts.request_body(request_id)?;
+                CapturedRequestBody::new(body, visibility.clone())
+                    .collected_network_data_artifact(request_id)
+            })
+            .collect::<Vec<_>>();
+        artifacts.extend(self.captured_response_bodies.bodies.iter().filter_map(
+            |(request_id, visibility)| {
+                let artifact = browser_artifacts.response_body(request_id)?;
+                CapturedResponseBody::new(artifact, visibility.clone())
+                    .collected_network_data_artifact(request_id)
+            },
+        ));
         artifacts
     }
 
@@ -1888,6 +1682,7 @@ impl SubresourceNetworkArtifacts {
 
 #[cfg(test)]
 mod tests {
+    use moli_core::browser_host::BrowserNetworkArtifactStore;
     use moli_core::page::{
         ScriptNetworkOutputItem, SubresourceNetworkRecord, SubresourceNetworkRequestHandle,
         SubresourceRequestInitiatorType, SubresourceRequestStarted, SubresourceResourceType,
@@ -1900,107 +1695,52 @@ mod tests {
         PendingWebSocketNetworkActivity, PendingWebSocketNetworkActivitySession,
     };
     use super::{
-        CapturedResponseBodyStore, NetworkBacklogPreferredRequestId, NetworkBacklogRequestIdPlan,
-        TargetNetworkAgentState, WebSocketNetworkArtifacts,
+        ConnectionNetworkRequestIdAllocator, NetworkBacklogPreferredRequestId,
+        NetworkBacklogRequestIdPlan, TargetNetworkAgentState, WebSocketNetworkArtifacts,
     };
-    use crate::conn::{CapturedBody, CapturedBodyWriter, ConnectionNetworkRequestIdAllocator};
+    use crate::conn::CapturedBodyWriter;
 
     #[test]
-    fn response_body_store_defaults_to_one_tenth_of_chromium_desktop_budget() {
-        let store = CapturedResponseBodyStore::default();
-
-        assert_eq!(
-            store.buffered_bodies.limits(),
-            moli_bounded_buffer::ByteLimits::new(20_000_000, 2_000_000)
-        );
-    }
-
-    #[test]
-    fn response_body_store_marks_oldest_payload_evicted_when_total_budget_fills() {
-        let mut store =
-            CapturedResponseBodyStore::with_limits(moli_bounded_buffer::ByteLimits::new(5, 4));
-        store.insert_captured_body_with_collector_scope(
-            "REQ-first".to_owned(),
-            CapturedBody::from_string("aa".to_owned()),
-            [None],
-            std::iter::empty::<String>(),
-            false,
-        );
-        store.insert_captured_body_with_collector_scope(
-            "REQ-second".to_owned(),
-            CapturedBody::from_string("bb".to_owned()),
-            [None],
-            std::iter::empty::<String>(),
-            false,
-        );
-        store.insert_captured_body_with_collector_scope(
-            "REQ-third".to_owned(),
-            CapturedBody::from_string("ccc".to_owned()),
-            [None],
-            std::iter::empty::<String>(),
-            false,
+    fn browser_response_body_outlives_one_frontend_visibility_projection() {
+        let browser_artifacts = BrowserNetworkArtifactStore::default();
+        let mut first_frontend = TargetNetworkAgentState::default();
+        first_frontend.adopt_browser_network_artifact_store(browser_artifacts.clone());
+        first_frontend.record_captured_response_body(
+            "REQ-shared".to_owned(),
+            "host body".to_owned(),
+            [Some("SID-first".to_owned())],
         );
 
-        assert_eq!(store.buffered_body_bytes(), 5);
-        assert_eq!(
-            store
-                .get("REQ-first")
-                .expect("evicted metadata must remain addressable")
-                .body_bytes_limited(10)
-                .expect_err("oldest payload should be evicted")
-                .to_string(),
-            "Request content was evicted from inspector cache"
+        first_frontend.remove_captured_response_body_visibility_for_session(Some("SID-first"));
+        assert!(
+            first_frontend
+                .captured_response_body("REQ-shared")
+                .is_none()
         );
         assert_eq!(
-            store
-                .get("REQ-second")
-                .expect("second response should remain")
-                .body_bytes_limited(10)
-                .expect("second response body should remain readable"),
-            b"bb"
+            browser_artifacts
+                .response_body("REQ-shared")
+                .expect("Browser Host must retain the raw response artifact")
+                .body_bytes_limited(32)
+                .expect("retained response body should remain readable"),
+            b"host body"
         );
+        drop(first_frontend);
+
+        let mut second_frontend = TargetNetworkAgentState::default();
+        second_frontend.adopt_browser_network_artifact_store(browser_artifacts);
+        second_frontend
+            .record_pending_response_body("REQ-shared".to_owned(), [Some("SID-second".to_owned())]);
+        let projected = second_frontend
+            .captured_response_body("REQ-shared")
+            .expect("a later frontend projection should join the Host artifact");
+        assert!(projected.is_visible_to_session(Some("SID-second")));
         assert_eq!(
-            store
-                .get("REQ-third")
-                .expect("third response should remain")
-                .body_bytes_limited(10)
-                .expect("third response body should remain readable"),
-            b"ccc"
+            projected
+                .body_bytes_limited(32)
+                .expect("later frontend should read the Host body"),
+            b"host body"
         );
-    }
-
-    #[test]
-    fn response_body_store_returns_byte_charge_on_state_and_visibility_removal() {
-        let mut store =
-            CapturedResponseBodyStore::with_limits(moli_bounded_buffer::ByteLimits::new(8, 4));
-        store.insert_captured_body_with_collector_scope(
-            "REQ-failed".to_owned(),
-            CapturedBody::from_string("body".to_owned()),
-            [None],
-            std::iter::empty::<String>(),
-            false,
-        );
-        assert_eq!(store.buffered_body_bytes(), 4);
-        store.insert_failed_with_collector_scope(
-            "REQ-failed".to_owned(),
-            "network failed".to_owned(),
-            [None],
-            std::iter::empty::<String>(),
-            false,
-        );
-        assert_eq!(store.buffered_body_bytes(), 0);
-
-        store.insert_captured_body_with_collector_scope(
-            "REQ-session".to_owned(),
-            CapturedBody::from_string("abc".to_owned()),
-            [Some("SID-1".to_owned())],
-            std::iter::empty::<String>(),
-            false,
-        );
-        assert_eq!(store.buffered_body_bytes(), 3);
-        store.remove_session_visibility(Some("SID-1"));
-        assert_eq!(store.buffered_body_bytes(), 0);
-        assert!(store.get("REQ-session").is_none());
     }
 
     fn subresource_record(url: &str) -> SubresourceNetworkRecord {
@@ -2350,7 +2090,7 @@ mod tests {
             "a contextual id already bound to a request handle must not be consumed by an earlier unrelated backlog record"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             1,
             "only the unrelated record should allocate a new request id"
         );
@@ -2415,7 +2155,7 @@ mod tests {
             "REQ-bound"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "bound request id should not consume a new network id"
         );
@@ -2428,7 +2168,7 @@ mod tests {
             "REQ-1"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             1,
             "subsequent lookups should reuse the socket mapping"
         );
@@ -2600,7 +2340,7 @@ mod tests {
             "REQ-from-subresource"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "subresource output binding should not allocate a second request id"
         );
@@ -2818,7 +2558,7 @@ mod tests {
             "resolving already-bound WebSocket metadata must not consume the preferred id needed by the next ordinary subresource"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "synthetic WebSocket binding and preferred subresource id should not allocate fallback request ids"
         );
@@ -2906,7 +2646,7 @@ mod tests {
             "merged prepared tokens must preserve preferred-id availability across already-bound WebSocket metadata"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "merged synthetic WebSocket binding and preferred subresource id should not allocate fallback request ids"
         );
@@ -3020,7 +2760,7 @@ mod tests {
             "websocket subresource delivery must reuse the socket request id instead of inventing a second id"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             1,
             "reusing the existing socket request id should not allocate a second request id"
         );
@@ -3061,7 +2801,7 @@ mod tests {
             "visible subresource metadata owns the request id binding in the combined production path"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "preferred subresource binding should not allocate a synthetic WebSocket request id"
         );
@@ -3107,7 +2847,7 @@ mod tests {
             "the later ordinary subresource should still consume the preferred request id"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             1,
             "only the frame-only WebSocket path should allocate a fallback request id"
         );
@@ -3143,7 +2883,7 @@ mod tests {
             "frame delivery should reuse the same owner-resolved request id"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             0,
             "delivery snapshots should not allocate when subresource binding exists"
         );
@@ -3167,7 +2907,7 @@ mod tests {
             vec!["REQ-1"],
             "unbound handshake delivery should allocate a request id"
         );
-        assert_eq!(request_id_allocator.next_sequence_for_test(), 1);
+        assert_eq!(request_id_allocator.next_request_sequence_for_test(), 1);
 
         assert_eq!(
             websocket_frame_outputs(&pending_combined_snapshot_with_allocator(
@@ -3179,7 +2919,7 @@ mod tests {
             "frame delivery should reuse the request id allocated for the same socket"
         );
         assert_eq!(
-            request_id_allocator.next_sequence_for_test(),
+            request_id_allocator.next_request_sequence_for_test(),
             1,
             "frame delivery should not allocate another request id for the same socket"
         );

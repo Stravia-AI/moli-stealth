@@ -1117,7 +1117,7 @@ async fn runtime_evaluate_child_navigation_emits_child_frame_navigation_and_life
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({
@@ -1169,7 +1169,7 @@ async fn runtime_evaluate_timeout_child_navigation_emits_child_frame_navigation_
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({
@@ -1212,7 +1212,7 @@ async fn runtime_evaluate_child_location_navigation_emits_child_frame_navigation
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({
@@ -1293,7 +1293,7 @@ async fn runtime_evaluate_child_history_back_emits_child_frame_navigation_and_li
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .page_session_state
         .page_lifecycle_events = true;
     ctx.process_async(json!({

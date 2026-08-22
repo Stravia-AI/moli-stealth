@@ -135,7 +135,7 @@ pub(crate) fn complete_pending_autofill_command(
 ) -> CommandOutputPlan {
     let outcome = completed.completed.and_then(|completion| {
         conn.loaded_page_mut_for_protocol_access(completed.session_id.as_deref())
-            .and_then(|page| {
+            .and_then(|mut page| {
                 page.finish_autofill_trigger(completion)
                     .map_err(|error| error.to_string())
             })

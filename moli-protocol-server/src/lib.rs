@@ -3,6 +3,7 @@
 //! This crate owns the transport, frontend routing, and protocol actor
 //! scheduling used by CDP, WebDriver BiDi, and WebDriver Classic.
 
+mod browser_host;
 mod cdp_frontend;
 mod cdp_frontend_router;
 mod cdp_scheduler;
@@ -13,3 +14,6 @@ pub mod runtime_thread_budget;
 
 pub use config::ServerConfig;
 pub use protocol_server::ProtocolServer;
+
+#[cfg(test)]
+pub(crate) use moli_cookie_cache as cookie_cache;

@@ -1,8 +1,7 @@
 use moli_protocol::devtools_runtime::{
-    DevToolsCommand, DevToolsEvaluateScriptCommand, DevToolsGetNavigationHistoryCommand,
-    DevToolsGetNavigationHistoryResult, DevToolsGetOuterHtmlCommand, DevToolsGetTargetsCommand,
-    DevToolsHistoryTraversalDestination, DevToolsNavigateCommand, DevToolsNavigationWait,
-    DevToolsReloadCommand, DevToolsResultOwnership, DevToolsTargetId,
+    DevToolsCommand, DevToolsEvaluateScriptCommand, DevToolsGetOuterHtmlCommand,
+    DevToolsGetTargetsCommand, DevToolsHistoryTraversalDestination, DevToolsNavigateCommand,
+    DevToolsNavigationWait, DevToolsReloadCommand, DevToolsResultOwnership, DevToolsTargetId,
     DevToolsTraverseHistoryCommand,
 };
 use serde_json::Value;
@@ -77,36 +76,14 @@ pub fn refresh_command(
     })
 }
 
-pub fn navigation_history_command(context: &ClassicDevToolsCommandContext) -> DevToolsCommand {
-    DevToolsCommand::GetNavigationHistory(DevToolsGetNavigationHistoryCommand {
-        context: context.command_context(),
-    })
-}
-
-pub fn history_traversal_entry(
-    history: &DevToolsGetNavigationHistoryResult,
-    delta: i32,
-) -> Option<(i32, String)> {
-    let target_index = history.current_index as i64 + i64::from(delta);
-    if target_index < 0 || target_index >= history.entries.len() as i64 {
-        return None;
-    }
-    let entry = &history.entries[target_index as usize];
-    Some((entry.id, entry.url.clone()))
-}
-
 pub fn traverse_history_command(
     context: &ClassicDevToolsCommandContext,
-    entry_id: i32,
-    url: impl Into<String>,
+    delta: i64,
     wait: DevToolsNavigationWait,
 ) -> DevToolsCommand {
     DevToolsCommand::TraverseHistory(DevToolsTraverseHistoryCommand {
         context: context.command_context(),
-        destination: DevToolsHistoryTraversalDestination::Entry {
-            entry_id,
-            url: url.into(),
-        },
+        destination: DevToolsHistoryTraversalDestination::Delta(delta),
         wait,
     })
 }

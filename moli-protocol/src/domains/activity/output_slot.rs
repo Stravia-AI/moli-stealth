@@ -321,4 +321,18 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn dedicated_worker_lifecycle_can_unlock_awaiting_runtime_response() {
+        assert_eq!(
+            ProtocolOutputSlot::DedicatedWorkerTargetLifecycle.command_response_order(),
+            ProtocolOutputResponseOrder::BeforeResponse,
+            "attachedToTarget must be publishable while the creating Runtime command awaits the paused Worker"
+        );
+        assert_eq!(
+            ProtocolOutputSlot::DedicatedWorkerTargetLifecycle.delivery(),
+            ProtocolOutputDelivery::OwnerAction,
+            "worker auto-attach is progress, not a protocol-only observation"
+        );
+    }
 }

@@ -156,9 +156,8 @@ async fn same_context_background_session_can_stage_its_own_pre_document_state_be
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_devtools_state = active
-            .parked_page_session_state(staged.target_id())
-            .expect("staged page session state")
-            .devtools_session_state
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .expect("staged Target frontend state")
             .runtime_bindings
             .as_slice();
         assert_eq!(staged_devtools_state.len(), 1);
@@ -178,7 +177,7 @@ async fn same_context_background_session_can_stage_its_own_pre_document_state_be
             script_id
         );
         assert!(
-            active.devtools_session_state.runtime_bindings.is_empty(),
+            active.devtools_session_state().runtime_bindings.is_empty(),
             "active target DevTools session must not inherit staged target binding"
         );
         assert!(
@@ -354,9 +353,8 @@ async fn same_context_background_session_can_stage_its_own_utility_pre_document_
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_devtools_state = active
-            .parked_page_session_state(staged.target_id())
-            .expect("staged page session state")
-            .devtools_session_state
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .expect("staged Target frontend state")
             .runtime_bindings
             .as_slice();
         assert_eq!(staged_devtools_state.len(), 1);
@@ -383,7 +381,7 @@ async fn same_context_background_session_can_stage_its_own_utility_pre_document_
             script_id
         );
         assert!(
-            active.devtools_session_state.runtime_bindings.is_empty(),
+            active.devtools_session_state().runtime_bindings.is_empty(),
             "active target DevTools session must not inherit staged target binding"
         );
         assert!(
@@ -608,8 +606,8 @@ async fn same_context_background_session_can_remove_its_own_binding_before_promo
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_bindings_empty = active
-            .parked_page_session_state(staged.target_id())
-            .is_none_or(|state| state.devtools_session_state.runtime_bindings.is_empty());
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .is_none_or(|state| state.runtime_bindings.is_empty());
         assert!(
             staged_bindings_empty,
             "removed binding should be cleared from parked DevTools session"
@@ -766,9 +764,8 @@ async fn same_context_background_session_can_remove_its_own_preload_before_promo
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_bindings = &active
-            .parked_page_session_state(staged.target_id())
-            .expect("staged page session state")
-            .devtools_session_state
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .expect("staged Target frontend state")
             .runtime_bindings;
         assert_eq!(staged_bindings.len(), 1);
         assert!(
@@ -918,8 +915,8 @@ async fn same_context_background_session_can_remove_its_own_utility_binding_befo
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_bindings_empty = active
-            .parked_page_session_state(staged.target_id())
-            .is_none_or(|state| state.devtools_session_state.runtime_bindings.is_empty());
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .is_none_or(|state| state.runtime_bindings.is_empty());
         assert!(
             staged_bindings_empty,
             "removed utility binding should be cleared from parked DevTools session"
@@ -1101,9 +1098,8 @@ async fn same_context_background_session_can_remove_its_own_utility_preload_befo
             .background_target(&second_target_id)
             .expect("staged background target");
         let staged_bindings = &active
-            .parked_page_session_state(staged.target_id())
-            .expect("staged page session state")
-            .devtools_session_state
+            .primary_devtools_session_state_for_target(staged.target_id())
+            .expect("staged Target frontend state")
             .runtime_bindings;
         assert_eq!(staged_bindings.len(), 1);
         assert_eq!(
@@ -3487,33 +3483,19 @@ async fn same_context_background_session_can_stage_its_own_page_settings_before_
             .as_ref()
             .expect("active browser context");
         let staged = active
-            .parked_page_session_state(&second_target_id)
-            .expect("staged page settings for background target");
-        assert!(
-            staged
-                .devtools_session_state
-                .page_session_state
-                .page_bypass_csp_enabled
-        );
+            .primary_devtools_session_state_for_target(&second_target_id)
+            .expect("staged frontend settings for background target");
+        assert!(staged.page_session_state.page_bypass_csp_enabled);
         assert_eq!(
-            staged
-                .devtools_session_state
-                .page_session_state
-                .page_font_families
-                .get("standard"),
+            staged.page_session_state.page_font_families.get("standard"),
             Some(&json!("Georgia"))
         );
         assert_eq!(
-            staged
-                .devtools_session_state
-                .page_session_state
-                .page_font_families
-                .get("fixed"),
+            staged.page_session_state.page_font_families.get("fixed"),
             Some(&json!("Fira Code"))
         );
         assert!(
             staged
-                .devtools_session_state
                 .page_session_state
                 .page_intercept_file_chooser_dialog_enabled
         );
@@ -3535,13 +3517,13 @@ async fn same_context_background_session_can_stage_its_own_page_settings_before_
     assert_eq!(active.active_target_id(), Some(second_target_id.as_str()));
     assert!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .page_bypass_csp_enabled
     );
     assert_eq!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .page_font_families
             .get("standard"),
@@ -3549,7 +3531,7 @@ async fn same_context_background_session_can_stage_its_own_page_settings_before_
     );
     assert_eq!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .page_font_families
             .get("fixed"),
@@ -3557,7 +3539,7 @@ async fn same_context_background_session_can_stage_its_own_page_settings_before_
     );
     assert!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .page_session_state
             .page_intercept_file_chooser_dialog_enabled
     );
@@ -4300,19 +4282,14 @@ async fn same_context_background_session_can_stage_its_own_lifecycle_events_befo
             .expect("active browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_lifecycle_events
         );
         let staged = active
-            .parked_page_session_state(&second_target_id)
-            .expect("second target should have staged parked page session state");
-        assert!(
-            staged
-                .devtools_session_state
-                .page_session_state
-                .page_lifecycle_events
-        );
+            .primary_devtools_session_state_for_target(&second_target_id)
+            .expect("second target should have staged frontend state");
+        assert!(staged.page_session_state.page_lifecycle_events);
     }
 
     ctx.process_async(json!({
@@ -4478,7 +4455,7 @@ async fn same_context_background_session_can_disable_its_own_lifecycle_events_be
             .expect("active browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .page_session_state
                 .page_lifecycle_events
         );
@@ -4616,19 +4593,14 @@ async fn same_context_background_session_can_stage_its_own_runtime_enable_before
             .expect("active browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
         let staged = active
-            .parked_page_session_state(&second_target_id)
-            .expect("second target should have staged parked page session state");
-        assert!(
-            staged
-                .devtools_session_state
-                .runtime_session_state
-                .runtime_frontend_enabled
-        );
+            .primary_devtools_session_state_for_target(&second_target_id)
+            .expect("second target should have staged frontend state");
+        assert!(staged.runtime_session_state.runtime_frontend_enabled);
     }
 
     ctx.process_async(json!({
@@ -4843,11 +4815,8 @@ async fn same_context_loaded_background_session_runtime_enable_replays_context_w
             "direct Runtime.enable should not promote the loaded background target"
         );
         assert!(
-            bc.parked_page_session_state(&second_target_id)
-                .is_some_and(|state| state
-                    .devtools_session_state
-                    .runtime_session_state
-                    .runtime_frontend_enabled),
+            bc.primary_devtools_session_state_for_target(&second_target_id)
+                .is_some_and(|state| state.runtime_session_state.runtime_frontend_enabled),
             "Runtime.enable should be staged on the background target owner"
         );
         assert!(
@@ -5132,6 +5101,10 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
                         )
                 })
         },
+    )
+    .await;
+    ctx.wait_for_only_background_navigation_gate_to_settle(
+        "named background popup navigation disposal and replay",
     )
     .await;
     let emitted = ctx.take_all();
@@ -5544,7 +5517,7 @@ async fn same_context_background_session_can_disable_its_own_runtime_before_prom
             .expect("active browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .runtime_frontend_enabled
         );
@@ -5692,19 +5665,14 @@ async fn same_context_background_session_can_stage_its_own_inspector_enable_befo
         );
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );
         let staged = active
-            .parked_page_session_state(&second_target_id)
-            .expect("second target should have staged parked page session state");
-        assert!(
-            staged
-                .devtools_session_state
-                .runtime_session_state
-                .inspector_enabled
-        );
+            .primary_devtools_session_state_for_target(&second_target_id)
+            .expect("second target should have staged frontend state");
+        assert!(staged.runtime_session_state.inspector_enabled);
     }
     assert!(
         !ctx.sent.iter().any(|message| {
@@ -5835,7 +5803,7 @@ async fn same_context_background_session_can_disable_its_own_inspector_before_pr
             .expect("active browser context");
         assert!(
             !active
-                .devtools_session_state
+                .devtools_session_state()
                 .runtime_session_state
                 .inspector_enabled
         );

@@ -4,6 +4,7 @@ use super::parking::TargetOwnerState;
 use super::runtime_slot::TargetRuntimeSlot;
 use super::session_storage::TargetSessionStorageNamespace;
 use crate::domains::audits_output_state::TargetAuditsSessionState;
+use moli_core::browser_host::BrowserTargetHandle;
 use moli_core::page::V8InspectorSessionState;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -61,6 +62,7 @@ impl TargetPerformanceSessionState {
 
 #[derive(Debug, Default)]
 pub(crate) struct ActiveTargetState {
+    pub(crate) target_handle: Option<BrowserTargetHandle>,
     pub(crate) runtime_slot: TargetRuntimeSlot,
     pub(crate) fetch_owner: TargetFetchOwner,
     pub(crate) owner_state: TargetOwnerState,

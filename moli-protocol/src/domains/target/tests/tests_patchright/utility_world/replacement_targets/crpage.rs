@@ -317,7 +317,7 @@ async fn patchright_over_cdp_utility_world_init_persists_across_targets_without_
     );
     assert!(
         active
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {

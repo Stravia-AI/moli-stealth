@@ -498,16 +498,16 @@ impl BidiLogEventState {
                     owner_context,
                 )
                 .or_else(|| {
-                    owner_scoped_service_worker_realm_id_from_protocol_context(
-                        aux_data,
-                        owner_context,
-                    )
-                })
-                .or_else(|| {
                     context
                         .get("uniqueId")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
+                })
+                .or_else(|| {
+                    owner_scoped_service_worker_realm_id_from_protocol_context(
+                        aux_data,
+                        owner_context,
+                    )
                 })
                 .unwrap_or_else(|| execution_context_id.to_string());
                 let browsing_context = owner_context

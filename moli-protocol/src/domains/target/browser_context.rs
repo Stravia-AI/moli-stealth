@@ -163,7 +163,7 @@ fn devtools_service_worker_log_target_ids(
         if browser_context_filter.is_some_and(|filter| browser_context.id != filter) {
             continue;
         }
-        for target_info in browser_context.devtools_target_infos() {
+        for target_info in browser_context.devtools_worker_target_infos() {
             if target_info.kind != DevToolsTargetKind::ServiceWorker {
                 continue;
             }
@@ -312,7 +312,7 @@ pub(super) fn execute_devtools_create_browser_context_command(
         normalize_proxy_bypass_list_for_loader(command.proxy_bypass_list.as_deref());
     browser_context.proxy_autoconfig_url = command.proxy_autoconfig_url;
     browser_context.proxy_socks_version = command.proxy_socks_version;
-    conn.insert_browser_context(browser_context);
+    conn.try_insert_browser_context(browser_context)?;
     Ok(DevToolsCreateBrowserContextResult {
         browser_context_id: crate::devtools_runtime::DevToolsBrowserContextId::from(id),
     })
@@ -361,18 +361,17 @@ pub(super) async fn execute_devtools_remove_browser_context_command_async(
         );
     }
 
-    let mut protocol_events = Vec::new();
-    if should_emit_internal_lifecycle {
-        protocol_events.extend(target_destroyed_automation_events_for_browser_context(
-            conn,
-            &browser_context_id,
-        ));
-    }
+    let prefix_events = if should_emit_internal_lifecycle {
+        target_destroyed_automation_events_for_browser_context(conn, &browser_context_id)
+    } else {
+        Vec::new()
+    };
     let mut side_effects = events::TargetProtocolSideEffects::default();
     let mut command_context = crate::conn::CommandDispatchContext::default();
     if let Err(error) = super::browser_context_disposal::execute_browser_context_disposal_async(
         conn,
         browser_context_id,
+        prefix_events,
         &mut side_effects,
         &mut command_context,
     )
@@ -380,6 +379,7 @@ pub(super) async fn execute_devtools_remove_browser_context_command_async(
     {
         return (Err(error), Vec::new());
     }
+    let mut protocol_events = Vec::new();
     protocol_events.extend(side_effects.into_background_events());
     protocol_events.extend(command_context.take_protocol_events());
     (Ok(DevToolsCommandResult::Empty), protocol_events)
@@ -402,37 +402,39 @@ pub(super) fn devtools_browser_target_info() -> DevToolsTargetInfo {
     }
 }
 
-fn devtools_target_infos(
+pub(in crate::domains) fn devtools_target_infos(
     conn: &CdpConnection,
     root: Option<&DevToolsTargetId>,
     filter: Option<&[DevToolsTargetFilterEntry]>,
 ) -> Result<Vec<DevToolsTargetInfo>, DevToolsError> {
     let mut targets = Vec::new();
-    for browser_context in conn.browser_contexts() {
-        for mut target_info in browser_context.devtools_target_infos() {
-            if let Some(message) =
-                super::transient_no_page_devtools_target_info_error(conn, &target_info)
-            {
-                return Err(DevToolsError::new(DevToolsErrorKind::Internal, message));
-            }
-            if let Some(target_id) = target_info.target_id.as_ref() {
-                target_info.moli_popup_id = browser_context.target_popup_id(target_id.as_str());
-            }
-            if let Some(tab_target_info) = conn.tab_target_info_for_page_target_info(&target_info)
-                && target_info_matches_root(&tab_target_info, root)
-                && target_filter_allows_info(filter, &tab_target_info)
-            {
-                targets.push(tab_target_info);
-            }
-            if !target_info_matches_root(&target_info, root)
-                || !target_filter_allows_info(filter, &target_info)
-            {
-                continue;
-            }
-            targets.push(target_info);
+    for target_info in current_devtools_target_infos(conn)? {
+        if let Some(message) =
+            super::transient_no_page_devtools_target_info_error(conn, &target_info)
+        {
+            return Err(DevToolsError::new(DevToolsErrorKind::Internal, message));
         }
+        if let Some(tab_target_info) = conn.tab_target_info_for_page_target_info(&target_info)
+            && target_info_matches_root(&tab_target_info, root)
+            && target_filter_allows_info(filter, &tab_target_info)
+        {
+            targets.push(tab_target_info);
+        }
+        if !target_info_matches_root(&target_info, root)
+            || !target_filter_allows_info(filter, &target_info)
+        {
+            continue;
+        }
+        targets.push(target_info);
     }
     Ok(targets)
+}
+
+pub(in crate::domains) fn current_devtools_target_infos(
+    conn: &CdpConnection,
+) -> Result<Vec<DevToolsTargetInfo>, DevToolsError> {
+    let snapshot = conn.capture_browser_top_level_target_snapshot()?;
+    conn.project_devtools_target_infos_from_browser_snapshot(&snapshot)
 }
 
 pub(in crate::domains) fn devtools_target_infos_for_discovery(
@@ -486,7 +488,7 @@ pub(in crate::domains) fn target_filter_allows_type(
     false
 }
 
-fn target_destroyed_automation_events_for_browser_context(
+pub(super) fn target_destroyed_automation_events_for_browser_context(
     conn: &CdpConnection,
     browser_context_id: &str,
 ) -> Vec<BackgroundProtocolEvent> {
@@ -574,7 +576,11 @@ struct DisposeBcParams {
     browser_context_id: Option<String>,
 }
 
-pub(super) fn start_dispose_browser_context_command(cmd: &Cmd<'_>) -> TargetCommandTaskStep {
+pub(super) fn start_dispose_browser_context_command(
+    conn: &mut CdpConnection,
+    cmd: &Cmd<'_>,
+    command_context: &crate::conn::CommandDispatchContext,
+) -> TargetCommandTaskStep {
     let params: DisposeBcParams = match cmd.get_params() {
         Ok(Some(p)) => p,
         _ => {
@@ -587,28 +593,26 @@ pub(super) fn start_dispose_browser_context_command(cmd: &Cmd<'_>) -> TargetComm
             return super::target_command_error(-32602, "InvalidParams");
         }
     };
-    pending_dispose_browser_context_command(cmd.id, cmd.session_id, wanted_id)
-}
-
-pub(super) async fn complete_dispose_browser_context_command_async(
-    conn: &mut CdpConnection,
-    wanted_id: String,
-    command_context: &mut crate::conn::CommandDispatchContext,
-) -> CommandOutputPlan {
-    let mut side_effects = events::TargetProtocolSideEffects::default();
-    match super::browser_context_disposal::execute_browser_context_disposal_async(
-        conn,
-        wanted_id,
-        &mut side_effects,
-        command_context,
-    )
-    .await
-    {
-        Ok(()) => {
-            let mut plan = CommandOutputPlan::success();
-            plan.extend(side_effects.into_plan());
-            plan
-        }
-        Err(error) => CommandOutputPlan::from_devtools_error(error),
+    let Some(browser_context_handle) = conn
+        .browser_context_by_id(&wanted_id)
+        .map(|context| context.browser_context_handle().clone())
+    else {
+        return TargetCommandTaskStep::Complete(CommandOutputPlan::from_devtools_error(
+            DevToolsError::new(
+                DevToolsErrorKind::Internal,
+                format!("Failed to find context with id {wanted_id}"),
+            ),
+        ));
+    };
+    match conn.publish_browser_owner_context_disposal_command(
+        browser_context_handle,
+        Vec::new(),
+        command_context.detached_participant_context(),
+    ) {
+        Ok(pending) => pending_dispose_browser_context_command(cmd.id, cmd.session_id, pending),
+        Err(error) => TargetCommandTaskStep::Complete(CommandOutputPlan::error_without_session(
+            -32000,
+            format!("BrowserHostContextDisposalAdmissionFailed: {error}"),
+        )),
     }
 }

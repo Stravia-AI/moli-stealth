@@ -321,6 +321,125 @@ async fn enable_with_page_can_complete_through_pending_command_task() {
 }
 
 #[tokio::test]
+async fn node_result_normalization_is_an_owned_runtime_command_phase() {
+    let mut ctx = TestContext::new();
+    with_loaded_document_async(&mut ctx, "<!doctype html><body>node</body>").await;
+
+    let raw = json!({
+        "id": 11_003,
+        "method": "Runtime.evaluate",
+        "params": { "expression": "document.body" }
+    })
+    .to_string();
+    let first = match ctx.conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => *pending,
+        CdpCommandTaskStep::Complete(_) => {
+            panic!("Runtime.evaluate should first wait for its Inspector dispatch")
+        }
+    };
+    assert!(
+        !first.owns_runtime_protocol_message_normalization_for_test(),
+        "the initial participant should still be the renderer Inspector dispatch"
+    );
+
+    let second = match ctx
+        .conn
+        .complete_pending_command_dispatch(first.wait().await)
+        .await
+    {
+        CdpCommandTaskStep::Pending(pending) => *pending,
+        CdpCommandTaskStep::Complete(_) => {
+            panic!("DOM remote-object normalization must be exposed as a second participant")
+        }
+    };
+    assert!(
+        second.owns_runtime_protocol_message_normalization_for_test(),
+        "the command must own its exact-Page DOM-node normalization wait"
+    );
+
+    let (messages, scheduler_events) =
+        complete_pending_command_task_for_test(&mut ctx, second).await;
+    assert!(scheduler_events.is_empty());
+    let response = messages
+        .iter()
+        .find(|message| message["id"] == json!(11_003))
+        .expect("Runtime.evaluate should retain its command response");
+    assert_eq!(response["result"]["result"]["subtype"], json!("node"));
+}
+
+#[tokio::test]
+async fn stale_owned_runtime_normalization_does_not_enter_replacement_page() {
+    let mut ctx = TestContext::new();
+    with_loaded_document_async(&mut ctx, "<!doctype html><body>old</body>").await;
+    let old_attachment = ctx
+        .conn
+        .current_renderer_agent_attachment_id_for_session_owner(None)
+        .expect("the old Page should have an exact renderer attachment");
+
+    let raw = json!({
+        "id": 11_004,
+        "method": "Runtime.evaluate",
+        "params": { "expression": "document.body" }
+    })
+    .to_string();
+    let first = match ctx.conn.start_command_dispatch(&raw) {
+        CdpCommandTaskStep::Pending(pending) => *pending,
+        CdpCommandTaskStep::Complete(_) => panic!("Runtime.evaluate should dispatch to Inspector"),
+    };
+    let normalization = match ctx
+        .conn
+        .complete_pending_command_dispatch(first.wait().await)
+        .await
+    {
+        CdpCommandTaskStep::Pending(pending) => *pending,
+        CdpCommandTaskStep::Complete(_) => panic!("node normalization should remain pending"),
+    };
+    assert!(normalization.owns_runtime_protocol_message_normalization_for_test());
+    let completed_normalization = normalization.wait().await;
+
+    let replacement = ctx
+        .conn
+        .load_page_via_runtime_async("data:text/html,<!doctype html><body>replacement</body>")
+        .await
+        .expect("replacement Page should load");
+    let old_page = ctx
+        .conn
+        .runtime_session_owner_slot_mut(None)
+        .expect("the target should remain resident")
+        .clear_loaded_page_for_test_fixture();
+    drop(old_page);
+    ctx.conn
+        .runtime_session_owner_slot_mut(None)
+        .expect("the replacement target should remain resident")
+        .set_loaded_page_for_test(replacement);
+    let replacement_attachment = ctx
+        .conn
+        .current_renderer_agent_attachment_id_for_session_owner(None)
+        .expect("the replacement Page should have an exact renderer attachment");
+    assert_ne!(old_attachment, replacement_attachment);
+
+    let step = ctx
+        .conn
+        .complete_pending_command_dispatch(completed_normalization)
+        .await;
+    let (messages, scheduler_events) = complete_command_task_step_for_test(&mut ctx, step).await;
+    assert!(scheduler_events.is_empty());
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["id"] == json!(11_004) && message.get("error").is_some()),
+        "stale Runtime output should terminate the command with an error: {messages:?}"
+    );
+    assert_eq!(
+        ctx.conn
+            .current_renderer_agent_attachment_id_for_session_owner(None),
+        Some(replacement_attachment),
+        "stale normalization must leave the successor attachment untouched"
+    );
+    assert!(!ctx.conn.has_pending_inspector_awaits());
+}
+
+#[tokio::test]
 async fn loaded_page_runtime_enable_projection_waits_for_v8_success() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(&mut ctx, "<html><title>ok</title><body></body></html>").await;
@@ -336,7 +455,7 @@ async fn loaded_page_runtime_enable_projection_waits_for_v8_success() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled,
         "protocol Runtime.enabled projection must not flip before V8 Runtime.enable succeeds"
@@ -358,7 +477,7 @@ async fn loaded_page_runtime_enable_projection_waits_for_v8_success() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled,
         "protocol Runtime.enabled projection should flip after V8 Runtime.enable succeeds"
@@ -522,11 +641,6 @@ async fn loaded_page_runtime_agent_state_commands_dispatch_after_runtime_enable(
 async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(&mut ctx, "<!doctype html><body>before</body>").await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist")
-        .set_active_target_id("TID-runtime-agent-restore");
     enable_runtime_and_take_execution_context_id_async(&mut ctx, 11_016).await;
 
     for (id, method, params) in [
@@ -561,7 +675,7 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
         .expect("browser context should exist");
     assert!(
         browser_context
-            .devtools_session_state
+            .devtools_session_state()
             .inspector_session_state
             .v8_state
             .is_some(),
@@ -612,11 +726,6 @@ async fn runtime_agent_configuration_is_restored_on_replacement_page_isolate() {
 async fn opaque_reattach_state_wins_over_conflicting_runtime_listener_configuration() {
     let mut ctx = TestContext::new();
     with_loaded_document_async(&mut ctx, "<!doctype html><body>before</body>").await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist")
-        .set_active_target_id("TID-runtime-reattach-precedence");
 
     ctx.process_async(json!({"id": 11_023, "method": "Runtime.enable"}))
         .await;
@@ -632,14 +741,14 @@ async fn opaque_reattach_state_wins_over_conflicting_runtime_listener_configurat
         .expect("browser context should exist");
     assert!(
         browser_context
-            .devtools_session_state
+            .devtools_session_state()
             .inspector_session_state
             .v8_state
             .is_some(),
         "successful Runtime.disable must persist the disabled V8 agent cookie"
     );
     browser_context
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -1714,7 +1823,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
@@ -1727,7 +1836,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
@@ -1740,7 +1849,7 @@ async fn enable_and_disable_update_browser_context_runtime_flag() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_session_state
             .runtime_frontend_enabled
     );
@@ -1770,8 +1879,8 @@ async fn evaluate_rejects_default_context_while_main_document_navigation_is_pend
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
     browser_context.set_target_url("data:text/html,previous".to_owned());
-    browser_context
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+    ctx.conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
     ctx.sent.clear();
 
@@ -1820,10 +1929,7 @@ async fn evaluate_started_before_pending_navigation_can_complete() {
         .to_string(),
     );
     ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist")
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
 
     let (messages, _scheduler_events) = complete_command_task_step_for_test(&mut ctx, step).await;
@@ -1856,8 +1962,8 @@ async fn evaluate_rejects_auxiliary_session_while_main_document_navigation_is_pe
         "auxiliary session should attach to the active target"
     );
     browser_context.set_target_url("data:text/html,previous".to_owned());
-    browser_context
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+    ctx.conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
     assert!(
         ctx.conn
@@ -1895,8 +2001,8 @@ async fn dom_get_document_rejects_while_main_document_navigation_is_pending() {
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
     browser_context.set_target_url("data:text/html,previous".to_owned());
-    browser_context
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+    ctx.conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
     ctx.sent.clear();
 
@@ -1922,31 +2028,27 @@ async fn document_navigation_gate_is_scoped_to_background_target_owner() {
     browser_context.set_active_target_id("TID-active");
     browser_context.attach_active_session("SID-active");
     browser_context
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
     browser_context.background_targets.push(background_target);
-    ctx.conn.browser_context = Some(browser_context);
+    ctx.conn.insert_browser_context(browser_context);
     ctx.install_navigation_fixture_for_session_owner(
-        "data:text/html,<html><title>active</title></html>",
+        "data:text/html,<!doctype html><title>active</title>",
         Some("SID-active"),
     )
     .await;
-    ctx.install_navigation_fixture_for_session_owner(
-        "data:text/html,<html><title>background</title></html>",
-        Some("SID-background"),
-    )
-    .await;
-    let browser_context = ctx.conn.browser_context.as_mut().expect("browser context");
-    browser_context.mutate_parked_page_session_state("TID-background", |state| {
-        state
-            .devtools_session_state
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-    });
-    browser_context
-        .start_document_navigation_for_target(
-            "TID-background",
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .expect("browser context fixture")
+        .primary_devtools_session_state_for_target_mut("TID-background")
+        .expect("background Target frontend state")
+        .runtime_session_state
+        .runtime_frontend_enabled = true;
+    ctx.conn
+        .start_document_navigation_for_session_owner(
+            Some("SID-background"),
             "PENDING-BACKGROUND-LOADER".to_owned(),
         )
         .expect("background document navigation should start");
@@ -2297,16 +2399,16 @@ async fn page_navigate_network_failure_commits_error_document() {
     );
     let old_document_token = ctx
         .conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .start_document_navigation_for_active_target("LOADER-before-network-error".to_owned())
+        .start_document_navigation_for_session_owner(
+            Some("SID-1"),
+            "LOADER-before-network-error".to_owned(),
+        )
         .expect("loaded document token");
     ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .commit_document_navigation_if_matches(&old_document_token);
+        .commit_document_navigation_for_session_owner_if_matches(
+            Some("SID-1"),
+            &old_document_token,
+        );
     let before_target_page = ctx
         .conn
         .target_page_residence_identity_for_session(Some("SID-1"))
@@ -2424,12 +2526,12 @@ async fn page_navigate_network_failure_commits_error_document() {
         .and_then(BrowserContext::loaded_page)
         .expect("network error Document should remain loaded");
     assert_eq!(page.final_url().as_str(), NETWORK_ERROR_PAGE_URL);
+    drop(page);
     assert!(
-        !ctx.conn
-            .browser_context
-            .as_ref()
-            .expect("browser context")
-            .accepts_document_body_completion_event(&old_document_token),
+        !ctx.conn.accepts_document_body_completion_for_session_owner(
+            Some("SID-1"),
+            &old_document_token,
+        ),
         "the retired document generation must not accept late completion"
     );
     let error_document_loader_id = ctx
@@ -2446,7 +2548,7 @@ async fn page_navigate_network_failure_commits_error_document() {
             frame_id: "TID-1".to_owned(),
             session_id: Some("SID-1".to_owned()),
             request_id: Some(stale_request_id.to_owned()),
-            loader_id: old_document_token.loader_id.clone(),
+            loader_id: old_document_token.loader_id().to_owned(),
             request_announced: true,
             requested_url: url::Url::parse("https://stale.example.test/old-body").unwrap(),
             request_method: "GET".to_owned(),
@@ -2470,11 +2572,13 @@ async fn page_navigate_network_failure_commits_error_document() {
         vec![("content-type".to_owned(), "text/plain".to_owned())],
         false,
     );
-    let (stale_completion_messages, stale_completion_scheduler_events) = ctx
+    let (stale_completion_outcome, stale_completion_disposition) = ctx
         .conn
         .drain_background_navigation_completion_turn_async(stale_body_completion)
-        .await
-        .into_parts();
+        .await;
+    assert!(stale_completion_disposition.is_terminal());
+    let (stale_completion_messages, stale_completion_scheduler_events) =
+        stale_completion_outcome.into_parts();
     assert!(stale_completion_messages.is_empty());
     assert!(stale_completion_scheduler_events.is_empty());
     assert_eq!(
@@ -2506,7 +2610,7 @@ async fn page_navigate_network_failure_commits_error_document() {
         ctx.conn
             .target_page_residence_identity_for_session(Some("SID-1")),
         Some(before_target_page),
-        "current master installs navigation Documents as a new target Page attachment"
+        "current master installs navigation Documents as a new target Page generation"
     );
     assert_ne!(
         ctx.conn
@@ -2714,8 +2818,9 @@ async fn evaluate_can_complete_through_pending_command_dispatch() {
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("simple Runtime.evaluate should start as a pending command");
-    let (mut messages, scheduler_events) =
-        super::complete_pending_command_task_for_test(&mut ctx, pending).await;
+    let completed = pending.wait().await;
+    let outcome = ctx.conn.complete_pending_command_dispatch(completed).await;
+    let (mut messages, scheduler_events) = outcome.into_parts();
 
     let msg = messages
         .pop()
@@ -2978,7 +3083,11 @@ async fn isolated_evaluate_can_complete_through_pending_command_dispatch() {
         .conn
         .try_start_pending_command_dispatch(&raw)
         .expect("Runtime.evaluate with isolated contextId should start as a pending command");
-    let (messages, _) = super::complete_pending_command_task_for_test(&mut ctx, pending).await;
+    let outcome = ctx
+        .conn
+        .complete_pending_command_dispatch(pending.wait().await)
+        .await;
+    let (messages, _) = outcome.into_parts();
     let response = messages
         .iter()
         .find(|message| message["id"] == json!(3_022))
@@ -3028,8 +3137,11 @@ async fn call_function_context_resolution_can_complete_through_pending_command_d
         .conn
         .try_start_pending_command_dispatch(&isolated_raw)
         .expect("Runtime.callFunctionOn with isolated executionContextId should start pending");
-    let (isolated_messages, _) =
-        super::complete_pending_command_task_for_test(&mut ctx, isolated_pending).await;
+    let isolated_outcome = ctx
+        .conn
+        .complete_pending_command_dispatch(isolated_pending.wait().await)
+        .await;
+    let (isolated_messages, _) = isolated_outcome.into_parts();
     let isolated_response = isolated_messages
         .iter()
         .find(|message| message["id"] == json!(3_025))
@@ -3049,8 +3161,11 @@ async fn call_function_context_resolution_can_complete_through_pending_command_d
         .conn
         .try_start_pending_command_dispatch(&default_raw)
         .expect("Runtime.callFunctionOn without objectId should start pending");
-    let (default_messages, _) =
-        super::complete_pending_command_task_for_test(&mut ctx, default_pending).await;
+    let default_outcome = ctx
+        .conn
+        .complete_pending_command_dispatch(default_pending.wait().await)
+        .await;
+    let (default_messages, _) = default_outcome.into_parts();
     let default_response = default_messages
         .iter()
         .find(|message| message["id"] == json!(3_026))
@@ -3183,8 +3298,11 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .conn
         .try_start_pending_command_dispatch(&heap_raw)
         .expect("Runtime.getHeapUsage should start as a pending command");
-    let (heap_messages, _) =
-        super::complete_pending_command_task_for_test(&mut ctx, heap_pending).await;
+    let heap_outcome = ctx
+        .conn
+        .complete_pending_command_dispatch(heap_pending.wait().await)
+        .await;
+    let (heap_messages, _) = heap_outcome.into_parts();
     let heap_response = heap_messages
         .iter()
         .find(|message| message["id"] == json!(3_08))
@@ -3218,8 +3336,11 @@ async fn heap_usage_and_release_group_can_complete_through_pending_command_dispa
         .conn
         .try_start_pending_command_dispatch(&release_group_raw)
         .expect("Runtime.releaseObjectGroup should start as a pending command");
-    let (release_group_messages, _) =
-        super::complete_pending_command_task_for_test(&mut ctx, release_group_pending).await;
+    let release_group_outcome = ctx
+        .conn
+        .complete_pending_command_dispatch(release_group_pending.wait().await)
+        .await;
+    let (release_group_messages, _) = release_group_outcome.into_parts();
     let release_group_response = release_group_messages
         .iter()
         .find(|message| message["id"] == json!(3_10))
@@ -6616,7 +6737,7 @@ async fn runtime_evaluate_dom_parser_query_apis_reuse_existing_detached_node_ide
 #[tokio::test]
 async fn registered_named_world_object_handles_remain_callable_after_navigation() {
     let mut ctx = TestContext::new();
-    let (background_tx, mut background_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (background_tx, mut background_rx) = crate::conn::browser_background_output_channel();
     ctx.conn.set_background_event_sender(background_tx);
     with_loaded_document_async(&mut ctx, "<html><body>before</body></html>").await;
     let bc = ctx
@@ -6626,7 +6747,7 @@ async fn registered_named_world_object_handles_remain_callable_after_navigation(
         .expect("browser context should exist");
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -6716,7 +6837,7 @@ async fn registered_named_world_object_handles_remain_callable_after_navigation(
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn.insert_browser_context(other_context);
     assert!(
         ctx.conn.activate_browser_context_by_id_async("BID-2").await,
         "test setup should switch the active context away from the pending Runtime.callFunctionOn owner"
@@ -6768,7 +6889,7 @@ async fn call_function_on_rejects_object_id_known_to_different_target_owner() {
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn.insert_browser_context(other_context);
 
     ctx.process_async(json!({
         "id": 513,
@@ -6954,7 +7075,7 @@ async fn call_function_on_rejects_dom_resolve_node_object_id_from_different_targ
     let mut other_context = crate::conn::BrowserContext::new("BID-2".into());
     other_context.set_active_target_id("TID-2");
     other_context.attach_active_session("SID-2");
-    ctx.conn.inactive_browser_contexts.push(other_context);
+    ctx.conn.insert_browser_context(other_context);
 
     ctx.process_async(json!({
         "id": 518,

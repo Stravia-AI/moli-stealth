@@ -174,19 +174,12 @@ async fn get_target_info_reports_background_target_in_same_browser_context() {
 async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
     let mut ctx = TestContext::new();
     ctx.conn.auto_attach = true;
-    let browser_context = ctx
+    let mut browser_context = ctx
         .conn
         .new_browser_context("BID-popup-diagnostics".to_owned());
+    browser_context.set_active_target_id("TID-popup-opener");
+    browser_context.attach_active_session("SID-popup-opener");
     ctx.conn.insert_browser_context(browser_context);
-    {
-        let browser_context = ctx
-            .conn
-            .browser_context
-            .as_mut()
-            .expect("browser context should be active");
-        browser_context.set_active_target_id("TID-popup-opener");
-        browser_context.attach_active_session("SID-popup-opener");
-    }
 
     let opener_page = ctx
         .conn
@@ -358,8 +351,7 @@ async fn attach_to_target_keeps_background_target_parked_when_active_target_has_
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
     assert_eq!(
@@ -1343,31 +1335,8 @@ async fn activate_target_chain_restores_multiple_set_auto_attach_background_load
         .as_mut()
         .unwrap()
         .attach_active_session("SID-active");
-    {
-        let bc = ctx.conn.browser_context.as_mut().unwrap();
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-000000000F".into(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "about:blank#second".into(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-0000000010".into(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "about:blank#third".into(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-    }
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#second", None);
+    push_background_target(&mut ctx, "TID-0000000010", "about:blank#third", None);
 
     ctx.process_async(json!({
         "id": 1835,
@@ -1544,31 +1513,8 @@ async fn close_target_restores_loaded_runtime_to_previous_set_auto_attach_target
         .as_mut()
         .unwrap()
         .attach_active_session("SID-active");
-    {
-        let bc = ctx.conn.browser_context.as_mut().unwrap();
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-000000000F".into(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "about:blank#second".into(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-        bc.background_targets
-            .push(crate::conn::BackgroundTarget::new(
-                "TID-0000000010".into(),
-                None,
-                crate::conn::TargetIdentityState::new(
-                    "about:blank#third".into(),
-                    crate::conn::URL_BASE.into(),
-                    "Secure".into(),
-                ),
-                crate::conn::TargetPageSlot::empty_for_test_fixture(),
-            ));
-    }
+    push_background_target(&mut ctx, "TID-000000000F", "about:blank#second", None);
+    push_background_target(&mut ctx, "TID-0000000010", "about:blank#third", None);
 
     ctx.process_async(json!({
         "id": 1846,
@@ -1771,8 +1717,10 @@ async fn detach_from_target_clears_background_target_session() {
         .expect("active browser context");
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert!(
-        bc.background_target(&second_target_id)
-            .is_some_and(|target| target.session_id().is_none()),
+        bc.background_target(&second_target_id).is_some()
+            && bc
+                .primary_session_id_for_target(&second_target_id)
+                .is_none(),
         "detaching a parked target session should clear the parked session binding without promoting it",
     );
     assert!(
@@ -1800,21 +1748,12 @@ async fn page_command_on_background_target_session_routes_without_promoting_load
         .as_mut()
         .unwrap()
         .attach_active_session("SID-active");
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .unwrap()
-        .background_targets
-        .push(crate::conn::BackgroundTarget::new(
-            "TID-000000000F".into(),
-            Some("SID-bg".into()),
-            crate::conn::TargetIdentityState::new(
-                "about:blank#second".into(),
-                crate::conn::URL_BASE.into(),
-                "Secure".into(),
-            ),
-            crate::conn::TargetPageSlot::empty_for_test_fixture(),
-        ));
+    push_background_target(
+        &mut ctx,
+        "TID-000000000F",
+        "about:blank#second",
+        Some("SID-bg"),
+    );
 
     ctx.process_async(json!({
         "id": 12,
@@ -1838,8 +1777,7 @@ async fn page_command_on_background_target_session_routes_without_promoting_load
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target("TID-000000000F")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000F"),
         Some("SID-bg")
     );
     assert!(
@@ -1891,13 +1829,13 @@ async fn close_target_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 20,
@@ -1990,7 +1928,7 @@ async fn close_target_aborts_paused_runtime_fetch_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -2123,7 +2061,7 @@ async fn close_target_aborts_paused_response_stage_runtime_xhr_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -2291,7 +2229,7 @@ async fn close_target_aborts_paused_runtime_xhr_auth_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn

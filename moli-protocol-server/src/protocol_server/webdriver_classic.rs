@@ -47,11 +47,11 @@ use moli_protocol_webdriver_classic::{
     get_element_computed_label_command, get_element_computed_role_command,
     get_element_css_value_command, get_element_displayed_command, get_element_enabled_command,
     get_element_property_reference_command, get_element_rect_reference_command,
-    get_element_rendered_text_command, get_element_text_reference_command, history_traversal_entry,
-    layout_metrics_command, matched_capabilities_from_new_session_params, navigate_command,
-    navigation_history_command, new_session_response, page_load_strategy_from_capabilities,
-    page_source_command, parse_timeouts, print_page_command, refresh_command,
-    release_remote_object_command, resolve_element_reference_command_with_execution_context,
+    get_element_rendered_text_command, get_element_text_reference_command, layout_metrics_command,
+    matched_capabilities_from_new_session_params, navigate_command, new_session_response,
+    page_load_strategy_from_capabilities, page_source_command, parse_timeouts, print_page_command,
+    refresh_command, release_remote_object_command,
+    resolve_element_reference_command_with_execution_context,
     resolve_shadow_root_reference_command_with_execution_context, screenshot_command,
     shadow_root_attached_command, status_response as classic_status_response, timeouts_value,
     title_command, traverse_history_command, unhandled_prompt_behavior_from_capabilities,
@@ -61,11 +61,11 @@ use serde_json::{Map, Value, json};
 use tokio::time::sleep;
 use tracing::warn;
 
-use super::AppState;
 use super::webdriver_files::{
     downloadable_file_bytes, downloadable_file_zip_base64, selected_files_from_paths,
     unique_download_directory, uploaded_file_from_base64_zip,
 };
+use super::{AppState, flush_storage_partition_profile};
 
 mod alerts;
 mod cookies;
@@ -1654,11 +1654,8 @@ pub(super) async fn webdriver_classic_new_session(
     } else {
         None
     };
-    let initial_cookies = state.cookie_profile.snapshot();
-    let initial_cookie_snapshot = initial_cookies.clone();
-    let initial_storage_partition = state.initial_storage_partition(initial_cookies);
+    let initial_storage_partition = state.initial_storage_partition();
     let runtime = ClassicSessionRuntimeHandle::spawn(
-        initial_cookie_snapshot,
         initial_storage_partition,
         moli_core::runtime::NavigationRuntimeConfig::new(
             state.fetch_config.clone(),
@@ -1762,10 +1759,8 @@ pub(super) async fn webdriver_classic_delete_session(
         .lock()
         .release_session(&session_id);
     if let Some(runtime) = runtime {
-        let cookie_commit = runtime.shutdown().await;
-        if let Err(error) = state.cookie_profile.commit_and_save(cookie_commit) {
-            warn!(?error, "failed to persist Classic cookie profile");
-        }
+        runtime.shutdown().await;
+        flush_storage_partition_profile(state.storage_partition, "webdriver-classic").await;
         return classic_webdriver_json_response(StatusCode::OK, delete_session_response());
     }
     classic_error_into_response(ClassicError::new(
@@ -2590,34 +2585,19 @@ async fn webdriver_classic_traverse_history(
         Err(error) => return classic_error_into_response(error),
     };
     let context = classic_top_level_context(&binding);
-    let history = match binding
+    let command = traverse_history_command(
+        &context,
+        i64::from(delta),
+        binding.page_load_strategy.navigation_wait(),
+    );
+    let traversal = binding
         .runtime
-        .execute(navigation_history_command(&context))
-        .await
-    {
-        Ok(DevToolsCommandResult::GetNavigationHistory(history)) => history,
-        Ok(_) => {
-            return classic_error_into_response(ClassicError::new(
-                ClassicErrorCode::UnknownError,
-                "navigation history returned an unexpected result",
-            ));
-        }
-        Err(error) => return classic_error_into_response(classic_error_from_devtools_error(error)),
-    };
-    let Some((entry_id, url)) = history_traversal_entry(&history, delta) else {
-        return classic_success_into_response(Value::Null);
-    };
-    match webdriver_classic_execute_page_load_command(
-        &binding,
-        traverse_history_command(
-            &context,
-            entry_id,
-            url,
-            binding.page_load_strategy.navigation_wait(),
-        ),
-    )
-    .await
-    {
+        .execute_inner(
+            command,
+            binding.timeouts.page_load.map(Duration::from_millis),
+        )
+        .await;
+    match traversal {
         Ok(DevToolsCommandResult::TraverseHistory(result)) => {
             if !result.same_document {
                 classic_reset_to_top_level_browsing_context(&state, &session_id);
@@ -2629,7 +2609,13 @@ async fn webdriver_classic_traverse_history(
             ClassicErrorCode::UnknownError,
             "history traversal returned an unexpected result",
         )),
-        Err(error) => classic_error_into_response(error),
+        Err(error) if error.kind == DevToolsErrorKind::NoSuchHistoryEntry => {
+            classic_success_into_response(Value::Null)
+        }
+        Err(error) if error.kind == DevToolsErrorKind::Timeout => classic_error_into_response(
+            ClassicError::new(ClassicErrorCode::Timeout, "page load timed out"),
+        ),
+        Err(error) => classic_error_into_response(classic_error_from_devtools_error(error)),
     }
 }
 

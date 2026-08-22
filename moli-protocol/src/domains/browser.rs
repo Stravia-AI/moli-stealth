@@ -13,15 +13,12 @@ use crate::devtools_runtime::{
 use crate::domains::actions::BrowserAction;
 use crate::domains::command_output::CommandOutputPlan;
 use crate::version;
-use moli_core::page::{CompletedPageCommand, PendingPageCommand};
+use moli_core::{
+    browser_host::{BrowserDownloadBehavior, BrowserDownloadPolicyUpdate},
+    page::{CompletedPageCommand, PendingPageCommand},
+};
 
 const DEV_TOOLS_WINDOW_ID: u32 = 1_923_710_101;
-const DOWNLOAD_BEHAVIORS: &[&str] = &["default", "deny", "allow", "allowAndName"];
-
-pub(crate) fn is_valid_download_behavior(behavior: &str) -> bool {
-    DOWNLOAD_BEHAVIORS.contains(&behavior)
-}
-
 pub(crate) struct PendingBrowserCommandDispatch {
     command_id: Option<u64>,
     response_session_id: Option<String>,
@@ -208,9 +205,10 @@ fn bounds_json(bounds: &BrowserWindowBounds) -> Value {
 }
 
 fn get_window_for_target(conn: &CdpConnection) -> CommandOutputPlan {
+    let policy = conn.browser_host_policy_snapshot();
     CommandOutputPlan::result(json!({
         "windowId": DEV_TOOLS_WINDOW_ID,
-        "bounds": bounds_json(&conn.window_bounds)
+        "bounds": bounds_json(policy.window_bounds())
     }))
 }
 
@@ -300,13 +298,17 @@ fn set_window_bounds(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> CommandOutputPl
             return CommandOutputPlan::error(-32602, "InvalidParams");
         }
     };
-    conn.window_bounds.left = left;
-    conn.window_bounds.top = top;
-    conn.window_bounds.width = width;
-    conn.window_bounds.height = height;
+    let mut bounds = conn.browser_host_policy_snapshot().window_bounds().clone();
+    bounds.left = left;
+    bounds.top = top;
+    bounds.width = width;
+    bounds.height = height;
     if let Some(window_state) = params.bounds.window_state {
-        conn.window_bounds.window_state = window_state.as_ref().to_owned();
+        bounds.window_state = window_state.as_ref().to_owned();
     }
+    conn.apply_browser_host_policy_update(
+        moli_core::browser_host::BrowserHostPolicyUpdate::ReplaceWindowBounds(bounds),
+    );
 
     CommandOutputPlan::success()
 }
@@ -327,22 +329,27 @@ pub(crate) fn set_download_behavior_command_output_plan(
     {
         return CommandOutputPlan::error(-31998, "UnknownBrowserContextId");
     }
-    if !is_valid_download_behavior(params.behavior.as_str()) {
+    let Some(behavior) = BrowserDownloadBehavior::parse(params.behavior.as_str()) else {
         return CommandOutputPlan::error(-32602, "InvalidParams");
-    }
+    };
 
     match params.browser_context_id {
-        Some(browser_context_id) => conn.download_behavior.set_browser_context_policy(
-            browser_context_id,
-            params.behavior,
-            params.download_path,
-        ),
-        None => conn
-            .download_behavior
-            .set_global_policy(params.behavior, params.download_path),
+        Some(browser_context_id) => {
+            conn.apply_browser_download_policy_update(
+                BrowserDownloadPolicyUpdate::SetBrowserContext {
+                    browser_context_id: browser_context_id.clone(),
+                    behavior,
+                    download_path: params.download_path,
+                },
+            );
+            conn.ensure_automation_download_event_override_for_browser_context(&browser_context_id);
+        }
+        None => conn.apply_browser_download_policy_update(BrowserDownloadPolicyUpdate::SetGlobal {
+            behavior,
+            download_path: params.download_path,
+        }),
     }
-    conn.download_behavior
-        .set_browser_events_enabled_for_session(cmd.session_id, params.events_enabled);
+    conn.set_browser_download_events_enabled_for_session(cmd.session_id, params.events_enabled);
 
     CommandOutputPlan::success()
 }
@@ -406,38 +413,57 @@ fn execute_devtools_set_download_behavior(
         match target_contexts {
             Some(user_contexts) => {
                 for browser_context_id in user_contexts {
-                    conn.download_behavior
-                        .reset_browser_context(browser_context_id.as_str());
+                    let browser_context_id = browser_context_id.into_string();
+                    conn.apply_browser_download_policy_update(
+                        BrowserDownloadPolicyUpdate::RemoveBrowserContext {
+                            browser_context_id: browser_context_id.clone(),
+                        },
+                    );
+                    conn.clear_automation_download_events_for_browser_context(&browser_context_id);
                 }
             }
-            None => conn.download_behavior.reset_global(),
+            None => {
+                conn.apply_browser_download_policy_update(BrowserDownloadPolicyUpdate::ResetGlobal);
+                conn.set_automation_download_events_enabled_for_browser_context(None, false);
+            }
         }
         return Ok(DevToolsCommandResult::Empty);
     };
 
-    if !is_valid_download_behavior(behavior.behavior.as_str()) {
+    let Some(parsed_behavior) = BrowserDownloadBehavior::parse(behavior.behavior.as_str()) else {
         return Err(DevToolsError::new(
             DevToolsErrorKind::InvalidArgument,
             "download behavior is invalid",
         ));
-    }
+    };
 
     match target_contexts {
         Some(user_contexts) => {
             for browser_context_id in user_contexts {
-                conn.download_behavior.set_browser_context(
-                    browser_context_id.into_string(),
-                    behavior.behavior.clone(),
-                    behavior.download_path.clone(),
+                let browser_context_id = browser_context_id.into_string();
+                conn.apply_browser_download_policy_update(
+                    BrowserDownloadPolicyUpdate::SetBrowserContext {
+                        browser_context_id: browser_context_id.clone(),
+                        behavior: parsed_behavior,
+                        download_path: behavior.download_path.clone(),
+                    },
+                );
+                conn.set_automation_download_events_enabled_for_browser_context(
+                    Some(&browser_context_id),
                     behavior.events_enabled,
                 );
             }
         }
-        None => conn.download_behavior.set_global(
-            behavior.behavior,
-            behavior.download_path,
-            behavior.events_enabled,
-        ),
+        None => {
+            conn.apply_browser_download_policy_update(BrowserDownloadPolicyUpdate::SetGlobal {
+                behavior: parsed_behavior,
+                download_path: behavior.download_path,
+            });
+            conn.set_automation_download_events_enabled_for_browser_context(
+                None,
+                behavior.events_enabled,
+            );
+        }
     }
     Ok(DevToolsCommandResult::Empty)
 }
@@ -457,20 +483,30 @@ async fn execute_devtools_set_permission_command_async(
         .browser_context_id
         .map(|browser_context_id| browser_context_id.into_string());
 
-    conn.permission_overrides.retain(|override_entry| {
-        override_entry.permission != command.permission
-            || override_entry.origin.as_deref() != Some(command.origin.as_str())
-            || override_entry.embedded_origin != command.embedded_origin
+    let permission = command.permission;
+    let setting = normalize_permission_setting(command.setting);
+    let origin = command.origin;
+    let embedded_origin = command.embedded_origin;
+    let mut overrides = conn
+        .browser_host_policy_snapshot()
+        .permission_overrides()
+        .to_vec();
+    overrides.retain(|override_entry| {
+        override_entry.permission != permission
+            || override_entry.origin.as_deref() != Some(origin.as_str())
+            || override_entry.embedded_origin != embedded_origin
             || override_entry.browser_context_id != browser_context_id
     });
-    conn.permission_overrides
-        .push(crate::conn::PermissionOverride {
-            permission: command.permission,
-            setting: normalize_permission_setting(command.setting),
-            origin: Some(command.origin),
-            embedded_origin: command.embedded_origin,
-            browser_context_id,
-        });
+    overrides.push(crate::conn::PermissionOverride {
+        permission,
+        setting,
+        origin: Some(origin),
+        embedded_origin,
+        browser_context_id,
+    });
+    conn.apply_browser_host_policy_update(
+        moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(overrides),
+    );
 
     let pending = start_loaded_page_permission_override_commands(conn)
         .map_err(|error| DevToolsError::new(DevToolsErrorKind::Internal, error))?;
@@ -561,20 +597,26 @@ fn start_set_permission_command(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> Brow
         return browser_error_step(-31998, "UnknownBrowserContextId");
     }
 
-    conn.permission_overrides.retain(|override_entry| {
+    let mut overrides = conn
+        .browser_host_policy_snapshot()
+        .permission_overrides()
+        .to_vec();
+    overrides.retain(|override_entry| {
         override_entry.permission != params.permission
             || override_entry.origin != params.origin
             || override_entry.embedded_origin != params.embedded_origin
             || override_entry.browser_context_id != params.browser_context_id
     });
-    conn.permission_overrides
-        .push(crate::conn::PermissionOverride {
-            permission: params.permission,
-            setting: normalize_permission_setting(params.setting),
-            origin: params.origin,
-            embedded_origin: params.embedded_origin,
-            browser_context_id: params.browser_context_id,
-        });
+    overrides.push(crate::conn::PermissionOverride {
+        permission: params.permission,
+        setting: normalize_permission_setting(params.setting),
+        origin: params.origin,
+        embedded_origin: params.embedded_origin,
+        browser_context_id: params.browser_context_id,
+    });
+    conn.apply_browser_host_policy_update(
+        moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(overrides),
+    );
     start_apply_permission_overrides_command(conn, cmd)
 }
 
@@ -592,22 +634,28 @@ fn start_grant_permissions_command(
         return browser_error_step(-31998, "UnknownBrowserContextId");
     }
 
+    let mut overrides = conn
+        .browser_host_policy_snapshot()
+        .permission_overrides()
+        .to_vec();
     for permission in params.permissions {
-        conn.permission_overrides.retain(|override_entry| {
+        overrides.retain(|override_entry| {
             override_entry.permission != permission
                 || override_entry.origin != params.origin
                 || override_entry.embedded_origin.is_some()
                 || override_entry.browser_context_id != params.browser_context_id
         });
-        conn.permission_overrides
-            .push(crate::conn::PermissionOverride {
-                permission,
-                setting: PermissionSetting::Granted.label().to_owned(),
-                origin: params.origin.clone(),
-                embedded_origin: None,
-                browser_context_id: params.browser_context_id.clone(),
-            });
+        overrides.push(crate::conn::PermissionOverride {
+            permission,
+            setting: PermissionSetting::Granted.label().to_owned(),
+            origin: params.origin.clone(),
+            embedded_origin: None,
+            browser_context_id: params.browser_context_id.clone(),
+        });
     }
+    conn.apply_browser_host_policy_update(
+        moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(overrides),
+    );
 
     start_apply_permission_overrides_command(conn, cmd)
 }
@@ -630,11 +678,22 @@ fn start_reset_permissions_command(
     }
 
     if let Some(browser_context_id) = params.browser_context_id {
-        conn.permission_overrides.retain(|entry| {
+        let mut overrides = conn
+            .browser_host_policy_snapshot()
+            .permission_overrides()
+            .to_vec();
+        overrides.retain(|entry| {
             entry.browser_context_id.as_deref() != Some(browser_context_id.as_str())
         });
+        conn.apply_browser_host_policy_update(
+            moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(overrides),
+        );
     } else {
-        conn.permission_overrides.clear();
+        conn.apply_browser_host_policy_update(
+            moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(
+                Vec::new(),
+            ),
+        );
     }
 
     start_apply_permission_overrides_command(conn, cmd)
@@ -669,7 +728,10 @@ fn start_apply_permission_overrides_command(
 fn start_loaded_page_permission_override_commands(
     conn: &mut CdpConnection,
 ) -> Result<Vec<PendingBrowserPageCommand>, String> {
-    let all_overrides = conn.permission_overrides.clone();
+    let all_overrides = conn
+        .browser_host_policy_snapshot()
+        .permission_overrides()
+        .to_vec();
     let mut pending = Vec::new();
     for browser_context in conn
         .browser_context
@@ -761,7 +823,7 @@ fn finish_pending_permission_override_command(
     target: PendingBrowserPageTarget,
     completion: CompletedPageCommand,
 ) -> Result<(), String> {
-    let page = match target {
+    let mut page = match target {
         PendingBrowserPageTarget::BrowserContextActive { browser_context_id } => conn
             .browser_context_by_id_mut(&browser_context_id)
             .and_then(|browser_context| {
@@ -781,3 +843,836 @@ fn finish_pending_permission_override_command(
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// Tests – ported from lightpanda/src/cdp/domains/browser.zig
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::conn::CdpCommandTaskStep;
+    use crate::testing::TestContext;
+    use axum::{Router, response::IntoResponse, routing::get};
+    use tokio::net::TcpListener;
+
+    #[test]
+    fn permission_setting_parses_standard_cdp_tokens() {
+        assert_eq!(
+            PermissionSetting::parse("granted"),
+            Some(PermissionSetting::Granted)
+        );
+        assert_eq!(
+            PermissionSetting::parse("denied"),
+            Some(PermissionSetting::Denied)
+        );
+        assert_eq!(
+            PermissionSetting::parse("prompt"),
+            Some(PermissionSetting::Prompt)
+        );
+        assert_eq!(PermissionSetting::parse("Granted"), None);
+        assert_eq!(PermissionSetting::parse("unknown"), None);
+    }
+
+    #[test]
+    fn normalize_permission_setting_preserves_unknown_tokens() {
+        assert_eq!(
+            normalize_permission_setting("granted".to_owned()),
+            "granted"
+        );
+        assert_eq!(normalize_permission_setting("prompt".to_owned()), "prompt");
+        assert_eq!(
+            normalize_permission_setting("experimental".to_owned()),
+            "experimental"
+        );
+    }
+
+    fn take_response_by_id(ctx: &mut TestContext, id: u64) -> Value {
+        let pos = ctx
+            .sent
+            .iter()
+            .position(|message| message["id"] == json!(id))
+            .expect("expected response with matching id");
+        ctx.sent.remove(pos)
+    }
+
+    async fn with_loaded_document_async(ctx: &mut TestContext, url: &str) {
+        let mut browser_context = crate::conn::BrowserContext::new("BID-1".into());
+        browser_context.set_active_target_id("TID-1");
+        browser_context.attach_active_session("SID-1");
+        ctx.conn.insert_browser_context(browser_context);
+        let page = ctx
+            .conn
+            .load_page_via_runtime_async(url)
+            .await
+            .expect("must load document");
+        let _ = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .expect("inserted browser context must be selected")
+            .active_target
+            .runtime_slot
+            .replace_loaded_page(Some(page));
+    }
+
+    async fn current_permission_state_async(
+        ctx: &mut TestContext,
+        permission_name: &str,
+    ) -> String {
+        current_permission_state_for_session_async(ctx, "SID-1", permission_name).await
+    }
+
+    async fn current_permission_state_for_session_async(
+        ctx: &mut TestContext,
+        session_id: &str,
+        permission_name: &str,
+    ) -> String {
+        ctx.process_async(json!({
+            "id": 9_000,
+            "method": "Runtime.evaluate",
+            "sessionId": session_id,
+            "params": {
+                "expression": format!(
+                    "(() => {{ globalThis.__permissionState = 'pending'; navigator.permissions.query({{ name: '{}' }}).then(status => {{ globalThis.__permissionState = status.state; }}); return 'scheduled'; }})()",
+                    permission_name
+                )
+            }
+        }))
+        .await;
+        let response = take_response_by_id(ctx, 9_000);
+        assert_eq!(response["result"]["result"]["value"], json!("scheduled"));
+
+        ctx.process_async(json!({
+            "id": 9_001,
+            "method": "Runtime.evaluate",
+            "sessionId": session_id,
+            "params": { "expression": "globalThis.__permissionState" }
+        }))
+        .await;
+        take_response_by_id(ctx, 9_001)["result"]["result"]["value"]
+            .as_str()
+            .expect("permission state should be a string")
+            .to_owned()
+    }
+
+    /// cdp.browser: getVersion
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_version_returns_chromium_compatible_metadata() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({"id": 32, "method": "Browser.getVersion"}))
+            .await;
+        ctx.expect_result(
+            32,
+            json!({
+                "protocolVersion": version::PROTOCOL_VERSION,
+                "product": version::PRODUCT,
+                "revision": version::REVISION,
+                "userAgent": moli_fetch::FetchConfig::DEFAULT_USER_AGENT,
+                "jsVersion": version::js_version(),
+            }),
+            None,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_version_preserves_target_session_route() {
+        let mut ctx = TestContext::new();
+        let mut browser_context = crate::conn::BrowserContext::new("BID-1".into());
+        browser_context.set_active_target_id("TID-1");
+        browser_context.attach_active_session("SID-1");
+        ctx.conn.browser_context = Some(browser_context);
+        ctx.process_async(json!({
+            "id": 32_001,
+            "method": "Browser.getVersion",
+            "sessionId": "SID-1"
+        }))
+        .await;
+        ctx.expect_result(
+            32_001,
+            json!({
+                "protocolVersion": version::PROTOCOL_VERSION,
+                "product": version::PRODUCT,
+                "revision": version::REVISION,
+                "userAgent": moli_fetch::FetchConfig::DEFAULT_USER_AGENT,
+                "jsVersion": version::js_version(),
+            }),
+            Some("SID-1"),
+        );
+    }
+
+    /// cdp.browser: getWindowForTarget
+    #[tokio::test(flavor = "multi_thread")]
+    async fn get_window_for_target_returns_window_info() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({"id": 33, "method": "Browser.getWindowForTarget"}))
+            .await;
+        ctx.expect_result(
+            33,
+            json!({
+                "windowId": DEV_TOOLS_WINDOW_ID,
+                "bounds": { "windowState": "normal" }
+            }),
+            None,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_window_bounds_updates_get_window_for_target() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 34,
+            "method": "Browser.setWindowBounds",
+            "params": {
+                "windowId": DEV_TOOLS_WINDOW_ID,
+                "bounds": {
+                    "left": 10,
+                    "top": 20,
+                    "width": 1280,
+                    "height": 720,
+                    "windowState": "minimized"
+                }
+            }
+        }))
+        .await;
+        ctx.expect_result(34, json!({}), None);
+
+        ctx.process_async(json!({"id": 35, "method": "Browser.getWindowForTarget"}))
+            .await;
+        ctx.expect_result(
+            35,
+            json!({
+                "windowId": DEV_TOOLS_WINDOW_ID,
+                "bounds": {
+                    "left": 10,
+                    "top": 20,
+                    "width": 1280,
+                    "height": 720,
+                    "windowState": "minimized"
+                }
+            }),
+            None,
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_window_bounds_rejects_unknown_window_id() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 36,
+            "method": "Browser.setWindowBounds",
+            "params": {
+                "windowId": 999,
+                "bounds": { "windowState": "normal" }
+            }
+        }))
+        .await;
+        ctx.expect_error(36, -32602, "InvalidParams");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_download_behavior_updates_connection_state_and_context_override() {
+        let mut ctx = TestContext::new();
+        ctx.conn
+            .insert_browser_context(crate::conn::BrowserContext::new("BID-1".into()));
+
+        ctx.process_async(json!({
+            "id": 36_901,
+            "method": "Browser.setDownloadBehavior",
+            "params": {
+                "behavior": "allowAndName",
+                "downloadPath": "/tmp/global-downloads",
+                "eventsEnabled": true
+            }
+        }))
+        .await;
+        ctx.expect_result(36_901, json!({}), None);
+
+        ctx.process_async(json!({
+            "id": 37,
+            "method": "Browser.setDownloadBehavior",
+            "params": {
+                "behavior": "allow",
+                "downloadPath": "/tmp/downloads",
+                "eventsEnabled": true,
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(37, json!({}), None);
+
+        let policy = ctx.conn.browser_download_policy_snapshot();
+        assert_eq!(
+            policy.global().behavior(),
+            BrowserDownloadBehavior::AllowAndName
+        );
+        assert_eq!(
+            policy.global().download_path(),
+            Some("/tmp/global-downloads")
+        );
+        assert!(
+            !ctx.conn
+                .automation_download_events_enabled_for_browser_context(None)
+        );
+        assert_eq!(
+            ctx.conn.browser_download_event_session_ids_for_test(),
+            vec![None]
+        );
+        assert!(policy.browser_context_override("BID-1").is_some());
+
+        let context_settings = policy.effective_for_browser_context(Some("BID-1"));
+        assert_eq!(context_settings.behavior(), BrowserDownloadBehavior::Allow);
+        assert_eq!(context_settings.download_path(), Some("/tmp/downloads"));
+        assert!(
+            !ctx.conn
+                .automation_download_events_enabled_for_browser_context(Some("BID-1"))
+        );
+
+        let global_settings = policy.effective_for_browser_context(None);
+        assert_eq!(
+            global_settings.behavior(),
+            BrowserDownloadBehavior::AllowAndName
+        );
+        assert_eq!(
+            global_settings.download_path(),
+            Some("/tmp/global-downloads")
+        );
+        assert!(
+            !ctx.conn
+                .automation_download_events_enabled_for_browser_context(None)
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_download_behavior_tracks_event_observers_per_session_and_detach() {
+        let mut ctx = TestContext::new();
+        ctx.conn
+            .register_browser_session("SID-browser-a".to_owned());
+        ctx.conn
+            .register_browser_session("SID-browser-b".to_owned());
+
+        ctx.process_async(json!({
+            "id": 37_001,
+            "method": "Browser.setDownloadBehavior",
+            "sessionId": "SID-browser-a",
+            "params": {
+                "behavior": "allowAndName",
+                "downloadPath": "/tmp/downloads-a",
+                "eventsEnabled": true
+            }
+        }))
+        .await;
+        ctx.expect_result(37_001, json!({}), Some("SID-browser-a"));
+
+        ctx.process_async(json!({
+            "id": 37_002,
+            "method": "Browser.setDownloadBehavior",
+            "sessionId": "SID-browser-b",
+            "params": {
+                "behavior": "allowAndName",
+                "downloadPath": "/tmp/downloads-b",
+                "eventsEnabled": false
+            }
+        }))
+        .await;
+        ctx.expect_result(37_002, json!({}), Some("SID-browser-b"));
+        assert_eq!(
+            ctx.conn.browser_download_event_session_ids_for_test(),
+            vec![Some("SID-browser-a".to_owned())]
+        );
+
+        assert!(
+            ctx.conn
+                .detach_browser_session_owner_without_event("SID-browser-a")
+                .is_some()
+        );
+        assert!(
+            ctx.conn
+                .browser_download_event_session_ids_for_test()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_download_behavior_rejects_unknown_browser_context_id() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 38,
+            "method": "Browser.setDownloadBehavior",
+            "params": {
+                "behavior": "allow",
+                "browserContextId": "BID-missing"
+            }
+        }))
+        .await;
+        ctx.expect_error(38, -31998, "UnknownBrowserContextId");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_download_behavior_rejects_invalid_params() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 39,
+            "method": "Browser.setDownloadBehavior",
+            "params": {}
+        }))
+        .await;
+        ctx.expect_error(39, -32602, "InvalidParams");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_download_behavior_rejects_unknown_behavior() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 390,
+            "method": "Browser.setDownloadBehavior",
+            "params": {
+                "behavior": "allowandname",
+                "downloadPath": "/tmp/downloads"
+            }
+        }))
+        .await;
+        ctx.expect_error(390, -32602, "InvalidParams");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_download_rejects_unknown_guid() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 391,
+            "method": "Browser.cancelDownload",
+            "params": { "guid": "missing-guid" }
+        }))
+        .await;
+        ctx.expect_error(391, -32602, "No download item found for the given GUID");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn open_download_as_stream_reads_completed_artifact_via_io_domain() {
+        let mut ctx = TestContext::new();
+        let artifact_path = std::env::temp_dir().join(format!(
+            "moli-cdp-download-stream-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&artifact_path, [0_u8, 255_u8, b'a'])
+            .expect("test download artifact should be written");
+        ctx.conn
+            .test_insert_completed_download("DOWNLOAD-STREAM-1", artifact_path.clone());
+
+        ctx.process_async(json!({
+            "id": 392,
+            "method": "Browser.openDownloadAsStream",
+            "params": { "guid": "DOWNLOAD-STREAM-1" }
+        }))
+        .await;
+        let stream = take_response_by_id(&mut ctx, 392)["result"]["stream"]
+            .as_str()
+            .expect("stream handle")
+            .to_owned();
+        assert!(stream.starts_with("BROWSER-STREAM-"));
+
+        ctx.process_async(json!({
+            "id": 393,
+            "method": "IO.read",
+            "params": { "handle": stream }
+        }))
+        .await;
+        ctx.expect_result(
+            393,
+            json!({ "base64Encoded": true, "data": "AP9h", "eof": true }),
+            None,
+        );
+
+        let _ = std::fs::remove_file(artifact_path);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_permission_updates_connection_state() {
+        let mut ctx = TestContext::new();
+        ctx.conn
+            .insert_browser_context(crate::conn::BrowserContext::new("BID-1".into()));
+
+        ctx.process_async(json!({
+            "id": 40,
+            "method": "Browser.setPermission",
+            "params": {
+                "permission": { "name": "clipboard-read" },
+                "setting": "denied",
+                "origin": "https://example.com",
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(40, json!({}), None);
+        let policy = ctx.conn.browser_host_policy_snapshot();
+        let permission_overrides = policy.permission_overrides();
+        assert_eq!(permission_overrides.len(), 1);
+        assert_eq!(
+            permission_overrides[0].permission,
+            json!({ "name": "clipboard-read" })
+        );
+        assert_eq!(permission_overrides[0].setting, "denied");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grant_permissions_records_granted_entries() {
+        let mut ctx = TestContext::new();
+        ctx.conn
+            .insert_browser_context(crate::conn::BrowserContext::new("BID-1".into()));
+
+        ctx.process_async(json!({
+            "id": 41,
+            "method": "Browser.grantPermissions",
+            "params": {
+                "permissions": [
+                    { "name": "geolocation" },
+                    { "name": "clipboard-read" }
+                ],
+                "origin": "https://example.com",
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(41, json!({}), None);
+        let policy = ctx.conn.browser_host_policy_snapshot();
+        assert_eq!(policy.permission_overrides().len(), 2);
+        assert!(
+            policy
+                .permission_overrides()
+                .iter()
+                .all(|entry| entry.setting == "granted")
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn reset_permissions_clears_matching_browser_context_scope() {
+        let mut ctx = TestContext::new();
+        ctx.conn
+            .insert_browser_context(crate::conn::BrowserContext::new("BID-1".into()));
+        ctx.conn.apply_browser_host_policy_update(
+            moli_core::browser_host::BrowserHostPolicyUpdate::ReplacePermissionOverrides(vec![
+                crate::conn::PermissionOverride {
+                    permission: json!({ "name": "clipboard-read" }),
+                    setting: "granted".into(),
+                    origin: Some("https://example.com".into()),
+                    embedded_origin: None,
+                    browser_context_id: Some("BID-1".into()),
+                },
+                crate::conn::PermissionOverride {
+                    permission: json!({ "name": "clipboard-write" }),
+                    setting: "granted".into(),
+                    origin: Some("https://example.com".into()),
+                    embedded_origin: None,
+                    browser_context_id: None,
+                },
+            ]),
+        );
+
+        ctx.process_async(json!({
+            "id": 42,
+            "method": "Browser.resetPermissions",
+            "params": { "browserContextId": "BID-1" }
+        }))
+        .await;
+        ctx.expect_result(42, json!({}), None);
+        let policy = ctx.conn.browser_host_policy_snapshot();
+        assert_eq!(policy.permission_overrides().len(), 1);
+        assert_eq!(policy.permission_overrides()[0].browser_context_id, None);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn permission_methods_reject_unknown_browser_context_id() {
+        let mut ctx = TestContext::new();
+        ctx.process_async(json!({
+            "id": 43,
+            "method": "Browser.setPermission",
+            "params": {
+                "permission": { "name": "clipboard-read" },
+                "setting": "granted",
+                "browserContextId": "BID-missing"
+            }
+        }))
+        .await;
+        ctx.expect_error(43, -31998, "UnknownBrowserContextId");
+
+        ctx.process_async(json!({
+            "id": 44,
+            "method": "Browser.grantPermissions",
+            "params": {
+                "permissions": [{ "name": "geolocation" }],
+                "browserContextId": "BID-missing"
+            }
+        }))
+        .await;
+        ctx.expect_error(44, -31998, "UnknownBrowserContextId");
+
+        ctx.process_async(json!({
+            "id": 45,
+            "method": "Browser.resetPermissions",
+            "params": { "browserContextId": "BID-missing" }
+        }))
+        .await;
+        ctx.expect_error(45, -31998, "UnknownBrowserContextId");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn grant_and_reset_permissions_update_loaded_page_query_state() {
+        let mut ctx = TestContext::new();
+        with_loaded_document_async(&mut ctx, "data:text/html,<body></body>").await;
+
+        ctx.process_async(json!({ "id": 46, "method": "Runtime.enable", "sessionId": "SID-1" }))
+            .await;
+        let response = take_response_by_id(&mut ctx, 46);
+        assert_eq!(response["result"], json!({}));
+        ctx.sent.clear();
+
+        ctx.process_async(json!({
+            "id": 47,
+            "method": "Browser.grantPermissions",
+            "params": {
+                "permissions": [{ "name": "geolocation" }],
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(47, json!({}), None);
+        assert_eq!(
+            current_permission_state_async(&mut ctx, "geolocation").await,
+            "granted"
+        );
+
+        ctx.process_async(json!({
+            "id": 48,
+            "method": "Browser.resetPermissions",
+            "params": { "browserContextId": "BID-1" }
+        }))
+        .await;
+        ctx.expect_result(48, json!({}), None);
+        assert_eq!(
+            current_permission_state_async(&mut ctx, "geolocation").await,
+            "prompt"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn set_permission_origin_updates_matching_loaded_page_query_state() {
+        async fn handler() -> impl IntoResponse {
+            "<!doctype html><html><body>ok</body></html>"
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/page", get(handler)))
+                .await
+                .unwrap();
+        });
+
+        let mut ctx = TestContext::new();
+        let url = format!("http://{addr}/page");
+        with_loaded_document_async(&mut ctx, &url).await;
+
+        ctx.process_async(json!({ "id": 49, "method": "Runtime.enable", "sessionId": "SID-1" }))
+            .await;
+        let response = take_response_by_id(&mut ctx, 49);
+        assert_eq!(response["result"], json!({}));
+        ctx.sent.clear();
+
+        ctx.process_async(json!({
+            "id": 50,
+            "method": "Browser.setPermission",
+            "params": {
+                "permission": { "name": "geolocation" },
+                "setting": "denied",
+                "origin": format!("http://{addr}"),
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(50, json!({}), None);
+        assert_eq!(
+            current_permission_state_async(&mut ctx, "geolocation").await,
+            "denied"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn async_dispatch_set_permission_updates_matching_loaded_page_query_state() {
+        async fn handler() -> impl IntoResponse {
+            "<!doctype html><html><body>ok</body></html>"
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/page", get(handler)))
+                .await
+                .unwrap();
+        });
+
+        let mut ctx = TestContext::new();
+        let url = format!("http://{addr}/page");
+        with_loaded_document_async(&mut ctx, &url).await;
+
+        ctx.process_async(json!({
+            "id": 51,
+            "method": "Browser.setPermission",
+            "params": {
+                "permission": { "name": "geolocation" },
+                "setting": "denied",
+                "origin": format!("http://{addr}"),
+                "browserContextId": "BID-1"
+            }
+        }))
+        .await;
+        ctx.expect_result(51, json!({}), None);
+        assert_eq!(
+            current_permission_state_async(&mut ctx, "geolocation").await,
+            "denied"
+        );
+
+        server.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pending_permission_overrides_use_concrete_page_targets_across_ambient_owner_change() {
+        let mut ctx = TestContext::new();
+        let mut browser_context =
+            crate::conn::BrowserContext::new("BID-browser-permission".to_owned());
+        browser_context.set_active_target_id("TID-browser-permission-active".to_owned());
+        browser_context.attach_active_session("SID-browser-permission-active".to_owned());
+        ctx.conn.insert_browser_context(browser_context);
+
+        let active_page = ctx
+            .conn
+            .load_page_via_runtime_async("data:text/html,<title>active permissions</title>")
+            .await
+            .expect("active page should load");
+        let background_page = ctx
+            .conn
+            .load_page_via_runtime_async("data:text/html,<title>background permissions</title>")
+            .await
+            .expect("background page should load");
+
+        let mut background = crate::conn::BackgroundTarget::with_url(
+            "TID-browser-permission-background".to_owned(),
+            Some("SID-browser-permission-background".to_owned()),
+            background_page.final_url().as_str().to_owned(),
+        );
+        background.replace_loaded_page(Some(background_page));
+
+        let browser_context = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .expect("inserted browser context must be selected");
+        browser_context
+            .active_target
+            .runtime_slot
+            .set_loaded_page_for_test(active_page);
+        browser_context.background_targets.push(background);
+
+        for (id, session_id) in [
+            (52, "SID-browser-permission-active"),
+            (53, "SID-browser-permission-background"),
+        ] {
+            ctx.process_async(json!({
+                "id": id,
+                "method": "Runtime.enable",
+                "sessionId": session_id
+            }))
+            .await;
+            ctx.expect_result(id, json!({}), Some(session_id));
+        }
+        ctx.sent.clear();
+
+        let background_route = ctx
+            .conn
+            .target_session_route_for_target_id("TID-browser-permission-background")
+            .expect("background target route");
+        let raw = serde_json::to_string(&json!({
+            "id": 54,
+            "method": "Browser.grantPermissions",
+            "params": {
+                "permissions": [{ "name": "geolocation" }],
+                "browserContextId": "BID-browser-permission"
+            }
+        }))
+        .expect("Browser.grantPermissions command should serialize");
+        let pending = {
+            let previous_route = ctx
+                .conn
+                .replace_none_session_owner_route_override(Some(background_route));
+            let step = ctx.conn.start_command_dispatch(&raw);
+            ctx.conn
+                .replace_none_session_owner_route_override(previous_route);
+            match step {
+                CdpCommandTaskStep::Pending(pending) => pending,
+                CdpCommandTaskStep::Complete(outcome) => {
+                    panic!(
+                        "Browser.grantPermissions should update loaded page permission overrides: {:?}",
+                        outcome.into_parts().0
+                    )
+                }
+            }
+        };
+
+        let active_route = ctx
+            .conn
+            .target_session_route_for_target_id("TID-browser-permission-active")
+            .expect("active target route");
+        let previous_route = ctx
+            .conn
+            .replace_none_session_owner_route_override(Some(active_route));
+        let (messages, scheduler_events) = ctx
+            .complete_command_task_step_for_test(CdpCommandTaskStep::Pending(pending))
+            .await;
+        ctx.conn
+            .replace_none_session_owner_route_override(previous_route);
+
+        assert!(scheduler_events.is_empty());
+        assert_eq!(messages, vec![json!({ "id": 54, "result": {} })]);
+        assert_eq!(
+            ctx.conn
+                .browser_context
+                .as_ref()
+                .and_then(crate::conn::BrowserContext::active_target_id),
+            Some("TID-browser-permission-active")
+        );
+
+        assert_eq!(
+            current_permission_state_for_session_async(
+                &mut ctx,
+                "SID-browser-permission-active",
+                "geolocation"
+            )
+            .await,
+            "granted"
+        );
+        assert_eq!(
+            current_permission_state_for_session_async(
+                &mut ctx,
+                "SID-browser-permission-background",
+                "geolocation"
+            )
+            .await,
+            "granted"
+        );
+    }
+
+    /// Noop methods should return an empty result without error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn noop_methods_return_empty_result() {
+        for method in &["Browser.setPermission", "Browser.grantPermissions"] {
+            let mut ctx = TestContext::new();
+            ctx.process_async(json!({"id": 1, "method": method, "params": {}}))
+                .await;
+            ctx.expect_error(1, -32602, "InvalidParams");
+        }
+    }
+}

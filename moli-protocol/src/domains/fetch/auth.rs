@@ -1,16 +1,18 @@
 use crate::conn::{
-    BackgroundProtocolEvent, CdpConnection, Cmd, PendingFetchAuthNavigation,
-    PendingFetchNavigation, PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
+    BackgroundProtocolEvent, BrowserOwnerPausedNavigationSidecar, CdpConnection, Cmd,
+    CommandDispatchContext, PendingFetchAuthNavigation, PendingFetchNavigation,
+    PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
+    TargetPageResidenceIdentity,
 };
 use crate::devtools_runtime::{
-    DevToolsAuthChallengeAction, DevToolsCommand, DevToolsContinueWithAuthCommand,
-    DevToolsProtocol, DevToolsRequestId,
+    DevToolsAuthChallengeAction, DevToolsContinueWithAuthCommand, DevToolsProtocol,
+    DevToolsRequestId,
 };
 use crate::domains::command_output::CommandOutputPlan;
 use crate::domains::{activity, network};
+use moli_core::browser_host::BrowserPausedNavigationDecision;
 use moli_core::page::{CompletedPageCommand, SubresourceAuthCredentials};
 
-use super::PendingFetchCommandOperation;
 use super::helpers::{
     pending_fetch_auth_navigation_required_event, pending_subresource_auth_required_event,
     request_auth_for_challenge,
@@ -26,11 +28,13 @@ use super::state::{
     take_pending_auth_navigation_for_action_session,
     take_pending_subresource_auth_request_for_action_session,
 };
+use super::{CompletedFetchCommandOperation, PendingFetchCommandOperation};
 use super::{
     FetchCommandOutput, FetchCommandTaskStep, PendingFetchCommandDispatch, PendingFetchCommandKind,
 };
 
 pub(super) enum PendingContinueWithAuthState {
+    BrowserOwnerNavigationDecision,
     SubresourceAuthCancel {
         pending: Box<crate::conn::PendingSubresourceFetchAuthRequest>,
         correlation: Option<PreparedSubresourceCorrelation>,
@@ -67,12 +71,7 @@ pub(super) fn start_continue_with_auth_command(
         }
     };
     let command = build_cdp_continue_with_auth_command(conn, cmd, params);
-    super::commands::start_devtools_fetch_command(
-        conn,
-        cmd.id,
-        cmd.session_id,
-        DevToolsCommand::ContinueWithAuth(command),
-    )
+    start_devtools_continue_with_auth_command(conn, cmd.id, cmd.session_id, &command, true)
 }
 
 fn build_cdp_continue_with_auth_command(
@@ -108,12 +107,14 @@ pub(super) fn start_devtools_continue_with_auth_command(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: &DevToolsContinueWithAuthCommand,
+    admit_to_browser_owner: bool,
 ) -> FetchCommandTaskStep {
     if let Some(step) = start_devtools_continue_with_auth_command_for_pending(
         conn,
         command_id,
         command_session_id,
         command,
+        admit_to_browser_owner,
     ) {
         return step;
     }
@@ -131,6 +132,7 @@ pub(super) fn start_devtools_continue_with_auth_command_for_pending(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     command: &DevToolsContinueWithAuthCommand,
+    admit_to_browser_owner: bool,
 ) -> Option<FetchCommandTaskStep> {
     let request_id = command.request_id.as_str().to_owned();
     let action_session_id = action_session_id_for_devtools_context(
@@ -327,43 +329,80 @@ pub(super) fn start_devtools_continue_with_auth_command_for_pending(
         &request_id,
     )?;
 
-    Some(match command.action {
-        DevToolsAuthChallengeAction::Default
-            if pending
-                .auth_stage_pause_state()
-                .is_some_and(|chain| !chain.remaining_sessions.is_empty()) =>
-        {
-            FetchCommandTaskStep::Complete(
-                chained_navigation_auth_required_output_plan(conn, command_session_id, pending)
-                    .unwrap_or_else(|| CommandOutputPlan::error(-32000, "RequestNotFound")),
-            )
-        }
-        DevToolsAuthChallengeAction::Default => {
-            FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-                conn,
-                command_id,
-                command_session_id,
-                PendingFetchCommandKind::ContinueWithAuth {
-                    state: Box::new(PendingContinueWithAuthState::NavigationFail {
-                        pending: Box::new(pending),
-                    }),
-                },
-                PendingFetchCommandOperation::Ready,
-            ))
-        }
-        DevToolsAuthChallengeAction::Cancel => {
-            FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-                conn,
-                command_id,
-                command_session_id,
-                PendingFetchCommandKind::ContinueWithAuth {
-                    state: Box::new(PendingContinueWithAuthState::NavigationCancel {
-                        pending: Box::new(pending),
-                    }),
-                },
-                PendingFetchCommandOperation::Ready,
-            ))
-        }
+    if matches!(command.action, DevToolsAuthChallengeAction::Default)
+        && pending
+            .auth_stage_pause_state()
+            .is_some_and(|chain| !chain.remaining_sessions.is_empty())
+    {
+        return Some(FetchCommandTaskStep::Complete(
+            chained_navigation_auth_required_output_plan(conn, command_session_id, pending)
+                .unwrap_or_else(|| CommandOutputPlan::error(-32000, "RequestNotFound")),
+        ));
+    }
+
+    if !admit_to_browser_owner {
+        return Some(match command.action {
+            DevToolsAuthChallengeAction::Default => {
+                FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                    conn,
+                    command_id,
+                    command_session_id,
+                    PendingFetchCommandKind::ContinueWithAuth {
+                        state: Box::new(PendingContinueWithAuthState::NavigationFail {
+                            pending: Box::new(pending),
+                        }),
+                    },
+                    PendingFetchCommandOperation::Ready,
+                ))
+            }
+            DevToolsAuthChallengeAction::Cancel => {
+                FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                    conn,
+                    command_id,
+                    command_session_id,
+                    PendingFetchCommandKind::ContinueWithAuth {
+                        state: Box::new(PendingContinueWithAuthState::NavigationCancel {
+                            pending: Box::new(pending),
+                        }),
+                    },
+                    PendingFetchCommandOperation::Ready,
+                ))
+            }
+            DevToolsAuthChallengeAction::ProvideCredentials => {
+                let Some(auth) = request_auth_for_challenge(
+                    &pending.challenge,
+                    command.username.as_deref().unwrap_or_default(),
+                    command.password.as_deref().unwrap_or_default(),
+                ) else {
+                    conn.register_pending_fetch_auth_navigation_for_session_owner(
+                        command_session_id,
+                        request_id.clone(),
+                        pending,
+                    );
+                    return Some(FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                        -32000,
+                        "NotImplemented",
+                    )));
+                };
+                FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+                    conn,
+                    command_id,
+                    command_session_id,
+                    PendingFetchCommandKind::ContinueWithAuth {
+                        state: Box::new(PendingContinueWithAuthState::NavigationContinue {
+                            pending: Box::new(pending),
+                            auth,
+                        }),
+                    },
+                    PendingFetchCommandOperation::Ready,
+                ))
+            }
+        });
+    }
+
+    let decision = match command.action {
+        DevToolsAuthChallengeAction::Default => BrowserPausedNavigationDecision::fail_auth(),
+        DevToolsAuthChallengeAction::Cancel => BrowserPausedNavigationDecision::cancel_auth(),
         DevToolsAuthChallengeAction::ProvideCredentials => {
             let Some(auth) = request_auth_for_challenge(
                 &pending.challenge,
@@ -372,7 +411,7 @@ pub(super) fn start_devtools_continue_with_auth_command_for_pending(
             ) else {
                 conn.register_pending_fetch_auth_navigation_for_session_owner(
                     command_session_id,
-                    request_id.clone(),
+                    request_id,
                     pending,
                 );
                 return Some(FetchCommandTaskStep::Complete(CommandOutputPlan::error(
@@ -380,20 +419,112 @@ pub(super) fn start_devtools_continue_with_auth_command_for_pending(
                     "NotImplemented",
                 )));
             };
-            FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
-                conn,
-                command_id,
-                command_session_id,
-                PendingFetchCommandKind::ContinueWithAuth {
-                    state: Box::new(PendingContinueWithAuthState::NavigationContinue {
-                        pending: Box::new(pending),
-                        auth,
-                    }),
-                },
-                PendingFetchCommandOperation::Ready,
+            BrowserPausedNavigationDecision::continue_auth(auth)
+        }
+    };
+    let Some(page_owner) = page_owner_for_pending_auth_navigation(conn, &pending) else {
+        let restored_request_id = pending.fetch_request_id.clone();
+        if !conn.register_pending_fetch_auth_navigation_for_session_owner(
+            command_session_id,
+            restored_request_id,
+            pending,
+        ) {
+            tracing::error!(
+                request_id,
+                "failed to restore auth-paused navigation after Page owner capture failure"
+            );
+        }
+        return Some(FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+            -32000,
+            "BrowserHostPausedNavigationDecisionAdmissionFailed: PageNotFound",
+        )));
+    };
+    let publication = conn.publish_browser_owner_paused_navigation_auth_decision(
+        page_owner.clone(),
+        pending,
+        decision,
+        CommandDispatchContext::default(),
+    );
+    Some(match publication {
+        Ok(pending) => FetchCommandTaskStep::Pending(PendingFetchCommandDispatch::new(
+            conn,
+            command_id,
+            command_session_id,
+            PendingFetchCommandKind::ContinueWithAuth {
+                state: Box::new(PendingContinueWithAuthState::BrowserOwnerNavigationDecision),
+            },
+            PendingFetchCommandOperation::BrowserOwnerPausedNavigationDecision(pending),
+        )),
+        Err(failure) => {
+            let (error, pending) = failure.into_parts();
+            if let Some(pending) = pending {
+                match pending {
+                    BrowserOwnerPausedNavigationSidecar::Auth(pending) => {
+                        restore_pending_auth_navigation_after_owner_publication_failure(
+                            conn,
+                            &page_owner,
+                            command_session_id,
+                            pending,
+                        );
+                    }
+                    BrowserOwnerPausedNavigationSidecar::Request(_) => {
+                        tracing::error!(
+                            "continueWithAuth publication returned a request-navigation sidecar"
+                        );
+                    }
+                    BrowserOwnerPausedNavigationSidecar::Response(_) => {
+                        tracing::error!(
+                            "continueWithAuth publication returned a response-navigation sidecar"
+                        );
+                    }
+                }
+            }
+            FetchCommandTaskStep::Complete(CommandOutputPlan::error(
+                -32000,
+                format!("BrowserHostPausedNavigationDecisionAdmissionFailed: {error}"),
             ))
         }
     })
+}
+
+fn page_owner_for_pending_auth_navigation(
+    conn: &mut CdpConnection,
+    pending: &PendingFetchAuthNavigation,
+) -> Option<TargetPageResidenceIdentity> {
+    let route = conn
+        .target_session_route_for_target_id(&pending.navigation.frame_id)
+        .or_else(|| conn.session_route(pending.navigation.navigate_session_id.as_deref()))?;
+    let mut owner_scope = conn.scoped_none_session_owner_route_override(route);
+    owner_scope
+        .conn_mut()
+        .target_page_residence_identity_for_session(None)
+}
+
+fn restore_pending_auth_navigation_after_owner_publication_failure(
+    conn: &mut CdpConnection,
+    page_owner: &TargetPageResidenceIdentity,
+    fallback_session_id: Option<&str>,
+    pending: PendingFetchAuthNavigation,
+) {
+    let request_id = pending.fetch_request_id.clone();
+    let restored = if let Some(route) = conn.target_page_owner_route_if_current(page_owner) {
+        let mut owner_scope = conn.scoped_none_session_owner_route_override(route);
+        owner_scope
+            .conn_mut()
+            .register_pending_fetch_auth_navigation_for_session_owner(None, request_id, pending)
+    } else {
+        conn.register_pending_fetch_auth_navigation_for_session_owner(
+            fallback_session_id,
+            request_id,
+            pending,
+        )
+    };
+    if !restored {
+        tracing::error!(
+            target_id = page_owner.target_id(),
+            "failed to restore auth-paused navigation after Browser Host publication failure"
+        );
+    }
 }
 
 fn continued_subresource_request(
@@ -522,11 +653,21 @@ fn next_chained_subresource_auth_required_event(
 pub(super) async fn complete_continue_with_auth_command_async(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    completed: Option<Result<CompletedPageCommand, String>>,
+    completed: CompletedFetchCommandOperation,
     state: PendingContinueWithAuthState,
     out: &mut FetchCommandOutput,
 ) {
     match state {
+        PendingContinueWithAuthState::BrowserOwnerNavigationDecision => {
+            let Some(completed) = completed.into_browser_owner_paused_navigation_decision() else {
+                out.push_error(-32000, "Missing Browser Owner completion");
+                return;
+            };
+            match completed {
+                Ok(completed) => out.extend_browser_owner_projection_as_command_response(completed),
+                Err(error) => out.push_error(-32000, error),
+            }
+        }
         PendingContinueWithAuthState::SubresourceAuthCancel {
             pending,
             correlation,
@@ -534,7 +675,7 @@ pub(super) async fn complete_continue_with_auth_command_async(
             complete_subresource_auth_terminal_async(
                 conn,
                 session_id,
-                completed,
+                completed.into_page_completion(),
                 *pending,
                 true,
                 correlation,
@@ -544,12 +685,20 @@ pub(super) async fn complete_continue_with_auth_command_async(
         }
         PendingContinueWithAuthState::SubresourceAuthFail { pending } => {
             complete_subresource_auth_terminal_async(
-                conn, session_id, completed, *pending, false, None, out,
+                conn,
+                session_id,
+                completed.into_page_completion(),
+                *pending,
+                false,
+                None,
+                out,
             )
             .await;
         }
         PendingContinueWithAuthState::SubresourceAuthContinue { correlation } => {
-            if let Err(error) = finish_continue_subresource_auth(conn, session_id, completed) {
+            if let Err(error) =
+                finish_continue_subresource_auth(conn, session_id, completed.into_page_completion())
+            {
                 correlation.rollback(conn, session_id);
                 out.push_error(-32000, error);
                 return;
@@ -634,10 +783,10 @@ async fn complete_subresource_auth_terminal_async(
         }
     };
     let result = match conn.loaded_page_mut_for_protocol_access(activity_session_id) {
-        Ok(page) if expose_challenged_response => page
+        Ok(mut page) if expose_challenged_response => page
             .finish_cancel_pending_subresource_auth(completion)
             .map(|_| ()),
-        Ok(page) => page
+        Ok(mut page) => page
             .finish_fail_pending_subresource_auth(completion)
             .map(|_| ()),
         Err(message) => {
@@ -676,7 +825,7 @@ fn finish_continue_subresource_auth(
     completed: Option<Result<CompletedPageCommand, String>>,
 ) -> Result<(), String> {
     let completion = completed.ok_or_else(|| "Missing renderer completion".to_owned())??;
-    let page = conn.loaded_page_mut_for_protocol_access(session_id)?;
+    let mut page = conn.loaded_page_mut_for_protocol_access(session_id)?;
     page.finish_continue_pending_subresource_auth(completion)
         .map(|_| ())
         .map_err(|error| format!("subresource auth continue failed: {error}"))

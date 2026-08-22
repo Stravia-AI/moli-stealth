@@ -750,7 +750,7 @@ async fn fetch_with_load_waits_for_runtime_owned_async_classic_execution() -> Re
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_with_domcontentloaded_stops_before_fast_runtime_owned_async_classic_execution()
+async fn fetch_with_domcontentloaded_observes_a_valid_fast_runtime_owned_async_classic_race()
 -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
@@ -765,30 +765,30 @@ async fn fetch_with_domcontentloaded_stops_before_fast_runtime_owned_async_class
         )
         .await?;
 
+    let dcl_order =
+        diagnostic_global(&page, "runtimeOwnedAsyncFastDclOrder").and_then(JsValueSnapshot::as_str);
+    match dcl_order {
+        Some("after-append:async=true,dcl:interactive") => assert_eq!(
+            diagnostic_global(&page, "runtimeOwnedAsyncFastLoadOrder"),
+            None,
+            "the DCL snapshot must precede a later async-script task"
+        ),
+        Some(
+            "after-append:async=true,external-script:interactive,load:interactive,dcl:interactive",
+        ) => assert_eq!(
+            diagnostic_global(&page, "runtimeOwnedAsyncFastLoadOrder"),
+            Some(&JsValueSnapshot::String(
+                "after-append:async=true,external-script:interactive,load:interactive".to_owned()
+            )),
+            "a ready async-script task may finish before the queued DCL task"
+        ),
+        other => panic!("runtime-owned async classic produced an invalid DCL order: {other:?}"),
+    }
     assert_eq!(
-        diagnostic_global(&page, "runtimeOwnedAsyncFastDclOrder"),
-        Some(&JsValueSnapshot::String(
-            "after-append:async=true,dcl:interactive".to_owned()
-        ))
+        diagnostic_global(&page, "runtimeOwnedAsyncFastFinalOrder"),
+        None,
+        "the exact DCL snapshot must always precede Window load"
     );
-    if let Some(load_order) =
-        diagnostic_global(&page, "runtimeOwnedAsyncFastLoadOrder").and_then(JsValueSnapshot::as_str)
-    {
-        assert!(
-            load_order
-                .starts_with("after-append:async=true,dcl:interactive,external-script:interactive"),
-            "fast runtime-owned async script overtook DOMContentLoaded: {load_order}"
-        );
-    }
-    if let Some(final_order) = diagnostic_global(&page, "runtimeOwnedAsyncFastFinalOrder")
-        .and_then(JsValueSnapshot::as_str)
-    {
-        assert!(
-            final_order
-                .starts_with("after-append:async=true,dcl:interactive,external-script:interactive"),
-            "fast runtime-owned async script overtook DOMContentLoaded: {final_order}"
-        );
-    }
 
     server.shutdown().await;
     Ok(())
@@ -829,7 +829,7 @@ async fn fetch_with_domcontentloaded_keeps_runtime_owned_async_script_behind_def
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn fetch_with_domcontentloaded_stops_before_runtime_owned_module_execution() -> Result<()> {
+async fn fetch_with_domcontentloaded_observes_a_valid_runtime_owned_module_race() -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
@@ -843,11 +843,17 @@ async fn fetch_with_domcontentloaded_stops_before_runtime_owned_module_execution
         )
         .await?;
 
-    assert_eq!(
-        diagnostic_global(&page, "runtimeOwnedAsyncModuleDclOrder"),
-        Some(&JsValueSnapshot::String(
-            "ready:loading,after-append:async=true,dcl:interactive".to_owned()
-        ))
+    let dcl_order = diagnostic_global(&page, "runtimeOwnedAsyncModuleDclOrder")
+        .and_then(JsValueSnapshot::as_str);
+    assert!(
+        matches!(
+            dcl_order,
+            Some("ready:loading,after-append:async=true,dcl:interactive")
+                | Some(
+                    "ready:loading,after-append:async=true,module,module-microtask,dcl:interactive"
+                )
+        ),
+        "runtime-owned async module produced an invalid DCL order: {dcl_order:?}"
     );
     assert_eq!(
         diagnostic_global(&page, "runtimeOwnedAsyncModuleFinalOrder"),

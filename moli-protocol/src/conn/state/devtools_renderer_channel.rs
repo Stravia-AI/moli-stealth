@@ -185,6 +185,23 @@ impl DevToolsRendererChannel {
         &mut self,
         candidate: PreparedRendererAgentAttachment,
     ) -> Result<CommittedRendererAgentAttachment, DevToolsRendererChannelError> {
+        self.validate_candidate_commit(&candidate)?;
+        self.inflight_cross_document_navigations
+            .retain(|navigation| navigation == candidate.navigation());
+        self.committed_latest_navigation = Some(candidate.navigation.clone());
+        let current = candidate.attachment;
+        let previous = self.current.replace(current);
+        Ok(CommittedRendererAgentAttachment {
+            navigation: candidate.navigation,
+            current,
+            previous,
+        })
+    }
+
+    pub(crate) fn validate_candidate_commit(
+        &self,
+        candidate: &PreparedRendererAgentAttachment,
+    ) -> Result<(), DevToolsRendererChannelError> {
         self.ensure_open()?;
         if !self
             .inflight_cross_document_navigations
@@ -198,16 +215,7 @@ impl DevToolsRendererChannel {
         if self.committed_latest_navigation.as_ref() == Some(candidate.navigation()) {
             return Err(DevToolsRendererChannelError::NavigationAlreadyCommitted);
         }
-        self.inflight_cross_document_navigations
-            .retain(|navigation| navigation == candidate.navigation());
-        self.committed_latest_navigation = Some(candidate.navigation.clone());
-        let current = candidate.attachment;
-        let previous = self.current.replace(current);
-        Ok(CommittedRendererAgentAttachment {
-            navigation: candidate.navigation,
-            current,
-            previous,
-        })
+        Ok(())
     }
 
     pub(crate) fn rollback_committed_candidate(
@@ -215,8 +223,11 @@ impl DevToolsRendererChannel {
         transaction: CommittedRendererAgentAttachment,
     ) -> Result<(), DevToolsRendererChannelError> {
         self.ensure_open()?;
-        if self.committed_latest_navigation.as_ref() != Some(transaction.navigation())
-            || self.current != Some(transaction.current())
+        if self.current != Some(transaction.current())
+            || self
+                .committed_latest_navigation
+                .as_ref()
+                .is_some_and(|navigation| navigation != transaction.navigation())
         {
             return Err(DevToolsRendererChannelError::CommittedCandidateMismatch);
         }
@@ -465,11 +476,7 @@ mod tests {
     use serde_json::json;
 
     fn navigation(label: u64) -> DocumentNavigationToken {
-        DocumentNavigationToken {
-            target_id: "TID-channel".to_owned(),
-            loader_id: format!("LID-{label}"),
-            request_id: crate::conn::state::NavigationRequestId::allocate(),
-        }
+        DocumentNavigationToken::new("TID-channel", format!("LID-{label}"))
     }
 
     fn batch(
@@ -651,6 +658,40 @@ mod tests {
                 .expect("rolled-back navigation finish")
                 .is_some()
         );
+    }
+
+    #[test]
+    fn superseding_navigation_can_roll_back_exact_current_candidate_transaction() {
+        let initial_agent = RendererDevToolsAgentToken::allocate();
+        let candidate_agent = RendererDevToolsAgentToken::allocate();
+        let request_a = navigation(1);
+        let request_b = navigation(2);
+        let mut channel = DevToolsRendererChannel::default();
+        channel
+            .attach_current(initial_agent)
+            .expect("initial attach");
+        let initial = channel.current().expect("initial attachment");
+        channel
+            .navigation_started(request_a.clone())
+            .expect("navigation A");
+        let candidate = channel
+            .attach_candidate(&request_a, candidate_agent)
+            .expect("candidate A");
+        let transaction = channel
+            .commit_candidate_transaction(candidate)
+            .expect("candidate A commit");
+
+        channel
+            .navigation_started(request_b.clone())
+            .expect("navigation B supersedes Browser Core request A");
+        assert_eq!(channel.committed_latest_navigation, None);
+        channel
+            .rollback_committed_candidate(transaction)
+            .expect("the exact still-current candidate transaction should roll back");
+
+        assert_eq!(channel.current(), Some(initial));
+        assert_eq!(channel.latest_started_navigation, Some(request_b));
+        assert!(channel.output_is_suspended());
     }
 
     #[test]

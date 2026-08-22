@@ -370,6 +370,65 @@ async fn websocket_bidi_existing_classic_session_shares_classic_runtime_context(
 }
 
 #[tokio::test]
+async fn websocket_bidi_detach_does_not_stop_classic_devtools_host_service() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let session_id = classic_new_session_on_server(cdp_addr).await;
+    let mut socket = connect_classic_session_bidi_socket(cdp_addr, &session_id).await;
+
+    let initial_tree =
+        send_bidi_command(&mut socket, 1, "browsingContext.getTree", json!({})).await;
+    assert_eq!(initial_tree["type"], json!("success"));
+
+    socket
+        .close(None)
+        .await
+        .expect("close attached Classic-session BiDi frontend");
+    let closed = timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("server should acknowledge attached BiDi frontend close");
+    assert!(matches!(
+        closed,
+        Some(Ok(WsMessage::Close(_))) | None | Some(Err(_))
+    ));
+
+    let page_url = classic_data_url_for_bidi_test(
+        "<!doctype html><title>Classic survives BiDi detach</title><main>alive</main>",
+    );
+    let navigated = classic_request_on_server_with_body(
+        cdp_addr,
+        "POST",
+        &format!("/session/{session_id}/url"),
+        json!({ "url": page_url }),
+    )
+    .await;
+    assert_eq!(navigated, json!({ "value": null }));
+
+    let title = classic_request_on_server_with_body(
+        cdp_addr,
+        "GET",
+        &format!("/session/{session_id}/title"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(title, json!({ "value": "Classic survives BiDi detach" }));
+
+    let mut reattached = connect_classic_session_bidi_socket(cdp_addr, &session_id).await;
+    let tree = send_bidi_command(&mut reattached, 2, "browsingContext.getTree", json!({})).await;
+    assert_eq!(tree["type"], json!("success"));
+    assert_eq!(tree["result"]["contexts"][0]["url"], json!(page_url));
+
+    let _ = reattached.close(None).await;
+    let _ = classic_request_on_server_with_body(
+        cdp_addr,
+        "DELETE",
+        &format!("/session/{session_id}"),
+        json!({}),
+    )
+    .await;
+    protocol_server.abort();
+}
+
+#[tokio::test]
 async fn websocket_bidi_navigation_stales_classic_element_from_replaced_page() {
     let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
     let session_id = classic_new_session_on_server(cdp_addr).await;
@@ -1474,10 +1533,19 @@ async fn websocket_bidi_session_subscribe_emits_context_created_before_create_re
         .iter()
         .position(|message| message["id"] == json!(3_u64))
         .expect("create response");
-    let event_index = messages
+    let event_indexes = messages
         .iter()
-        .position(|message| message["method"] == json!("browsingContext.contextCreated"))
-        .expect("contextCreated event");
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message["method"] == json!("browsingContext.contextCreated")).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_indexes.len(),
+        1,
+        "one exact contextCreated event is required: {messages:#?}"
+    );
+    let event_index = event_indexes[0];
     assert!(
         event_index < response_index,
         "contextCreated should be emitted before browsingContext.create resolves: {messages:#?}"
@@ -2226,12 +2294,28 @@ async fn websocket_bidi_session_subscribe_emits_context_destroyed_on_close() {
         .expect("close response");
     assert_eq!(close["type"], json!("success"));
 
-    let event = messages
+    let response_index = messages
         .iter()
-        .find(|message| message["method"] == json!("browsingContext.contextDestroyed"))
-        .unwrap_or_else(|| {
-            panic!("expected contextDestroyed before close response: {messages:#?}")
-        });
+        .position(|message| message["id"] == json!(4_u64))
+        .expect("close response");
+    let event_indexes = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(index, message)| {
+            (message["method"] == json!("browsingContext.contextDestroyed")).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        event_indexes.len(),
+        1,
+        "one exact contextDestroyed event is required: {messages:#?}"
+    );
+    let event_index = event_indexes[0];
+    assert!(
+        event_index < response_index,
+        "contextDestroyed should be emitted before browsingContext.close resolves: {messages:#?}"
+    );
+    let event = &messages[event_index];
     assert_eq!(event["type"], json!("event"));
     assert_eq!(event["params"]["context"], json!(context_id.clone()));
     assert_eq!(event["params"]["url"], json!("about:blank"));
@@ -4351,12 +4435,29 @@ async fn websocket_bidi_network_auth_required_intercept_blocks_matching_request(
         ))
         .await
         .expect("send network.continueWithAuth cancel");
-    let continue_messages = recv_until_id(&mut socket, 6).await;
+    let mut continue_messages = recv_until_id(&mut socket, 6).await;
+    if !continue_messages
+        .iter()
+        .any(|message| message["id"] == json!(5_u64))
+    {
+        continue_messages.extend(recv_until_id(&mut socket, 5).await);
+    }
     let continue_auth = continue_messages
         .iter()
         .find(|message| message["id"] == json!(6_u64))
         .expect("network.continueWithAuth response");
     assert_eq!(continue_auth["type"], json!("success"));
+    let navigate = continue_messages
+        .iter()
+        .find(|message| message["id"] == json!(5_u64))
+        .expect("cancelled auth should complete the waiting navigation response");
+    assert_eq!(
+        navigate["type"],
+        json!("success"),
+        "auth cancellation should commit the 401 document: {continue_messages:?}"
+    );
+    assert!(navigate["result"]["navigation"].as_str().is_some());
+    assert_eq!(navigate["result"]["url"], json!(auth_url));
 
     let _ = socket.close(None).await;
     protocol_server.abort();
@@ -12342,6 +12443,108 @@ async fn websocket_bidi_set_viewport_user_contexts_apply_and_inherit() {
 }
 
 #[tokio::test]
+async fn websocket_bidi_script_created_target_lifecycle_uses_committed_navigation() {
+    let (cdp_addr, protocol_server) = spawn_test_protocol_server().await;
+    let (mut socket, opener_context_id) = bidi_session_with_context(cdp_addr).await;
+    const POPUP_URL: &str = "data:text/html,<title>Lifecycle Popup</title><main>popup</main>";
+
+    let subscribe = send_bidi_command(
+        &mut socket,
+        3,
+        "session.subscribe",
+        json!({
+            "events": [
+                "browsingContext.domContentLoaded",
+                "browsingContext.load"
+            ]
+        }),
+    )
+    .await;
+    assert_eq!(subscribe["type"], json!("success"));
+
+    socket
+        .send(WsMessage::Text(
+            json!({
+                "id": 4_u64,
+                "method": "script.callFunction",
+                "params": {
+                    "functionDeclaration": format!(
+                        "() => window.open({}, '_blank') !== null",
+                        serde_json::to_string(POPUP_URL).expect("serialize popup URL")
+                    ),
+                    "awaitPromise": false,
+                    "target": {
+                        "context": opener_context_id.clone()
+                    }
+                }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .expect("send script-created popup command");
+    let mut messages = recv_until_id(&mut socket, 4).await;
+    let call_response = messages
+        .iter()
+        .find(|message| message["id"] == json!(4_u64))
+        .expect("script.callFunction response");
+    assert_eq!(call_response["type"], json!("success"));
+
+    let is_committed_popup_load = |message: &serde_json::Value| {
+        message["method"] == json!("browsingContext.load")
+            && message["params"]["context"] != json!(opener_context_id)
+            && message["params"]["url"] == json!(POPUP_URL)
+            && message["params"]["navigation"].as_str().is_some()
+    };
+    if !messages.iter().any(is_committed_popup_load) {
+        messages.append(&mut recv_until_match(&mut socket, is_committed_popup_load).await);
+    }
+
+    let popup_context_id = messages
+        .iter()
+        .find(|message| is_committed_popup_load(message))
+        .and_then(|message| message["params"]["context"].as_str())
+        .expect("fact-backed popup load context")
+        .to_owned();
+    let lifecycle_events = messages
+        .iter()
+        .filter(|message| {
+            message["params"]["context"] == json!(popup_context_id)
+                && matches!(
+                    message["method"].as_str(),
+                    Some("browsingContext.domContentLoaded" | "browsingContext.load")
+                )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lifecycle_events.len(),
+        2,
+        "one committed Document should produce one DCL and one load: {messages:#?}"
+    );
+    assert_eq!(
+        lifecycle_events[0]["method"],
+        json!("browsingContext.domContentLoaded")
+    );
+    assert_eq!(lifecycle_events[1]["method"], json!("browsingContext.load"));
+    let navigation = lifecycle_events[0]["params"]["navigation"]
+        .as_str()
+        .expect("committed popup navigation id");
+    for event in lifecycle_events {
+        assert_eq!(event["params"]["url"], json!(POPUP_URL));
+        assert_eq!(event["params"]["navigation"], json!(navigation));
+        assert!(
+            event["params"]["timestamp"]
+                .as_u64()
+                .is_some_and(|value| value > 0),
+            "committed lifecycle should retain a real timestamp: {event:?}"
+        );
+    }
+
+    let _ = socket.close(None).await;
+    protocol_server.abort();
+}
+
+#[tokio::test]
 async fn websocket_bidi_set_viewport_user_context_inherits_through_window_open() {
     // Ported from Chromium/WPT
     // webdriver/tests/bidi/browsing_context/set_viewport/window_open.py.
@@ -17082,13 +17285,21 @@ async fn websocket_bidi_preload_channel_emits_after_wait_none_navigation() {
         4,
         "script.addPreloadScript",
         json!({
-            "functionDeclaration": "(channel) => channel('wait-none-preload')",
-            "arguments": [{
-                "type": "channel",
-                "value": {
-                    "channel": "wait_none_channel"
+            "functionDeclaration": "(first, second) => { first('wait-none-first'); second('wait-none-second'); }",
+            "arguments": [
+                {
+                    "type": "channel",
+                    "value": {
+                        "channel": "wait_none_channel_first"
+                    }
+                },
+                {
+                    "type": "channel",
+                    "value": {
+                        "channel": "wait_none_channel_second"
+                    }
                 }
-            }],
+            ],
             "contexts": [context_id.clone()]
         }),
     )
@@ -17120,7 +17331,7 @@ async fn websocket_bidi_preload_channel_emits_after_wait_none_navigation() {
         &mut socket,
         navigate_messages,
         "script.message",
-        1,
+        2,
     )
     .await;
     let navigate = bidi_message_by_id(&messages, 5);
@@ -17129,22 +17340,54 @@ async fn websocket_bidi_preload_channel_emits_after_wait_none_navigation() {
         json!("success"),
         "wait=none navigation should return successfully: {messages:#?}"
     );
-    let script_message = bidi_events_by_method(&messages, "script.message")
-        .pop()
-        .expect("wait=none preload script.message event");
-    let realm = script_message["params"]["source"]["realm"]
+    let navigate_position = messages
+        .iter()
+        .position(|message| message["id"] == json!(5))
+        .expect("wait=none navigation response position");
+    let script_message_positions = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(position, message)| {
+            (message["method"] == json!("script.message")).then_some(position)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(script_message_positions.len(), 2);
+    assert!(
+        navigate_position < script_message_positions[0]
+            && script_message_positions[0] < script_message_positions[1],
+        "Chromium-compatible wait=none ordering is navigate response, then FIFO channel messages: {messages:#?}"
+    );
+    let script_messages = bidi_events_by_method(&messages, "script.message");
+    let first_realm = script_messages[0]["params"]["source"]["realm"]
         .as_str()
-        .expect("wait=none preload script.message realm");
+        .expect("first wait=none preload script.message realm");
+    let second_realm = script_messages[1]["params"]["source"]["realm"]
+        .as_str()
+        .expect("second wait=none preload script.message realm");
     assert_eq!(
-        script_message["params"],
+        script_messages[0]["params"],
         json!({
-            "channel": "wait_none_channel",
+            "channel": "wait_none_channel_first",
             "data": {
                 "type": "string",
-                "value": "wait-none-preload"
+                "value": "wait-none-first"
             },
             "source": {
-                "realm": realm,
+                "realm": first_realm,
+                "context": context_id.clone()
+            }
+        })
+    );
+    assert_eq!(
+        script_messages[1]["params"],
+        json!({
+            "channel": "wait_none_channel_second",
+            "data": {
+                "type": "string",
+                "value": "wait-none-second"
+            },
+            "source": {
+                "realm": second_realm,
                 "context": context_id
             }
         })

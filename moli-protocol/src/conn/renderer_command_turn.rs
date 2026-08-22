@@ -22,7 +22,7 @@ impl CdpConnection {
             return completion.into_output();
         }
 
-        if let Ok(page) = self.loaded_page_mut_for_interruptible_protocol_access(session_id) {
+        if let Ok(mut page) = self.loaded_page_mut_for_interruptible_protocol_access(session_id) {
             return page.finish_page_command_turn(completion);
         }
 

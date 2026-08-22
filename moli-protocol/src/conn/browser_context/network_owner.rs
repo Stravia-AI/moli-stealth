@@ -8,6 +8,7 @@ use crate::domains::network::{
     NetworkBacklogPreferredRequestId, PendingNetworkBacklogDeliverySnapshot,
     TargetNetworkBacklogPreparedDelivery,
 };
+use moli_core::browser_host::BrowserHostPolicyUpdate;
 use moli_core::page::PendingPageCommand;
 
 impl TargetSessionStateMut<'_> {
@@ -529,7 +530,7 @@ impl CdpConnection {
         &self,
         request_id: &str,
         session_id: Option<&str>,
-    ) -> Option<&CapturedResponseBody> {
+    ) -> Option<CapturedResponseBody> {
         self.browser_contexts().find_map(|browser_context| {
             browser_context
                 .active_target
@@ -559,7 +560,7 @@ impl CdpConnection {
         &self,
         request_id: &str,
         session_id: Option<&str>,
-    ) -> Option<&CapturedRequestBody> {
+    ) -> Option<CapturedRequestBody> {
         self.browser_contexts().find_map(|browser_context| {
             browser_context
                 .active_target
@@ -672,10 +673,8 @@ impl CdpConnection {
         primary_session_id: Option<&str>,
         preferred_request_id: Option<NetworkBacklogPreferredRequestId<'_>>,
     ) -> Option<TargetNetworkBacklogPreparedDelivery> {
-        let mut network_request_id_allocator =
-            std::mem::take(&mut self.network_request_id_allocator);
-        let result = self
-            .runtime_session_owner_slot_mut(session_id)
+        let mut network_request_id_allocator = self.browser_host_state.network_artifacts();
+        self.runtime_session_owner_slot_mut(session_id)
             .ok()
             .map(|runtime_slot| {
                 runtime_slot.network_backlog_prepared_delivery(
@@ -684,9 +683,7 @@ impl CdpConnection {
                     preferred_request_id,
                     &mut network_request_id_allocator,
                 )
-            });
-        self.network_request_id_allocator = network_request_id_allocator;
-        result
+            })
     }
 
     pub(crate) fn network_request_id_for_subresource_handle_for_session_owner(
@@ -694,19 +691,15 @@ impl CdpConnection {
         session_id: Option<&str>,
         handle: moli_core::page::SubresourceNetworkRequestHandle,
     ) -> Option<String> {
-        let mut network_request_id_allocator =
-            std::mem::take(&mut self.network_request_id_allocator);
-        let result = self
-            .runtime_session_owner_slot_mut(session_id)
+        let mut network_request_id_allocator = self.browser_host_state.network_artifacts();
+        self.runtime_session_owner_slot_mut(session_id)
             .ok()
             .map(|runtime_slot| {
                 runtime_slot.network_request_id_for_subresource_handle(
                     handle,
                     &mut network_request_id_allocator,
                 )
-            });
-        self.network_request_id_allocator = network_request_id_allocator;
-        result
+            })
     }
 
     pub(crate) fn pending_network_backlog_delivery_snapshot_for_session_owner(
@@ -716,10 +709,8 @@ impl CdpConnection {
         primary_session_id: Option<&str>,
         preferred_request_id: Option<NetworkBacklogPreferredRequestId<'_>>,
     ) -> Option<PendingNetworkBacklogDeliverySnapshot> {
-        let mut network_request_id_allocator =
-            std::mem::take(&mut self.network_request_id_allocator);
-        let result = self
-            .runtime_session_owner_slot_mut(session_id)
+        let mut network_request_id_allocator = self.browser_host_state.network_artifacts();
+        self.runtime_session_owner_slot_mut(session_id)
             .ok()
             .and_then(|runtime_slot| {
                 runtime_slot.pending_network_backlog_delivery_snapshot(
@@ -728,9 +719,7 @@ impl CdpConnection {
                     preferred_request_id,
                     &mut network_request_id_allocator,
                 )
-            });
-        self.network_request_id_allocator = network_request_id_allocator;
-        result
+            })
     }
 
     pub(crate) fn network_event_session_ids_for_session_owner(
@@ -783,11 +772,15 @@ impl CdpConnection {
     }
 
     pub(crate) fn set_global_cache_disabled(&mut self, cache_disabled: bool) {
-        self.global_cache_disabled = cache_disabled;
+        self.apply_browser_host_policy_update(BrowserHostPolicyUpdate::SetGlobalCacheDisabled(
+            cache_disabled,
+        ));
     }
 
     pub(crate) fn set_global_extra_headers(&mut self, extra_headers: Vec<(String, String)>) {
-        self.global_extra_headers = extra_headers.clone();
+        self.apply_browser_host_policy_update(BrowserHostPolicyUpdate::SetGlobalExtraHeaders(
+            extra_headers.clone(),
+        ));
         if let Some(browser_context) = self.browser_context.as_mut() {
             browser_context.global_extra_headers = extra_headers.clone();
         }
@@ -877,10 +870,11 @@ impl CdpConnection {
         session_id: Option<&str>,
         user_agent: Option<String>,
     ) -> Result<Option<PendingPageCommand>, String> {
+        let base_identity = self.base_browser_identity();
         let browser_identity = user_agent.as_ref().map(|user_agent| {
             moli_browser_profile::BrowserIdentityProfile::new(
                 user_agent.clone(),
-                self.base_browser_identity.accept_language(),
+                base_identity.accept_language(),
             )
         });
         self.start_set_browser_identity_override_for_session_owner(session_id, browser_identity)
@@ -906,7 +900,11 @@ impl CdpConnection {
                         .clear_browser_identity_override();
                 }
             } else {
-                self.global_browser_identity_override = browser_identity.clone();
+                self.apply_browser_host_policy_update(
+                    BrowserHostPolicyUpdate::SetGlobalBrowserIdentityOverride(
+                        browser_identity.clone(),
+                    ),
+                );
             }
             self.apply_active_engine_fetch_overrides();
             return self.start_rebuild_resource_runtime_for_session_owner(session_id);
@@ -915,7 +913,9 @@ impl CdpConnection {
             && self.none_session_owner_route_override().is_none()
             && self.browser_context.is_none()
         {
-            self.global_browser_identity_override = browser_identity.clone();
+            self.apply_browser_host_policy_update(
+                BrowserHostPolicyUpdate::SetGlobalBrowserIdentityOverride(browser_identity.clone()),
+            );
             self.apply_active_engine_fetch_overrides();
             return self.start_rebuild_resource_runtime_for_session_owner(session_id);
         }
@@ -948,7 +948,9 @@ impl CdpConnection {
             if let Some(browser_context) = self.browser_context.as_mut() {
                 browser_context.tls_verify_host_override = Some(enabled);
             } else {
-                self.base_tls_verify_host = enabled;
+                self.apply_browser_host_policy_update(
+                    BrowserHostPolicyUpdate::SetBaseTlsVerifyHost(enabled),
+                );
             }
             self.apply_active_engine_fetch_overrides();
             return self.start_rebuild_resource_runtime_for_session_owner(session_id);
@@ -1064,19 +1066,25 @@ fn clear_parked_network_observation_artifacts_if_unobserved(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conn::{BackgroundTarget, ParkedPageSessionState};
+    use crate::conn::BackgroundTarget;
+    use crate::conn::state::DevToolsSessionState;
 
     fn active_session_state_mut(browser_context: &mut BrowserContext) -> TargetSessionStateMut<'_> {
+        let (devtools_session_state, network_policy, tls_verify_host_override) =
+            browser_context.active_frontend_and_policy_state_mut();
         TargetSessionStateMut::Active {
-            devtools_session_state: &mut browser_context.devtools_session_state,
-            network_policy: &mut browser_context.network_policy,
-            tls_verify_host_override: &mut browser_context.tls_verify_host_override,
+            devtools_session_state,
+            network_policy,
+            tls_verify_host_override,
         }
     }
 
-    fn parked_session_state_mut(state: &mut ParkedPageSessionState) -> TargetSessionStateMut<'_> {
+    fn parked_session_state_mut<'a>(
+        state: &'a mut ParkedPageSessionState,
+        devtools_session_state: &'a mut DevToolsSessionState,
+    ) -> TargetSessionStateMut<'a> {
         TargetSessionStateMut::Parked {
-            devtools_session_state: &mut state.devtools_session_state,
+            devtools_session_state,
             network_policy: &mut state.network_policy,
             tls_verify_host_override: &mut state.tls_verify_host_override,
         }
@@ -1092,6 +1100,7 @@ mod tests {
                 Some("SID-background".to_owned()),
                 "https://background.example/".to_owned(),
             ));
+        browser_context.adopt_background_target_fixture_attachments();
         assert!(
             browser_context
                 .assign_auxiliary_session_to_target("TID-background", "SID-aux".to_owned())
@@ -1113,6 +1122,7 @@ mod tests {
                 Some("SID-background".to_owned()),
                 "https://background.example/".to_owned(),
             ));
+        browser_context.adopt_background_target_fixture_attachments();
         conn.browser_context = Some(browser_context);
 
         let (active_fetch_id, active_network_request_id) = conn
@@ -1191,21 +1201,25 @@ mod tests {
         );
 
         let mut parked = ParkedPageSessionState::default();
-        parked_session_state_mut(&mut parked).set_cache_disabled(true);
-        parked_session_state_mut(&mut parked).set_bypass_service_worker(true);
-        let parked_blocked = parked_session_state_mut(&mut parked)
+        let mut parked_devtools = DevToolsSessionState::default();
+        parked_session_state_mut(&mut parked, &mut parked_devtools).set_cache_disabled(true);
+        parked_session_state_mut(&mut parked, &mut parked_devtools).set_bypass_service_worker(true);
+        let parked_blocked = parked_session_state_mut(&mut parked, &mut parked_devtools)
             .set_blocked_url_patterns(vec!["*://parked-blocked.test/*".to_owned()]);
-        let parked_headers_should_apply = parked_session_state_mut(&mut parked)
-            .set_extra_http_headers(vec![("X-Test".to_owned(), "parked".to_owned())]);
-        let parked_user_agent_should_refresh = parked_session_state_mut(&mut parked)
-            .set_user_agent_override(Some("Moli/Parked".to_owned()));
-        let parked_offline = parked_session_state_mut(&mut parked).set_emulated_network_conditions(
-            true,
-            50.0,
-            2048.0,
-            512.0,
-            Some("cellular4g".to_owned()),
-        );
+        let parked_headers_should_apply =
+            parked_session_state_mut(&mut parked, &mut parked_devtools)
+                .set_extra_http_headers(vec![("X-Test".to_owned(), "parked".to_owned())]);
+        let parked_user_agent_should_refresh =
+            parked_session_state_mut(&mut parked, &mut parked_devtools)
+                .set_user_agent_override(Some("Moli/Parked".to_owned()));
+        let parked_offline = parked_session_state_mut(&mut parked, &mut parked_devtools)
+            .set_emulated_network_conditions(
+                true,
+                50.0,
+                2048.0,
+                512.0,
+                Some("cellular4g".to_owned()),
+            );
 
         assert!(parked.network_policy.cache_disabled());
         assert!(parked.network_policy.bypass_service_worker());
@@ -1359,8 +1373,10 @@ mod tests {
 
     #[test]
     fn network_target_listener_can_be_disabled_after_enable() {
-        let mut conn = CdpConnection::default();
-        conn.browser_context = Some(BrowserContext::new("BID-network".to_owned()));
+        let mut conn = CdpConnection {
+            browser_context: Some(BrowserContext::new("BID-network".to_owned())),
+            ..Default::default()
+        };
         conn.browser_context
             .as_mut()
             .expect("browser context")

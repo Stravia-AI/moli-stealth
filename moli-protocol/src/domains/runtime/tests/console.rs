@@ -346,11 +346,6 @@ async fn heap_profiler_sampling_and_tracking_are_restored_on_replacement_page_is
         "<!doctype html><script>globalThis.__heapBefore = []</script>",
     )
     .await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist")
-        .set_active_target_id("TID-heap-profiler-restore");
 
     for command in [
         json!({"id": 206_840, "method": "HeapProfiler.enable"}),
@@ -523,7 +518,7 @@ async fn deferred_heap_profiler_state_follows_renderer_owned_document_navigation
         .browser_context
         .as_ref()
         .expect("browser context")
-        .devtools_session_state
+        .devtools_session_state()
         .inspector_session_state;
     assert!(
         inspector_state.v8_state.is_some(),
@@ -834,12 +829,13 @@ async fn heap_profiler_moli_reset_idle_engine_only_resets_without_loaded_page() 
         "loaded targets should not be reset by the idle-engine diagnostic: {loaded_response:?}"
     );
 
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context")
-        .reset_active_target_slot_to_empty_async()
+    ctx.process_async(json!({"id": 206_818, "method": "Page.close"}))
         .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 206_818)["result"],
+        json!({}),
+        "the production Target termination transaction should retire the loaded target"
+    );
 
     ctx.process_async(json!({"id": 206_819, "method": "HeapProfiler.moliResetIdleEngine"}))
         .await;

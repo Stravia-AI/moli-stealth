@@ -4,8 +4,9 @@ use moli_core::page::{
 };
 
 use super::state::{
-    CommittedRendererAgentAttachment, FinishedRendererDocumentNavigation,
-    PreparedRendererAgentAttachment, RendererAgentAttachment, RendererPageResidenceIdentity,
+    CommittedRendererAgentAttachment, DevToolsRendererChannelError,
+    FinishedRendererDocumentNavigation, PreparedRendererAgentAttachment, RendererAgentAttachment,
+    RendererPageResidenceIdentity,
 };
 use super::{CdpConnection, DocumentNavigationToken};
 
@@ -53,6 +54,7 @@ impl CdpConnection {
         agent_token: RendererDevToolsAgentToken,
     ) -> Result<PreparedRendererAgentAttachment, String> {
         self.validate_navigation_target_owner(session_id, token)?;
+        self.ensure_pending_renderer_navigation_for_session_owner(session_id, token)?;
         self.runtime_session_owner_slot(session_id)?
             .prepare_renderer_agent_candidate_token(token, agent_token)
             .map_err(|error| error.to_string())
@@ -153,15 +155,39 @@ impl CdpConnection {
         renderer_page: RendererPageResidenceIdentity,
     ) -> Result<CommittedRendererAgentAttachment, String> {
         self.validate_navigation_target_owner(session_id, candidate.navigation())?;
+        // The renderer channel owns attachment-lease diagnostics such as
+        // supersession. Validate that projection without mutating it before
+        // Browser Core makes the authoritative request-identity decision.
+        self.runtime_session_owner_slot(session_id)?
+            .validate_renderer_agent_candidate_commit(&candidate)
+            .map_err(|error| error.to_string())?;
+        self.ensure_pending_renderer_navigation_for_session_owner(
+            session_id,
+            candidate.navigation(),
+        )?;
         let transaction = self
             .runtime_session_owner_slot_mut(session_id)?
             .commit_renderer_agent_candidate_transaction(candidate, renderer_page)
             .map_err(|error| error.to_string())?;
         let page_owner = self
-            .pending_target_page_residence_identity_for_session(session_id)
+            .target_page_owner_key_for_session(session_id)
             .ok_or_else(|| "NavigationTargetOwnerMissing".to_owned())?;
-        self.bind_renderer_page_output_owner(renderer_page, page_owner);
+        self.bind_renderer_page_output_target(renderer_page, page_owner);
         Ok(transaction)
+    }
+
+    fn ensure_pending_renderer_navigation_for_session_owner(
+        &self,
+        session_id: Option<&str>,
+        token: &DocumentNavigationToken,
+    ) -> Result<(), String> {
+        if self.accepts_pending_document_navigation_for_session_owner(session_id, token) {
+            return Ok(());
+        }
+        if self.has_pending_document_navigation_for_session_owner(session_id) {
+            return Err(DevToolsRendererChannelError::SupersededNavigation.to_string());
+        }
+        Err("renderer channel navigation request is no longer pending".to_owned())
     }
 
     pub(crate) fn rollback_committed_renderer_agent_candidate_for_session_owner(
@@ -197,7 +223,7 @@ impl CdpConnection {
                 tracing::debug!(
                     %error,
                     session_id,
-                    loader_id = token.loader_id,
+                    loader_id = token.loader_id(),
                     "renderer channel rejected navigation completion"
                 );
                 None
@@ -232,7 +258,7 @@ impl CdpConnection {
         let (_, target_id) = self
             .target_owner_identity_for_session(session_id)
             .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
-        if target_id.as_deref() != Some(token.target_id.as_str()) {
+        if target_id.as_deref() != Some(token.target_id()) {
             return Err("renderer channel navigation target owner mismatch".to_owned());
         }
         Ok(())
@@ -284,8 +310,10 @@ mod tests {
                 "SID-background-aux".to_owned(),
             )
         );
-        let mut conn = CdpConnection::default();
-        conn.browser_context = Some(browser_context);
+        let conn = CdpConnection {
+            browser_context: Some(browser_context),
+            ..Default::default()
+        };
 
         let filtered = conn.filter_renderer_inspector_batches_for_target_owner(
             Some("SID-active-primary"),
@@ -348,7 +376,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .inspector_session_state
                 .v8_state,
             Some(accepted_state.clone())
@@ -373,7 +401,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .auxiliary_devtools_session_states["SID-state-aux"]
+                .auxiliary_devtools_session_states()["SID-state-aux"]
                 .inspector_session_state
                 .v8_state,
             Some(auxiliary_state),
@@ -422,7 +450,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .inspector_session_state
                 .v8_state,
             Some(route_completed_state)
@@ -452,7 +480,7 @@ mod tests {
                 .browser_context
                 .as_ref()
                 .expect("browser context")
-                .devtools_session_state
+                .devtools_session_state()
                 .inspector_session_state
                 .v8_state,
             Some(response_state),

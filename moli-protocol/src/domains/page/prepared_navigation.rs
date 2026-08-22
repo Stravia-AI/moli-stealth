@@ -2,6 +2,7 @@ use moli_core::RendererRuntimeCommandCausalIdentity;
 use moli_core::page::{
     RendererDocumentLifecycleIdentity, RendererDocumentSourcedSameDocumentNavigation,
     RendererDocumentSourcedTopLevelLocationNavigation, RendererPendingSameDocumentNavigation,
+    RendererPendingTopLevelHistoryTraversal,
 };
 
 use crate::conn::TargetPageResidenceIdentity;
@@ -70,5 +71,31 @@ impl PagePreparedTopLevelLocationNavigation {
 
     pub(super) fn runtime_command_cause(&self) -> Option<&RendererRuntimeCommandCausalIdentity> {
         self.navigation.runtime_command_cause()
+    }
+}
+
+/// A renderer-requested top-level history traversal bound to the exact Page
+/// residence that published it.
+///
+/// The renderer payload intentionally contains only a relative delta. Browser
+/// Owner resolves the history entry and URL after this Page wins its mailbox
+/// turn, so delayed output cannot follow a replacement Page or mutable
+/// frontend route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct PagePreparedTopLevelHistoryTraversal {
+    owner: TargetPageResidenceIdentity,
+    traversal: RendererPendingTopLevelHistoryTraversal,
+}
+
+impl PagePreparedTopLevelHistoryTraversal {
+    pub(super) fn new(
+        owner: TargetPageResidenceIdentity,
+        traversal: RendererPendingTopLevelHistoryTraversal,
+    ) -> Self {
+        Self { owner, traversal }
+    }
+
+    pub(super) fn into_parts(self) -> (TargetPageResidenceIdentity, i64) {
+        (self.owner, self.traversal.delta)
     }
 }

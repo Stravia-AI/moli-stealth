@@ -770,7 +770,8 @@ fn complete_get_storage_key_for_top_frame_command(
         Err(error) => return CommandOutputPlan::error(-32000, error),
     };
     let mut route_scope = owner_scope.enter(conn);
-    let Some(page) = loaded_page_mut_for_session(route_scope.conn_mut(), owner_scope.session_id())
+    let Some(mut page) =
+        loaded_page_mut_for_session(route_scope.conn_mut(), owner_scope.session_id())
     else {
         return CommandOutputPlan::error(-32000, "NoFrameForGivenId");
     };
@@ -791,7 +792,8 @@ fn complete_get_storage_key_for_frame_command(
         Err(error) => return CommandOutputPlan::error(-32000, error),
     };
     let mut route_scope = owner_scope.enter(conn);
-    let Some(page) = loaded_page_mut_for_session(route_scope.conn_mut(), owner_scope.session_id())
+    let Some(mut page) =
+        loaded_page_mut_for_session(route_scope.conn_mut(), owner_scope.session_id())
     else {
         return CommandOutputPlan::error(-32000, "NoFrameForGivenId");
     };
@@ -878,7 +880,7 @@ fn complete_set_cookies_result(
         ));
     };
     let owner = {
-        let Some(page) = browser_context.active_target.runtime_slot.loaded_page_mut() else {
+        let Some(mut page) = browser_context.active_target.runtime_slot.loaded_page_mut() else {
             return Err(DevToolsError::new(
                 DevToolsErrorKind::Internal,
                 "NoDocumentLoaded",
@@ -899,10 +901,10 @@ fn complete_set_cookies_result(
     Ok(set_cookie_reports_result(&reports))
 }
 
-fn loaded_page_mut_for_session<'a>(
-    conn: &'a mut CdpConnection,
+fn loaded_page_mut_for_session(
+    conn: &mut CdpConnection,
     session_id: Option<&str>,
-) -> Option<&'a mut moli_core::page::Page> {
+) -> Option<moli_core::browser_host::BrowserPageRuntimeLease> {
     conn.loaded_page_mut_for_protocol_access(session_id).ok()
 }
 

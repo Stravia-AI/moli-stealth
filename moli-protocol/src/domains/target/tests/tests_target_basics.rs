@@ -47,7 +47,7 @@ async fn close_active_target_fails_only_active_owner_pending_awaits() {
         Some("SID-bg-await".to_owned()),
         "about:blank#bg-await".to_owned(),
     ));
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.conn
         .register_pending_inspector_await(1041201, Some("SID-active-await"));
     ctx.conn
@@ -141,7 +141,7 @@ async fn attach_to_target_selects_inactive_browser_context() {
     load_bc_with_target(&mut ctx, "BID-A", "TID-A");
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 6,
@@ -183,7 +183,7 @@ async fn attach_to_target_creates_auxiliary_session_and_keeps_target_context_act
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-B");
     inactive.attach_active_session("SID-B");
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 61,
@@ -248,13 +248,13 @@ async fn dispose_browser_context_aborts_paused_request_stage_navigation() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    bc.devtools_session_state
+    bc.devtools_session_state_mut()
         .runtime_session_state
         .inspector_enabled = true;
     bc.active_target
         .runtime_slot
         .enable_primary_network_events();
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 20,
@@ -339,7 +339,7 @@ async fn dispose_browser_context_aborts_paused_runtime_fetch_subresource() {
     let mut bc = BrowserContext::new("BID-9".into());
     bc.set_active_target_id("TID-000000000A");
     bc.attach_active_session("SID-1");
-    ctx.conn.browser_context = Some(bc);
+    ctx.conn.insert_browser_context(bc);
     ctx.install_navigation_fixture_for_session_owner(&page_url, Some("SID-1"))
         .await;
     ctx.conn
@@ -428,8 +428,7 @@ async fn create_target_for_inactive_browser_context_keeps_previously_active_cont
     let mut ctx = TestContext::new();
     load_bc(&mut ctx, "BID-A");
     ctx.conn
-        .inactive_browser_contexts
-        .push(BrowserContext::new("BID-B".into()));
+        .insert_browser_context(BrowserContext::new("BID-B".into()));
 
     ctx.process_async(json!({
         "id": 1010,
@@ -493,8 +492,7 @@ async fn create_target_with_auto_attach_attaches_second_target_in_same_browser_c
     let bc = ctx.conn.browser_context.as_ref().unwrap();
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
 }
@@ -560,8 +558,7 @@ async fn page_command_on_auto_attached_background_target_session_routes_without_
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
     assert!(
@@ -637,8 +634,7 @@ async fn page_bring_to_front_promotes_background_session_explicitly() {
     assert_eq!(bc.active_target_id(), Some(second_target_id.as_str()));
     assert_eq!(bc.active_session_id(), Some(session_id.as_str()));
     assert_eq!(
-        bc.background_target("TID-000000000A")
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target("TID-000000000A"),
         Some("SID-active")
     );
 }
@@ -656,7 +652,7 @@ async fn page_bring_to_front_on_inactive_context_restores_previous_context() {
     let mut inactive = BrowserContext::new("BID-B".into());
     inactive.set_active_target_id("TID-active-b".to_owned());
     inactive.attach_active_session("SID-active-b".to_owned());
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    ctx.conn.insert_browser_context(inactive);
 
     ctx.process_async(json!({
         "id": 1023,
@@ -735,8 +731,7 @@ async fn page_navigate_on_auto_attached_background_target_session_routes_without
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
     assert!(
@@ -863,7 +858,10 @@ async fn page_stop_loading_aborts_background_pending_fetch_without_promotion() {
         let background = bc
             .background_target(&second_target_id)
             .expect("background target should remain parked");
-        assert_eq!(background.session_id(), Some(session_id.as_str()));
+        assert_eq!(
+            bc.primary_session_id_for_target(background.target_id()),
+            Some(session_id.as_str())
+        );
         assert!(
             bc.parked_fetch_state(&second_target_id)
                 .is_none_or(|state| state.is_empty())
@@ -1076,8 +1074,7 @@ async fn runtime_remove_binding_on_background_target_session_routes_without_prom
     assert_eq!(bc.active_target_id(), Some("TID-000000000A"));
     assert_eq!(bc.active_session_id(), Some("SID-active"));
     assert_eq!(
-        bc.background_target(&second_target_id)
-            .and_then(|target| target.session_id()),
+        bc.primary_session_id_for_target(&second_target_id),
         Some(session_id.as_str())
     );
     assert!(
@@ -1625,7 +1622,7 @@ async fn same_context_targets_do_not_replay_bare_isolated_worlds_after_switching
             .active_target
             .runtime_slot
             .replace_loaded_page(Some(first_page));
-        bc.devtools_session_state
+        bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
     }
@@ -1719,7 +1716,7 @@ async fn same_context_targets_do_not_replay_bare_isolated_worlds_after_switching
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 
@@ -1756,7 +1753,7 @@ async fn same_context_targets_do_not_replay_bare_isolated_worlds_after_switching
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
     let target_a_replay_url =
@@ -1820,7 +1817,7 @@ async fn same_context_targets_do_not_replay_bare_isolated_worlds_after_switching
         .browser_context
         .as_mut()
         .unwrap()
-        .devtools_session_state
+        .devtools_session_state_mut()
         .runtime_session_state
         .runtime_frontend_enabled = true;
 

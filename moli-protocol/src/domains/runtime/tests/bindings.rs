@@ -62,7 +62,7 @@ async fn runtime_disable_clears_stored_binding_definitions_when_enabled() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| binding.name == "bindingClearedOnDisable")
@@ -80,7 +80,7 @@ async fn runtime_disable_clears_stored_binding_definitions_when_enabled() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .is_empty(),
         "Runtime.disable should clear stored binding definitions when the Runtime agent was enabled"
@@ -279,7 +279,7 @@ async fn add_binding_can_complete_through_multi_phase_pending_command_task() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| binding.name == "pendingBinding")
@@ -313,8 +313,8 @@ async fn add_binding_during_document_navigation_persists_without_touching_retiri
         .expect("browser context should exist");
     browser_context.set_active_target_id("TID-1");
     browser_context.attach_active_session("SID-1");
-    browser_context
-        .start_document_navigation_for_active_target("PENDING-LOADER".to_owned())
+    ctx.conn
+        .start_document_navigation_for_session_owner(Some("SID-1"), "PENDING-LOADER".to_owned())
         .expect("active navigation should start");
     assert!(
         ctx.conn
@@ -433,7 +433,7 @@ async fn add_binding_rejects_execution_context_id_with_context_name() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| binding.name == "invalidBinding"),
@@ -478,7 +478,7 @@ async fn remove_binding_deactivates_current_page_binding_and_removes_persisted_d
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "tempBinding")
@@ -542,7 +542,7 @@ async fn remove_binding_can_complete_through_multi_phase_pending_command_task() 
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "pendingRemoveBinding")
@@ -827,7 +827,7 @@ async fn add_binding_without_runtime_enable_installs_current_main_world_and_pers
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| binding.name == "immediateBinding"
@@ -936,7 +936,7 @@ async fn add_binding_with_execution_context_id_targets_existing_isolated_world()
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "utilityBindingById"),
@@ -1023,7 +1023,7 @@ async fn add_binding_execution_context_id_completes_through_pending_command_task
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "pendingUtilityBindingById"),
@@ -1277,14 +1277,10 @@ async fn patchright_style_existing_utility_world_binding_install_persists_withou
 #[tokio::test]
 async fn patchright_style_pre_document_add_binding_persists_until_navigation() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(crate::conn::BrowserContext::new("BID-1".into()));
-    let bc = ctx
-        .conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist");
+    let mut bc = crate::conn::BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 360,
@@ -1300,7 +1296,7 @@ async fn patchright_style_pre_document_add_binding_persists_until_navigation() {
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -1379,7 +1375,7 @@ async fn pre_document_add_binding_completes_through_command_task_without_live_pa
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .any(|binding| {
@@ -1408,14 +1404,10 @@ async fn run_if_waiting_for_debugger_completes_through_command_task() {
 #[tokio::test]
 async fn patchright_style_pre_document_remove_binding_succeeds_before_navigation() {
     let mut ctx = TestContext::new();
-    ctx.conn.browser_context = Some(crate::conn::BrowserContext::new("BID-1".into()));
-    let bc = ctx
-        .conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist");
+    let mut bc = crate::conn::BrowserContext::new("BID-1".into());
     bc.set_active_target_id("TID-1");
     bc.attach_active_session("SID-1");
+    ctx.conn.insert_browser_context(bc);
 
     ctx.process_async(json!({
         "id": 364,
@@ -1441,7 +1433,7 @@ async fn patchright_style_pre_document_remove_binding_succeeds_before_navigation
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "temporaryPreDocumentBinding"),
@@ -1528,7 +1520,7 @@ async fn pre_document_remove_binding_completes_through_command_task_without_live
             .browser_context
             .as_ref()
             .expect("browser context should exist")
-            .devtools_session_state
+            .devtools_session_state()
             .runtime_bindings
             .iter()
             .all(|binding| binding.name != "preDocumentRemoveTaskBinding"),

@@ -215,8 +215,8 @@ pub(crate) fn disown_network_data_result(
 }
 
 enum NetworkDataBody<'a> {
-    Request(&'a CapturedRequestBody),
-    Response(&'a CapturedResponseBody),
+    Request(CapturedRequestBody),
+    Response(CapturedResponseBody),
     Collected(&'a CollectedNetworkDataBody),
 }
 
