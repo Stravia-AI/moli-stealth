@@ -67,11 +67,13 @@ pub struct FetchArgs {
     #[arg(long, value_enum, default_value = "done")]
     pub wait_until: FetchWaitUntil,
 
-    /// Milliseconds to wait for a client-side replacement navigation after an
-    /// executable 4xx/5xx Document reaches the selected lifecycle stage. A
+    /// Minimum milliseconds from fetch start to allow an executable 4xx/5xx
+    /// Document to begin a client-side replacement navigation. Time spent
+    /// reaching the selected lifecycle stage counts toward this minimum. A
     /// value of 0 disables additional waiting but still accepts a navigation
-    /// that is already pending when the stage result is inspected. This only
-    /// applies to `domcontentloaded`, `load`, and `done` waits.
+    /// already pending when the stage result is inspected. If no replacement
+    /// starts in time, the current error response is returned with its body.
+    /// This only applies to `domcontentloaded`, `load`, and `done` waits.
     #[arg(
         long,
         value_name = "MILLISECONDS",
@@ -677,6 +679,7 @@ mod tests {
 
         assert!(help.contains("--redirect-wait-ms <MILLISECONDS>"));
         assert!(!help.contains("--redirect-time"));
+        assert!(help.contains("Minimum milliseconds from fetch start"));
         assert!(help.contains("Maximum total readiness time in milliseconds"));
         assert!(help.contains("response match, selector, and script waits share one absolute"));
     }

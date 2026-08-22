@@ -182,6 +182,14 @@ where
 }
 
 fn run_fetch_cli_with_wait_until(url: &str, wait_until: &str) -> Result<Output> {
+    run_fetch_cli_with_wait_until_and_dump(url, wait_until, "html")
+}
+
+fn run_fetch_cli_with_wait_until_and_dump(
+    url: &str,
+    wait_until: &str,
+    dump: &str,
+) -> Result<Output> {
     run_moli([
         "moli",
         "fetch",
@@ -192,7 +200,7 @@ fn run_fetch_cli_with_wait_until(url: &str, wait_until: &str) -> Result<Output> 
         "--wait-until",
         wait_until,
         "--dump",
-        "html",
+        dump,
         url,
     ])
 }
@@ -2573,7 +2581,7 @@ fn cli_default_done_recovers_from_delayed_403_navigation_at_load() -> Result<()>
 }
 
 #[test]
-fn cli_explicit_load_fails_when_404_does_not_navigate_and_does_not_retry() -> Result<()> {
+fn cli_explicit_load_returns_404_body_without_retrying() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/net/upstream/xhr/404-then-200");
@@ -2581,53 +2589,57 @@ fn cli_explicit_load_fails_when_404_does_not_navigate_and_does_not_retry() -> Re
     runtime.block_on(server.shutdown());
 
     assert!(
-        !output.status.success(),
-        "an HTTP error document without navigation must fail: stdout={}\nstderr={}",
+        output.status.success(),
+        "an HTTP error document with a body must be returned: stdout={}\nstderr={}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = clean_output(&output.stdout);
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
-    assert!(stderr.contains("404 Not Found"), "stderr={stderr}");
-    assert!(stderr.contains("1000 ms grace period"), "stderr={stderr}");
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 404);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(html.contains("first-hit-404"), "stdout={stdout}");
+    assert!(!html.contains("second-hit-200"), "stdout={stdout}");
     Ok(())
 }
 
 #[test]
-fn cli_explicit_domcontentloaded_fails_when_500_does_not_navigate() -> Result<()> {
+fn cli_explicit_domcontentloaded_returns_500_body() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/net/upstream/xhr/500");
     let output = run_fetch_cli_with_wait_until(&url, "domcontentloaded")?;
     runtime.block_on(server.shutdown());
 
-    assert!(!output.status.success());
-    let stdout = clean_output(&output.stdout);
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
     assert!(
-        stderr.contains("500 Internal Server Error"),
-        "stderr={stderr}"
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
-    assert!(stderr.contains("1000 ms grace period"), "stderr={stderr}");
+    let stdout = clean_output(&output.stdout);
+    assert!(stdout.contains("Internal Server Error"), "stdout={stdout}");
     Ok(())
 }
 
 #[test]
-fn cli_explicit_load_rejects_navigation_after_the_one_second_grace() -> Result<()> {
+fn cli_explicit_load_returns_error_page_when_navigation_starts_after_the_minimum() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-late-navigation");
     let output = run_fetch_cli_with_wait_until(&url, "load")?;
     runtime.block_on(server.shutdown());
 
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = clean_output(&output.stdout);
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
-    assert!(stderr.contains("403 Forbidden"), "stderr={stderr}");
-    assert!(stderr.contains("1000 ms grace period"), "stderr={stderr}");
+    assert!(stdout.contains("id=\"challenge\""), "stdout={stdout}");
+    assert!(stdout.contains("late-challenge"), "stdout={stdout}");
+    assert!(!stdout.contains("http-error-navigation-target"));
     Ok(())
 }
 
@@ -2771,41 +2783,72 @@ fn cli_zero_redirect_wait_accepts_navigation_already_pending_at_stage() -> Resul
 }
 
 #[test]
-fn cli_zero_redirect_wait_rejects_navigation_that_starts_later() -> Result<()> {
+fn cli_zero_redirect_wait_returns_the_current_error_page() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-navigation");
     let output = run_fetch_cli_with_dump_and_args(&url, "html", &["--redirect-wait-ms", "0"])?;
     runtime.block_on(server.shutdown());
 
-    assert!(!output.status.success());
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = clean_output(&output.stdout);
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
-    assert!(stderr.contains("403 Forbidden"), "stderr={stderr}");
-    assert!(stderr.contains("0 ms grace period"), "stderr={stderr}");
+    assert!(stdout.contains("id=\"challenge\""), "stdout={stdout}");
+    assert!(!stdout.contains("http-error-navigation-target"));
     Ok(())
 }
 
 #[test]
-fn cli_explicit_load_rejects_http_error_navigation_to_another_error() -> Result<()> {
+fn cli_same_document_navigation_returns_the_current_http_error_page() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-same-document-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_eq!(payload["status"], 403);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(html.contains("id=\"challenge\""), "stdout={stdout}");
+    assert!(
+        html.contains("http-error-navigation=same-document"),
+        "stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_explicit_load_returns_a_replacement_error_document() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/wait-until-http-error-navigation-to-error");
-    let output = run_fetch_cli_with_wait_until(&url, "load")?;
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
     runtime.block_on(server.shutdown());
 
-    assert!(!output.status.success());
-    let stdout = clean_output(&output.stdout);
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
     assert!(
-        stderr.contains("500 Internal Server Error"),
-        "stderr={stderr}"
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 500);
+    let html = payload["html"].as_str().unwrap_or_default();
     assert!(
-        stderr.contains("reached another HTTP error document"),
-        "stderr={stderr}"
+        html.contains("id=\"http-error-navigation-target\""),
+        "stdout={stdout}"
     );
     Ok(())
 }
@@ -2836,7 +2879,7 @@ fn cli_non_lifecycle_wait_modes_keep_http_error_dump_behavior() -> Result<()> {
 }
 
 #[test]
-fn cli_default_done_fails_when_http_error_document_does_not_navigate() -> Result<()> {
+fn cli_default_done_returns_http_error_status_and_body() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/net/upstream/xhr/404");
@@ -2845,13 +2888,19 @@ fn cli_default_done_fails_when_http_error_document_does_not_navigate() -> Result
 
     let stdout = clean_output(&output.stdout);
     assert!(
-        !output.status.success(),
-        "default done must fail an HTTP error document without navigation: stdout={stdout}"
+        output.status.success(),
+        "default done must return an HTTP response with its body: stdout={stdout} stderr={}",
+        clean_output(&output.stderr)
     );
-    let stderr = clean_output(&output.stderr);
-    assert!(stdout.is_empty(), "stdout={stdout}");
-    assert!(stderr.contains("404 Not Found"), "stderr={stderr}");
-    assert!(stderr.contains("1000 ms grace period"), "stderr={stderr}");
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 404);
+    assert!(
+        payload["html"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Not Found"),
+        "stdout={stdout}"
+    );
     Ok(())
 }
 
@@ -2865,12 +2914,310 @@ fn cli_default_done_http_error_wait_does_not_retry_request() -> Result<()> {
 
     let stdout = clean_output(&output.stdout);
     assert!(
-        !output.status.success(),
-        "a hidden HTTP retry would incorrectly receive the fixture's second 200 response"
+        output.status.success(),
+        "stderr={}",
+        clean_output(&output.stderr)
     );
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 404);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(html.contains("first-hit-404"), "stdout={stdout}");
+    assert!(
+        !html.contains("second-hit-200"),
+        "a hidden HTTP retry would incorrectly receive the fixture's second 200 response: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_default_done_returns_raw_http_error_status_and_body() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/net/upstream/xhr/binary-404");
+    let output = run_fetch_cli_with_default_wait_and_dump(&url, "json")?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 404);
+    assert_eq!(payload["html"], "raw-error-body");
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_500_returns_complete_body_without_an_additive_wait() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-500");
+
+    for wait_until in ["domcontentloaded", "load", "done"] {
+        let output = run_fetch_cli_with_wait_until_and_dump(&url, wait_until, "json")?;
+        assert!(
+            output.status.success(),
+            "wait_until={wait_until} stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = clean_output(&output.stdout);
+        let payload: Value = serde_json::from_str(&stdout)?;
+        assert_json_dump_shape(&payload, &url, 500);
+        let html = payload["html"].as_str().unwrap_or_default();
+        assert!(
+            html.contains("id=\"slow-http-error-head\""),
+            "wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            html.contains("id=\"slow-http-error-tail\""),
+            "the delayed main-response tail must be present: wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            !html.contains("id=\"slow-http-error-post-load-early\""),
+            "a fresh post-Load wait would run the 400 ms marker: wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            !html.contains("id=\"slow-http-error-post-load-late\""),
+            "wait_until={wait_until} stdout={stdout}"
+        );
+    }
+
+    runtime.block_on(server.shutdown());
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_500_fallback_remains_live_for_page_waits() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-500");
+    let output = run_fetch_cli_with_dump_and_args(
+        &url,
+        "json",
+        &["--wait-selector", "#slow-http-error-post-load-early"],
+    )?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 500);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"slow-http-error-tail\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        html.contains("id=\"slow-http-error-post-load-early\""),
+        "the fallback Page must keep running for explicit page waits: stdout={stdout}"
+    );
+    assert!(
+        !html.contains("id=\"slow-http-error-post-load-late\""),
+        "the selector wait should not turn into an open-ended delay: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_500_and_page_wait_share_one_total_timeout() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-500");
+    let output = run_fetch_cli_with_dump_and_args(
+        &url,
+        "json",
+        &[
+            "--timeout",
+            "4000",
+            "--wait-selector",
+            "#slow-http-error-post-load-after-total-deadline",
+        ],
+    )?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        !output.status.success(),
+        "a fresh selector timeout would incorrectly succeed: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
     let stderr = clean_output(&output.stderr);
     assert!(stdout.is_empty(), "stdout={stdout}");
-    assert!(stderr.contains("404 Not Found"), "stderr={stderr}");
+    assert!(
+        stderr.contains("failed while waiting for selector"),
+        "stderr={stderr}"
+    );
+    assert!(stderr.contains("timed out"), "stderr={stderr}");
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_500_returns_complete_body_for_best_effort_modes() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-500");
+
+    for wait_until in ["networkidle", "domstable"] {
+        let output = run_fetch_cli_with_wait_until_and_dump(&url, wait_until, "json")?;
+        assert!(
+            output.status.success(),
+            "wait_until={wait_until} stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = clean_output(&output.stdout);
+        let payload: Value = serde_json::from_str(&stdout)?;
+        assert_json_dump_shape(&payload, &url, 500);
+        let html = payload["html"].as_str().unwrap_or_default();
+        assert!(
+            html.contains("id=\"slow-http-error-head\""),
+            "wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            html.contains("id=\"slow-http-error-tail\""),
+            "wait_until={wait_until} stdout={stdout}"
+        );
+    }
+
+    runtime.block_on(server.shutdown());
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_403_returns_before_a_post_load_navigation_by_default() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 403);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"slow-http-error-navigation-tail\""),
+        "the 1.25 s main-response tail must be returned: stdout={stdout}"
+    );
+    assert!(
+        !html.contains("slow-http-error-navigation-target"),
+        "the default minimum elapsed before Load and must not become an extra post-Load grace: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_403_uses_remaining_configured_wait_for_navigation() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &["--redirect-wait-ms", "3000"])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 200);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"slow-http-error-navigation-target\""),
+        "the unconsumed minimum must catch the post-Load navigation: stdout={stdout}"
+    );
+    assert!(
+        !html.contains("slow-http-error-navigation-tail"),
+        "the replacement Document must supersede the original 403 body: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_http_error_replacement_to_slow_streaming_500_returns_complete_body() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-navigation-to-slow-streaming-500");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 500);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"slow-http-error-head\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        html.contains("id=\"slow-http-error-tail\""),
+        "the replacement 500 main-response tail must be complete: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_http_error_still_obeys_the_total_timeout() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-500");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &["--timeout", "400"])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(!output.status.success());
+    let stdout = clean_output(&output.stdout);
+    let stderr = clean_output(&output.stderr);
+    assert!(stdout.is_empty(), "stdout={stdout}");
+    assert!(stderr.contains("timed out after 400 ms"), "stderr={stderr}");
+    assert!(
+        !stderr.contains("resident renderer page entry must retain an active PageVm"),
+        "the partial error Page must tear down cleanly: stderr={stderr}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_raw_404_returns_complete_status_and_body() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-http-error-slow-streaming-raw-404");
+    let output = run_fetch_cli_with_default_wait_and_dump(&url, "json")?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 404);
+    assert_eq!(payload["html"], "slow-raw-404-head|slow-raw-404-tail");
     Ok(())
 }
 

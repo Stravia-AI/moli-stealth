@@ -2516,6 +2516,10 @@ pub(super) fn build_router() -> Router {
         )
         .route("/net/upstream/xhr/500", any(net_upstream_xhr_500_page))
         .route(
+            "/net/upstream/xhr/binary-404",
+            any(net_upstream_xhr_binary_404_page),
+        )
+        .route(
             "/net/upstream/xhr/binary",
             any(net_upstream_xhr_binary_page),
         )

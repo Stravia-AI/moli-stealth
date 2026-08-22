@@ -12,7 +12,7 @@ use crate::cli::{FetchArgs, FetchWaitUntil};
 use anyhow::{Context, Result, anyhow, bail};
 use moli_core::{
     page::{Page, SubresourceResponseWaitCriteria},
-    runtime::{Browser, FetchDeadline, FetchedDocument, PageVmInitStage, RenderedDomWaitUntil},
+    runtime::{Browser, FetchDeadline, FetchedDocument, RenderedDomWaitUntil},
 };
 use moli_fetch::Request;
 use std::time::Duration;
@@ -21,7 +21,7 @@ use std::time::Duration;
 pub(super) struct ReadinessPlan {
     wait_until: RenderedDomWaitUntil,
     deadline: FetchDeadline,
-    redirect_wait: Duration,
+    minimum_navigation_wait: Duration,
     response: Option<SubresourceResponseWaitCriteria>,
     selector: Option<String>,
     script: Option<String>,
@@ -37,22 +37,11 @@ impl ReadinessPlan {
             wait_until: rendered_wait_until(args.wait_until),
             deadline: FetchDeadline::new(Duration::from_millis(args.timeout))
                 .context("failed to create fetch readiness deadline")?,
-            redirect_wait: Duration::from_millis(args.redirect_wait_ms),
+            minimum_navigation_wait: Duration::from_millis(args.redirect_wait_ms),
             response,
             selector: args.wait_selector.clone(),
             script,
         })
-    }
-
-    pub(super) fn lifecycle_stage(&self) -> Option<PageVmInitStage> {
-        // Only concrete Document lifecycle milestones opt into HTTP-error
-        // navigation recovery. `done` retains the historical load boundary;
-        // network-idle and DOM-stable retain best-effort HTTP-error dumps.
-        match self.wait_until {
-            RenderedDomWaitUntil::DomContentLoaded => Some(PageVmInitStage::DomContentLoaded),
-            RenderedDomWaitUntil::Load | RenderedDomWaitUntil::Done => Some(PageVmInitStage::Load),
-            RenderedDomWaitUntil::NetworkIdle | RenderedDomWaitUntil::DomStable => None,
-        }
     }
 
     pub(super) fn has_page_waits(&self) -> bool {
@@ -73,7 +62,7 @@ impl ReadinessPlan {
                     request,
                     self.wait_until,
                     self.deadline,
-                    self.redirect_wait,
+                    self.minimum_navigation_wait,
                 )
                 .await
             }

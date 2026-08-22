@@ -16,10 +16,10 @@ use clap::Parser;
 use moli_core::runtime::{
     Browser, FetchedDocument, NavigationRuntimeConfig, storage_partition::StoragePartitionState,
 };
-use moli_fetch::{NetworkFetchFailureContext, Request, ensure_http_status_success};
+use moli_fetch::{NetworkFetchFailureContext, Request};
 use moli_protocol_server::ProtocolServer;
 
-use self::{http_error_navigation::is_http_error_status, readiness::ReadinessPlan};
+use self::readiness::ReadinessPlan;
 
 pub async fn run_from_env() -> Result<()> {
     let cli = Cli::parse_from(normalize_args_for_compat(std::env::args_os()));
@@ -66,21 +66,6 @@ pub async fn run_cli_with_config<W: Write>(
             let mut page = match fetched_document {
                 FetchedDocument::Page(page) => page,
                 FetchedDocument::Raw(raw_document) => {
-                    if readiness.lifecycle_stage().is_some()
-                        && is_http_error_status(raw_document.status())
-                    {
-                        let status_error = ensure_http_status_success(
-                            raw_document.final_url().as_str(),
-                            raw_document.status(),
-                            false,
-                        );
-                        finalize_fetch_browser(browser);
-                        return status_error
-                            .context(
-                                "HTTP error response is not an executable document and cannot navigate",
-                            )
-                            .with_context(|| anyhow!("failed to fetch `{}`", args.url));
-                    }
                     if readiness.has_page_waits() || args.delay_ms > 0 {
                         finalize_fetch_browser(browser);
                         return Err(anyhow!(
@@ -98,26 +83,6 @@ pub async fn run_cli_with_config<W: Write>(
                     return Ok(());
                 }
             };
-
-            if readiness.lifecycle_stage().is_some() && is_http_error_status(page.status()) {
-                let error = ensure_http_status_success(
-                    page.final_url().as_str(),
-                    page.status(),
-                    false,
-                )
-                .context(
-                    "navigation from the HTTP error document reached another HTTP error document",
-                )
-                .expect_err("HTTP error status must fail success validation");
-                if let Err(close_error) = page.close_async().await {
-                    tracing::warn!(
-                        error = %close_error,
-                        "failed to close fetched page after HTTP error navigation failure"
-                    );
-                }
-                finalize_fetch_browser(browser);
-                return Err(with_fetch_context(error, &args.url));
-            }
 
             if let Err(error) = readiness.wait_for_page(&browser, &mut page).await {
                 if let Err(close_error) = page.close_async().await {

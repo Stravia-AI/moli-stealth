@@ -176,6 +176,39 @@ window.addEventListener('load', () => {
 });
 </script>
 </body></html>"#;
+const WAIT_UNTIL_SLOW_STREAMING_500_HEAD: &[u8] = br#"<!doctype html>
+<html><head><title>slow streaming 500</title><script>
+const appendSlowErrorMarker = (id, text) => {
+  const marker = document.createElement('main');
+  marker.id = id;
+  marker.textContent = text;
+  document.body.appendChild(marker);
+};
+window.addEventListener('load', () => {
+  setTimeout(() => appendSlowErrorMarker('slow-http-error-post-load-early', 'post-load-early'), 400);
+  setTimeout(() => appendSlowErrorMarker('slow-http-error-post-load-late', 'post-load-late'), 1400);
+  setTimeout(() => appendSlowErrorMarker('slow-http-error-post-load-after-total-deadline', 'post-load-after-total-deadline'), 3000);
+});
+</script></head><body><main id="slow-http-error-head">slow-500-head</main>"#;
+const WAIT_UNTIL_SLOW_STREAMING_500_TAIL: &[u8] =
+    br#"<main id="slow-http-error-tail">slow-500-tail</main></body></html>"#;
+const WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_HEAD: &[u8] = br#"<!doctype html>
+<html><head><title>slow streaming 403 navigation</title><script>
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    document.cookie = 'moli-slow-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax';
+    location.reload();
+  }, 300);
+});
+</script></head><body><main id="slow-http-error-navigation-head">slow-403-head</main>"#;
+const WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_TAIL: &[u8] =
+    br#"<main id="slow-http-error-navigation-tail">slow-403-tail</main></body></html>"#;
+const WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_FINAL_HTML: &str = r#"<!doctype html>
+<html><head><title>slow streaming challenge passed</title></head><body>
+<main id="slow-http-error-navigation-target">slow-http-error-navigation=done</main>
+</body></html>"#;
+
+const SLOW_HTTP_ERROR_STREAM_TAIL_DELAY: Duration = Duration::from_millis(1_250);
 
 pub(super) fn add_wait_routes(router: Router) -> Router {
     router
@@ -275,6 +308,10 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
             get(wait_until_http_error_navigation_to_error_page),
         )
         .route(
+            "/wait-until-http-error-navigation-to-slow-streaming-500",
+            get(wait_until_http_error_navigation_to_slow_streaming_500_page),
+        )
+        .route(
             "/wait-until-http-error-immediate-navigation",
             get(wait_until_http_error_immediate_navigation_page),
         )
@@ -293,6 +330,18 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
         .route(
             "/wait-until-http-error-late-navigation",
             get(wait_until_http_error_late_navigation_page),
+        )
+        .route(
+            "/wait-until-http-error-slow-streaming-500",
+            get(wait_until_http_error_slow_streaming_500_page),
+        )
+        .route(
+            "/wait-until-http-error-slow-streaming-navigation",
+            get(wait_until_http_error_slow_streaming_navigation_page),
+        )
+        .route(
+            "/wait-until-http-error-slow-streaming-raw-404",
+            get(wait_until_http_error_slow_streaming_raw_404_page),
         )
         .route(
             "/wait-until-readiness-http-error-navigation",
@@ -332,6 +381,25 @@ async fn wait_until_http_error_navigation_to_error_page(headers: HeaderMap) -> R
             Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML),
         )
             .into_response();
+    }
+
+    (
+        StatusCode::FORBIDDEN,
+        Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_http_error_navigation_to_slow_streaming_500_page(
+    headers: HeaderMap,
+) -> Response {
+    if has_cookie(&headers, "moli-http-error-navigation=passed") {
+        return slow_http_error_streaming_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "text/html; charset=utf-8",
+            WAIT_UNTIL_SLOW_STREAMING_500_HEAD,
+            WAIT_UNTIL_SLOW_STREAMING_500_TAIL,
+        );
     }
 
     (
@@ -413,6 +481,71 @@ async fn wait_until_http_error_late_navigation_page(headers: HeaderMap) -> Respo
         Html(WAIT_UNTIL_HTTP_ERROR_LATE_NAVIGATION_CHALLENGE_HTML),
     )
         .into_response()
+}
+
+fn slow_http_error_streaming_response(
+    status: StatusCode,
+    content_type: &'static str,
+    head: &'static [u8],
+    tail: &'static [u8],
+) -> Response {
+    let (tx, rx) = tokio::sync::mpsc::channel(2);
+    tokio::spawn(async move {
+        if tx
+            .send(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                head,
+            )))
+            .await
+            .is_err()
+        {
+            return;
+        }
+        sleep(SLOW_HTTP_ERROR_STREAM_TAIL_DELAY).await;
+        let _ = tx
+            .send(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
+                tail,
+            )))
+            .await;
+    });
+
+    Response::builder()
+        .status(status)
+        .header(CONTENT_TYPE, content_type)
+        .body(Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .expect("slow HTTP error streaming response should build")
+}
+
+async fn wait_until_http_error_slow_streaming_500_page() -> Response {
+    slow_http_error_streaming_response(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "text/html; charset=utf-8",
+        WAIT_UNTIL_SLOW_STREAMING_500_HEAD,
+        WAIT_UNTIL_SLOW_STREAMING_500_TAIL,
+    )
+}
+
+async fn wait_until_http_error_slow_streaming_navigation_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-slow-http-error-navigation=passed") {
+        return Html(WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    slow_http_error_streaming_response(
+        StatusCode::FORBIDDEN,
+        "text/html; charset=utf-8",
+        WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_HEAD,
+        WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_TAIL,
+    )
+}
+
+async fn wait_until_http_error_slow_streaming_raw_404_page() -> Response {
+    slow_http_error_streaming_response(
+        StatusCode::NOT_FOUND,
+        "application/octet-stream",
+        b"slow-raw-404-head|",
+        b"slow-raw-404-tail",
+    )
 }
 
 async fn wait_until_readiness_http_error_navigation_page(headers: HeaderMap) -> Response {

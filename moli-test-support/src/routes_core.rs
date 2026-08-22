@@ -5803,6 +5803,15 @@ pub(super) async fn net_upstream_xhr_500_page() -> Response {
     (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response()
 }
 
+pub(super) async fn net_upstream_xhr_binary_404_page() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        [(CONTENT_TYPE, "application/octet-stream")],
+        b"raw-error-body".to_vec(),
+    )
+        .into_response()
+}
+
 pub(super) async fn net_upstream_xhr_binary_page() -> Response {
     let bytes = [0u8, 0, 1, 2, 0, 0, 9];
     ([(CONTENT_TYPE, "application/octet-stream")], bytes.to_vec()).into_response()
