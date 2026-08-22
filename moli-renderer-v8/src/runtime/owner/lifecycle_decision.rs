@@ -25,6 +25,7 @@ pub(super) struct PendingLifecycleNavigation {
     snapshot: RendererLifecycleSnapshot,
     navigation_grace_ms: u64,
     navigation_deadline: Instant,
+    finish_on_timeout: bool,
     resume_parked_page_turn: bool,
 }
 
@@ -147,9 +148,19 @@ impl RendererOwnerHandle {
             RendererLifecycleDecision::Finish => {
                 self.finalize_pending_page_creation_reply(pending).await
             }
-            RendererLifecycleDecision::FollowNextDocument {
-                navigation_grace_ms,
-            } => {
+            decision @ (RendererLifecycleDecision::FollowNextDocument { .. }
+            | RendererLifecycleDecision::FollowNextDocumentOrFinish { .. }) => {
+                let (navigation_grace_ms, finish_on_timeout) = match decision {
+                    RendererLifecycleDecision::FollowNextDocument {
+                        navigation_grace_ms,
+                    } => (navigation_grace_ms, false),
+                    RendererLifecycleDecision::FollowNextDocumentOrFinish {
+                        navigation_grace_ms,
+                    } => (navigation_grace_ms, true),
+                    RendererLifecycleDecision::Finish => unreachable!(
+                        "the Finish lifecycle decision is handled by the preceding match arm"
+                    ),
+                };
                 let navigation_deadline = match checked_live_page_wait_deadline(
                     navigation_grace_ms,
                     "lifecycle-target successor navigation grace",
@@ -180,6 +191,7 @@ impl RendererOwnerHandle {
                         snapshot,
                         navigation_grace_ms,
                         navigation_deadline,
+                        finish_on_timeout,
                         resume_parked_page_turn: released.resume_parked_page_turn,
                     }),
                 ))
@@ -196,6 +208,7 @@ impl RendererOwnerHandle {
             snapshot,
             navigation_grace_ms,
             navigation_deadline,
+            finish_on_timeout,
             resume_parked_page_turn,
         } = wait;
         let token = pending.token;
@@ -235,6 +248,19 @@ impl RendererOwnerHandle {
         }
         if Instant::now() >= navigation_deadline {
             self.restore_live_page_entry(token, entry);
+            if finish_on_timeout {
+                if resume_parked_page_turn {
+                    // The lifecycle gate was released before this wait so
+                    // timers and other Page work could start a replacement
+                    // navigation. Preserve any scheduler wake parked behind
+                    // that gate when an immediate deadline accepts the Page.
+                    self.signal_internal_page_turn_source(
+                        token,
+                        RendererOwnerWakeSource::SchedulerContinuation,
+                    );
+                }
+                return self.finalize_pending_page_creation_reply(pending).await;
+            }
             return self
                 .retire_failed_page_creation(
                     token,
@@ -260,6 +286,7 @@ impl RendererOwnerHandle {
                     snapshot,
                     navigation_grace_ms,
                     navigation_deadline,
+                    finish_on_timeout,
                     resume_parked_page_turn: false,
                 },
             )),

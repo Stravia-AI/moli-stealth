@@ -32,6 +32,11 @@ pub enum RendererLifecycleDecision {
     /// period, then follow its successor to the same lifecycle target before
     /// page creation replies.
     FollowNextDocument { navigation_grace_ms: u64 },
+    /// Observe one cross-Document navigation within the supplied grace
+    /// period and follow it to the same lifecycle target. If no successor
+    /// starts in time, accept the current Document instead of failing page
+    /// creation.
+    FollowNextDocumentOrFinish { navigation_grace_ms: u64 },
 }
 
 /// Synchronous, one-shot policy decider for a page-creation lifecycle target.

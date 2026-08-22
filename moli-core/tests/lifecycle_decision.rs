@@ -107,6 +107,46 @@ async fn lifecycle_decider_finishes_without_extra_owner_command() -> Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn immediate_lifecycle_fallback_resumes_page_work_after_domcontentloaded() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/wait-until-domcontentloaded-runtime-script-slow");
+
+    let mut page = executable_page(
+        browser
+            .fetch_document_with_lifecycle_decider(
+                Request::get(&url)?,
+                RenderedDomWaitUntil::DomContentLoaded,
+                Duration::from_secs(5),
+                |_| {
+                    Ok(RendererLifecycleDecision::FollowNextDocumentOrFinish {
+                        navigation_grace_ms: 0,
+                    })
+                },
+            )
+            .await?,
+    )?;
+    assert!(
+        !page
+            .serialize_html_async()
+            .await?
+            .contains("id=\"late-dcl-script-slow\"")
+    );
+
+    browser
+        .wait_for_page_delay(&mut page, Duration::from_millis(500))
+        .await?;
+    assert!(
+        page.serialize_html_async()
+            .await?
+            .contains("id=\"late-dcl-script-slow\"")
+    );
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn lifecycle_decider_supports_static_about_blank() -> Result<()> {
     let browser = Browser::new(AppConfig::default())?;
     let observed_target = Arc::new(Mutex::new(None));
@@ -443,6 +483,36 @@ async fn http_error_navigation_wait_reports_no_navigation_without_refetching() -
     let error = format!("{error:#}");
     assert!(error.contains("404 Not Found"), "error={error}");
     assert!(error.contains("100 ms grace period"), "error={error}");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn http_error_navigation_wait_can_finish_the_current_document() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+    let url = server.url("/net/upstream/xhr/404");
+
+    let page = executable_page(
+        browser
+            .fetch_document_with_lifecycle_decider(
+                Request::get(&url)?,
+                RenderedDomWaitUntil::Load,
+                Duration::from_secs(5),
+                |target| {
+                    assert_eq!(target.status, 404);
+                    Ok(RendererLifecycleDecision::FollowNextDocumentOrFinish {
+                        navigation_grace_ms: 100,
+                    })
+                },
+            )
+            .await?,
+    )?;
+
+    assert_eq!(page.status(), 404);
+    let html = page.serialize_html_async().await?;
+    assert!(html.contains("Not Found"), "html={html}");
 
     server.shutdown().await;
     Ok(())
