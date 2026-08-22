@@ -56,7 +56,8 @@ pub(in crate::runtime) use bound::*;
 #[cfg(test)]
 use entry::StandaloneNavigationFollowState;
 pub(in crate::runtime) use entry::{
-    LivePageEntry, PublishedReplacementDocument, RetiringPageEntry,
+    CommittedNavigationBootstrapCompletion, CommittedNavigationEntry, LivePageEntry,
+    PublishedReplacementDocument, RetiringPageEntry,
 };
 pub(in crate::runtime) use phase_one::{
     LivePagePendingNavigationPhaseOneAdvance, PendingPhaseOneEntryAdvance,
@@ -431,6 +432,20 @@ pub(super) enum LivePageNavigationFollowOutcome {
 pub(super) struct LivePageNavigationFollowTurn {
     pub(super) outcome: LivePageNavigationFollowOutcome,
     pub(super) document_commit: Option<PublishedReplacementDocument>,
+}
+
+/// Typed result of one checked-out navigation task. A task that ends before
+/// commit returns a live entry; a task that fails, panics, or is cancelled
+/// during replacement bootstrap returns the committed state explicitly.
+pub(super) enum LivePageNavigationFollowEntryAdvance {
+    Live {
+        entry: LivePageEntry,
+        result: Result<LivePageNavigationFollowTurn>,
+    },
+    Committed {
+        entry: CommittedNavigationEntry,
+        error: anyhow::Error,
+    },
 }
 
 pub(super) struct RendererOwnerLocalContext {

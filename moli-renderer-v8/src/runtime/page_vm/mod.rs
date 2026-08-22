@@ -1708,6 +1708,120 @@ fn mark_followed_navigation_document_commit(
     }
 }
 
+pub(in crate::runtime) enum PageVmDocumentCommitPreparation {
+    Uncommitted(Box<PageVmFollowNavigationTurnOutcome>),
+    Prepared(Box<PageVmPreparedFollowedNavigationCommit>),
+}
+
+pub(in crate::runtime) struct PageVmPreparedFollowedNavigationCommit {
+    initiator_url: Url,
+    navigation_handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
+    loaded: LoadedFollowedLocationNavigation,
+    navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
+    reserved_service_worker_client_id: Option<crate::service_worker_runtime::ServiceWorkerClientId>,
+    service_worker_client_navigate: Option<crate::types::ServiceWorkerClientNavigateContinuation>,
+    stage: PageVmInitStage,
+}
+
+struct PageVmCommittedNavigationBootstrapPayload {
+    page_id: PageId,
+    local_executor: JsLocalExecutor,
+    request_client: ResourceRequestClient,
+    env: PageVmEnvConfig,
+    runtime_hooks: PageVmRuntimeHooks,
+    navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
+    loaded: LoadedFollowedLocationNavigation,
+    stage: PageVmInitStage,
+}
+
+/// Owns all continuation state after the source Document has committed away
+/// and until a replacement `PageVm` has been produced.
+///
+/// Failure metadata intentionally remains outside the consumed bootstrap
+/// payload. If the local task is cancelled while awaiting the replacement,
+/// the checked-out committed entry can still reject the ServiceWorker follow
+/// and retire the Page without consulting the dead source `ScriptVm`.
+pub(in crate::runtime) struct PageVmCommittedNavigationBootstrap {
+    payload: Option<PageVmCommittedNavigationBootstrapPayload>,
+    browser_context_runtime: RendererBrowserContextRuntime,
+    initiator_url: Option<Url>,
+    navigation_handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
+    reserved_service_worker_client_id: Option<crate::service_worker_runtime::ServiceWorkerClientId>,
+    service_worker_client_navigate: Option<crate::types::ServiceWorkerClientNavigateContinuation>,
+}
+
+impl PageVmCommittedNavigationBootstrap {
+    pub(in crate::runtime) async fn bootstrap(
+        &mut self,
+    ) -> Result<PageVmFollowedNavigationBuildOutcome> {
+        let payload = self.payload.take().ok_or_else(|| {
+            anyhow!("committed location-navigation bootstrap was already consumed")
+        })?;
+        bootstrap_committed_followed_location_navigation(
+            payload.page_id,
+            payload.local_executor,
+            payload.request_client,
+            payload.env,
+            payload.runtime_hooks,
+            payload.navigation_bootstrap_entry,
+            self.reserved_service_worker_client_id,
+            payload.stage,
+            payload.loaded,
+            crate::runtime::page::FollowedLocationNavigationBootstrapBoundary::DocumentCommit,
+        )
+        .await
+    }
+
+    pub(in crate::runtime) fn finalize_build_outcome(
+        &mut self,
+        mut outcome: PageVmFollowedNavigationBuildOutcome,
+    ) -> Result<PageVmFollowedNavigationBuildOutcome> {
+        mark_followed_navigation_document_commit(&mut outcome, self.navigation_handoff)?;
+        match &mut outcome {
+            PageVmFollowedNavigationBuildOutcome::ContinuePostParseLifecycle {
+                page_vm, ..
+            }
+            | PageVmFollowedNavigationBuildOutcome::TriggeredNavigation { page_vm, .. } => {
+                if let Some(continuation) = self.service_worker_client_navigate.take() {
+                    page_vm
+                        .vm_mut()
+                        .complete_pending_service_worker_client_navigate_after_follow(continuation);
+                }
+                self.reserved_service_worker_client_id = None;
+                self.initiator_url = None;
+            }
+            PageVmFollowedNavigationBuildOutcome::PendingPhaseOne(pending) => {
+                pending.metadata.service_worker_client_navigate =
+                    self.service_worker_client_navigate.take();
+                pending.metadata.abort_reserved_service_worker_client_id =
+                    self.reserved_service_worker_client_id.take();
+                pending.metadata.abort_navigation_initiator_url = self.initiator_url.take();
+            }
+            PageVmFollowedNavigationBuildOutcome::Download(download) => {
+                return Err(anyhow!(
+                    "committed location-navigation bootstrap produced a download for {} without a replacement PageVm",
+                    download.url
+                ));
+            }
+        }
+        Ok(outcome)
+    }
+
+    pub(in crate::runtime) fn reject(&mut self, failure: &str) {
+        let mut metadata = PageVmFollowedNavigationMetadata {
+            service_worker_client_navigate: self.service_worker_client_navigate.take(),
+            abort_reserved_service_worker_client_id: self.reserved_service_worker_client_id.take(),
+            ..PageVmFollowedNavigationMetadata::default()
+        };
+        metadata.reject(
+            None,
+            &self.browser_context_runtime,
+            format!("Cannot navigate to URL: {failure}"),
+        );
+        self.initiator_url = None;
+    }
+}
+
 impl PageVm {
     pub(super) async fn run_ready_document_write_stylesheet_blocked_script(
         &mut self,
@@ -2385,35 +2499,45 @@ impl PageVm {
         pending_document_lifecycle_turn: &mut Option<PendingDocumentLifecycleTurn>,
         stage: PageVmInitStage,
     ) -> Result<PageVmFollowNavigationTurnOutcome> {
-        self.follow_pending_location_navigation_one_turn_at_boundary_async(
-            pending_document_lifecycle_turn,
-            stage,
-            crate::runtime::page::FollowedLocationNavigationBootstrapBoundary::ContinuePhaseOne,
-        )
-        .await
+        match self
+            .prepare_pending_location_navigation_one_turn_async(
+                pending_document_lifecycle_turn,
+                stage,
+            )
+            .await?
+        {
+            PageVmDocumentCommitPreparation::Uncommitted(outcome) => Ok(*outcome),
+            PageVmDocumentCommitPreparation::Prepared(prepared) => {
+                self.finish_prepared_followed_location_navigation_for_test(
+                    pending_document_lifecycle_turn,
+                    *prepared,
+                )
+                .await
+            }
+        }
     }
 
     pub(super) async fn prepare_pending_location_navigation_document_commit_one_turn_async(
         &mut self,
         pending_document_lifecycle_turn: &mut Option<PendingDocumentLifecycleTurn>,
         stage: PageVmInitStage,
-    ) -> Result<PageVmFollowNavigationTurnOutcome> {
-        self.follow_pending_location_navigation_one_turn_at_boundary_async(
+    ) -> Result<PageVmDocumentCommitPreparation> {
+        self.prepare_pending_location_navigation_one_turn_async(
             pending_document_lifecycle_turn,
             stage,
-            crate::runtime::page::FollowedLocationNavigationBootstrapBoundary::DocumentCommit,
         )
         .await
     }
 
-    async fn follow_pending_location_navigation_one_turn_at_boundary_async(
+    async fn prepare_pending_location_navigation_one_turn_async(
         &mut self,
         pending_document_lifecycle_turn: &mut Option<PendingDocumentLifecycleTurn>,
         stage: PageVmInitStage,
-        bootstrap_boundary: crate::runtime::page::FollowedLocationNavigationBootstrapBoundary,
-    ) -> Result<PageVmFollowNavigationTurnOutcome> {
+    ) -> Result<PageVmDocumentCommitPreparation> {
         let Some(pending) = self.vm_mut().take_pending_location_navigation_with_seed() else {
-            return Ok(PageVmFollowNavigationTurnOutcome::Completed);
+            return Ok(PageVmDocumentCommitPreparation::Uncommitted(Box::new(
+                PageVmFollowNavigationTurnOutcome::Completed,
+            )));
         };
         let initiator_url = self.vm().document_runtime.document_url().clone();
         let navigation_handoff = pending.handoff;
@@ -2469,6 +2593,7 @@ impl PageVm {
                     | Ok(PageVmFollowNavigationTurnOutcome::TriggeredNavigation { .. }) => self
                         .vm_mut()
                         .complete_pending_service_worker_client_navigate_after_follow(continuation),
+                    #[cfg(test)]
                     Ok(PageVmFollowNavigationTurnOutcome::PendingPhaseOne(_)) => {
                         unreachable!(
                             "javascript: location navigation cannot park in asynchronous phase-one creation"
@@ -2482,7 +2607,8 @@ impl PageVm {
                         ),
                 }
             }
-            return outcome;
+            return outcome
+                .map(|outcome| PageVmDocumentCommitPreparation::Uncommitted(Box::new(outcome)));
         }
 
         let loaded = match load_followed_location_navigation(
@@ -2514,7 +2640,9 @@ impl PageVm {
                     reserved_service_worker_client_id,
                     service_worker_client_navigate,
                 );
-                return Ok(PageVmFollowNavigationTurnOutcome::Completed);
+                return Ok(PageVmDocumentCommitPreparation::Uncommitted(Box::new(
+                    PageVmFollowNavigationTurnOutcome::Completed,
+                )));
             }
             LoadedFollowedLocationNavigation::Download(download) => {
                 self.abort_followed_navigation_without_document(
@@ -2522,7 +2650,9 @@ impl PageVm {
                     reserved_service_worker_client_id,
                     service_worker_client_navigate,
                 );
-                return Ok(PageVmFollowNavigationTurnOutcome::Download(download));
+                return Ok(PageVmDocumentCommitPreparation::Uncommitted(Box::new(
+                    PageVmFollowNavigationTurnOutcome::Download(download),
+                )));
             }
             loaded @ (LoadedFollowedLocationNavigation::StreamingDocument { .. }
             | LoadedFollowedLocationNavigation::ExternalDocument { .. }) => loaded,
@@ -2543,13 +2673,41 @@ impl PageVm {
         );
         *pending_document_lifecycle_turn = None;
 
-        let mut outcome = match self
+        Ok(PageVmDocumentCommitPreparation::Prepared(Box::new(
+            PageVmPreparedFollowedNavigationCommit {
+                initiator_url,
+                navigation_handoff,
+                loaded,
+                navigation_bootstrap_entry: pending.entry_seed,
+                reserved_service_worker_client_id,
+                service_worker_client_navigate,
+                stage,
+            },
+        )))
+    }
+
+    #[cfg(test)]
+    async fn finish_prepared_followed_location_navigation_for_test(
+        &mut self,
+        pending_document_lifecycle_turn: &mut Option<PendingDocumentLifecycleTurn>,
+        prepared: PageVmPreparedFollowedNavigationCommit,
+    ) -> Result<PageVmFollowNavigationTurnOutcome> {
+        let PageVmPreparedFollowedNavigationCommit {
+            initiator_url,
+            loaded,
+            navigation_bootstrap_entry,
+            reserved_service_worker_client_id,
+            service_worker_client_navigate,
+            stage,
+            ..
+        } = prepared;
+        let outcome = match self
             .bootstrap_followed_location_navigation(
                 loaded,
-                pending.entry_seed,
+                navigation_bootstrap_entry,
                 reserved_service_worker_client_id,
                 stage,
-                bootstrap_boundary,
+                crate::runtime::page::FollowedLocationNavigationBootstrapBoundary::ContinuePhaseOne,
             )
             .await
         {
@@ -2564,12 +2722,6 @@ impl PageVm {
                 return Err(error);
             }
         };
-        if matches!(
-            bootstrap_boundary,
-            crate::runtime::page::FollowedLocationNavigationBootstrapBoundary::DocumentCommit
-        ) {
-            mark_followed_navigation_document_commit(&mut outcome, navigation_handoff)?;
-        }
         Ok(match outcome {
             PageVmFollowedNavigationBuildOutcome::ContinuePostParseLifecycle {
                 page_vm,
@@ -2628,6 +2780,60 @@ impl PageVm {
                 }
                 PageVmFollowNavigationTurnOutcome::TriggeredNavigation { stage }
             }
+        })
+    }
+
+    pub(super) fn commit_prepared_followed_location_navigation(
+        &mut self,
+        prepared: PageVmPreparedFollowedNavigationCommit,
+    ) -> Result<PageVmCommittedNavigationBootstrap> {
+        let PageVmPreparedFollowedNavigationCommit {
+            initiator_url,
+            navigation_handoff,
+            loaded,
+            navigation_bootstrap_entry,
+            reserved_service_worker_client_id,
+            service_worker_client_navigate,
+            stage,
+        } = prepared;
+        let env = self.followed_location_navigation_env();
+        let runtime_hooks = self.runtime_hooks.clone().for_cross_document_commit();
+        let browser_context_runtime = runtime_hooks.browser_context_runtime.clone();
+        let local_executor = self.local_executor.clone();
+        let request_client = self.request_client.clone();
+        let page_id = self.page_id;
+        let commit_result = (|| {
+            ensure!(
+                runtime_hooks.has_renderer_page_script_environment(),
+                "owner-managed navigation commit requires a renderer Page script environment"
+            );
+            self.commit_main_window_proxy_navigation()
+        })();
+        if let Err(error) = commit_result {
+            self.reject_failed_followed_location_navigation(
+                &initiator_url,
+                reserved_service_worker_client_id,
+                service_worker_client_navigate,
+                &error,
+            );
+            return Err(error);
+        }
+        Ok(PageVmCommittedNavigationBootstrap {
+            payload: Some(PageVmCommittedNavigationBootstrapPayload {
+                page_id,
+                local_executor,
+                request_client,
+                env,
+                runtime_hooks,
+                navigation_bootstrap_entry,
+                loaded,
+                stage,
+            }),
+            browser_context_runtime,
+            initiator_url: Some(initiator_url),
+            navigation_handoff,
+            reserved_service_worker_client_id,
+            service_worker_client_navigate,
         })
     }
 
@@ -2762,6 +2968,7 @@ impl PageVm {
                 | Ok(PageVmFollowNavigationTurnOutcome::TriggeredNavigation { .. }) => self
                     .vm_mut()
                     .complete_pending_service_worker_client_navigate_after_follow(continuation),
+                #[cfg(test)]
                 Ok(PageVmFollowNavigationTurnOutcome::PendingPhaseOne(_)) => {
                     unreachable!(
                         "javascript: location navigation cannot park in asynchronous phase-one creation"
@@ -2815,26 +3022,8 @@ impl PageVm {
         }
     }
 
-    async fn bootstrap_followed_location_navigation(
-        &mut self,
-        loaded: LoadedFollowedLocationNavigation,
-        navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
-        reserved_service_worker_client_id: Option<
-            crate::service_worker_runtime::ServiceWorkerClientId,
-        >,
-        stage: PageVmInitStage,
-        boundary: crate::runtime::page::FollowedLocationNavigationBootstrapBoundary,
-    ) -> Result<PageVmFollowedNavigationBuildOutcome> {
-        debug_assert!(
-            is_on_named_owner_execution_lane_for(&self.local_executor),
-            "async followed location-navigation rebuild must execute on the matching named owner lane"
-        );
-        debug_assert!(matches!(
-            &loaded,
-            LoadedFollowedLocationNavigation::StreamingDocument { .. }
-                | LoadedFollowedLocationNavigation::ExternalDocument { .. }
-        ));
-        let env = PageVmEnvConfig {
+    fn followed_location_navigation_env(&self) -> PageVmEnvConfig {
+        PageVmEnvConfig {
             main_document_commit: None,
             web_storage: self.vm().web_storage_handles(),
             document_start_scripts: self.document_start_scripts.clone(),
@@ -2876,7 +3065,30 @@ impl PageVm {
             top_level_storage_key: None,
             navigation_bootstrap_entry: None,
             reserved_service_worker_client_id: None,
-        };
+        }
+    }
+
+    #[cfg(test)]
+    async fn bootstrap_followed_location_navigation(
+        &mut self,
+        loaded: LoadedFollowedLocationNavigation,
+        navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
+        reserved_service_worker_client_id: Option<
+            crate::service_worker_runtime::ServiceWorkerClientId,
+        >,
+        stage: PageVmInitStage,
+        boundary: crate::runtime::page::FollowedLocationNavigationBootstrapBoundary,
+    ) -> Result<PageVmFollowedNavigationBuildOutcome> {
+        debug_assert!(
+            is_on_named_owner_execution_lane_for(&self.local_executor),
+            "async followed location-navigation rebuild must execute on the matching named owner lane"
+        );
+        debug_assert!(matches!(
+            &loaded,
+            LoadedFollowedLocationNavigation::StreamingDocument { .. }
+                | LoadedFollowedLocationNavigation::ExternalDocument { .. }
+        ));
+        let env = self.followed_location_navigation_env();
         let runtime_hooks = self.runtime_hooks.clone().for_cross_document_commit();
         if runtime_hooks.has_renderer_page_script_environment() {
             self.commit_main_window_proxy_navigation()?;
@@ -4175,6 +4387,7 @@ impl PageVm {
                             )
                         }
                         PageVmFollowNavigationTurnOutcome::Download(_) => true,
+                        #[cfg(test)]
                         PageVmFollowNavigationTurnOutcome::PendingPhaseOne(_) => {
                             unreachable!(
                                 "javascript: location navigation cannot park in asynchronous phase-one creation"
@@ -4309,6 +4522,7 @@ impl PageVm {
                             )
                         }
                         PageVmFollowNavigationTurnOutcome::Download(_) => true,
+                        #[cfg(test)]
                         PageVmFollowNavigationTurnOutcome::PendingPhaseOne(_) => {
                             unreachable!(
                                 "javascript: location navigation cannot park in asynchronous phase-one creation"

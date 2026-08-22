@@ -112,23 +112,20 @@ mod navigation_dispatch_tests {
     }
 
     #[test]
-    fn committed_navigation_transitions_to_retiring_before_settlement() {
+    fn committed_navigation_settlement_does_not_require_a_live_vm() {
         let handoff = crate::page_task_queue::RendererTopLevelNavigationHandoff::new(1);
         for succeeded in [false, true] {
-            for state in [
+            for mut state in [
                 StandaloneNavigationFollowState::Idle,
                 StandaloneNavigationFollowState::Following { handoff },
                 StandaloneNavigationFollowState::FailedWithPendingNavigation { handoff },
             ] {
-                let entry = phase_one_entry_shell_without_active_page_vm(state);
-                let mut entry = entry.into_retiring_after_committed_navigation();
-
-                entry.settle_standalone_navigation_follow(succeeded);
+                state.settle(None, succeeded);
 
                 assert_eq!(
-                    entry.entry.standalone_navigation_follow,
+                    state,
                     StandaloneNavigationFollowState::Idle,
-                    "a committed navigation shell must settle {state:?} to Idle after succeeded={succeeded}"
+                    "a committed navigation must settle to Idle after succeeded={succeeded}"
                 );
             }
         }

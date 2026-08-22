@@ -1136,7 +1136,7 @@ pub(super) enum FollowedLocationNavigationBootstrapBoundary {
 
 #[cfg(test)]
 impl LoadedFollowedLocationNavigation {
-    fn fail_after_commit_for_test(&self) -> bool {
+    fn has_header_for_test(&self, expected_name: &str) -> bool {
         let headers = match self {
             Self::NoDocument | Self::Download(_) => return false,
             Self::StreamingDocument { response, .. } => &response.headers,
@@ -1144,9 +1144,9 @@ impl LoadedFollowedLocationNavigation {
                 response_headers, ..
             } => response_headers,
         };
-        headers.iter().any(|(name, value)| {
-            name.eq_ignore_ascii_case("x-moli-test-fail-after-navigation-commit") && value == "1"
-        })
+        headers
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case(expected_name) && value == "1")
     }
 }
 
@@ -1253,7 +1253,11 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
         "committed location-navigation bootstrap must execute on the matching named owner lane"
     );
     #[cfg(test)]
-    if loaded.fail_after_commit_for_test() {
+    if loaded.has_header_for_test("x-moli-test-panic-after-navigation-commit") {
+        panic!("injected panic after main navigation commit for testing");
+    }
+    #[cfg(test)]
+    if loaded.has_header_for_test("x-moli-test-fail-after-navigation-commit") {
         return Err(anyhow!(
             "injected failure after main navigation commit for testing"
         ));

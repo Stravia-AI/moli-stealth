@@ -3090,8 +3090,10 @@ document.close();
         .expect("document.open navigation identity test page should close");
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn committed_navigation_bootstrap_failure_retires_page_before_follow_settlement() {
+async fn assert_committed_navigation_bootstrap_injection_retires_page(
+    injection_header: &'static str,
+    expected_failure: &str,
+) {
     let runtime = JsRuntime::initialize();
     let loader =
         ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
@@ -3099,7 +3101,7 @@ async fn committed_navigation_bootstrap_failure_retires_page_before_follow_settl
         "/replacement",
         "<!doctype html><main>replacement</main>",
         "text/html",
-        vec![("x-moli-test-fail-after-navigation-commit", "1")],
+        vec![(injection_header, "1")],
         Duration::ZERO,
     )
     .await;
@@ -3121,11 +3123,11 @@ async fn committed_navigation_bootstrap_failure_retires_page_before_follow_settl
     );
     let result = pending.await_ready().await;
     let Err(error) = result else {
-        panic!("the injected post-commit bootstrap failure must reject page creation")
+        panic!("the injected post-commit bootstrap termination must reject page creation")
     };
     let failure = format!("{error:#}");
     assert!(
-        failure.contains("injected failure after main navigation commit for testing"),
+        failure.contains(expected_failure),
         "page creation must report the injected post-commit failure: {failure}"
     );
     server
@@ -3149,6 +3151,24 @@ async fn committed_navigation_bootstrap_failure_retires_page_before_follow_settl
         .await
         .expect("renderer owner should remain usable after retiring the failed navigation");
     assert_eq!(runtime.renderer_page_count_for_testing(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_navigation_bootstrap_failure_retires_page_before_follow_settlement() {
+    assert_committed_navigation_bootstrap_injection_retires_page(
+        "x-moli-test-fail-after-navigation-commit",
+        "injected failure after main navigation commit for testing",
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn committed_navigation_bootstrap_panic_returns_committed_entry_to_owner() {
+    assert_committed_navigation_bootstrap_injection_retires_page(
+        "x-moli-test-panic-after-navigation-commit",
+        "local task panicked before restoring its page entry",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

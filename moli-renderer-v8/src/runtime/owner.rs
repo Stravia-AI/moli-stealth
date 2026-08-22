@@ -5,7 +5,8 @@ use super::navigation::{
 };
 use super::owner_local::RendererAttachedPage;
 use super::owner_local_store::{
-    LivePageEntry, LivePageEntryCheckoutError, LivePageNavigationFailureRecipient,
+    CommittedNavigationEntry, LivePageEntry, LivePageEntryCheckoutError,
+    LivePageNavigationFailureRecipient, LivePageNavigationFollowEntryAdvance,
     LivePageNavigationFollowOutcome, LivePageNavigationFollowTurn,
     LivePagePendingNavigationCompletion, LivePagePendingNavigationPhaseOneAdvance,
     NavigationReplyPolicy, PendingPhaseOneEntryAdvance, RendererDisplacedOrdinaryTurn,
@@ -378,6 +379,54 @@ impl std::fmt::Display for LivePageNavigationFailureDisposition {
             Self::ReturnToInitiator(error) => std::fmt::Display::fmt(error, f),
             Self::PublishToPageCreation(failure) | Self::ReportBackground(failure) => {
                 std::fmt::Display::fmt(failure, f)
+            }
+        }
+    }
+}
+
+impl LivePageNavigationFailureDisposition {
+    fn publish_page_creation_failure(
+        &self,
+        token: RendererPageToken,
+    ) -> Option<Result<PageCreationNavigationFailurePublication>> {
+        match self {
+            Self::PublishToPageCreation(failure) => Some(
+                publish_page_navigation_failure_on_bound_owner_local_store(token, *failure),
+            ),
+            Self::ReturnToInitiator(_) | Self::ReportBackground(_) => None,
+        }
+    }
+
+    fn into_dispatch_outcome(
+        self,
+        token: RendererPageToken,
+        page_creation_publication: Option<Result<PageCreationNavigationFailurePublication>>,
+    ) -> RenderRuntimeDispatchOutcome {
+        match self {
+            Self::PublishToPageCreation(failure) => {
+                match page_creation_publication
+                    .expect("Page-creation failure disposition must publish before restoration")
+                {
+                    Ok(PageCreationNavigationFailurePublication::Recorded) => {
+                        RenderRuntimeDispatchOutcome::PageCreationNavigationFailurePublished {
+                            token,
+                            failure,
+                        }
+                    }
+                    Ok(PageCreationNavigationFailurePublication::AlreadyRecorded) => {
+                        RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()))
+                    }
+                    Ok(PageCreationNavigationFailurePublication::NoActiveCreationObserver) => {
+                        RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(
+                            "unobserved background navigation failure: {failure}"
+                        )))
+                    }
+                    Err(error) => RenderRuntimeDispatchOutcome::BackgroundComplete(Err(error)),
+                }
+            }
+            Self::ReturnToInitiator(error) => Err(error).into(),
+            Self::ReportBackground(failure) => {
+                RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(failure.to_string())))
             }
         }
     }
@@ -3248,6 +3297,29 @@ impl RendererOwnerHandle {
         Err(error).into()
     }
 
+    fn finish_committed_navigation_failure(
+        &self,
+        token: RendererPageToken,
+        mut entry: CommittedNavigationEntry,
+        disposition: LivePageNavigationFailureDisposition,
+    ) -> RenderRuntimeDispatchOutcome {
+        // Page creation owns the strong failure observer while the stable Page
+        // slot owns only its weak publisher. Publish before marking the slot
+        // retiring so the parked creation turn observes this exact failure.
+        let page_creation_publication = disposition.publish_page_creation_failure(token);
+        tracing::warn!(
+            page_id = token.page_id.as_u64(),
+            failure = %disposition,
+            "retiring page after committed navigation failed to bootstrap"
+        );
+        let cleanup_failure = disposition.to_string();
+        entry.settle_standalone_navigation_follow(false);
+        remove_page_on_bound_owner_local_store(token);
+        let entry = entry.reject_and_retire(&cleanup_failure);
+        restore_retiring_entry_after_command_on_bound_owner_local_store(token, entry);
+        disposition.into_dispatch_outcome(token, page_creation_publication)
+    }
+
     async fn finish_live_page_navigation_failure(
         &self,
         token: RendererPageToken,
@@ -3256,28 +3328,24 @@ impl RendererOwnerHandle {
         disposition: LivePageNavigationFailureDisposition,
     ) -> RenderRuntimeDispatchOutcome {
         let had_uncommitted_page_vm = entry.has_uncommitted_page_vm();
-        let navigation_committed = entry
-            .vm
-            .as_ref()
-            .is_none_or(|page_vm| !page_vm.has_live_script_vm());
-        let should_retire_page = navigation_committed || retire_page_on_failure;
+        debug_assert!(
+            entry
+                .active_page_vm()
+                .is_some_and(PageVm::has_live_script_vm),
+            "live navigation failure handling requires an active PageVm"
+        );
+        let should_retire_page = retire_page_on_failure;
         // Page creation owns the strong failure observer while the stable Page
         // slot owns only its weak publisher. Publish before requesting Page
-        // retirement: restoring a checked-out committed entry tears down that
-        // slot, but the parked creation turn must retain the concrete terminal
-        // and be woken instead of falling through to its generic timeout.
-        let page_creation_publication = match &disposition {
-            LivePageNavigationFailureDisposition::PublishToPageCreation(failure) => Some(
-                publish_page_navigation_failure_on_bound_owner_local_store(token, *failure),
-            ),
-            LivePageNavigationFailureDisposition::ReturnToInitiator(_)
-            | LivePageNavigationFailureDisposition::ReportBackground(_) => None,
-        };
+        // retirement: restoring a checked-out entry into a retiring slot tears
+        // it down, but the parked creation turn must retain the concrete
+        // terminal and be woken instead of falling through to its timeout.
+        let page_creation_publication = disposition.publish_page_creation_failure(token);
         if should_retire_page {
             tracing::warn!(
                 page_id = token.page_id.as_u64(),
                 failure = %disposition,
-                "retiring page after committed navigation failed to bootstrap"
+                "retiring page after live navigation failure"
             );
             // Mark the stable slot retiring while this turn still owns the
             // entry. Restoring then tears down the detached shell without ever
@@ -3296,41 +3364,9 @@ impl RendererOwnerHandle {
             );
             remove_page_on_bound_owner_local_store(token);
         }
-        if navigation_committed {
-            let mut entry = entry.into_retiring_after_committed_navigation();
-            entry.settle_standalone_navigation_follow(false);
-            restore_retiring_entry_after_command_on_bound_owner_local_store(token, entry);
-        } else {
-            entry.settle_standalone_navigation_follow(false);
-            self.restore_live_page_entry(token, entry);
-        }
-        match disposition {
-            LivePageNavigationFailureDisposition::PublishToPageCreation(failure) => {
-                match page_creation_publication
-                    .expect("Page-creation failure disposition must publish before retirement")
-                {
-                    Ok(PageCreationNavigationFailurePublication::Recorded) => {
-                        RenderRuntimeDispatchOutcome::PageCreationNavigationFailurePublished {
-                            token,
-                            failure,
-                        }
-                    }
-                    Ok(PageCreationNavigationFailurePublication::AlreadyRecorded) => {
-                        RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()))
-                    }
-                    Ok(PageCreationNavigationFailurePublication::NoActiveCreationObserver) => {
-                        RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(
-                            "unobserved background navigation failure: {failure}"
-                        )))
-                    }
-                    Err(error) => RenderRuntimeDispatchOutcome::BackgroundComplete(Err(error)),
-                }
-            }
-            LivePageNavigationFailureDisposition::ReturnToInitiator(error) => Err(error).into(),
-            LivePageNavigationFailureDisposition::ReportBackground(failure) => {
-                RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(failure.to_string())))
-            }
-        }
+        entry.settle_standalone_navigation_follow(false);
+        self.restore_live_page_entry(token, entry);
+        disposition.into_dispatch_outcome(token, page_creation_publication)
     }
 
     /// Compute the earliest Page-owned task deadline. This combines JavaScript
@@ -5822,13 +5858,22 @@ impl RendererOwnerHandle {
                 )
                 .await;
         }
-        let (entry, follow_result) =
-            follow_pending_location_navigation_one_turn_on_entry_via_local_task(
-                self.state.local_executor.clone(),
-                entry,
-                stage,
-            )
-            .await;
+        let advance = follow_pending_location_navigation_one_turn_on_entry_via_local_task(
+            self.state.local_executor.clone(),
+            entry,
+            stage,
+        )
+        .await;
+        let (entry, follow_result) = match advance {
+            LivePageNavigationFollowEntryAdvance::Live { entry, result } => (entry, result),
+            LivePageNavigationFollowEntryAdvance::Committed { entry, error } => {
+                return self.finish_committed_navigation_failure(
+                    token,
+                    entry,
+                    LivePageNavigationFailureDisposition::ReturnToInitiator(error),
+                );
+            }
+        };
         let LivePageNavigationFollowTurn {
             outcome: follow_outcome,
             document_commit,

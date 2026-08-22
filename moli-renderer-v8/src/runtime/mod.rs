@@ -386,6 +386,10 @@ pub(crate) use self::page_vm::{
     AuthorizedCurrentPopupDocumentLoadCompletion, AuthorizedLiveMainModulepreloadFetchCompletion,
     CurrentChildDocumentLoadApplication,
 };
+pub(in crate::runtime) use self::page_vm::{
+    PageVmCommittedNavigationBootstrap, PageVmDocumentCommitPreparation,
+    PageVmPreparedFollowedNavigationCommit,
+};
 pub use self::phase_one::ExternalRawDocumentBodyStream;
 use self::phase_one::PendingPhaseOneResidence;
 pub(in crate::runtime) use self::phase_one::{
@@ -593,6 +597,7 @@ pub(in crate::runtime) enum PageVmFollowNavigationTurnOutcome {
         outcome: page_vm::DocumentLifecycleTurnOutcome,
     },
     Download(RendererPendingDownloadActivation),
+    #[cfg(test)]
     PendingPhaseOne(PageVmPendingPhaseOneNavigation),
     TriggeredNavigation {
         stage: PageVmInitStage,

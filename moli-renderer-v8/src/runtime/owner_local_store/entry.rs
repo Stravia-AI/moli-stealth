@@ -75,6 +75,31 @@ pub(in crate::runtime) struct LivePageEntry {
     pub(super) last_published_replacement_document: Option<PublishedReplacementDocument>,
 }
 
+/// A checked-out Page whose source Document has committed away while its
+/// replacement `PageVm` is still being bootstrapped.
+///
+/// This state never enters the stable Page scheduler. It exists only inside
+/// the navigation local-task guard, so cancellation and panic return a typed
+/// committed residence instead of an invalid [`LivePageEntry`].
+pub(in crate::runtime) struct CommittedNavigationEntry {
+    entry: LivePageEntry,
+    navigation: Box<PageVmCommittedNavigationBootstrap>,
+}
+
+pub(in crate::runtime) enum CommittedNavigationBootstrapCompletion {
+    ContinuePostParseLifecycle {
+        page_tasks: Vec<crate::page_task_queue::PostParsePageOwnedWork>,
+        stage: PageVmInitStage,
+        started: Instant,
+    },
+    PendingPhaseOne {
+        wake_token: RendererPageToken,
+    },
+    TriggeredNavigation {
+        stage: PageVmInitStage,
+    },
+}
+
 /// A checked-out Page entry whose final active `PageVm` has been consumed by
 /// teardown and which can therefore only return through the retiring
 /// residence boundary.
@@ -84,6 +109,95 @@ pub(in crate::runtime) struct LivePageEntry {
 /// restore path.
 pub(in crate::runtime) struct RetiringPageEntry {
     pub(super) entry: LivePageEntry,
+}
+
+impl CommittedNavigationEntry {
+    pub(super) fn new(
+        mut entry: LivePageEntry,
+        navigation: PageVmCommittedNavigationBootstrap,
+    ) -> Self {
+        entry.vm = None;
+        Self {
+            entry,
+            navigation: Box::new(navigation),
+        }
+    }
+
+    pub(in crate::runtime) async fn bootstrap_replacement(
+        &mut self,
+    ) -> Result<PageVmFollowedNavigationBuildOutcome> {
+        self.navigation.bootstrap().await
+    }
+
+    pub(in crate::runtime) fn install_bootstrap_outcome(
+        &mut self,
+        outcome: PageVmFollowedNavigationBuildOutcome,
+    ) -> Result<CommittedNavigationBootstrapCompletion> {
+        let outcome = self.navigation.finalize_build_outcome(outcome)?;
+        match outcome {
+            PageVmFollowedNavigationBuildOutcome::ContinuePostParseLifecycle {
+                page_vm,
+                page_tasks,
+                stage,
+                started,
+            } => {
+                self.entry.install_resumed_phase_one_page_vm(page_vm);
+                Ok(
+                    CommittedNavigationBootstrapCompletion::ContinuePostParseLifecycle {
+                        page_tasks,
+                        stage,
+                        started,
+                    },
+                )
+            }
+            PageVmFollowedNavigationBuildOutcome::PendingPhaseOne(pending) => {
+                let wake_token = self
+                    .entry
+                    .install_new_pending_phase_one_navigation(pending)?;
+                Ok(CommittedNavigationBootstrapCompletion::PendingPhaseOne { wake_token })
+            }
+            PageVmFollowedNavigationBuildOutcome::TriggeredNavigation { page_vm, stage } => {
+                self.entry.install_resumed_phase_one_page_vm(page_vm);
+                Ok(CommittedNavigationBootstrapCompletion::TriggeredNavigation { stage })
+            }
+            PageVmFollowedNavigationBuildOutcome::Download(_) => unreachable!(
+                "committed bootstrap finalization must reject outcomes without a replacement PageVm"
+            ),
+        }
+    }
+
+    pub(in crate::runtime) fn into_live(self) -> LivePageEntry {
+        assert!(
+            self.entry
+                .active_page_vm()
+                .is_some_and(PageVm::has_live_script_vm),
+            "a completed committed navigation must produce a live replacement PageVm"
+        );
+        self.entry
+    }
+
+    pub(in crate::runtime) fn reject_and_retire(mut self, failure: &str) -> RetiringPageEntry {
+        self.navigation.reject(failure);
+        // Replacement installation and the Committed -> Live tag change are
+        // synchronous, but a panic inside that narrow transition must still
+        // retire any partially installed replacement instead of double
+        // panicking in the task-guard cleanup path.
+        if self.entry.active_page_vm().is_some() {
+            tracing::error!(
+                failure,
+                "retiring a replacement PageVm left inside a committed navigation transition"
+            );
+            self.entry.close_for_context_teardown();
+            self.entry.vm = None;
+        }
+        RetiringPageEntry::new(self.entry)
+    }
+
+    pub(in crate::runtime) fn settle_standalone_navigation_follow(&mut self, succeeded: bool) {
+        self.entry
+            .standalone_navigation_follow
+            .settle(None, succeeded);
+    }
 }
 
 impl RetiringPageEntry {
@@ -234,24 +348,21 @@ impl LivePageEntry {
         self.standalone_navigation_follow.settle(current, succeeded);
     }
 
-    /// Consume the inert PageVm shell left after a cross-document commit whose
-    /// replacement failed to bootstrap. The old ScriptVm is already gone, so
-    /// this entry can only return through the teardown-only residence path.
-    pub(in crate::runtime) fn into_retiring_after_committed_navigation(
-        mut self,
-    ) -> RetiringPageEntry {
+    /// Commit the source Document synchronously. The navigation task guard
+    /// must immediately move this entry into `CommittedNavigationEntry`
+    /// before crossing another await boundary.
+    pub(in crate::runtime) fn commit_prepared_navigation(
+        &mut self,
+        prepared: PageVmPreparedFollowedNavigationCommit,
+    ) -> Result<PageVmCommittedNavigationBootstrap> {
         assert!(
             self.pending_phase_one_navigation.is_none(),
-            "a committed navigation shell cannot coexist with pending phase one"
+            "a source navigation commit cannot coexist with pending phase one"
         );
-        assert!(
-            self.vm
-                .as_ref()
-                .is_none_or(|page_vm| !page_vm.has_live_script_vm()),
-            "a committed navigation shell must not retain a live ScriptVm"
-        );
-        self.vm = None;
-        RetiringPageEntry::new(self)
+        let navigation = self
+            .page_vm_mut()
+            .commit_prepared_followed_location_navigation(prepared)?;
+        Ok(navigation)
     }
 
     /// A replacement PageVm becomes the active owner-local runtime before its

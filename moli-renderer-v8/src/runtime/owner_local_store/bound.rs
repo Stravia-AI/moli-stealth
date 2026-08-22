@@ -218,14 +218,15 @@ impl<E, R> Drop for EntryLocalTaskGuard<E, R> {
     }
 }
 
-pub(in crate::runtime) async fn run_entry_on_bound_owner_local_store_local_task<R, F>(
+async fn run_typed_entry_on_bound_owner_local_store_local_task<E, R, F>(
     local_executor: JsLocalExecutor,
-    entry: LivePageEntry,
+    entry: E,
     operation: F,
-) -> (LivePageEntry, Result<R>)
+) -> (E, Result<R>)
 where
+    E: 'static,
     R: 'static,
-    F: for<'a> FnOnce(&'a mut LivePageEntry) -> EntryLocalTaskFuture<'a, R> + 'static,
+    F: for<'a> FnOnce(&'a mut E) -> EntryLocalTaskFuture<'a, R> + 'static,
 {
     let (reply_tx, reply_rx) = oneshot::channel();
     // Construct the guard before spawning. If the local task is cancelled
@@ -242,6 +243,18 @@ where
     reply_rx
         .await
         .expect("entry local task guard must return the page entry on task termination")
+}
+
+pub(in crate::runtime) async fn run_entry_on_bound_owner_local_store_local_task<R, F>(
+    local_executor: JsLocalExecutor,
+    entry: LivePageEntry,
+    operation: F,
+) -> (LivePageEntry, Result<R>)
+where
+    R: 'static,
+    F: for<'a> FnOnce(&'a mut LivePageEntry) -> EntryLocalTaskFuture<'a, R> + 'static,
+{
+    run_typed_entry_on_bound_owner_local_store_local_task(local_executor, entry, operation).await
 }
 
 pub(in crate::runtime) fn take_entry_for_command_on_bound_owner_local_store(
@@ -609,56 +622,164 @@ pub(in crate::runtime) async fn advance_subresource_response_wait_turn_on_entry_
     .await
 }
 
+enum NavigationLocalTaskEntry {
+    Live(LivePageEntry),
+    Committed(CommittedNavigationEntry),
+    Transitioning,
+}
+
+impl NavigationLocalTaskEntry {
+    fn live_mut(&mut self) -> &mut LivePageEntry {
+        match self {
+            Self::Live(entry) => entry,
+            Self::Committed(_) | Self::Transitioning => {
+                unreachable!("navigation task must be live at this boundary")
+            }
+        }
+    }
+
+    fn committed_mut(&mut self) -> &mut CommittedNavigationEntry {
+        match self {
+            Self::Committed(entry) => entry,
+            Self::Live(_) | Self::Transitioning => {
+                unreachable!("navigation task must be committed at this boundary")
+            }
+        }
+    }
+
+    fn commit(&mut self, prepared: PageVmPreparedFollowedNavigationCommit) -> Result<()> {
+        let navigation = self.live_mut().commit_prepared_navigation(prepared)?;
+        let Self::Live(entry) = std::mem::replace(self, Self::Transitioning) else {
+            unreachable!("navigation commit must consume a live entry")
+        };
+        *self = Self::Committed(CommittedNavigationEntry::new(entry, navigation));
+        Ok(())
+    }
+
+    fn finish_commit(&mut self) {
+        let Self::Committed(entry) = std::mem::replace(self, Self::Transitioning) else {
+            unreachable!("replacement bootstrap must complete a committed entry")
+        };
+        *self = Self::Live(entry.into_live());
+    }
+
+    async fn bootstrap_committed_navigation(&mut self) -> Result<LivePageNavigationFollowOutcome> {
+        let bootstrap_outcome = self.committed_mut().bootstrap_replacement().await?;
+        let completion = self
+            .committed_mut()
+            .install_bootstrap_outcome(bootstrap_outcome)?;
+        self.finish_commit();
+        match completion {
+            CommittedNavigationBootstrapCompletion::ContinuePostParseLifecycle {
+                page_tasks,
+                stage,
+                started,
+            } => {
+                let lifecycle = {
+                    let (page_vm, pending_document_lifecycle_turn) =
+                        self.live_mut().page_vm_and_document_lifecycle_turn_mut();
+                    page_vm
+                        .begin_post_parse_lifecycle_on_named_owner_lane(
+                            pending_document_lifecycle_turn,
+                            page_tasks,
+                            stage,
+                            started,
+                        )
+                        .await?
+                };
+                Ok(LivePageNavigationFollowOutcome::PostParseLifecycle {
+                    target_stage: stage,
+                    outcome: lifecycle,
+                })
+            }
+            CommittedNavigationBootstrapCompletion::PendingPhaseOne { wake_token } => {
+                Ok(LivePageNavigationFollowOutcome::PendingPhaseOne { wake_token })
+            }
+            CommittedNavigationBootstrapCompletion::TriggeredNavigation { stage } => {
+                Ok(LivePageNavigationFollowOutcome::TriggeredNavigation { stage })
+            }
+        }
+    }
+}
+
 pub(in crate::runtime) async fn follow_pending_location_navigation_one_turn_on_entry_via_local_task(
     local_executor: JsLocalExecutor,
     entry: LivePageEntry,
     stage: PageVmInitStage,
-) -> (LivePageEntry, Result<LivePageNavigationFollowTurn>) {
-    run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
-        Box::pin(async move {
-            let outcome = {
-                let (page_vm, pending_document_lifecycle_turn) =
-                    entry.page_vm_and_document_lifecycle_turn_mut();
-                page_vm
-                    .prepare_pending_location_navigation_document_commit_one_turn_async(
-                        pending_document_lifecycle_turn,
-                        stage,
-                    )
-                    .await
-            };
-            let outcome = match outcome? {
-                PageVmFollowNavigationTurnOutcome::Completed => {
-                    LivePageNavigationFollowOutcome::Completed
-                }
-                PageVmFollowNavigationTurnOutcome::PostParseLifecycle {
-                    target_stage,
+) -> LivePageNavigationFollowEntryAdvance {
+    let (entry, result) = run_typed_entry_on_bound_owner_local_store_local_task(
+        local_executor,
+        NavigationLocalTaskEntry::Live(entry),
+        move |entry| {
+            Box::pin(async move {
+                let preparation = {
+                    let (page_vm, pending_document_lifecycle_turn) =
+                        entry.live_mut().page_vm_and_document_lifecycle_turn_mut();
+                    page_vm
+                        .prepare_pending_location_navigation_document_commit_one_turn_async(
+                            pending_document_lifecycle_turn,
+                            stage,
+                        )
+                        .await
+                };
+                let outcome = match preparation? {
+                    PageVmDocumentCommitPreparation::Prepared(prepared) => {
+                        entry.commit(*prepared)?;
+                        entry.bootstrap_committed_navigation().await?
+                    }
+                    PageVmDocumentCommitPreparation::Uncommitted(outcome) => match *outcome {
+                        PageVmFollowNavigationTurnOutcome::Completed => {
+                            LivePageNavigationFollowOutcome::Completed
+                        }
+                        PageVmFollowNavigationTurnOutcome::PostParseLifecycle {
+                            target_stage,
+                            outcome,
+                        } => LivePageNavigationFollowOutcome::PostParseLifecycle {
+                            target_stage,
+                            outcome,
+                        },
+                        PageVmFollowNavigationTurnOutcome::Download(download) => {
+                            LivePageNavigationFollowOutcome::Download(download)
+                        }
+                        #[cfg(test)]
+                        PageVmFollowNavigationTurnOutcome::PendingPhaseOne(pending) => {
+                            let wake_token = entry
+                                .live_mut()
+                                .install_new_pending_phase_one_navigation(pending)?;
+                            LivePageNavigationFollowOutcome::PendingPhaseOne { wake_token }
+                        }
+                        PageVmFollowNavigationTurnOutcome::TriggeredNavigation { stage } => {
+                            LivePageNavigationFollowOutcome::TriggeredNavigation { stage }
+                        }
+                    },
+                };
+                let document_commit = if entry.live_mut().has_uncommitted_page_vm() {
+                    Some(entry.live_mut().publish_replacement_document_commit()?)
+                } else {
+                    None
+                };
+                Ok(LivePageNavigationFollowTurn {
                     outcome,
-                } => LivePageNavigationFollowOutcome::PostParseLifecycle {
-                    target_stage,
-                    outcome,
-                },
-                PageVmFollowNavigationTurnOutcome::Download(download) => {
-                    LivePageNavigationFollowOutcome::Download(download)
-                }
-                PageVmFollowNavigationTurnOutcome::PendingPhaseOne(pending) => {
-                    let wake_token = entry.install_new_pending_phase_one_navigation(pending)?;
-                    LivePageNavigationFollowOutcome::PendingPhaseOne { wake_token }
-                }
-                PageVmFollowNavigationTurnOutcome::TriggeredNavigation { stage } => {
-                    LivePageNavigationFollowOutcome::TriggeredNavigation { stage }
-                }
-            };
-            let document_commit = entry
-                .has_uncommitted_page_vm()
-                .then(|| entry.publish_replacement_document_commit())
-                .transpose()?;
-            Ok(LivePageNavigationFollowTurn {
-                outcome,
-                document_commit,
+                    document_commit,
+                })
             })
-        })
-    })
-    .await
+        },
+    )
+    .await;
+    match entry {
+        NavigationLocalTaskEntry::Live(entry) => {
+            LivePageNavigationFollowEntryAdvance::Live { entry, result }
+        }
+        NavigationLocalTaskEntry::Committed(entry) => {
+            let error = result.err().unwrap_or_else(|| {
+                anyhow!("committed navigation task completed without a replacement PageVm")
+            });
+            LivePageNavigationFollowEntryAdvance::Committed { entry, error }
+        }
+        NavigationLocalTaskEntry::Transitioning => {
+            unreachable!("navigation task cannot return while changing typestate")
+        }
+    }
 }
 
 pub(in crate::runtime) fn remove_page_on_bound_owner_local_store(token: RendererPageToken) {
