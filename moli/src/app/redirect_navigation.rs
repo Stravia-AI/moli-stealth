@@ -1,4 +1,4 @@
-//! CLI policy for replacing an HTTP error Document with its next navigation.
+//! CLI policy for replacing a non-success Document with its next navigation.
 //!
 //! HTTP status interpretation and timeout configuration belong to the CLI
 //! layer. The renderer receives only the generic lifecycle-target decision.
@@ -10,11 +10,11 @@ use moli_core::runtime::{
 use moli_fetch::Request;
 use std::time::{Duration, Instant};
 
-pub(super) fn is_http_error_status(status: u16) -> bool {
-    (400..=599).contains(&status)
+pub(super) fn uses_redirect_wait(status: u16) -> bool {
+    (300..=599).contains(&status)
 }
 
-pub(super) async fn fetch_with_http_error_navigation(
+pub(super) async fn fetch_with_redirect_wait(
     browser: &Browser,
     request: Request,
     wait_until: RenderedDomWaitUntil,
@@ -23,20 +23,20 @@ pub(super) async fn fetch_with_http_error_navigation(
 ) -> Result<FetchedDocument> {
     let minimum_navigation_deadline = Instant::now()
         .checked_add(minimum_navigation_wait)
-        .context("HTTP error replacement-navigation wait exceeds the supported range")?;
+        .context("response replacement-navigation wait exceeds the supported range")?;
     // The first DCL/load is delivered to this synchronous decision normally.
-    // A 4xx/5xx keeps running until the configured minimum time from fetch
-    // start has elapsed, giving client-side challenges a chance to replace the
-    // error Document. The initial lifecycle load therefore consumes this
-    // window instead of receiving a fresh grace period afterward. The outer
-    // readiness deadline still caps this wait and any successor lifecycle.
+    // A 3xx/4xx/5xx Document keeps running until the configured minimum time
+    // from fetch start has elapsed, giving client-side responses a chance to
+    // replace it. The initial lifecycle load therefore consumes this window
+    // instead of receiving a fresh grace period afterward. The outer readiness
+    // deadline still caps this wait and any successor lifecycle.
     browser
         .fetch_document_with_lifecycle_decider_and_deadline(
             request,
             wait_until,
             deadline,
             move |target| {
-                Ok(if is_http_error_status(target.status) {
+                Ok(if uses_redirect_wait(target.status) {
                     RendererLifecycleDecision::FollowNextDocumentOrFinish {
                         navigation_grace_ms: remaining_wait_milliseconds(
                             minimum_navigation_deadline,
@@ -61,17 +61,20 @@ fn remaining_wait_milliseconds(deadline: Instant, now: Instant) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_http_error_status, remaining_wait_milliseconds};
+    use super::{remaining_wait_milliseconds, uses_redirect_wait};
     use std::time::{Duration, Instant};
 
     #[test]
-    fn http_error_status_covers_only_four_hundred_and_five_hundred_ranges() {
-        assert!(!is_http_error_status(399));
-        assert!(is_http_error_status(400));
-        assert!(is_http_error_status(499));
-        assert!(is_http_error_status(500));
-        assert!(is_http_error_status(599));
-        assert!(!is_http_error_status(600));
+    fn redirect_wait_status_covers_three_hundred_through_five_hundred_ranges() {
+        assert!(!uses_redirect_wait(299));
+        assert!(uses_redirect_wait(300));
+        assert!(uses_redirect_wait(304));
+        assert!(uses_redirect_wait(399));
+        assert!(uses_redirect_wait(400));
+        assert!(uses_redirect_wait(499));
+        assert!(uses_redirect_wait(500));
+        assert!(uses_redirect_wait(599));
+        assert!(!uses_redirect_wait(600));
     }
 
     #[test]

@@ -1,7 +1,7 @@
 //! Callable command runner for the Moli CLI.
 
-mod http_error_navigation;
 mod readiness;
+mod redirect_navigation;
 
 use std::{io::Write, sync::Arc};
 

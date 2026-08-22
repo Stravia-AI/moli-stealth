@@ -7,7 +7,7 @@
 //! retained by the Page, so starting that wait after lifecycle completion does
 //! not lose an early matching response.
 
-use super::http_error_navigation::fetch_with_http_error_navigation;
+use super::redirect_navigation::fetch_with_redirect_wait;
 use crate::cli::{FetchArgs, FetchWaitUntil};
 use anyhow::{Context, Result, anyhow, bail};
 use moli_core::{
@@ -57,7 +57,7 @@ impl ReadinessPlan {
             RenderedDomWaitUntil::DomContentLoaded
             | RenderedDomWaitUntil::Load
             | RenderedDomWaitUntil::Done => {
-                fetch_with_http_error_navigation(
+                fetch_with_redirect_wait(
                     browser,
                     request,
                     self.wait_until,

@@ -2494,6 +2494,154 @@ fn cli_load_waits_for_slow_post_domcontentloaded_runtime_script() -> Result<()> 
 }
 
 #[test]
+fn cli_default_redirect_wait_follows_client_navigation_from_terminal_302() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-redirect-status-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 200);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"redirect-status-navigation-target\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        !html.contains("id=\"redirect-status-challenge\""),
+        "the successor Document must replace the terminal 302 body: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_terminal_302_without_navigation_waits_then_returns_its_body() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-redirect-status-no-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 302);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"terminal-redirect-status\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        html.contains("id=\"redirect-status-wait-marker\""),
+        "the default redirect wait must keep the terminal 302 Page live: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_zero_redirect_wait_returns_terminal_302_before_delayed_page_work() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-redirect-status-no-navigation");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &["--redirect-wait-ms", "0"])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &url, 302);
+    let html = payload["html"].as_str().unwrap_or_default();
+    assert!(
+        html.contains("id=\"terminal-redirect-status\""),
+        "stdout={stdout}"
+    );
+    assert!(
+        !html.contains("id=\"redirect-status-wait-marker\""),
+        "a zero redirect wait must not run delayed Page work: stdout={stdout}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cli_slow_streaming_terminal_302_does_not_add_a_post_load_wait() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/wait-until-redirect-status-slow-streaming-302");
+
+    for wait_until in ["domcontentloaded", "load", "done"] {
+        let output = run_fetch_cli_with_wait_until_and_dump(&url, wait_until, "json")?;
+        assert!(
+            output.status.success(),
+            "wait_until={wait_until} stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = clean_output(&output.stdout);
+        let payload: Value = serde_json::from_str(&stdout)?;
+        assert_json_dump_shape(&payload, &url, 302);
+        let html = payload["html"].as_str().unwrap_or_default();
+        assert!(
+            html.contains("id=\"slow-redirect-status-head\""),
+            "wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            html.contains("id=\"slow-redirect-status-tail\""),
+            "the delayed terminal 302 body must be complete: wait_until={wait_until} stdout={stdout}"
+        );
+        assert!(
+            !html.contains("id=\"slow-redirect-status-post-load\""),
+            "time spent loading the body must consume the minimum redirect wait: wait_until={wait_until} stdout={stdout}"
+        );
+    }
+
+    runtime.block_on(server.shutdown());
+    Ok(())
+}
+
+#[test]
+fn cli_http_redirect_with_location_does_not_consume_redirect_wait() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/redirect");
+    let final_url = server.url("/static");
+    let output = run_fetch_cli_with_dump_and_args(
+        &url,
+        "json",
+        &["--timeout", "4000", "--redirect-wait-ms", "10000"],
+    )?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "an HTTP redirect with Location must finish at the network destination without a renderer grace: stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &final_url, 200);
+    Ok(())
+}
+
+#[test]
 fn cli_domcontentloaded_recovers_from_delayed_403_navigation_at_same_stage() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;

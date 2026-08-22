@@ -71,6 +71,36 @@ const WAIT_UNTIL_INTERVAL_FETCH_HTML: &str = "<!doctype html><html><body data-st
 const WAIT_UNTIL_INTERVAL_DOM_MUTATION_HTML: &str = "<!doctype html><html><body data-state=\"init\"><main id=\"mutation-count\">0</main><script>window.addEventListener('load', () => { setInterval(() => { const count = Number(document.body.getAttribute('data-mutation-count') || '0') + 1; document.body.setAttribute('data-mutation-count', String(count)); document.getElementById('mutation-count').textContent = String(count); }, 50); });</script></body></html>";
 const WAIT_UNTIL_SLOW_STATIC_HTML: &str =
     "<!doctype html><html><body><main id=\"slow-main\">slow-main=ready</main></body></html>";
+const WAIT_UNTIL_REDIRECT_STATUS_NAVIGATION_HTML: &str = r#"<!doctype html>
+<html><head><title>terminal 302 navigation</title></head><body>
+<main id="redirect-status-challenge">redirect-status=challenge</main>
+<script>
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    document.cookie = 'moli-redirect-status-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax';
+    location.reload();
+  }, 75);
+});
+</script>
+</body></html>"#;
+const WAIT_UNTIL_REDIRECT_STATUS_NAVIGATION_FINAL_HTML: &str = r#"<!doctype html>
+<html><head><title>terminal 302 navigation passed</title></head><body>
+<main id="redirect-status-navigation-target">redirect-status=navigation-done</main>
+</body></html>"#;
+const WAIT_UNTIL_REDIRECT_STATUS_NO_NAVIGATION_HTML: &str = r#"<!doctype html>
+<html><head><title>terminal 302</title></head><body>
+<main id="terminal-redirect-status">redirect-status=terminal</main>
+<script>
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const marker = document.createElement('main');
+    marker.id = 'redirect-status-wait-marker';
+    marker.textContent = 'redirect-status=waited';
+    document.body.appendChild(marker);
+  }, 300);
+});
+</script>
+</body></html>"#;
 const WAIT_UNTIL_HTTP_ERROR_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 75); });</script></body></html>";
 const WAIT_UNTIL_HTTP_ERROR_LATE_NAVIGATION_CHALLENGE_HTML: &str = "<!doctype html><html><head><title>late 403 challenge</title></head><body><main id=\"challenge\">http-error-navigation=late-challenge</main><script>window.addEventListener('load', () => { setTimeout(() => { document.cookie = 'moli-http-error-navigation=passed; Path=/; Max-Age=3600; SameSite=Lax'; location.reload(); }, 1200); });</script></body></html>";
 const WAIT_UNTIL_READINESS_HTTP_ERROR_CHALLENGE_HTML: &str = r#"<!doctype html>
@@ -192,6 +222,19 @@ window.addEventListener('load', () => {
 </script></head><body><main id="slow-http-error-head">slow-500-head</main>"#;
 const WAIT_UNTIL_SLOW_STREAMING_500_TAIL: &[u8] =
     br#"<main id="slow-http-error-tail">slow-500-tail</main></body></html>"#;
+const WAIT_UNTIL_SLOW_STREAMING_302_HEAD: &[u8] = br#"<!doctype html>
+<html><head><title>slow streaming 302</title><script>
+window.addEventListener('load', () => {
+  setTimeout(() => {
+    const marker = document.createElement('main');
+    marker.id = 'slow-redirect-status-post-load';
+    marker.textContent = 'slow-redirect-status=post-load';
+    document.body.appendChild(marker);
+  }, 400);
+});
+</script></head><body><main id="slow-redirect-status-head">slow-302-head</main>"#;
+const WAIT_UNTIL_SLOW_STREAMING_302_TAIL: &[u8] =
+    br#"<main id="slow-redirect-status-tail">slow-302-tail</main></body></html>"#;
 const WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_HEAD: &[u8] = br#"<!doctype html>
 <html><head><title>slow streaming 403 navigation</title><script>
 window.addEventListener('load', () => {
@@ -208,7 +251,7 @@ const WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_FINAL_HTML: &str = r#"<!doctype h
 <main id="slow-http-error-navigation-target">slow-http-error-navigation=done</main>
 </body></html>"#;
 
-const SLOW_HTTP_ERROR_STREAM_TAIL_DELAY: Duration = Duration::from_millis(1_250);
+const SLOW_STATUS_STREAM_TAIL_DELAY: Duration = Duration::from_millis(1_250);
 
 pub(super) fn add_wait_routes(router: Router) -> Router {
     router
@@ -300,6 +343,18 @@ pub(super) fn add_wait_routes(router: Router) -> Router {
             get(wait_until_slow_interval_dom_mutation_page),
         )
         .route(
+            "/wait-until-redirect-status-navigation",
+            get(wait_until_redirect_status_navigation_page),
+        )
+        .route(
+            "/wait-until-redirect-status-no-navigation",
+            get(wait_until_redirect_status_no_navigation_page),
+        )
+        .route(
+            "/wait-until-redirect-status-slow-streaming-302",
+            get(wait_until_redirect_status_slow_streaming_302_page),
+        )
+        .route(
             "/wait-until-http-error-navigation",
             get(wait_until_http_error_navigation_page),
         )
@@ -362,6 +417,35 @@ async fn wait_until_lifecycle_page() -> Html<&'static str> {
     Html(WAIT_UNTIL_LIFECYCLE_HTML)
 }
 
+async fn wait_until_redirect_status_navigation_page(headers: HeaderMap) -> Response {
+    if has_cookie(&headers, "moli-redirect-status-navigation=passed") {
+        return Html(WAIT_UNTIL_REDIRECT_STATUS_NAVIGATION_FINAL_HTML).into_response();
+    }
+
+    (
+        StatusCode::FOUND,
+        Html(WAIT_UNTIL_REDIRECT_STATUS_NAVIGATION_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_redirect_status_no_navigation_page() -> Response {
+    (
+        StatusCode::FOUND,
+        Html(WAIT_UNTIL_REDIRECT_STATUS_NO_NAVIGATION_HTML),
+    )
+        .into_response()
+}
+
+async fn wait_until_redirect_status_slow_streaming_302_page() -> Response {
+    slow_status_streaming_response(
+        StatusCode::FOUND,
+        "text/html; charset=utf-8",
+        WAIT_UNTIL_SLOW_STREAMING_302_HEAD,
+        WAIT_UNTIL_SLOW_STREAMING_302_TAIL,
+    )
+}
+
 async fn wait_until_http_error_navigation_page(headers: HeaderMap) -> Response {
     if has_cookie(&headers, "moli-http-error-navigation=passed") {
         return Html(WAIT_UNTIL_HTTP_ERROR_NAVIGATION_FINAL_HTML).into_response();
@@ -394,7 +478,7 @@ async fn wait_until_http_error_navigation_to_slow_streaming_500_page(
     headers: HeaderMap,
 ) -> Response {
     if has_cookie(&headers, "moli-http-error-navigation=passed") {
-        return slow_http_error_streaming_response(
+        return slow_status_streaming_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             "text/html; charset=utf-8",
             WAIT_UNTIL_SLOW_STREAMING_500_HEAD,
@@ -483,7 +567,7 @@ async fn wait_until_http_error_late_navigation_page(headers: HeaderMap) -> Respo
         .into_response()
 }
 
-fn slow_http_error_streaming_response(
+fn slow_status_streaming_response(
     status: StatusCode,
     content_type: &'static str,
     head: &'static [u8],
@@ -500,7 +584,7 @@ fn slow_http_error_streaming_response(
         {
             return;
         }
-        sleep(SLOW_HTTP_ERROR_STREAM_TAIL_DELAY).await;
+        sleep(SLOW_STATUS_STREAM_TAIL_DELAY).await;
         let _ = tx
             .send(Ok::<Bytes, std::convert::Infallible>(Bytes::from_static(
                 tail,
@@ -514,11 +598,11 @@ fn slow_http_error_streaming_response(
         .body(Body::from_stream(
             tokio_stream::wrappers::ReceiverStream::new(rx),
         ))
-        .expect("slow HTTP error streaming response should build")
+        .expect("slow status streaming response should build")
 }
 
 async fn wait_until_http_error_slow_streaming_500_page() -> Response {
-    slow_http_error_streaming_response(
+    slow_status_streaming_response(
         StatusCode::INTERNAL_SERVER_ERROR,
         "text/html; charset=utf-8",
         WAIT_UNTIL_SLOW_STREAMING_500_HEAD,
@@ -531,7 +615,7 @@ async fn wait_until_http_error_slow_streaming_navigation_page(headers: HeaderMap
         return Html(WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_FINAL_HTML).into_response();
     }
 
-    slow_http_error_streaming_response(
+    slow_status_streaming_response(
         StatusCode::FORBIDDEN,
         "text/html; charset=utf-8",
         WAIT_UNTIL_SLOW_STREAMING_403_NAVIGATION_HEAD,
@@ -540,7 +624,7 @@ async fn wait_until_http_error_slow_streaming_navigation_page(headers: HeaderMap
 }
 
 async fn wait_until_http_error_slow_streaming_raw_404_page() -> Response {
-    slow_http_error_streaming_response(
+    slow_status_streaming_response(
         StatusCode::NOT_FOUND,
         "application/octet-stream",
         b"slow-raw-404-head|",
