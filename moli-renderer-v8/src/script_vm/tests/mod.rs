@@ -6210,6 +6210,58 @@ async fn child_parser_resumes_write_queued_during_external_script_block() {
     assert_eq!(result, "true|true");
 }
 
+#[test]
+fn pending_initial_child_navigation_keeps_initial_empty_window_surface() {
+    let mut vm = new_storage_test_vm("https://child-pending-window.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "pending-window";
+  frame.src = "https://child-pending-window.test/target.html";
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("pending child Window setup should evaluate");
+
+    assert!(
+        vm.has_pending_child_navigation_commit_for_test(),
+        "the target navigation must remain pending before its typed commit turn"
+    );
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const child = document.getElementById("pending-window").contentWindow;
+  return [
+    child.location.href,
+    child.navigation.currentEntry?.url ?? "null",
+    child.document.URL,
+    child.document.readyState,
+  ].join("|");
+})()
+"#,
+        )
+        .expect("pending child Window state should evaluate"),
+        "about:blank|about:blank|about:blank|complete",
+        "a planned target must not be projected as committed while the initial empty Document is still live"
+    );
+
+    let child_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handles_in_document_order()[0];
+    assert!(
+        vm._context_host
+            .borrow()
+            .child_browsing_context_current_url(child_handle)
+            .is_some_and(|url| moli_url::is_about_blank(&url)),
+        "native current-Document state must agree with the initial empty Window surface"
+    );
+}
+
 #[tokio::test]
 async fn pending_child_navigation_does_not_materialize_initial_empty_preload_realm() {
     let mut vm = new_storage_test_vm("https://child-preload-lazy.test/");

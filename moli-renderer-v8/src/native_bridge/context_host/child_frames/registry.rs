@@ -147,7 +147,17 @@ impl JsContextHost {
                             Self::child_browsing_context_single_entry_seed(&attribute_bootstrap)
                         })
                 };
-                let committed_navigation_entry_seed = if attribute_bootstrap_changed {
+                let committed_navigation_entry_seed = if is_new {
+                    // The target entry is planned when a frame owner with a
+                    // non-blank navigation attribute is discovered, but its
+                    // live Document is still the synchronous initial empty
+                    // document. Keep the committed projection pinned to that
+                    // actual Document until NavigationCommit installs the
+                    // fetched/srcdoc target. Otherwise a pending iframe can
+                    // expose the target URL together with the old complete
+                    // about:blank Document.
+                    Self::child_browsing_context_single_entry_seed(&live_bootstrap)
+                } else if attribute_bootstrap_changed {
                     existing
                         .as_ref()
                         .map(|entry| entry.committed_navigation_entry_seed())
