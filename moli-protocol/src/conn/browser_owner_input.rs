@@ -244,6 +244,39 @@ pub(crate) struct PendingBrowserOwnerPausedNavigationDecisionCommand {
     reply: oneshot::Receiver<CompletedBrowserOwnerPausedNavigationDecisionCommand>,
 }
 
+pub(crate) enum PreparedBrowserOwnerCommand {
+    Navigation(PreparedBrowserOwnerNavigationCommand),
+    StopLoading(PreparedBrowserOwnerStopLoadingCommand),
+    ContextDisposal(PreparedBrowserOwnerContextDisposalCommand),
+    InitialTargetNavigation(PreparedBrowserOwnerInitialTargetNavigationCommand),
+    PausedNavigationDecision(Box<PreparedBrowserOwnerPausedNavigationDecisionCommand>),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PreparedBrowserOwnerCommandKind {
+    Navigation,
+    StopLoading,
+    ContextDisposal,
+    InitialTargetNavigation,
+    PausedNavigationDecision,
+}
+
+impl PreparedBrowserOwnerCommand {
+    fn kind(&self) -> PreparedBrowserOwnerCommandKind {
+        match self {
+            Self::Navigation(_) => PreparedBrowserOwnerCommandKind::Navigation,
+            Self::StopLoading(_) => PreparedBrowserOwnerCommandKind::StopLoading,
+            Self::ContextDisposal(_) => PreparedBrowserOwnerCommandKind::ContextDisposal,
+            Self::InitialTargetNavigation(_) => {
+                PreparedBrowserOwnerCommandKind::InitialTargetNavigation
+            }
+            Self::PausedNavigationDecision(_) => {
+                PreparedBrowserOwnerCommandKind::PausedNavigationDecision
+            }
+        }
+    }
+}
+
 impl PendingBrowserOwnerPausedNavigationDecisionCommand {
     pub(crate) async fn wait(
         self,
@@ -334,24 +367,36 @@ impl CdpConnection {
         loop {
             let command_id = self.browser_host_state.allocate_browser_command_id();
             if !self
-                .prepared_browser_owner_navigation_commands
+                .prepared_browser_owner_commands
                 .contains_key(&command_id)
-                && !self
-                    .prepared_browser_owner_stop_loading_commands
-                    .contains_key(&command_id)
-                && !self
-                    .prepared_browser_owner_context_disposal_commands
-                    .contains_key(&command_id)
-                && !self
-                    .prepared_browser_owner_paused_navigation_decision_commands
-                    .contains_key(&command_id)
-                && !self
-                    .prepared_browser_owner_initial_target_navigation_commands
-                    .contains_key(&command_id)
             {
                 return command_id;
             }
         }
+    }
+
+    fn take_prepared_browser_owner_command(
+        &mut self,
+        command_id: BrowserCommandId,
+        expected_kind: PreparedBrowserOwnerCommandKind,
+    ) -> Option<PreparedBrowserOwnerCommand> {
+        let prepared = self.prepared_browser_owner_commands.remove(&command_id)?;
+        let actual_kind = prepared.kind();
+        if actual_kind == expected_kind {
+            return Some(prepared);
+        }
+
+        let previous = self
+            .prepared_browser_owner_commands
+            .insert(command_id, prepared);
+        debug_assert!(previous.is_none());
+        tracing::error!(
+            browser_command_id = command_id.get(),
+            ?expected_kind,
+            ?actual_kind,
+            "prepared Browser Owner command kind did not match selected Host input"
+        );
+        None
     }
 
     /// Publishes one frontend-originated top-level navigation.
@@ -461,9 +506,9 @@ impl CdpConnection {
         command_context: CommandDispatchContext,
     ) -> Result<PendingBrowserOwnerNavigationCommand, BrowserOwnerInputPublicationError> {
         let (reply, pending_reply) = oneshot::channel();
-        self.prepared_browser_owner_navigation_commands.insert(
+        self.prepared_browser_owner_commands.insert(
             command_id,
-            PreparedBrowserOwnerNavigationCommand {
+            PreparedBrowserOwnerCommand::Navigation(PreparedBrowserOwnerNavigationCommand {
                 // Direct WebDriver commands do not always have a wire command
                 // id. A foreground Page participant still needs an opaque id
                 // so the shared navigation pipeline emits its terminal result
@@ -476,7 +521,7 @@ impl CdpConnection {
                 result_payload,
                 command_context,
                 reply,
-            },
+            }),
         );
         let kind = input.kind();
         let publication = if let Some(browser_host) = self.browser_host_handle.as_ref() {
@@ -487,8 +532,7 @@ impl CdpConnection {
             Err(BrowserOwnerInputPublicationError::HostNotInstalled { kind })
         };
         if let Err(error) = publication {
-            self.prepared_browser_owner_navigation_commands
-                .remove(&command_id);
+            let _ = self.take_prepared_browser_owner_navigation_command(command_id);
             return Err(error);
         }
         if moli_trace::cdp_runtime_trace_enabled() {
@@ -508,8 +552,14 @@ impl CdpConnection {
         &mut self,
         command_id: BrowserCommandId,
     ) -> Option<PreparedBrowserOwnerNavigationCommand> {
-        self.prepared_browser_owner_navigation_commands
-            .remove(&command_id)
+        let prepared = self.take_prepared_browser_owner_command(
+            command_id,
+            PreparedBrowserOwnerCommandKind::Navigation,
+        )?;
+        let PreparedBrowserOwnerCommand::Navigation(prepared) = prepared else {
+            unreachable!("prepared command kind was validated")
+        };
+        Some(prepared)
     }
 
     /// Publishes one target-slot-scoped stop-loading command.
@@ -526,12 +576,12 @@ impl CdpConnection {
         let command_id = self.allocate_browser_owner_command_id();
         let input = BrowserOwnerInput::frontend_stop_loading(command_id, page_owner);
         let (reply, pending_reply) = oneshot::channel();
-        self.prepared_browser_owner_stop_loading_commands.insert(
+        self.prepared_browser_owner_commands.insert(
             command_id,
-            PreparedBrowserOwnerStopLoadingCommand {
+            PreparedBrowserOwnerCommand::StopLoading(PreparedBrowserOwnerStopLoadingCommand {
                 command_context,
                 reply,
-            },
+            }),
         );
         let kind = input.kind();
         let publication = if let Some(browser_host) = self.browser_host_handle.as_ref() {
@@ -542,8 +592,7 @@ impl CdpConnection {
             Err(BrowserOwnerInputPublicationError::HostNotInstalled { kind })
         };
         if let Err(error) = publication {
-            self.prepared_browser_owner_stop_loading_commands
-                .remove(&command_id);
+            let _ = self.take_prepared_browser_owner_stop_loading_command(command_id);
             return Err(error);
         }
         if moli_trace::cdp_runtime_trace_enabled() {
@@ -563,8 +612,14 @@ impl CdpConnection {
         &mut self,
         command_id: BrowserCommandId,
     ) -> Option<PreparedBrowserOwnerStopLoadingCommand> {
-        self.prepared_browser_owner_stop_loading_commands
-            .remove(&command_id)
+        let prepared = self.take_prepared_browser_owner_command(
+            command_id,
+            PreparedBrowserOwnerCommandKind::StopLoading,
+        )?;
+        let PreparedBrowserOwnerCommand::StopLoading(prepared) = prepared else {
+            unreachable!("prepared command kind was validated")
+        };
+        Some(prepared)
     }
 
     /// Publishes disposal of one exact BrowserContext instance.
@@ -582,15 +637,16 @@ impl CdpConnection {
         let input =
             BrowserOwnerInput::frontend_dispose_browser_context(command_id, browser_context_handle);
         let (reply, pending_reply) = oneshot::channel();
-        self.prepared_browser_owner_context_disposal_commands
-            .insert(
-                command_id,
+        self.prepared_browser_owner_commands.insert(
+            command_id,
+            PreparedBrowserOwnerCommand::ContextDisposal(
                 PreparedBrowserOwnerContextDisposalCommand {
                     prefix_events,
                     command_context,
                     reply,
                 },
-            );
+            ),
+        );
         let kind = input.kind();
         let publication = if let Some(browser_host) = self.browser_host_handle.as_ref() {
             browser_host.publish(input).map_err(|error| {
@@ -600,8 +656,7 @@ impl CdpConnection {
             Err(BrowserOwnerInputPublicationError::HostNotInstalled { kind })
         };
         if let Err(error) = publication {
-            self.prepared_browser_owner_context_disposal_commands
-                .remove(&command_id);
+            let _ = self.take_prepared_browser_owner_context_disposal_command(command_id);
             return Err(error);
         }
         if moli_trace::cdp_runtime_trace_enabled() {
@@ -621,8 +676,14 @@ impl CdpConnection {
         &mut self,
         command_id: BrowserCommandId,
     ) -> Option<PreparedBrowserOwnerContextDisposalCommand> {
-        self.prepared_browser_owner_context_disposal_commands
-            .remove(&command_id)
+        let prepared = self.take_prepared_browser_owner_command(
+            command_id,
+            PreparedBrowserOwnerCommandKind::ContextDisposal,
+        )?;
+        let PreparedBrowserOwnerCommand::ContextDisposal(prepared) = prepared else {
+            unreachable!("prepared command kind was validated")
+        };
+        Some(prepared)
     }
 
     /// Publishes one exact Page-scoped decision for a paused top-level
@@ -700,15 +761,16 @@ impl CdpConnection {
             command_id, page_owner, decision,
         );
         let (reply, pending_reply) = oneshot::channel();
-        self.prepared_browser_owner_paused_navigation_decision_commands
-            .insert(
-                command_id,
+        self.prepared_browser_owner_commands.insert(
+            command_id,
+            PreparedBrowserOwnerCommand::PausedNavigationDecision(Box::new(
                 PreparedBrowserOwnerPausedNavigationDecisionCommand {
                     pending_navigation,
                     command_context,
                     reply,
                 },
-            );
+            )),
+        );
         let kind = input.kind();
         let publication = if let Some(browser_host) = self.browser_host_handle.as_ref() {
             browser_host.publish(input).map_err(|error| {
@@ -719,8 +781,7 @@ impl CdpConnection {
         };
         if let Err(error) = publication {
             let pending_navigation = self
-                .prepared_browser_owner_paused_navigation_decision_commands
-                .remove(&command_id)
+                .take_prepared_browser_owner_paused_navigation_decision_command(command_id)
                 .map(|prepared| prepared.into_parts().0);
             if pending_navigation.is_none() {
                 tracing::error!(
@@ -750,8 +811,14 @@ impl CdpConnection {
         &mut self,
         command_id: BrowserCommandId,
     ) -> Option<PreparedBrowserOwnerPausedNavigationDecisionCommand> {
-        self.prepared_browser_owner_paused_navigation_decision_commands
-            .remove(&command_id)
+        let prepared = self.take_prepared_browser_owner_command(
+            command_id,
+            PreparedBrowserOwnerCommandKind::PausedNavigationDecision,
+        )?;
+        let PreparedBrowserOwnerCommand::PausedNavigationDecision(prepared) = prepared else {
+            unreachable!("prepared command kind was validated")
+        };
+        Some(*prepared)
     }
 
     /// Publishes an already-prepared protocol-neutral Browser action.
@@ -869,11 +936,12 @@ impl CdpConnection {
             command_id, page_owner, url,
         );
         let (reply, pending_reply) = oneshot::channel();
-        self.prepared_browser_owner_initial_target_navigation_commands
-            .insert(
-                command_id,
+        self.prepared_browser_owner_commands.insert(
+            command_id,
+            PreparedBrowserOwnerCommand::InitialTargetNavigation(
                 PreparedBrowserOwnerInitialTargetNavigationCommand { reply },
-            );
+            ),
+        );
         let kind = input.kind();
         let publication = if let Some(browser_host) = self.browser_host_handle.as_ref() {
             browser_host.publish(input).map_err(|error| {
@@ -883,8 +951,7 @@ impl CdpConnection {
             Err(BrowserOwnerInputPublicationError::HostNotInstalled { kind })
         };
         if let Err(error) = publication {
-            self.prepared_browser_owner_initial_target_navigation_commands
-                .remove(&command_id);
+            let _ = self.take_prepared_browser_owner_initial_target_navigation_command(command_id);
             return Err(error);
         }
         if moli_trace::cdp_runtime_trace_enabled() {
@@ -904,8 +971,14 @@ impl CdpConnection {
         &mut self,
         command_id: BrowserCommandId,
     ) -> Option<PreparedBrowserOwnerInitialTargetNavigationCommand> {
-        self.prepared_browser_owner_initial_target_navigation_commands
-            .remove(&command_id)
+        let prepared = self.take_prepared_browser_owner_command(
+            command_id,
+            PreparedBrowserOwnerCommandKind::InitialTargetNavigation,
+        )?;
+        let PreparedBrowserOwnerCommand::InitialTargetNavigation(prepared) = prepared else {
+            unreachable!("prepared command kind was validated")
+        };
+        Some(prepared)
     }
 
     /// Revalidates a selected initial-Target input against Core authority.
@@ -1083,7 +1156,7 @@ mod tests {
                 kind: BrowserOwnerInputKind::FrontendStopLoading,
             }
         ));
-        assert!(conn.prepared_browser_owner_stop_loading_commands.is_empty());
+        assert!(conn.prepared_browser_owner_commands.is_empty());
         assert!(
             conn.take_scheduler_events().is_empty(),
             "stop-loading rejection must not recreate a Protocol scheduler fallback"
@@ -1246,10 +1319,7 @@ mod tests {
                 kind: BrowserOwnerInputKind::FrontendEnsureInitialTargetNavigation,
             }
         ));
-        assert!(
-            conn.prepared_browser_owner_initial_target_navigation_commands
-                .is_empty()
-        );
+        assert!(conn.prepared_browser_owner_commands.is_empty());
         assert!(!conn.has_pending_document_navigation_for_session_owner(None));
         assert!(conn.take_scheduler_events().is_empty());
     }
@@ -1358,9 +1428,6 @@ mod tests {
                 .is_some_and(|page| page.final_url().as_str() == url),
             "dropping the frontend wait must not cancel the Browser action"
         );
-        assert!(
-            conn.prepared_browser_owner_initial_target_navigation_commands
-                .is_empty()
-        );
+        assert!(conn.prepared_browser_owner_commands.is_empty());
     }
 }

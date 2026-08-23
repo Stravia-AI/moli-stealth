@@ -1190,20 +1190,8 @@ pub struct CdpConnection {
     next_session_id: u32,
     next_page_domain_subscription_generation: u64,
     next_internal_runtime_command_id: u64,
-    prepared_browser_owner_navigation_commands:
-        HashMap<BrowserCommandId, browser_owner_input::PreparedBrowserOwnerNavigationCommand>,
-    prepared_browser_owner_stop_loading_commands:
-        HashMap<BrowserCommandId, browser_owner_input::PreparedBrowserOwnerStopLoadingCommand>,
-    prepared_browser_owner_context_disposal_commands:
-        HashMap<BrowserCommandId, browser_owner_input::PreparedBrowserOwnerContextDisposalCommand>,
-    prepared_browser_owner_initial_target_navigation_commands: HashMap<
-        BrowserCommandId,
-        browser_owner_input::PreparedBrowserOwnerInitialTargetNavigationCommand,
-    >,
-    prepared_browser_owner_paused_navigation_decision_commands: HashMap<
-        BrowserCommandId,
-        browser_owner_input::PreparedBrowserOwnerPausedNavigationDecisionCommand,
-    >,
+    prepared_browser_owner_commands:
+        HashMap<BrowserCommandId, browser_owner_input::PreparedBrowserOwnerCommand>,
     none_session_owner_route_override: Option<CdpSessionRoute>,
     pending_runtime_await_jobs: HashMap<PendingRendererCommandKey, RuntimeAwaitJob>,
     claimed_pending_inspector_await_owners:
@@ -1477,11 +1465,7 @@ impl CdpConnection {
             next_session_id: 0,
             next_page_domain_subscription_generation: 0,
             next_internal_runtime_command_id: 902_000_000,
-            prepared_browser_owner_navigation_commands: HashMap::new(),
-            prepared_browser_owner_stop_loading_commands: HashMap::new(),
-            prepared_browser_owner_context_disposal_commands: HashMap::new(),
-            prepared_browser_owner_initial_target_navigation_commands: HashMap::new(),
-            prepared_browser_owner_paused_navigation_decision_commands: HashMap::new(),
+            prepared_browser_owner_commands: HashMap::new(),
             pending_runtime_await_jobs: HashMap::new(),
             claimed_pending_inspector_await_owners: HashMap::new(),
             network_data_collectors: crate::domains::network::NetworkDataCollectorStore::default(),
