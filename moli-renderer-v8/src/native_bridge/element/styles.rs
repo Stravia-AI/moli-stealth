@@ -340,32 +340,41 @@ fn style_object_computation_context<'s>(
     style: v8::Local<'s, v8::Object>,
 ) -> StyleComputationContext {
     let read_document = style_object_read_document(scope, style);
-    let viewport = bridge_handle_from_object(scope, style)
-        .ok()
-        .and_then(|(runtime_ptr, bridge_handle)| {
-            let runtime = unsafe { &*runtime_ptr };
-            match bridge_handle {
-                BridgeHandle::ComputedStyle(handle, descriptor) => match descriptor.target {
-                    ComputedStyleTargetKey::Dynamic => runtime
-                        .dom_host()
-                        .owner_document_handle(handle)
-                        .or(read_document)
-                        .map(|document| style_viewport_for_document(runtime, document)),
-                    ComputedStyleTargetKey::ChildFrame(frame_handle) => {
-                        iframe_handle_viewport(runtime, frame_handle)
-                    }
-                    ComputedStyleTargetKey::DetachedIframe(_)
-                    | ComputedStyleTargetKey::PopupDocument(_) => None,
-                },
-                BridgeHandle::Window
-                | BridgeHandle::Node(_)
-                | BridgeHandle::ClassList(_, _)
-                | BridgeHandle::Dataset(_)
-                | BridgeHandle::Style(_) => None,
-            }
-        })
+    let viewport = live_computed_style_viewport(scope, style)
         .unwrap_or_else(|| style_object_viewport(scope, style));
     StyleComputationContext::new(viewport).with_read_document(read_document)
+}
+
+fn live_computed_style_viewport<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    style: v8::Local<'s, v8::Object>,
+) -> Option<StyleViewport> {
+    let Ok((runtime_ptr, BridgeHandle::ComputedStyle(handle, descriptor))) =
+        bridge_handle_from_object(scope, style)
+    else {
+        return None;
+    };
+    let runtime = unsafe { &*runtime_ptr };
+    match descriptor.target {
+        ComputedStyleTargetKey::Dynamic => {
+            if let Some(frame) = computed_style_target_child_frame_handle(scope, runtime, handle) {
+                return iframe_handle_viewport(runtime, frame);
+            }
+            if !computed_style_target_is_in_flat_tree(runtime, handle) {
+                return None;
+            }
+            let document = runtime.dom_host().owner_document_handle(handle)?;
+            Some(style_viewport_for_document(runtime, document))
+        }
+        ComputedStyleTargetKey::ChildFrame(frame)
+            if child_frame_target_document_is_current(runtime, handle, frame) =>
+        {
+            iframe_handle_viewport(runtime, frame)
+        }
+        ComputedStyleTargetKey::ChildFrame(_)
+        | ComputedStyleTargetKey::DetachedIframe(_)
+        | ComputedStyleTargetKey::PopupDocument(_) => None,
+    }
 }
 
 fn style_object_property_count_with_context<'s>(
