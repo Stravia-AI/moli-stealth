@@ -342,9 +342,7 @@ mod tests {
     use crate::browser_host::fact_journal::BrowserFactJournal;
     use crate::{
         PageId,
-        browser_host::{
-            BrowserContextId, BrowserDocumentNavigation, BrowserInstanceId, BrowserTargetId,
-        },
+        browser_host::{BrowserDocumentNavigation, BrowserInstanceId},
         page::{
             RendererDocumentTerminationReason, RendererDocumentToken, RendererFrameToken,
             RendererLifecycleEpoch,
@@ -385,12 +383,7 @@ mod tests {
 
     fn publish(journal: &mut BrowserFactJournal, page: PageResidenceIdentity, fact: BrowserFact) {
         journal
-            .publish_batch(
-                BrowserContextId::new("context-1"),
-                BrowserTargetId::new("target-1"),
-                page,
-                vec![fact],
-            )
+            .publish_batch(page, vec![fact])
             .expect("test fact should publish");
     }
 

@@ -111,8 +111,6 @@ pub enum BrowserFact {
 pub struct BrowserFactEnvelope {
     sequence: BrowserFactSequence,
     browser_instance_id: BrowserInstanceId,
-    browser_context_id: BrowserContextId,
-    target_id: BrowserTargetId,
     page_residence: PageResidenceIdentity,
     fact: BrowserFact,
 }
@@ -127,11 +125,13 @@ impl BrowserFactEnvelope {
     }
 
     pub fn browser_context_id(&self) -> &BrowserContextId {
-        &self.browser_context_id
+        self.page_residence.browser_context_identity()
     }
 
     pub fn target_id(&self) -> &BrowserTargetId {
-        &self.target_id
+        self.page_residence
+            .target_identity()
+            .expect("Browser fact envelopes are always target-backed")
     }
 
     pub fn page_residence(&self) -> &PageResidenceIdentity {
@@ -392,11 +392,14 @@ impl BrowserFactJournal {
 
     pub(super) fn publish_batch(
         &mut self,
-        browser_context_id: BrowserContextId,
-        target_id: BrowserTargetId,
         page_residence: PageResidenceIdentity,
         facts: Vec<BrowserFact>,
     ) -> Result<Vec<Arc<BrowserFactEnvelope>>, BrowserFactPublishError> {
+        if page_residence.target_identity().is_none() {
+            return Err(BrowserFactPublishError::TargetlessPageResidence(
+                page_residence,
+            ));
+        }
         if facts.is_empty() {
             return Ok(Vec::new());
         }
@@ -418,8 +421,6 @@ impl BrowserFactJournal {
             let envelope = Arc::new(BrowserFactEnvelope {
                 sequence,
                 browser_instance_id: self.browser_instance_id,
-                browser_context_id: browser_context_id.clone(),
-                target_id: target_id.clone(),
                 page_residence: page_residence.clone(),
                 fact,
             });
@@ -474,8 +475,6 @@ mod tests {
     fn publish(journal: &mut BrowserFactJournal, source_sequence: u64) {
         journal
             .publish_batch(
-                BrowserContextId::new("context-1"),
-                BrowserTargetId::new("target-1"),
                 PageResidenceIdentity::new("context-1".to_owned(), Some("target-1".to_owned()), 0),
                 vec![lifecycle_fact(source_sequence)],
             )
@@ -519,6 +518,42 @@ mod tests {
                 .sequence()
                 .get(),
             3
+        );
+    }
+
+    #[test]
+    fn envelope_identity_is_derived_from_its_target_backed_page_source() {
+        let mut journal = BrowserFactJournal::new(BrowserInstanceId::allocate());
+        publish(&mut journal, 10);
+
+        let envelope = journal
+            .snapshot()
+            .pop()
+            .expect("published fact should be retained");
+        assert_eq!(envelope.browser_context_id().as_str(), "context-1");
+        assert_eq!(envelope.target_id().as_str(), "target-1");
+        assert_eq!(envelope.page_residence().browser_context_id(), "context-1");
+        assert_eq!(envelope.page_residence().target_id(), Some("target-1"));
+    }
+
+    #[test]
+    fn targetless_page_source_is_rejected_before_allocating_a_fact_sequence() {
+        let mut journal = BrowserFactJournal::new(BrowserInstanceId::allocate());
+        let targetless = PageResidenceIdentity::new("context-1".to_owned(), None, 0);
+
+        assert_eq!(
+            journal.publish_batch(targetless.clone(), vec![lifecycle_fact(10)]),
+            Err(BrowserFactPublishError::TargetlessPageResidence(targetless))
+        );
+        publish(&mut journal, 20);
+        assert_eq!(
+            journal
+                .snapshot()
+                .pop()
+                .expect("valid fact should publish after rejection")
+                .sequence()
+                .get(),
+            1
         );
     }
 

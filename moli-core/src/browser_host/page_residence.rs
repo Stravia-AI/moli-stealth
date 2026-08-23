@@ -221,8 +221,16 @@ impl PageResidenceIdentity {
         self.browser_context_id.as_str()
     }
 
+    pub(super) fn browser_context_identity(&self) -> &BrowserContextId {
+        &self.browser_context_id
+    }
+
     pub fn target_id(&self) -> Option<&str> {
         self.target_id.as_ref().map(BrowserTargetId::as_str)
+    }
+
+    pub(super) fn target_identity(&self) -> Option<&BrowserTargetId> {
+        self.target_id.as_ref()
     }
 
     pub fn loaded_page_generation(&self) -> u64 {

@@ -2,9 +2,9 @@ use std::sync::Arc;
 
 use crate::{
     browser_host::{
-        BrowserContextId, BrowserDocumentLifecycleWaitOutcome, BrowserDocumentLifecycleWaitTicket,
-        BrowserFact, BrowserFactEnvelope, BrowserFactPublishError, BrowserFactSubscriber,
-        BrowserFactWakeSubscriber, BrowserTargetId, PageResidenceIdentity,
+        BrowserDocumentLifecycleWaitOutcome, BrowserDocumentLifecycleWaitTicket, BrowserFact,
+        BrowserFactEnvelope, BrowserFactPublishError, BrowserFactSubscriber,
+        BrowserFactWakeSubscriber, PageResidenceIdentity,
     },
     page::{
         RendererDocumentLifecycleEvent, RendererDocumentLifecycleEventKind,
@@ -100,12 +100,8 @@ impl BrowserNavigationOwner {
         debug_assert_eq!(page.target_id(), Some(owner.target_id()));
         debug_assert_eq!(self.page_owner_key_if_current(page).as_ref(), Some(owner));
         debug_assert!(self.has_target(owner.target_id()));
-        self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
-            page.clone(),
-            vec![BrowserFact::TargetCreated],
-        )
+        self.browser_facts
+            .publish_batch(page.clone(), vec![BrowserFact::TargetCreated])
     }
 
     /// Publishes one accepted cross-Document request against the exact Page
@@ -136,12 +132,7 @@ impl BrowserNavigationOwner {
         facts.push(BrowserFact::NavigationAccepted {
             navigation: navigation.clone(),
         });
-        self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
-            page.clone(),
-            facts,
-        )
+        self.browser_facts.publish_batch(page.clone(), facts)
     }
 
     /// Publishes the unique non-commit terminal fact for one exact request
@@ -164,8 +155,6 @@ impl BrowserNavigationOwner {
             self.document_lifecycles.retire_page(owner, previous_page);
         }
         self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
             current_page.clone(),
             vec![BrowserFact::NavigationFailed {
                 navigation: navigation.clone(),
@@ -190,8 +179,6 @@ impl BrowserNavigationOwner {
         );
         debug_assert_eq!(current_page.target_id(), Some(owner.target_id()));
         self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
             current_page.clone(),
             vec![BrowserFact::NavigationConvertedToDownload {
                 navigation: navigation.clone(),
@@ -234,8 +221,6 @@ impl BrowserNavigationOwner {
         );
         self.document_lifecycles.retire_page(owner, previous_page);
         self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
             current_page.clone(),
             vec![
                 BrowserFact::NavigationCommitted {
@@ -317,12 +302,8 @@ impl BrowserNavigationOwner {
         }
         facts.push(target_fact);
         self.document_lifecycles.retire_page(owner, previous_page);
-        self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
-            terminal_page.clone(),
-            facts,
-        )
+        self.browser_facts
+            .publish_batch(terminal_page.clone(), facts)
     }
 
     /// Records lifecycle current state plus reached/terminated facts accepted
@@ -392,12 +373,8 @@ impl BrowserNavigationOwner {
         if facts.is_empty() {
             return Ok(Vec::new());
         }
-        self.browser_facts.publish_batch(
-            BrowserContextId::new(owner.browser_context_id()),
-            BrowserTargetId::new(owner.target_id()),
-            expected_page.clone(),
-            facts,
-        )
+        self.browser_facts
+            .publish_batch(expected_page.clone(), facts)
     }
 }
 
@@ -527,8 +504,6 @@ mod tests {
             owner
                 .browser_facts
                 .publish_batch(
-                    BrowserContextId::new("context-noise"),
-                    BrowserTargetId::new("target-noise"),
                     PageResidenceIdentity::new(
                         "context-noise".to_owned(),
                         Some("target-noise".to_owned()),
