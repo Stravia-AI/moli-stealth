@@ -142,6 +142,7 @@ impl JsContextHost {
             .frame_viewport(frame)
     }
 
+    #[cfg(debug_assertions)]
     pub(crate) fn style_viewport_generation(&self) -> u64 {
         self.style_viewport_generation.get()
     }

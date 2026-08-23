@@ -5721,6 +5721,364 @@ fn one_shadow_stylesheet_change_preserves_the_other_scope_cascade_data() {
 }
 
 #[test]
+fn viewport_resize_recascades_cached_viewport_units_without_media_match_changes() {
+    reset_source_cascade_rebuild_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let rule_target = host.create_element("div");
+    assert!(host.set_attribute(rule_target, "class", "rule-target stable-media-target"));
+    assert!(host.append_child(document, rule_target));
+    let inline_target = host.create_element("div");
+    assert!(host.set_attribute(inline_target, "style", "width: 12vw; height: 25vh",));
+    assert!(host.append_child(document, inline_target));
+    let shadow_host = host.create_element("section");
+    assert!(host.append_child(document, shadow_host));
+    let shadow_root = host
+        .attach_shadow_root(shadow_host, "open")
+        .expect("the viewport-unit host should accept a shadow root");
+    let shadow_target = host.create_element("span");
+    assert!(host.set_attribute(shadow_target, "class", "shadow-target"));
+    assert!(host.append_child(shadow_root, shadow_target));
+
+    let document_url = url::Url::parse("https://example.test/viewport-units.html").unwrap();
+    let mut inputs = FullStyleWorldSnapshot::default();
+    inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            r#"
+              .rule-target {
+                position: absolute;
+                width: 10vw;
+                height: 10vh;
+                min-width: 2vmin;
+                max-width: 2vmax;
+                font-size: 2vmin;
+                padding-left: calc(5vw + 8px);
+                top: 10dvh;
+                right: 10svh;
+                bottom: 10lvh;
+              }
+              @media (min-width: 1px) {
+                .stable-media-target { left: 50vw; }
+              }
+            "#
+            .into(),
+            document_url.clone(),
+        )
+        .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
+            document, 81,
+        ))),
+    );
+    inputs.shadow_stylesheet_sources.push((
+        shadow_root,
+        vec![
+            StyloStylesheetSource::new(
+                ".shadow-target { width: 25vw; height: 25vh; }".into(),
+                document_url.clone(),
+            )
+            .with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
+                shadow_root,
+                82,
+            ))),
+        ],
+    ));
+
+    let engine = MoliStyleEngine::new();
+    let viewport_1000 = StyleViewport::new(Some(1000.0), Some(800.0));
+    let read = |target, property, viewport| {
+        engine
+            .computed_style_property_value(
+                &host,
+                &document_url,
+                target,
+                property,
+                None,
+                &inputs,
+                viewport,
+            )
+            .unwrap_or_else(|| panic!("{property} should have a computed value"))
+    };
+    let rule_properties = [
+        "width",
+        "height",
+        "min-width",
+        "max-width",
+        "font-size",
+        "padding-left",
+        "top",
+        "right",
+        "bottom",
+        "left",
+    ];
+    assert_eq!(
+        rule_properties.map(|property| read(rule_target, property, viewport_1000)),
+        [
+            "100px", "80px", "16px", "20px", "16px", "58px", "80px", "80px", "80px", "500px",
+        ],
+    );
+    assert_eq!(read(inline_target, "width", viewport_1000), "120px");
+    assert_eq!(read(inline_target, "height", viewport_1000), "200px");
+    assert_eq!(read(shadow_target, "width", viewport_1000), "250px");
+    assert_eq!(read(shadow_target, "height", viewport_1000), "200px");
+    let style_before = retained_primary_style_for_test(&engine, &host, rule_target)
+        .expect("the initial viewport-relative style should be retained");
+    let document_flushes = engine.retained_stylist_flush_count_for_document_for_test(document);
+    let shadow_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, shadow_root)
+        .expect("the shadow scope should be retained");
+    let source_rebuilds = source_cascade_rebuild_count_for_test();
+
+    let viewport_500 = StyleViewport::new(Some(500.0), Some(400.0));
+    assert_eq!(
+        rule_properties.map(|property| read(rule_target, property, viewport_500)),
+        [
+            "50px", "40px", "8px", "10px", "8px", "33px", "40px", "40px", "40px", "250px",
+        ],
+        "the same cached element must recascade every viewport-relative unit",
+    );
+    assert_eq!(read(inline_target, "width", viewport_500), "60px");
+    assert_eq!(read(inline_target, "height", viewport_500), "100px");
+    assert_eq!(read(shadow_target, "width", viewport_500), "125px");
+    assert_eq!(read(shadow_target, "height", viewport_500), "100px");
+    let style_after = retained_primary_style_for_test(&engine, &host, rule_target)
+        .expect("the resized viewport-relative style should be retained");
+    assert!(
+        !ServoArc::ptr_eq(&style_before, &style_after),
+        "viewport invalidation must replace the canonical ComputedValues on the same element",
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        document_flushes,
+        "an always-matching media query must not be used to hide viewport-unit invalidation",
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, shadow_root),
+        Some(shadow_flushes),
+        "viewport units alone must not flush the ShadowRoot AuthorStyles",
+    );
+    assert_eq!(
+        source_cascade_rebuild_count_for_test(),
+        source_rebuilds,
+        "viewport units alone must not rebuild source-local cascade data",
+    );
+}
+
+#[test]
+fn repeated_viewport_resizes_recascade_only_dependent_cached_elements() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let dependent = host.create_element("div");
+    let independent = host.create_element("div");
+    assert!(host.set_attribute(dependent, "class", "viewport-dependent"));
+    assert!(host.set_attribute(independent, "class", "viewport-independent"));
+    assert!(host.append_child(document, dependent));
+    assert!(host.append_child(document, independent));
+
+    let document_url = url::Url::parse("https://example.test/repeated-resize.html").unwrap();
+    let mut inputs = FullStyleWorldSnapshot::default();
+    inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            r#"
+              .viewport-dependent { width: 10vw; height: 10vh; }
+              .viewport-independent { width: 123px; height: 45px; }
+            "#
+            .into(),
+            document_url.clone(),
+        )
+        .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
+            document, 83,
+        ))),
+    );
+
+    let engine = MoliStyleEngine::new();
+    let read = |target, property, viewport| {
+        engine
+            .computed_style_property_value(
+                &host,
+                &document_url,
+                target,
+                property,
+                None,
+                &inputs,
+                viewport,
+            )
+            .unwrap_or_else(|| panic!("{property} should have a computed value"))
+    };
+    let large = StyleViewport::new(Some(800.0), Some(600.0));
+    assert_eq!(read(dependent, "width", large), "80px");
+    assert_eq!(read(independent, "width", large), "123px");
+    let first_dependent = retained_primary_style_for_test(&engine, &host, dependent).unwrap();
+    let first_independent = retained_primary_style_for_test(&engine, &host, independent).unwrap();
+    let flushes = engine.retained_stylist_flush_count_for_document_for_test(document);
+
+    let small = StyleViewport::new(Some(400.0), Some(300.0));
+    assert_eq!(read(dependent, "width", small), "40px");
+    assert_eq!(read(dependent, "height", small), "30px");
+    assert_eq!(read(independent, "width", small), "123px");
+    let second_dependent = retained_primary_style_for_test(&engine, &host, dependent).unwrap();
+    let second_independent = retained_primary_style_for_test(&engine, &host, independent).unwrap();
+    assert!(!ServoArc::ptr_eq(&first_dependent, &second_dependent));
+    assert!(
+        ServoArc::ptr_eq(&first_independent, &second_independent),
+        "a viewport-independent cached element must survive a resize unchanged",
+    );
+
+    assert_eq!(read(dependent, "width", large), "80px");
+    assert_eq!(read(dependent, "height", large), "60px");
+    assert_eq!(read(independent, "height", large), "45px");
+    let third_dependent = retained_primary_style_for_test(&engine, &host, dependent).unwrap();
+    let third_independent = retained_primary_style_for_test(&engine, &host, independent).unwrap();
+    assert!(!ServoArc::ptr_eq(&second_dependent, &third_dependent));
+    assert!(
+        ServoArc::ptr_eq(&second_independent, &third_independent),
+        "reversing a resize must still preserve viewport-independent ComputedValues",
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        flushes,
+        "viewport-unit recascade must not flush an unchanged stylesheet",
+    );
+}
+
+#[test]
+fn viewport_resize_propagates_through_inheritance_variables_pseudos_and_nested_shadow_roots() {
+    let mut host = test_host();
+    let document = host.document_handle();
+    let parent = host.create_element("section");
+    let child = host.create_element("span");
+    let pseudo_target = host.create_element("div");
+    assert!(host.set_attribute(parent, "class", "viewport-parent"));
+    assert!(host.set_attribute(child, "class", "viewport-child"));
+    assert!(host.set_attribute(pseudo_target, "class", "viewport-pseudo"));
+    assert!(host.append_child(document, parent));
+    assert!(host.append_child(parent, child));
+    assert!(host.append_child(document, pseudo_target));
+
+    let outer_host = host.create_element("article");
+    assert!(host.append_child(document, outer_host));
+    let outer_root = host
+        .attach_shadow_root(outer_host, "open")
+        .expect("outer host should accept a shadow root");
+    let outer_target = host.create_element("div");
+    let inner_host = host.create_element("aside");
+    assert!(host.set_attribute(outer_target, "class", "outer-viewport-target"));
+    assert!(host.append_child(outer_root, outer_target));
+    assert!(host.append_child(outer_root, inner_host));
+    let inner_root = host
+        .attach_shadow_root(inner_host, "open")
+        .expect("a host inside a ShadowRoot should accept a nested shadow root");
+    let inner_target = host.create_element("span");
+    assert!(host.set_attribute(inner_target, "class", "inner-viewport-target"));
+    assert!(host.append_child(inner_root, inner_target));
+
+    let document_url = url::Url::parse("https://example.test/viewport-dependencies.html").unwrap();
+    let mut inputs = FullStyleWorldSnapshot::default();
+    inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            r#"
+              .viewport-parent { font-size: 2vmin; --viewport-gap: 10vw; }
+              .viewport-child { font-size: 2em; padding-left: var(--viewport-gap); }
+              .viewport-pseudo::before {
+                content: "viewport";
+                width: 10vw;
+                height: 10vh;
+              }
+            "#
+            .into(),
+            document_url.clone(),
+        )
+        .with_source_id(Some(StyleSourceId::document_adopted_style_sheet(
+            document, 84,
+        ))),
+    );
+    inputs.shadow_stylesheet_sources.push((
+        outer_root,
+        vec![
+            StyloStylesheetSource::new(
+                ".outer-viewport-target { width: 20vw; }".into(),
+                document_url.clone(),
+            )
+            .with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
+                outer_root, 85,
+            ))),
+        ],
+    ));
+    inputs.shadow_stylesheet_sources.push((
+        inner_root,
+        vec![
+            StyloStylesheetSource::new(
+                ".inner-viewport-target { height: 15vh; }".into(),
+                document_url.clone(),
+            )
+            .with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
+                inner_root, 86,
+            ))),
+        ],
+    ));
+
+    let engine = MoliStyleEngine::new();
+    let read = |target, property, pseudo, viewport| {
+        engine
+            .computed_style_property_value(
+                &host,
+                &document_url,
+                target,
+                property,
+                pseudo,
+                &inputs,
+                viewport,
+            )
+            .unwrap_or_else(|| panic!("{property} should have a computed value"))
+    };
+    let large = StyleViewport::new(Some(1000.0), Some(800.0));
+    assert_eq!(read(parent, "font-size", None, large), "16px");
+    assert_eq!(read(child, "font-size", None, large), "32px");
+    assert_eq!(read(child, "padding-left", None, large), "100px");
+    assert_eq!(read(pseudo_target, "width", Some("before"), large), "100px");
+    assert_eq!(read(pseudo_target, "height", Some("before"), large), "80px");
+    assert_eq!(read(outer_target, "width", None, large), "200px");
+    assert_eq!(read(inner_target, "height", None, large), "120px");
+    let child_before = retained_primary_style_for_test(&engine, &host, child).unwrap();
+    let nested_before = retained_primary_style_for_test(&engine, &host, inner_target).unwrap();
+    let outer_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, outer_root)
+        .expect("outer shadow scope should be retained");
+    let inner_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, inner_root)
+        .expect("inner shadow scope should be retained");
+
+    let small = StyleViewport::new(Some(500.0), Some(400.0));
+    assert_eq!(read(parent, "font-size", None, small), "8px");
+    assert_eq!(
+        read(child, "font-size", None, small),
+        "16px",
+        "viewport invalidation must propagate through inherited font metrics",
+    );
+    assert_eq!(
+        read(child, "padding-left", None, small),
+        "50px",
+        "a viewport unit substituted through an inherited custom property must recascade",
+    );
+    assert_eq!(read(pseudo_target, "width", Some("before"), small), "50px");
+    assert_eq!(read(pseudo_target, "height", Some("before"), small), "40px");
+    assert_eq!(read(outer_target, "width", None, small), "100px");
+    assert_eq!(read(inner_target, "height", None, small), "60px");
+    let child_after = retained_primary_style_for_test(&engine, &host, child).unwrap();
+    let nested_after = retained_primary_style_for_test(&engine, &host, inner_target).unwrap();
+    assert!(!ServoArc::ptr_eq(&child_before, &child_after));
+    assert!(!ServoArc::ptr_eq(&nested_before, &nested_after));
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, outer_root),
+        Some(outer_flushes),
+        "viewport dependency invalidation must not rebuild the outer AuthorStyles",
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, inner_root),
+        Some(inner_flushes),
+        "viewport dependency invalidation must not rebuild nested AuthorStyles",
+    );
+}
+
+#[test]
 fn device_changes_keep_media_sheets_installed_and_flush_only_affected_tree_scopes() {
     reset_source_cascade_rebuild_count_for_test();
     let mut host = test_host();

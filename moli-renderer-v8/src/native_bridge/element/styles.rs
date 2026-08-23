@@ -340,8 +340,32 @@ fn style_object_computation_context<'s>(
     style: v8::Local<'s, v8::Object>,
 ) -> StyleComputationContext {
     let read_document = style_object_read_document(scope, style);
-    StyleComputationContext::new(style_object_viewport(scope, style))
-        .with_read_document(read_document)
+    let viewport = bridge_handle_from_object(scope, style)
+        .ok()
+        .and_then(|(runtime_ptr, bridge_handle)| {
+            let runtime = unsafe { &*runtime_ptr };
+            match bridge_handle {
+                BridgeHandle::ComputedStyle(handle, descriptor) => match descriptor.target {
+                    ComputedStyleTargetKey::Dynamic => runtime
+                        .dom_host()
+                        .owner_document_handle(handle)
+                        .or(read_document)
+                        .map(|document| style_viewport_for_document(runtime, document)),
+                    ComputedStyleTargetKey::ChildFrame(frame_handle) => {
+                        iframe_handle_viewport(runtime, frame_handle)
+                    }
+                    ComputedStyleTargetKey::DetachedIframe(_)
+                    | ComputedStyleTargetKey::PopupDocument(_) => None,
+                },
+                BridgeHandle::Window
+                | BridgeHandle::Node(_)
+                | BridgeHandle::ClassList(_, _)
+                | BridgeHandle::Dataset(_)
+                | BridgeHandle::Style(_) => None,
+            }
+        })
+        .unwrap_or_else(|| style_object_viewport(scope, style));
+    StyleComputationContext::new(viewport).with_read_document(read_document)
 }
 
 fn style_object_property_count_with_context<'s>(

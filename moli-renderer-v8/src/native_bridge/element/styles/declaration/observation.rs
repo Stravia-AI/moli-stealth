@@ -85,6 +85,7 @@ pub(super) struct StyleObservationInputs<'a> {
     runtime: &'a JsContextHost,
     key: StyleObservationKey,
     context: StyleComputationContext,
+    #[cfg(debug_assertions)]
     tracks_persistent_world: bool,
     prepared_update: RefCell<Option<Rc<PreparedStyleWorldUpdate>>>,
     stylesheet_query_snapshot: RefCell<Option<Rc<FullStyleWorldSnapshot>>>,
@@ -95,13 +96,14 @@ impl<'a> StyleObservationInputs<'a> {
         runtime: &'a JsContextHost,
         source_document: Option<DomHandle>,
         context: StyleComputationContext,
-        tracks_persistent_world: bool,
+        _tracks_persistent_world: bool,
     ) -> Self {
         Self {
             runtime,
             key: StyleObservationKey::for_document(runtime, source_document),
             context,
-            tracks_persistent_world,
+            #[cfg(debug_assertions)]
+            tracks_persistent_world: _tracks_persistent_world,
             prepared_update: RefCell::new(None),
             stylesheet_query_snapshot: RefCell::new(None),
         }

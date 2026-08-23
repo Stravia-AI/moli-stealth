@@ -4529,6 +4529,339 @@ fn computed_style_child_document_viewport_units_use_css_iframe_size() {
 }
 
 #[test]
+fn held_main_document_computed_styles_follow_repeated_viewport_surface_changes() {
+    let mut vm = new_storage_test_vm("https://held-main-viewport-units.test/");
+    let surface = |inner_width, inner_height| crate::protocol_types::ViewportSurface {
+        inner_width,
+        inner_height,
+        outer_width: inner_width,
+        outer_height: inner_height,
+        device_pixel_ratio: 1.0,
+        screen_width: 1920,
+        screen_height: 1080,
+        screen_avail_width: 1920,
+        screen_avail_height: 1040,
+    };
+    vm.set_viewport_surface(Some(surface(1000, 800)))
+        .expect("initial viewport surface should update");
+
+    let before = vm
+        .eval(
+            r#"
+(() => {
+  const style = document.createElement('style');
+  style.textContent = `
+    #held-main-viewport-target {
+      position: absolute;
+      width: 10vw;
+      height: 10vh;
+      --pseudo-width: 5vw;
+    }
+    #held-main-viewport-target::before {
+      content: "viewport";
+      width: var(--pseudo-width);
+      height: 2vmin;
+    }
+    @media (min-width: 1px) {
+      #held-main-viewport-target { left: 50vw; }
+    }`;
+  (document.head || document.documentElement || document).appendChild(style);
+  const target = document.createElement('div');
+  target.id = 'held-main-viewport-target';
+  target.style.paddingLeft = '12vw';
+  (document.body || document.documentElement || document).appendChild(target);
+  const held = getComputedStyle(target);
+  const heldBefore = getComputedStyle(target, '::before');
+  globalThis.__heldMainViewportStyles = { target, held, heldBefore };
+  return [
+    innerWidth,
+    innerHeight,
+    held.width,
+    held.height,
+    held.paddingLeft,
+    held.left,
+    heldBefore.width,
+    heldBefore.height
+  ].join('|');
+})()
+"#,
+        )
+        .expect("main-document viewport-unit styles should be cached");
+    assert_eq!(before, "1000|800|100px|80px|120px|500px|50px|16px");
+    let document = vm.document_handle_for_test();
+    let updates = vm.retained_style_system_update_count_for_document_for_test(document);
+    let stylist = vm.retained_stylist_identity_for_document_for_test(document);
+
+    vm.set_viewport_surface(Some(surface(500, 400)))
+        .expect("smaller viewport surface should update");
+    let smaller = vm
+        .eval(
+            r#"
+(() => {
+  const { target, held, heldBefore } = __heldMainViewportStyles;
+  const fresh = getComputedStyle(target);
+  const freshBefore = getComputedStyle(target, '::before');
+  return [
+    innerWidth,
+    innerHeight,
+    held.width,
+    held.height,
+    held.paddingLeft,
+    held.left,
+    heldBefore.width,
+    heldBefore.height,
+    fresh.width,
+    freshBefore.width
+  ].join('|');
+})()
+"#,
+        )
+        .expect("held styles should observe the smaller viewport");
+    assert_eq!(smaller, "500|400|50px|40px|60px|250px|25px|8px|50px|25px");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates + 1,
+        "one viewport transition should update the retained document world once",
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist,
+        "viewport changes must retain the Document Stylist",
+    );
+
+    vm.set_viewport_surface(Some(surface(1000, 800)))
+        .expect("restored viewport surface should update");
+    let restored = vm
+        .eval(
+            r#"
+(() => {
+  const { held, heldBefore } = __heldMainViewportStyles;
+  return [
+    innerWidth,
+    innerHeight,
+    held.width,
+    held.height,
+    held.paddingLeft,
+    held.left,
+    heldBefore.width,
+    heldBefore.height
+  ].join('|');
+})()
+"#,
+        )
+        .expect("held styles should observe the restored viewport");
+    assert_eq!(restored, "1000|800|100px|80px|120px|500px|50px|16px");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates + 2,
+        "each distinct viewport transition should produce one retained update",
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist,
+    );
+}
+
+#[test]
+fn cached_child_viewport_units_update_after_the_iframe_viewport_changes() {
+    let mut vm = new_storage_test_vm("https://cached-child-viewport-units.test/");
+    vm.force_fresh_layout_reads_for_test();
+
+    let before = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement('iframe');
+  frame.id = 'cached-viewport-unit-frame';
+  frame.style.cssText = 'width:200px;height:160px';
+  (document.body || document.documentElement || document).appendChild(frame);
+  const childWindow = frame.contentWindow;
+  const childDocument = childWindow.document;
+  childDocument.open();
+  childDocument.write(`
+    <style>
+      #target {
+        position: absolute;
+        width: 10vw;
+        height: 10vh;
+        padding-left: calc(5vw + 8px);
+      }
+      @media (min-width: 1px) {
+        #target { left: 50vw; }
+      }
+    </style>
+    <body><div id="target"></div></body>`);
+  childDocument.close();
+  const target = childDocument.getElementById('target');
+  const held = childWindow.getComputedStyle(target);
+  frame.getBoundingClientRect();
+  globalThis.__cachedViewportUnitFixture = { frame, childWindow, target, held };
+  return [
+    childWindow.innerWidth,
+    childWindow.innerHeight,
+    held.width,
+    held.height,
+    held.paddingLeft,
+    held.left
+  ].join('|');
+})()
+"#,
+        )
+        .expect("the child viewport-unit style should be cached before resize");
+    assert_eq!(before, "200|160|20px|16px|18px|100px");
+    let child_document = child_document_handle_for_frame_id(&vm, "cached-viewport-unit-frame");
+    let updates = vm.retained_style_system_update_count_for_document_for_test(child_document);
+
+    let after = vm
+        .eval(
+            r#"
+(() => {
+  const { frame, childWindow, target, held } = __cachedViewportUnitFixture;
+  frame.style.width = '100px';
+  frame.style.height = '80px';
+  const frameWidth = frame.getBoundingClientRect().width;
+  const heldValues = [held.width, held.height, held.paddingLeft, held.left];
+  const fresh = childWindow.getComputedStyle(target);
+  return [
+    frameWidth,
+    childWindow.innerWidth,
+    childWindow.innerHeight,
+    ...heldValues,
+    fresh.width,
+    fresh.height
+  ].join('|');
+})()
+"#,
+        )
+        .expect("the same cached child element should observe the resized iframe viewport");
+    assert_eq!(after, "100|100|80|10px|8px|13px|50px|10px|8px");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        updates + 1,
+        "one iframe viewport change should update its retained style world exactly once",
+    );
+}
+
+#[test]
+fn nested_iframe_cached_viewport_units_follow_recursive_frame_resizes() {
+    let mut vm = new_storage_test_vm("https://nested-cached-viewport-units.test/");
+    vm.force_fresh_layout_reads_for_test();
+
+    let before = vm
+        .eval(
+            r#"
+(() => {
+  const outerFrame = document.createElement('iframe');
+  outerFrame.id = 'nested-viewport-outer-frame';
+  outerFrame.style.cssText = 'width:200px;height:160px;border:0';
+  (document.body || document.documentElement || document).appendChild(outerFrame);
+
+  const outerWindow = outerFrame.contentWindow;
+  const outerDocument = outerWindow.document;
+  outerDocument.open();
+  outerDocument.write(`
+    <style>
+      html, body { margin: 0; width: 100%; height: 100%; }
+      #nested-viewport-inner-frame {
+        display: block;
+        width: 50%;
+        height: 50%;
+        border: 0;
+      }
+    </style>
+    <body><iframe id="nested-viewport-inner-frame"></iframe></body>`);
+  outerDocument.close();
+
+  const innerFrame = outerDocument.getElementById('nested-viewport-inner-frame');
+  const innerWindow = innerFrame.contentWindow;
+  const innerDocument = innerWindow.document;
+  innerDocument.open();
+  innerDocument.write(`
+    <style>
+      #nested-viewport-target {
+        width: 10vw;
+        height: 10vh;
+        padding-left: 5vmin;
+      }
+    </style>
+    <body><div id="nested-viewport-target"></div></body>`);
+  innerDocument.close();
+
+  outerFrame.getBoundingClientRect();
+  innerFrame.getBoundingClientRect();
+  const target = innerDocument.getElementById('nested-viewport-target');
+  const held = innerWindow.getComputedStyle(target);
+  globalThis.__nestedViewportUnitFixture = {
+    outerFrame,
+    innerFrame,
+    outerWindow,
+    innerWindow,
+    target,
+    held
+  };
+  return [
+    outerWindow.innerWidth,
+    outerWindow.innerHeight,
+    innerWindow.innerWidth,
+    innerWindow.innerHeight,
+    held.width,
+    held.height,
+    held.paddingLeft
+  ].join('|');
+})()
+"#,
+        )
+        .expect("nested viewport-unit styles should be cached");
+    assert_eq!(before, "200|160|100|80|10px|8px|4px");
+    let inner_document = child_document_handle_for_frame_id(&vm, "nested-viewport-inner-frame");
+    let updates = vm.retained_style_system_update_count_for_document_for_test(inner_document);
+    let stylist = vm.retained_stylist_identity_for_document_for_test(inner_document);
+
+    let after = vm
+        .eval(
+            r#"
+(() => {
+  const {
+    outerFrame,
+    innerFrame,
+    outerWindow,
+    innerWindow,
+    target,
+    held
+  } = __nestedViewportUnitFixture;
+  outerFrame.style.width = '100px';
+  outerFrame.style.height = '80px';
+  outerFrame.getBoundingClientRect();
+  innerFrame.getBoundingClientRect();
+  const heldValues = [held.width, held.height, held.paddingLeft];
+  const fresh = innerWindow.getComputedStyle(target);
+  return [
+    outerWindow.innerWidth,
+    outerWindow.innerHeight,
+    innerWindow.innerWidth,
+    innerWindow.innerHeight,
+    ...heldValues,
+    fresh.width,
+    fresh.height
+  ].join('|');
+})()
+"#,
+        )
+        .expect("nested held styles should observe recursive iframe resize");
+    assert_eq!(after, "100|80|50|40|5px|4px|2px|5px|4px");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(inner_document),
+        updates + 1,
+        "the innermost Document should consume one recursive viewport transition",
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(inner_document),
+        stylist,
+        "recursive iframe resizing must retain the innermost Stylist",
+    );
+}
+
+#[test]
 fn child_document_mixed_style_observations_do_not_churn_the_retained_world() {
     let mut vm = new_storage_test_vm("https://child-style-observation-context.test/");
     let warmup = vm
