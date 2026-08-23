@@ -247,6 +247,7 @@ impl RendererMainDocumentCommitSeed {
             security_origin,
             secure_context_type,
             timestamp: self.timestamp,
+            auxiliary_browsing_context_policy: None,
         }
     }
 }
@@ -459,6 +460,12 @@ pub struct NavigationDispatchState {
     /// through large navigation futures; keeping it inline regresses the
     /// default Tokio worker stack even for unrelated target creation.
     pub(crate) source_document_security: Box<NavigationSourceDocumentSecurityContext>,
+    /// Exact once-only ServiceWorker `Clients.openWindow()` completion carried
+    /// by the destination navigation. It survives Fetch pauses, redirects and
+    /// background scheduling, and is settled only by the terminal commit
+    /// owner. Ordinary navigations carry `None`.
+    pub(crate) service_worker_clients_open_window_continuation:
+        Option<moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation>,
 }
 
 impl NavigationDispatchState {

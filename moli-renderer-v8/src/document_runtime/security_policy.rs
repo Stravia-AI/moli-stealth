@@ -591,6 +591,10 @@ impl DocumentRuntime {
         self.policy_container.sandbox
     }
 
+    pub(crate) fn set_document_sandbox_policy(&mut self, policy: DocumentSandboxPolicy) {
+        self.policy_container.sandbox = policy;
+    }
+
     pub(crate) fn response_content_security_report_only_policies(&self) -> &[String] {
         &self
             .policy_container
@@ -741,6 +745,41 @@ impl DocumentRuntime {
             self.document_url(),
             request_url,
             redirect_status,
+            ContentSecurityPolicyDisposition::Report,
+        );
+        DocumentContentSecurityPolicyCheck {
+            report_only_violation,
+            enforced_violation,
+        }
+    }
+
+    pub(crate) fn form_action_csp_check(
+        &self,
+        request_url: &Url,
+    ) -> DocumentContentSecurityPolicyCheck {
+        let document_url = self.document_url();
+        let policies = self.document_content_security_policy_strings_for_optional_document(
+            Some(self.document_handle()),
+            &self.policy_container.response_content_security_policies,
+            &self.policy_container.content_security_reporting_endpoints,
+        );
+        let enforced_violation = document_url_policy_violation_from_document_policies(
+            policies,
+            document_url,
+            request_url,
+            ContentSecurityPolicyResourceKind::DocumentFormAction,
+            ContentSecurityPolicyRedirectStatus::NoRedirect,
+            ContentSecurityPolicyDisposition::Enforce,
+        );
+        let report_only_violation = document_url_policy_violation(
+            &self
+                .policy_container
+                .response_content_security_report_only_policies,
+            &self.policy_container.content_security_reporting_endpoints,
+            document_url,
+            request_url,
+            ContentSecurityPolicyResourceKind::DocumentFormAction,
+            ContentSecurityPolicyRedirectStatus::NoRedirect,
             ContentSecurityPolicyDisposition::Report,
         );
         DocumentContentSecurityPolicyCheck {
@@ -1177,6 +1216,44 @@ impl DocumentRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn form_action_csp_check_for_child_document(
+        &self,
+        document_handle: Option<DomHandle>,
+        document_url: &Url,
+        response_policies: &[String],
+        response_report_only_policies: &[String],
+        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+        request_url: &Url,
+    ) -> DocumentContentSecurityPolicyCheck {
+        let policies = self.document_content_security_policy_strings_for_optional_document(
+            document_handle,
+            response_policies,
+            response_reporting_endpoints,
+        );
+        let enforced_violation = document_url_policy_violation_from_document_policies(
+            policies,
+            document_url,
+            request_url,
+            ContentSecurityPolicyResourceKind::DocumentFormAction,
+            ContentSecurityPolicyRedirectStatus::NoRedirect,
+            ContentSecurityPolicyDisposition::Enforce,
+        );
+        let report_only_violation = document_url_policy_violation(
+            response_report_only_policies,
+            response_reporting_endpoints,
+            document_url,
+            request_url,
+            ContentSecurityPolicyResourceKind::DocumentFormAction,
+            ContentSecurityPolicyRedirectStatus::NoRedirect,
+            ContentSecurityPolicyDisposition::Report,
+        );
+        DocumentContentSecurityPolicyCheck {
+            report_only_violation,
+            enforced_violation,
+        }
+    }
+
     pub(crate) fn document_frame_csp_violation_for_child_document(
         &self,
         document_handle: Option<DomHandle>,
@@ -1474,6 +1551,50 @@ impl DocumentRuntime {
             sink,
             sample,
             ContentSecurityPolicyDisposition::Enforce,
+        )
+    }
+
+    pub(crate) fn trusted_types_sink_csp_report_only_violation_for_child_document(
+        &self,
+        document_url: &Url,
+        response_report_only_policies: &[String],
+        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+        sink: &str,
+        sample: &str,
+    ) -> Option<DocumentContentSecurityPolicyViolation> {
+        let policies = document_response_content_security_policy_strings(
+            response_report_only_policies,
+            response_reporting_endpoints,
+        );
+        document_trusted_types_sink_policy_violation_from_document_policies(
+            policies,
+            document_url,
+            sink,
+            sample,
+            ContentSecurityPolicyDisposition::Report,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn trusted_types_for_script_requirements_for_child_document(
+        &self,
+        document_handle: Option<DomHandle>,
+        response_policies: &[String],
+        response_report_only_policies: &[String],
+        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+    ) -> TrustedTypesForScriptRequirements {
+        let enforced = self.requires_trusted_types_for_script_for_child_document(
+            document_handle,
+            response_policies,
+            response_reporting_endpoints,
+        );
+        let report_only_policies = document_response_content_security_policy_strings(
+            response_report_only_policies,
+            response_reporting_endpoints,
+        );
+        TrustedTypesForScriptRequirements::new(
+            enforced,
+            document_policies_require_trusted_types_for_script(&report_only_policies),
         )
     }
 
@@ -2314,36 +2435,54 @@ mod tests {
         assert_eq!(
             runtime.document_sandbox_policy(),
             DocumentSandboxPolicy {
+                sandboxes_navigation: true,
                 forces_opaque_origin: true,
                 allows_scripts: false,
+                allows_forms: false,
+                allows_popups: false,
                 allows_popups_to_escape: false,
+                allows_top_navigation: false,
+                allows_top_navigation_by_user_activation: false,
+                frame_owner_explicitly_allows_top_navigation: false,
                 sandboxes_document_domain: true,
             }
         );
 
         runtime.set_response_content_security_policies(&[String::from(
-            "sandbox allow-scripts allow-same-origin allow-popups-to-escape-sandbox",
+            "sandbox allow-scripts allow-same-origin allow-forms allow-popups-to-escape-sandbox",
         )]);
         assert_eq!(
             runtime.document_sandbox_policy(),
             DocumentSandboxPolicy {
+                sandboxes_navigation: true,
                 forces_opaque_origin: false,
                 allows_scripts: true,
+                allows_forms: true,
+                allows_popups: false,
                 allows_popups_to_escape: true,
+                allows_top_navigation: false,
+                allows_top_navigation_by_user_activation: false,
+                frame_owner_explicitly_allows_top_navigation: false,
                 sandboxes_document_domain: true,
             }
         );
 
         runtime.set_response_content_security_policies(&[
-            String::from("sandbox allow-scripts allow-popups-to-escape-sandbox"),
+            String::from("sandbox allow-scripts allow-forms allow-popups-to-escape-sandbox"),
             String::from("sandbox allow-same-origin"),
         ]);
         assert_eq!(
             runtime.document_sandbox_policy(),
             DocumentSandboxPolicy {
+                sandboxes_navigation: true,
                 forces_opaque_origin: true,
                 allows_scripts: false,
+                allows_forms: false,
+                allows_popups: false,
                 allows_popups_to_escape: false,
+                allows_top_navigation: false,
+                allows_top_navigation_by_user_activation: false,
+                frame_owner_explicitly_allows_top_navigation: false,
                 sandboxes_document_domain: true,
             }
         );
@@ -2351,6 +2490,81 @@ mod tests {
         runtime.set_response_content_security_policies(&[String::from("script-src 'self'")]);
         assert_eq!(
             runtime.document_sandbox_policy(),
+            DocumentSandboxPolicy::default()
+        );
+    }
+
+    #[test]
+    fn response_csp_cannot_forge_frame_owner_top_navigation_provenance() {
+        let response =
+            DocumentSandboxPolicy::from_response_content_security_policies(&[String::from(
+                "sandbox allow-scripts allow-top-navigation",
+            )]);
+        assert!(response.sandboxes_navigation);
+        assert!(response.allows_top_navigation);
+        assert!(!response.frame_owner_explicitly_allows_top_navigation);
+
+        let owner = DocumentSandboxPolicy {
+            sandboxes_navigation: true,
+            allows_top_navigation: true,
+            frame_owner_explicitly_allows_top_navigation: true,
+            ..DocumentSandboxPolicy::default()
+        };
+        let effective = owner.with_response_content_security_policy(response);
+        assert!(effective.allows_top_navigation);
+        assert!(effective.frame_owner_explicitly_allows_top_navigation);
+
+        let response_restriction = DocumentSandboxPolicy::from_response_content_security_policies(
+            &[String::from("sandbox allow-scripts")],
+        );
+        let effective = owner.with_response_content_security_policy(response_restriction);
+        assert!(!effective.allows_top_navigation);
+        assert!(
+            effective.frame_owner_explicitly_allows_top_navigation,
+            "response CSP may restrict the effective flag but must not rewrite frame-owner provenance"
+        );
+    }
+
+    #[test]
+    fn auxiliary_creation_policy_separates_popup_admission_from_sandbox_escape() {
+        let policy_container = |policy: &str| DocumentPolicyContainer {
+            sandbox: DocumentSandboxPolicy::from_response_content_security_policies(&[
+                policy.to_owned()
+            ]),
+            ..DocumentPolicyContainer::default()
+        };
+
+        assert_eq!(
+            policy_container("sandbox allow-scripts allow-popups-to-escape-sandbox")
+                .into_auxiliary_browsing_context_creation_policy()
+                .expect_err("escape alone must not admit an auxiliary context"),
+            AuxiliaryBrowsingContextCreationDenial::SandboxedWithoutAllowPopups
+        );
+
+        let inherited = policy_container("sandbox allow-scripts allow-popups")
+            .into_auxiliary_browsing_context_creation_policy()
+            .expect("allow-popups should admit an auxiliary context");
+        let inherited_sandbox = inherited
+            .renderer_auxiliary_browsing_context_policy()
+            .sandbox();
+        assert_eq!(inherited_sandbox, inherited.into_policy_container().sandbox);
+        assert!(inherited_sandbox.sandboxes_document_domain);
+        assert!(inherited_sandbox.allows_scripts);
+        assert!(inherited_sandbox.allows_popups);
+        assert!(!inherited_sandbox.allows_popups_to_escape);
+
+        let escaped =
+            policy_container("sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox")
+                .into_auxiliary_browsing_context_creation_policy()
+                .expect("allow-popups should admit an escaping auxiliary context");
+        assert_eq!(
+            escaped
+                .renderer_auxiliary_browsing_context_policy()
+                .sandbox(),
+            DocumentSandboxPolicy::default()
+        );
+        assert_eq!(
+            escaped.into_policy_container().sandbox,
             DocumentSandboxPolicy::default()
         );
     }

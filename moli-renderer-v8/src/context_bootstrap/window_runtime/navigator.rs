@@ -6,8 +6,8 @@ use crate::context_bootstrap::navigator_runtime::{
     STORAGE_BUCKET_MANAGER_BRAND_SLOT, STORAGE_BUCKET_MANAGER_CHILD_HANDLE_SLOT,
     STORAGE_BUCKET_MANAGER_POPUP_ID_SLOT, STORAGE_MANAGER_BRAND_SLOT,
     STORAGE_MANAGER_CHILD_HANDLE_SLOT, STORAGE_MANAGER_POPUP_ID_SLOT,
-    current_protocol_user_gesture_activation, navigator_identity_profile,
-    navigator_receiver_branded, set_navigator_identity_profile,
+    current_transient_user_activation, navigator_identity_profile, navigator_receiver_branded,
+    set_navigator_identity_profile,
 };
 use crate::context_bootstrap::storage_buckets::{
     IMPLICIT_DEFAULT_BUCKET_INTERNAL_NAME, StorageBucketCacheId, StorageBucketCacheMatch,
@@ -517,7 +517,7 @@ pub(in crate::context_bootstrap) fn navigator_vibrate_callback<'s>(
     let Some(mut parsed) = webidl::parse_args::<NavigatorVibrateArgs>(scope, &args) else {
         return;
     };
-    if !current_protocol_user_gesture_activation(scope) {
+    if !current_transient_user_activation(scope) {
         rv.set_bool(false);
         return;
     }

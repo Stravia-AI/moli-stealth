@@ -31,7 +31,7 @@ pub(super) async fn commit_loaded_navigation_async(
     navigation: MaterializedLoadedDocumentProgress,
     committed_renderer_attachment: Option<CommittedRendererAgentAttachment>,
     command_context: &mut CommandDispatchContext,
-) {
+) -> bool {
     let MaterializedLoadedDocumentProgress {
         page,
         pending_download,
@@ -63,7 +63,7 @@ pub(super) async fn commit_loaded_navigation_async(
                 "{error} after early Page.navigate result"
             );
         }
-        return;
+        return false;
     };
     let is_network_error_page = network_error_page.is_some();
     let navigation_session_id = state.navigate_session_id.clone();
@@ -94,7 +94,7 @@ pub(super) async fn commit_loaded_navigation_async(
     )
     .await
     else {
-        return;
+        return false;
     };
     if !is_network_error_page {
         let _ = conn.commit_main_document_resource_for_session_owner(
@@ -161,6 +161,7 @@ pub(super) async fn commit_loaded_navigation_async(
             .await;
     })
     .await;
+    true
 }
 
 pub(super) async fn commit_stable_page_navigation_async(
@@ -170,7 +171,7 @@ pub(super) async fn commit_stable_page_navigation_async(
     state: NavigationDispatchState,
     navigation: MaterializedStablePageDocumentProgress,
     committed_renderer_attachment: CommittedRendererAgentAttachment,
-) {
+) -> bool {
     let MaterializedStablePageDocumentProgress {
         stable_page_target,
         pending_download,
@@ -202,7 +203,7 @@ pub(super) async fn commit_stable_page_navigation_async(
                 "{error} after early Page.navigate result"
             );
         }
-        return;
+        return false;
     };
     let is_network_error_page = network_error_page.is_some();
     let navigation_session_id = state.navigate_session_id.clone();
@@ -235,7 +236,7 @@ pub(super) async fn commit_stable_page_navigation_async(
     ))
     .await
     else {
-        return;
+        return false;
     };
     if !is_network_error_page {
         let _ = conn.commit_main_document_resource_for_session_owner(
@@ -290,6 +291,7 @@ pub(super) async fn commit_stable_page_navigation_async(
             .await;
     })
     .await;
+    true
 }
 
 fn split_renderer_page_creation_lifecycle_at_load_boundary(

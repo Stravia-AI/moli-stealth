@@ -384,6 +384,8 @@ pub(crate) struct TargetPageSlot {
     initial_document_page_build_completion: Option<watch::Sender<Option<Result<(), String>>>>,
     auxiliary_browsing_context_id: Option<u64>,
     initial_document_page_reservation: Option<RendererPageReservationToken>,
+    auxiliary_browsing_context_policy:
+        Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy>,
     pending_renderer_page: Option<PendingRendererPageBinding>,
 }
 
@@ -457,18 +459,27 @@ impl TargetPageSlot {
     pub(crate) fn stage_pending_auxiliary_page(
         &mut self,
         pending: RendererPendingAuxiliaryPage,
+        policy: Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy>,
     ) -> bool {
         if self.loaded_page.is_some()
             || self.loaded_page_absence_reason
                 != TargetPageAbsenceReason::InitialDocumentPageBuildPending
             || self.auxiliary_browsing_context_id.is_some()
             || self.initial_document_page_reservation.is_some()
+            || self.auxiliary_browsing_context_policy.is_some()
         {
             return false;
         }
         self.auxiliary_browsing_context_id = Some(pending.browsing_context_id());
         self.initial_document_page_reservation = Some(pending.page_reservation());
+        self.auxiliary_browsing_context_policy = policy;
         true
+    }
+
+    pub(crate) fn auxiliary_browsing_context_policy(
+        &self,
+    ) -> Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy> {
+        self.auxiliary_browsing_context_policy
     }
 
     pub(crate) fn take_initial_document_page_reservation(

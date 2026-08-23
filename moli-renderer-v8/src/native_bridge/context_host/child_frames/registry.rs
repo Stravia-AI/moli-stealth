@@ -311,9 +311,8 @@ impl JsContextHost {
                     sandbox: if attribute_bootstrap_changed || is_new {
                         refresh_policy_source
                             .map(|policy| {
-                                policy.sandbox.with_response_content_security_policy(
-                                    sandbox_policy_from_owner,
-                                )
+                                sandbox_policy_from_owner
+                                    .with_response_content_security_policy(policy.sandbox)
                             })
                             .unwrap_or(sandbox_policy_from_owner)
                     } else {
@@ -334,6 +333,10 @@ impl JsContextHost {
                     content_security_reporting_endpoints: refresh_policy_source
                         .map(|policy| policy.content_security_reporting_endpoints.clone())
                         .unwrap_or_default(),
+                    top_navigation_without_user_gesture_is_restricted: refresh_policy_source
+                        .is_some_and(|policy| {
+                            policy.top_navigation_without_user_gesture_is_restricted
+                        }),
                 };
                 let initial_empty_document_init: Option<ChildInitialEmptyDocumentInit> = is_new
                     .then(|| {

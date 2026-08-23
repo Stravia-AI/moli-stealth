@@ -1659,9 +1659,7 @@ impl ScriptVm {
         let user_gesture = runtime_protocol_message_user_gesture(raw_json);
         let file_prompt_handler = runtime_protocol_message_file_prompt_handler(raw_json);
         if user_gesture {
-            self._context_host
-                .borrow_mut()
-                .begin_protocol_user_gesture_activation();
+            self._context_host.borrow_mut().notify_user_activation();
         }
         if let Some(handler) = file_prompt_handler.as_deref() {
             self._context_host
@@ -1706,11 +1704,6 @@ impl ScriptVm {
             self._context_host
                 .borrow_mut()
                 .end_webdriver_bidi_file_prompt_handler();
-        }
-        if user_gesture {
-            self._context_host
-                .borrow_mut()
-                .end_protocol_user_gesture_activation();
         }
         result
     }
@@ -1919,6 +1912,9 @@ impl ScriptVmPageRealmBootstrap {
             crate::service_worker_runtime::ServiceWorkerClientId,
         >,
         initial_document_environment: Option<ScriptVmInitialDocumentEnvironment>,
+        auxiliary_browsing_context_policy: Option<
+            crate::runtime::RendererAuxiliaryBrowsingContextPolicy,
+        >,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
         let document_handle = dom_host.document_handle();
         let document_url = dom_host
@@ -1929,6 +1925,32 @@ impl ScriptVmPageRealmBootstrap {
         let document_base_url = dom_host
             .document_base_url_for_handle(document_handle)
             .unwrap_or_else(|| document_url.clone());
+        assert!(
+            initial_document_environment.is_none() || auxiliary_browsing_context_policy.is_none(),
+            "a Document bootstrap cannot carry both an explicit and auxiliary initial environment"
+        );
+        let initial_document_environment = initial_document_environment.or_else(|| {
+            auxiliary_browsing_context_policy.map(|policy| ScriptVmInitialDocumentEnvironment {
+                origin: if policy.forces_opaque_origin() {
+                    "null".to_owned()
+                } else {
+                    moli_url::origin_ascii_serialization(&document_url)
+                },
+                policy_container: policy.initial_document_policy_container(),
+            })
+        });
+        let top_level_storage_key = if auxiliary_browsing_context_policy
+            .is_some_and(|policy| policy.forces_opaque_origin())
+        {
+            Some(moli_storage_key::MoliStorageKey::new(
+                "null".to_owned(),
+                moli_storage_key::site_for_url(&document_url),
+                Some(browser_context_runtime.next_web_storage_opaque_context_nonce()),
+                moli_storage_key::StoragePartitionRelation::FirstParty,
+            ))
+        } else {
+            top_level_storage_key
+        };
         let initial_document_origin = initial_document_environment
             .as_ref()
             .map(|environment| environment.origin.clone());
@@ -2309,6 +2331,7 @@ impl ScriptVmDefaultWorldBootstrap {
                 origin: initial_document_origin,
                 policy_container: initial_document_policy_container,
             }),
+            None,
         )?
         .bootstrap_default_world_in_scope(&mut *scope, global_template)
     }
@@ -2341,6 +2364,7 @@ impl ScriptVmDefaultWorldBootstrap {
             renderer_document_isolate_bootstrap,
             &[],
             crate::runtime::new_shared_renderer_backend_node_registry(),
+            None,
             None,
             None,
             None,
@@ -2383,6 +2407,7 @@ impl ScriptVmDefaultWorldBootstrap {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -2406,6 +2431,9 @@ impl ScriptVmDefaultWorldBootstrap {
         reserved_service_worker_client_id: Option<
             crate::service_worker_runtime::ServiceWorkerClientId,
         >,
+        auxiliary_browsing_context_policy: Option<
+            crate::runtime::RendererAuxiliaryBrowsingContextPolicy,
+        >,
     ) -> std::result::Result<Self, ScriptVmBootstrapError> {
         ScriptVmPageRealmBootstrap::new_from_dom_host(
             bootstrap_dom_host,
@@ -2425,6 +2453,7 @@ impl ScriptVmDefaultWorldBootstrap {
             top_level_storage_key,
             reserved_service_worker_client_id,
             None,
+            auxiliary_browsing_context_policy,
         )?
         .bootstrap_default_world()
     }
@@ -2707,6 +2736,16 @@ impl ScriptVm {
         &self,
     ) -> crate::page_task_queue::RendererResourceCompletionSender {
         self._context_host.borrow().resource_completion_sender()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bind_auxiliary_page_reservation_allocator_for_test(
+        &mut self,
+        allocator: crate::runtime::RendererAuxiliaryPageReservationAllocator,
+    ) {
+        self._context_host
+            .borrow_mut()
+            .bind_auxiliary_page_reservation_allocator(allocator);
     }
 
     #[cfg(test)]
@@ -6049,6 +6088,14 @@ impl ScriptVm {
         self._context_host
             .borrow_mut()
             .take_pending_location_navigation()
+    }
+
+    pub(super) fn take_pending_javascript_location_navigation_batch(
+        &mut self,
+    ) -> Vec<super::native_bridge::PendingLocationNavigation> {
+        self._context_host
+            .borrow_mut()
+            .take_pending_javascript_location_navigation_batch()
     }
 
     pub(super) fn take_pending_non_javascript_location_navigation(

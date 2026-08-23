@@ -304,11 +304,11 @@ mod tests {
         );
         let resource_loader_owner = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
             .expect("standalone test loader");
-        let browser_context_owner = RendererBrowserContextRuntime::new();
         let initial_document_loader_bootstrap = DocumentResourceLoaderBootstrap::new(
             resource_loader_owner.handle(),
             standalone_runtime.resource_task_runner(),
         );
+        let browser_context_owner = RendererBrowserContextRuntime::new();
         let page_realm = ScriptVmDefaultWorldBootstrap::standalone_page_realm_from_dom_host_with_resource_completion_sender_and_browser_context_runtime_for_test_with_current_runtime(
             DomHost::from_dom(document),
             page_task_tx,

@@ -32,9 +32,11 @@ mod window_document_source;
 pub use javascript_dialog::{
     RendererJavaScriptDialogId, RendererJavaScriptDialogSource, RendererPendingJavaScriptDialog,
 };
+pub(crate) use popup_activation::RendererPopupCreationUserActivation;
 pub use popup_activation::{
-    RendererPendingPopupActivation, RendererPopupActivationSource, RendererPopupDisposition,
-    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
+    RendererAuxiliaryBrowsingContextPolicy, RendererPendingPopupActivation,
+    RendererPopupActivationSource, RendererPopupDisposition, RendererPopupNewTargetDisposition,
+    RendererResolvedPopupTarget,
 };
 pub use window_document_source::RendererWindowDocumentSource;
 
@@ -322,11 +324,22 @@ pub struct RendererDocumentSourcedTopLevelLocationNavigation {
 /// policy against their actual destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererTopLevelNavigationSource {
-    root_document: RendererDocumentLifecycleIdentity,
-    window: RendererWindowDocumentSource,
+    cause: RendererTopLevelNavigationSourceCause,
     source_url: String,
     referrer_policy: Option<String>,
     suppress_referrer: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RendererTopLevelNavigationSourceCause {
+    Window {
+        root_document: RendererDocumentLifecycleIdentity,
+        window: RendererWindowDocumentSource,
+    },
+    /// Browser-context APIs such as `Clients.openWindow()` have an initiating
+    /// worker URL and referrer policy but deliberately have no Window or
+    /// Document owner to forge into the causal chain.
+    BrowserContext,
 }
 
 impl RendererTopLevelNavigationSource {
@@ -338,20 +351,50 @@ impl RendererTopLevelNavigationSource {
         suppress_referrer: bool,
     ) -> Self {
         Self {
-            root_document,
-            window,
+            cause: RendererTopLevelNavigationSourceCause::Window {
+                root_document,
+                window,
+            },
             source_url,
             referrer_policy,
             suppress_referrer,
         }
     }
 
-    pub fn root_document(&self) -> RendererDocumentLifecycleIdentity {
-        self.root_document
+    pub fn browser_context(
+        source_url: String,
+        referrer_policy: Option<String>,
+        suppress_referrer: bool,
+    ) -> Self {
+        Self {
+            cause: RendererTopLevelNavigationSourceCause::BrowserContext,
+            source_url,
+            referrer_policy,
+            suppress_referrer,
+        }
     }
 
-    pub fn window(&self) -> &RendererWindowDocumentSource {
-        &self.window
+    pub fn root_document(&self) -> Option<RendererDocumentLifecycleIdentity> {
+        match &self.cause {
+            RendererTopLevelNavigationSourceCause::Window { root_document, .. } => {
+                Some(*root_document)
+            }
+            RendererTopLevelNavigationSourceCause::BrowserContext => None,
+        }
+    }
+
+    pub fn window(&self) -> Option<&RendererWindowDocumentSource> {
+        match &self.cause {
+            RendererTopLevelNavigationSourceCause::Window { window, .. } => Some(window),
+            RendererTopLevelNavigationSourceCause::BrowserContext => None,
+        }
+    }
+
+    pub fn is_browser_context(&self) -> bool {
+        matches!(
+            &self.cause,
+            RendererTopLevelNavigationSourceCause::BrowserContext
+        )
     }
 
     pub fn source_url(&self) -> &str {
@@ -489,7 +532,7 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         if let Some(source) = request.source() {
             assert_eq!(
                 source.root_document(),
-                source_document,
+                Some(source_document),
                 "top-level navigation request source must match its causal root Document"
             );
         }
@@ -963,6 +1006,9 @@ pub struct RendererMainDocumentCommit {
     pub security_origin: String,
     pub secure_context_type: String,
     pub timestamp: f64,
+    /// Opaque renderer-owned frame policy retained by the target across
+    /// auxiliary top-level Document replacements.
+    pub auxiliary_browsing_context_policy: Option<RendererAuxiliaryBrowsingContextPolicy>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -4950,6 +4996,9 @@ pub enum RendererPageCommand {
         url: String,
     },
     RefreshFullPageState,
+    /// Consumes the exact target Page's already-queued `javascript:` URL task
+    /// before a browser-owned ordinary navigation may commit over it.
+    RunPendingJavascriptUrlTasksBeforeBrowserNavigation,
     PageDiagnosticsSnapshot,
     HasPendingLocationNavigation,
     DispatchMouseEventAtPoint {

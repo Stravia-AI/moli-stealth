@@ -2458,6 +2458,7 @@ async fn page_navigate_network_failure_commits_error_document_in_stable_page() {
                     String::new(),
                 ),
             ),
+            service_worker_clients_open_window_continuation: None,
         },
         None,
         Ok(crate::conn::CapturedBody::from_string(

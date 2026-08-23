@@ -1986,7 +1986,11 @@ fn install_window_runtime_state<'s>(
         global,
         runtime.document_url().as_str(),
     )?;
-    let origin = moli_url::origin_ascii_serialization(runtime.document_url());
+    let origin = if runtime.document_sandbox_policy().forces_opaque_origin {
+        "null".to_owned()
+    } else {
+        moli_url::origin_ascii_serialization(runtime.document_url())
+    };
     set_window_origin_runtime_state(scope, global, &origin)?;
 
     let console = ConsoleObjectDeclaration::default()

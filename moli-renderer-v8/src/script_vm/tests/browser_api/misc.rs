@@ -20294,6 +20294,7 @@ async fn service_worker_window_client_owner_requests_reject_on_stale_document_ow
             request_id: 103,
             source_version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
             source_run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            source_script_url: url::Url::parse(&format!("{base_url}/app/worker.js")).unwrap(),
             url: url::Url::parse(&format!("{base_url}/app/opened.html")).unwrap(),
         },
     )
@@ -20408,11 +20409,10 @@ async fn service_worker_client_focus_request_marks_current_page_focused() {
 
 #[tokio::test]
 async fn service_worker_clients_open_window_request_records_popup_activation() {
-    let (base_url, server) = spawn_service_worker_response_server(vec![
-        (
-            "/app/worker.js",
-            "text/javascript; charset=utf-8",
-            r#"
+    let (base_url, server) = spawn_service_worker_response_server(vec![(
+        "/app/worker.js",
+        "text/javascript; charset=utf-8",
+        r#"
             self.addEventListener("install", event => {
               event.waitUntil(self.skipWaiting());
             });
@@ -20420,13 +20420,7 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
               event.waitUntil(clients.claim());
             });
             "#,
-        ),
-        (
-            "/app/opened.html",
-            "text/html; charset=utf-8",
-            "<!doctype html><title>opened</title>",
-        ),
-    ])
+    )])
     .await;
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let (mut vm, browser_context_runtime) =
@@ -20434,6 +20428,7 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
             &format!("{base_url}/app/page.html"),
             &loader,
         );
+    vm.bind_auxiliary_page_reservation_allocator_for_test();
 
     vm.eval(
         r#"
@@ -20476,6 +20471,7 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
             request_id: 88,
             source_version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
             source_run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            source_script_url: url::Url::parse(&format!("{base_url}/app/worker.js")).unwrap(),
             url: url::Url::parse(&format!("{base_url}/app/opened.html")).unwrap(),
         },
     )
@@ -20483,83 +20479,107 @@ async fn service_worker_clients_open_window_request_records_popup_activation() {
 
     let popups = vm.take_pending_popup_activations();
     assert_eq!(popups.len(), 1);
-    assert!(popups[0].popup_id().is_some());
-    let popup_id = popups[0].popup_id().expect("openWindow popup id");
-    assert_eq!(popups[0].url(), format!("{base_url}/app/opened.html"));
-    assert_eq!(popups[0].target_name(), "_blank");
+    let activation = &popups[0];
+    assert_eq!(activation.popup_id(), None);
+    assert_eq!(activation.url(), format!("{base_url}/app/opened.html"));
+    assert_eq!(activation.target_name(), "_blank");
     assert!(matches!(
-        popups[0].source(),
+        activation.source(),
         crate::RendererPopupActivationSource::BrowserContext
     ));
     assert_eq!(
         popups[0].disposition(),
         crate::RendererPopupDisposition::Foreground
     );
-    assert!(vm.has_pending_lightweight_popup_document_loads());
+    assert_eq!(
+        activation.new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed)
+    );
+    let pending_page = activation
+        .pending_auxiliary_page()
+        .expect("openWindow must reserve its real auxiliary Page");
+    let continuation = activation
+        .service_worker_clients_open_window_continuation()
+        .expect("clients.openWindow must retain its exact Page completion");
+    assert_eq!(
+        continuation.expected_page_id(),
+        pending_page.page_reservation().page_id()
+    );
+    let navigation_source = activation
+        .navigation_source()
+        .expect("openWindow navigation must retain its worker source");
+    assert!(navigation_source.is_browser_context());
+    assert_eq!(navigation_source.root_document(), None);
+    assert_eq!(navigation_source.window(), None);
+    assert_eq!(
+        navigation_source.source_url(),
+        format!("{base_url}/app/worker.js")
+    );
+    assert_eq!(
+        activation.navigation_referrer(),
+        Some(format!("{base_url}/app/worker.js").as_str())
+    );
+    assert_eq!(activation.initial_document_referrer(), Some(""));
+    assert_eq!(
+        activation.document_referrer(),
+        Some(format!("{base_url}/app/worker.js").as_str())
+    );
+    assert!(!vm.has_pending_lightweight_popup_document_loads());
 
-    drain_service_worker_test_until_popup_loads_settle(
+    assert_eq!(
+        browser_context_runtime
+            .service_worker_runtime()
+            .pending_service_lane_event_count(),
+        0
+    );
+    continuation.resolve_null();
+    continuation.resolve_null();
+    assert_eq!(
+        browser_context_runtime
+            .service_worker_runtime()
+            .pending_service_lane_event_count(),
+        1,
+        "the exact-Page continuation must complete at most once"
+    );
+    assert_eq!(
+        browser_context_runtime.drain_service_worker_service_lane(),
+        1
+    );
+    assert_eq!(
+        browser_context_runtime
+            .service_worker_runtime()
+            .pending_service_lane_event_count(),
+        0
+    );
+
+    run_service_worker_clients_open_window_request_task_for_test(
         &mut vm,
-        &browser_context_runtime,
         &loader,
-        "service worker openWindow",
-    )
-    .await;
-
-    let clients = browser_context_runtime
-        .service_worker_runtime()
-        .query_clients(&crate::runtime::ServiceWorkerClientQuery {
+        "abandoned Page openWindow request",
+        crate::types::ServiceWorkerClientsOpenWindowRequestCompletion {
+            host: current_target,
             request_id: 89,
-            registration_id: crate::runtime::ServiceWorkerRegistrationId::from_u64_for_test(1),
-            version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
-            kind: crate::runtime::ServiceWorkerClientQueryKind::MatchAll {
-                options: crate::runtime::ServiceWorkerClientQueryOptions {
-                    include_uncontrolled: true,
-                    client_type: crate::runtime::ServiceWorkerClientQueryType::Window,
-                },
-            },
-        });
-    let opened = clients
-        .clients
-        .iter()
-        .find(|client| client.url.as_str() == format!("{base_url}/app/opened.html"))
-        .expect("opened popup should be registered as a service worker window client");
-    assert!(opened.controlled);
-    let opened_client_id = opened.id;
-    let opened_exposed_client_id = opened.exposed_id.clone();
-    let popup_document_owner = vm
-        ._context_host
-        .borrow()
-        .current_lightweight_popup_document_owner(popup_id)
-        .expect("openWindow popup document owner");
-
-    run_service_worker_client_focus_request_task_for_test(
-        &mut vm,
-        &loader,
-        "current popup focus request",
-        crate::types::ServiceWorkerClientFocusRequestCompletion {
-            target: service_worker_window_client_target_for_test(
-                opened_client_id,
-                crate::native_bridge::WindowDocumentOwner::LightweightPopup(popup_document_owner),
-            ),
-            request_id: 90,
             source_version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
             source_run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            source_script_url: url::Url::parse(&format!("{base_url}/app/worker.js")).unwrap(),
+            url: url::Url::parse(&format!("{base_url}/app/abandoned.html")).unwrap(),
         },
     )
     .await;
-    browser_context_runtime.drain_service_worker_service_lane();
-    let focused_clients = browser_context_runtime
-        .service_worker_runtime()
-        .query_clients(&crate::runtime::ServiceWorkerClientQuery {
-            request_id: 91,
-            registration_id: crate::runtime::ServiceWorkerRegistrationId::from_u64_for_test(1),
-            version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
-            kind: crate::runtime::ServiceWorkerClientQueryKind::Get {
-                exposed_client_id: opened_exposed_client_id,
-            },
-        });
-    assert_eq!(focused_clients.clients.len(), 1);
-    assert!(focused_clients.clients[0].focused);
+    let abandoned = vm.take_pending_popup_activations();
+    assert_eq!(abandoned.len(), 1);
+    drop(abandoned);
+    assert_eq!(
+        browser_context_runtime
+            .service_worker_runtime()
+            .pending_service_lane_event_count(),
+        1,
+        "dropping an unconsumed Fresh Page activation must settle openWindow as null"
+    );
+    assert_eq!(
+        browser_context_runtime.drain_service_worker_service_lane(),
+        1
+    );
 
     server
         .await
@@ -20857,7 +20877,7 @@ async fn service_worker_popup_client_survives_javascript_reopen() {
 }
 
 #[tokio::test]
-async fn service_worker_clients_open_window_about_blank_request_creates_no_popup() {
+async fn service_worker_clients_open_window_about_url_canonicalizes_to_fresh_page() {
     let (base_url, server) = spawn_service_worker_response_server(vec![(
         "/app/worker.js",
         "text/javascript; charset=utf-8",
@@ -20877,6 +20897,7 @@ async fn service_worker_clients_open_window_about_blank_request_creates_no_popup
             &format!("{base_url}/app/page.html"),
             &loader,
         );
+    vm.bind_auxiliary_page_reservation_allocator_for_test();
 
     vm.eval(
         r#"
@@ -20913,21 +20934,48 @@ async fn service_worker_clients_open_window_about_blank_request_creates_no_popup
     run_service_worker_clients_open_window_request_task_for_test(
         &mut vm,
         &loader,
-        "about:blank openWindow request",
+        "about:crash openWindow request",
         crate::types::ServiceWorkerClientsOpenWindowRequestCompletion {
             host: current_target,
             request_id: 92,
             source_version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
             source_run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
-            url: url::Url::parse("about:blank").unwrap(),
+            source_script_url: url::Url::parse(&format!("{base_url}/app/worker.js")).unwrap(),
+            url: url::Url::parse("about:crash").unwrap(),
         },
     )
     .await;
 
     let popups = vm.take_pending_popup_activations();
-    assert!(popups.is_empty());
+    assert_eq!(popups.len(), 1);
+    let activation = &popups[0];
+    assert_eq!(activation.popup_id(), None);
+    assert_eq!(activation.url(), "about:blank");
+    assert_eq!(
+        activation.new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed)
+    );
+    let pending_page = activation
+        .pending_auxiliary_page()
+        .expect("about: URL must still reserve a real auxiliary Page");
+    let continuation = activation
+        .service_worker_clients_open_window_continuation()
+        .expect("about: URL must retain its exact Page completion");
+    assert_eq!(
+        continuation.expected_page_id(),
+        pending_page.page_reservation().page_id()
+    );
+    assert!(
+        activation
+            .navigation_source()
+            .is_some_and(crate::RendererTopLevelNavigationSource::is_browser_context)
+    );
     assert!(!vm.has_pending_lightweight_popup_document_loads());
-    browser_context_runtime.drain_service_worker_service_lane();
+    continuation.resolve_null();
+    assert_eq!(
+        browser_context_runtime.drain_service_worker_service_lane(),
+        1
+    );
 
     server
         .await
@@ -20935,7 +20983,7 @@ async fn service_worker_clients_open_window_about_blank_request_creates_no_popup
 }
 
 #[tokio::test]
-async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
+async fn service_worker_clients_open_window_cross_origin_keeps_worker_referrer_source() {
     let (base_url, server) = spawn_service_worker_response_server(vec![(
         "/app/worker.js",
         "text/javascript; charset=utf-8",
@@ -20962,6 +21010,7 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
             &format!("{base_url}/app/page.html"),
             &loader,
         );
+    vm.bind_auxiliary_page_reservation_allocator_for_test();
 
     vm.eval(
         r#"
@@ -21004,6 +21053,7 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
             request_id: 94,
             source_version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
             source_run: crate::runtime::RendererServiceWorkerRunIdentity::fresh(),
+            source_script_url: url::Url::parse(&format!("{base_url}/app/worker.js")).unwrap(),
             url: url::Url::parse(&popup_url).unwrap(),
         },
     )
@@ -21011,45 +21061,43 @@ async fn service_worker_clients_open_window_cross_origin_result_stays_null() {
 
     let popups = vm.take_pending_popup_activations();
     assert_eq!(popups.len(), 1);
-    assert!(popups[0].popup_id().is_some());
-    assert_eq!(popups[0].url(), popup_url);
-    assert_eq!(popups[0].target_name(), "_blank");
-    assert!(vm.has_pending_lightweight_popup_document_loads());
-
-    drain_service_worker_test_until_popup_loads_settle(
-        &mut vm,
-        &browser_context_runtime,
-        &loader,
-        "cross-origin service worker openWindow",
-    )
-    .await;
-
-    let clients = browser_context_runtime
-        .service_worker_runtime()
-        .query_clients(&crate::runtime::ServiceWorkerClientQuery {
-            request_id: 95,
-            registration_id: crate::runtime::ServiceWorkerRegistrationId::from_u64_for_test(1),
-            version_id: crate::runtime::ServiceWorkerVersionId::from_u64_for_test(1),
-            kind: crate::runtime::ServiceWorkerClientQueryKind::MatchAll {
-                options: crate::runtime::ServiceWorkerClientQueryOptions {
-                    include_uncontrolled: true,
-                    client_type: crate::runtime::ServiceWorkerClientQueryType::Window,
-                },
-            },
-        });
-    assert!(
-        clients
-            .clients
-            .iter()
-            .all(|client| client.url.as_str() != popup_url)
+    let activation = &popups[0];
+    assert_eq!(activation.popup_id(), None);
+    assert_eq!(activation.url(), popup_url);
+    assert_eq!(activation.target_name(), "_blank");
+    assert_eq!(
+        activation.new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed)
     );
+    assert!(activation.pending_auxiliary_page().is_some());
+    assert_eq!(
+        activation.navigation_referrer(),
+        Some(format!("{base_url}/").as_str())
+    );
+    let navigation_source = activation
+        .navigation_source()
+        .expect("cross-origin openWindow must retain its worker source");
+    assert!(navigation_source.is_browser_context());
+    assert_eq!(
+        navigation_source.source_url(),
+        format!("{base_url}/app/worker.js")
+    );
+    assert!(!vm.has_pending_lightweight_popup_document_loads());
+
+    activation
+        .service_worker_clients_open_window_continuation()
+        .expect("cross-origin openWindow completion")
+        .resolve_null();
+    assert_eq!(
+        browser_context_runtime.drain_service_worker_service_lane(),
+        1
+    );
+
+    popup_server.abort();
 
     server
         .await
         .expect("service worker cross-origin openWindow script server should finish");
-    popup_server
-        .await
-        .expect("service worker cross-origin popup server should finish");
 }
 
 #[tokio::test]
@@ -21464,6 +21512,7 @@ async fn navigator_service_worker_notification_action_navigate_records_popup_act
             &format!("{base_url}/app/page.html"),
             &loader,
         );
+    vm.bind_auxiliary_page_reservation_allocator_for_test();
     vm.set_permission_overrides(&[crate::protocol_types::PermissionOverrideRegistration {
         permission: serde_json::Value::String("notifications".to_owned()),
         setting: "granted".to_owned(),
@@ -21519,9 +21568,30 @@ async fn navigator_service_worker_notification_action_navigate_records_popup_act
 
     let popups = vm.take_pending_popup_activations();
     assert_eq!(popups.len(), 1);
-    assert!(popups[0].popup_id().is_some());
-    assert_eq!(popups[0].url(), "about:blank");
-    assert_eq!(popups[0].target_name(), "_blank");
+    let activation = &popups[0];
+    assert_eq!(activation.popup_id(), None);
+    assert_eq!(activation.url(), "about:blank");
+    assert_eq!(activation.target_name(), "_blank");
+    assert!(matches!(
+        activation.source(),
+        crate::RendererPopupActivationSource::BrowserContext
+    ));
+    assert_eq!(
+        activation.new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed)
+    );
+    assert!(activation.pending_auxiliary_page().is_some());
+    assert!(
+        activation
+            .navigation_source()
+            .is_some_and(crate::RendererTopLevelNavigationSource::is_browser_context)
+    );
+    assert!(
+        activation
+            .service_worker_clients_open_window_continuation()
+            .is_none(),
+        "notification navigation has no clients.openWindow Promise"
+    );
     assert!(!vm.has_pending_lightweight_popup_document_loads());
     assert_eq!(
         vm.eval("String(globalThis.__serviceWorkerNotificationActionNavigateProbe)")
@@ -23338,14 +23408,20 @@ fn window_open_about_blank_returns_lightweight_popup_window() {
                 popup.opener === window,
                 popup.location.href,
                 popup.navigation.currentEntry === null,
-                closeShape,
-                String(popup.close())
+                closeShape
               ].join("|");
               popup.location.href = "about:blank#2";
+              const afterNavigation = popup.location.href;
+              const closeResult = String(popup.close());
+              // This standalone fixture has completed the lightweight
+              // record's final teardown. A later setter must not resurrect
+              // that retired owner through the generic Location fallback.
+              popup.location.href = "about:blank#3";
               return [
-                before,
-                popup.location.href,
-                popup.__unexpectedCurrentEntryChange === true
+                [before, closeResult].join("|"),
+                afterNavigation,
+                popup.__unexpectedCurrentEntryChange === true,
+                popup.location.href
               ].join(";");
             })()
             "##,
@@ -23354,7 +23430,7 @@ fn window_open_about_blank_returns_lightweight_popup_window() {
 
     assert_eq!(
         result,
-        "[object Window]|true|about:blank#1|true|function:close:0:false:true:true:true|undefined;about:blank#2;false"
+        "[object Window]|true|about:blank#1|true|function:close:0:false:true:true:true|undefined;about:blank#2;false;about:blank#2"
     );
 }
 
@@ -23378,6 +23454,1320 @@ fn window_open_existing_context_special_targets_never_enter_the_popup_carrier() 
         assert_eq!(
             navigation.url.as_str(),
             format!("https://example.com/{target}")
+        );
+    }
+}
+
+#[test]
+fn protocol_user_gesture_persists_until_new_auxiliary_creation_consumes_it() {
+    let mut vm = new_storage_test_vm("https://popup-user-activation.test/source");
+
+    let activation = vm
+        .evaluate_expression_payload_with_await(
+            "JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])",
+            false,
+            true,
+        )
+        .expect("protocol user gesture should evaluate");
+    assert_eq!(activation["value"], r#"[true,true]"#);
+    assert_eq!(
+        vm.eval(
+            "JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])"
+        )
+        .expect("activation should remain observable after the protocol command"),
+        r#"[true,true]"#,
+        "DevTools userGesture must notify persistent frame activation rather than a command-stack flag"
+    );
+
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const opened = window.open("about:blank#consumes-activation", "_blank");
+  return JSON.stringify({
+    opened: opened !== null,
+    active: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  });
+})()
+"#,
+        )
+        .expect("activated popup creation should evaluate"),
+        r#"{"opened":true,"active":false,"sticky":true}"#
+    );
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(
+        activations[0].creation_had_transient_user_activation(),
+        Some(true)
+    );
+    assert_eq!(
+        activations[0].creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+}
+
+#[test]
+fn existing_named_target_does_not_consume_popup_user_activation() {
+    let mut vm = new_storage_test_vm("https://popup-user-activation.test/source");
+
+    assert_eq!(
+        vm.eval(
+            r#"
+globalThis.__activationTarget = window.open(
+  "about:blank#initial-target",
+  "activation-target"
+);
+String(__activationTarget !== null)
+"#,
+        )
+        .expect("named activation target should be created"),
+        "true"
+    );
+    assert_eq!(vm.take_pending_popup_activations().len(), 1);
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .set_popup_blocker_policy(crate::RendererPopupBlockerPolicy::RequireTransientActivation);
+
+    let result = vm
+        .evaluate_expression_payload_with_await(
+            r#"
+JSON.stringify((() => {
+  const reused = window.open("about:blank#reused-target", "activation-target");
+  const activeAfterReuse = navigator.userActivation.isActive;
+  const created = window.open("about:blank#new-target", "second-activation-target");
+  return {
+    reused: reused === __activationTarget,
+    activeAfterReuse,
+    created: created !== null,
+    activeAfterCreation: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  };
+})())
+"#,
+            false,
+            true,
+        )
+        .expect("existing-target and new-target activation probe should evaluate");
+    assert_eq!(
+        result["value"],
+        r#"{"reused":true,"activeAfterReuse":true,"created":true,"activeAfterCreation":false,"sticky":true}"#
+    );
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(
+        activations.len(),
+        2,
+        "existing target navigation and one new-context creation should each retain their exact owner action"
+    );
+    assert_eq!(
+        activations[0].creation_had_transient_user_activation(),
+        None,
+        "existing-target navigation must stay outside new-context admission"
+    );
+    assert_eq!(
+        activations[1].creation_had_transient_user_activation(),
+        Some(true)
+    );
+    assert_eq!(
+        activations[1].creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+}
+
+#[test]
+fn strict_popup_blocker_admits_only_the_first_new_context_for_one_activation() {
+    let mut vm = new_storage_test_vm("https://strict-popup-blocker.test/source");
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .set_popup_blocker_policy(crate::RendererPopupBlockerPolicy::RequireTransientActivation);
+
+    assert_eq!(
+        vm.eval(
+            r#"
+JSON.stringify({
+  opened: window.open("about:blank#blocked", "blocked-target") !== null,
+  active: navigator.userActivation.isActive,
+  sticky: navigator.userActivation.hasBeenActive
+})
+"#,
+        )
+        .expect("unactivated strict popup probe should evaluate"),
+        r#"{"opened":false,"active":false,"sticky":false}"#
+    );
+    assert!(vm.take_pending_popup_activations().is_empty());
+
+    let result = vm
+        .evaluate_expression_payload_with_await(
+            r#"
+JSON.stringify((() => {
+  const first = window.open("about:blank#first", "strict-first");
+  const second = window.open("about:blank#second", "strict-second");
+  return {
+    first: first !== null,
+    second: second !== null,
+    active: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  };
+})())
+"#,
+            false,
+            true,
+        )
+        .expect("activated strict popup probe should evaluate");
+    assert_eq!(
+        result["value"],
+        r#"{"first":true,"second":false,"active":false,"sticky":true}"#
+    );
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(
+        activations[0].creation_had_transient_user_activation(),
+        Some(true)
+    );
+    assert_eq!(
+        activations[0].creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+}
+
+#[test]
+fn trusted_mouse_input_notifies_activation_but_synthetic_click_does_not() {
+    let mut vm = new_parsed_test_vm(
+        "https://trusted-popup-input.test/source",
+        r#"<html><body><button id="open" type="button">open</button></body></html>"#,
+    );
+    vm.set_root_document_lifecycle(
+        crate::runtime::RendererDocumentLifecycleJournalHandle::new_initial(
+            crate::PageId::new_for_testing(1_805_001),
+        ),
+    );
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .set_popup_blocker_policy(crate::RendererPopupBlockerPolicy::RequireTransientActivation);
+    vm.eval(
+        r#"
+globalThis.__openedByInput = [];
+document.getElementById("open").addEventListener("click", () => {
+  __openedByInput.push(window.open("about:blank#input", "_blank") !== null);
+});
+"#,
+    )
+    .expect("popup input listener should install");
+
+    assert_eq!(
+        vm.eval(
+            r#"
+document.getElementById("open").click();
+JSON.stringify({ opened: __openedByInput, active: navigator.userActivation.isActive, sticky: navigator.userActivation.hasBeenActive })
+"#,
+        )
+        .expect("synthetic click probe should evaluate"),
+        r#"{"opened":[false],"active":false,"sticky":false}"#
+    );
+    assert!(vm.take_pending_popup_activations().is_empty());
+
+    vm.dispatch_mouse_event_at_point(20.0, 20.0, "mousedown", 0, None, 0.0, 0.0)
+        .expect("trusted mousedown should dispatch");
+    assert_eq!(
+        vm.eval("JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])")
+            .expect("trusted mousedown activation should be observable"),
+        r#"[true,true]"#
+    );
+    vm.dispatch_mouse_event_at_point(20.0, 20.0, "mouseup", 0, None, 0.0, 0.0)
+        .expect("trusted mouseup should dispatch click activation");
+    assert_eq!(
+        vm.eval(
+            "JSON.stringify({ opened: __openedByInput, active: navigator.userActivation.isActive, sticky: navigator.userActivation.hasBeenActive })"
+        )
+        .expect("trusted click popup result should evaluate"),
+        r#"{"opened":[false,true],"active":false,"sticky":true}"#
+    );
+    assert_eq!(vm.take_pending_popup_activations().len(), 1);
+}
+
+#[test]
+fn trusted_keyboard_and_touch_activation_triggering_events_update_the_ledger() {
+    let mut keyboard_vm = new_parsed_test_vm(
+        "https://trusted-key-activation.test/source",
+        r#"<html><body><input id="target"></body></html>"#,
+    );
+    keyboard_vm
+        .dispatch_key_event("keydown", "Escape", "Escape", "", 0, false, false)
+        .expect("trusted Escape keydown should dispatch");
+    assert_eq!(
+        keyboard_vm
+            .eval("JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])")
+            .expect("Escape activation state should evaluate"),
+        r#"[false,false]"#,
+        "Escape is excluded from activation-triggering keyboard input"
+    );
+    keyboard_vm
+        .dispatch_key_event("keydown", "a", "KeyA", "a", 0, false, false)
+        .expect("trusted non-Escape keydown should dispatch");
+    assert_eq!(
+        keyboard_vm
+            .eval("JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])")
+            .expect("keyboard activation state should evaluate"),
+        r#"[true,true]"#
+    );
+
+    let mut touch_vm = new_parsed_test_vm(
+        "https://trusted-touch-activation.test/source",
+        r#"<html><body><button id="target">target</button></body></html>"#,
+    );
+    touch_vm
+        .dispatch_touch_event_at_point(20.0, 20.0, "touchstart", false)
+        .expect("trusted touchstart should dispatch");
+    assert_eq!(
+        touch_vm
+            .eval("JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])")
+            .expect("touchstart activation state should evaluate"),
+        r#"[false,false]"#,
+        "touch activation is notified by pointer release rather than pointer press"
+    );
+    touch_vm
+        .dispatch_touch_event_at_point(20.0, 20.0, "touchend", false)
+        .expect("trusted touchend should dispatch");
+    assert_eq!(
+        touch_vm
+            .eval("JSON.stringify([navigator.userActivation.isActive, navigator.userActivation.hasBeenActive])")
+            .expect("touchend activation state should evaluate"),
+        r#"[true,true]"#
+    );
+}
+
+#[test]
+fn sandbox_without_allow_popups_blocks_new_window_open_targets_but_reuses_self_name() {
+    for sandbox in [
+        "allow-scripts allow-same-origin",
+        "allow-scripts allow-same-origin allow-popups-to-escape-sandbox",
+    ] {
+        let mut vm = new_storage_test_vm("https://sandbox-popup-admission.test/root/page.html");
+        vm.eval(&format!(
+            r#"
+(() => {{
+  const iframe = document.createElement("iframe");
+  iframe.name = "sandboxSource";
+  iframe.sandbox = {sandbox:?};
+  (document.body || document.documentElement || document).appendChild(iframe);
+}})()
+"#
+        ))
+        .expect("sandbox popup admission setup should evaluate");
+        vm.drain_pending_child_frame_work_for_test();
+
+        let result = vm
+            .eval(
+                r##"
+String(document.querySelector("iframe").contentWindow.eval(`
+(() => {
+  const blockedBlank = window.open("about:blank#blocked-blank", "_blank") === null;
+  const blockedNamed = window.open("about:blank#blocked-named", "missingTarget") === null;
+  const reused = window.open("about:blank#reused", "sandboxSource");
+  return JSON.stringify({
+    blockedBlank,
+    blockedNamed,
+    reusedSelf: reused === window,
+    href: location.href
+  });
+})()
+`))
+"##,
+            )
+            .expect("sandbox child window.open probe should evaluate");
+
+        assert_eq!(
+            result,
+            r##"{"blockedBlank":true,"blockedNamed":true,"reusedSelf":true,"href":"about:blank#reused"}"##,
+            "sandbox={sandbox:?}"
+        );
+        assert!(
+            vm.take_pending_popup_activations().is_empty(),
+            "sandbox={sandbox:?} must not reserve or publish a new auxiliary context"
+        );
+    }
+}
+
+#[test]
+fn sandbox_denial_does_not_consume_activation_before_an_allowed_creation() {
+    let mut vm = new_storage_test_vm("https://sandbox-activation-order.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const iframe = document.createElement("iframe");
+  iframe.sandbox = "allow-scripts allow-same-origin";
+  (document.body || document.documentElement || document).appendChild(iframe);
+})()
+"#,
+    )
+    .expect("sandbox activation ordering setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .evaluate_expression_payload_with_await(
+            r#"
+JSON.stringify((() => {
+  const child = document.querySelector("iframe").contentWindow;
+  const blocked = child.eval(`window.open("about:blank#sandbox-blocked", "_blank") === null`);
+  const activeAfterDenial = navigator.userActivation.isActive;
+  const opened = window.open("about:blank#allowed-after-denial", "_blank");
+  return {
+    blocked,
+    activeAfterDenial,
+    opened: opened !== null,
+    activeAfterCreation: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  };
+})())
+"#,
+            false,
+            true,
+        )
+        .expect("sandbox and activation ordering probe should evaluate");
+    assert_eq!(
+        result["value"],
+        r#"{"blocked":true,"activeAfterDenial":true,"opened":true,"activeAfterCreation":false,"sticky":true}"#
+    );
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(
+        activations[0].creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+}
+
+#[test]
+fn sandbox_without_allow_forms_blocks_existing_target_navigation() {
+    let mut vm = new_storage_test_vm("https://sandbox-form-gate.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin allow-popups allow-top-navigation";
+  const host = document.body || document.documentElement || document;
+  host.appendChild(source);
+})()
+"#,
+    )
+    .expect("sandboxed form existing-target setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+String(document.getElementById("source").contentWindow.eval(`
+(() => {
+  const target = document.createElement("iframe");
+  target.id = "target";
+  target.name = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(target);
+
+  const form = document.createElement("form");
+  form.action = "https://sandbox-form-gate.test/blocked";
+  form.target = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(form);
+  const events = [];
+  const required = document.createElement("input");
+  required.required = true;
+  form.appendChild(required);
+  required.addEventListener("invalid", () => events.push("invalid"));
+  form.addEventListener("submit", () => events.push("submit"));
+  form.addEventListener("formdata", () => events.push("formdata"));
+  form.requestSubmit();
+  form.submit();
+  return events.join("|");
+})()
+`))
+"#,
+        )
+        .expect("sandboxed form existing-target probe should evaluate");
+
+    assert_eq!(
+        result, "formdata",
+        "requestSubmit must stop before validation/submit while direct submit reaches entry-list construction before the second sandbox gate"
+    );
+    let target_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handles_in_document_order()
+        .get(1)
+        .copied()
+        .expect("existing form target should have a nested child browsing context");
+    assert!(
+        vm._context_host
+            .borrow()
+            .child_browsing_context_pending_live_navigation_for_test(target_handle)
+            .is_none(),
+        "allow-forms denial must prevent existing named-target navigation from being scheduled"
+    );
+    assert!(vm.take_pending_popup_activations().is_empty());
+}
+
+#[test]
+fn sandbox_top_navigation_uses_committed_tokens_and_activation() {
+    struct Case {
+        sandbox: &'static str,
+        replacement_sandbox: Option<&'static str>,
+        activate: bool,
+        expected_allowed: bool,
+    }
+
+    for case in [
+        Case {
+            sandbox: "allow-scripts allow-same-origin",
+            replacement_sandbox: None,
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            sandbox: "allow-scripts allow-same-origin allow-top-navigation-by-user-activation",
+            replacement_sandbox: None,
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            sandbox: "allow-scripts allow-same-origin allow-top-navigation-by-user-activation",
+            replacement_sandbox: None,
+            activate: true,
+            expected_allowed: true,
+        },
+        Case {
+            sandbox: "allow-scripts allow-same-origin allow-top-navigation",
+            replacement_sandbox: None,
+            activate: false,
+            expected_allowed: true,
+        },
+        Case {
+            sandbox: "allow-scripts allow-same-origin",
+            replacement_sandbox: Some("allow-scripts allow-same-origin allow-top-navigation"),
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            sandbox: "allow-scripts allow-same-origin allow-top-navigation",
+            replacement_sandbox: Some("allow-scripts allow-same-origin"),
+            activate: false,
+            expected_allowed: true,
+        },
+    ] {
+        let mut vm = new_storage_test_vm("https://sandbox-top-policy.test/root/page.html");
+        vm.eval(&format!(
+            r#"
+(() => {{
+  const frame = document.createElement("iframe");
+  frame.id = "source";
+  frame.sandbox = {sandbox:?};
+  (document.body || document.documentElement || document).appendChild(frame);
+}})()
+"#,
+            sandbox = case.sandbox,
+        ))
+        .expect("sandbox top-navigation fixture should evaluate");
+        vm.drain_pending_child_frame_work_for_test();
+        if let Some(replacement_sandbox) = case.replacement_sandbox {
+            vm.eval(&format!(
+                "document.getElementById('source').sandbox = {replacement_sandbox:?}"
+            ))
+            .expect("sandbox attribute mutation should evaluate");
+        }
+        if case.activate {
+            vm._context_host.borrow_mut().notify_user_activation();
+        }
+
+        let result = vm
+            .eval(
+                r#"
+String(document.getElementById("source").contentWindow.eval(`
+(() => {
+  try {
+    top.location = "/accepted-by-can-navigate";
+    return "allowed";
+  } catch (error) {
+    return "blocked:" + error.name;
+  }
+})()
+`))
+"#,
+            )
+            .expect("sandbox top-navigation probe should evaluate");
+        assert_eq!(
+            result == "allowed",
+            case.expected_allowed,
+            "sandbox={:?}, replacement={:?}, result={result}",
+            case.sandbox,
+            case.replacement_sandbox,
+        );
+        assert_eq!(
+            vm.take_pending_location_navigation_with_seed().is_some(),
+            case.expected_allowed,
+            "sandbox={:?}, replacement={:?}",
+            case.sandbox,
+            case.replacement_sandbox,
+        );
+    }
+}
+
+#[test]
+fn sandboxed_special_top_entry_points_share_can_navigate_authority() {
+    let mut vm = new_storage_test_vm("https://sandbox-special-top.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "source";
+  frame.sandbox = "allow-scripts allow-same-origin allow-forms";
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("sandbox special-target fixture should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+String(document.getElementById("source").contentWindow.eval(`
+(() => {
+  const opened = window.open("/blocked-window-open", "_top") !== null;
+
+  const anchor = document.createElement("a");
+  anchor.href = "/blocked-anchor";
+  anchor.target = "_top";
+  document.body.appendChild(anchor);
+  anchor.click();
+
+  const getForm = document.createElement("form");
+  getForm.action = "/blocked-get-form";
+  getForm.target = "_top";
+  document.body.appendChild(getForm);
+  getForm.submit();
+
+  const postForm = document.createElement("form");
+  postForm.action = "/blocked-post-form";
+  postForm.method = "post";
+  postForm.target = "_top";
+  document.body.appendChild(postForm);
+  postForm.submit();
+  return opened;
+})()
+`))
+"#,
+        )
+        .expect("sandbox special-target probes should evaluate");
+    assert_eq!(
+        result, "true",
+        "an existing _top WindowProxy remains the selected target even when its navigation is denied"
+    );
+    assert!(
+        vm.take_pending_location_navigation_with_seed().is_none(),
+        "window.open, hyperlink, GET form, and POST form must all stop at the same sandbox CanNavigate authority"
+    );
+    assert!(
+        vm.take_pending_popup_activations().is_empty(),
+        "a denied existing _top target must not fall through to auxiliary creation"
+    );
+}
+
+#[test]
+fn cross_origin_child_top_navigation_uses_chromium_destination_relation_matrix() {
+    struct Case {
+        top_url: &'static str,
+        destination: &'static str,
+        activate: bool,
+        expected_allowed: bool,
+    }
+
+    for case in [
+        Case {
+            top_url: "https://www.example.test/root/page.html",
+            destination: "https://www.example.test/accepted-by-target-origin",
+            activate: false,
+            expected_allowed: true,
+        },
+        Case {
+            top_url: "https://www.example.test/root/page.html",
+            destination: "https://sub.example.test/accepted-by-registrable-domain",
+            activate: false,
+            expected_allowed: true,
+        },
+        Case {
+            top_url: "https://www.example.test/root/page.html",
+            destination: "https://unrelated.test/blocked-without-activation",
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            top_url: "https://www.example.test/root/page.html",
+            destination: "http://sub.example.test/blocked-by-scheme-mismatch",
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            top_url: "https://www.example.test/root/page.html",
+            destination: "https://unrelated.test/accepted-by-sticky-activation",
+            activate: true,
+            expected_allowed: true,
+        },
+        Case {
+            top_url: "http://127.0.0.1:8000/root/page.html",
+            destination: "http://127.0.0.1:9000/blocked-ip-site-fallback",
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            top_url: "http://localhost:8000/root/page.html",
+            destination: "http://localhost:9000/blocked-single-label-site-fallback",
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            top_url: "https://co.uk:8000/root/page.html",
+            destination: "https://co.uk:9000/blocked-public-suffix-site-fallback",
+            activate: false,
+            expected_allowed: false,
+        },
+    ] {
+        let mut vm = new_storage_test_vm(case.top_url);
+        vm._context_host
+            .borrow()
+            .browser_context_runtime()
+            .set_popup_blocker_policy(
+                crate::RendererPopupBlockerPolicy::RequireTransientActivation,
+            );
+        vm.eval(
+            r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.src = "data:text/html,<!doctype html><title>opaque source</title>";
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+        )
+        .expect("cross-origin top-navigation fixture should evaluate");
+        vm.drain_pending_child_frame_work_for_test();
+        let child_context_id = vm
+            .live_child_default_runtime_realm_inventory()
+            .into_iter()
+            .map(|realm| realm.context_id)
+            .next()
+            .expect("cross-origin child default realm should materialize");
+        if case.activate {
+            vm._context_host.borrow_mut().notify_user_activation();
+        }
+
+        vm.eval_in_child_default_context(
+            child_context_id,
+            &format!(
+                "top.location = {}; 'attempted'",
+                serde_json::to_string(case.destination)
+                    .expect("destination should serialize as JavaScript string")
+            ),
+        )
+        .expect("cross-origin top Location assignment should evaluate");
+        let pending = vm.take_pending_location_navigation_with_seed();
+        assert_eq!(
+            pending.is_some(),
+            case.expected_allowed,
+            "top={:?}, destination={:?}, activate={}",
+            case.top_url,
+            case.destination,
+            case.activate,
+        );
+        if let Some(pending) = pending {
+            assert_eq!(pending.url.as_str(), case.destination);
+        }
+    }
+}
+
+#[test]
+fn cross_origin_location_relative_destination_uses_entered_source_base_url() {
+    for (source_base, expected_url) in [
+        (
+            "https://sub.example.test/source/",
+            Some("https://sub.example.test/source/relative-target"),
+        ),
+        ("https://unrelated.test/source/", None),
+    ] {
+        let mut vm = new_storage_test_vm("https://www.example.test/root/page.html");
+        vm._context_host
+            .borrow()
+            .browser_context_runtime()
+            .set_popup_blocker_policy(
+                crate::RendererPopupBlockerPolicy::RequireTransientActivation,
+            );
+        let source_url = format!(
+            r#"data:text/html,<!doctype html><base href="{source_base}"><title>opaque source</title>"#,
+        );
+        vm.eval(&format!(
+            r#"
+(() => {{
+  const frame = document.createElement("iframe");
+  frame.src = {source_url};
+  (document.body || document.documentElement || document).appendChild(frame);
+}})()
+"#,
+            source_url = serde_json::to_string(&source_url)
+                .expect("source data URL should serialize as JavaScript string"),
+        ))
+        .expect("relative cross-origin Location fixture should evaluate");
+        vm.drain_pending_child_frame_work_for_test();
+        let child_context_id = vm
+            .live_child_default_runtime_realm_inventory()
+            .into_iter()
+            .map(|realm| realm.context_id)
+            .next()
+            .expect("cross-origin child default realm should materialize");
+
+        vm.eval_in_child_default_context(
+            child_context_id,
+            r#"top.location = "relative-target"; "attempted""#,
+        )
+        .expect("relative cross-origin top Location assignment should evaluate");
+        let pending = vm.take_pending_location_navigation_with_seed();
+        assert_eq!(
+            pending.as_ref().map(|request| request.url.as_str()),
+            expected_url,
+            "source_base={source_base:?}",
+        );
+    }
+}
+
+#[test]
+fn cross_origin_sandbox_top_navigation_uses_frame_owner_token_provenance() {
+    struct Case {
+        sandbox: &'static str,
+        activate: bool,
+        expected_allowed: bool,
+    }
+
+    for case in [
+        Case {
+            sandbox: "allow-scripts allow-top-navigation",
+            activate: false,
+            expected_allowed: true,
+        },
+        Case {
+            sandbox: "allow-scripts allow-top-navigation-by-user-activation",
+            activate: false,
+            expected_allowed: false,
+        },
+        Case {
+            sandbox: "allow-scripts allow-top-navigation-by-user-activation",
+            activate: true,
+            expected_allowed: true,
+        },
+        Case {
+            sandbox: "allow-scripts",
+            activate: true,
+            expected_allowed: false,
+        },
+    ] {
+        let mut vm = new_storage_test_vm("https://sandbox-owner-policy.test/root/page.html");
+        vm._context_host
+            .borrow()
+            .browser_context_runtime()
+            .set_popup_blocker_policy(
+                crate::RendererPopupBlockerPolicy::RequireTransientActivation,
+            );
+        vm.eval(&format!(
+            r#"
+(() => {{
+  const frame = document.createElement("iframe");
+  frame.sandbox = {sandbox:?};
+  frame.src = "data:text/html,<!doctype html><title>opaque sandbox source</title>";
+  (document.body || document.documentElement || document).appendChild(frame);
+}})()
+"#,
+            sandbox = case.sandbox,
+        ))
+        .expect("cross-origin sandbox top-navigation fixture should evaluate");
+        vm.drain_pending_child_frame_work_for_test();
+        let child_context_id = vm
+            .live_child_default_runtime_realm_inventory()
+            .into_iter()
+            .map(|realm| realm.context_id)
+            .next()
+            .expect("cross-origin sandbox child default realm should materialize");
+        if case.activate {
+            vm._context_host.borrow_mut().notify_user_activation();
+        }
+
+        let result = vm
+            .eval_in_child_default_context(
+                child_context_id,
+                r#"
+(() => {
+  try {
+    top.location = "https://destination.test/from-sandbox";
+    return "accepted";
+  } catch (error) {
+    return "blocked:" + error.name;
+  }
+})()
+"#,
+            )
+            .expect("cross-origin sandbox top Location assignment should evaluate");
+        assert_eq!(
+            vm.take_pending_location_navigation_with_seed().is_some(),
+            case.expected_allowed,
+            "sandbox={:?}, activate={}, result={result}",
+            case.sandbox,
+            case.activate,
+        );
+        assert_eq!(
+            result.starts_with("blocked:SecurityError"),
+            !case.expected_allowed,
+            "sandbox={:?}, activate={}, result={result}",
+            case.sandbox,
+            case.activate,
+        );
+    }
+}
+
+#[test]
+fn sandboxed_named_lookup_skips_non_descendant_sibling() {
+    let mut vm = new_storage_test_vm("https://sandbox-named-policy.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin";
+  const target = document.createElement("iframe");
+  target.id = "target";
+  target.name = "sandboxSibling";
+  const host = document.body || document.documentElement || document;
+  host.appendChild(source);
+  host.appendChild(target);
+  target.contentWindow.__marker = "unchanged";
+})()
+"#,
+    )
+    .expect("sandbox named-target fixture should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+JSON.stringify({
+  opened: document.getElementById("source").contentWindow.eval(
+    `window.open("about:blank#blocked-sibling", "sandboxSibling") !== null`
+  ),
+  marker: document.getElementById("target").contentWindow.__marker,
+  href: document.getElementById("target").contentWindow.location.href
+})
+"#,
+        )
+        .expect("sandbox named-target probe should evaluate");
+    assert_eq!(
+        result,
+        r#"{"opened":false,"marker":"unchanged","href":"about:blank"}"#
+    );
+    assert!(vm.take_pending_popup_activations().is_empty());
+}
+
+#[test]
+fn sandboxed_direct_submit_creates_only_the_initial_empty_popup_before_late_denial() {
+    let mut vm = new_storage_test_vm("https://sandbox-form-create.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin allow-popups";
+  (document.body || document.documentElement || document).appendChild(source);
+})()
+"#,
+    )
+    .expect("sandboxed direct-submit popup setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .set_popup_blocker_policy(crate::RendererPopupBlockerPolicy::RequireTransientActivation);
+
+    let result = vm
+        .evaluate_expression_payload_with_await(
+            r#"
+JSON.stringify((() => {
+  const formDataEvents = Number(document.getElementById("source").contentWindow.eval(`
+    (() => {
+      const form = document.createElement("form");
+      form.action = "about:blank#blocked-destination";
+      form.target = "creationOnlyFormTarget";
+      (document.body || document.documentElement || document).appendChild(form);
+      let count = 0;
+      form.addEventListener("formdata", () => ++count);
+      form.submit();
+      return count;
+    })()
+  `));
+  return {
+    formDataEvents,
+    active: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  };
+})())
+"#,
+            false,
+            true,
+        )
+        .expect("sandboxed direct-submit popup probe should evaluate");
+    assert_eq!(
+        result["value"], r#"{"formDataEvents":1,"active":false,"sticky":true}"#,
+        "target creation must consume the shared transient grant after entry-list construction"
+    );
+
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    let activation = &activations[0];
+    assert_eq!(activation.url(), "about:blank?#blocked-destination");
+    assert_eq!(activation.target_name(), "creationOnlyFormTarget");
+    assert!(
+        !activation.has_destination_navigation(),
+        "late allow-forms denial must not turn the initial empty Document into a destination request"
+    );
+    assert_eq!(activation.request_method(), None);
+    assert_eq!(activation.request_body(), None);
+    assert_eq!(activation.request_headers(), None);
+    assert_eq!(
+        activation.creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+    // This unit VM has no renderer Page reservation allocator. The protocol
+    // owner test below covers materialization of the real initial Page; this
+    // boundary owns the source policy, activation transaction, and absence of
+    // a destination request.
+}
+
+#[test]
+fn sandbox_allow_forms_does_not_imply_allow_popups() {
+    let mut vm = new_storage_test_vm("https://sandbox-form-policy.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin allow-forms";
+  const host = document.body || document.documentElement || document;
+  host.appendChild(source);
+})()
+"#,
+    )
+    .expect("sandbox allow-forms setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+String(document.getElementById("source").contentWindow.eval(`
+(() => {
+  const target = document.createElement("iframe");
+  target.id = "target";
+  target.name = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(target);
+
+  const existing = document.createElement("form");
+  existing.action = "https://sandbox-form-policy.test/existing";
+  existing.target = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(existing);
+  existing.submit();
+
+  const fresh = document.createElement("form");
+  fresh.action = "about:blank#blocked-new-context";
+  fresh.target = "_blank";
+  document.body.appendChild(fresh);
+  fresh.submit();
+  return "submitted";
+})()
+`))
+"#,
+        )
+        .expect("sandbox allow-forms probe should evaluate");
+    assert_eq!(result, "submitted");
+
+    let target_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handles_in_document_order()
+        .get(1)
+        .copied()
+        .expect("existing form target should have a nested child browsing context");
+    assert!(
+        vm._context_host
+            .borrow()
+            .child_browsing_context_pending_live_navigation_for_test(target_handle)
+            .is_some(),
+        "allow-forms should permit submission to an existing target"
+    );
+    assert!(
+        vm.take_pending_popup_activations().is_empty(),
+        "allow-forms must not bypass the independent allow-popups creation gate"
+    );
+}
+
+#[test]
+fn sandboxed_request_submit_denial_precedes_popup_activation_consumption() {
+    let mut vm = new_storage_test_vm("https://sandbox-form-activation.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin allow-popups";
+  (document.body || document.documentElement || document).appendChild(source);
+})()
+"#,
+    )
+    .expect("sandboxed form activation setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+    vm._context_host
+        .borrow()
+        .browser_context_runtime()
+        .set_popup_blocker_policy(crate::RendererPopupBlockerPolicy::RequireTransientActivation);
+
+    let result = vm
+        .evaluate_expression_payload_with_await(
+            r#"
+JSON.stringify((() => {
+  const formDataEvents = Number(document.getElementById("source").contentWindow.eval(`
+    (() => {
+      const form = document.createElement("form");
+      form.action = "about:blank#blocked-form";
+      form.target = "_blank";
+      (document.body || document.documentElement || document).appendChild(form);
+      let count = 0;
+      form.addEventListener("formdata", () => ++count);
+      form.requestSubmit();
+      return count;
+    })()
+  `));
+  const opened = window.open("about:blank#allowed-window", "_blank");
+  return {
+    formDataEvents,
+    parentOpened: opened !== null,
+    active: navigator.userActivation.isActive,
+    sticky: navigator.userActivation.hasBeenActive
+  };
+})())
+"#,
+            false,
+            true,
+        )
+        .expect("sandboxed form activation probe should evaluate");
+    assert_eq!(
+        result["value"], r#"{"formDataEvents":0,"parentOpened":true,"active":false,"sticky":true}"#,
+        "the early form sandbox gate must retain the grant for the next admitted new-context creation"
+    );
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    assert_eq!(activations[0].url(), "about:blank#allowed-window");
+    assert_eq!(
+        activations[0].creation_consumed_transient_user_activation(),
+        Some(true)
+    );
+}
+
+#[test]
+fn formdata_disconnection_stops_submission_before_the_late_sandbox_gate() {
+    let mut vm = new_storage_test_vm("https://formdata-disconnect.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const target = document.createElement("iframe");
+  target.name = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(target);
+})()
+"#,
+    )
+    .expect("formdata disconnection target setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const form = document.createElement("form");
+  form.action = "https://formdata-disconnect.test/blocked";
+  form.target = "existingFormTarget";
+  (document.body || document.documentElement || document).appendChild(form);
+  let formDataEvents = 0;
+  form.addEventListener("formdata", () => {
+    ++formDataEvents;
+    form.remove();
+  });
+  form.submit();
+  return String(formDataEvents);
+})()
+"#,
+        )
+        .expect("formdata disconnection probe should evaluate");
+    assert_eq!(result, "1");
+
+    let target_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handle_by_index(0)
+        .expect("existing form target should have a child browsing context");
+    assert!(
+        vm._context_host
+            .borrow()
+            .child_browsing_context_pending_live_navigation_for_test(target_handle)
+            .is_none(),
+        "disconnecting the form during entry-list construction must abort before target navigation"
+    );
+}
+
+#[test]
+fn disconnected_form_submit_stops_before_entry_list_construction() {
+    let mut vm = new_storage_test_vm("https://disconnected-form-submit.test/page.html");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const form = document.createElement("form");
+  form.action = "https://disconnected-form-submit.test/blocked";
+  let formDataEvents = 0;
+  form.addEventListener("formdata", () => ++formDataEvents);
+  form.submit();
+  return String(formDataEvents);
+})()
+"#,
+        )
+        .expect("disconnected form submission probe should evaluate");
+    assert_eq!(result, "0");
+    assert!(vm.take_pending_location_navigation_with_seed().is_none());
+    assert!(vm.take_pending_popup_activations().is_empty());
+}
+
+#[test]
+fn response_csp_sandbox_allow_forms_intersects_across_policies() {
+    for (policies, expected_allowed) in [
+        (vec!["script-src 'self'"], true),
+        (vec!["sandbox allow-scripts"], false),
+        (vec!["sandbox allow-scripts allow-forms"], true),
+        (
+            vec![
+                "sandbox allow-scripts allow-forms",
+                "sandbox allow-scripts allow-same-origin",
+            ],
+            false,
+        ),
+    ] {
+        let mut vm = new_storage_test_vm("https://csp-form-gate.test/page.html");
+        vm.set_response_content_security_policies(
+            &policies
+                .iter()
+                .map(|policy| (*policy).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        vm.eval(
+            r#"
+(() => {
+  const form = document.createElement("form");
+  form.action = "https://csp-form-gate.test/submitted";
+  (document.body || document.documentElement || document).appendChild(form);
+  form.submit();
+})()
+"#,
+        )
+        .expect("response CSP sandbox form probe should evaluate");
+        assert_eq!(
+            vm.take_pending_location_navigation_with_seed().is_some(),
+            expected_allowed,
+            "policies={policies:?}"
+        );
+    }
+}
+
+#[test]
+fn sandbox_without_allow_popups_blocks_hyperlink_and_form_auxiliary_targets() {
+    let mut vm = new_storage_test_vm("https://sandbox-element-popup.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const iframe = document.createElement("iframe");
+  iframe.sandbox = "allow-scripts allow-same-origin allow-forms";
+  (document.body || document.documentElement || document).appendChild(iframe);
+})()
+"#,
+    )
+    .expect("sandbox element popup setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let result = vm
+        .eval(
+            r#"
+String(document.querySelector("iframe").contentWindow.eval(`
+(() => {
+  const html = document.documentElement || document.appendChild(document.createElement("html"));
+  const body = document.body || html.appendChild(document.createElement("body"));
+  const anchor = document.createElement("a");
+  anchor.href = "about:blank?from=anchor";
+  anchor.target = "_blank";
+  body.appendChild(anchor);
+  anchor.click();
+
+  const form = document.createElement("form");
+  form.action = "about:blank?from=form";
+  form.target = "_blank";
+  body.appendChild(form);
+  form.submit();
+  return "activated";
+})()
+`))
+"#,
+        )
+        .expect("sandbox child element popup probe should evaluate");
+
+    assert_eq!(result, "activated");
+    assert!(
+        vm.take_pending_popup_activations().is_empty(),
+        "sandboxed hyperlink and form new-context actions must stop before Page reservation"
+    );
+}
+
+#[test]
+fn response_csp_sandbox_requires_allow_popups_for_auxiliary_creation() {
+    for (policies, expected_allowed) in [
+        (vec!["sandbox allow-scripts"], false),
+        (
+            vec!["sandbox allow-scripts allow-popups-to-escape-sandbox"],
+            false,
+        ),
+        (vec!["sandbox allow-scripts allow-popups"], true),
+        (
+            vec![
+                "sandbox allow-scripts allow-popups",
+                "sandbox allow-scripts allow-same-origin",
+            ],
+            false,
+        ),
+    ] {
+        let mut vm = new_storage_test_vm("https://csp-popup-admission.test/page.html");
+        vm.set_response_content_security_policies(
+            &policies
+                .iter()
+                .map(|policy| (*policy).to_owned())
+                .collect::<Vec<_>>(),
+        );
+
+        let result = vm
+            .eval("String(window.open('about:blank#csp-popup', '_blank') !== null)")
+            .expect("response CSP popup admission probe should evaluate");
+        assert_eq!(
+            result,
+            expected_allowed.to_string(),
+            "policies={policies:?}"
+        );
+        assert_eq!(
+            vm.take_pending_popup_activations().len(),
+            usize::from(expected_allowed),
+            "policies={policies:?}"
         );
     }
 }
@@ -23427,11 +24817,11 @@ fn child_window_open_top_carries_exact_source_and_noreferrer_policy() {
     assert!(source.suppresses_referrer());
     assert_eq!(
         source.window(),
-        &crate::RendererWindowDocumentSource::ChildFrame {
+        Some(&crate::RendererWindowDocumentSource::ChildFrame {
             frame_id: child.frame_id.0,
             local_window_id: child.local_window_id.0,
             document_id: child.document_id.0,
-        }
+        })
     );
 }
 
@@ -24204,6 +25594,61 @@ async fn window_open_non_about_returns_lightweight_popup_and_dispatches_load() {
 }
 
 #[tokio::test]
+async fn cross_origin_lightweight_popup_can_navigate_its_typed_opener_endpoint() {
+    let (popup_url, server) = spawn_lightweight_popup_response_html_server(
+        "popup typed opener navigation server",
+        "popup typed opener navigation",
+        "",
+        r#"<!doctype html><script>
+let outcome = "accepted";
+try {
+  opener.location = "https://opener-relation-destination.test/accepted";
+} catch (error) {
+  outcome = "blocked:" + error.name;
+}
+opener.postMessage("opener-navigation:" + outcome, "*");
+</script>"#,
+    )
+    .await;
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(
+        "https://opener-relation-source.test/root/page.html",
+        &loader,
+    );
+    vm.eval(&format!(
+        r#"
+globalThis.__popupOpenerNavigationResult = "pending";
+onmessage = event => {{
+  globalThis.__popupOpenerNavigationResult = String(event.data);
+}};
+open({popup_url});
+"#,
+        popup_url = serde_json::to_string(&popup_url).expect("popup URL should serialize"),
+    ))
+    .expect("cross-origin popup opener-navigation setup should evaluate");
+
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__popupOpenerNavigationResult)",
+        "opener-navigation:accepted",
+        "typed popup opener navigation",
+    )
+    .await;
+    let pending = vm
+        .take_pending_location_navigation_with_seed()
+        .expect("cross-origin popup should navigate its exact typed opener endpoint");
+    assert_eq!(
+        pending.url.as_str(),
+        "https://opener-relation-destination.test/accepted"
+    );
+
+    server
+        .await
+        .expect("popup typed opener navigation server should finish");
+}
+
+#[tokio::test]
 async fn lightweight_popup_document_write_during_load_replaces_existing_body() {
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let mut vm =
@@ -24679,6 +26124,7 @@ async fn sandbox_child_about_blank_popup_reloads_self_without_escape_and_message
     assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
         "allow-scripts allow-popups",
         "null",
+        false,
     )
     .await;
 }
@@ -24688,6 +26134,27 @@ async fn sandbox_child_about_blank_popup_reloads_self_with_escape_and_messages_t
     assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
         "allow-scripts allow-popups allow-popups-to-escape-sandbox",
         "http://127.0.0.1",
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sandbox_child_direct_url_popup_without_escape_messages_top() {
+    assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
+        "allow-scripts allow-popups",
+        "null",
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sandbox_child_direct_url_popup_with_escape_messages_top() {
+    assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
+        "allow-scripts allow-popups allow-popups-to-escape-sandbox",
+        "http://127.0.0.1",
+        true,
     )
     .await;
 }
@@ -24742,8 +26209,9 @@ async fn sandbox_child_inside_popup_cannot_navigate_popup_top() {
 async fn assert_sandbox_child_about_blank_popup_reloads_self_and_messages_top(
     sandbox: &str,
     expected_popup_origin_prefix: &str,
+    direct_url: bool,
 ) {
-    let (helper_url, server) = spawn_sandbox_popup_helper_server().await;
+    let (helper_url, server) = spawn_sandbox_popup_helper_server(direct_url).await;
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
     let helper_url_parsed = Url::parse(&helper_url).expect("helper url");
     let document_url = format!(
@@ -26438,7 +27906,9 @@ navigator.storageBuckets.delete("opaque-origin-bucket")
     (format!("http://{addr}/popup.html"), server)
 }
 
-async fn spawn_sandbox_popup_helper_server() -> (String, tokio::task::JoinHandle<()>) {
+async fn spawn_sandbox_popup_helper_server(
+    direct_url: bool,
+) -> (String, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind sandbox popup helper server");
@@ -26458,7 +27928,21 @@ async fn spawn_sandbox_popup_helper_server() -> (String, tokio::task::JoinHandle
                 .read(&mut buffer)
                 .await
                 .expect("read sandbox popup helper request");
-            let body = r#"<!doctype html>
+            let body = if direct_url {
+                r#"<!doctype html>
+<script>
+  if (opener) {
+    opener.postMessage(undefined, "*");
+    self.close();
+  } else {
+    onmessage = function (e) {
+      parent.postMessage({ data: e.data, origin: e.origin }, "*");
+    };
+    var popupWin = window.open(location.href);
+  }
+</script>"#
+            } else {
+                r#"<!doctype html>
 <script>
   if (opener) {
     opener.postMessage(undefined, "*");
@@ -26470,7 +27954,8 @@ async fn spawn_sandbox_popup_helper_server() -> (String, tokio::task::JoinHandle
     var popupWin = window.open();
     popupWin.location.href = location.href;
   }
-</script>"#;
+</script>"#
+            };
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),

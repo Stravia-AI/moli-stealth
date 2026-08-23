@@ -1378,16 +1378,14 @@ pub(crate) fn decode_text_html_data_url(raw_url: &str) -> Option<Result<String, 
 fn inline_html_navigation_source(
     raw_url: &str,
 ) -> Option<Result<InlineHtmlNavigationSource, String>> {
-    if raw_url == "about:blank" {
-        return Some(
-            Url::parse(raw_url)
-                .map(|document_url| InlineHtmlNavigationSource {
-                    document_url,
-                    html: ABOUT_BLANK_DOCUMENT_HTML.to_owned(),
-                    response_headers: vec![("content-type".into(), "text/html".into())],
-                })
-                .map_err(|error| format!("failed to parse about:blank url: {error}")),
-        );
+    if let Ok(document_url) = Url::parse(raw_url)
+        && moli_url::is_about_blank(&document_url)
+    {
+        return Some(Ok(InlineHtmlNavigationSource {
+            document_url,
+            html: ABOUT_BLANK_DOCUMENT_HTML.to_owned(),
+            response_headers: vec![("content-type".into(), "text/html".into())],
+        }));
     }
 
     let html = decode_text_html_data_url(raw_url)?;
@@ -2339,6 +2337,7 @@ impl CdpConnection {
                 None,
                 initial_document_referrer.map(str::to_owned),
                 initial_top_level_browsing_context_name.map(str::to_owned),
+                load_inputs.auxiliary_browsing_context_policy,
             )
             .map_err(|error| {
                 let message = format!("failed to start initial document page build: {error}");
@@ -4544,8 +4543,8 @@ async fn apply_navigation_load_input_overrides_async(
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundNavigationEarlyResult, decode_data_url_body, decode_data_url_response,
-        decode_text_html_data_url, decoded_data_url_navigation_response,
+        ABOUT_BLANK_DOCUMENT_HTML, BackgroundNavigationEarlyResult, decode_data_url_body,
+        decode_data_url_response, decode_text_html_data_url, decoded_data_url_navigation_response,
         inline_html_navigation_source,
     };
     use serde_json::json;
@@ -4585,6 +4584,23 @@ mod tests {
         assert_eq!(
             source.response_headers,
             vec![("Content-Type".to_owned(), "text/html".to_owned())]
+        );
+    }
+
+    #[test]
+    fn inline_about_blank_navigation_preserves_query_and_fragment() {
+        let source = inline_html_navigation_source("about:blank?form=#destination")
+            .expect("about:blank navigation source")
+            .expect("valid about:blank navigation source");
+
+        assert_eq!(
+            source.document_url.as_str(),
+            "about:blank?form=#destination"
+        );
+        assert_eq!(source.html, ABOUT_BLANK_DOCUMENT_HTML);
+        assert_eq!(
+            source.response_headers,
+            vec![("content-type".to_owned(), "text/html".to_owned())]
         );
     }
 

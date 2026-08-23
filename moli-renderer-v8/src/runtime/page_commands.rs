@@ -86,6 +86,11 @@ impl PageVm {
                 .vm_mut()
                 .navigate_top_level_same_document_from_browser(&url)
                 .map(RendererPageReply::Bool),
+            RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation => {
+                Err(anyhow!(
+                    "pending javascript URL tasks must be routed through the renderer owner continuation"
+                ))
+            }
             RendererPageCommand::DispatchMouseEventAtPoint {
                 x,
                 y,

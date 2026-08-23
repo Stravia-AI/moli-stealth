@@ -15,7 +15,10 @@ use crate::{
         sync_window_location_runtime_state, web_storage_area_key_for_storage_key,
     },
     document_runtime::create_content_security_policy_violation_event,
-    document_runtime::{DocumentPolicyContainer, DocumentSandboxPolicy, DomHandle},
+    document_runtime::{
+        AuxiliaryBrowsingContextCreationPolicy, DocumentPolicyContainer, DocumentSandboxPolicy,
+        DomHandle,
+    },
     host::HostTimerOwner,
     native_bridge::{
         ComputedStyleDescriptor, ComputedStyleTargetKey, OwnerDispatchScope, WindowTaskTarget,
@@ -422,9 +425,15 @@ fn inherit_lightweight_popup_opener_sandbox(
     let Some(opener) = opener else {
         return;
     };
+    target.sandboxes_navigation |= opener.sandboxes_navigation;
     target.forces_opaque_origin |= opener.forces_opaque_origin;
     target.allows_scripts &= opener.allows_scripts;
+    target.allows_forms &= opener.allows_forms;
+    target.allows_popups &= opener.allows_popups;
     target.allows_popups_to_escape &= opener.allows_popups_to_escape;
+    target.allows_top_navigation &= opener.allows_top_navigation;
+    target.allows_top_navigation_by_user_activation &=
+        opener.allows_top_navigation_by_user_activation;
     target.sandboxes_document_domain |= opener.sandboxes_document_domain;
 }
 
@@ -612,30 +621,19 @@ impl JsContextHost {
         auxiliary_page_exposes_opener: Option<bool>,
         stage_named_related_page: bool,
         creator_base_url: Url,
-        creator_policy_container: DocumentPolicyContainer,
+        creator_policy: AuxiliaryBrowsingContextCreationPolicy,
     ) -> Option<OpenedLightweightPopup<'s>> {
-        if opener.is_some()
-            && let Some(name) = trackable_lightweight_popup_window_name(target_name)
-            && let Some(popup_id) = self.lightweight_popup_window_names.get(&name).copied()
-            && self.lightweight_popup_is_open(popup_id)
-            && let Some(window) = self.reopen_lightweight_popup_window(
-                scope,
-                popup_id,
-                opener,
-                opener_child_handle,
-                href,
-                creator_base_url.clone(),
-                creator_policy_container.clone(),
-            )
-        {
-            return Some(OpenedLightweightPopup {
-                window,
-                popup_id,
-                created_new_browsing_context: false,
-                pending_auxiliary_page: None,
-                captured_session_storage_store: None,
-                captured_initial_empty_document_storage_key: None,
-            });
+        let creator_policy_container = creator_policy.into_policy_container();
+        if let Some(opened) = self.reopen_existing_lightweight_popup_window(
+            scope,
+            opener,
+            opener_child_handle,
+            target_name,
+            href,
+            creator_base_url.clone(),
+            creator_policy_container.clone(),
+        ) {
+            return Some(opened);
         }
         let pending_auxiliary_page = auxiliary_page_exposes_opener
             .and_then(|exposes_opener| self.reserve_pending_auxiliary_page(exposes_opener));
@@ -650,7 +648,6 @@ impl JsContextHost {
             && (stage_named_related_page
                 || trackable_lightweight_popup_window_name(target_name).is_none())
             && let Ok(requested_url) = Url::parse(href)
-            && requested_url.scheme() != "javascript"
         {
             return self.create_renderer_owned_initial_empty_window(
                 scope,
@@ -698,6 +695,57 @@ impl JsContextHost {
             captured_session_storage_store: None,
             captured_initial_empty_document_storage_key: None,
         })
+    }
+
+    /// Resolves and navigates an existing legacy named popup before new-context
+    /// admission. This compatibility lookup must remain outside the popup
+    /// blocker/activation-consumption transaction, matching the renderer-owned
+    /// related-Page resolver above it.
+    pub(crate) fn reopen_existing_lightweight_popup_window<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        opener: Option<v8::Local<'s, v8::Object>>,
+        opener_child_handle: Option<DomHandle>,
+        target_name: &str,
+        href: &str,
+        creator_base_url: Url,
+        creator_policy_container: DocumentPolicyContainer,
+    ) -> Option<OpenedLightweightPopup<'s>> {
+        let opener = opener?;
+        let name = trackable_lightweight_popup_window_name(target_name)?;
+        let popup_id = self.lightweight_popup_window_names.get(&name).copied()?;
+        if !self.lightweight_popup_is_open(popup_id) {
+            return None;
+        }
+        let window = self.reopen_lightweight_popup_window(
+            scope,
+            popup_id,
+            Some(opener),
+            opener_child_handle,
+            href,
+            creator_base_url,
+            creator_policy_container,
+        )?;
+        Some(OpenedLightweightPopup {
+            window,
+            popup_id,
+            created_new_browsing_context: false,
+            pending_auxiliary_page: None,
+            captured_session_storage_store: None,
+            captured_initial_empty_document_storage_key: None,
+        })
+    }
+
+    /// Selection-only compatibility lookup for a live legacy named popup.
+    ///
+    /// Direct form submission may have to select this browsing context before
+    /// a late policy check while leaving its current loader and Document
+    /// untouched. Callers that intend to navigate must continue through
+    /// `reopen_existing_lightweight_popup_window`.
+    pub(crate) fn live_lightweight_popup_id_for_name(&self, target_name: &str) -> Option<u64> {
+        let name = trackable_lightweight_popup_window_name(target_name)?;
+        let popup_id = self.lightweight_popup_window_names.get(&name).copied()?;
+        self.lightweight_popup_is_open(popup_id).then_some(popup_id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1614,13 +1662,6 @@ impl JsContextHost {
                 .pending_lightweight_popup_classic_script_loads
                 .is_empty()
     }
-
-    pub(crate) fn lightweight_popup_has_pending_document_load(&self, popup_id: u64) -> bool {
-        self.pending_lightweight_popup_document_loads
-            .values()
-            .any(|pending| pending.target.task().popup_id() == popup_id)
-    }
-
     pub(crate) fn lightweight_popup_is_open(&self, popup_id: u64) -> bool {
         self.lightweight_popup_record(popup_id)
             .is_some_and(LightweightPopupBrowsingContextRecord::is_open)
@@ -2106,7 +2147,6 @@ impl JsContextHost {
     fn retire_lightweight_popup_document_owner(&mut self, owner: LightweightPopupDocumentOwner) {
         let _ = self
             .retire_document_resource_loader(super::WindowDocumentOwner::LightweightPopup(owner));
-        self.finish_service_worker_clients_open_window_popup_with_null_for_owner(owner);
         self.retire_service_worker_window_document_owner(
             super::WindowDocumentOwner::LightweightPopup(owner),
         );
@@ -2214,7 +2254,6 @@ impl JsContextHost {
                 self.allocate_lightweight_popup_document_owner(popup_id)
             }
         };
-        self.finish_service_worker_clients_open_window_popup_with_null_for_owner(current_owner);
         self.cancel_lightweight_popup_document_loads(popup_id);
         self.cancel_lightweight_popup_classic_script_loads(popup_id);
         let record = self
@@ -2580,7 +2619,6 @@ impl JsContextHost {
                         pending.previous_url,
                     );
                 }
-                self.finish_service_worker_clients_open_window_popup(document_owner);
                 return PopupDocumentLoadApplication::Applied { body_activity };
             }
             Ok(PopupDocumentLoadOutcome::Loaded(loaded)) => {
@@ -2730,9 +2768,6 @@ impl JsContextHost {
                 }
             }
             Err(error) => {
-                self.finish_service_worker_clients_open_window_popup_with_null_for_owner(
-                    document_owner,
-                );
                 self.unregister_service_worker_popup_client(popup_id);
                 tracing::debug!(
                     popup_id,
@@ -2755,7 +2790,6 @@ impl JsContextHost {
             return PopupDocumentLoadApplication::Applied { body_activity };
         }
         self.queue_lightweight_popup_load_event(load_event_task);
-        self.finish_service_worker_clients_open_window_popup(document_owner);
         PopupDocumentLoadApplication::Applied { body_activity }
     }
 
@@ -3470,7 +3504,6 @@ impl JsContextHost {
                     }
                     if self.lightweight_popup_committed_navigation_task_is_current(task) {
                         self.queue_lightweight_popup_load_event(task);
-                        self.finish_service_worker_clients_open_window_popup(task.document_owner());
                     }
                 }
                 PopupClassicScriptLoadApplication::Applied {
@@ -4103,6 +4136,15 @@ impl JsContextHost {
         activation: RendererPendingPopupActivation,
         window_open_event: Option<crate::RendererPendingWindowOpenEvent>,
     ) {
+        if let (Some(event), Some(creation_user_gesture)) = (
+            window_open_event.as_ref(),
+            activation.creation_had_transient_user_activation(),
+        ) {
+            assert_eq!(
+                event.user_gesture, creation_user_gesture,
+                "Page.windowOpen must observe the frozen pre-consumption activation transaction"
+            );
+        }
         let mut items = Vec::with_capacity(1 + usize::from(window_open_event.is_some()));
         if let Some(event) = window_open_event {
             items.push(crate::runtime::RendererOutputItem::Observation(
@@ -4623,7 +4665,7 @@ pub(crate) fn javascript_url_csp_source(url: &Url) -> String {
     format!("javascript:{}", javascript_url_source(url))
 }
 
-fn javascript_url_source(url: &Url) -> String {
+pub(crate) fn javascript_url_source(url: &Url) -> String {
     let source = url
         .as_str()
         .strip_prefix("javascript:")

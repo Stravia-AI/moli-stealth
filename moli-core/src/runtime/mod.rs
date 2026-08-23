@@ -40,8 +40,9 @@ pub use moli_renderer_v8::{
     DetachedParserScriptFetchContinuation, RendererBrowserContextRuntime,
     RendererBrowserContextRuntimeOwner, RendererBrowserContextRuntimeOwnerAccess,
     RendererLifecycleDecider, RendererLifecycleDecision, RendererLifecycleSnapshot,
-    RendererPageReservationToken, RendererReservedServiceWorkerClient,
-    RendererServiceWorkerMainResourceFetch, RendererSharedWorkerRuntimeDiagnostics,
+    RendererPageReservationToken, RendererPopupBlockerPolicy, RendererReservedServiceWorkerClient,
+    RendererServiceWorkerClientsOpenWindowContinuation, RendererServiceWorkerMainResourceFetch,
+    RendererSharedWorkerRuntimeDiagnostics,
 };
 pub use navigation_engine::{
     BuiltDocumentPage, CommittedDocumentPageReplacement, CommittedDocumentResourceSource,

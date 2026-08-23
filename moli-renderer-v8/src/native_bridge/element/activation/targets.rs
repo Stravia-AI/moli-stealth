@@ -4,13 +4,14 @@ use crate::{
     context_bootstrap::{
         dispatch_cross_document_navigation_navigate_event_for_window,
         dispatch_cross_document_navigation_navigate_event_for_window_with_form_data,
+        runtime_window_dispatch_scope,
     },
     document_runtime::{DocumentPolicyContainer, DomHandle},
     native_bridge::context_host::{
         ChildBrowsingContextNavigationRequest, FormSubmissionChildNavigationTarget,
         OwnerDispatchScope, PendingFormSubmissionChildNavigation, WindowExecutionContextIdentity,
     },
-    util::{context_host_ptr_from_context_slot, v8str},
+    util::{context_host_ptr_from_context_slot, context_host_ptr_from_window_object, v8str},
 };
 
 use super::super::super::JsContextHost;
@@ -207,8 +208,7 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
     } else {
         source_host.current_registered_window_execution_context_identity(source_scope)
     }?;
-    let destination_is_javascript =
-        url::Url::parse(destination_url).is_ok_and(|url| url.scheme() == "javascript");
+    let destination_url = url::Url::parse(destination_url).ok()?;
     source_host.sync_child_browsing_context_subtree(scope, source_host.document_handle());
     let current_page_handles = source_host.child_browsing_context_handles_in_document_order();
     let top_level_targets = source_host.related_page_top_level_targets_for_navigation(scope);
@@ -220,13 +220,15 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
         OwnerDispatchScope::Top => {
             if let Some((window, target_context, _, name, _)) = source_top
                 && name == target_name
-                && (!destination_is_javascript
-                    || source_can_access_target_scope(
-                        source_host_ptr,
+                && source_host
+                    .can_navigate_browsing_context(
+                        scope,
                         source_identity,
-                        source_host_ptr,
+                        source_host,
                         OwnerDispatchScope::Top,
-                    ))
+                        &destination_url,
+                    )
+                    .is_ok()
             {
                 return Some(NamedBrowsingContextNavigationTarget::CurrentTopLevel {
                     window: *window,
@@ -242,7 +244,7 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                     handle,
                     target_name,
                     None,
-                    destination_is_javascript,
+                    &destination_url,
                 ) {
                     return Some(target);
                 }
@@ -262,20 +264,22 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                     handle,
                     target_name,
                     None,
-                    destination_is_javascript,
+                    &destination_url,
                 ) {
                     return Some(target);
                 }
             }
             if let Some((window, target_context, _, name, _)) = source_top
                 && name == target_name
-                && (!destination_is_javascript
-                    || source_can_access_target_scope(
-                        source_host_ptr,
+                && source_host
+                    .can_navigate_browsing_context(
+                        scope,
                         source_identity,
-                        source_host_ptr,
+                        source_host,
                         OwnerDispatchScope::Top,
-                    ))
+                        &destination_url,
+                    )
+                    .is_ok()
             {
                 return Some(NamedBrowsingContextNavigationTarget::CurrentTopLevel {
                     window: *window,
@@ -295,7 +299,7 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                     handle,
                     target_name,
                     None,
-                    destination_is_javascript,
+                    &destination_url,
                 ) {
                     return Some(target);
                 }
@@ -311,14 +315,17 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
         let Some(target_host_ptr) = context_host_ptr_from_context_slot(target_context) else {
             continue;
         };
+        let target_host = unsafe { &mut *target_host_ptr };
         if name == target_name
-            && (!destination_is_javascript
-                || source_can_access_target_scope(
-                    source_host_ptr,
+            && source_host
+                .can_navigate_browsing_context(
+                    scope,
                     source_identity,
-                    target_host_ptr,
+                    target_host,
                     OwnerDispatchScope::Top,
-                ))
+                    &destination_url,
+                )
+                .is_ok()
         {
             return Some(NamedBrowsingContextNavigationTarget::RelatedTopLevel {
                 window,
@@ -326,7 +333,6 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                 page,
             });
         }
-        let target_host = unsafe { &mut *target_host_ptr };
         target_host.sync_child_browsing_context_subtree(scope, target_host.document_handle());
         let handles = target_host.child_browsing_context_handles_in_document_order();
         for handle in handles {
@@ -338,7 +344,7 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                 handle,
                 target_name,
                 Some(page),
-                destination_is_javascript,
+                &destination_url,
             ) {
                 return Some(target);
             }
@@ -371,17 +377,19 @@ fn resolve_child_navigation_candidate<'s>(
     handle: DomHandle,
     target_name: &str,
     target_page: Option<crate::RendererResolvedPopupTarget>,
-    destination_is_javascript: bool,
+    destination_url: &url::Url,
 ) -> Option<NamedBrowsingContextNavigationTarget<'s>> {
     let target_host = unsafe { &*target_host_ptr };
     if !target_host.child_browsing_context_matches_name_for_navigation(handle, target_name)
-        || !source_can_navigate_child_target(
-            source_host_ptr,
-            source_identity,
-            target_host_ptr,
-            handle,
-            destination_is_javascript,
-        )
+        || unsafe { &*source_host_ptr }
+            .can_navigate_browsing_context(
+                scope,
+                source_identity,
+                target_host,
+                OwnerDispatchScope::Child(handle),
+                destination_url,
+            )
+            .is_err()
     {
         return None;
     }
@@ -411,49 +419,6 @@ fn resolve_child_navigation_candidate<'s>(
             page,
             browsing_context_id,
         }),
-    }
-}
-
-fn source_can_navigate_child_target(
-    source_host_ptr: *mut JsContextHost,
-    source_identity: WindowExecutionContextIdentity,
-    target_host_ptr: *mut JsContextHost,
-    handle: DomHandle,
-    destination_is_javascript: bool,
-) -> bool {
-    if source_host_ptr == target_host_ptr
-        && source_identity.dispatch_scope() == OwnerDispatchScope::Child(handle)
-    {
-        return true;
-    }
-    if destination_is_javascript {
-        return source_can_access_target_scope(
-            source_host_ptr,
-            source_identity,
-            target_host_ptr,
-            OwnerDispatchScope::Child(handle),
-        );
-    }
-
-    let target_host = unsafe { &*target_host_ptr };
-    let mut target_scope = OwnerDispatchScope::Child(handle);
-    loop {
-        if source_can_access_target_scope(
-            source_host_ptr,
-            source_identity,
-            target_host_ptr,
-            target_scope,
-        ) {
-            return true;
-        }
-        target_scope = match target_scope {
-            OwnerDispatchScope::Child(child) => target_host
-                .child_browsing_context_parent_handle(child)
-                .map(OwnerDispatchScope::Child)
-                .unwrap_or(OwnerDispatchScope::Top),
-            OwnerDispatchScope::Top => return false,
-            OwnerDispatchScope::LightweightPopup(_) => return false,
-        };
     }
 }
 
@@ -517,6 +482,76 @@ fn queue_top_level_location_navigation(
     true
 }
 
+fn is_javascript_navigation_request(request: &RendererTopLevelNavigationRequest) -> bool {
+    url::Url::parse(request.url()).is_ok_and(|url| url.scheme() == "javascript")
+}
+
+fn queue_renderer_owned_top_level_javascript_url_navigation_for_host(
+    target_host_ptr: *mut JsContextHost,
+    request: RendererTopLevelNavigationRequest,
+) -> bool {
+    if !is_javascript_navigation_request(&request) {
+        return false;
+    }
+    let target_host = unsafe { &mut *target_host_ptr };
+    if target_host.root_document_lifecycle_identity().is_none() {
+        return false;
+    }
+    target_host.record_cross_page_renderer_top_level_navigation_request(request, None)
+}
+
+fn cancel_pending_renderer_owned_javascript_url_navigation_for_host(
+    target_host_ptr: *mut JsContextHost,
+) {
+    let target_host = unsafe { &mut *target_host_ptr };
+    if target_host.pending_location_navigation_scheme_is("javascript") {
+        target_host.clear_pending_location_navigation();
+    }
+}
+
+fn queue_renderer_owned_top_level_javascript_url_navigation_in_context(
+    target_context: v8::Local<'_, v8::Context>,
+    request: RendererTopLevelNavigationRequest,
+) -> bool {
+    context_host_ptr_from_context_slot(target_context).is_some_and(|target_host_ptr| {
+        queue_renderer_owned_top_level_javascript_url_navigation_for_host(target_host_ptr, request)
+    })
+}
+
+fn cancel_pending_renderer_owned_javascript_url_navigation_in_context(
+    target_context: v8::Local<'_, v8::Context>,
+) {
+    if let Some(target_host_ptr) = context_host_ptr_from_context_slot(target_context) {
+        cancel_pending_renderer_owned_javascript_url_navigation_for_host(target_host_ptr);
+    }
+}
+
+/// Sends a JavaScript URL directly to the real Page that owns `target_window`.
+///
+/// Target selection/creation is synchronous, but the Page owner follows this
+/// pending slot on its next networking-task turn. Protocol therefore receives
+/// a creation/reuse observation without a second destination navigation.
+pub(crate) fn queue_renderer_owned_top_level_javascript_url_navigation_for_window(
+    scope: &mut v8::PinScope<'_, '_>,
+    target_window: v8::Local<'_, v8::Object>,
+    request: RendererTopLevelNavigationRequest,
+) -> bool {
+    context_host_ptr_from_window_object(scope, target_window).is_some_and(|target_host_ptr| {
+        queue_renderer_owned_top_level_javascript_url_navigation_for_host(target_host_ptr, request)
+    })
+}
+
+/// Cancels a JavaScript URL task when a later browser-owned navigation wins
+/// the same real Page target before that task receives an owner turn.
+pub(crate) fn cancel_pending_renderer_owned_javascript_url_navigation_for_window(
+    scope: &mut v8::PinScope<'_, '_>,
+    target_window: v8::Local<'_, v8::Object>,
+) {
+    if let Some(target_host_ptr) = context_host_ptr_from_window_object(scope, target_window) {
+        cancel_pending_renderer_owned_javascript_url_navigation_for_host(target_host_ptr);
+    }
+}
+
 fn queue_popup_target_navigation(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
@@ -531,10 +566,18 @@ fn queue_popup_target_navigation(
     else {
         return false;
     };
+    let creator_policy_container = runtime
+        .document_policy_container_snapshot_for_owner(dispatch_scope)
+        .unwrap_or_default();
+    let admission = match runtime.admit_new_auxiliary_browsing_context(creator_policy_container) {
+        Ok(admission) => admission,
+        Err(_) => return true,
+    };
+    let creation_user_activation = admission.user_activation();
     let window_open_event = RendererPendingWindowOpenEvent::browser_window(
         resolved_url,
         target_name,
-        runtime.protocol_user_gesture_activation(),
+        creation_user_activation.user_gesture(),
     );
     runtime.record_pending_popup_activation(
         RendererPendingPopupActivation::window(
@@ -546,7 +589,8 @@ fn queue_popup_target_navigation(
             target_name.to_owned(),
             RendererPopupDisposition::Foreground,
         )
-        .with_initial_auxiliary_state(None, None),
+        .with_initial_auxiliary_state(None, None)
+        .with_creation_user_activation(creation_user_activation),
         Some(window_open_event),
     );
     true
@@ -688,6 +732,7 @@ fn navigate_hyperlink_popup_target<'s>(
         disposition,
         resolved_related_target,
         None,
+        ElementPopupDestinationPolicy::Always,
     )
 }
 
@@ -715,6 +760,7 @@ pub(in crate::native_bridge) fn navigate_form_auxiliary_target<'s>(
             form_data_entries,
             user_initiated,
         }),
+        ElementPopupDestinationPolicy::SourceFormPolicies,
     )
 }
 
@@ -756,6 +802,44 @@ pub(in crate::native_bridge) fn navigate_form_named_target<'s>(
         form_data_entries,
         user_initiated,
     };
+    let destination_navigation_allowed =
+        unsafe { &*runtime_ptr }.document_allows_form_submission_for_node(form_handle);
+    if !destination_navigation_allowed {
+        return match resolved_target {
+            Some(_) => true,
+            None => navigate_element_popup_target(
+                scope,
+                runtime_ptr,
+                form_handle,
+                target_name,
+                navigation_request,
+                disposition,
+                None,
+                None,
+                ElementPopupDestinationPolicy::SourceFormPolicies,
+            ),
+        };
+    }
+    if resolved_target.is_some()
+        && !source_node_javascript_url_allowed_by_csp(
+            scope,
+            runtime_ptr,
+            form_handle,
+            navigation_request.url(),
+        )
+    {
+        return true;
+    }
+    if resolved_target.is_some()
+        && !source_node_form_action_allowed_by_csp_with_runtime(
+            scope,
+            unsafe { &mut *runtime_ptr },
+            form_handle,
+            navigation_request.url(),
+        )
+    {
+        return true;
+    }
     if cancel_all_previous_child_targets {
         let pending = unsafe { &mut *runtime_ptr }
             .take_pending_form_submission_child_navigations_for_form(form_handle);
@@ -802,6 +886,7 @@ pub(in crate::native_bridge) fn navigate_form_named_target<'s>(
             disposition,
             Some((window, target_context, page)),
             Some(event),
+            ElementPopupDestinationPolicy::Always,
         ),
         Some(NamedBrowsingContextNavigationTarget::RelatedPageChild {
             owner_host_ptr,
@@ -846,6 +931,7 @@ pub(in crate::native_bridge) fn navigate_form_named_target<'s>(
             disposition,
             None,
             Some(event),
+            ElementPopupDestinationPolicy::SourceFormPolicies,
         ),
     }
 }
@@ -1085,6 +1171,70 @@ struct FormPopupNavigationEvent<'s, 'entries> {
     user_initiated: bool,
 }
 
+#[derive(Clone, Copy)]
+enum ElementPopupDestinationPolicy {
+    Always,
+    SourceFormPolicies,
+}
+
+impl ElementPopupDestinationPolicy {
+    fn allows_form_submission(self, runtime: &JsContextHost, source_handle: DomHandle) -> bool {
+        match self {
+            Self::Always => true,
+            Self::SourceFormPolicies => {
+                runtime.document_allows_form_submission_for_node(source_handle)
+            }
+        }
+    }
+
+    fn allows_form_action(
+        self,
+        scope: &mut v8::PinScope<'_, '_>,
+        runtime: &mut JsContextHost,
+        source_handle: DomHandle,
+        resolved_url: &str,
+    ) -> bool {
+        match self {
+            Self::Always => true,
+            Self::SourceFormPolicies => source_node_form_action_allowed_by_csp_with_runtime(
+                scope,
+                runtime,
+                source_handle,
+                resolved_url,
+            ),
+        }
+    }
+
+    fn allows_navigation(
+        self,
+        scope: &mut v8::PinScope<'_, '_>,
+        runtime: &mut JsContextHost,
+        source_handle: DomHandle,
+        resolved_url: &str,
+    ) -> bool {
+        self.allows_form_submission(runtime, source_handle)
+            && self.allows_form_action(scope, runtime, source_handle, resolved_url)
+    }
+
+    fn requires_initial_empty_creation(self) -> bool {
+        matches!(self, Self::SourceFormPolicies)
+    }
+}
+
+fn popup_activation_with_destination_policy(
+    activation: RendererPendingPopupActivation,
+    navigation_request: RendererTopLevelNavigationRequest,
+    destination_navigation_allowed: bool,
+) -> RendererPendingPopupActivation {
+    if !destination_navigation_allowed {
+        return activation.without_destination_navigation();
+    }
+    if is_javascript_navigation_request(&navigation_request) {
+        return activation.without_destination_navigation_with_requested_url_observation();
+    }
+    activation.with_navigation_request(navigation_request)
+}
+
 fn navigate_element_popup_target<'s, 'entries>(
     scope: &mut v8::PinScope<'s, '_>,
     runtime_ptr: *mut JsContextHost,
@@ -1098,6 +1248,7 @@ fn navigate_element_popup_target<'s, 'entries>(
         crate::RendererResolvedPopupTarget,
     )>,
     form_navigation_event: Option<FormPopupNavigationEvent<'s, 'entries>>,
+    destination_policy: ElementPopupDestinationPolicy,
 ) -> bool {
     let relations = element_popup_relations(unsafe { &*runtime_ptr }, source_handle, target_name);
     let Some(dispatch_scope) =
@@ -1122,12 +1273,31 @@ fn navigate_element_popup_target<'s, 'entries>(
     let resolved_url = navigation_request.url();
     let Some(mut creator) = element_popup_creator(scope, runtime_ptr, source_handle) else {
         let runtime = unsafe { &mut *runtime_ptr };
+        if !source_javascript_url_allows_new_context_by_policy(
+            scope,
+            runtime,
+            dispatch_scope,
+            resolved_url,
+        ) {
+            return true;
+        }
+        let creator_policy_container = runtime
+            .document_policy_container_snapshot_for_owner(dispatch_scope)
+            .unwrap_or_default();
+        let admission = match runtime.admit_new_auxiliary_browsing_context(creator_policy_container)
+        {
+            Ok(admission) => admission,
+            Err(_) => return true,
+        };
+        let creation_user_activation = admission.user_activation();
+        let destination_navigation_allowed =
+            destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
         let window_open_event = RendererPendingWindowOpenEvent::browser_window(
             resolved_url,
             target_name,
-            runtime.protocol_user_gesture_activation(),
+            creation_user_activation.user_gesture(),
         );
-        runtime.record_pending_popup_activation(
+        let activation = popup_activation_with_destination_policy(
             RendererPendingPopupActivation::window(
                 root_document,
                 source,
@@ -1136,11 +1306,13 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 target_name.to_owned(),
                 disposition,
-            )
-            .with_navigation_request(navigation_request)
-            .with_initial_auxiliary_state(None, None),
-            Some(window_open_event),
-        );
+            ),
+            navigation_request,
+            destination_navigation_allowed,
+        )
+        .with_initial_auxiliary_state(None, None)
+        .with_creation_user_activation(creation_user_activation);
+        runtime.record_pending_popup_activation(activation, Some(window_open_event));
         return true;
     };
     let initial_document_referrer = if relations.suppress_referrer {
@@ -1187,21 +1359,24 @@ fn navigate_element_popup_target<'s, 'entries>(
     let ordinary_target_name = (SpecialBrowsingContextTarget::parse(target_name).is_none()
         && !target_name.is_empty())
     .then_some(target_name);
-    let resolved_related_target = (target_url
-        .as_ref()
-        .is_some_and(|url| url.scheme() != "javascript")
-        && ordinary_target_name.is_some())
-    .then(|| {
-        resolved_related_target.or_else(|| {
-            runtime.related_page_named_target_for_navigation(
-                scope,
-                ordinary_target_name.expect("ordinary target name was checked"),
-                None,
-            )
+    let resolved_related_target = ordinary_target_name
+        .is_some()
+        .then(|| {
+            resolved_related_target.or_else(|| {
+                runtime.related_page_named_target_for_navigation(
+                    scope,
+                    ordinary_target_name.expect("ordinary target name was checked"),
+                    None,
+                )
+            })
         })
-    })
-    .flatten();
+        .flatten();
     if let Some((target_window, target_context, resolved_target_page)) = resolved_related_target {
+        let destination_navigation_allowed =
+            destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
+        if !destination_navigation_allowed {
+            return true;
+        }
         if let Some(form_navigation_event) = form_navigation_event
             && !dispatch_related_page_form_navigation_event(
                 scope,
@@ -1213,7 +1388,20 @@ fn navigate_element_popup_target<'s, 'entries>(
         {
             return true;
         }
-        runtime.record_pending_popup_activation(
+        if is_javascript_navigation_request(&navigation_request)
+            && !queue_renderer_owned_top_level_javascript_url_navigation_in_context(
+                target_context,
+                navigation_request.clone(),
+            )
+        {
+            tracing::warn!(
+                ?resolved_target_page,
+                "selected related javascript URL target lost its renderer Page owner"
+            );
+        } else if !is_javascript_navigation_request(&navigation_request) {
+            cancel_pending_renderer_owned_javascript_url_navigation_in_context(target_context);
+        }
+        let activation = popup_activation_with_destination_policy(
             RendererPendingPopupActivation::window(
                 root_document,
                 source,
@@ -1222,23 +1410,95 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 target_name.to_owned(),
                 disposition,
-            )
-            .with_navigation_request(navigation_request.clone())
-            .with_navigation_referrers(
-                navigation_referrer,
-                initial_document_referrer,
-                document_referrer,
-            )
-            .with_resolved_target_page(resolved_target_page),
-            None,
-        );
+            ),
+            navigation_request.clone(),
+            true,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
+        )
+        .with_resolved_target_page(resolved_target_page);
+        runtime.record_pending_popup_activation(activation, None);
         return true;
     }
+    let has_live_lightweight_target = opener.is_some()
+        && runtime
+            .live_lightweight_popup_id_for_name(target_name)
+            .is_some();
+    if has_live_lightweight_target {
+        // The legacy compatibility target is still an existing browsing
+        // context. Preserve Blink's late ordering: select it first, then run
+        // allow-forms, source JavaScript-URL CSP, and form-action before any
+        // loader/parser mutation. A denial must not fall through to creation.
+        if !destination_policy.allows_form_submission(runtime, source_handle)
+            || !source_javascript_url_allowed_by_csp_for_owner(
+                scope,
+                runtime,
+                dispatch_scope,
+                resolved_url,
+            )
+            || !destination_policy.allows_form_action(scope, runtime, source_handle, resolved_url)
+        {
+            return true;
+        }
+        let Some(opened_popup) = runtime.reopen_existing_lightweight_popup_window(
+            scope,
+            opener,
+            None,
+            target_name,
+            resolved_url,
+            creator.base_url.clone(),
+            creator.policy_container.clone(),
+        ) else {
+            // Selection succeeded, so a stale compatibility endpoint is a
+            // consumed existing-target attempt rather than a creation miss.
+            return true;
+        };
+        let popup_id = opened_popup.popup_id;
+        let session_storage_store = runtime.lightweight_popup_session_storage_store(popup_id);
+        let initial_empty_document_storage_key =
+            runtime.lightweight_popup_initial_empty_document_storage_key(popup_id);
+        let activation = popup_activation_with_destination_policy(
+            RendererPendingPopupActivation::window(
+                root_document,
+                source,
+                !relations.suppress_opener,
+                Some(popup_id),
+                resolved_url.to_owned(),
+                target_name.to_owned(),
+                disposition,
+            ),
+            navigation_request,
+            true,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
+        )
+        .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key);
+        runtime.record_pending_popup_activation(activation, None);
+        return true;
+    }
+    if !source_javascript_url_allows_new_context_by_policy(
+        scope,
+        runtime,
+        dispatch_scope,
+        resolved_url,
+    ) {
+        return true;
+    }
+    let admission = match runtime.admit_new_auxiliary_browsing_context(creator.policy_container) {
+        Ok(admission) => admission,
+        Err(_) => return true,
+    };
+    let creation_user_activation = admission.user_activation();
+    let auxiliary_browsing_context_policy = admission.renderer_auxiliary_browsing_context_policy();
+    let creator_policy = admission.into_creation_policy();
     if relations.suppress_opener
         && (target_name.eq_ignore_ascii_case("_blank") || ordinary_target_name.is_some())
-        && target_url
-            .as_ref()
-            .is_some_and(|url| url.scheme() != "javascript")
         && let Some(pending_auxiliary_page) = runtime.reserve_pending_auxiliary_page(false)
     {
         let new_target_disposition = if ordinary_target_name.is_some() {
@@ -1246,8 +1506,9 @@ fn navigate_element_popup_target<'s, 'entries>(
         } else {
             RendererPopupNewTargetDisposition::FreshUnnamed
         };
-        let user_gesture = runtime.protocol_user_gesture_activation();
-        runtime.record_pending_popup_activation(
+        let destination_navigation_allowed =
+            destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
+        let activation = popup_activation_with_destination_policy(
             RendererPendingPopupActivation::window(
                 root_document,
                 source,
@@ -1256,41 +1517,54 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 target_name.to_owned(),
                 disposition,
-            )
-            .with_navigation_request(navigation_request.clone())
-            .with_navigation_referrers(
-                navigation_referrer,
-                initial_document_referrer,
-                document_referrer,
-            )
-            .with_pending_auxiliary_page(Some(pending_auxiliary_page))
-            .with_new_target_disposition(new_target_disposition),
+            ),
+            navigation_request.clone(),
+            destination_navigation_allowed,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
+        )
+        .with_pending_auxiliary_page(Some(pending_auxiliary_page))
+        .with_auxiliary_browsing_context_policy(auxiliary_browsing_context_policy)
+        .with_new_target_disposition(new_target_disposition)
+        .with_creation_user_activation(creation_user_activation);
+        runtime.record_pending_popup_activation(
+            activation,
             Some(RendererPendingWindowOpenEvent::browser_window(
                 resolved_url,
                 target_name,
-                user_gesture,
+                creation_user_activation.user_gesture(),
             )),
         );
         return true;
     }
+    let synchronous_creation_url = if destination_policy.requires_initial_empty_creation() {
+        "about:blank"
+    } else {
+        resolved_url
+    };
     let Some(opened_popup) = runtime.open_lightweight_popup_window(
         scope,
         runtime_ptr,
         opener,
         None,
         target_name,
-        resolved_url,
+        synchronous_creation_url,
         Some(!relations.suppress_opener),
         true,
         creator.base_url,
-        creator.policy_container,
+        creator_policy,
     ) else {
+        let destination_navigation_allowed =
+            destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
         let window_open_event = RendererPendingWindowOpenEvent::browser_window(
             resolved_url,
             target_name,
-            runtime.protocol_user_gesture_activation(),
+            creation_user_activation.user_gesture(),
         );
-        runtime.record_pending_popup_activation(
+        let activation = popup_activation_with_destination_policy(
             RendererPendingPopupActivation::window(
                 root_document,
                 source,
@@ -1299,16 +1573,18 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 target_name.to_owned(),
                 disposition,
-            )
-            .with_navigation_request(navigation_request.clone())
-            .with_navigation_referrers(
-                navigation_referrer,
-                initial_document_referrer,
-                document_referrer,
-            )
-            .with_initial_auxiliary_state(None, None),
-            Some(window_open_event),
-        );
+            ),
+            navigation_request.clone(),
+            destination_navigation_allowed,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
+        )
+        .with_initial_auxiliary_state(None, None)
+        .with_creation_user_activation(creation_user_activation);
+        runtime.record_pending_popup_activation(activation, Some(window_open_event));
         return true;
     };
     let popup_id = opened_popup.popup_id;
@@ -1325,20 +1601,42 @@ fn navigate_element_popup_target<'s, 'entries>(
         && pending_auxiliary_page.is_some()
         && !relations.suppress_opener)
         .then_some(RendererPopupNewTargetDisposition::Related);
-    let user_gesture = runtime.protocol_user_gesture_activation();
     let window_open_event = opened_popup.created_new_browsing_context.then(|| {
-        RendererPendingWindowOpenEvent::browser_window(resolved_url, target_name, user_gesture)
+        RendererPendingWindowOpenEvent::browser_window(
+            resolved_url,
+            target_name,
+            creation_user_activation.user_gesture(),
+        )
     });
-    let activation = RendererPendingPopupActivation::window(
-        root_document,
-        source,
-        !relations.suppress_opener,
-        Some(popup_id),
-        resolved_url.to_owned(),
-        target_name.to_owned(),
-        disposition,
+    let destination_navigation_allowed =
+        destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
+    if destination_navigation_allowed
+        && pending_auxiliary_page.is_some()
+        && is_javascript_navigation_request(&navigation_request)
+        && !queue_renderer_owned_top_level_javascript_url_navigation_for_window(
+            scope,
+            opened_popup.window,
+            navigation_request.clone(),
+        )
+    {
+        tracing::warn!(
+            popup_id,
+            "new related javascript URL target lost its staged renderer Page owner"
+        );
+    }
+    let activation = popup_activation_with_destination_policy(
+        RendererPendingPopupActivation::window(
+            root_document,
+            source,
+            !relations.suppress_opener,
+            Some(popup_id),
+            resolved_url.to_owned(),
+            target_name.to_owned(),
+            disposition,
+        ),
+        navigation_request,
+        destination_navigation_allowed,
     )
-    .with_navigation_request(navigation_request)
     .with_navigation_referrers(
         navigation_referrer,
         initial_document_referrer,
@@ -1348,6 +1646,11 @@ fn navigate_element_popup_target<'s, 'entries>(
     .with_pending_auxiliary_page(pending_auxiliary_page);
     let activation = if let Some(disposition) = new_target_disposition {
         activation.with_new_target_disposition(disposition)
+    } else {
+        activation
+    };
+    let activation = if opened_popup.created_new_browsing_context {
+        activation.with_creation_user_activation(creation_user_activation)
     } else {
         activation
     };
@@ -1384,7 +1687,7 @@ fn dispatch_related_page_form_navigation_event<'s>(
     )
 }
 
-fn hyperlink_javascript_url_allowed_by_csp(
+pub(in crate::native_bridge) fn source_node_javascript_url_allowed_by_csp(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
     source_handle: DomHandle,
@@ -1400,8 +1703,86 @@ fn hyperlink_javascript_url_allowed_by_csp(
     else {
         return false;
     };
+    source_javascript_url_allowed_by_csp_for_owner(
+        scope,
+        unsafe { &mut *runtime_ptr },
+        owner,
+        resolved_url,
+    )
+}
+
+pub(in crate::native_bridge) fn source_node_form_action_allowed_by_csp(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    source_handle: DomHandle,
+    resolved_url: &str,
+) -> bool {
+    source_node_form_action_allowed_by_csp_with_runtime(
+        scope,
+        unsafe { &mut *runtime_ptr },
+        source_handle,
+        resolved_url,
+    )
+}
+
+fn source_node_form_action_allowed_by_csp_with_runtime(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime: &mut JsContextHost,
+    source_handle: DomHandle,
+    resolved_url: &str,
+) -> bool {
+    let Ok(request_url) = url::Url::parse(resolved_url) else {
+        return true;
+    };
+    let Some(owner) = runtime.owner_dispatch_scope_for_node(source_handle) else {
+        return false;
+    };
+    runtime.allows_form_action_by_csp(scope, owner, &request_url)
+}
+
+pub(crate) fn source_javascript_url_allowed_by_csp_for_owner(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime: &mut JsContextHost,
+    owner: OwnerDispatchScope,
+    resolved_url: &str,
+) -> bool {
+    let Ok(url) = url::Url::parse(resolved_url) else {
+        return true;
+    };
+    if url.scheme() != "javascript" {
+        return true;
+    }
     let source = crate::native_bridge::javascript_url_csp_source(&url);
-    unsafe { &mut *runtime_ptr }.allows_inline_javascript_navigation_by_csp(scope, owner, &source)
+    runtime.allows_inline_javascript_navigation_by_csp(scope, owner, &source)
+}
+
+/// Blink only runs the source realm's full JavaScript-URL pre-navigation
+/// check when target lookup missed and the navigation is about to create a new
+/// auxiliary browsing context. Existing targets run source CSP after
+/// selection, then defer Trusted Types entirely to their own execution realm.
+pub(crate) fn source_javascript_url_allows_new_context_by_policy(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime: &mut JsContextHost,
+    owner: OwnerDispatchScope,
+    resolved_url: &str,
+) -> bool {
+    if !source_javascript_url_allowed_by_csp_for_owner(scope, runtime, owner, resolved_url) {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(resolved_url) else {
+        return true;
+    };
+    if url.scheme() != "javascript" {
+        return true;
+    }
+    let source = crate::native_bridge::javascript_url_source(&url);
+    let requirements = runtime.trusted_types_for_script_requirements(scope);
+    crate::context_bootstrap::trusted_script_string_for_javascript_navigation(
+        scope,
+        &source,
+        requirements,
+    )
+    .is_some_and(|source| !source.is_empty())
 }
 
 fn browsing_context_window_for_dispatch_scope<'s>(
@@ -1443,6 +1824,63 @@ fn browsing_context_dispatch_scope_for_node(
         .map(crate::native_bridge::OwnerDispatchScope::Child)
 }
 
+pub(in crate::native_bridge) fn source_node_can_navigate_top_level(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    source_handle: DomHandle,
+    destination_url: &url::Url,
+) -> bool {
+    let Some(source_scope) =
+        browsing_context_dispatch_scope_for_node(scope, runtime_ptr, source_handle)
+    else {
+        return false;
+    };
+    source_dispatch_scope_can_navigate_top_level(scope, runtime_ptr, source_scope, destination_url)
+}
+
+fn source_dispatch_scope_can_navigate_top_level(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    source_scope: OwnerDispatchScope,
+    destination_url: &url::Url,
+) -> bool {
+    source_dispatch_scope_can_navigate_target(
+        scope,
+        runtime_ptr,
+        source_scope,
+        runtime_ptr,
+        OwnerDispatchScope::Top,
+        destination_url,
+    )
+}
+
+fn source_dispatch_scope_can_navigate_target(
+    scope: &mut v8::PinScope<'_, '_>,
+    source_host_ptr: *mut JsContextHost,
+    source_scope: OwnerDispatchScope,
+    target_host_ptr: *mut JsContextHost,
+    target_scope: OwnerDispatchScope,
+    destination_url: &url::Url,
+) -> bool {
+    let source_host = unsafe { &*source_host_ptr };
+    let source_identity = if source_host.entered_owner_dispatch_scope(scope) == source_scope {
+        source_host.current_runtime_window_execution_context_identity(scope)
+    } else {
+        source_host.current_registered_window_execution_context_identity(source_scope)
+    };
+    source_identity.is_some_and(|source_identity| {
+        source_host
+            .can_navigate_browsing_context(
+                scope,
+                source_identity,
+                unsafe { &*target_host_ptr },
+                target_scope,
+                destination_url,
+            )
+            .is_ok()
+    })
+}
+
 fn navigate_special_target_from_window<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     runtime_ptr: *mut JsContextHost,
@@ -1451,8 +1889,53 @@ fn navigate_special_target_from_window<'s>(
     resolved_url: &str,
     source: Option<crate::RendererTopLevelNavigationSource>,
 ) -> Option<v8::Local<'s, v8::Object>> {
+    let target_window = special_target_window_from_source_window(scope, source_window, target)?;
     let global = scope.get_current_context().global(scope);
-    let target_window = match target {
+    let destination_url = url::Url::parse(resolved_url).ok()?;
+    let source_scope = unsafe { &*runtime_ptr }.entered_owner_dispatch_scope(scope);
+    let target_host_ptr =
+        crate::native_bridge::cross_origin_window_target_host_ptr(scope, target_window)
+            .or_else(|| context_host_ptr_from_window_object(scope, target_window));
+    let target_scope =
+        if crate::native_bridge::is_cross_origin_related_top_window_proxy(scope, target_window) {
+            Some(OwnerDispatchScope::Top)
+        } else {
+            runtime_window_dispatch_scope(scope, target_window)
+        };
+    let target_can_navigate =
+        target_host_ptr
+            .zip(target_scope)
+            .is_some_and(|(target_host_ptr, target_scope)| {
+                source_dispatch_scope_can_navigate_target(
+                    scope,
+                    runtime_ptr,
+                    source_scope,
+                    target_host_ptr,
+                    target_scope,
+                    &destination_url,
+                )
+            });
+    if !target_can_navigate {
+        // Target selection succeeded even though CanNavigate refused the
+        // navigation (or one endpoint went stale). Element/window.open callers
+        // silently keep that existing target instead of surfacing Location's
+        // synchronous sandbox exception or falling through to popup creation.
+        return Some(target_window);
+    }
+    let navigated = if target_window.strict_equals(global.into()) {
+        queue_top_level_location_navigation(scope, runtime_ptr, resolved_url, source)
+    } else {
+        navigate_target_window_location(scope, runtime_ptr, target_window, resolved_url, source)
+    };
+    if navigated { Some(target_window) } else { None }
+}
+
+fn special_target_window_from_source_window<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    source_window: v8::Local<'s, v8::Object>,
+    target: Option<SpecialBrowsingContextTarget>,
+) -> Option<v8::Local<'s, v8::Object>> {
+    match target {
         None | Some(SpecialBrowsingContextTarget::Current) => source_window,
         Some(SpecialBrowsingContextTarget::Top) => source_window
             .get(scope, v8str(scope, "top").into())
@@ -1461,13 +1944,20 @@ fn navigate_special_target_from_window<'s>(
             .get(scope, v8str(scope, "parent").into())
             .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())?,
         Some(SpecialBrowsingContextTarget::Blank) => return None,
-    };
-    let navigated = if target_window.strict_equals(global.into()) {
-        queue_top_level_location_navigation(scope, runtime_ptr, resolved_url, source)
-    } else {
-        navigate_target_window_location(scope, runtime_ptr, target_window, resolved_url, source)
-    };
-    if navigated { Some(target_window) } else { None }
+    }
+    .into()
+}
+
+pub(crate) fn existing_browsing_context_target_window<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    runtime_ptr: *mut JsContextHost,
+    target: SpecialBrowsingContextTarget,
+) -> Option<v8::Local<'s, v8::Object>> {
+    assert_ne!(target, SpecialBrowsingContextTarget::Blank);
+    let dispatch_scope = unsafe { &*runtime_ptr }.entered_owner_dispatch_scope(scope);
+    let source_window =
+        browsing_context_window_for_dispatch_scope(scope, runtime_ptr, dispatch_scope)?;
+    special_target_window_from_source_window(scope, source_window, Some(target))
 }
 
 pub(crate) fn navigate_existing_browsing_context_target<'s>(
@@ -1623,9 +2113,6 @@ pub(in crate::native_bridge) fn navigate_hyperlink_target_browsing_context<'s>(
     source_element: Option<v8::Local<'s, v8::Object>>,
     popup_disposition: RendererPopupDisposition,
 ) -> bool {
-    if !hyperlink_javascript_url_allowed_by_csp(scope, runtime_ptr, source_handle, resolved_url) {
-        return true;
-    }
     let special_target = target_name.and_then(SpecialBrowsingContextTarget::parse);
     if special_target == Some(SpecialBrowsingContextTarget::Blank) {
         return navigate_hyperlink_popup_target(
@@ -1653,6 +2140,16 @@ pub(in crate::native_bridge) fn navigate_hyperlink_target_browsing_context<'s>(
                     )
                 },
             );
+        if resolved_target.is_some()
+            && !source_node_javascript_url_allowed_by_csp(
+                scope,
+                runtime_ptr,
+                source_handle,
+                resolved_url,
+            )
+        {
+            return true;
+        }
         if let Some(target) = resolved_target.as_ref()
             && target.related_top_level_page().is_none()
         {
@@ -1701,6 +2198,9 @@ pub(in crate::native_bridge) fn navigate_hyperlink_target_browsing_context<'s>(
     );
     let navigation_source = unsafe { &*runtime_ptr }
         .renderer_top_level_navigation_source_for_node(source_handle, relations.suppress_referrer);
+    if !source_node_javascript_url_allowed_by_csp(scope, runtime_ptr, source_handle, resolved_url) {
+        return true;
+    }
     navigate_special_target_from_window(
         scope,
         runtime_ptr,

@@ -12,6 +12,7 @@ use crate::{
     conn::{
         CapturedBody, ConnectionNetworkRequestIdAllocator, PopupTargetNavigationAuthorityState,
         PopupTargetNavigationClaimIdentity, PopupTargetNavigationOwnerAction,
+        TargetPageResidenceIdentity,
     },
     domains::{
         log_output_state::{TargetLogOutputQueueState, TargetNetworkLogEntry},
@@ -169,6 +170,19 @@ impl TargetRuntimeSlot {
         true
     }
 
+    pub(crate) fn stage_popup_target_without_destination_navigation(
+        &mut self,
+        page_owner: TargetPageResidenceIdentity,
+    ) -> bool {
+        if self.popup_target_navigation_authority.is_some() {
+            return false;
+        }
+        self.popup_target_navigation_authority = Some(
+            PopupTargetNavigationAuthorityState::NoDestination(page_owner),
+        );
+        true
+    }
+
     pub(crate) fn take_held_initial_popup_target_navigation_owner_action(
         &mut self,
     ) -> Option<PopupTargetNavigationOwnerAction> {
@@ -206,7 +220,7 @@ impl TargetRuntimeSlot {
     pub(crate) fn has_popup_target_navigation_authority(&self) -> bool {
         self.popup_target_navigation_authority
             .as_ref()
-            .map(PopupTargetNavigationAuthorityState::claim_identity)
+            .map(PopupTargetNavigationAuthorityState::page_owner)
             .is_some()
     }
 
@@ -238,8 +252,15 @@ impl TargetRuntimeSlot {
     pub(crate) fn stage_pending_auxiliary_page(
         &mut self,
         pending: RendererPendingAuxiliaryPage,
+        policy: Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy>,
     ) -> bool {
-        self.page_slot.stage_pending_auxiliary_page(pending)
+        self.page_slot.stage_pending_auxiliary_page(pending, policy)
+    }
+
+    pub(crate) fn auxiliary_browsing_context_policy(
+        &self,
+    ) -> Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy> {
+        self.page_slot.auxiliary_browsing_context_policy()
     }
 
     pub(crate) fn take_initial_document_page_reservation(

@@ -41,6 +41,7 @@ impl BrowserContext {
             creator,
             None,
             None,
+            None,
             session_storage_namespace,
         );
     }
@@ -53,6 +54,9 @@ impl BrowserContext {
         initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
+        auxiliary_browsing_context_policy: Option<
+            moli_core::page::RendererAuxiliaryBrowsingContextPolicy,
+        >,
         session_storage_store: Option<SharedWebStorageStore>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
     ) {
@@ -66,6 +70,7 @@ impl BrowserContext {
             initial_empty_document_url,
             creator,
             pending_auxiliary_page,
+            auxiliary_browsing_context_policy,
             initial_empty_document_storage_key,
             session_storage_namespace,
         );
@@ -92,6 +97,9 @@ impl BrowserContext {
         initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
+        auxiliary_browsing_context_policy: Option<
+            moli_core::page::RendererAuxiliaryBrowsingContextPolicy,
+        >,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
         session_storage_namespace: Option<TargetSessionStorageNamespace>,
     ) {
@@ -107,10 +115,16 @@ impl BrowserContext {
         let mut target = BackgroundTarget::with_identity(target_id, session_id, target_identity);
         if let Some(pending_auxiliary_page) = pending_auxiliary_page {
             assert!(
-                target
-                    .runtime_slot
-                    .stage_pending_auxiliary_page(pending_auxiliary_page),
+                target.runtime_slot.stage_pending_auxiliary_page(
+                    pending_auxiliary_page,
+                    auxiliary_browsing_context_policy,
+                ),
                 "new popup target must accept its renderer-owned auxiliary Page reservation"
+            );
+        } else {
+            assert!(
+                auxiliary_browsing_context_policy.is_none(),
+                "auxiliary frame policy cannot outlive a rejected Page reservation"
             );
         }
         if let Some(namespace) = session_storage_namespace {

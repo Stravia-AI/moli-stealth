@@ -8,6 +8,7 @@ use crate::{
         CHILD_BROWSING_CONTEXT_HANDLE_SLOT, LocationNavigationKind, WINDOW_OPENER_SLOT,
         dispatch_cross_document_navigation_navigate_event_for_window,
         navigate_top_level_window_location_from_cross_origin,
+        resolve_location_navigation_target_against_entered_base,
     },
     definitions::define_get_set_property,
     document_runtime::DomHandle,
@@ -2542,6 +2543,28 @@ impl CrossOriginWindowObserver {
             target_scope,
         )
     }
+
+    fn can_navigate(
+        self,
+        scope: &mut v8::PinScope<'_, '_>,
+        target_host_ptr: *mut JsContextHost,
+        target_scope: super::super::OwnerDispatchScope,
+        destination_url: &url::Url,
+    ) -> Result<(), super::super::BrowsingContextNavigationDenial> {
+        let accessing_host = unsafe { &*self.host_ptr };
+        let target_host = unsafe { &*target_host_ptr };
+        accessing_host.can_navigate_browsing_context(
+            scope,
+            self.identity,
+            target_host,
+            target_scope,
+            destination_url,
+        )
+    }
+
+    fn navigation_api_base_url(self, scope: &mut v8::PinScope<'_, '_>) -> Option<url::Url> {
+        unsafe { &*self.host_ptr }.navigation_api_base_url_for_identity(scope, self.identity)
+    }
 }
 
 /// Ephemeral target registry authority resolved for one WindowProxy callback.
@@ -3854,6 +3877,9 @@ fn cross_origin_location_navigate_raw<'s>(
     kind: LocationNavigationKind,
     raw: String,
 ) -> bool {
+    let Some(observer) = CrossOriginWindowObserver::resolve(scope) else {
+        return true;
+    };
     let related_window = cross_origin_related_top_window_target(scope, receiver)
         .map(|window| v8::Global::new(scope, window));
     let child_handle = child_handle_from_object(scope, receiver);
@@ -3866,23 +3892,57 @@ fn cross_origin_location_navigate_raw<'s>(
     };
     let target_context = v8::Global::new(scope, target_context);
     let target_context = v8::Local::new(scope, &target_context);
-    let target_scope = &mut v8::ContextScope::new(scope, target_context);
     let Some(host_ptr) = context_host_ptr_from_context_slot(target_context) else {
         return false;
     };
+    let navigation_target_scope = child_handle.map_or(
+        super::super::OwnerDispatchScope::Top,
+        super::super::OwnerDispatchScope::Child,
+    );
+    let current_href = if let Some(handle) = child_handle {
+        unsafe { &*host_ptr }
+            .document_url_for_child_context(handle)
+            .to_string()
+    } else {
+        unsafe { &*host_ptr }.document_url().to_string()
+    };
+    // Resolve while the source/entered realm is still current. Blink's
+    // Location setter uses the entered Window's API base URL, not the target
+    // Location's Document base URL. Passing the absolute URL through to the
+    // target context also keeps the policy decision and queued navigation on
+    // the same destination.
+    let source_base_url = observer.navigation_api_base_url(scope);
+    let Some(target_url) = resolve_location_navigation_target_against_entered_base(
+        &current_href,
+        kind,
+        Some(raw.clone()),
+        source_base_url.as_ref(),
+    ) else {
+        return false;
+    };
+    if let Err(denial) =
+        observer.can_navigate(scope, host_ptr, navigation_target_scope, &target_url)
+    {
+        if denial.is_sandbox_violation() {
+            throw_cross_origin_location_security_error(scope);
+            return false;
+        }
+        return true;
+    }
+    let target_scope = &mut v8::ContextScope::new(scope, target_context);
     if let Some(window) = related_window {
         let window = v8::Local::new(target_scope, &window);
         return navigate_top_level_window_location_from_cross_origin(
             target_scope,
             window,
             kind,
-            raw,
+            target_url.to_string(),
         );
     }
 
     let handle = child_handle.expect("cross-origin child navigation must retain its handle");
     let host = unsafe { &mut *host_ptr };
-    let target = host.resolve_child_browsing_context_url(handle, &raw);
+    let target = target_url;
     match kind {
         LocationNavigationKind::Assign => {
             if cross_origin_location_target_is_same_document(host, handle, &target)

@@ -3,12 +3,12 @@ use crate::frame_owner_model::FrameDocumentTaskOwner;
 use crate::runtime::ServiceWorkerControlState;
 use crate::service_worker_runtime::ServiceWorkerNotificationAction;
 use crate::service_worker_runtime::{
-    ServiceWorkerClientFrameType, ServiceWorkerClientId, ServiceWorkerClientSnapshot,
-    ServiceWorkerClientsOpenWindowError, ServiceWorkerFetchDispatch, ServiceWorkerFetchRequest,
-    ServiceWorkerFetchRequestMetadata, ServiceWorkerNavigationPreloadState,
-    ServiceWorkerNavigationPreloadStateError, ServiceWorkerPushSubscriptionSnapshot,
-    ServiceWorkerRegistrationSnapshot, ServiceWorkerRequestDestination,
-    ServiceWorkerUnregisterStart, ServiceWorkerUpdateViaCache, ServiceWorkerVersionId,
+    ServiceWorkerClientFrameType, ServiceWorkerClientId, ServiceWorkerFetchDispatch,
+    ServiceWorkerFetchRequest, ServiceWorkerFetchRequestMetadata,
+    ServiceWorkerNavigationPreloadState, ServiceWorkerNavigationPreloadStateError,
+    ServiceWorkerPushSubscriptionSnapshot, ServiceWorkerRegistrationSnapshot,
+    ServiceWorkerRequestDestination, ServiceWorkerUnregisterStart, ServiceWorkerUpdateViaCache,
+    ServiceWorkerVersionId,
 };
 use crate::structured_clone::V8StructuredClonePayload;
 use crate::worker::{WorkerNetworkPolicy, WorkerScriptKind, worker_secure_context_for_script_url};
@@ -92,14 +92,6 @@ pub(crate) struct ServiceWorkerRegistrationWatcher {
     pub(crate) scope_url: Url,
     pub(crate) storage_key: String,
     pub(crate) registration: v8::Weak<v8::Object>,
-}
-
-#[derive(Clone)]
-pub(crate) struct PendingServiceWorkerClientsOpenWindowPopup {
-    request_id: u64,
-    source_version_id: ServiceWorkerVersionId,
-    source_run: crate::runtime::RendererServiceWorkerRunIdentity,
-    document_owner: crate::native_bridge::LightweightPopupDocumentOwner,
 }
 
 impl JsContextHost {
@@ -1396,8 +1388,6 @@ impl JsContextHost {
             self.browser_context_runtime
                 .unregister_service_worker_client(client_id);
         }
-        self.pending_service_worker_clients_open_window_popups
-            .remove(&popup_id);
     }
 
     pub(crate) fn unregister_all_service_worker_popup_clients(&mut self) {
@@ -1405,135 +1395,6 @@ impl JsContextHost {
             self.browser_context_runtime
                 .unregister_service_worker_client(client_id);
         }
-        self.pending_service_worker_clients_open_window_popups
-            .clear();
-    }
-
-    pub(crate) fn begin_service_worker_clients_open_window_popup(
-        &mut self,
-        popup_id: u64,
-        document_url: Url,
-        request_id: u64,
-        source_version_id: ServiceWorkerVersionId,
-        source_run: crate::runtime::RendererServiceWorkerRunIdentity,
-    ) {
-        let Some(document_owner) = self.current_lightweight_popup_document_owner(popup_id) else {
-            tracing::warn!(
-                popup_id,
-                request_id,
-                "resolved service worker clients.openWindow as null without a committed popup document"
-            );
-            self.browser_context_runtime
-                .service_worker_runtime()
-                .enqueue_clients_open_window_completed(
-                    crate::types::ServiceWorkerClientsOpenWindowCompletion {
-                        request_id,
-                        source_version_id,
-                        source_run,
-                        result: Ok(None),
-                    },
-                );
-            return;
-        };
-        let pending = PendingServiceWorkerClientsOpenWindowPopup {
-            request_id,
-            source_version_id,
-            source_run,
-            document_owner,
-        };
-        if self
-            .register_or_update_service_worker_popup_client(document_owner, document_url)
-            .is_none()
-        {
-            self.dispatch_service_worker_clients_open_window_popup_result(pending, Ok(None));
-            return;
-        }
-        if self.lightweight_popup_has_pending_document_load(popup_id) {
-            self.pending_service_worker_clients_open_window_popups
-                .insert(popup_id, pending);
-            return;
-        }
-        let result = self.service_worker_clients_open_window_popup_result(&pending);
-        self.dispatch_service_worker_clients_open_window_popup_result(pending, result);
-    }
-
-    pub(crate) fn finish_service_worker_clients_open_window_popup(
-        &mut self,
-        document_owner: crate::native_bridge::LightweightPopupDocumentOwner,
-    ) {
-        let popup_id = document_owner.popup_id();
-        let Some(pending) = self
-            .pending_service_worker_clients_open_window_popups
-            .get(&popup_id)
-            .filter(|pending| pending.document_owner == document_owner)
-            .cloned()
-        else {
-            return;
-        };
-        self.pending_service_worker_clients_open_window_popups
-            .remove(&popup_id);
-        let result = self.service_worker_clients_open_window_popup_result(&pending);
-        self.dispatch_service_worker_clients_open_window_popup_result(pending, result);
-    }
-
-    pub(crate) fn finish_service_worker_clients_open_window_popup_with_null_for_owner(
-        &mut self,
-        document_owner: crate::native_bridge::LightweightPopupDocumentOwner,
-    ) {
-        let popup_id = document_owner.popup_id();
-        let Some(pending) = self
-            .pending_service_worker_clients_open_window_popups
-            .get(&popup_id)
-            .filter(|pending| pending.document_owner == document_owner)
-            .cloned()
-        else {
-            return;
-        };
-        self.pending_service_worker_clients_open_window_popups
-            .remove(&popup_id);
-        self.dispatch_service_worker_clients_open_window_popup_result(pending, Ok(None));
-    }
-
-    fn service_worker_clients_open_window_popup_result(
-        &self,
-        pending: &PendingServiceWorkerClientsOpenWindowPopup,
-    ) -> Result<Option<ServiceWorkerClientSnapshot>, ServiceWorkerClientsOpenWindowError> {
-        if !self.lightweight_popup_document_owner_is_current(pending.document_owner) {
-            tracing::debug!(
-                document_owner = ?pending.document_owner,
-                "resolved stale service worker clients.openWindow popup as null"
-            );
-            return Ok(None);
-        }
-        let popup_id = pending.document_owner.popup_id();
-        let Some(client_id) = self.service_worker_popup_clients.get(&popup_id).copied() else {
-            return Ok(None);
-        };
-        self.browser_context_runtime
-            .service_worker_runtime()
-            .client_navigate_result_for_current_window_client(pending.source_version_id, client_id)
-            .map_err(|error| match error {
-                crate::service_worker_runtime::ServiceWorkerClientNavigateError::TypeError(
-                    message,
-                ) => ServiceWorkerClientsOpenWindowError::type_error(message),
-            })
-    }
-
-    fn dispatch_service_worker_clients_open_window_popup_result(
-        &self,
-        pending: PendingServiceWorkerClientsOpenWindowPopup,
-        result: Result<Option<ServiceWorkerClientSnapshot>, ServiceWorkerClientsOpenWindowError>,
-    ) {
-        self.browser_context_runtime
-            .service_worker_runtime()
-            .enqueue_clients_open_window_completed(
-                crate::types::ServiceWorkerClientsOpenWindowCompletion {
-                    request_id: pending.request_id,
-                    source_version_id: pending.source_version_id,
-                    source_run: pending.source_run,
-                    result,
-                },
-            );
     }
 
     pub(crate) fn service_worker_registration_for_client(

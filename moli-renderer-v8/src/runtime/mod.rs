@@ -255,7 +255,8 @@ pub(crate) use self::browser_context_runtime::ServiceWorkerControlState;
 pub use self::browser_context_runtime::{
     DetachedParserScriptFetchContinuation, RendererBrowserContextRuntime,
     RendererBrowserContextRuntimeOwner, RendererBrowserContextRuntimeOwnerAccess,
-    RendererReservedServiceWorkerClient, RendererServiceWorkerMainResourceFetch,
+    RendererPopupBlockerPolicy, RendererReservedServiceWorkerClient,
+    RendererServiceWorkerClientsOpenWindowContinuation, RendererServiceWorkerMainResourceFetch,
 };
 pub(crate) use self::browser_context_runtime::{
     RendererStoragePartitionIdentity, RendererWorkerContextRuntime,
@@ -308,22 +309,24 @@ pub use self::page_state::RendererPageRecord;
 pub(crate) use self::page_state::RendererPageSlotHandle;
 pub use self::page_state::RendererPageState;
 use self::page_surface::RendererPageTable;
+pub(crate) use self::page_surface::RendererPopupCreationUserActivation;
 pub use self::page_surface::RendererRuntimeInspectorMessageResponseOrder;
 pub use self::page_surface::{
     DevToolsSessionKey, RendererAccessibilityPayloadsForObjectId, RendererActivityDiagnostics,
     RendererAgentAttachmentId, RendererAutofillAddressField, RendererAutofillCreditCard,
     RendererAutofillTriggerOutcome, RendererAutofillTriggerRequest,
-    RendererCaptureScreencastFrameReply, RendererCaptureScreenshotReply,
-    RendererCapturedScreencastFrame, RendererCapturedScreenshot, RendererCommandTurnCompletion,
-    RendererCommandTurnOutput, RendererCountEntry, RendererDedicatedWorkerTargetEvent,
-    RendererDedicatedWorkerTargetInfo, RendererDevToolsAgentToken, RendererDocumentBoxModel,
-    RendererDocumentChildNodeSnapshotEvent, RendererDocumentChildNodeSnapshotEvents,
-    RendererDocumentChildNodeSnapshots, RendererDocumentFrontendNodeIdsResolution,
-    RendererDocumentHitTestResult, RendererDocumentIsolateAccountingDiagnostics,
-    RendererDocumentNodeAttributesResolution, RendererDocumentNodeClientRect,
-    RendererDocumentNodeGeometry, RendererDocumentNodePropertyResolution,
-    RendererDocumentNodeReference, RendererDocumentNodeTextResolution,
-    RendererDocumentQuerySelectorNode, RendererDocumentQuerySelectorResolution,
+    RendererAuxiliaryBrowsingContextPolicy, RendererCaptureScreencastFrameReply,
+    RendererCaptureScreenshotReply, RendererCapturedScreencastFrame, RendererCapturedScreenshot,
+    RendererCommandTurnCompletion, RendererCommandTurnOutput, RendererCountEntry,
+    RendererDedicatedWorkerTargetEvent, RendererDedicatedWorkerTargetInfo,
+    RendererDevToolsAgentToken, RendererDocumentBoxModel, RendererDocumentChildNodeSnapshotEvent,
+    RendererDocumentChildNodeSnapshotEvents, RendererDocumentChildNodeSnapshots,
+    RendererDocumentFrontendNodeIdsResolution, RendererDocumentHitTestResult,
+    RendererDocumentIsolateAccountingDiagnostics, RendererDocumentNodeAttributesResolution,
+    RendererDocumentNodeClientRect, RendererDocumentNodeGeometry,
+    RendererDocumentNodePropertyResolution, RendererDocumentNodeReference,
+    RendererDocumentNodeTextResolution, RendererDocumentQuerySelectorNode,
+    RendererDocumentQuerySelectorResolution,
     RendererDocumentQuerySelectorWithChildNodeSnapshotEvents,
     RendererDocumentSourcedSameDocumentNavigation,
     RendererDocumentSourcedTopLevelLocationNavigation, RendererDomAttributeMutation,

@@ -14,7 +14,7 @@ pub(in crate::context_bootstrap) use self::navigator::{
     SERVICE_WORKER_OWNER_TOKEN_SLOT, STORAGE_BUCKET_MANAGER_BRAND_SLOT,
     STORAGE_BUCKET_MANAGER_CHILD_HANDLE_SLOT, STORAGE_BUCKET_MANAGER_POPUP_ID_SLOT,
     STORAGE_MANAGER_BRAND_SLOT, STORAGE_MANAGER_CHILD_HANDLE_SLOT, STORAGE_MANAGER_POPUP_ID_SLOT,
-    build_storage_manager_worker_template, current_protocol_user_gesture_activation,
+    build_storage_manager_worker_template, current_transient_user_activation,
     install_storage_manager_constructor_template_bindings, navigator_identity_profile,
     navigator_receiver_branded, service_worker_owner_token_value, set_navigator_identity_profile,
 };

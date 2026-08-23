@@ -9461,6 +9461,86 @@ async fn queued_iframe_javascript_url_does_not_execute_after_scripting_is_disabl
 }
 
 #[tokio::test]
+async fn iframe_javascript_url_uses_the_stable_child_target_trusted_types_policy() {
+    let mut vm = new_storage_test_vm("https://iframe-javascript-target-policy.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "trusted-types-javascript-url-frame";
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("child Trusted Types fixture should evaluate");
+    assert_initial_about_blank_child_completed_synchronously_for_test(
+        &mut vm,
+        "child Trusted Types fixture should initialize the child Document",
+    )
+    .await;
+    let child_context_id = materialize_single_child_default_realm_for_test(
+        &mut vm,
+        "child Trusted Types JavaScript URL target",
+    );
+
+    vm.eval_in_child_default_context(
+        child_context_id,
+        r#"
+(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "require-trusted-types-for 'script'";
+  (document.head || document.documentElement).appendChild(meta);
+  globalThis.__childOriginalJavascriptUrlRan = false;
+  globalThis.__childRewrittenJavascriptUrlRan = false;
+  globalThis.__childJavascriptUrlDefaultPolicyCalls = [];
+  trustedTypes.createPolicy("default", {
+    createScript(value, type, sink) {
+      __childJavascriptUrlDefaultPolicyCalls.push([value, type, sink]);
+      return value.replace(
+        "__childOriginalJavascriptUrlRan",
+        "__childRewrittenJavascriptUrlRan"
+      );
+    }
+  });
+  location.href =
+    "javascript:globalThis.__childOriginalJavascriptUrlRan = true";
+})()
+"#,
+    )
+    .expect("child JavaScript URL should queue under the target policy");
+    assert!(
+        vm.run_child_frame_task_source_once_for_test(ChildFrameSemanticTurnKind::NavigationCommit)
+            .await,
+        "child NavigationCommit should enqueue target-owned JavaScript URL work"
+    );
+    expect_child_frame_task_source_after_realm_prerequisite(
+        &mut vm,
+        ChildFrameSemanticTurnKind::DocumentScriptReady,
+        "child JavaScript URL should run after the stable target realm prerequisite",
+    )
+    .await;
+
+    let state = vm
+        .eval_in_child_default_context(
+            child_context_id,
+            r#"
+JSON.stringify({
+  original: __childOriginalJavascriptUrlRan,
+  rewritten: __childRewrittenJavascriptUrlRan,
+  calls: __childJavascriptUrlDefaultPolicyCalls
+})
+"#,
+        )
+        .expect("child target Trusted Types state should evaluate");
+    assert_eq!(
+        state,
+        r#"{"original":false,"rewritten":true,"calls":[["globalThis.__childOriginalJavascriptUrlRan = true","TrustedScript","Location href"]]}"#
+    );
+}
+
+#[tokio::test]
 async fn iframe_javascript_url_exception_does_not_replace_child_document_or_load() {
     let mut vm = new_storage_test_vm("https://iframe-javascript-url-exception.test/");
 

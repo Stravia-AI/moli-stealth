@@ -1606,10 +1606,20 @@ fn session_owner_navigation_is_same_document_fragment(
     session_id: Option<&str>,
     target: &str,
 ) -> bool {
-    let Some(current) = conn.runtime_session_owner_target_url(session_id) else {
+    // The DevTools target URL is an observational projection and may already
+    // contain an accepted navigation's destination before that navigation
+    // executes. Classify against the installed renderer Page instead; using
+    // the projection can turn a cross-document `about:blank?…#…` form
+    // destination into a false same-document repeat.
+    let Some(mut current) = conn
+        .runtime_session_owner_slot(session_id)
+        .ok()
+        .and_then(|slot| slot.loaded_page())
+        .map(|page| page.final_url().clone())
+    else {
         return false;
     };
-    let (Ok(mut current), Ok(mut target)) = (Url::parse(&current), Url::parse(target)) else {
+    let Ok(mut target) = Url::parse(target) else {
         return false;
     };
     // Chromium treats an exact repeat of a fragment-free URL as a new
@@ -2292,6 +2302,9 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    service_worker_clients_open_window_continuation: Option<
+        moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
+    >,
 ) -> NavigateCommandStart {
     let reloaded_after_crash_session_ids =
         reloaded_after_crash_session_ids_for_session_owner(conn, session_id);
@@ -2308,6 +2321,12 @@ pub(super) fn start_session_owner_navigation_from_renderer(
         // classification as Page.navigate. In particular, a freshly created
         // popup's `about:blank#fragment` target must not discard its initial
         // Document by trying to fetch the non-fetchable about: URL.
+        if let Some(continuation) = service_worker_clients_open_window_continuation {
+            // No cross-Document WindowClient is installed. `about:` is the
+            // only admitted ServiceWorker producer that can reach this branch,
+            // and the specification exposes no WindowClient for it.
+            continuation.resolve_null();
+        }
         start_top_level_same_document_navigate(conn, session_id, url.to_owned(), result_payload)
     } else {
         let result_projection = NavigationResultProjection::Cdp(result_payload);
@@ -2323,6 +2342,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
             request_method,
             request_body.map(<[u8]>::to_vec),
             request_headers.to_vec(),
+            service_worker_clients_open_window_continuation,
             // The renderer has already settled the browsing-context action;
             // fetching and committing the destination is a new navigation
             // lifecycle, not work that the current protocol projection may
@@ -2919,6 +2939,7 @@ fn start_navigate_to_url_command_with_background_policy(
         "GET",
         None,
         Vec::new(),
+        None,
         allow_background_navigation,
         request_load_policy,
         initiator,
@@ -2948,6 +2969,9 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     request_method: &str,
     request_body: Option<Vec<u8>>,
     request_headers: Vec<(String, String)>,
+    service_worker_clients_open_window_continuation: Option<
+        moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
+    >,
     allow_background_navigation: bool,
     request_load_policy: NavigationRequestLoadPolicy,
     initiator: NavigationStartInitiator,
@@ -3035,6 +3059,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         request_load_policy,
         timestamp,
         source_document_security: Box::new(source_document_security),
+        service_worker_clients_open_window_continuation,
     };
     let mut pending_fetch_navigation = None;
 
@@ -3554,6 +3579,10 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
 ) {
     let navigation_session_id = state.navigate_session_id.clone();
     let navigation_loader_id = state.loader_id.clone();
+    let service_worker_clients_open_window_continuation = state
+        .service_worker_clients_open_window_continuation
+        .clone();
+    let mut service_worker_open_window_document_committed = false;
     let document_continuation_gate_key =
         crate::conn::BackgroundNavigationGateKey::for_navigation(&token, &state);
     let mut foreground_document_continuation_observer = None;
@@ -3618,6 +3647,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                         network::materialize_stable_page_navigation_progress(
                                             conn, &state, navigation,
                                         );
+                                    let is_network_error_page =
+                                        navigation.network_error_page.is_some();
                                     foreground_document_continuation_observer =
                                         schedule_renderer_document_continuation(
                                             conn,
@@ -3626,7 +3657,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                             &mut background_document_continuation,
                                             navigation.document_continuation_observer.take(),
                                         );
-                                    Box::pin(commit_stable_page_navigation_async(
+                                    service_worker_open_window_document_committed =
+                                        Box::pin(commit_stable_page_navigation_async(
                                         conn,
                                         out,
                                         &token,
@@ -3634,7 +3666,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                         navigation,
                                         transaction,
                                     ))
-                                    .await;
+                                    .await
+                                            && !is_network_error_page;
                                 }
                                 Err(error) => {
                                     if error.page_was_preserved() {
@@ -3668,6 +3701,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                         network::materialize_loaded_navigation_progress(
                                             conn, &state, navigation,
                                         );
+                                    let is_network_error_page =
+                                        navigation.network_error_page.is_some();
                                     foreground_document_continuation_observer =
                                         schedule_renderer_document_continuation(
                                             conn,
@@ -3676,7 +3711,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                             &mut background_document_continuation,
                                             navigation.document_continuation_observer.take(),
                                         );
-                                    commit_loaded_navigation_async(
+                                    service_worker_open_window_document_committed =
+                                        commit_loaded_navigation_async(
                                         conn,
                                         out,
                                         Some(&token),
@@ -3685,7 +3721,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                                         Some(transaction),
                                         command_context,
                                     )
-                                    .await;
+                                    .await
+                                            && !is_network_error_page;
                                 }
                                 Err(error) => {
                                     if let Err(rollback_error) = conn
@@ -3720,6 +3757,7 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
         }
         network::MaterializedNavigationLoadOutcome::Loaded(navigation) => {
             let mut navigation = *navigation;
+            let is_network_error_page = navigation.network_error_page.is_some();
             foreground_document_continuation_observer = schedule_renderer_document_continuation(
                 conn,
                 &token,
@@ -3727,7 +3765,7 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                 &mut background_document_continuation,
                 navigation.document_continuation_observer.take(),
             );
-            commit_loaded_navigation_async(
+            service_worker_open_window_document_committed = commit_loaded_navigation_async(
                 conn,
                 out,
                 Some(&token),
@@ -3736,7 +3774,8 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
                 None,
                 command_context,
             )
-            .await;
+            .await
+                && !is_network_error_page;
         }
         network::MaterializedNavigationLoadOutcome::Download(navigation) => {
             let _ = conn.clear_pending_navigation_history_update_for_session_owner(
@@ -3827,6 +3866,12 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
         navigation_session_id.as_deref(),
         &navigation_loader_id,
     );
+    settle_service_worker_clients_open_window_navigation(
+        conn,
+        navigation_session_id.as_deref(),
+        service_worker_clients_open_window_continuation,
+        service_worker_open_window_document_committed,
+    );
     if let Some(observer) = foreground_document_continuation_observer {
         let (predecessor, page_state) = observer.wait().await.into_parts();
         let page_state_applied = page_state.is_some_and(|page_state| {
@@ -3849,6 +3894,31 @@ pub(crate) async fn complete_materialized_navigation_into_buffer_async(
             command_context.set_renderer_output_predecessor(predecessor);
         }
     }
+}
+
+fn settle_service_worker_clients_open_window_navigation(
+    conn: &CdpConnection,
+    session_id: Option<&str>,
+    continuation: Option<moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation>,
+    document_committed: bool,
+) {
+    let Some(continuation) = continuation else {
+        return;
+    };
+    if !document_committed {
+        continuation.resolve_null();
+        return;
+    }
+    let Some(page) = conn
+        .runtime_session_owner_slot(session_id)
+        .ok()
+        .and_then(|slot| slot.loaded_page())
+    else {
+        continuation.resolve_null();
+        return;
+    };
+    continuation
+        .resolve_for_committed_page(page.renderer_page_id(), page.service_worker_client_id());
 }
 
 fn schedule_renderer_document_continuation(

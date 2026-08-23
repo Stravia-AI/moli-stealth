@@ -1046,11 +1046,18 @@ impl TestContext {
                     return false;
                 }
                 CdpCommandTaskStep::Pending(pending) => {
-                    let completed = pending.wait().await;
-                    step = self
-                        .conn
-                        .complete_pending_command_dispatch_with_context(completed, command_context)
-                        .await;
+                    // Mirror the production scheduler's heap boundaries.  A
+                    // pending target command can retain both its completed
+                    // initial Page build and the navigation continuation, so
+                    // embedding either future here makes unrelated protocol
+                    // tests pay for the largest command state on their small
+                    // test-thread stack.
+                    let completed = Box::pin(pending.wait()).await;
+                    step = Box::pin(self.conn.complete_pending_command_dispatch_with_context(
+                        completed,
+                        command_context,
+                    ))
+                    .await;
                 }
             }
         }

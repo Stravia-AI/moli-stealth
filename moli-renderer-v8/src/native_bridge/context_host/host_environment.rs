@@ -778,22 +778,6 @@ impl JsContextHost {
         self.idle_override
     }
 
-    pub(crate) fn begin_protocol_user_gesture_activation(&mut self) {
-        self.protocol_user_gesture_activation_depth = self
-            .protocol_user_gesture_activation_depth
-            .saturating_add(1);
-    }
-
-    pub(crate) fn end_protocol_user_gesture_activation(&mut self) {
-        self.protocol_user_gesture_activation_depth = self
-            .protocol_user_gesture_activation_depth
-            .saturating_sub(1);
-    }
-
-    pub(crate) fn protocol_user_gesture_activation(&self) -> bool {
-        self.protocol_user_gesture_activation_depth > 0
-    }
-
     pub(crate) fn replace_current_input_event(
         &mut self,
         event: Option<crate::native_bridge::CurrentInputEvent>,

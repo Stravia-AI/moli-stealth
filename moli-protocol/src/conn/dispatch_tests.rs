@@ -734,6 +734,7 @@ async fn bidi_fetch_control_resolves_background_request_owner() {
                 request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                 timestamp: 0.0,
                 source_document_security: Default::default(),
+                service_worker_clients_open_window_continuation: None,
             },
             request_cookie_report: None,
             intercept_response: false,
@@ -2432,6 +2433,7 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         security_origin: "null".to_owned(),
         secure_context_type: "InsecureScheme".to_owned(),
         timestamp: 0.0,
+        auxiliary_browsing_context_policy: None,
     };
     conn.commit_loaded_navigation_target_identity_for_session_owner(
         None,

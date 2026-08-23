@@ -1066,6 +1066,8 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) main_document_commit: Option<super::RendererMainDocumentCommit>,
     pub(crate) initial_document_referrer: Option<String>,
     pub(crate) initial_top_level_browsing_context_name: Option<String>,
+    pub(crate) auxiliary_browsing_context_policy:
+        Option<super::RendererAuxiliaryBrowsingContextPolicy>,
     pub(crate) top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
     pub(crate) web_storage: crate::RendererWebStorageHandles,
     pub(crate) document_start_scripts: Vec<DocumentStartScript>,
@@ -1137,6 +1139,7 @@ impl PageVmEnvConfig {
             main_document_commit: None,
             initial_document_referrer: None,
             initial_top_level_browsing_context_name: None,
+            auxiliary_browsing_context_policy: None,
             top_level_storage_key: Some(top_level_storage_key),
             web_storage,
             document_start_scripts: Vec::new(),
@@ -4406,6 +4409,12 @@ impl PageVm {
             env.initial_document_referrer.clone(),
             env.top_level_storage_key.clone(),
             env.reserved_service_worker_client_id,
+            env.auxiliary_browsing_context_policy.map(|policy| {
+                policy.with_response_content_security_policies(
+                    &env.document_policy_container
+                        .response_content_security_policies,
+                )
+            }),
         )?;
         if let Some(name) = env.initial_top_level_browsing_context_name.as_deref() {
             vm_bootstrap.initialize_initial_top_level_browsing_context_name(name);
@@ -4684,6 +4693,10 @@ impl PageVm {
                 PageVmEnvironmentConfigApplyMode::StagedInitialAdoption => unreachable!(
                     "staged initial adoption must preserve its creator-derived document policy"
                 ),
+            }
+            if let Some(policy) = env.auxiliary_browsing_context_policy {
+                self.vm_mut()
+                    .apply_auxiliary_browsing_context_policy(policy);
             }
             self.vm_mut()
                 .document_runtime

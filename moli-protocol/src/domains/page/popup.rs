@@ -91,7 +91,9 @@ pub(super) async fn emit_prepared(
             source,
             disposition,
             popup_id,
-            request,
+            requested_url,
+            destination_request,
+            reports_requested_url_without_destination,
             target_name,
             navigation_referrer,
             initial_document_referrer,
@@ -99,6 +101,8 @@ pub(super) async fn emit_prepared(
             pending_auxiliary_page,
             resolved_target_page,
             new_target_disposition,
+            auxiliary_browsing_context_policy,
+            service_worker_clients_open_window_continuation,
             session_storage_store,
             initial_empty_document_storage_key,
         ) = activation.into_parts();
@@ -109,11 +113,20 @@ pub(super) async fn emit_prepared(
                 ..
             }
         );
+        // `Navigate()` for an ordinary Window producer is invoked before its
+        // asynchronously queued target-Document javascript URL tasks run.
+        // Renderer publications can split those facts even when both came
+        // from one source V8 turn, so the destination owner must preserve the
+        // Page task boundary instead of trying to pair adjacent publications.
+        let drain_pending_javascript_tasks_before_commit = destination_request.is_some()
+            && matches!(&source, RendererPopupActivationSource::Window { .. });
         let opener = resolve_devtools_opener(conn, &page_owner, &source);
         let creation = PopupTargetCreation::new(
             page_owner.browser_context_id().to_owned(),
             popup_id,
-            request,
+            requested_url,
+            destination_request,
+            reports_requested_url_without_destination,
             target_name,
             opener,
             can_access_opener,
@@ -124,8 +137,11 @@ pub(super) async fn emit_prepared(
             pending_auxiliary_page,
             resolved_target_page,
             new_target_disposition,
+            auxiliary_browsing_context_policy,
+            service_worker_clients_open_window_continuation,
             session_storage_store,
             initial_empty_document_storage_key,
+            drain_pending_javascript_tasks_before_commit,
         );
         let browser_context_id = page_owner.browser_context_id().to_owned();
         // Keep the large target-admission state off the generic renderer

@@ -176,6 +176,8 @@ pub(crate) struct TargetNavigationLoadInputs {
     storage_handles: TargetNavigationStorageHandles,
     pub(crate) root_frame_id: Option<String>,
     pub(crate) renderer_runtime: RendererBrowserContextRuntimeOwnerAccess,
+    pub(crate) auxiliary_browsing_context_policy:
+        Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy>,
     pub(crate) browser_identity_override: Option<moli_browser_profile::BrowserIdentityProfile>,
     pub(crate) http_proxy_override: Option<String>,
     pub(crate) http_no_proxy_override: Option<String>,
@@ -236,9 +238,11 @@ impl TargetNavigationLoadInputs {
         final_url: &Url,
         network_error_page: Option<&NetworkErrorPageNavigation>,
     ) -> Option<RendererMainDocumentCommit> {
-        self.main_document_commit_seed
-            .as_ref()
-            .map(|seed| seed.resolve(final_url, network_error_page))
+        self.main_document_commit_seed.as_ref().map(|seed| {
+            let mut commit = seed.resolve(final_url, network_error_page);
+            commit.auxiliary_browsing_context_policy = self.auxiliary_browsing_context_policy;
+            commit
+        })
     }
 
     pub(crate) fn page_storage_handles(&self) -> BrowserContextPageStorageHandles {
@@ -288,6 +292,10 @@ impl TargetNavigationLoadInputs {
             ),
             root_frame_id: browser_context.active_target_id_owned(),
             renderer_runtime: browser_context.renderer_runtime_owner_access(),
+            auxiliary_browsing_context_policy: browser_context
+                .active_target
+                .runtime_slot
+                .auxiliary_browsing_context_policy(),
             browser_identity_override: browser_context
                 .effective_active_browser_identity_override_owned(),
             http_proxy_override: browser_context.http_proxy_override.clone(),
@@ -356,6 +364,7 @@ impl TargetNavigationLoadInputs {
             storage_handles: TargetNavigationStorageHandles::from_page_handles(page_handles),
             root_frame_id: None,
             renderer_runtime,
+            auxiliary_browsing_context_policy: None,
             browser_identity_override: None,
             http_proxy_override: None,
             http_no_proxy_override: None,
@@ -895,6 +904,9 @@ impl<'a> TargetSessionOwnerRef<'a> {
                     ),
                     root_frame_id: Some(target_id.clone()),
                     renderer_runtime: browser_context.renderer_runtime_owner_access(),
+                    auxiliary_browsing_context_policy: target
+                        .runtime_slot
+                        .auxiliary_browsing_context_policy(),
                     browser_identity_override: page_state
                         .network_policy
                         .browser_identity_override_owned()
@@ -4703,6 +4715,7 @@ mod tests {
             security_origin: "https://nav.example".to_owned(),
             secure_context_type: "Secure".to_owned(),
             timestamp: 0.0,
+            auxiliary_browsing_context_policy: None,
         };
         {
             let mut owner = TargetSessionOwnerMut::BackgroundTarget {

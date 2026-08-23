@@ -45,6 +45,7 @@ fn test_navigation_dispatch_state(fetch_request_id: &str) -> NavigationDispatchS
         request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
         timestamp: 0.0,
         source_document_security: Default::default(),
+        service_worker_clients_open_window_continuation: None,
     }
 }
 

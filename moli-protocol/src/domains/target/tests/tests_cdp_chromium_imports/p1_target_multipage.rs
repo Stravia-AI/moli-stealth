@@ -2336,6 +2336,95 @@ async fn rust_cdp_chromium_target_window_open_javascript_url_still_reports_popup
     assert_eq!(popup["params"]["targetInfo"]["openerId"], "TID-js-opener");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn ordinary_popup_navigation_then_javascript_url_preserves_renderer_protocol_order() {
+    let fixture = SmokeFixtureServer::start().await;
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            enable_root_target_discovery_for_test(&mut ctx);
+            let opener_url = fixture.url("/plain");
+            let opener_target_id = create_target(&mut ctx, 2_600_240, None, &opener_url).await;
+            let opener_session_id =
+                attach_to_target(&mut ctx, 2_600_240, None, &opener_target_id).await;
+            ctx.take_all();
+            ctx.enable_background_navigation_scheduler_for_test();
+            let ordinary_url = fixture.url("/history-b");
+            let messages = open_popup_from_runtime(
+                &mut ctx,
+                2_600_241,
+                &format!(
+                    r#"(() => {{
+  globalThis.__ordinaryThenJavascript = new Promise(resolve => {{
+    globalThis.__resolveOrdinaryThenJavascript = resolve;
+  }});
+  const first = window.open('{ordinary_url}', 'phase5e-order');
+  const second = window.open(
+    'javascript:opener.__resolveOrdinaryThenJavascript("ran");void 0',
+    'phase5e-order'
+  );
+  return [first !== null, first === second];
+}})()"#
+                ),
+            )
+            .await;
+            assert_eq!(
+                response(&messages, 2_600_241)["result"]["result"]["value"],
+                json!([true, true]),
+                "the second producer must reuse the synchronously selected stable WindowProxy: {messages:?}"
+            );
+            let popup = event(&messages, "Target.targetCreated");
+            assert_eq!(popup["params"]["targetInfo"]["url"], ordinary_url);
+            let popup_target_id = popup["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("ordered popup target id")
+                .to_owned();
+            assert_eq!(
+                messages
+                    .iter()
+                    .filter(|message| message["method"] == json!("Target.targetCreated"))
+                    .count(),
+                1,
+                "ordinary and javascript producers must not create two targets"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_600_242,
+                "method": "Runtime.evaluate",
+                "sessionId": opener_session_id.clone(),
+                "params": {
+                    "expression": "globalThis.__ordinaryThenJavascript",
+                    "awaitPromise": true,
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            crate::testing::wait_until_message(
+                &mut ctx,
+                Some(opener_session_id.as_str()),
+                "ordinary-then-javascript opener completion",
+                |message| message["id"] == json!(2_600_242),
+            )
+            .await;
+            let completion = take_response_by_id(&mut ctx, 2_600_242);
+            assert_eq!(
+                completion["result"]["result"]["value"],
+                json!("ran"),
+                "later target task must resolve the opener promise: {completion:?}"
+            );
+
+            ctx.wait_until_scheduler_state("ordinary popup destination commit", |conn| {
+                conn.browser_context
+                    .as_ref()
+                    .and_then(|browser_context| browser_context.background_target(&popup_target_id))
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == ordinary_url.as_str())
+            })
+            .await;
+        })
+        .await;
+}
+
 // Chromium/WPT source:
 // third_party/blink/web_tests/external/wpt/html/semantics/links/
 // links-created-by-a-and-area-elements/target_blank_implicit_noopener.html

@@ -6,9 +6,9 @@ use super::{
     RendererOutputItem, RendererOutputPublication, RendererOutputResidenceIdentity,
     RendererOutputTransportMessage, RendererOutputTransportReceiver, RendererOutputTransportSender,
     RendererOwnerAction, RendererPageCommand, RendererPageHandle, RendererPageReply,
-    RendererPageTestingHandle, RendererPendingPopupActivation, RendererPointerEventProperties,
-    RendererPreparedDocumentCommitConfiguration, RendererProtocolObservation,
-    RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
+    RendererPageTestingHandle, RendererPendingPopupActivation, RendererPendingWindowOpenEvent,
+    RendererPointerEventProperties, RendererPreparedDocumentCommitConfiguration,
+    RendererProtocolObservation, RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
     RendererRuntimeInspectorResponseSender, RendererScriptAgentAdmission,
 };
 use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_js_local_executor};
@@ -384,6 +384,23 @@ fn popup_activations_for_page(
         .filter_map(|record| match record.item() {
             RendererOutputItem::OwnerAction(RendererOwnerAction::Popup(activation)) => {
                 Some(activation.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn window_open_events_for_page(
+    publications: &[RendererOutputPublication],
+    page: &RendererPageHandle,
+) -> Vec<RendererPendingWindowOpenEvent> {
+    publications
+        .iter()
+        .filter(|publication| publication_is_for_page(publication, page))
+        .flat_map(RendererOutputPublication::records)
+        .filter_map(|record| match record.item() {
+            RendererOutputItem::Observation(RendererProtocolObservation::WindowOpen(event)) => {
+                Some(event.clone())
             }
             _ => None,
         })
@@ -4273,6 +4290,66 @@ async fn committed_navigation_bootstrap_panic_returns_committed_entry_to_owner()
     .await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn browser_navigation_causal_command_drains_pending_javascript_url_tasks() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://example.test/browser-navigation-causal-command")
+            .expect("test URL"),
+        "<!doctype html><body>causal command target</body>",
+    )
+    .await;
+
+    let (queued, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  location.href = "javascript:void(globalThis.__browserNavigationCausalTask = 'ran')";
+  return String(globalThis.__browserNavigationCausalTask);
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("javascript URL should queue without the generic Runtime command following it");
+    assert_eq!(
+        renderer_json_value(queued),
+        Some(serde_json::json!("undefined"))
+    );
+    assert_eq!(
+        has_pending_location_navigation_for_test(&page).await,
+        Some(true)
+    );
+
+    let (drained, _) = page
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("browser navigation causal command should run on the exact Page owner");
+    assert!(matches!(drained, RendererPageReply::Unit));
+    assert_eq!(
+        has_pending_location_navigation_for_test(&page).await,
+        Some(false)
+    );
+
+    let (state, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__browserNavigationCausalTask".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("javascript URL side effect should evaluate");
+    assert_eq!(renderer_json_value(state), Some(serde_json::json!("ran")));
+
+    page.close_async()
+        .await
+        .expect("causal command test Page should close");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn external_raw_streaming_delegates_post_load_meta_refresh_to_browser() {
     let runtime = JsRuntime::initialize();
@@ -8069,6 +8146,130 @@ JSON.stringify([
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn sandboxed_direct_form_submit_creates_related_initial_page_without_destination() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let source_url =
+        url::Url::parse("https://sandbox-form-create.test/root/page.html").expect("source URL");
+    let mut source_page = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        "<!doctype html><body>sandboxed direct form source</body>",
+    )
+    .await;
+    source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const source = document.createElement("iframe");
+  source.id = "source";
+  source.sandbox = "allow-scripts allow-same-origin allow-popups";
+  document.body.appendChild(source);
+  return true;
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("sandboxed direct form iframe should install");
+    let (completed, _) = source_page
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("sandboxed direct form iframe should finish initial lifecycle");
+    assert!(matches!(completed, RendererPageReply::Bool(true)));
+    output_rx.drain();
+
+    let (submitted, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  return document.getElementById("source").contentWindow.eval(`
+    (() => {
+      const form = document.createElement("form");
+      form.action = "about:blank#blocked-destination";
+      form.target = "creationOnlyFormTarget";
+      document.body.appendChild(form);
+      let formDataEvents = 0;
+      form.addEventListener("formdata", () => ++formDataEvents);
+      form.submit();
+      return formDataEvents;
+    })()
+  `);
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("sandboxed direct form should select its target");
+    assert_eq!(renderer_json_value(submitted), Some(serde_json::json!(1)));
+
+    let publications = output_rx.drain();
+    let window_open_events = window_open_events_for_page(&publications, &source_page);
+    assert_eq!(window_open_events.len(), 1);
+    assert_eq!(
+        window_open_events[0].url,
+        "about:blank?#blocked-destination"
+    );
+    assert_eq!(window_open_events[0].window_name, "creationOnlyFormTarget");
+    assert!(!window_open_events[0].user_gesture);
+
+    let activations = popup_activations_for_page(&publications, &source_page);
+    assert_eq!(activations.len(), 1);
+    let activation = &activations[0];
+    assert_eq!(activation.url(), window_open_events[0].url);
+    assert!(!activation.has_destination_navigation());
+    assert_eq!(
+        activation.new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::Related)
+    );
+    let pending_target = activation
+        .pending_auxiliary_page()
+        .expect("creation-only related popup should reserve its exact renderer Page");
+    let mut target_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        pending_target.page_reservation(),
+        source_url.clone(),
+        "creationOnlyFormTarget",
+    )
+    .await;
+    let (initial_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"[location.href, document.referrer, name].join("|")"#.to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("creation-only initial Page should remain observable");
+    assert_eq!(
+        renderer_json_value(initial_state),
+        Some(serde_json::json!(format!(
+            "about:blank|{}|creationOnlyFormTarget",
+            source_url
+        )))
+    );
+
+    target_page
+        .close_async()
+        .await
+        .expect("creation-only target Page should close");
+    source_page
+        .close_async()
+        .await
+        .expect("creation-only source Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn related_page_named_form_post_uses_nested_target_owner_and_exact_request() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
@@ -8668,6 +8869,933 @@ async fn named_frame_lookup_skips_candidate_the_source_cannot_navigate() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn javascript_popup_producers_queue_the_final_related_target_page_realm() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let source_url =
+        url::Url::parse("https://javascript-popup-target.test/source.html").expect("source URL");
+    let mut source_page = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        "<!doctype html><body>javascript popup source</body>",
+    )
+    .await;
+
+    let (created, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  globalThis.__javascriptTargetEvents = [];
+  globalThis.__javascriptTargetProxy = window.open(
+    "javascript:void(window.__initialTargetMarker = [document.defaultView === window, opener !== null, location.href].join('|'), opener.__javascriptTargetEvents.push('initial'))",
+    "javascript-final-target"
+  );
+  return [
+    __javascriptTargetProxy !== null,
+    __javascriptTargetProxy.location.href,
+    __javascriptTargetProxy.document.defaultView === __javascriptTargetProxy,
+    String(__javascriptTargetProxy.__initialTargetMarker),
+    __javascriptTargetEvents.length
+  ].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related javascript target should be created");
+    assert_eq!(
+        renderer_json_value(created),
+        Some(serde_json::json!("true|about:blank|true|undefined|0"))
+    );
+    let creation_publications = output_rx.drain();
+    let creation_activations = popup_activations_for_page(&creation_publications, &source_page);
+    assert_eq!(creation_activations.len(), 1);
+    let pending_target = creation_activations[0]
+        .pending_auxiliary_page()
+        .expect("related javascript target should reserve its exact renderer Page");
+    assert!(!creation_activations[0].has_destination_navigation());
+    assert_eq!(
+        creation_activations[0].new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::Related)
+    );
+    let mut target_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        pending_target.page_reservation(),
+        source_url.clone(),
+        "javascript-final-target",
+    )
+    .await;
+    output_rx.drain();
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow initial javascript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("new target Page owner should follow its initial javascript URL");
+    let (initial_target_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.__initialTargetMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("initial target javascript URL state should evaluate");
+    assert_eq!(
+        renderer_json_value(initial_target_state),
+        Some(serde_json::json!("true|true|about:blank"))
+    );
+
+    add_runtime_binding_for_test(&target_page, "automaticJavascriptTargetWake", None, None)
+        .await
+        .expect("target Page should install the automatic-wake binding");
+    output_rx.drain();
+    let (automatic_wake_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const selected = window.open(
+    "javascript:void(window.__automaticTargetWake = true, automaticJavascriptTargetWake('target-owner'))",
+    "javascript-final-target"
+  );
+  return String(selected.__automaticTargetWake);
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-Page javascript URL should queue an automatic target-owner wake");
+    assert_eq!(
+        renderer_json_value(automatic_wake_immediate),
+        Some(serde_json::json!("undefined")),
+        "cross-Page target selection must remain synchronous without executing the URL in the source turn"
+    );
+    let automatic_wake_publications = tokio::time::timeout(Duration::from_secs(2), async {
+        let mut publications = Vec::new();
+        loop {
+            let publication = output_rx
+                .recv()
+                .await
+                .expect("renderer output transport should remain open");
+            let observed_target_binding = publication_is_for_page(&publication, &target_page)
+                && publication.records().iter().any(|record| {
+                    matches!(
+                        record.item(),
+                        RendererOutputItem::Observation(
+                            RendererProtocolObservation::RuntimeBinding(call)
+                        ) if call.name == "automaticJavascriptTargetWake"
+                            && call.payload == "target-owner"
+                    )
+                });
+            publications.push(publication);
+            if observed_target_binding {
+                break publications;
+            }
+        }
+    })
+    .await
+    .expect("the existing target Page owner should run its queued JavaScript URL without an external target command");
+    let automatic_wake_activations =
+        popup_activations_for_page(&automatic_wake_publications, &source_page);
+    assert_eq!(automatic_wake_activations.len(), 1);
+    let automatic_target_residence = automatic_wake_activations[0]
+        .resolved_target_page()
+        .expect("automatic JavaScript URL wake should retain the exact related Page");
+    assert_eq!(
+        automatic_target_residence.owner_local_host_id(),
+        pending_target.page_reservation().local_host_id()
+    );
+    assert_eq!(
+        automatic_target_residence.page_id(),
+        pending_target.page_reservation().page_id()
+    );
+    assert!(!automatic_wake_activations[0].has_destination_navigation());
+    let (automatic_wake_target_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.__automaticTargetWake".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("automatic target-owner JavaScript URL state should evaluate");
+    assert_eq!(
+        renderer_json_value(automatic_wake_target_state),
+        Some(serde_json::json!(true))
+    );
+
+    let (window_open_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const selected = window.open(
+    "javascript:void(window.__windowOpenTargetMarker = [document.defaultView === window, opener !== null, location.href].join('|'), opener.__javascriptTargetEvents.push('window-open'))",
+    "javascript-final-target"
+  );
+  return [
+    selected === __javascriptTargetProxy,
+    String(selected.__windowOpenTargetMarker),
+    __javascriptTargetEvents.length
+  ].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("window.open javascript URL should synchronously select its target");
+    assert_eq!(
+        renderer_json_value(window_open_immediate),
+        Some(serde_json::json!("true|undefined|1")),
+        "target selection is synchronous but javascript URL execution must wait for the target Page task"
+    );
+    let window_open_publications = output_rx.drain();
+    let window_open_activations =
+        popup_activations_for_page(&window_open_publications, &source_page);
+    assert_eq!(window_open_activations.len(), 1);
+    let target_residence = window_open_activations[0]
+        .resolved_target_page()
+        .expect("javascript URL must reuse the live related target Page");
+    assert_eq!(
+        target_residence.owner_local_host_id(),
+        pending_target.page_reservation().local_host_id()
+    );
+    assert_eq!(
+        target_residence.page_id(),
+        pending_target.page_reservation().page_id()
+    );
+    assert!(!window_open_activations[0].has_destination_navigation());
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow window.open javascript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should follow the window.open javascript URL");
+    let (window_open_target_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.__windowOpenTargetMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("window.open javascript URL target state should evaluate");
+    assert_eq!(
+        renderer_json_value(window_open_target_state),
+        Some(serde_json::json!("true|true|about:blank"))
+    );
+
+    let (hyperlink_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const link = document.createElement("a");
+  link.href = "javascript:void(window.__hyperlinkTargetMarker = document.defaultView === window, opener.__javascriptTargetEvents.push('hyperlink'))";
+  link.target = "javascript-final-target";
+  link.rel = "opener";
+  document.body.appendChild(link);
+  link.click();
+  return String(__javascriptTargetProxy.__hyperlinkTargetMarker);
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("hyperlink javascript URL should synchronously select its target");
+    assert_eq!(
+        renderer_json_value(hyperlink_immediate),
+        Some(serde_json::json!("undefined"))
+    );
+    let hyperlink_publications = output_rx.drain();
+    let hyperlink_activations = popup_activations_for_page(&hyperlink_publications, &source_page);
+    assert_eq!(hyperlink_activations.len(), 1);
+    assert_eq!(
+        hyperlink_activations[0].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(!hyperlink_activations[0].has_destination_navigation());
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow hyperlink javascript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should follow the hyperlink javascript URL");
+
+    let (form_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = "javascript:void(window.__formTargetMarker = document.defaultView === window, opener.__javascriptTargetEvents.push('form'))";
+  form.target = "javascript-final-target";
+  form.rel = "opener";
+  const input = document.createElement("input");
+  input.name = "field";
+  input.value = "value";
+  form.appendChild(input);
+  document.body.appendChild(form);
+  form.submit();
+  return String(__javascriptTargetProxy.__formTargetMarker);
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("form javascript URL should synchronously select its target");
+    assert_eq!(
+        renderer_json_value(form_immediate),
+        Some(serde_json::json!("undefined"))
+    );
+    let form_publications = output_rx.drain();
+    let form_activations = popup_activations_for_page(&form_publications, &source_page);
+    assert_eq!(form_activations.len(), 1);
+    assert_eq!(
+        form_activations[0].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(!form_activations[0].has_destination_navigation());
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow form javascript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should follow the form javascript URL");
+
+    let (queued_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  window.open(
+    "javascript:opener.__javascriptTargetEvents.push('queued-first')",
+    "javascript-final-target"
+  );
+  window.open(
+    "javascript:opener.__javascriptTargetEvents.push('queued-second')",
+    "javascript-final-target"
+  );
+  return __javascriptTargetEvents.join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same target should accept two javascript URL candidates in one source turn");
+    assert_eq!(
+        renderer_json_value(queued_immediate),
+        Some(serde_json::json!("initial|window-open|hyperlink|form"))
+    );
+    let queued_publications = output_rx.drain();
+    let queued_activations = popup_activations_for_page(&queued_publications, &source_page);
+    assert_eq!(queued_activations.len(), 2);
+    assert!(queued_activations.iter().all(|activation| {
+        activation.resolved_target_page() == Some(target_residence)
+            && !activation.has_destination_navigation()
+    }));
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow queued javascript URL batch'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should preserve queued javascript URL FIFO order");
+    let (queued_events, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__javascriptTargetEvents.join('|')".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("queued javascript URL events should evaluate");
+    assert_eq!(
+        renderer_json_value(queued_events),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second"
+        )),
+        "multiple JavaScript URLs queued before the target networking task must all execute in FIFO order"
+    );
+
+    let (ordinary_supersession_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  window.open(
+    "javascript:opener.__javascriptTargetEvents.push('canceled-by-ordinary-navigation')",
+    "javascript-final-target"
+  );
+  const selected = window.open(
+    "about:blank#ordinary-navigation-wins",
+    "javascript-final-target"
+  );
+  return [
+    selected === __javascriptTargetProxy,
+    __javascriptTargetEvents.join("|")
+  ].join(";");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("ordinary target navigation should synchronously supersede a javascript URL task");
+    assert_eq!(
+        renderer_json_value(ordinary_supersession_immediate),
+        Some(serde_json::json!(
+            "true;initial|window-open|hyperlink|form|queued-first|queued-second"
+        ))
+    );
+    let ordinary_supersession_publications = output_rx.drain();
+    let ordinary_supersession_activations =
+        popup_activations_for_page(&ordinary_supersession_publications, &source_page);
+    assert_eq!(ordinary_supersession_activations.len(), 2);
+    assert_eq!(
+        ordinary_supersession_activations[0].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(!ordinary_supersession_activations[0].has_destination_navigation());
+    assert_eq!(
+        ordinary_supersession_activations[1].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(ordinary_supersession_activations[1].has_destination_navigation());
+    assert_eq!(
+        ordinary_supersession_activations[1].url(),
+        "about:blank#ordinary-navigation-wins"
+    );
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'ordinary navigation canceled the javascript URL task'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page should have no superseded javascript URL left to execute");
+    let (ordinary_supersession_events, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__javascriptTargetEvents.join('|')".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("ordinary navigation supersession events should evaluate");
+    assert_eq!(
+        renderer_json_value(ordinary_supersession_events),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second"
+        )),
+        "an accepted ordinary navigation must cancel the previous target-local javascript URL task"
+    );
+
+    let (hyperlink_supersession_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  window.open(
+    "javascript:opener.__javascriptTargetEvents.push('canceled-by-ordinary-hyperlink')",
+    "javascript-final-target"
+  );
+  const link = document.createElement("a");
+  link.href = "about:blank#ordinary-hyperlink-wins";
+  link.target = "javascript-final-target";
+  link.rel = "opener";
+  document.body.appendChild(link);
+  link.click();
+  return __javascriptTargetEvents.join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("ordinary hyperlink should supersede a target-local javascript URL task");
+    assert_eq!(
+        renderer_json_value(hyperlink_supersession_immediate),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second"
+        ))
+    );
+    let hyperlink_supersession_publications = output_rx.drain();
+    let hyperlink_supersession_activations =
+        popup_activations_for_page(&hyperlink_supersession_publications, &source_page);
+    assert_eq!(hyperlink_supersession_activations.len(), 2);
+    assert!(!hyperlink_supersession_activations[0].has_destination_navigation());
+    assert_eq!(
+        hyperlink_supersession_activations[1].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(hyperlink_supersession_activations[1].has_destination_navigation());
+    assert_eq!(
+        hyperlink_supersession_activations[1].url(),
+        "about:blank#ordinary-hyperlink-wins"
+    );
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'ordinary hyperlink canceled the javascript URL task'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page should have no hyperlink-superseded javascript URL left");
+    let (hyperlink_supersession_events, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__javascriptTargetEvents.join('|')".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("ordinary hyperlink supersession events should evaluate");
+    assert_eq!(
+        renderer_json_value(hyperlink_supersession_events),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second"
+        )),
+        "the element target owner must cancel the previous target-local javascript URL task"
+    );
+
+    let (replacement_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const selected = window.open(
+    "javascript:\"<!doctype html><body id='javascript-replacement'>replacement</body>\"",
+    "javascript-final-target"
+  );
+  return [
+    selected === __javascriptTargetProxy,
+    selected.document.getElementById("javascript-replacement") === null,
+    __javascriptTargetEvents.join("|")
+  ].join(";");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("string-completion javascript URL should queue in the existing target");
+    assert_eq!(
+        renderer_json_value(replacement_immediate),
+        Some(serde_json::json!(
+            "true;true;initial|window-open|hyperlink|form|queued-first|queued-second"
+        ))
+    );
+    let replacement_publications = output_rx.drain();
+    let replacement_activations =
+        popup_activations_for_page(&replacement_publications, &source_page);
+    assert_eq!(replacement_activations.len(), 1);
+    assert_eq!(
+        replacement_activations[0].resolved_target_page(),
+        Some(target_residence)
+    );
+    assert!(!replacement_activations[0].has_destination_navigation());
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow string-completion javascript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should apply javascript URL string completion");
+    let (replacement_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+[
+  document.body.textContent,
+  document.defaultView === window,
+  location.href
+].join("|")
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("javascript URL replacement Document should evaluate");
+    assert_eq!(
+        renderer_json_value(replacement_state),
+        Some(serde_json::json!("replacement|true|about:blank"))
+    );
+    let (stable_proxy_state, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+[
+  __javascriptTargetProxy.document.body.textContent,
+  __javascriptTargetProxy.document.defaultView === __javascriptTargetProxy
+].join("|")
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("opener should retain the stable target WindowProxy");
+    assert_eq!(
+        renderer_json_value(stable_proxy_state),
+        Some(serde_json::json!("replacement|true"))
+    );
+
+    let (retired_document_immediate, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  window.open(
+    "javascript:opener.__javascriptTargetEvents.push('retired-document-task')",
+    "javascript-final-target"
+  );
+  __javascriptTargetProxy.document.open();
+  __javascriptTargetProxy.document.write("<!doctype html><body>replacement before task</body>");
+  __javascriptTargetProxy.document.close();
+  return __javascriptTargetEvents.join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target document replacement should retire queued javascript URL work");
+    assert_eq!(
+        renderer_json_value(retired_document_immediate),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second"
+        ))
+    );
+    let retired_document_publications = output_rx.drain();
+    let retired_document_activations =
+        popup_activations_for_page(&retired_document_publications, &source_page);
+    assert_eq!(retired_document_activations.len(), 1);
+    assert!(!retired_document_activations[0].has_destination_navigation());
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'discard retired javascript URL task'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("target Page owner should discard the retired javascript URL task");
+    let (retired_document_state, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+[
+  __javascriptTargetEvents.join("|"),
+  __javascriptTargetProxy.document.body.textContent
+].join(";")
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("retired target javascript URL state should evaluate");
+    assert_eq!(
+        renderer_json_value(retired_document_state),
+        Some(serde_json::json!(
+            "initial|window-open|hyperlink|form|queued-first|queued-second;replacement before task"
+        )),
+        "a javascript URL task queued for the retired Document must not execute in its replacement"
+    );
+
+    let (noopener_result, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+window.open(
+  "javascript:globalThis.__freshJavascriptUrlMustNotRun = true",
+  "_blank",
+  "noopener"
+) === null
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("noopener javascript popup should create an inaccessible target");
+    assert_eq!(
+        renderer_json_value(noopener_result),
+        Some(serde_json::json!(true))
+    );
+    let noopener_publications = output_rx.drain();
+    let noopener_activations = popup_activations_for_page(&noopener_publications, &source_page);
+    assert_eq!(noopener_activations.len(), 1);
+    assert!(!noopener_activations[0].has_destination_navigation());
+    assert_eq!(
+        noopener_activations[0].new_target_disposition(),
+        Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed)
+    );
+    assert!(matches!(
+        noopener_activations[0]
+            .pending_auxiliary_page()
+            .expect("noopener javascript popup should reserve a Fresh Page")
+            .page_reservation()
+            .script_agent_admission(),
+        RendererScriptAgentAdmission::Fresh
+    ));
+
+    target_page
+        .close_async()
+        .await
+        .expect("javascript target Page should close");
+    source_page
+        .close_async()
+        .await
+        .expect("javascript source Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_policy_checks_keep_existing_and_new_target_order_distinct() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let source_url = url::Url::parse("https://javascript-source-trusted-types.test/source.html")
+        .expect("source URL");
+    let mut source_page = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        "<!doctype html><body>javascript source Trusted Types</body>",
+    )
+    .await;
+
+    let (created, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  globalThis.__trustedTypesExistingTarget = window.open(
+    "about:blank",
+    "trusted-types-existing-target"
+  );
+  return __trustedTypesExistingTarget !== null;
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("existing target fixture should be created before source CSP changes");
+    assert_eq!(renderer_json_value(created), Some(serde_json::json!(true)));
+    let creation_publications = output_rx.drain();
+    let creation_activations = popup_activations_for_page(&creation_publications, &source_page);
+    assert_eq!(creation_activations.len(), 1);
+    let pending_target = creation_activations[0]
+        .pending_auxiliary_page()
+        .expect("existing target should reserve its renderer Page");
+    let mut target_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        pending_target.page_reservation(),
+        source_url.clone(),
+        "trusted-types-existing-target",
+    )
+    .await;
+    output_rx.drain();
+
+    let (selection, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "require-trusted-types-for 'script'";
+  (document.head || document.documentElement).appendChild(meta);
+
+  const existing = window.open(
+    "javascript:globalThis.__existingTargetBypassedSourceTrustedTypes = true",
+    "trusted-types-existing-target"
+  );
+  const missing = window.open(
+    "javascript:globalThis.__newTargetMustNotExist = true",
+    "trusted-types-new-target"
+  );
+  return [
+    existing === __trustedTypesExistingTarget,
+    missing === null
+  ].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source Trusted Types target-selection probe should evaluate");
+    assert_eq!(
+        renderer_json_value(selection),
+        Some(serde_json::json!("true|true"))
+    );
+
+    let selection_publications = output_rx.drain();
+    let selection_activations = popup_activations_for_page(&selection_publications, &source_page);
+    assert_eq!(
+        selection_activations.len(),
+        1,
+        "the existing target must publish reuse while the source Trusted Types check blocks the missing target before creation"
+    );
+    let resolved_target = selection_activations[0]
+        .resolved_target_page()
+        .expect("existing JavaScript URL must retain the selected Page residence");
+    assert_eq!(
+        resolved_target.owner_local_host_id(),
+        pending_target.page_reservation().local_host_id()
+    );
+    assert_eq!(
+        resolved_target.page_id(),
+        pending_target.page_reservation().page_id()
+    );
+    assert!(!selection_activations[0].has_destination_navigation());
+
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'follow existing-target JavaScript URL'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("existing target should execute under its own Trusted Types policy");
+    let (target_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "String(globalThis.__existingTargetBypassedSourceTrustedTypes)".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("existing target state should evaluate");
+    assert_eq!(
+        renderer_json_value(target_state),
+        Some(serde_json::json!("true"))
+    );
+
+    output_rx.drain();
+    let (source_csp_selection, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "script-src 'none'";
+  (document.head || document.documentElement).appendChild(meta);
+
+  const existing = window.open(
+    "javascript:globalThis.__existingTargetBlockedBySourceCsp = true",
+    "trusted-types-existing-target"
+  );
+  const missing = window.open(
+    "javascript:globalThis.__newTargetBlockedBySourceCsp = true",
+    "source-csp-new-target"
+  );
+  return [
+    existing === __trustedTypesExistingTarget,
+    missing === null
+  ].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source CSP target-selection probe should evaluate");
+    assert_eq!(
+        renderer_json_value(source_csp_selection),
+        Some(serde_json::json!("true|true")),
+        "source CSP must preserve an existing target return while blocking a missing target before creation"
+    );
+    let source_csp_publications = output_rx.drain();
+    assert!(
+        popup_activations_for_page(&source_csp_publications, &source_page).is_empty(),
+        "source CSP must neither queue the selected target nor create the missing target"
+    );
+    target_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: "'drain source-CSP-blocked target tasks'".to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("source-CSP-blocked target should remain commandable");
+    let (source_csp_target_state, _) = target_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "String(globalThis.__existingTargetBlockedBySourceCsp)".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source-CSP-blocked target state should evaluate");
+    assert_eq!(
+        renderer_json_value(source_csp_target_state),
+        Some(serde_json::json!("undefined")),
+        "the existing target's JavaScript URL must not execute after source CSP denial"
+    );
+
+    output_rx.drain();
+    let (form_selection, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "form-action 'none'";
+  (document.head || document.documentElement).appendChild(meta);
+
+  const submit = target => {
+    const form = document.createElement("form");
+    form.action = `about:blank#blocked-${target}`;
+    form.target = target;
+    form.rel = "opener";
+    document.body.appendChild(form);
+    form.submit();
+  };
+  submit("trusted-types-existing-target");
+  submit("_blank");
+  return __trustedTypesExistingTarget.location.href;
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("form-action target-order probe should evaluate");
+    assert_eq!(
+        renderer_json_value(form_selection),
+        Some(serde_json::json!("about:blank")),
+        "an existing target must be selected but retain its current Document when form-action blocks"
+    );
+    let form_publications = output_rx.drain();
+    let form_activations = popup_activations_for_page(&form_publications, &source_page);
+    assert_eq!(
+        form_activations.len(),
+        1,
+        "the blocked existing-target form publishes no navigation, while the missing _blank target retains creation"
+    );
+    assert!(
+        !form_activations[0].has_destination_navigation(),
+        "form-action denial must leave the newly created target on its initial Document"
+    );
+    assert!(form_activations[0].pending_auxiliary_page().is_some());
+
+    target_page
+        .close_async()
+        .await
+        .expect("target Page should close");
+    source_page
+        .close_async()
+        .await
+        .expect("source Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
     let runtime = JsRuntime::initialize();
     let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
@@ -9148,7 +10276,7 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
         Some(crate::RendererPopupNewTargetDisposition::Related),
         "opener-preserving named form creation must freeze related-group admission"
     );
-    assert_eq!(named_form_popups[0].request_method(), "GET");
+    assert_eq!(named_form_popups[0].request_method(), Some("GET"));
     assert_eq!(named_form_popups[0].request_body(), None);
 
     let (reused_named_form_result, _) = second_page
@@ -9203,13 +10331,15 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
             ..
         }
     ));
-    assert_eq!(reused_named_form_popups[0].request_method(), "POST");
+    assert_eq!(reused_named_form_popups[0].request_method(), Some("POST"));
     assert_eq!(
         reused_named_form_popups[0].request_body(),
         Some(b"form+field=form%2Bvalue".as_slice())
     );
     assert_eq!(
-        reused_named_form_popups[0].request_headers(),
+        reused_named_form_popups[0]
+            .request_headers()
+            .expect("POST form popup must retain request headers"),
         &[(
             "Content-Type".to_owned(),
             "application/x-www-form-urlencoded".to_owned()
@@ -9384,13 +10514,15 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
         Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed),
         "an implicit base target=_blank form must use the same Fresh policy as an explicit target"
     );
-    assert_eq!(base_target_form_popups[0].request_method(), "POST");
+    assert_eq!(base_target_form_popups[0].request_method(), Some("POST"));
     assert_eq!(
         base_target_form_popups[0].request_body(),
         Some(b"base+target=post+body".as_slice())
     );
     assert_eq!(
-        base_target_form_popups[0].request_headers(),
+        base_target_form_popups[0]
+            .request_headers()
+            .expect("POST form popup must retain request headers"),
         &[(
             "Content-Type".to_owned(),
             "application/x-www-form-urlencoded".to_owned()
@@ -22774,6 +23906,7 @@ async fn adopt_staged_related_about_blank_test_page(
             None,
             Some(initial_document_referrer),
             Some(target_name.to_owned()),
+            None,
         )
         .expect("staged related about:blank Page should start");
     let (page, _, _, _creation_artifacts, pending_download) = pending
@@ -22847,6 +23980,7 @@ async fn create_related_test_html_page_with_optional_indexed_db_manager_for_scri
             None,
             None,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+            None,
             None,
             None,
             None,
@@ -22978,6 +24112,7 @@ fn start_test_html_page_with_optional_indexed_db_manager_and_navigation_dispatch
             None,
             None,
             top_level_navigation_dispatch,
+            None,
             None,
             None,
             None,

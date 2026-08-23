@@ -508,10 +508,10 @@ struct UserActivationObjectDeclaration {
     #[webapi(slot = USER_ACTIVATION_BRAND_SLOT, init = true)]
     brand: (),
 
-    #[webapi(accessor_property, getter = navigator_user_activation_state_getter_callback, enumerable)]
+    #[webapi(accessor_property, getter = navigator_user_activation_is_active_getter_callback, enumerable)]
     is_active: (),
 
-    #[webapi(accessor_property, getter = navigator_user_activation_state_getter_callback, enumerable)]
+    #[webapi(accessor_property, getter = navigator_user_activation_has_been_active_getter_callback, enumerable)]
     has_been_active: (),
 }
 
@@ -742,12 +742,17 @@ pub(in crate::context_bootstrap) fn navigator_receiver_branded<'s>(
         .is_some_and(|value| value.boolean_value(scope))
 }
 
-pub(crate) fn current_protocol_user_gesture_activation(scope: &mut v8::PinScope<'_, '_>) -> bool {
+pub(crate) fn current_transient_user_activation(scope: &mut v8::PinScope<'_, '_>) -> bool {
     context_host_ptr_from_global_bridge(scope)
-        .is_some_and(|host_ptr| unsafe { (&*host_ptr).protocol_user_gesture_activation() })
+        .is_some_and(|host_ptr| unsafe { (&*host_ptr).transient_user_activation() })
 }
 
-fn navigator_user_activation_state_getter_callback<'s>(
+fn current_sticky_user_activation(scope: &mut v8::PinScope<'_, '_>) -> bool {
+    context_host_ptr_from_global_bridge(scope)
+        .is_some_and(|host_ptr| unsafe { (&*host_ptr).sticky_user_activation() })
+}
+
+fn navigator_user_activation_is_active_getter_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'s, v8::Value>,
@@ -758,8 +763,23 @@ fn navigator_user_activation_state_getter_callback<'s>(
         throw_type_error(scope, "Illegal invocation");
         return;
     }
-    let active = current_protocol_user_gesture_activation(scope);
+    let active = current_transient_user_activation(scope);
     rv.set(v8::Boolean::new(scope, active).into());
+}
+
+fn navigator_user_activation_has_been_active_getter_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'s, v8::Value>,
+) {
+    if get_private_value(scope, args.this(), USER_ACTIVATION_BRAND_SLOT)
+        .is_none_or(|value| !value.boolean_value(scope))
+    {
+        throw_type_error(scope, "Illegal invocation");
+        return;
+    }
+    let has_been_active = current_sticky_user_activation(scope);
+    rv.set(v8::Boolean::new(scope, has_been_active).into());
 }
 
 fn set_resolved_promise(

@@ -590,6 +590,7 @@ impl JsContextHost {
                     document_credentialless,
                     credentialless_storage_nonce,
                 );
+                self.refresh_child_top_navigation_policy_after_commit(handle);
                 let resource_was_cached = loaded
                     .document_network
                     .as_ref()

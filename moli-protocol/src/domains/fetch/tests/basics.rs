@@ -1079,6 +1079,7 @@ async fn disable_clears_fetch_state() {
                 request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                 timestamp: 0.0,
                 source_document_security: Default::default(),
+                service_worker_clients_open_window_continuation: None,
             },
             request_cookie_report: None,
             intercept_response: false,
@@ -1118,6 +1119,7 @@ async fn disable_clears_fetch_state() {
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
                     source_document_security: Default::default(),
+                    service_worker_clients_open_window_continuation: None,
                 },
                 challenge: FetchAuthChallenge {
                     origin: "http://example.test".to_owned(),
@@ -1342,6 +1344,7 @@ async fn continue_with_auth_rejects_invalid_response_without_consuming_pending_a
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
                     source_document_security: Default::default(),
+                    service_worker_clients_open_window_continuation: None,
                 },
                 challenge: FetchAuthChallenge {
                     origin: "http://example.test".to_owned(),
@@ -1417,6 +1420,7 @@ async fn continue_with_auth_unsupported_challenge_preserves_pending_auth_navigat
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
                     source_document_security: Default::default(),
+                    service_worker_clients_open_window_continuation: None,
                 },
                 challenge: FetchAuthChallenge {
                     origin: "http://example.test".to_owned(),
@@ -1588,6 +1592,7 @@ fn emit_auth_required_preserves_request_headers_and_post_data_shape() {
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 0.0,
             source_document_security: Default::default(),
+            service_worker_clients_open_window_continuation: None,
         },
         request_cookie_report: None,
         intercept_response: false,

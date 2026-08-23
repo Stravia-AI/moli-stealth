@@ -949,6 +949,7 @@ mod tests {
             main_document_commit: None,
             initial_document_referrer: None,
             initial_top_level_browsing_context_name: None,
+            auxiliary_browsing_context_policy: None,
             top_level_storage_key: None,
             document_start_scripts: vec![],
             runtime_bindings: vec![],

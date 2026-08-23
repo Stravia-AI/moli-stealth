@@ -1,6 +1,6 @@
 # Popup / Auxiliary Browsing Context：现状、Chromium 对照与统一方案
 
-日期：2026-08-02；最后更新：2026-08-04
+日期：2026-08-02；最后更新：2026-08-06
 
 状态：架构评估与分阶段迁移设计；`popup-refactor` 已完成 Phase 1 primitive 抽取、
 Phase 2A script-agent identity / current-policy baseline，以及 Phase 2B 的 selective
@@ -29,8 +29,9 @@ opener、非命名、非 `javascript:` 的 non-empty URL：destination 在 targe
 auxiliary Page owner 导航一次，opener host 不再启动 mirrored loader。Phase 4 第二纵切又把
 destination 提升为携带 exact `TargetPageResidenceIdentity` 的 typed claim，并在 target-local
 slot 中建立 `Held → Published → Consumed` authority；旧 admission 因 Page generation 变化而失效
-后，不能导航 replacement Page，也不能被 `Page.enable` 等入口从 target URL 重建。Phase 3-5
-仍未整体完成。Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
+后，不能导航 replacement Page，也不能被 `Page.enable` 等入口从 target URL 重建。Phase 3-4 的
+single-owner/navigation 主干现已完成；Phase 5 的 local/Fresh creation policy 已在 E3 exit，lifecycle、
+group/remote、identity/lifetime 与最终双栈删除仍未整体完成。Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
 并覆盖 initial realm/history 保留和后续 redirect replacement。第四纵切又把 replacement
 Document 的 commit/attachment publication 与其精确 DCL continuation 分开：protocol 可以在
 parser 仍阻塞时控制已经提交的 realm，renderer owner 则用独立 typed terminal 交付同一 turn 的
@@ -104,9 +105,63 @@ task、loader 与 parser ledger，而不会误取消同一 child 后来发生的
 `window.open()`、hyperlink 与 form 命中 current top 时的 initiating Window/Document、source URL、
 Referrer Policy 和 suppression 冻结进同一 typed request；target Page 仍是唯一 scheduler/loader owner，
 但 redirect、cross-origin 与 Fetch URL override 不再把 target root 误当 initiator，最终
-`document.referrer` 也按实际 commit URL 重算。`javascript:` 的完整
-target-realm execution、sandbox、top-level activation/opener 特例、focus transaction、COOP group sever 与
-remote/disconnected endpoint 仍未完成。
+`document.referrer` 也按实际 commit URL 重算。E2I 又完成 sandbox 对**新建** auxiliary context 的
+renderer-side admission：attribute / response CSP 的 `allow-popups` 与
+`allow-popups-to-escape-sandbox` 已独立建模，`window.open()`、hyperlink、form 和兼容 queue 都在 existing
+target lookup 之后、Page reservation / `Page.windowOpen` 之前消费同一 typed policy。被拒绝的
+`window.open()` 返回 `null`，不留下 popup activation；escape token 本身不会错误放行。`javascript:` 的完整
+target-realm execution 在该阶段仍未完成，现已由 E2N 收口。E2J 随后把准入时冻结的 sandbox frame policy 作为 renderer-owned opaque
+carrier 交给 Fresh/no-local-proxy target：显式 noopener `window.open()` 与 implicit noopener hyperlink/form
+都由 target Page slot 跨 initial `about:blank` 和后续 Document replacement 持有同一 policy；protocol 只保管
+typed value，不解释 sandbox flags。继承 sandbox 的 Fresh Page 现在会在 realm 可观察前安装 opaque origin、
+`document.domain` 禁止、script gate 与 nonce-bearing storage key，并与每次 response CSP sandbox 求交集，
+`noopener` 仍独立切断 opener/group。E2K 又把 DevTools `userGesture` 与 trusted mouse/key/touch input 收敛为
+Page/frame-tree lifetime 的 transient/sticky activation ledger：existing target lookup 不进入 creation gate，sandbox
+拒绝不消费，真正 admitted 的 new-context transaction 才执行 browser-context popup-blocker policy 并至多消费一次
+精确 generation；`Page.windowOpen.userGesture` 只观察消费前冻结值。Lightmount 保留自动化默认放行，并提供严格
+require-activation policy；完整 top-level `CanNavigate`、`javascript:` target-realm execution、focus
+transaction、COOP group sever 与 remote/disconnected endpoint 在该阶段仍未完成。E2L 现已把 `allow-forms` 收回
+source-Document form owner：iframe attribute、所有 response-CSP `sandbox` policy 与 inherited popup policy
+共同形成 typed `DocumentSandboxPolicy::allows_forms`；`requestSubmit()` 在 validation/`submit` 前拒绝，直接
+`submit()` 则保留 `formdata` entry-list construction，随后复核 form connected/current owner policy，再阻止
+actual target navigation。它与 `allow-popups` 独立，早门禁也不会误消费 E2K transient activation。Chromium
+direct `submit()` 还会在晚门禁前完成 target selection，并可能只留下 initial empty popup。E2L.1 已把这项
+实现顺序收进同一 owner：ordinary named / `_blank` 在晚门禁前先选择 existing target 或创建 initial empty
+auxiliary Page；被拒绝的新 target 仍完成 popup admission、activation consume、`Page.windowOpen` 与 target
+creation，但 renderer-to-protocol carrier 的 destination request 为 `None`。protocol 因此保留 URL 为空的
+DevTools target 和唯一 `about:blank` Document，不发布 loader/scheduler work，也不会从空 target URL 反推
+一次伪导航。E2M.1 又建立了 renderer-owned **local `CanNavigate` authority**：current/related Page 的
+top/child、兼容 lightweight endpoint 统一消费 committed sandbox navigation flags、top-navigation token、
+policy-container sticky guard、transient/sticky activation、target/ancestor origin、typed opener relation 与
+destination origin/site exception；ordinary named resolver、special target、form、same/cross-origin Location 均不再
+各自猜测权限。跨源相对 Location URL 也以 source execution-context identity 的 Document base 解析，policy 与
+真正排队的 request 使用同一绝对 URL。RemoteFrame/fenced/embedder 分支、file-local 特例、security console
+diagnostic 仍是后续阶段。E2N 进一步把 full-creator `window.open()`、hyperlink 与 form 的
+`javascript:` request 放进最终选中/新建的真实 target Page pending slot：target selection/creation 与 stable
+WindowProxy 返回保持同步，执行则严格推迟到 target Page 的 networking-task owner turn。target Document identity、
+source carrier、target CSP、异常/non-string/string completion、执行中另起 navigation、普通 navigation supersession
+与 Document replacement cancellation 都由同一个 Page/Document currentness 边界判定；protocol activation 对
+`javascript:` 只观察 target create/reuse，不再发布第二个 destination navigation。Fresh/noopener target 仍会创建
+唯一 initial Page，但不会在无 opener 且 opaque 的跨源 realm 中错误执行 creator 提供的脚本。
+E2O 在这份 single-owner 基础上补齐 policy 收尾：最终 target Page 或 stable child FrameRealm 都按
+`target CSP → target Trusted Types pre-navigation check → execution` 处理 JavaScript URL；enforce/report-only、
+default policy rewrite、invalid reconstructed URL 和 callback exception 均不向调度 API 同步抛错。producer 侧则
+区分 existing hit 与 creation miss：existing target 先解析 stable WindowProxy，再只做 source inline-navigation
+CSP；miss 才在创建前做 source CSP + Trusted Types gate。form submission 同时接入无 `default-src` fallback 的
+`form-action`，并保持 target selection/new initial Page、late `allow-forms`、source CSP、`form-action` 与 target
+scheduler 的 Chromium 顺序。实现直接复用已经成熟的 child-frame stable WindowProxy/realm 与 E2N target Page
+task，而没有引入第三套 policy executor。
+Phase 5E3 现已完成 local/Fresh creation-policy 收口：Service Worker
+`clients.openWindow()` 与 notification navigation 不再借当前 root Window 伪造 source，也不再调用
+lightweight popup owner；两者以 browser-context source 创建无 opener 的 Fresh auxiliary Page，并与 DOM
+producer 共用同一 target admission/navigation pipeline。`clients.openWindow()` 的 Promise continuation 绑定
+exact reserved Page、worker version/generation 与 request id，跨 Fetch fulfill、redirect、transport terminal 和
+background commit 保持 move-only authority，只在 exact committed/current/execution-ready/same-origin
+WindowClient 上返回对象，其余已打开但不可观察或未提交路径返回 `null`。同一 source turn 的 ordinary target
+navigation 与后继 `javascript:` target task 即使分裂为多个 renderer publication，也会在普通导航 start 后、
+commit 前经过 exact target Page owner lane；fast response 不再抢先替换执行该 task 的 Document。至此本地
+DOM 与非 DOM production creation producer 都以真实 Page 为权威 owner；COOP/remote/fenced group model、
+unload/focus lifetime 和 Phase 6 compatibility 双栈删除仍是独立的大阶段。
 
 代码基线：
 
@@ -132,16 +187,19 @@ top-level browsing context。它不是 Blink 用于 `<select>`、权限气泡等
 拿到的 Window 与 CDP target 看到不同 DOM、`close()` 与 target 生命周期分裂，继续
 补 facade 只会扩大同步成本。
 
-`popup-refactor` 当前已经为 opener-preserving、非 `javascript:` URL（非命名、普通 named
-`window.open()`、ordinary named hyperlink 和 full-creator form auxiliary target）建立 production
-迁移路径：creator 与 target 共享同一
+`popup-refactor` 当前已经为 opener-preserving 的非命名/普通 named `window.open()`、ordinary named hyperlink
+和 full-creator form auxiliary target 建立 production 迁移路径；其中 ordinary destination 与
+`javascript:` 都由最终 target Page 持有。creator 与 target 共享同一
 stable WindowProxy、initial realm、Document 和 Page residence；non-empty destination 在 target admission
 后从该 Page 发起一次 replacement navigation，opener host 不再保存对应 lightweight Document record 或
-启动 mirrored loader。非命名及普通 named 的 `noopener` / `noreferrer` 创建路径与 hyperlink/form
+启动 mirrored loader。`javascript:` 的 target 选择/创建同步完成，脚本在该 target 的 Page task 上异步执行，
+不会作为 protocol/browser navigation 再跑一遍。非命名及普通 named 的 `noopener` / `noreferrer` 创建路径与 hyperlink/form
 `_blank` 也已经进入独立 Fresh Page 的 single-owner 路径，只是不向 creator 暴露 local WindowProxy；
-form POST 的 exact body/header 则沿同一 target-owned navigation claim 发出。上述双实现判断仍适用于
-`javascript:` URL、缺少完整 creator capability 的 child-frame hyperlink/form source 和其余尚未迁移入口；
-因此 lightweight 模型仍是 Phase 4-6 的主要删除对象，而不是可以继续扩展的长期架构。
+form POST 的 exact body/header 则沿同一 target-owned navigation claim 发出。Phase 5E3 又把 Service Worker
+`clients.openWindow()` 与 notification navigation 接入无 opener 的 Fresh Page，并补齐 exact Promise terminal
+与 ordinary→`javascript:` protocol ordering。上述双实现判断现在只适用于 compatibility/standalone fallback、
+legacy lightweight facade 及尚未建立 remote endpoint 的入口，不再适用于 production SW/notification producer；
+因此 lightweight 模型仍是 Phase 6 的主要删除对象，而不是可以继续扩展的长期架构。
 
 建议采纳下面的方向：
 
@@ -355,20 +413,20 @@ owners”。这不是原始评估时的推测，而是 Phase 4 第一纵切之�
 
 | 语义 | 当前状态 | 直接后果 |
 |---|---|---|
-| authoritative Page | related 非命名、普通 named `window.open()`/hyperlink/full-creator form，以及 Fresh noopener 非命名/普通 named 路径已统一；`javascript:`、部分 child-source 路径仍可让 lightweight Page 与 target Page 并存 | 未迁移入口的 DOM、history、lifecycle 仍可分叉 |
-| navigation owner | 已迁移入口一个 URL 只有一个 owner；legacy 入口仍可能有两个 load owner | 未迁移入口仍可能重复请求、cookie、服务端副作用和计时 |
-| top-level initiator / referrer | E2H 已让 current-top `window.open()`、hyperlink/form 与 related target request 保存 exact source Window/Document 和 policy；preflight、transport redirect/Fetch URL override、最终 `document.referrer` 不再从 target root 反推 | redirect response 自身更新 policy、完整 Fetch response-stage override、`javascript:` 与 sandbox/origin creation policy 仍需独立收口 |
-| realm | related 非命名/普通 named 路径（含 full-creator form）使用真实独立 realm；Fresh noopener（含普通 named）不向 creator 暴露 local proxy；legacy facade 仍可能共享 opener `Context` | `javascript:`/部分 child-source legacy handle 仍可能与 CDP execution context 无关 |
-| synchronous access | 已迁移 related path 直接访问 target 的真实 Document；legacy facade 仍模拟部分 `w.document` | 未迁移入口的写入不会自然出现在 target DOM |
+| authoritative Page | related 非命名、普通 named `window.open()`/hyperlink/full-creator form、Fresh noopener，以及 E3 的 SW `clients.openWindow()` / notification navigation 都已统一到真实 Page；E2N 已把 DOM producer 的 `javascript:` target 也交给该 Page；compatibility fallback 仍可保留 lightweight owner | legacy/standalone 入口的 DOM、history、lifecycle 仍可分叉 |
+| navigation owner | DOM 与 E3 非 DOM production producer 的一个 URL 只有一个 owner；legacy compatibility 入口仍可能有两个 load owner | Phase 6 前兼容入口仍可能重复请求、cookie、服务端副作用和计时 |
+| top-level initiator / referrer | E2H 已让 current-top `window.open()`、hyperlink/form 与 related target request 保存 exact source Window/Document 和 policy；E2N 的 target-local `javascript:` task 也保留这份 source carrier；preflight、transport redirect/Fetch URL override、最终 `document.referrer` 不再从 target root 反推 | redirect response 自身更新 policy、完整 Fetch response-stage override 仍需独立收口 |
+| realm | related 非命名/普通 named 路径（含 full-creator form 与 E2N `javascript:`）使用真实独立 target realm；Fresh noopener 以及 SW/notification Fresh Page 不暴露伪 opener realm；legacy facade 仍可能共享 opener `Context` | compatibility handle 仍可能与 CDP execution context 无关 |
+| synchronous access | 已迁移 related path 直接访问 target 的真实 Document；E2N 同步返回 stable target WindowProxy、异步执行 target task；legacy facade 仍模拟部分 `w.document` | 未迁移入口的写入不会自然出现在 target DOM |
 | cross-origin WindowProxy | 有局部 restriction/facade | 不是完整 outer/inner 或 local/remote proxy 模型 |
-| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 related auxiliary Page 已在 Phase 5B 统一；Fresh noopener 不向 opener 暴露 close handle | named/`javascript:` 等 legacy 路径仍可能让 `closed`、targetDestroyed、资源回收不一致 |
+| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 related auxiliary Page（包括 E2N primary `javascript:` target）已在 Phase 5B 统一；Fresh noopener 不向 opener 暴露 close handle | compatibility fallback 仍可能让 `closed`、targetDestroyed、资源回收不一致 |
 | focus/blur | top-level Window 上仍有 no-op surface | named-target focus 和事件不完整 |
-| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order 与普通 nested `CanNavigate`；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；protocol map 仅为 projection/legacy fallback | 完整 sandbox/top-level `CanNavigate`、remote/fenced/COOP 后查找仍可能不一致 |
+| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；E2M.1 已让 current/related local candidate 统一经过 renderer `CanNavigate` authority；protocol map 仅为 projection/legacy fallback | RemoteFrame/fenced/COOP group switch 后查找仍未建模；legacy compatibility helper 待 Phase 6 删除 |
 | opener / COOP | 有 opener suppression 字段和局部 policy | 没有完整 browsing-context-group split / opener sever |
-| popup blocker | userGesture 被观测，部分 policy 已冻结 | 没有统一的 transient activation 消耗和创建 gate |
-| sandbox | 有部分 frame policy 输入 | `allow-popups` / escape-sandbox 创建边界不完整 |
+| popup blocker / user activation | E2K 已建立 renderer-owned 5s transient + sticky ledger、exact generation consume、existing-target bypass、sandbox-before-blocker order、pre-consumption `Page.windowOpen` observation 和 browser-context allow/require policy；E2M.1 已把 transient/sticky 状态接入 local top-navigation decision；DevTools gesture 与 trusted mouse/key/touch 共用 owner | 尚无 content-setting/CDP 配置面与 blocked console/UI diagnostic；RemoteFrame replication、per-frame visibility 和 history activation 长尾未完成 |
+| sandbox | E2I 已统一 attribute/response-CSP `allow-popups` 新建准入，并区分 escape 只控制继承；E2J 又让 Fresh/no-local-proxy target Page 跨 initial 与后续 Document 持有 renderer-frozen policy；E2L/L.1 已补 source `allow-forms` 和 creation-only side effect；E2M.1 已提交并冻结 navigation/top-navigation flags、frame-owner token provenance 与 Chromium `can_navigate_top_without_user_gesture` 等价 guard，并用于 local target selection/navigation | security console diagnostic、RemoteFrame/fenced/embedder 与 file-local 特例仍缺失 |
 | initial empty Document | 已迁移 related 路径由 target 采纳同一份；Fresh noopener 只由目标 Page 创建；legacy 双栈仍各有一份 | 未迁移入口的同步 mutation 与 target attach 无法指向同一对象 |
-| script loader | 已迁移入口只使用 Page loader；form POST request 也由 selected target 的唯一 loader 消费；legacy lightweight 仍有专用 parser/script wrapper | `javascript:`/部分 child-source 的 loader、module、CSP、currentness 仍会漂移 |
+| script loader / JavaScript URL task | ordinary URL、form POST 与 E3 SW/notification destination 都只使用 selected target Page 的唯一 loader；E2N `javascript:` 由 target Page pending slot / Document task 执行，E2O 补齐 target CSP/Trusted Types/form-action，E3 再锁住 ordinary start→target JS task→commit 顺序；legacy lightweight 仍有专用 parser/script wrapper | redirect-time/browser-process form-action continuation、RemoteFrame/isolated-world 与 compatibility executor 仍未统一 |
 
 因此，继续为 lightweight 路径分别补 module、dynamic import、beforeunload、COOP、
 cross-origin descriptor、CDP Runtime context 等功能，会让每个修复都复制到另一条路径。
@@ -390,9 +448,10 @@ window-open|window_open|browsing-context-names|noopener|noreferrer|opener|auxili
 | fail | 12 |
 | timeout | 28 |
 
-这些 case list 的采集早于最近 E2A-E2H，不是当前 `popup-refactor` 的运行结果，也不能作为新 owner/scheduler
-路径的验收证据。下一轮 WPT 应固定 commit、目标集、timeout、并发度与正确性输出后重新分类；在此之前，
-下面的 case 只能用于选择 focused slice。
+这些 case list 的采集早于最近 E2A-E2O，不是当前 `popup-refactor` 的运行结果，也不能作为新 owner/scheduler
+路径的验收证据。E2I 已固定 commit/binary 跑过三例 focused slice，结果和限制见对应实施章节；完整 popup
+目标集仍需固定 timeout、并发度与正确性输出后重新分类。在此之前，下面的历史 case 只能用于选择 focused
+slice。
 
 代表性风险包括：
 
@@ -3612,9 +3671,10 @@ activate hyperlink(url, ordinaryName, rel)
 - staged Related Page 的 session-storage store 与 initial storage key 直接取自 creation result，再以旧
   lightweight record lookup 作为 legacy fallback。真实 Page staging 不需要留下一份 mirrored record，
   因而不能在创建后反查那份本不应存在的状态；
-- source 缺少完整 creator capability、URL 无法解析或为 `javascript:` 时仍走 legacy carrier。
-  `javascript:` 需要在 selected target realm 中同步执行并受该 realm CSP/currentness 约束，不能仅靠
-  async Page admission 机械迁移；
+- E2C 入库时，source 缺少完整 creator capability、URL 无法解析或为 `javascript:` 时仍走 legacy carrier。
+  Chromium 的实际合同是同步选择/创建 selected target，但把脚本作为该 target Document 的 networking task
+  异步执行，并使用 target realm/CSP/currentness；这不能靠 protocol async Page admission 机械迁移。full-creator
+  `javascript:` 缺口现已由 E2N 完成，缺少 creator capability 的 compatibility fallback 仍保留；
 - 旧 `owner_scheduler_applies_legacy_hyperlink_popup_terminal_from_stable_page_route` 被删除。它等待
   opener-local loader 请求并从 mirrored Document 回写 opener，恰好要求已迁移路径保留第二 owner；新的
   renderer activation 和 protocol target-realm 回归覆盖正确责任边界。
@@ -3704,8 +3764,9 @@ target lookup 顺序保持窄且与 E2C 一致：
 4. related hit 携带 `RendererResolvedPopupTarget`，不创建 Page、不产生 `Page.windowOpen`；
 5. miss 且保留 opener 时 staging 一个真实 Related initial Page；miss 且抑制 opener 时 reserve
    `FreshNamed` 或 `_blank` 的 `FreshUnnamed` Page；
-6. source 没有 full creator capability、`javascript:` 或其它尚未迁移条件继续 fail closed 到 legacy
-   carrier，不能借本纵切声称 child-source 完整 ordering 已经完成。
+6. E2D 入库时，source 没有 full creator capability、`javascript:` 或其它尚未迁移条件继续 fail closed 到
+   legacy carrier，不能借本纵切声称 child-source 完整 ordering 已经完成；后续 E2N 已迁移 full-creator
+   `javascript:` producer，但没有扩大“缺少 creator capability”的 fallback。
 
 `rel=noopener/noreferrer` 仍不改变 existing-target lookup。命中已有 related Page 时，本次 source 的
 opener exposure/referrer policy 只进入 navigation activation；目标 Page 既有的 Page-scoped opener edge
@@ -3758,8 +3819,9 @@ shared element selector 只共用 target/group/referrer/creation primitive，没
 
 这个 event 接入只覆盖已经能由 renderer group 精确解析的 related top-level hit。它不等于完整实现
 Blink `Frame::ScheduleFormSubmission()`：同一 form 的跨 task supersession、target loader
-`CancelClientNavigation()`、parser cancellation、RemoteFrame scheduler 与 sandbox `allow-forms` 仍需在
-通用 form/navigation owner 后续补齐，不能靠删除旧 activation 或 drain queue 伪装正确。
+`CancelClientNavigation()`、parser cancellation、RemoteFrame scheduler 与 sandbox `allow-forms` 当时仍需在
+通用 form/navigation owner 后续补齐，不能靠删除旧 activation 或 drain queue 伪装正确；其中 local/related
+child cancellation 已由 E2G 完成，source-Document `allow-forms` 双门禁已由 E2L 完成。
 
 ##### 本纵切建立的不变量与证据边界
 
@@ -4075,7 +4137,8 @@ cargo nextest run -p lightmount-renderer-v8 \
 
 E2F 有意没有声称完成 Chromium 的整个 scheduling contract：跨 Page same-form cancellation、target loader
 `CancelClientNavigation()`、parser cancellation、RemoteFrame scheduler、sandbox `allow-forms` 与 top-level
-`CanNavigate()` 仍未实现。child-source 命中 current top 虽已保留 method/body/headers 和 exact target owner，
+`CanNavigate()` 当时仍未实现；前两项 local/related child owner 已由 E2G 收敛，`allow-forms` source gate 已由
+E2L 收敛。child-source 命中 current top 虽已保留 method/body/headers 和 exact target owner，
 但当时 top-level protocol carrier 仍只记录 root Document lifecycle，尚未携带 child source/referrer identity（后由
 E2H 解决）；这与
 redirect、cross-origin/downgrade referrer 再计算一起需要单独纵切，不能由本轮 related-child direct-response
@@ -4387,13 +4450,1685 @@ cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
 本轮没有把共享 fetch runtime 扩张成完整 navigation Fetch Standard 实现。redirect response 自身通过
 `Referrer-Policy` 改写后续 hop、Fetch response-stage fulfill/continueResponse 与显式 `Referer` 的全部
 Chromium 关系仍需独立 probe；source security origin/CSP、sandbox/top-navigation permission 和
-`javascript:` target-realm execution 也不能从这个 URL/policy carrier 外推。当前 enum 中保留
+`javascript:` target-realm execution 在 E2H 入库时也不能从这个 URL/policy carrier 外推；该执行 owner 现已由
+E2N 单独实现。当前 enum 中保留
 `LightweightPopup` 只是迁移期兼容 source identity，不是 Phase 6 可以删除双栈的信号。
 
-##### E1/E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H 有意保留的 Phase 5E 范围
+#### Phase 5E2I：sandbox new-auxiliary creation admission
 
-E1/E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H 不是 creation/group policy 完成标志，以下边界不能套用“非命名直接 Fresh Page”或
-“所有 name 都查 related same-agent registry”的捷径：
+E2H 之后，DOM producer 已能在 renderer 内精确区分 existing target 与 new auxiliary target，但 sandbox
+policy 仍只有 origin/scripts/escape 的局部投影。一个没有 `allow-popups` 的 sandbox child 会照常创建
+lightweight record、Page reservation、popup activation 和 `Page.windowOpen` observation；response CSP
+`sandbox` 也不会阻止 root `window.open()`。这不仅是返回值错误，还会在被浏览器策略拒绝的动作上留下隐藏
+Page/target/storage work，违反本章的 creation transaction 不变量。
+
+##### Chromium/WPT 合同与失败基线
+
+本轮继续固定 Chromium `a03603fe9af6`：
+
+- `FrameTree::FindOrCreateFrameForNavigation()` 先调用 `FindFrameForNavigationInternal()`；只有没有命中
+  existing context 时才进入 `CreateNewWindow()`。因此 sandbox popup gate 不能提前阻断 `_self` / `_parent` /
+  `_top` 或 ordinary existing name；
+- `CreateNewWindow()` 在真正创建 auxiliary Page 前检查 `WebSandboxFlags::kPopups`，失败返回 `nullptr`，并且
+  不进入 embedder `CreateWindow()`；这也是 `window.open()` 返回 `null` 的 owner 边界；
+- `services/network/public/cpp/web_sandbox_flags.cc` 将 `allow-popups` 映射为移除 `kPopups`（以及 custom
+  protocol 相关 flag），而 `allow-popups-to-escape-sandbox` 只移除
+  `kPropagatesToAuxiliaryBrowsingContexts`。后者不会隐式授予创建权限；
+- 本地 WPT `html/browsers/sandboxing/sandbox-disallow-popups.html` 断言 blocked `window.open()` 的返回值为
+  `null` 且 destination 不加载；`iframe_sandbox_popups_nonescaping-*` 与
+  `iframe_sandbox_popups_escaping-*` 则分别要求 allowed popup 继承或逃离 sandbox。
+
+renderer 回归先固定三个违反路径：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 sandbox_without_allow_popups
+# run 4628abb3-0e05-4911-961b-58a860618203：2 failed。
+# window.open(_blank/named-miss) 都返回非 null；anchor/form 也留下 popup activation。
+# 同一 sandbox child 以自己的 ordinary name 为 target 已正确复用 existing context，证明失败点只在 new target。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  response_csp_sandbox_requires_allow_popups_for_auxiliary_creation
+# run 0eed2bb2-408b-40df-82d4-7257a370679a：1 failed；`sandbox allow-scripts` 仍创建 popup。
+```
+
+首版测试没有 `allow-same-origin`，parent test realm 对 opaque child 调用测试专用 `eval` 时先被正确的
+cross-origin access check 拒绝；这不是产品失败证据。回归随后改为
+`allow-scripts allow-same-origin [allow-forms]`，只移除测试 harness 的跨源干扰，仍保留 popup sandbox flag。
+
+##### typed admission 与 owner 顺序
+
+E2I 在 `DocumentPolicyContainer` owner 中新增一次性构造的
+`AuxiliaryBrowsingContextCreationPolicy`。调用顺序是：
+
+```text
+source Window/element policy snapshot
+  -> special / ordinary existing-target lookup
+  -> DocumentPolicyContainer::into_auxiliary_browsing_context_creation_policy()
+       sandbox active && !allow-popups => BlockedBySandbox
+       allowed && propagates           => target policy keeps sandbox flags
+       allowed && escape               => target policy uses unsandboxed defaults
+  -> Page reservation / initial realm staging / popup activation / Page.windowOpen
+```
+
+具体边界如下：
+
+- `DocumentSandboxPolicy` 现在显式保存 `allows_popups`。无 sandbox 时默认允许；iframe attribute 按 ASCII
+  case-insensitive token 解析；多个 enforced response CSP 中只有每一个 active `sandbox` directive 都包含
+  `allow-popups` 才允许。owner attribute 与 response CSP 合并时使用交集，不会被后来的宽松 policy 放大；
+- `allow-popups-to-escape-sandbox` 保持独立交集。admission 先检查 `allow-popups`，再决定 accepted target
+  是否继承 sandbox；因此 escape-only policy 必须拒绝，不能借 escape token 绕过 popup gate；
+- `window.open()` 在 special/current-page/related-page name lookup 返回之后才构造 typed policy。child receiver
+  的 policy 从已经选定的 `OwnerDispatchScope` 读取，而不是仅依赖 entered-realm marker；红测曾证明后者在
+  `child.contentWindow.eval()` 嵌套调用中会错误回退到 root policy；
+- hyperlink/form 的 full-creator path 在 current/related target hit 之后消费同一 typed policy；兼容
+  `queue_popup_target_navigation()` 也从 exact dispatch scope 做同一 gate。blocked default action 返回 handled，
+  但不会创建 lightweight record、reserve Page、记录 activation 或发布 `Page.windowOpen`；
+- `open_lightweight_popup_window()` 的参数从原始 `DocumentPolicyContainer` 收紧为 admitted typed policy，避免
+  当前 DOM 或非 DOM caller 绕过 gate。Service Worker `clients.openWindow()` 与 notification navigation 没有
+  Document sandbox source，必须显式构造 browser-context/default admission；本轮没有把它们伪装成 root
+  Window action；
+- existing target 不消费 creation admission。回归中 sandbox child 仍可用自己的 ordinary frame name 命中
+  self 并完成 same-document navigation，且不产生 popup activation。
+
+##### 当前证据与明确未完成项
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 sandbox_without_allow_popups
+# run 734056d9-4ad8-4817-93be-2061ae7d33af：2 passed。
+
+cargo nextest run -p lightmount-renderer-v8 sandbox
+# 首次实现后 run f736c117-5418-4a76-827e-ccbfad47c86d：24 passed。
+# 补入 direct-URL WPT 等价回归后 run e38bfe19-78a8-484a-987c-50f9d66df6b2：27 passed。
+# 覆盖 attribute/CSP parser、window.open/link/form block、response CSP、既有 non-escape/escape popup、
+# nested top-navigation denial、document.domain 与 sandbox storage 邻接行为。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  auxiliary_creation_policy_separates_popup_admission_from_sandbox_escape
+# run 45b184dc-66b5-47e4-922f-9a457cc281de：1 passed；escape-only 拒绝、propagating/escaping policy 分叉。
+
+cargo nextest run -p lightmount-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 772090fe-b0e7-46bc-9f3c-1169a8feefbb：20/20 iterations passed，每轮 7/7。
+```
+
+本轮也用当前 release binary 跑了三个最贴近的 upstream WPT，但结果不能被折算成全绿：
+
+```bash
+uv run --project lightmount-benchmark python -m lightmount_benchmark.wpt_cross \
+  --wpt-root ../wpt --engine lightmount --mode cli \
+  --lightmount-bin target/release/lightmount \
+  --case html/browsers/sandboxing/sandbox-disallow-popups.html \
+  --case html/semantics/embedded-content/the-iframe-element/iframe_sandbox_popups_nonescaping-1.html \
+  --case html/semantics/embedded-content/the-iframe-element/iframe_sandbox_popups_escaping-1.html
+# /tmp/lightmount-wpt-popup-sandbox-e2i-20260805：fail=1、timeout=2。
+```
+
+为了避免把旧的 `wpt-cross-current` pass 分类或 fixture 限制误当作本轮产品回归，又从本轮未修改起点
+`128647d91cd2` 构建了独立 release binary，使用同一 runner/case set 做 A/B：基线同样是
+`fail=1、timeout=2`。逐例证据进一步区分了失败边界：
+
+- 基线 `sandbox-disallow-popups.html` 在约 54ms 直接失败，`window.open()` 返回
+  `SecurityError: Blocked a frame ...`，没有满足 WPT 的 `null` 合同；当前实现已经越过该
+  `assert_equals(e.data, "null")`，约 12s 后才因 `stash-take.py` 响应不是 JSON 而失败。本仓库
+  `wpt_cross` fixture server 明确只实现白名单 Python handler，当前没有实现
+  `/fetch/api/resources/stash-take.py` / `stash-put.py`，所以该 fail 的第二层“目标 URL 未加载”断言还不能作为
+  产品证据；
+- 两条 allowed-popup inheritance WPT 在 `128647d91cd2` 与当前 binary 上都 timeout，因此不是 E2I
+  引入的回归，但也不能沿用 8 月 2/3 日更早全量快照中的 pass 作为当前验收。renderer 内增加了与 helper
+  相同的 direct `window.open(location.href)` 回归，non-escape/escape 两条均通过，并进入上述 20 次 stress；
+  CLI 路径仍暴露 auxiliary Page task/lifecycle pumping 的独立缺口，需后续用 protocol trace 收口。
+
+因此，E2I 的强证据是 renderer owner admission、无 reservation/event 副作用、direct-URL realm 行为以及
+基线/当前的返回值差分；“stash 证明 destination 绝未请求”和“当前 CLI inheritance WPT pass”仍是明确的
+证据债，不能写成已完成。
+
+提交前 workspace 门禁：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# run 283da5a2-ae6e-473f-a593-a0a04f4439c0：16030 passed、18 skipped；执行阶段 100.014s。
+
+cargo fmt --all --check
+# passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 30s。
+
+git pull -r origin master
+# origin/master 从 d4070fec16 前进到 780d9fe8ed；43 个 topic commit 无冲突完成 rebase。
+
+cargo nextest run -p lightmount-renderer-v8 sandbox \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# rebase 后 run 5efdca76-c6a2-4ddd-b19f-5b1a162833d0：27 passed。
+
+cargo nextest run -p lightmount-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# rebase 后 run 85e6aa59-bf56-404c-ac5c-556ab50f70bb：20/20 iterations passed，每轮 7/7。
+
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# rebase 后 run a36f4e37-5172-4fc1-9dde-2b96ba8710c3：16030 passed、18 skipped；执行阶段 135.592s。
+
+cargo fmt --all --check
+# rebase 后 passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# rebase 后 passed；1m 34s。
+```
+
+这轮只完成 **new auxiliary admission**，不把它写成完整 sandbox/activation transaction：
+
+- E2I 入库时，opener-preserving staged initial realm 已消费 admitted policy，而 Fresh/no-local-proxy Page
+  reservation 尚未把 accepted sandbox flags 作为 public renderer-to-Page carrier 交给实际 initial Document
+  build；该缺口已由下节 E2J 补齐，且没有让 protocol 根据 opener/target name 反推；
+- `allow-forms` 是 form submission 自身的 permission，不等于 `allow-popups`；该独立 source-Document owner
+  已由 E2L 接入。完整 sandbox top-navigation flags、opener relation、activation exception、fenced/remote 分支
+  仍属于 `CanNavigate`；
+- 当前 `userGesture` 只是 protocol observation，没有持久 transient activation 或消费 ledger。本轮 gate 在
+  reservation/event 之前，因此不会新增错误消费，但也没有实现 popup blocker 或“allowed creation consumes
+  activation”的 Chromium 语义；
+- Chromium 的 sandbox console diagnostic、`javascript:` 最终 target realm/CSP/currentness，以及 COOP group
+  sever 均未在 E2I 实现；其中 full-creator JavaScript URL owner 现已由 E2N 完成。
+
+E2I 入库时确定的下一最小纵切是 **Fresh auxiliary accepted-sandbox carrier**，让 implicit noopener
+anchor/form 与显式 noopener `window.open()` 的 initial Page 使用 renderer 已冻结的同一 policy。该纵切现已由
+E2J 完成；popup blocker 与 transient activation 消耗又已由 E2K 接入同一 creation transaction；form
+source-Document `allow-forms` 双门禁已由 E2L 完成。下一步先补 direct `form.submit()` 晚门禁之前的
+creation-only target carrier；该纵切已由 E2L.1 完成，下一步进入完整 `CanNavigate`。
+
+#### Phase 5E2J：Fresh auxiliary accepted-sandbox carrier
+
+E2I 只把 sandbox 决策推进到“是否允许创建”与“是否逃离 sandbox”。opener-preserving Related Page 能在同步
+staging 时直接消费 accepted policy，但 Fresh/no-local-proxy activation 只把 Page reservation 交给 protocol；
+`noopener` 又有意不保留 DOM opener。因此如果 target owner 在创建事务里没有单独持有 frame policy，initial
+`about:blank` 与真实 destination 都会回退到 URL/default policy，`allow-popups-to-escape-sandbox` 未出现时也会
+错误逃离 sandbox。
+
+##### Chromium 合同与 owner 选择
+
+本轮继续以 Chromium `a03603fe9af6` 为固定基线，关键源码边界是：
+
+- `third_party/blink/renderer/core/page/create_window.cc` 的 `CreateNewWindow()` 在 popup admission 之后，独立于
+  `features.noopener` 计算 `sandbox_flags`：creator 仍受
+  `kPropagatesToAuxiliaryBrowsingContexts` 约束时传递 active flags，否则传 `kNone`；
+- `content/browser/web_contents/web_contents_impl.cc` 的 `CreateWithOpener()` 即使收到
+  `opener_suppressed=true`，仍先用 `opener_rfh->active_sandbox_flags()` 设置新 root 的 pending frame policy；
+  `SetOpenerForNewContents()` 只在 `!opener_suppressed` 时建立可脚本访问的 opener edge。也就是说“谁创建了
+  auxiliary context”和“新 Window 是否暴露 opener”是两条不同关系；
+- `content/browser/renderer_host/render_frame_host_impl.cc` 在 initial empty Document 上把 effective frame policy
+  与 CSP sandbox 合并。后续 Document 也以 browsing-context/frame policy 为底，再叠加本次 response CSP；
+  sandbox 不是从 opener URL、target name 或当前 `Window.opener` 反推的单次导航参数。
+
+据此，本轮选择 **target Page slot 是跨 Document 的长期 owner，renderer 是 policy 的唯一解释者**：protocol
+需要持有一个可复制的 typed value，以便重建 navigation wrapper 或 active/background target 切换后继续交回
+renderer，但不能看到或分支判断 `DocumentSandboxPolicy` 的内部 flags。把 carrier 放进短命
+`NavigationEngine` 会在 target runtime 重建时丢失；把它留在 opener relation 又会与 noopener 的正确 sever
+冲突。
+
+##### typed carrier 与 Document commit 路径
+
+新增的 `RendererAuxiliaryBrowsingContextPolicy` 对 core/protocol 公开类型身份，但 sandbox payload 和解释方法
+保持 renderer-private。完整流向是：
+
+```text
+creator DocumentPolicyContainer
+  -> AuxiliaryBrowsingContextCreationPolicy（E2I admission/escape decision）
+  -> RendererAuxiliaryBrowsingContextPolicy
+  -> RendererPendingPopupActivation（仅 Fresh disposition 必须携带）
+  -> PopupTargetCreation（opaque transport）
+  -> TargetPageSlot（browsing-context lifetime owner）
+       +-> initial empty Document build 的显式 input
+       `-> 每次 TargetNavigationLoadInputs
+             -> RendererMainDocumentCommit
+             -> replacement Document build
+  -> PageVm/ScriptVm realm bootstrap 与 response-policy merge
+```
+
+边界约束如下：
+
+- explicit noopener `window.open()` 与 implicit/explicit noopener hyperlink/form 的 Fresh producer，在 Page
+  reservation 之后、设置 `FreshUnnamed` / `FreshNamed` disposition 之前附上 frozen policy。activation 断言
+  `Fresh iff carrier present`；Related activation 不携带它，因为 live staged Page 已经拥有自己的 initial
+  environment；
+- `PopupTargetCreation`、`BrowserContext::stage_popup_background_target()` 和 `TargetRuntimeSlot` 只搬运 opaque
+  value。carrier 必须与 renderer Page reservation 同生；没有 reservation 却出现 carrier 会立即触发 owner
+  invariant，而不是静默创建一份 protocol-side sandbox projection；
+- `TargetPageSlot` 在 `replace_loaded_page()`、background/active promotion 与 navigation-engine wrapper replacement
+  之间保留 carrier。每次 load inputs 都从 exact target slot snapshot，再写入该次
+  `RendererMainDocumentCommit`；initial empty build 则走独立显式 input。renderer owner 会拒绝同一 Document 同时
+  收到互相冲突的 explicit/commit policy；
+- renderer owner 在 realm bootstrap 前先以 inherited frame sandbox 和本次 enforced response sandbox 求交集，
+  把 effective policy 同时用于 initial security origin、Window runtime origin、storage key 和 script execution
+  gate；随后 response CSP 安装进 `DocumentRuntime` 时再次以原 accepted frame policy 合并，避免 response setter
+  覆盖继承 flags。强制 opaque origin 时，top-level storage key 使用 browser-context 单调分配的 opaque nonce；
+  每个 replacement Document 获得自己的 nonce，不把同 URL 的两个 opaque Document 合并；
+- `Location.origin` 的 top-level projection 也改为先读取 authoritative current Document policy，再做 URL 自身
+  是否 opaque 的 fallback；否则 policy 已正确禁止 `document.domain` 时仍会错误暴露 tuple origin；Window
+  runtime 的 replaceable `origin` slot 同样从 bootstrap 时已经安装的 Document sandbox policy 初始化，不能再次
+  从 URL 覆盖 opaque origin；
+- escape-sandbox admission 会冻结 default/unsandboxed carrier，因此 noopener 仍创建 Fresh group，但不会被错误
+  施加 creator sandbox。carrier 本身不恢复 opener、不共享 creator tuple origin，也不改变 session-storage 的
+  noopener 分叉。
+
+##### 红测、回归与证据边界
+
+protocol 红测从带 `Content-Security-Policy: sandbox allow-scripts allow-popups` 的 opener 创建显式 noopener
+Fresh target，随后在 target realm 同时观察 `location.origin` 与 `document.domain`：
+
+```bash
+cargo nextest run -p lightmount-protocol \
+  noopener_popup_retains_creator_sandbox_policy_across_document_navigations \
+  --no-fail-fast
+# red run b1abfc80-23bd-4bc8-aa51-addfc66cad5b：1 failed；
+# 实际为 http://127.0.0.1:<port>|allowed，预期 null|SecurityError。
+```
+
+首版 carrier 接通后 `document.domain` 已抛 `SecurityError`，但 `location.origin` 仍按 URL 返回 HTTP origin；这份
+中间差分证明 policy 已到达 Document owner，同时暴露了 Location 的旧 URL-only 投影。补测“creator 允许 escape，
+target response 自己施加 CSP sandbox”时又得到 `Window.origin=http://...`、`location.origin=null`、
+`document.domain=SecurityError`，进一步证明 effective response policy 必须在 realm bootstrap 前形成，Window
+runtime state 不能随后按 URL 覆盖它。
+
+修复两处投影后，最终回归覆盖五个状态：显式 noopener `window.open(non-empty)` 的首个 destination 和第二次
+`Page.navigate`，implicit noopener anchor 创建的 initial `about:blank` 和其后 destination，以及 escape
+creator 创建、由 target response CSP 重新 sandbox 的 Fresh realm。前四者锁住 creator frame-policy persistence，
+第五个锁住 response intersection 的 bootstrap 时序；全部必须返回
+`origin|location.origin|domain = null|null|SecurityError`，且 anchor 与 form 共享同一个 element Fresh producer：
+
+```bash
+cargo nextest run -p lightmount-protocol \
+  -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 8e1a6134-991b-43ab-9c0e-4620a9787d0b：2 passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  auxiliary_creation_policy_separates_popup_admission_from_sandbox_escape \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run ead96a1d-3b87-4f29-8755-1544d4c25268：1 passed；
+# inherited/escaped typed carrier 与 E2I policy container 的 sandbox 完全一致。
+
+cargo nextest run -p lightmount-renderer-v8 sandbox \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 7d65f712-aa7b-4a52-a5ba-2ef83a3b7d89：27 passed；覆盖 E2I admission、
+# inheritance/escape 与相邻 origin/script/document.domain/storage/top-navigation sandbox 行为。
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation) or test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) or test(anchor_blank_target_uses_implicit_noopener)' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 27497ade-33a5-4f11-8a10-877109b5f8e1：20/20 iterations passed，每轮 4/4；
+# 同时锁住 sandbox carrier、E2H referrer/single-owner 与 E1 implicit-noopener 邻接路径。
+```
+
+本轮没有把历史 `fail=1、timeout=2` 的三条 sandbox WPT 重新包装成 E2J 的通过证据：本地
+`iframe_sandbox_popups_nonescaping-*` / `escaping-*` helper 使用 opener-preserving `window.open()` 或
+`rel=opener`，走的是 E2I 已覆盖的 Related path，不会命中本轮 Fresh/no-local-proxy carrier；而旧 WPT runner
+仍有 stash fixture 与 auxiliary task pumping 的已知限制。E2J 的强证据因此是 protocol target 的 initial /
+replacement realm 观测、renderer typed-policy 单测和下述完整门禁；直接对应 Fresh noopener sandbox inheritance
+的 upstream WPT 仍是证据债，不能沿用旧关键字快照声称已通过。
+
+提交前 workspace 门禁：
+
+```bash
+cargo nextest run --no-fail-fast
+# run 5e361013-7531-4e35-8414-2d114e5913a7：16032 passed、18 skipped；
+# 执行阶段 101.504s。
+
+cargo fmt --all --check
+# passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 33s。
+```
+
+同步 `origin/master` 后的基线与复验：
+
+```bash
+git pull -r origin master
+# origin/master 从 93ceb0ed1f 前进到 08d0340f0c；44 个 topic commit 完成 rebase。
+# 最早 popup 设计提交与 master 已重写的 cdp-runtime-renderer-runtime-current.md 有一处冲突；
+# 保留 master 的 2026-08-05 current-owner 文本，popup 文档仍由 docs/README、child-context 和 isolate 文档导航。
+```
+
+master 已把 `ParsedCdpCommand` 的旧 `traits` 收进 `CdpRendererCommandPolicy`。旧 navigation-continuation
+topic commit 重放后还有一个 getter 读取已删除字段，属于 Git 未能识别的语义冲突；同步适配是在 typed policy
+上补只读 accessor，并让 scheduler getter 从同一 ingress-frozen policy 读取，没有恢复第二份 method 分类。
+
+```bash
+cargo nextest run -p lightmount-protocol \
+  -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation) or test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) or test(anchor_blank_target_uses_implicit_noopener)' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# rebase 后 run 366ae4fe-9554-498b-aa8c-2e914548f16f：20/20 iterations passed，每轮 4/4。
+
+cargo nextest run --no-fail-fast
+# rebase 后首次 run 234b8b36-8923-4327-834e-93d2ad5f9261：16046 passed、3 failed、18 skipped。
+# 三条失败分别为 parser-script network backlog、replacement Document file chooser backend-node scope
+# 和 per-Page isolate churn SIGABRT；均不在 popup carrier 路径。
+
+cargo nextest run \
+  -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded) or test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement) or test(per_page_isolate_navigation_churn_disposes_replaced_page_vms)' \
+  --stress-count 50 --flaky-result fail --test-threads 3 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 64718878-96b0-4806-9e42-e26c1adc8804：50/50 iterations passed，每轮 3/3；
+# 不用 sleep/retry 或降低 workspace 并发修改产品行为。
+
+cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# rebase 后默认并发复跑 run a5064be3-7b7f-473c-a9dd-a525bc490970：
+# 16049 passed、18 skipped；执行阶段 120.199s。
+
+cargo fmt --all --check
+# rebase 后 passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# rebase 后 passed；1m 41s。
+```
+
+E2J 入库时确定的下一最小纵切是 renderer-owned transient activation ledger：existing-target navigation 不消费，
+真正通过 sandbox admission 的 new-context creation 才执行 blocker decision 和至多一次消费，并把
+`Page.windowOpen.userGesture` 降为该 transaction 的 observation。该纵切现已由 E2K 完成；form
+`allow-forms` 的 source-Document 双门禁又已由 E2L 完成。下一步处理 direct `form.submit()` 晚门禁之前的
+creation-only target side effect；该纵切已由 E2L.1 完成。后续依次处理完整 sandbox/top-level `CanNavigate`
+和 `javascript:` 最终 target-realm execution；其中当前 owner 可表达的 local `CanNavigate` 已由 E2M.1
+完成，full-creator `javascript:` final-target Page task/realm 又已由 E2N 完成。
+
+#### Phase 5E2K：transient user activation 与 popup creation transaction
+
+E2I/E2J 已经回答“sandbox 是否允许创建”和“accepted frame policy 由谁跨 Document 持有”，但此前
+`userGesture` 仍只是 `JsContextHost` 上的命令栈深度：`Runtime.evaluate(userGesture=true)` 进入 V8 前加一，
+命令返回后立即减一；`navigator.userActivation.isActive` 与 `hasBeenActive` 读取同一个瞬时布尔值。结果是
+gesture 不能跨 protocol command 保留，new popup 不消费，existing target 与 new context 也没有统一的
+blocker/consume 顺序。真实 Input dispatch 则完全不会授予 activation。
+
+##### Chromium / WPT 固定合同
+
+本轮仍以 Chromium `a03603fe9af6` 和 upstream WPT checkout
+`db95fafd1fcef8428805e41eb5705d444e8c67ce` 为固定对照，关键边界如下：
+
+- `third_party/blink/renderer/core/page/frame_tree.cc` 的
+  `FrameTree::FindOrCreateFrameForNavigation()` 先执行 named/special target lookup；只有没有 frame 才进入
+  `CreateNewWindow()`。已有 frame 随后只做 `CanNavigate` / focus，因此 existing-target navigation 不应进入
+  popup blocker，也不应消费 activation；
+- `content/browser/renderer_host/render_frame_host_impl.cc` 的 `CreateNewWindow()` 先计算 effective transient
+  activation，再调用 embedder `CanCreateWindow()`；denial 在 consume 前返回。admitted path 随后在创建 Page、
+  处理 opener-suppressed return 之前消费 browser/frame-tree activation；
+- `content/renderer/render_frame_impl.cc` 只有在 browser 返回非 blocked/non-reuse 结果后才消费 initiating
+  renderer 的 transient activation；即使最终是 noopener/ignore，也已完成 consume；
+- `third_party/blink/public/common/frame/user_activation_state.h` 与
+  `third_party/blink/common/frame/user_activation_state.cc` 分开保存 sticky bit 和 transient expiry timestamp。
+  普通 build 的 lifespan 是 5 秒（MSan 特例 60 秒），expiry 边界为 inclusive；`ConsumeIfActive()` 只成功一次；
+- `third_party/blink/renderer/core/inspector/thread_debugger_common_impl.cc` 的 `beginUserGesture()` 调用
+  `LocalFrame::NotifyUserActivation()`，并不是 inspector command scope 的临时 flag；
+- WPT `html/browsers/windows/consume-user-activation/window-open.html` 明确要求：创建新 window 后
+  `isActive == false`，重新打开 existing named window 后 `isActive == true`。multi-global 变体又要求从 entry /
+  incumbent / relevant globals 中选对被消费的 frame-tree activation。
+
+这些事实还区分了两项不能揉成一个布尔值的策略：**是否有 transient activation** 是 renderer/frame-tree
+动态状态，**没有 activation 时 embedder 是否仍允许 popup** 是 browser-context policy。Chrome 的 UI profile
+通常用前者驱动 popup blocker，但 content embedder、content setting、testing/automation 可以放行；放行不代表
+已有 activation 可以被重复使用。
+
+##### renderer-owned ledger 与 typed admission
+
+`JsContextHost` 现在持有 `TransientUserActivationLedger`，而不是
+`protocol_user_gesture_activation_depth`。ledger 保存：
+
+- 单调 `generation`，每次 trusted/protocol notification 创建一个新 identity 并刷新 5 秒 expiry；
+- transient grant：未过期且未消费时由 `navigator.userActivation.isActive` 与 activation-gated WebAPI 读取；
+- sticky bit：本 Document/frame lifetime 曾经激活后保持为真，由 `hasBeenActive` 单独读取；
+- consume：用同一个 `Instant` 冻结 observed generation 并清除它，避免 expiry 边界把 observation 与消费拆成
+  两个不同结果。
+
+创建事务的实际责任链是：
+
+```text
+DevTools userGesture / trusted input
+  -> Page/frame-tree TransientUserActivationLedger
+
+DOM popup producer
+  -> special / named current-Page / related-Page / legacy named lookup
+       -> existing hit: navigate exact target; no admission, no consume
+       `-> miss:
+            DocumentPolicyContainer
+              -> sandbox allow-popups admission
+              -> RendererPopupBlockerPolicy decision
+              -> observe + consume exact transient generation
+              -> AuxiliaryBrowsingContextCreationAdmission
+                   + accepted sandbox policy
+                   ` RendererPopupCreationUserActivation
+              -> reserve/create auxiliary Page
+              -> RendererPendingPopupActivation owner action
+              ` Page.windowOpen observation of frozen pre-consumption state
+```
+
+`AuxiliaryBrowsingContextCreationAdmission` 把 E2I 的 accepted sandbox policy 与本次
+`RendererPopupCreationUserActivation` 收进同一 renderer-only value。后者同时保存 observed/consumed generation，
+构造时要求两者完全相同；无 gesture 的 embedder bypass 则两者都为 `None`。这不是 protocol 可重算的字段：
+`RendererPendingPopupActivation` 仅保留 typed result 用于 owner invariant/诊断，`Page.windowOpen` 事件从同一
+frozen result 取得 `userGesture`，发布边界会断言两者一致。
+
+`RendererBrowserContextRuntime` 新增公开的 `RendererPopupBlockerPolicy`：
+
+- `AllowWithoutTransientActivation` 是 Lightmount 默认值，保持现有 headless automation/抓取工作负载不会因
+  新 blocker 突然少建 target；但如果创建时确实存在 activation，仍必须消费；
+- `RequireTransientActivation` 提供严格 Chromium-like admission，可由 embedder/browser profile 配置；没有
+  active grant 时 `window.open()` 返回 `null`，且不会 reserve Page、创建 lightweight record、发布 owner action
+  或 `Page.windowOpen`。
+
+顺序由 `JsContextHost::admit_new_auxiliary_browsing_context()` 唯一负责：先消费
+`DocumentPolicyContainer::into_auxiliary_browsing_context_creation_policy()` 的 sandbox verdict，再读取 blocker
+policy，最后才 observe/consume ledger。sandbox denial 和 blocker denial 都发生在消费前；一旦 embedder 接受，
+即使后续是 noopener/Fresh return 或具体 Page 创建失败，也不能把 grant 退回给脚本，这与 Chromium
+browser-side consume 时机一致。
+
+##### existing target 与所有 DOM producer
+
+`window.open()`、hyperlink、form 和 compatibility `queue_popup_target_navigation()` 都改为调用同一个 admission。
+其中 target lookup 必须严格先行：
+
+- renderer-owned current/related Page 与 nested frame 继续消费 E2A-E2F 的 typed resolver；命中时 activation
+  action 不携带 creation result；
+- 尚未删除的 named lightweight record 增加显式 preflight reopen。它在 sandbox/blocker/consume 之前导航旧
+  record，并发布 existing-target owner action但不发布 `Page.windowOpen`；`open_lightweight_popup_window()` 内部
+  仍保留同一 lookup 作为非 DOM compatibility fallback；
+- 真正 miss 后，Related、Fresh、legacy lightweight 和 protocol fallback new-context action 都携带同一
+  creation result。Fresh path 仍额外携带 E2J accepted frame policy；没有 Page reservation 的旧 compatibility
+  path 不伪造 Fresh policy carrier。
+
+因此同一个 activated command 可以先复用 named target，再创建一个新 target：第一次 lookup 后 activation
+仍为 active，第二次 creation 才消费。反过来，同一 activation 连续请求两个新 target，在严格 policy 下只有
+第一个被创建；默认 automation policy 会创建两个，但第二个 `Page.windowOpen.userGesture` 必须是 `false`。
+
+Service Worker `clients.openWindow()` 与 notification navigation 仍属于 browser-context/non-DOM producer；本轮
+没有把它们伪装成某个 root Document 的 user activation，也没有迁移其 lightweight owner。这保持了 Phase 6
+删除清单的真实边界。
+
+##### activation source 与 WebAPI observation
+
+V8 inspector `userGesture` 现在只在 command 开始时 `notify_user_activation()`，不再在 command 返回时清除；后续
+task/command 在 expiry 前可观察并消费同一 grant。Input dispatcher 按 HTML activation-triggering input 规则在
+author listener/default action 之前通知：mouse `mousedown`、non-mouse pointer 对应的 `touchend`、以及非
+`Escape` 的 `keydown`。脚本 `element.click()` 不经过这条 trusted-input ingress，因此不会绕过严格 blocker。
+
+WebDriver BiDi 的 `script.callFunction` / `script.evaluate` `userActivation=true` 也复用这条 protocol ingress。
+这不是 command-local override：当前 WebDriver BiDi Editor's Draft 的执行算法要求在 author function/expression
+前运行 HTML **activation notification steps**，没有在返回时恢复旧状态；upstream
+`webdriver/tests/bidi/script/{call_function,evaluate}/user_activation.py` 也会在每个参数用例前显式调用
+`window.open()` 消耗上一条 grant。因而 BiDi、CDP 和 trusted input 产生的是同一种可跨 command 保留、直到
+消费或 expiry 才失效的 transient state；page global 不能伪造它，而消费后 sticky state 仍为 true。
+
+原先读取 command-depth flag 的 pointer lock、storage access、vibrate、clipboard/editing command 等入口统一
+读取 persistent transient state。`navigator.userActivation.hasBeenActive` 则从 sticky bit 读取，不再随 popup
+consume 变回 false。当前每个 local child realm 都由同一 Page `JsContextHost` 编排，所以 ledger 是 local
+frame-tree aggregate；这与 popup consume-all-local-frame-tree 的结果一致，但还不是 Chromium 对 OOPIF/remote
+proxy 的逐 frame replication 模型。
+
+##### 红测、聚焦回归与协议证据
+
+实现前先加入两条 owner-level 红测：DevTools gesture 必须跨 command 保留直到 new context 消费，以及 existing
+named target reuse 不消费、后续 new context 才消费：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(protocol_user_gesture_persists_until_new_auxiliary_creation_consumes_it) or test(existing_named_target_does_not_consume_popup_user_activation)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# red run 06567c3a-daa8-4856-9551-85ba549aead2：2 failed。
+# command 结束后实际 [false,false]；existing reuse + new creation 后实际仍 active=true。
+```
+
+typed ledger/admission 接通后的首个同集 run：
+
+```bash
+# run 5ead0a45-9b45-4e8c-a0ff-052df896a64b：2 passed。
+```
+
+随后回归扩展到 5 秒 inclusive expiry、single-consume/new generation、严格 blocker、sandbox-before-consume、
+synthetic vs trusted mouse，以及 Escape/non-Escape keyboard 与 touch release：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 -E '<E2K 八条 ledger/admission/input 回归>' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 770ad35c-b82d-4b9e-9259-f5395b1bea71：8 passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(popup) or test(window_open)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run e1968a1a-c186-4977-9441-ffa93df539d2：111 passed。
+```
+
+协议层新增一个 `Runtime.evaluate(userGesture=true)` 命令连续创建两个 `_blank` 的回归。Lightmount 默认策略允许
+两个 target 都创建，但 expression 在第一次之后观察到 `[isActive, hasBeenActive] == [false,true]`，两个
+`Page.windowOpen.userGesture` 必须依次为 `true,false`。该用例与其他六条 owner 回归一起通过：
+
+```bash
+cargo nextest run -E '<E2K renderer + protocol 七条首轮回归>' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run a5ab5842-3a2c-4c71-8429-58a82e7b5e64：协议/ledger 6 passed；
+# 唯一失败是低层 parsed fixture 未安装 root lifecycle，trusted input 本身已正确显示 active=true。
+# 给该产品级 popup 测试安装 production-shaped root lifecycle 后，
+# run 92636417-2b22-4a4f-945c-4605cb35239b：该用例 passed。
+```
+
+跨 command 的 protocol adoption 另有独立回归：第一次 activated named creation 返回
+`opened=true,active=false,sticky=true`；第二个 `userGesture=true` command 重开同名 target，必须复用原
+WindowProxy、不发布第二个 target/event，并返回 `reused=true,active=true,sticky=true`。它与上述双 `_blank`
+event observation 一起复跑：
+
+```bash
+cargo nextest run -p lightmount-protocol \
+  -E 'test(page_window_open_observes_pre_consumption_activation_for_each_new_context) or test(window_open_named_target_reuses_existing_popup_target)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 94124b0c-0868-4886-8667-98034a19b569：2 passed。
+```
+
+首轮 workspace gate 还发现一条早于 E2K 的 BiDi 回归把 `userActivation=true` 错写成 command-local scope：
+
+```bash
+cargo nextest run --no-fail-fast
+# run 80d60f73-df77-437f-9bca-d00282811575：
+# 16058 tests run，16057 passed / 1 failed / 18 skipped；唯一失败为
+# websocket_bidi_call_function_user_activation_controls_navigator_and_copy。
+
+cargo nextest run -p lightmount \
+  -E 'test(websocket_bidi_call_function_user_activation_controls_navigator_and_copy)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run a3bcc91e-7fb4-4e0d-870f-e54a6d35edf2：1 passed。
+```
+
+该回归现在要求 activation 跨下一条无 gesture command 保留，再用 `window.open()` 精确消费 transient grant，
+同时验证 `hasBeenActive` 保持 true；消费后设置同名 page global 也不能令 `isActive` 复活。这与 BiDi 规范算法和
+upstream WPT 的显式 pre-consume 结构一致，避免为了兼容旧断言重新引入 command-end clear。
+
+修正旧回归后的本轮 pre-commit workspace gate：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail \
+  --failure-output immediate
+# run 31b6c1d4-afb2-49b2-9b93-e95e473b2193：
+# 16058 passed、18 skipped；执行阶段 116.726s。
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 46s。
+```
+
+当前 release binary 也跑了 upstream `consume-user-activation/window-open.html`，但结果揭示的是 WPT bridge
+限制，不能写成产品通过：
+
+```bash
+cargo build --release -p lightmount
+# passed；1m 30s；binary sha256
+# e26ecd53a37532422425bf26df09752127dc1f008375a796c30f2cb977433571。
+
+uv run --project lightmount-benchmark python -m lightmount_benchmark.wpt_cross \
+  --wpt-root ../wpt --engine lightmount --mode cdp \
+  --lightmount-bin target/release/lightmount \
+  --output-dir /tmp/lightmount-wpt-popup-activation-e2k-20260805-1 \
+  --case html/browsers/windows/consume-user-activation/window-open.html
+# fail=1；harness OK；2 subtests 中 1 pass / 1 fail。
+# fail: Opening an existing window should not consume user activation。
+
+# 同一 binary/matrix 的 CLI mode：
+# /tmp/lightmount-wpt-popup-activation-e2k-20260805-cli-1；同样 1 pass / 1 fail。
+```
+
+这个 fail 不能反推 production existing-target consume 仍错误：仓库
+`lightmount-benchmark/lightmount_benchmark/wpt_cross/server.py` 注入的
+`test_driver_internal.click()` 使用页面内 `dispatchEvent(new MouseEvent(...))`，所以事件必然
+`isTrusted == false`，按规范与 E2K 实现都不能授予 activation。第一个“new window consumes”subtest 只是从未
+active 的 `false` 得到弱通过，第二个 bless 后仍为 false 才暴露 bridge 缺口。用同一 runner 跑系统 Chromium
+145.0.7632.116 也不是有效 comparator：第一条通过后 popup cleanup 失败，harness ERROR，第二条 NOTRUN；输出在
+`/tmp/chrome-wpt-popup-activation-e2k-20260805-1`。因此本轮强证据是 owner/protocol/trusted-input 回归；要让该
+upstream case 成为验收门禁，WPT CDP driver 必须把 `test_driver.click()` 接到真实 `Input.dispatchMouseEvent`
+或 WebDriver action，而不是在页面内伪造 trusted event。
+
+本轮实现提交推送后按 topic 约定同步 master；远端 master 没有新增提交，因此 rebase 是 no-op、没有冲突或
+commit rewrite。仍在同步后的精确 HEAD 上复验所有 E2K owner 边界与 workspace gate：
+
+```bash
+git pull -r origin master
+# Current branch popup-refactor is up to date.
+
+cargo nextest run -E '<E2K 11 条 ledger/admission/input/protocol/BiDi 回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 332ce20f-910c-4df4-a4b9-2e81c27ff6b5：20/20 iterations passed，
+# 每轮 11/11；覆盖 expiry/single-consume、sandbox/blocker order、trusted input、
+# Page.windowOpen pre-consumption observation、named reuse 与 BiDi persistence/consume。
+
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail \
+  --failure-output immediate
+# run eba0efa4-aac5-4486-bfdf-18f8f91b8417：
+# 16058 passed、18 skipped；执行阶段 100.650s。
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；incremental 0.19s。
+```
+
+##### 有意保留的边界与下一步
+
+E2K 不是完整 User Activation v2 或 popup UI 完成标志：
+
+- strict policy 目前是 `RendererBrowserContextRuntime` API，还没有 content-setting、CLI/CDP option、site exception
+  或 popup-blocked UI/console diagnostic；默认仍为 automation-friendly allow；
+- local child 使用 Page aggregate ledger，尚未实现 Chromium 的 notification same-origin visibility、ancestor /
+  descendant propagation、RemoteFrame/browser replication、restricted extension activation 与 history activation；
+- expiry 采用读取时惰性判定，不需要 timer/sleep；Document replacement 创建新 host 时会建立新 ledger。后续若
+  引入 BFCache/Page restore，需要显式定义 activation snapshot，而不能复用旧 host 残留；
+- E2K 提交时 Service Worker/notification producer 与 popup blocked diagnostics 仍按各自 Phase 5E/6 边界处理；
+  full-creator DOM `javascript:` 的最终 target Page/realm/CSP/currentness 后由 E2N 完成，非 DOM producer 没有
+  冒充 Window source，并已在 E3 以 browser-context source 迁入 Fresh Page；
+- 当前 upstream user-activation WPT bridge 只能合成 untrusted event；把真实 protocol input 接入 testdriver 是
+  harness 证据债，不应通过给 synthetic event 授权来让 case 变绿；
+- E2K 入库时的下一最小纵切是 form `allow-forms`。该 source-Document 双门禁现已由 E2L 完成；它与 popup
+  blocker 不同，也能阻止向 **existing** target 提交，因此没有错误塞进只为 new-context 构造的 admission。
+
+#### Phase 5E2L：source-Document `allow-forms` 双门禁
+
+E2I/E2J 已经能回答一个 sandboxed Document 是否允许**新建** auxiliary context，并把 accepted frame policy
+交给实际 target Page；但 form submission 自身一直没有 `allow-forms` owner。此前一个无 `allow-forms` 的 child
+可以向 existing named iframe/Page 排队 GET/POST，也可以先进入 `_blank` creation admission，因而
+`allow-popups`、popup blocker 和 target resolver 被迫替 form permission 做错误的间接判断。response CSP
+`sandbox` 也只投影 scripts/origin/popups，无法阻止 root Document form submission。
+
+##### Chromium 合同、双门禁与一个可观察实现细节
+
+本轮仍以 Chromium `a03603fe9af6` 为固定源码基线。关键边界不是 `LocalFrame::CanNavigate()`，而是
+`HTMLFormElement` 自己：
+
+- `third_party/blink/renderer/core/html/forms/html_form_element.cc::PrepareForSubmission()` 在 connected 检查后、
+  constraint validation 与 `submit` event 前检查 `WebSandboxFlags::kForms`；因此 click/implicit submit/
+  `requestSubmit()` 被拒绝时不会触发 validation、`invalid`、`submit` 或 `formdata`；
+- `HTMLFormElement::ScheduleFormSubmission()` 在 `FormSubmission::Create()` 完成 entry-list construction/
+  `formdata` 后再次检查 connected，再处理 dialog method，最后对普通 GET/POST 做第二次 `kForms` 检查；直接
+  `form.submit()` 绕过第一道 gate，所以仍会触发一次 `formdata`，但不得启动 destination navigation；
+- `third_party/blink/renderer/core/loader/form_submission.cc::FormSubmission::Create()` 冻结 action/target、构造
+  entry list，并调用 `FrameTree::FindOrCreateFrameForNavigation()`。也就是说，Blink 当前实现会在第二道 forms
+  gate **之前**做 target selection；这与“late gate 之前没有任何 target side effect”不是同一合同；
+- `services/network/public/cpp/web_sandbox_flags.cc` 将 `allow-forms` 与 `allow-popups`、
+  `allow-top-navigation` 分别映射，不能因为允许 form 就允许新窗口，也不能把 forms gate 推迟到 new-context
+  popup admission；
+- Chromium legacy web tests `fast/frames/form-submission-early-return-for-sandboxed-iframes.html`、
+  `fast/frames/sandboxed-iframe-forms.html` 与 dynamic 变体覆盖早门禁、allowed/disallowed form；固定 upstream
+  WPT checkout `db95fafd1fcef8428805e41eb5705d444e8c67ce` 没有找到能单独锁住 direct-submit target-selection
+  side effect 的 focused case，因此不能把 WPT 关键字快照当作这项语义的强证据；Chromium
+  `fast/frames/sandboxed-iframe-parsing-space-characters.html` 另用于锁定 attribute tokenizer 的 FF/VT 边界。
+
+源码审计后又用同一 `out/Default/chrome` 做了最小 headless/CDP target probe：sandbox iframe 设置
+`allow-scripts allow-popups`，其中 direct `form.submit()` 投向新 named target。在关闭 popup blocker 后，缺少
+`allow-forms` 的运行确实多出一个 URL 仍为空的 page target；加入 `allow-forms` 后相同 target 导航到
+`about:blank?#destination`。这证明 Chromium 的 direct-submit denial 可以留下 **creation-only initial empty
+popup**，而不是“拒绝前完全没有 target”。
+
+##### typed policy 与唯一 source owner
+
+`DocumentSandboxPolicy` 现在显式保存 `allows_forms`：
+
+- 无 sandbox 时默认 `true`；iframe `sandbox` attribute 只有出现 ASCII case-insensitive `allow-forms` token 才
+  为 true；attribute tokenization 统一使用 HTML space characters，U+000C form feed 是 delimiter，Chromium
+  明确判为非法组合的 U+000B vertical tab 不会再被 Rust `split_ascii_whitespace()` 错当 delimiter 并授予权限；
+- 每个 response CSP policy 若没有 `sandbox` directive 不增加限制；只要任一 active `sandbox` directive
+  缺少 `allow-forms`，所有 policy 的交集就为 false；
+- creator attribute policy 与 response policy 在 Document build 时继续取交集；Fresh/no-local-proxy Page 的
+  E2J typed sandbox carrier 自然携带新字段，尚未删除的 lightweight popup inheritance 也显式做 AND，protocol
+  不解析或重算该 flag。
+
+form owner 通过 `owner_dispatch_scope_for_node(form)` 在操作发生时解析 source Document，并读取当前 policy
+snapshot：
+
+```text
+form node
+  -> owner Document
+       -> root Page DocumentPolicyContainer
+       -> child browsing-context DocumentPolicyContainer
+       `-> legacy lightweight popup DocumentPolicyContainer
+  -> sandbox.allows_forms
+```
+
+这是 source permission，不是 target property。missing/detached owner 不凭空构造 sandbox denial；existing
+connected/currentness checks 与后续 navigation owner 仍负责淘汰 detached/stale work。
+
+Lightmount 当前两条执行链如下：
+
+```text
+requestSubmit / trusted activation
+  -> connected
+  -> source Document allow-forms EARLY GATE
+  -> constraint validation
+  -> submit event
+  -> freeze action/target + construct entry list / formdata
+  -> connected recheck
+  -> typed target selection
+       -> existing target: no creation consume
+       `-> miss: popup admission + initial empty Page creation
+  -> source Document allow-forms LATE GATE
+       -> denied: no destination request
+       `-> allowed: attach exact request / navigation
+
+direct form.submit()
+  -> connected
+  -> freeze action/target + construct entry list / formdata
+  -> connected recheck
+  -> typed target selection / possible initial empty Page creation
+  -> source Document allow-forms LATE GATE
+       -> denied: preserve creation, omit destination request
+       `-> allowed: attach exact request / navigation
+```
+
+因此早门禁不会创建 target、进入 popup blocker 或消费 E2K transient activation；晚门禁会保留 direct-submit
+可观察的 `formdata`。E2L.1 之后，existing hit 被拒绝时仍不碰 loader/parser/scheduler；new miss 则保留已准入的
+initial empty Page、window-open observation 与 activation consume，但没有 destination request。`formdata` handler
+若移除 form，connected recheck 仍先退出；`allow-forms` 允许 existing target submission，但 `_blank` miss 仍必须
+独立通过 E2I `allow-popups` 和 E2K blocker/activation transaction。
+
+##### 红测与聚焦证据
+
+最初四条 owner 回归在实现前得到 clean semantic red：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 -E '<最初四条 allow-forms owner 回归>' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 95a8449a-ede2-4d46-814d-ec2155b75469：1 passed / 3 failed。
+# requestSubmit + direct submit 实际为 submit|formdata|formdata；response CSP sandbox 仍允许 navigation；
+# direct _blank probe 还进入 creation/consume。
+```
+
+其中最初把 direct `_blank` denial 写成“绝不创建/绝不消费”的断言，在上述 Chromium probe 后被删除：它会把
+Lightmount 在 E2L 时尚缺 creation-only carrier 的行为误写成浏览器合同。E2L 当时的 owner 回归改为只要求
+`requestSubmit()` 的早门禁在 target work 前保留 activation；direct submit 则锁住 `formdata` 后不导航
+existing target。最终 10 条 policy/form/tokenizer 回归、更宽的 form/sandbox slice 与 popup/window-open 邻接
+slice 均通过：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 -E '<E2L 十条 form/CSP/attribute/tokenizer owner 回归>' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 62754038-2ec1-4d08-838b-7591a2acabea：10 passed。
+
+cargo nextest run -p lightmount-renderer-v8 -E 'test(form) or test(sandbox)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run fac06157-0d1d-4dcd-b842-6a4a380946f5：327 passed。
+
+cargo nextest run -p lightmount-renderer-v8 -E 'test(popup) or test(window_open)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 3e746aa3-2dfd-4171-9324-da916cd4a022：113 passed。
+```
+
+首轮 workspace gate 让 6 条既有 named-child fixture 稳定变红：这些 fixture 从未把动态 form 接入 Document，
+却期待 `form.submit()` 导航。Chromium 的 connected check 会在 entry-list construction 前拒绝这条路径；因此
+产品 owner 补了 direct-submit 首道 connected gate，仓库自有 runtime/WPT probe 与本地 Lightpanda upstream
+mirror 只做最小 harness 修正——append form 后继续测试原本的 named-target 行为，而不是放宽产品语义：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail \
+  --failure-output immediate
+# run 21d69b08-63c1-44a4-a84c-05a1eb0a6bfa：16058 passed / 8 failed / 18 skipped。
+# 6 条确定性失败均为 disconnected form fixture；另有 parser backlog 与 V8 isolate teardown 两条并发失败。
+
+cargo nextest run -E '<六条修正 fixture + disconnected form owner 回归>' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 4d7cd63c-6989-4693-bf73-4289d45048fb：7 passed。
+```
+
+两条并发失败没有触达本轮 form/policy 调用图。按 flaky 规则复核时，parser backlog 单独 30/30 通过（run
+`182af909-4653-4cfe-bbbb-c69d762f8542`）；它与 isolate churn 两条直接并跑曾有 5/20 iteration 失败（run
+`7a6b6de8-ca05-4444-a6be-24c5ab4468fd`），而仓库既有 parser/file-chooser/isolate 邻接矩阵又 20/20、
+每轮 3/3 通过（run `31224cde-45b3-4151-813b-445b39607390`），isolate churn 本身也在前一矩阵中 20/20
+通过。这说明失败与并发进程时序有关，不能外推成 E2L 语义证据，也没有用 sleep、retry 或产品并发降级
+修改行为。最终精确源码的 workspace gate：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail \
+  --failure-output immediate
+# run 5421969d-1548-4d69-9d52-2e96e7f24f93：16067 passed、18 skipped；执行阶段 101.445s。
+
+cargo fmt --all --check
+# passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 33s。
+```
+
+本轮实现提交并首次推送后按 topic 约定同步 master；远端 master 没有新增提交，因此 rebase 是 no-op、没有冲突
+或代码 rewrite。仍在同步后的精确 HEAD 上复验 E2L owner 与 workspace gate：
+
+```bash
+git pull -r origin master
+# Current branch popup-refactor is up to date.
+
+cargo nextest run -p lightmount-renderer-v8 -E '<E2L 十条 owner 回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 75cbfdfd-4b70-4008-af58-6deea4913fb4：20/20 iterations passed，每轮 10/10。
+
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail \
+  --failure-output immediate
+# run 9f73b8f6-072e-498b-9581-4c889888cf78：16067 passed、18 skipped；执行阶段 101.632s。
+
+cargo fmt --all --check
+# passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 29s。
+```
+
+##### E2L 入库时有意保留的边界
+
+E2L 完成的是 source-Document policy 与 actual navigation gate，不把以下内容伪装成已经对齐：
+
+- **E2L.1 creation-only target carrier**：direct `form.submit()` 在 Blink 中先 target selection，再晚门禁；new
+  target 可以只留下 initial empty Page，并可能经过 popup blocker/activation consume。E2L 入库时 Lightmount
+  仍在晚门禁前直接返回；该缺口现已由下节 E2L.1 完成；
+- E2L 入库时完整 sandbox/top-level `CanNavigate` 属于后续 E2M，不能塞进 form owner；其中 local
+  sandbox navigation flags、`allow-top-navigation[-by-user-activation]`、opener/ancestor relation 与
+  destination-origin/site exception 现已由 E2M.1 完成，fenced/remote/file-local/embedder 分支仍保留；
+- Chromium 的 security console diagnostic 尚未接入，当前只安静拒绝；E2L 入库时 `javascript:` form target 的
+  最终 target realm/CSP/currentness 仍走 legacy，full-creator 路径现已由 E2N 收口；
+- focused upstream WPT 缺口仍在；后续若新增/找到标准 case，应先确认 WPT driver 的 trusted-input/popup
+  lifecycle 能力，再把它升级为提交门禁。
+
+#### Phase 5E2L.1：direct-submit creation-only target carrier
+
+E2L 已经让 late `allow-forms` gate 阻止 destination navigation，但当时的调用链在 gate 失败时直接返回，因而
+丢失 Blink 已经完成的 target-selection side effect。不能用一条 synthetic GET `about:blank` 补这个差异：那会
+凭空创建 navigation id、history/load 生命周期和第二个 loader owner，也会把“初始空 Document”错误建模成
+“目标导航提交”。E2L.1 因此只拆开两个此前被绑死的事实：**请求创建/选择哪个 target**，以及**是否存在要交给
+该 target 的 destination request**。
+
+##### 固定 Chromium 合同与本地可观察证据
+
+本轮继续使用 `/home/donoughliu/chromium/src@a03603fe9af6`：
+
+- `HTMLFormElement::ScheduleFormSubmission()` 先调用 `FormSubmission::Create()`，取得其中冻结的
+  `TargetFrame()`，之后才执行普通 GET/POST 的第二道 `WebSandboxFlags::kForms` 检查；
+- `core/loader/form_submission.cc::FormSubmission::Create()` 在构造 entry list 和 request 后调用
+  `FrameTree::FindOrCreateFrameForNavigation()`；existing target 在这里完成选择，miss 则进入
+  `CreateNewWindow()`；
+- `core/page/create_window.cc` 在创建窗口前以 form action URL 调用 `probe::WindowOpen(...)`，所以 DevTools
+  `Page.windowOpen.url` 仍是 action URL；这不表示 destination navigation 随后一定发生；
+- E2L 的本地 headless/CDP probe 已证明：`sandbox="allow-scripts allow-popups"` 的 direct submit 指向新
+  named target 时会多出一个 URL 为空的 page target；加入 `allow-forms` 后同一 target 才导航到
+  `about:blank?#destination`。
+
+由此固定以下不变量：
+
+```text
+target selection result         late allow-forms      observable result
+existing target                 denied                target 不变；无 NavigateEvent / cancellation / load
+new target admitted + created   denied                WindowOpen + initial Page；无 destination request
+existing target                 allowed               exact target owner 执行 request
+new target admitted + created   allowed               initial Page 后执行 exact replacement request
+```
+
+`requestSubmit()` 的 E2L early gate 保持在 validation/submit/formdata/target work 之前，因此不进入上述
+creation-only 分支，也不消费 transient activation。只有绕过 early gate 的 direct `submit()`，或 early gate 后
+source policy 在 entry-list 阶段发生变化的路径，才可能到达 late decision。
+
+##### renderer target owner 与 typed carrier
+
+`RendererPendingPopupActivation` 不再以 mandatory request 代替整项 popup action，而是显式保存：
+
+```text
+requested_url: String
+destination_request: Option<RendererTopLevelNavigationRequest>
+```
+
+`requested_url` 是同步 target selection 和 `Page.windowOpen` 已观察到的 action URL；只有 `Some(request)` 才
+授权 target Page 启动 navigation。`without_destination_navigation()` 产生的不是 GET `about:blank`，而是 typed
+no-destination action；GET/POST method、body、headers 与 source/referrer carrier 在 allowed path 仍保持整份。
+
+form target owner 现在以 `ElementPopupDestinationPolicy::SourceFormSandbox` 标识需要 late gate 的请求：
+
+- ordinary named lookup 先解析 current/child/related target。existing hit 后才读取 source form 当前 owner policy；
+  denial 在 form-specific target `NavigateEvent`、same-form cancellation 和 loader/parser/scheduler 之前返回；
+- miss 与 `_blank` 先走 E2I/E2K admission，完成 blocker decision、activation consume 和 Fresh/Related Page
+  reservation 或 renderer-owned initial WindowProxy/Page 创建；之后再读取 source policy；
+- form 新建路径同步创建时固定使用 plain `about:blank`，避免 action 本身是 `about:blank#fragment` 时把 fragment
+  误提交进 initial Document；allowed path 的 fragment/GET query 仍由后续 exact request 处理；
+- denial 仍记录原 action URL 的 `RendererPendingWindowOpenEvent` 和 popup owner action，但后者不含 destination
+  request。初始 referrer、name、sandbox policy、session-storage namespace 与 stable WindowProxy reservation 都
+  继续属于同一个创建事务。
+
+legacy lightweight name map 目前仍作为兼容 lookup 存在；E2L.1 为它增加 selection-only live-id 查询，denied
+existing hit 不再调用会启动 loader 的 `reopen_existing_lightweight_popup_window()`。这不是扩大 lightweight
+模型，而是 Phase 6 删除双栈前避免旧 fallback 破坏新 owner 顺序。
+
+##### protocol target owner：空 URL、真实 initial Page、零 navigation work
+
+`PopupTargetCreation` 同样携带 `requested_url + Option<destination_request>`。new creation 的公共 target/attach
+事务保持唯一，但两条后续路径明确分开：
+
+- `Some(request)` 继续安装 `Held → Published → Consumed` 的 exact Page-residence navigation claim；
+- `None` 把 DevTools target identity URL 设为 Chromium 可观察的空串，同时以 `about:blank` 构造唯一 initial
+  Document，并安装 `NoDestination(TargetPageResidenceIdentity)` tombstone；不 capture、stage 或 publish
+  `PopupTargetNavigationOwnerAction`。
+
+该 tombstone 很重要：target URL 空串与 internal initial URL `about:blank` 不相等。如果不保留 typed
+no-destination authority，后续 `Page.enable`、isolated-world 等通用入口会把差异误判成尚未开始的 initial
+navigation，并从 mutable target URL 重建请求。E2L.1 让这些入口稳定返回“不应启动”，同时不制造 fake request。
+target discovery、automation lifecycle、tab/page auto-attach 与 initial Page materialization 由共享的
+`finish_popup_target_creation()` 完成，因此 creation-only 不是缺事件的旁路。
+
+allowed path 还暴露并修正了一个既有 projection/owner 混淆：form GET 会把空 entry list 序列化为
+`about:blank?#destination`，而 DevTools target URL 在 typed claim 执行前就已更新为该 destination。如果
+same-document classifier 读取 target URL，它会把“当前 projection 已等于 destination”误判成重复 fragment
+navigation；真实 initial Page 仍是 plain `about:blank`，renderer 随后会正确拒绝这条假 same-document 命令。
+现在分类只读取已安装 Page 的 `final_url()`，并把带 query/fragment 的 parsed `about:blank` 交给 synthetic
+Document loader。这样 allowed form 走真实 initial-Document replacement，denied form 仍保持零 navigation work，
+两条路径都不依赖 lightweight popup 预先写入 action URL。
+
+##### 聚焦回归与阶段证据
+
+实现阶段先锁住三层 owner：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(sandbox_without_allow_forms_blocks_existing_target_navigation) or test(sandboxed_request_submit_denial_precedes_popup_activation_consumption) or test(sandboxed_direct_submit_creates_only_the_initial_empty_popup_before_late_denial) or test(sandboxed_direct_form_submit_creates_related_initial_page_without_destination)' \
+  --no-fail-fast
+# 最终实现复跑 run d20ac427-d134-41a0-ba24-423233a9a8a7：4 passed。
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(creation_only_popup_keeps_initial_document_without_scheduling_or_url_rescan) or test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) or test(inline_about_blank_navigation_preserves_query_and_fragment)' \
+  --no-fail-fast
+# 最终实现复跑 run b0cb8662-2f38-451b-9b5a-56f3c33078bd：3 passed。
+
+cargo nextest run -p lightmount-renderer-v8 -E 'test(form) or test(sandbox)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# 最终实现复跑 run 0136b84d-6f7d-4e24-ad52-2fe51af1510e：329 passed。
+
+cargo nextest run -p lightmount-renderer-v8 -E 'test(popup) or test(window_open)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# 最终实现复跑 run eb44d99b-e87a-4e71-a48e-5a15ad2a78f7：114 passed。
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(popup) or test(same_document) or test(renderer_fragment_navigation_preserves_initial_document_residence) or test(inline_about_blank_navigation_preserves_query_and_fragment)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# 最终实现复跑 run eca682f6-e911-41a2-be26-d9ca4d8d7a16：68 passed。
+
+cargo nextest run -E '<E2L.1 六条 denied/allowed renderer/protocol owner 回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 12fdf757-0618-4623-8d6f-b8ded248bc61：20/20 iterations passed，每轮 6/6。
+```
+
+renderer unit 回归证明 `formdata` 已发生、shared transient activation 已被创建事务消费、carrier URL 保留但
+request 为 `None`；真实 Page 回归进一步证明 `WindowOpen` URL/name、Related Page reservation、stable initial
+`about:blank`、referrer 与 name。protocol 回归证明 `Target.targetCreated.url == ""`、唯一 loaded Page 仍为
+initial `about:blank`、scheduler event 为空，并主动调用通用 initial-URL scan 验证不能补出导航；allowed 对照则
+证明 target-local authority 仍存在、plain initial Page 最终被 exact `about:blank?#...` request 替换，且 parsed
+`about:blank` query/fragment 不会落入网络错误页。
+
+提交前 workspace 门禁为：
+
+```bash
+TMPDIR=<repo>/tmp/e2l1-gate cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run c3f9dfbb-e675-4c00-8d4b-718977886365：16071 passed，18 skipped。
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+# 均通过。
+```
+
+第一次 full-nextest 尝试 run `4746c10b-b985-4f08-adb7-4630e614c8eb` 在系统 `/tmp` tmpfs 已满时启动，首批
+99 个失败均为 `ENOSPC` 或其下载落盘连锁超时，运行在 2769 passed 后主动中止；这不是行为门禁证据。没有删除
+来源不明的历史 `/tmp/lightmount-*` 内容，而是把第二次完整运行隔离到仓库文件系统的临时目录；有效 run 全量
+通过后已清理本轮 132 KiB fixture。
+
+随后执行 `git pull -r origin master`，成功 rebase 到 `origin/master@815b44cbf0`。本次 master 增量是 TCP
+keepalive 与 WebDriver/CDP smoke 诊断 3 个提交，没有修改 popup/form/navigation owner；仍按 Rust 基线执行完整
+复验：
+
+```bash
+TMPDIR=<repo>/tmp/e2l1-post-rebase cargo nextest run \
+  -E '<E2L.1 六条 denied/allowed renderer/protocol owner 回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 9ee5a260-7867-4d82-98a3-732a8876e240：20/20 iterations passed，每轮 6/6。
+
+TMPDIR=<repo>/tmp/e2l1-post-rebase cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 8a453466-abc4-4cc8-93e5-87b64a6afc11：16072 passed，18 skipped。
+
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+# 均通过。
+```
+
+两次隔离运行各自只残留 132 KiB 测试 fixture，均在验证后按本轮创建的精确目录清理；系统 `/tmp` 的历史内容
+仍未改动。
+
+##### E2L.1 有意保留的边界与下一步
+
+- E2L.1 只对齐 target selection / creation 与 late forms decision，不实现 security console message；
+- E2L.1 入库时 sandbox/top-level `CanNavigate` 仍属于 E2M；其中 local token/activation、opener/ancestor 与
+  destination relation 现已由 E2M.1 统一，fenced/remote/file-local/embedder fallback 仍需后续 owner；
+- `javascript:` form/popup 必须同步完成最终 target 选择/创建，再在该 target Document 的 networking task 中
+  异步执行并使用其 CSP/origin/currentness，不能套用本节 HTTP(S)/`about:blank` destination carrier；该
+  full-creator 路径现已由 E2N 独立实现；
+- `NoDestination` 是 target-local typed tombstone，不是通用 navigation cancellation API；RemoteFrame scheduler、
+  COOP group sever 与 disconnected WindowProxy endpoint 仍按各自 owner 继续推进。
+
+#### Phase 5E2M.1：renderer-owned local `CanNavigate` authority
+
+E2E 在 named frame resolver 内实现过一份窄的 self / `javascript:` exact-origin / target-ancestor origin
+过滤，Location、special target 和 POST form 则各自仍有局部 sandbox 判断。继续在这些调用方追加
+`allow-top-navigation` 或 opener 例外会产生多份顺序不同的安全算法。E2M.1 把判断收回
+`JsContextHost::can_navigate_browsing_context()`：调用方只提供 committed source execution-context identity、
+typed target host/scope 和最终 destination URL，owner 返回稳定 denial reason；选择、报告和真正 scheduling 仍由
+各 API 自己负责。
+
+这里的 **local** 指 Lightmount 当前拥有的 `Top` / `Child(DomHandle)` /
+`LightweightPopup(id)`，以及 shared related-agent 中另一个真实 Page 的这些 local endpoint。它不表示本轮已经
+虚构出 Chromium 的 `RemoteFrame`、fenced-frame root 或 browser embedder decision。
+
+##### 固定 Chromium 合同与判断顺序
+
+本轮固定对照 `/home/donoughliu/chromium/src@a03603fe9af6`：
+
+- `third_party/blink/renderer/core/frame/local_frame.cc::LocalFrame::CanNavigate()` 从 source==target 开始，随后依次
+  处理 `javascript:` exact-origin、sandbox navigation/popup/top flags、普通 target-or-ancestor origin、outermost
+  opener relation，以及 child-to-own-top 的 activation/destination/content-setting exception；
+- `services/network/public/cpp/web_sandbox_flags.cc::ParseWebSandboxPolicy()` 分别清除
+  `kTopNavigation` 与 `kTopNavigationByUserActivation`。因此多个 attribute/CSP policy 必须按 restriction union
+  求交，`allow-top-navigation` 与 `allow-top-navigation-by-user-activation` 不能在不同 policy 之间拼成更强权限；
+- `content/browser/renderer_host/navigation_request.cc::CommitNavigation()` 先继承 parent policy-container 的
+  `can_navigate_top_without_user_gesture`，同源 top commit 放宽；cross-origin child 若 frame owner 没有显式
+  `allow-top-navigation` 则收紧。response CSP 即使携带同名 token，也不能伪造 frame-owner provenance；
+- destination relation 先比较 target current security origin，再比较相同 protocol 下非空
+  domain-and-registry；IP、single-label host 和 public suffix 不进入后者；
+- `CanAccessAncestor()` 还包含 file/local-origin compatibility 分支，`LocalFrame::CanNavigate()` 也会发送
+  `DidBlockNavigation`、console diagnostic/use-counter。Lightmount 本轮没有伪装这些尚无 owner 的分支已完成。
+
+本地 authority 按同一顺序实现以下可表达矩阵：
+
+```text
+1. source/target generation currentness；stale endpoint fail closed
+2. exact same browsing context -> allow
+3. javascript: 且 source 不能访问 exact target origin -> deny
+4. sandbox navigation：descendant / outermost popup / own top 三类关系
+5. own top token：unconditional、transient-only、committed sticky guard
+6. 普通 target-or-ancestor origin access
+7. outermost source-opener / target-opener-ancestor relation
+8. child -> own top：sticky activation、destination exact origin、same-protocol
+   registrable site、或显式 allow-without-activation embedder policy
+9. 其余 unrelated target -> deny
+```
+
+`BrowsingContextNavigationDenial` 只是一组 typed reason，不决定 JS surface。sandbox reason 供 Location 保持
+同步 `SecurityError`；ordinary target selection 对任何 denial 都安静跳过 candidate；element/window.open special
+target 保留“已选中 existing WindowProxy，但 navigation 被拒绝”的结果，不错误 fall through 到新 popup。
+
+##### committed policy-container，而不是动态 attribute 查询
+
+`DocumentSandboxPolicy` 新增并区分：
+
+```text
+sandboxes_navigation
+allows_top_navigation
+allows_top_navigation_by_user_activation
+frame_owner_explicitly_allows_top_navigation
+```
+
+attribute parser 与 response-CSP parser 分别生成 restriction，合并时对两类 top token 独立求交；只有 frame-owner
+attribute 能设置 provenance bit。`DocumentPolicyContainer` 另持有 inverse
+`top_navigation_without_user_gesture_is_restricted`，默认 permissive。每次真实 child Document commit 完成 origin 与
+sandbox policy 安装后，target owner冻结：
+
+```text
+committed origin same-origin with top     -> unrestricted
+cross-origin + owner explicit allow-top  -> inherit parent restriction
+cross-origin + no owner provenance       -> restricted
+```
+
+比较 committed raw origin 时移除 `document.domain` relaxation，避免脚本事后改变 policy-container decision；动态
+iframe `sandbox` mutation也不会重写已提交 Document 的 bit，只影响下一次 frame policy refresh/commit。网络成功、
+initial/local bootstrap、failed-start fallback 与 `javascript:` string-result replacement 的 commit 入口都调用同一
+freeze boundary。
+
+Fresh/legacy popup 的 propagated sandbox record 同步携带 navigation/top flags。response CSP 仍只能收紧；其
+`allow-top-navigation` 不会变成 frame-owner exception。`lightmount-site` 作为 renderer 的直接依赖，只用于
+Chromium domain-and-registry fallback，并显式排除 IP、localhost/single-label 与 public suffix。
+
+##### stable endpoint、source base 与调用入口
+
+opener relation 不再通过 V8 wrapper object identity 猜测：
+
+- 真实 related top Page 从 stable WindowProxy 解析 target host + dispatch scope；
+- compatibility lightweight popup 从 `LightweightPopupBrowsingContextRecord.opener` 的 typed
+  `PendingWindowMessageEndpoint` 读取 exact source scope；
+- source lightweight popup 导航其 own typed opener 也走同一 outermost relation；
+- source identity 与 target current owner 在判断前复核，closed/replaced endpoint 不会被 name lookup 复活。
+
+跨源 Location 的 relative URL 另修正一项因果边界。Blink 按 entered/source Window 的 API base URL 解析，而不是
+target Location 的 Document base。cross-origin observer 现在从 stable
+`WindowExecutionContextIdentity` 取得 Top/Child/Lightweight source Document base，先解析成绝对 URL，再将**同一个**
+URL交给 `CanNavigate` 与 target queue。这样 target-origin/site exception 不会批准 A，而真正提交 B。
+
+E2M.1 已接入的生产入口如下：
+
+| 入口 | authority 接点 | refusal surface |
+| --- | --- | --- |
+| ordinary named `window.open()` / hyperlink / form | current subtree、current Page、ordered related Page 的每个 candidate-local filter | 跳过不可导航 candidate；miss 再按既有 creation policy 处理 |
+| `_self` / `_parent` / `_top` element 与 `window.open()` | final selected WindowProxy 解析出的 host/scope | existing target 保持 selected；静默不 scheduling、不创建替代 popup |
+| same-origin/general Location setter | incumbent source realm + Location target owner | sandbox reason 抛 `SecurityError`；其他 refusal 静默终止 |
+| cross-origin Window/Location membrane | callback-scoped observer identity + receiver-owned target endpoint | sandbox reason 抛 `SecurityError`；stale/unrelated fail closed |
+| POST form current top | source form owner Document + top target | late policy refusal 视为 handled，零 Page navigation request |
+
+GET/special form 已复用 element special-target authority；ordinary named GET/POST 早已由 E2F resolver 消费。self child
+navigation、browser/CDP navigation 与 Service Worker `Client.navigate()` 是 target/browser 自身入口，不把它们
+错误套成另一个 Document 发起的 named-target `CanNavigate`。
+
+##### 聚焦证据
+
+实现阶段先用三条 red-to-green owner 回归锁住最容易被 wrapper/marker 掩盖的边界：
+
+```bash
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  -E '<frame-owner/CSP token intersection | cross-origin source-base relative Location | typed lightweight opener>' \
+  --no-fail-fast
+# run 1acdcf89-6093-4fa6-9267-c9d17b11ab9d：3 passed。
+```
+
+随后把 10 条新增 policy/entry tests 与 7 条已有 named/form/special-target/lifecycle 回归组成最终
+owner-focused slice：
+
+```bash
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  -E '<E2M.1 10 条新增 + 7 条既有 owner 回归>' --no-fail-fast
+# run 431a1261-bb2b-4b27-b691-f93f0d3dd0ee：17 passed。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 sandbox --no-fail-fast
+# run 98e7feea-44c5-4adf-ac82-7b06e943f311：44 passed。
+
+for iteration in $(seq 1 20); do
+  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+    -E '<同一 17 条 owner-focused 回归>' --no-fail-fast
+done
+# first run 9f54b8fc-5bc1-4570-b0f5-0982a0baf21c，
+# final run 8a7ef587-cf72-45d7-8ebb-2f862d145232；20/20 轮均为 17 passed。
+```
+
+destination matrix 覆盖 exact target origin、same registrable site、unrelated site、scheme mismatch、sticky activation、
+IP different port、localhost different port、public suffix different port，以及 source `<base>` 下相对 URL 的
+allow/deny。sandbox matrix覆盖 no token、activation token、有/无 transient activation、unconditional token、
+committed attribute mutation、frame-owner/CSP provenance、special-target 四入口和 non-descendant named sibling。
+
+第一次提交前全量 run `1b4dfe89-d49f-4e2e-a5e6-dcf95dc9a8e5` 是 16081 passed、1 failed、18 skipped；唯一
+failure 是旧 `window_open_about_blank_returns_lightweight_popup_window` 在先调用 `popup.close()`、同步退休 legacy
+Document owner 后，仍期待后续 Location fallback 改写 facade URL。中央 currentness authority 把它识别成
+`StaleContext`，没有再复活已关闭 record。对照 Blink `DOMWindow::close()` 的 `Page::CloseSoon()` 与
+`Location::SetLocation()` 的 attached-frame guard，真实 Page 在 deferred final teardown 前仍可被观察；而本测试用的
+standalone lightweight callback 已执行 final teardown。fixture 因此改为先验证 live popup navigation，再验证
+`close()` 返回/shape，并确认 close 后的第二次 setter 不会复活 owner，未放宽 stale-owner 判定。精确回归 run
+`fdf1972d-88ee-461d-8f87-761ec2941c58` 为 1 passed。
+
+##### E2M.1 有意保留的边界与下一步
+
+- `RemoteFrame`、fenced-frame root、remote embedder decision 与 activation replication 尚无本地 target kind，本轮
+  明确不以 `Top` 分支冒充；
+- Chromium file/local-origin descendant compatibility 尚未建模；当前 origin owner 对 file opaque/local identity
+  的表达仍需先统一，不能在 `CanNavigate` 调用方硬编码 URL scheme；
+- popup blocker 的 `AllowWithoutTransientActivation` 目前是 browser-context policy 对 Chromium
+  `DocumentLoader::ContentSettings::allow_popup` 的显式本地映射，不等于已经实现 content-setting/CDP 配置面；
+- transient/sticky ledger 当前是 local Page/frame-tree 聚合 owner；RemoteFrame/per-frame replication、history
+  activation 与 visibility 长尾仍需独立补齐；
+- security console message、`DidBlockNavigation` reason、use counter 尚未接入；API refusal 只有既有异常/静默表面；
+- central authority 已拒绝 cross-origin `javascript:` candidate；E2M.1 入库时最终 target 的同步选择、
+  target-Document 异步 task execution、CSP/origin/currentness 仍走 legacy，现已由 E2N 完成；
+- `navigate_named_iframe_target_from_document()` 只剩 current-host compatibility wrapper，生产
+  window.open/hyperlink/form resolver 已不依赖其权限判断；Phase 6 删除双栈时一并移除，不能继续扩展；
+- COOP browsing-context-group sever、disconnected/remote WindowProxy endpoint、focus/unload transaction 仍按后续
+  owner 阶段推进。
+
+#### Phase 5E2N：`javascript:` final-target Page task / realm
+
+E2M.1 已能拒绝 source 无权导航的 cross-origin target，但 production `window.open()`、hyperlink 与 form
+此前仍把 `javascript:` 当成“不能进入真实 Page migration”的特殊 scheme。新建 target 可能继续得到
+opener-host lightweight record；existing related target 则可能把 URL 留给 protocol 或 legacy facade 解释。
+这会同时违反三个已经建立的不变量：最终 target realm 不是执行 owner、protocol 可能把 renderer-only URL
+当作 browser navigation、旧 Document task 可能在 replacement realm 中复活。
+
+E2N 不新建第三套 JavaScript URL executor。它把请求交给已经由 child-frame/stable WindowProxy 纵切成熟的
+真实 Page/Document owner，并把“同步 target selection”与“异步 script execution”明确拆开。
+
+##### 固定 Chromium / WPT 合同：同步选 target，异步执行 task
+
+本轮继续固定 `/home/donoughliu/chromium/src@a03603fe9af6`，并校正了旧章节中“JavaScript URL 在 target
+realm 同步执行”的不准确表述：
+
+- `third_party/blink/renderer/core/frame/local_dom_window.cc::LocalDOMWindow::open()` 先通过
+  `FindOrCreateFrameForNavigation()` 同步选中或创建最终 `Frame`，随后才对该 frame 调用 `Navigate()`；因此
+  `window.open()` 的返回值和 stable WindowProxy 可同步观察，但脚本结果不可同步观察；
+- `third_party/blink/renderer/core/loader/frame_loader.cc::FrameLoader::StartNavigation()` 对 current-tab
+  `javascript:` 不进入 browser/network loader，而调用最终 target
+  `Document::ProcessJavaScriptUrl()`；new-context/no-opener 且 opaque cross-origin 的分支会故意不执行脚本；
+- `third_party/blink/renderer/core/dom/document.cc::Document::ProcessJavaScriptUrl()` 把 URL 追加到
+  `pending_javascript_urls_`，并只发布一个可取消的 `TaskType::kNetworking` task；
+  `ExecuteJavaScriptUrls()` 在 task 开始时 swap 出当时的 FIFO batch。多个已排队 URL 都执行；若前一条只启动
+  provisional navigation，batch 继续；若 Document commit/detach 使旧 `Document` 失去 frame，则停止；
+- `Document::CancelPendingJavaScriptUrls()` 在 Document replacement/teardown 清掉未选中的 task；
+  `HTMLFormElement` 对后来接受的普通 form submission 还会显式取消 target Document 的 pending JS URL 与
+  client navigation；
+- `third_party/blink/renderer/bindings/core/v8/script_controller.cc::ExecuteJavaScriptURL()` 使用 target Window 的
+  base URL、CSP 和 Trusted Types pre-navigation check，在 target realm 执行。异常/空结果/非字符串不替换；
+  字符串 completion 只有在**本次执行**没有启动 navigation 时才 clone/commit replacement Document；
+- upstream WPT
+  `html/browsers/browsing-the-web/navigating-across-documents/javascript-url-task-queuing.html`
+  显式断言 `window.open("javascript:...")` 和 opened-window Location 两种入口都不能同步执行。
+
+为确认容易从源码误读的 FIFO/cancellation 顺序，本轮还用同一 checkout 的
+`out/Default/chrome`（Chrome 147.0.7709.0，WebKit revision `a03603fe9af6`）跑了临时 CDP 最小探针；它不是
+Lightmount 提交门禁，但结果与上述 owner 一致：
+
+```text
+同一 target 连续 JS URL       -> queued-first, queued-second
+JS URL 后接 ordinary window  -> JS 不执行
+JS URL 后接 ordinary link    -> JS 不执行
+JS URL 后接 ordinary form    -> JS 不执行
+第一条 JS 内启动 navigation  -> first, second；batch 继续
+第一条 JS 返回 string        -> first；replacement 退休 second
+第一条 JS throw              -> first, second；异常不退休 batch
+ordinary navigation 后接 JS  -> 后来的 JS task 仍执行
+```
+
+##### 最终 target 的单向 owner 链
+
+E2N 的 production 链路为：
+
+```text
+source window.open / hyperlink / form
+  -> source CSP + E2M.1 CanNavigate
+  -> synchronous final target resolution/creation
+       existing current/child/related Page
+       or one staged Related initial Page
+       or one private Fresh Page
+  -> Related target JsContextHost pending queue
+       {handoff, source_document, target_document, navigation_source, URL}
+  -> explicit cross-Page target-owner wake
+  -> popup activation {exact Page residence, destination request = None}
+  -> protocol only adopts/reuses target; never loads javascript: URL
+  -> target Page networking owner snapshots current Document FIFO batch
+  -> target Document currentness + target CSP
+  -> execute in target default realm
+  -> optional string-result Document replacement on the same stable Page
+```
+
+具体责任边界如下：
+
+- `open_lightweight_popup_window()` 的 real initial Page staging 不再排除 `javascript:`。full-creator 的 Related
+  miss 因而同步得到真实 initial `about:blank` Page/realm/Document，返回给 opener 的就是 protocol 随后 adopt
+  的 stable WindowProxy；existing related hit 直接解析 target Window 的 `JsContextHost`；
+- `window_open_callback()` 与 element auxiliary selector 都把完整
+  `RendererTopLevelNavigationRequest`（包含 E2H source carrier）直接写入最终 target host。popup activation 对
+  `javascript:` 强制 `NoDestination`，所以 URL 不会再由 protocol/browser 创建第二次 navigation；
+- `NoDestination` 与 DevTools target-creation URL 是两个 typed fact：JavaScript popup 不发布 browser destination，
+  但新建 target 仍按 Chromium `Target.targetCreated` 报告 requested `javascript:` URL；late-denied creation-only
+  form 则继续报告空 URL。protocol 只消费 renderer 冻结的 projection flag，不从 scheme 反推执行策略；
+- existing Related Page 的写入发生在 source turn，不能借用 target host 的 ordinary-turn active flag。E2N 因此为
+  exact handoff 显式发布 target-owner wake；尚未 resident 的 staged initial Page 即使先收到一次早期 wake，adoption
+  仍会从同一 pending queue 发现请求，既不丢 task，也不制造第二个 owner；
+- hyperlink 和 form 复用同一 typed related Page resolver。form 现在在 entry-list construction 与 connected
+  recheck 后也执行 source-Document inline-navigation CSP，`_self`、ordinary name 与 `_blank` 不再绕过 source
+  check；最终 target 在执行 task 时再做自己的 CSP check；
+- `PendingLocationNavigation` 新增 `target_document`。它与 initiator `source_document` 是两个独立 identity：前者
+  决定 task 是否仍属于 current target Document，后者继续保存因果/referrer carrier，不能互相替代；
+- `JsContextHost` 的 ordinary/history navigation 保持 replace-only；同一 target Document 的 JavaScript URL
+  改为 FIFO queue。owner 选择 networking turn 时一次冻结当时的 JS batch，后来接受的 ordinary navigation
+  清空整批未选 task；已经选出的 batch 则按 Chromium 顺序执行；
+- 每个 batch item 执行前复核 `target_document`。task 排队后发生 `document.open()`、string-result commit 或其它
+  Document replacement 时，旧 item 只完成 cancellation，不进入 replacement realm；
+- string completion 的 currentness 不再读取“执行后是否存在任意 pending navigation”这一模糊布尔值，而是比较
+  执行前后的 exact navigation handoff。只有本次脚本新建 handoff 才忽略 completion；batch 中更早脚本已启动的
+  navigation 不会误判为本次脚本启动；
+- JS exception 被 target realm 正常报告，但不会让 Page owner command 失败或替换 Document；non-string completion
+  也只完成 task。string completion 使用既有 `JavascriptDocumentReplacement` lifecycle/commit owner，保持 stable
+  WindowProxy 与 Page residence；
+- existing Related target 随后接受普通 `window.open()` / hyperlink / form navigation 时，调用方不复制 loader
+  cancellation，而只通知 target host 清掉它自己的 pending JS queue。实际 ordinary request 仍由 protocol/target
+  loader 的唯一 owner 消费；
+- suppress-opener 的 `_blank`/ordinary-name JavaScript URL 仍 reserve 一份真实 Fresh Page，并返回 `null`。由于
+  没有 opener relation、initial Document 是独立 opaque origin，activation 没有 destination，creator 脚本不会
+  被错误注入 Fresh realm。这与 Blink `FrameLoader` 的 intentional no-op 分支一致。
+
+##### 回归与当前证据
+
+新增/扩展的 owner 回归覆盖：new Related initial target、existing named reuse、WindowProxy stable identity、
+window.open/hyperlink/POST form 三类 producer、同步返回/异步执行、source/target CSP、exception/non-string/string
+completion、执行中启动 navigation、FIFO batch、ordinary supersession、Document replacement cancellation、
+Fresh noopener no-execution，以及 protocol activation 的 exact residence / `NoDestination`。
+
+```bash
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 \
+  javascript_popup_producers_queue_the_final_related_target_page_realm --no-fail-fast
+# run 5aeecb11-4910-41a6-806e-79e323a6e9f2：1 passed；含无需外部 target command 的
+# cross-Page owner wake，以及 Window 与 element ordinary supersession。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 javascript \
+  --no-fail-fast
+# 最终 run f7b0d01d-7deb-4acf-8f34-e4994ce11583：32 passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 \
+  -E '<同一 4 条核心回归>' \
+  --stress-count 20 --flaky-result fail --test-threads 4
+# 最终 run e97c108f-3e18-424f-bd92-b8cf7868a04f：20/20 iterations passed，每轮 4/4。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
+  rust_cdp_chromium_target_window_open_javascript_url_still_reports_popup_target \
+  creation_only_popup_keeps_initial_document_without_scheduling_or_url_rescan \
+  --no-fail-fast
+# run 9f080bb7-9886-47fc-8bc1-83b15adaf9b7：2 passed；锁住 requested URL projection
+# 与 destination execution authority 的分离。
+```
+
+本轮阅读了 upstream WPT 源码，但没有把临时 Chromium CDP probe 或旧
+`wpt-cross-current` 关键字快照伪装成 Lightmount WPT pass。最终 full workspace gate 与 rebase 后证据记录在本文
+统一验证章节。
+
+##### E2N 有意保留的边界与下一步
+
+- E2N 提交时尚缺 target `CheckAndGetJavascriptUrl()` 的 Trusted Types pre-navigation check、form 的 Chromium
+  compatibility `form-action` check，以及 new/existing target 的 source policy 分岔；这些历史边界现已由 E2O
+  完成，不能再作为当前缺口；
+- E2N 只迁移有完整 renderer creator/target capability 的 DOM producer。它提交时保留的 Service Worker
+  `clients.openWindow()` 与 notification navigation 已由 E3 单独迁移为 browser-context source + Fresh Page，
+  没有伪装成 root Window 的 source Document；
+- already-published ordinary destination 后同一 source turn 又排队 JS URL 的 renderer/protocol causal ordering
+  已由 E3 的真实 protocol apply/commit integration 回归补齐；
+- RemoteFrame/fenced target、COOP group sever、isolated world、disconnected endpoint 与 cross-process scheduler
+  不在本地 Page queue 能表达的范围；
+- legacy lightweight JS executor 仍服务 standalone fixture/compatibility fallback。E2N 的结论是 primary owner 已
+  迁移，不是 Phase 6 已可直接删除；E3 后当前宽口径 surface 仍为 110 个 Rust 文件、1365 处命中；
+- E2O 后规划的非 DOM creation producer 与 focused protocol evidence 已由 E3 完成。后续按 lifecycle、
+  group/remote、identity/lifetime 三个完整 milestone 收口后，才进入 Phase 6 删除双栈。
+
+#### Phase 5E2O：target Trusted Types、`form-action` 与 source-selection ordering
+
+E2O 不是在 producer 上叠加三个独立布尔门禁。它补齐的是 E2N target task 两端的 policy transaction：
+
+```text
+existing target hit
+  -> resolve exact Page/Frame + stable WindowProxy
+  -> source Document inline-navigation CSP
+  -> target-owned navigation task
+  -> target Document CSP
+  -> target Realm Trusted Types pre-navigation check
+  -> execute rewritten/original source in that target Realm
+
+new-context miss
+  -> source Document CSP
+  -> source Realm Trusted Types creation preflight
+  -> auxiliary admission + exact initial Page/Document creation
+  -> target-owned navigation task
+  -> target Document CSP + target Realm Trusted Types
+  -> execute only if the target Document is still current
+```
+
+existing hit 的 source Trusted Types **不能**提前运行；最终选中的 target realm 才决定 default policy、CSP
+reporting realm 和脚本字符串。new-context miss 则不同：Blink 在创建 auxiliary context 前先用 source
+`CheckAndGetJavascriptUrl()` 做一次 non-empty gate，因此 source default policy 可以允许或拒绝创建，但其 rewrite
+不是 target 的执行字符串；target task 仍会用 target policy 检查原始 URL。这个差异也决定了 API 返回：source CSP
+拒绝 existing named target 时，`window.open()` 仍返回已选中的 stable WindowProxy（`noopener` 则仍返回
+`null`），且不能落入 new-popup fallback；真正的 miss 被 source CSP/Trusted Types 拒绝时才返回 `null` 且完全不
+创建 target。
+
+##### Chromium `a03603fe9af6` 的调用顺序证据
+
+| Chromium owner | 固定基线位置 | E2O 采用的事实 |
+| --- | --- | --- |
+| source inline check | `core/frame/local_dom_window.cc:514-535` | `AllowInlineJavascriptUrl()` 只做 source CSP，并明确说明 Trusted Types 留给最终 `ExecuteJavaScriptURL()` |
+| full pre-navigation check | `core/frame/local_dom_window.cc:538-572` | `CheckAndGetJavascriptUrl()` 先 source/target CSP，再执行 Trusted Types pre-navigation check，返回可能改写或为空的 source |
+| new auxiliary creation | `core/page/create_window.cc:275-298` | `CreateNewWindow()` 在任何 window creation 前对 `javascript:` 调 source `CheckAndGetJavascriptUrl()`，empty 直接失败 |
+| lookup/create split | `core/page/frame_tree.cc:202-226` | 先 `FindFrameForNavigationInternal()`；只有 miss 才进入 `CreateNewWindow()`，existing candidate 不走 source TT creation preflight |
+| existing navigation | `core/loader/frame_loader.cc:545-562` | 已选中的 frame 在 `AllowRequestForThisFrame()` 中只调用 origin/source Window 的 `AllowInlineJavascriptUrl()` |
+| final target execution | `bindings/core/v8/script_controller.cc:248-282` | target Window 在 execution turn 调自己的 `CheckAndGetJavascriptUrl()`，并以 target base URL/realm 执行 |
+| Trusted Types helper | `core/trustedtypes/trusted_types_util.cc:301-380,841-847` | navigation 使用 dummy exception state；default `createScript` 参数为 `TrustedScript` / `Location href`；invalid reconstructed `javascript:` URL 按 enforce/report-only 决定 block/continue |
+| `window.open()` return/opener | `core/frame/local_dom_window.cc:2396-2450` | selection/create 先完成，`Navigate()` 后 special target 总返回 Window；ordinary existing target 即使 `noopener` 返回 null，也不会变成 creation miss |
+| form target selection | `core/loader/form_submission.cc:372-394` | `FormSubmission::Create()` 已执行 `FindOrCreateFrameForNavigation()` 并冻结 exact target |
+| form late policy/schedule | `core/html/forms/html_form_element.cc:741-824` | selection 后才复核 connected、dialog/action、`allow-forms` 与 JavaScript compatibility `form-action`；target 存在才进入 navigation/scheduler |
+
+对应的 upstream WPT source 包括 `trusted-types/navigate-to-javascript-url-001..005,008.html`、
+`trusted-types/trusted-types-navigation.html`、
+`content-security-policy/form-action/form-action-src-javascript-blocked.sub.html`、
+`form-action-src-javascript-prevented.html` 和
+`content-security-policy/script-src/javascript-window-open-blocked.html`。这些文件用于确定行为矩阵；本轮仍不把
+“阅读 upstream source”写成 Lightmount WPT pass。
+
+##### Lightmount owner 与实现
+
+- `trusted_types.rs` 新增 navigation 专用 string conversion。它在当前 entered target realm 调 default
+  `createScript(value, "TrustedScript", "Location href")`，消费 callback exception；enforce 返回 `None`，
+  report-only dispatch violation 后继续原 source，成功 rewrite 则先验证重建的 `javascript:` URL。navigation API
+  不同步抛出 default-policy exception；
+- E2N 的 real target Page queue 没有另起 executor。`ScriptVm` 在选中 task 后先用 current target Document 做
+  CSP，再在 target default context 做 Trusted Types，PageVM 只执行返回的 rewritten source。普通 navigation、
+  target Document replacement 和 FIFO currentness 继续复用 E2N owner；
+- generic child 不借 top realm 代检。`FrameScriptJobKind::JavascriptUrl` 在 exact stable child FrameRealm 中依次
+  做 child effective CSP 与 Trusted Types，并把 rewrite 写回该 job；child response/meta enforced + report-only
+  policy 与 violation event 也从 child owner 读取。这正是复用既有 child-frame stable WindowProxy/realm 基础的
+  价值：policy、global、base URL、Document lifetime 与执行 realm 天然指向同一个 owner；
+- `window.open()`、hyperlink 和 form 都先用 typed resolver 选 existing target。existing Page/child、special
+  target 与 live lightweight compatibility target 在 selection 后运行 source CSP；denial 只阻止 target queue，
+  不触发 popup admission、activation consumption 或 fallback creation。related existing top 仍保留 Chromium 的
+  existing-opener update；
+- resolver miss/`_blank` 才运行 source `CSP → Trusted Types` creation preflight，并且发生在 auxiliary admission、
+  Page reservation、`Page.windowOpen` 和 initial Document creation之前。source default-policy rewrite 只作为 non-empty
+  admission fact，不会污染 target task source；
+- `form-action` 进入 source Document policy owner，覆盖 top、stable child 和 compatibility popup，并同时 dispatch
+  report-only/enforced violation。directive 不回退到 `default-src`，也不套用 script nonce/`strict-dynamic` 规则；
+- ordinary named form 的顺序固定为 `target selection → connected/allow-forms → source JS CSP → form-action → exact
+  target scheduler`。new target 的 creation preflight 和 initial Page 已发生在 late allow-forms/form-action 之前，
+  所以 late denial 继续保留 E2L.1 creation-only target，但不产生 destination loader/parser work；
+- `form-action` 拒绝不会先取消同一 form 已有的 pending target。只有新 submission 真正进入 target scheduling 后，
+  E2G 的 typed Page/Frame generation 才取消旧 task/loader/parser，避免 policy-denied submission 误杀既有导航。
+
+##### 回归与当前证据
+
+新增/扩展的回归覆盖以下矩阵：target enforce/no synchronous throw、target default-policy rewrite、report-only
+default-policy exception continuation、invalid reconstructed URL、stable child target realm、source TT 只阻止 miss、
+source CSP 命中 existing target 仍返回相同 proxy 但不 queue、`_self` return identity、form-action 无
+`default-src` fallback、preventDefault 不触发 policy、existing/new creation-only order，以及 E2N real related Page
+producer handoff。
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  popup_policy_checks_keep_existing_and_new_target_order_distinct \
+  window_open_javascript_url_source_csp_preserves_the_selected_self_target \
+  new_javascript_popup_uses_source_trusted_types_only_as_a_creation_preflight \
+  iframe_javascript_url_uses_the_stable_child_target_trusted_types_policy \
+  form_action_csp_runs_after_new_target_selection_and_skips_prevented_submission
+# run 30aa06df-c30f-4862-b85f-23bf5b9401f1：5 passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  javascript_location_navigation_enforces_target_trusted_types_without_throwing \
+  javascript_location_navigation_uses_the_target_default_policy_rewrite \
+  javascript_location_navigation_report_only_default_policy_exception_continues_original \
+  form_action_csp_runs_after_new_target_selection_and_skips_prevented_submission \
+  popup_policy_checks_keep_existing_and_new_target_order_distinct \
+  iframe_javascript_url_uses_the_stable_child_target_trusted_types_policy
+# run 574ba472-336a-4404-b6ac-4b35049c7135：6 passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  javascript_popup_producers_queue_the_final_related_target_page_realm \
+  sandboxed_direct_form_submit_creates_related_initial_page_without_destination \
+  form_javascript_url_csp_checks_the_source_document_before_target_selection \
+  iframe_javascript_url_string_completion_replaces_child_document \
+  submitter_cancels_previous_same_form_navigation_in_a_related_page_child
+# run 32901ca0-40d6-4edd-8dbc-d6d651efbe14：5 passed。
+
+cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+# passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  javascript_navigation_default_policy_rejects_an_invalid_reconstructed_url \
+  form_action_is_navigation_specific_and_has_no_default_src_fallback \
+  report_only_default_policy_transforms_or_preserves_by_callback_outcome \
+  rejected_default_policy_reports_both_dispositions_and_enforces_once
+# run 64f85d7d-1fc8-4245-8e7a-790d223a7fb4：4 passed。
+```
+
+##### E2O 检查点当时保留的边界
+
+- Service Worker `clients.openWindow()`、notification navigation 等非 DOM producer 当时仍显式进入 lightweight
+  owner；E3 已按这一边界把它们改成 browser-context source + Fresh Page，没有复用 root Window 作为假 source；
+- Lightmount 对 ordinary form scheme 也在 renderer 做 `form-action`，因为当前没有 Chromium browser-process
+  navigation policy continuation。redirect chain、response-stage URL override 与每 hop 的 form-action 语义仍需随
+  browser/network navigation policy owner 补齐；
+- isolated world 的 bypass、RemoteFrame/fenced target、cross-process scheduler 与 disconnected WindowProxy 不在
+  当前 local Page/FrameRealm 表达范围；
+- legacy lightweight executor 仍服务 standalone fixture 和 compatibility fallback。E2O 让它的 existing-target
+  source ordering 不再错误，但没有把其 active-realm Trusted Types/lifetime 提升为 Phase 6 可删证明；
+- already-published ordinary destination 后同一 turn 又排队 JavaScript URL 的 protocol apply/commit integration
+  已由 E3 完成；focused upstream WPT slice 和 CSP reporting endpoint 网络上报仍是外部证据债。
+
+#### Phase 5E3：非 DOM producer、精确 `openWindow()` terminal 与 local creation-policy exit
+
+E3 不是把 SW API 名字改成另一个 popup helper。它统一的是三个此前分离的责任边界：谁创建 Page、谁持有
+navigation 的因果 source，以及谁有权完成 worker Promise。阶段验收目标为：
+
+1. DOM、Service Worker 与 notification 的 production auxiliary creation 都交给真实 renderer Page；
+2. 非 DOM producer 不制造 source Window/Document，不暴露 opener，也不进入 related-name lookup；
+3. `clients.openWindow()` 只由 exact reserved Page 的最终 navigation terminal 完成一次；
+4. 普通 popup navigation 的 commit 不得越过同一 target Page 已经排队的 JavaScript URL task；
+5. SW/notification production caller 不再直接调用 lightweight owner。Phase 6 的 compatibility facade 删除不在
+   这项 exit criterion 内。
+
+##### Chromium `a03603fe9af6` 的非 DOM owner 证据
+
+| Chromium owner | 固定基线位置 | E3 采用的事实 |
+| --- | --- | --- |
+| Blink URL/activation gate | `third_party/blink/renderer/modules/service_worker/service_worker_clients.cc:229-264` | `openWindow()` 以 worker location 解析 URL，执行可显示性与 window-interaction gate，消费 interaction 后通过 ServiceWorker host 请求新 tab；没有 renderer Window opener |
+| browser canonicalization/security | `content/browser/service_worker/service_worker_version.cc:2070-2111` | browser 把任意 accepted `about:` canonicalize 为 `about:blank`，再次执行 process URL 权限检查，再进入统一 `OpenWindow()` |
+| browser creation source | `content/browser/service_worker/service_worker_client_utils.cc:498-550` | 新 WebContents 使用 worker script URL 生成 referrer/initiator origin，并标记 service-worker open-window；不是借当前 tab 的 root Document 充当 initiator |
+| commit/current client lookup | `content/browser/service_worker/service_worker_client_utils.cc:410-447,698-748` | navigation 必须先 commit；随后按 RenderFrameHost 查 exact WindowClient，等待 execution-ready；Page 已销毁或 client 不可见时成功返回 null client |
+
+Lightmount 保留自身无 browser process 的结构差异，但对齐同一可观察 owner 语义：renderer browser-context runtime
+持有 Page/client registry，protocol target admission 仍是唯一 browser owner，worker runtime 只接收最终 typed
+completion。
+
+##### 统一 producer transaction
+
+`record_service_worker_auxiliary_navigation()` 现在是两个非 DOM producer 的共享入口。它完成以下不可拆分事务：
+
+- 用 worker script URL 和 destination 冻结 `RendererTopLevelNavigationSource::BrowserContext`、network referrer 与
+  destination `document.referrer`；initial empty Document 的 referrer 为空；
+- reserve 一个 `RendererScriptAgentAdmission::Fresh` Page，选择 `FreshUnnamed`，携带 default/non-sandboxed
+  auxiliary frame policy，不产生 popup id、Window opener 或 session-storage clone；
+- `http` / `https` 原样进入 target Page，所有 `about:` canonicalize 为 `about:blank`；SW 的其他 scheme 返回
+  `TypeError`，notification action 则不创建 target；
+- notification navigation 到这里结束；`clients.openWindow()` 额外安装 move-only continuation，后续不能从 URL、
+  active target 或 target-name projection猜测完成对象。
+
+因此三个 producer 的差异只保留在必要的 source/policy 表面：
+
+| producer | causal source | group/opener | completion |
+| --- | --- | --- | --- |
+| Window/hyperlink/form | exact source Window/Document | Related 或 policy-selected Fresh；按既有规则暴露/切断 opener | 同步返回 stable WindowProxy 或 `null`，destination 异步 |
+| SW `clients.openWindow()` | worker script browser-context source | 强制 Fresh unnamed；无 opener | exact worker Promise continuation |
+| notification navigation | notification/worker script browser-context source | 强制 Fresh unnamed；无 opener | fire-and-forget owner action |
+
+##### `clients.openWindow()` 的 exact terminal
+
+continuation 同时冻结 `expected_page_id + request_id + source_version_id + source_generation`，并用共享 atomic once
+状态保证 clone、错误分支与 Drop fallback 只结算一次。它从 activation 移入 target-local navigation action，再随
+`NavigationDispatchState` 穿过 request/response Fetch interception、redirect、background load 和最终 commit；
+target slot 中长期保留的 claim tombstone不持有 Promise authority，避免 Page lifetime 反向保活 worker request。
+
+最终状态映射为：
+
+| navigation/Page terminal | worker 可观察结果 |
+| --- | --- |
+| exact reserved Page commit，client 仍 current、execution-ready 且与 worker script same-origin | 返回该 Page 的 `WindowClient` snapshot |
+| Page id mismatch、client 已消失/冻结、尚未 execution-ready、cross-origin 或 `about:blank` | Promise 成功 resolve `null` |
+| 204/205、download、transport/fetch failure 未形成可暴露的 same-origin `WindowClient`（包括只提交 error Document），或 authority 在途中被丢弃 | Promise 成功 resolve `null` |
+| URL/activation/host 在创建前被 API gate 拒绝 | 保留对应 `TypeError` / `InvalidAccessError`，不创建 Page |
+
+这里“请求失败后 null”不是用当前 target 扫描补结果：unresolved carrier 的 Drop 也只向独立 completion queue 写入
+typed null，queue 唤醒 exact ServiceWorker owner lane；source version/generation 过期时由 worker runtime 拒绝旧
+completion 修改新 worker execution。
+
+##### ordinary → JavaScript URL 的跨 publication 因果顺序
+
+协议回归最初证明一个容易忽略的事实：同一 source V8 turn 内连续的 ordinary `window.open(url, name)` 与
+`window.open(javascript:..., name)`，会因跨 Page handoff 分裂成两个 renderer publication。仅在单批 activation
+内回看或按 URL/name 配对都不成立。
+
+E3 把不变量放到 destination owner：每个 Window-origin ordinary popup navigation action 都携带
+`drain_pending_javascript_tasks_before_commit`。protocol 先启动普通 browser navigation并发布 provisional start，
+然后在该 cross-Document navigation 尚 suspended、background completion 尚不能被同一 actor 应用时，通过
+interruptible exact-Page access 派发
+`RunPendingJavascriptUrlTasksBeforeBrowserNavigation`。renderer owner 命令只在当前 pending scheme 确为
+`javascript:` 时进入既有 JavaScript navigation lifecycle/FIFO/currentness；没有 task 时为 unit no-op。普通
+navigation 若在 renderer selection 时已经 supersede 更早的 JS task，该 task 已被 target scheduler 取消，命令
+不会复活它。这样锁定的是 `ordinary start → already-queued target JS task → ordinary commit`，没有 sleep、yield、
+retry 或第二个 JavaScript executor。
+
+##### E3 聚焦证据
+
+```bash
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount-renderer-v8 \
+  browser_navigation_causal_command_drains_pending_javascript_url_tasks \
+  clients_open_window_page_completion_requires_exact_reserved_page_identity \
+  service_worker_clients_open_window_request_records_popup_activation \
+  service_worker_popup_client_survives_javascript_reopen \
+  service_worker_clients_open_window_about_url_canonicalizes_to_fresh_page \
+  service_worker_clients_open_window_cross_origin_keeps_worker_referrer_source \
+  navigator_service_worker_notification_action_navigate_records_popup_activation \
+  service_worker_open_window_admits_about_url_to_parent_and_rejects_file_scheme
+# run 4902d822-c14e-4114-bd4e-5937bf7359a8：8 passed。
+
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount-protocol \
+  service_worker_auxiliary_producers_use_fresh_pages_and_navigation_terminals \
+  clients_open_window_continuation_survives_fetch_fulfill \
+  ordinary_popup_navigation_then_javascript_url_preserves_renderer_protocol_order
+# run 71d96402-b911-4814-b648-3939da462365：3 passed。
+```
+
+第二组是完整 protocol apply/commit 证据，不只是 renderer carrier 单测：它覆盖 SW/notification target create、
+same-origin WindowClient、cross-origin/null、204/no-commit、transport error、Fetch fulfill continuation，以及 stable
+WindowProxy + 单 target 的 ordinary→JS 顺序。外部 Chrome/focused upstream WPT 本轮尚未运行，不能把这 11 条
+Rust 回归写成 WPT pass。
+
+##### Phase 5E local exit 后的边界
+
+- production SW/notification caller 已没有 `open_lightweight_popup_window()`；当前该符号只剩 DOM compatibility
+  facade 与 lightweight record 内部 reopen。全仓更宽的 lightweight 静态扫描仍为 110 个 Rust 文件、1365 处
+  命中（包含测试、注释和兼容投影），所以 E3 不是 Phase 6 删除完成证明；
+- script-closable、beforeunload/unload、renderer close ACK/timeout 与 focus/blur 仍缺少 Page/browser-context
+  transaction，应作为下一个完整 lifecycle milestone 一次推进；
+- COOP browsing-context-group switch、opener sever、RemoteFrame/fenced/embedder `CanNavigate`、remote/disconnected
+  WindowProxy 是后续最高风险 group/remote milestone；
+- group-safe opaque-origin nonce、被 JS 强引用的 detached Document/Node/realm lifetime 属于 identity/lifetime
+  milestone；redirect-time browser-process `form-action`、isolated-world bypass、file-local/diagnostic 和 focused WPT
+  仍是明确长尾。
+
+##### 距离最终架构的剩余工作量（2026-08-06）
+
+这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。常用 DOM popup 路径约完成
+85-90%；以“能删除 lightweight 双栈并具备 Chromium-shaped group/lifetime owner”为终态，约完成 65-70%。
+剩余 30-35% 集中了风险最高的工作，不能按当前测试数量线性外推：
+
+| 大里程碑 | 必须形成的 exit condition | 规模/风险判断 |
+| --- | --- | --- |
+| lifecycle closure | script-closable gate；beforeunload/unload；renderer close ACK/timeout；focus/blur 与 active Page 事务；close/navigation/worker teardown 共用 currentness | 大；3-5 个内聚提交 |
+| group/remote model | COOP browsing-context-group/script-agent split；opener sever；remote/disconnected WindowProxy；RemoteFrame/fenced/embedder `CanNavigate` | 最大且风险最高；5-8 个提交 |
+| identity/lifetime closure | group-safe opaque-origin nonce；JS 强引用 detached Document/Node/realm 可存活；remote scheduler 与 GC/owner 协同 | 大；3-5 个提交 |
+| Phase 6 removal | 删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle、protocol 第二 Page/navigation 与所有 fallback；用静态扫描 + WPT/CDP 证明无 production 回退 | 大且机械面广；4-7 个提交 |
+
+合计仍应按约 15-25 个内聚提交、四个阶段验收来规划。最不合理的下一步仍是直接删除 record：当前
+110 个 Rust 文件、1365 处宽口径 lightweight 命中说明 compatibility projection/test 和真实旧 owner 尚未完成
+解耦。下一阶段应一次完成 lifecycle closure，而不是继续拆成只改一个 gate 的小补丁。
+
+##### E1-E2O/E3 完成后的 Phase 5E 范围
+
+E3 是 local/Fresh creation-policy exit，不是 COOP/remote group model 或 Phase 6 删除完成标志。以下边界仍不能
+套用“非命名直接 Fresh Page”或“所有 name 都查 related same-agent registry”的捷径：
 
 - E2A 已让 `window.open()` 的 existing related top-level target 先执行 renderer group lookup；E2B 已让
   新建 named noopener/noreferrer context 使用 private Fresh group，并只在该 group 内保留/查找 live name；
@@ -4404,20 +6139,39 @@ E1/E2A/E2B/E2C/E2D/E2E/E2F/E2G/E2H 不是 creation/group policy 完成标志，�
   current/related child owner 执行；E2G 已让同一 source form 跨 Page 保存 stable target route 与 exact
   scheduler generation，并由目标 child owner 取消 task/load/parser work；E2H 已让 current-top
   `window.open()`、hyperlink/form 保存 source Window/Document 与 referrer policy，同时保持 target Page
-  的唯一 scheduler/loader authority；
-- `_self` / `_parent` / `_top` 继续命中 existing context，并按 Chromium compatibility 行为返回 Window；
-- `javascript:` URL 仍涉及同步 target realm/CSP 语义，本纵切保留 legacy path；
+  的唯一 scheduler/loader authority；E2I/E2J 已把 new-context sandbox admission 与 Fresh target 的
+  跨 Document frame-policy handoff 分开建模；E2K 又把 existing-target bypass、sandbox/blocker admission、
+  exact activation consume 与 protocol observation 收进同一事务；E2L 再把 source-Document `allow-forms`
+  双门禁和 `formdata` 后 connected recheck 放回 form owner；E2L.1 又把 late gate 前的 target selection/new
+  initial Page creation 与 optional destination request 收进同一 action；E2M.1 再把 local candidate/special
+  target/Location 的 permission decision 收进唯一 renderer authority；E2N 最后把 full-creator JavaScript URL
+  的同步 final-target selection、target-Document FIFO networking task、CSP/currentness 与 optional string-result
+  replacement 收进同一真实 Page owner，并让 protocol 只观察 `NoDestination` create/reuse；E2O 再把 target
+  Trusted Types、stable child realm、form-action 与 existing-hit/new-miss source policy ordering 收进同一
+  transaction；E3 最后把 SW/notification browser-context producer、exact `openWindow()` terminal 与
+  ordinary→JS protocol owner ordering 收进同一真实 Page pipeline；
+- `_self` / `_parent` / `_top` 继续命中 existing context，并按 Chromium compatibility 行为返回 Window；E2M.1
+  refusal 只阻止 navigation，不把已选中的 target 当成 miss；
+- full-creator `javascript:` URL 已由 E2N 完成同步 target selection + 异步 target-Document task，E2O 已补 target
+  Trusted Types、form-action CSP 和 source-selection ordering；E3 已完成 production 非 DOM producer 与
+  protocol ordinary→JS ordering，剩余的是 compatibility executor、remote/isolated-world 与外部 WPT 证据；
 - form named/`_blank` 的 target/request carrier、E2E resolver integration、local/related-child repeated
   submission cancellation 与 child-source current-top causal/referrer identity 已完成；完整 target
-  `CancelClientNavigation()`、sandbox forms gate 与 RemoteFrame 尚未完成；
-- E2E 的 `CanNavigate` 只实现 local nested candidate 的 self / `javascript:` exact-origin / 普通
-  target-or-ancestor origin 分支；sandbox navigation flags、top-level opener relation、sticky/transient user
-  activation、top-navigation destination exception、fenced tree 与 embedder fallback 尚未实现；
-- 跨 Page 精确继承的 opaque origin 目前仍只有 V8 security token 能区分；Rust
+  `CancelClientNavigation()` 与 RemoteFrame 仍未完成；source-Document sandbox forms gate 已由 E2L 完成，
+  direct-submit denial 的 creation-only auxiliary target carrier 已由 E2L.1 完成；
+- E2M.1 已把 E2E 的 local nested filter 提升为 current/related Page 共用的 local `CanNavigate` authority，
+  并消费 E2K activation、sandbox navigation/top flags、typed opener relation 与 destination origin/site
+  exception；RemoteFrame、fenced tree、file-local compatibility、browser embedder remote fallback 与 diagnostic
+  仍未实现；E2L forms gate 与 navigation policy 保持独立；
+- E2J 已为 sandboxed Fresh top-level 的每个 Document 分配 browser-context 唯一 storage nonce；但跨 Page
+  精确继承的 opaque origin 在 Window access equality 上仍只有 V8 security token 能区分；Rust
   `WindowAccessOrigin` 为避免 host-local owner id 碰撞会拒绝 related-host opaque equality，后续需要独立、
   group-safe 的 opaque origin nonce，不能把本轮 tuple-origin 修正外推到该路径；
-- popup blocker/transient activation、sandbox `allow-popups` / escape-sandbox、COOP group switch、remote 或
-  disconnected WindowProxy endpoint 仍没有统一 creation transaction；
+- E2I 已让 `allow-popups` / escape-sandbox 的 **new-context admission** 使用 typed policy；E2J 已补 Fresh
+  no-local-proxy sandbox handoff；E2K 已补 transient/sticky activation 和 browser-context popup-blocker
+  decision；E2L 已补 attribute/CSP/inherited `allow-forms` 和 source gate；E2L.1 已补 direct-submit
+  creation-only side effect；E2M.1 已补 local sandbox/top-level navigation decision。COOP group switch、remote 或
+  disconnected WindowProxy endpoint 仍没有完整统一；
 - E2H 已覆盖同源 direct、跨 origin redirect hop、Fetch request-stage URL override、默认 downgrade policy
   与最终 `document.referrer`；redirect response policy mutation、Fetch response-stage override 和
   explicit header/document-referrer 的完整 Chromium 矩阵仍需单独 WPT/最小探针。
@@ -4432,7 +6186,7 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
 | close policy / unload | accepted close transaction、动态 `closed`、task/fetch cancellation、target teardown 和 closed facade 已统一；script-closable、beforeunload/unload/ACK 尚未实现 | popup creation/group policy + 通用 Page unload lifecycle owner |
 | focus / blur | descriptor 和调用许可已存在，没有 Page focus authority/事件事务 | browser-context active/focus owner |
 | retained detached Document values | Document host retirement 后旧 function/DOM wrapper 当前安全抛 `TypeError`；Chromium 中被 JS 强引用的 detached Node/realm 仍可继续存活和读取 | 为 DocumentRuntime、realm 和 wrappers 建立 GC/owner 协同 lifetime，避免用 raw host pointer 决定对象寿命 |
-| policy/group sever | E1 已统一新建非命名 noopener/noreferrer；E2A/E2B 已统一 `window.open()` 的 related name authority 与 Fresh group/name handoff；E2C/E2D 已复用到 full-creator ordinary named hyperlink/form；E2E 已统一 child-source 与 related nested local frame-tree lookup；E2F 已让 ordinary named form exact request 消费该 typed owner；E2G 已补 local/related child 的 same-form typed scheduler cancellation；E2H 已补 child-source current-top typed initiator/referrer carrier。完整 sandbox/activation/COOP 和 remote/disconnected endpoint 仍未统一 | browsing-context group / popup policy owner + top-level navigation carrier owner |
+| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification browser-context creation、exact worker terminal 与 ordinary→JS apply/commit ordering。COOP、RemoteFrame/fenced/file-local、activation replication、diagnostic 和 disconnected endpoint 仍未统一 | browsing-context group / remote navigation policy owner |
 
 下一批按以下顺序推进，避免把动态状态继续塞进静态 surface：
 
@@ -4442,14 +6196,15 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
    target currentness 与早期 admission。script-closable/unload policy 按上节边界继续补齐。
 2. **Phase 5C：live relation/child projection（本纵切已完成）。** Page-scoped opener edge 与 top-level
    child/name registry 已取代静态 surface snapshot，覆盖动态 frames、named child、`then` / `open`
-   shadow、opener setter/discard sever 与 navigation persistence；COOP/remote group sever 留在 Phase 5E。
+   shadow、opener setter/discard sever 与 navigation persistence；COOP/remote group sever 留给独立 group/remote
+   milestone。
 3. **Phase 5D：WPT internal methods/per-incumbent membrane（D1-D3b 已完成）。** D1 已完成 Location、D2
    已完成 Window 的 exact ownKeys、unknown/index、mutation、prototype/preventExtensions 静态矩阵，
    D2.5 已把 related/generic nested child 接回通用 live registry owner并修复预物化 restricted facade；
    D3a 已完成 Function/accessor 的 accessing-Realm prototype、identity、cache、异常 realm 与
    receiver-owned target dispatch；D3b 已完成 stable top identity cutover、callback-scoped observer/target
    child projection，以及 same-host / related-Page 两条访问矩阵。
-4. **Phase 5E：creation/group policy（E1、E2A、E2B、E2C、E2D、E2E、E2F、E2G 与 E2H 已完成）。** E1 已覆盖
+4. **Phase 5E：local/Fresh creation policy（E1-E2O 与 E3 已完成）。** E1 已覆盖
    `window.open()` 非命名 noopener/noreferrer 与 hyperlink `_blank` implicit/explicit noopener 的
    single-owner/referrer commit；E2A 已覆盖 related top-level named `window.open()` 的真实 initial Page、
    live name/lifecycle registry 与 exact target reuse；E2B 已覆盖新建 named suppress-opener 的 Fresh
@@ -4462,9 +6217,23 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
    result，并复用 child stable WindowProxy/policy container；E2G 又让 source form 保存 stable Page/child route
    与 exact navigation-load binding，跨 Page 取消由目标 owner 撤销 task、loader/parser ledger 且不会误杀
    replacement navigation；E2H 再把 current-top 的 source Window/Document、URL/policy 与 suppression 保留到
-   redirect/Fetch URL override/commit，而不改变 target Page 的唯一 scheduler/loader ownership。下一步处理
-   popup blocker/transient activation、完整 sandbox/top-level `CanNavigate` 与 `javascript:` target-realm
-   execution，再处理 focus/detach、COOP group switch 与 remote/disconnected WindowProxy endpoint。
+   redirect/Fetch URL override/commit，而不改变 target Page 的唯一 scheduler/loader ownership；E2I 已把
+   attribute/response-CSP `allow-popups` admission 放到 existing lookup 之后、Page reservation/event 之前，并
+   让 escape token 只控制 sandbox 继承；E2J 又让 Fresh target 的 initial 和 replacement Document 从 target
+   Page slot 取得同一 renderer-owned accepted policy，且 noopener sever 与 sandbox inheritance 保持正交；
+   E2K 再把 DevTools/trusted-input activation、existing-target bypass、sandbox/blocker order、single consume 和
+   `Page.windowOpen` observation 放进同一 renderer transaction；E2L 又把 attribute/response-CSP/inherited
+   `allow-forms` 收进 source-Document 双门禁，并保留 direct-submit `formdata` timing；E2L.1 再让 late denial
+   保留 already-created initial Page/WindowOpen/activation transaction，同时以 optional request 明确不启动
+   destination navigation；E2M.1 已把当前 local owner 可表达的 sandbox/top-level `CanNavigate` 顺序统一到
+   committed policy 与 stable endpoint；E2N 又把 full-creator JavaScript URL 的同步 target selection、异步
+   target-Document FIFO task、source/target CSP、currentness/string replacement 和 protocol `NoDestination`
+   收进同一真实 Page；E2O 再补 target Trusted Types、stable child realm、form-action 与 existing/new source
+   policy 分岔；E3 最后把 Service Worker/notification browser-context producer、exact Page/worker continuation
+   terminal 与 ordinary→JS owner ordering 统一到真实 Page。下一步不再按小纵切追加 Phase 5E，而是按四个完整
+   milestone 推进：lifecycle closure（script-closable/unload/focus）、group/remote model（COOP/RemoteFrame/
+   disconnected endpoint）、identity/lifetime closure（opaque-origin nonce/detached realm），最后执行 Phase 6
+   lightweight 双栈删除。focused WPT、diagnostics/file-local 随对应 milestone 提供证据。
 
 Phase 5A 聚焦验证：
 
@@ -5107,9 +6876,451 @@ git diff --check
 # passed
 ```
 
+Phase 5E2M.1 提交前门禁结果：
+
+```bash
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# run df84c664-8487-46ef-96ed-bac2c8cab1b9：16082 passed、18 skipped；执行阶段 98.336s。
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/tmp/e2m1-check cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 02s。
+
+git diff --check
+# passed
+```
+
+Phase 5E2M.1 rebase 后集成与门禁结果：
+
+```bash
+git pull -r origin master
+# origin/master 从 abdb5e8cc4 前进到 d7fb86b60e；49 个 popup 分支提交完成重放。
+# 唯一文本冲突位于 script_vm.rs import，合并后同时保留 master 的
+# with_scoped_inspector_microtasks 与 popup 分支的 set_object_slot。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  loaded_child_document_retains_exact_network_response_body --no-fail-fast
+# run ec97fd16-bd36-4ff5-9d3a-0d8d05f06f66：1 passed。
+# master 新增的 body-preservation fixture 调用分支已扩展的 child response API 时缺少
+# document_referrer；该用例不构造 referrer，显式补 None，而 production caller 继续传
+# exact referrer。这是 rebase 后的语义编译冲突，不是用旧签名绕开新 carrier。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  -E '<E2M.1 10 条新增 + 7 条既有 owner 回归>' --no-fail-fast
+# run adff7e28-bbe6-4a5a-93f7-4f73de32aa11：17 passed。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 sandbox --no-fail-fast
+# run 352d8e23-7e14-498d-82d1-905222e8376d：44 passed。
+
+for iteration in $(seq 1 20); do
+  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+    -E '<同一 17 条 owner-focused 回归>' --no-fail-fast
+done
+# first run 36a54882-e0e9-4c4e-80af-ff12ad60b1ed，
+# final run 39bb1512-fda3-487c-aeed-559d31af9c74；20/20 轮均为 17 passed。
+```
+
+第一次 rebase 后全量命令在进入测试前因工作区文件系统 `ENOSPC` 失败，不能算门禁结果。
+当时 `target` 为 191 GiB，其中 `target/debug/deps` 为 165 GiB；先用
+`cargo clean -p lightmount-renderer-v8 --dry-run` 精确确认范围，再执行同一 package clean，删除
+316 个可重建 artifact、释放 23.4 GiB，没有清理源码、git 数据或用户目录。随后第一轮有效全量
+run `39fd13c7-2e49-4027-8e16-44aac0fd08a3` 为 16102 passed、2 failed、18 skipped：
+
+- file-chooser document-replacement shared-id 用例失败；它曾在旧全量中出现相同单次红灯，本轮单线程
+  精确复跑通过，并与下面的 storage case 共同并发压力 20/20 通过；
+- `local_storage_mutations_fan_out_across_targets_without_leaking_session_storage` 在默认 nextest
+  栈确定性 SIGABRT。rebase 前生产 scheduler 已在 pending wait/completion 两侧使用 heap boundary，
+  但 `TestContext` 的 scheduler mirror 仍把二者内嵌进自己的 async state。popup owner/continuation
+  与 master commit state 合并后使该测试专用 future 越过栈预算。测试调度器现在与生产路径一致地在
+  两侧 `Box::pin`；没有设置 `RUST_MIN_STACK`、新增大栈线程或 sleep/retry。
+
+修正后的精确、压力与最终全量证据：
+
+```bash
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-protocol \
+  local_storage_mutations_fan_out_across_targets_without_leaking_session_storage \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run 74a940e5-d3f6-4ba8-b9ee-37eff62fb3c7：1 passed。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-protocol \
+  -E 'test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement) | \
+      test(local_storage_mutations_fan_out_across_targets_without_leaking_session_storage)' \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 349b0ae6-5312-4e4c-8a39-681f97a70b0d：20/20 iterations passed，
+# 每轮 2/2；同时覆盖 file-chooser 单次红灯与 default-stack regression。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 44f5f352-7134-405e-9826-4a0bbc7ce89b：16104 passed、18 skipped；
+# 执行阶段 114.590s。
+
+cargo fmt --all --check
+# passed；新增 scheduler heap boundary 经 rustfmt 后复检。
+
+TMPDIR=<repo>/tmp/e2m1-check cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 39s。
+
+git diff --check
+# passed。
+```
+
+完成上述门禁、amend 和第一次 force-with-lease push 后，按本轮收尾约定再次执行
+`git pull -r origin master`。第一次连接在 TLS handshake 阶段终止，没有修改 refs 或工作树；重试后发现
+master 又从 `d7fb86b60e` 前进到 `106ac477d7`，49 个 popup 提交无冲突重放。该 master 增量只有
+`docs/microtask-policy-checkpoint-risk-audit-2026-08-05.md` 一份 582 行文档；直接比较已验证并推送的
+`5eeec64859` 与最终 rebase HEAD，tree 差异也只有这份新增文档。Rust、构建配置和测试代码完全相同，
+因此不为 docs-only rebase 机械重跑 Rust 门禁；上面的 16104/16104、fmt 和 clippy 结果继续对应最终
+代码内容。
+
+Phase 5E2N 提交前集成与门禁结果：
+
+```bash
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# 首次 run 7c364d36-d1c1-421e-8711-72f1e7fe8830：16109 passed、3 failed、18 skipped。
+```
+
+首次 full run 的三条 failure 分开处理，不能笼统归为“偶发”：
+
+- Chromium-imported `rust_cdp_chromium_target_window_open_javascript_url_still_reports_popup_target`
+  是 E2N 的真实回归。renderer 已正确保留 requested URL，但 protocol 把所有 `NoDestination` 新 target
+  一律投影为空 URL。现已拆分 `destination_request` 与
+  `reports_requested_url_without_destination`：JavaScript URL 仍不进入 browser loader，同时
+  `Target.targetCreated.url` 为 requested URL；creation-only form 的空 URL/无 scheduler work 不变。上文
+  2-case protocol 回归证明两面均成立；
+- file-chooser replacement shared-id 与 child-frame unique-context-id 两条用例不经过本轮 popup queue、
+  activation projection 或 JavaScript URL executor。它们在 full-workspace 高并发下各缺一次预期 protocol
+  observation，但用完全相同 binary 做双用例、2 threads 的 20 轮压力复跑均通过。这个阶段只能证明
+  “20 轮未复现”，不能证明 file-chooser 没有竞态；后续最终 rebase 门禁用 50 轮复现出 3 次失败并完成
+  owner-boundary 修复，见下一节：
+
+```bash
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
+  file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement \
+  emitted_child_frame_unique_context_id_selects_that_realm \
+  --stress-count 20 --flaky-result fail --test-threads 2
+# run 7da6bc55-0a0e-416a-a8a8-68e8e23ff1eb：20/20 iterations passed，每轮 2/2。
+```
+
+两条非 E2N failure 在这个历史检查点没有改生产代码或放宽断言；当时证据只支持“workspace 资源/调度下
+未复现的既有 timing risk”，不足以声称已找到根因。file-chooser 的这项判断已被下一节更强的复现和修复
+证据取代；child-frame unique-context-id 本轮仍没有再次失败。最终默认并发 full run 覆盖它们并全部通过：
+
+```bash
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 739cc9c4-3140-42cd-8a4c-f6452fab9244：16112 passed、18 skipped；
+# 执行阶段 101.818s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 43s。
+
+git diff --check
+# passed。
+```
+
+Phase 5E2N 最终 rebase、file-chooser owner 边界与门禁结果：
+
+```bash
+git pull -r origin master
+# 第一轮把 popup 分支重放到 origin/master@f22f23462b。50 个分支提交中，旧的
+# continuation-policy rebase 修复已被 master 等价包含，Git 自动丢弃该提交，最终保留 49 个。
+```
+
+第一轮 rebase 的文本冲突集中在同一批 ownership 演进，不是用一侧版本覆盖另一侧：合并结果同时保留
+master 的 structured shutdown `BrowserContext` runtime owner/handle、main Document frozen security
+identity 与 transport-error Document URL/security projection，以及 popup 分支的 stable Page/Document
+continuation、sandbox policy 和 transient activation。两个 standalone/test-only caller 随新 API 补齐
+optional creator/referrer/policy 参数，并像 production 一样保留 `ResourceRequestClientOwner` 与
+`RendererBrowserContextRuntimeOwner`，只向 realm bootstrap 传 handle；owner 不再由临时表达式提前释放。
+
+第一轮 rebase 后的相邻聚焦证据为：error-Document/security/lifecycle 5/5（run
+`68c4c943-b7dd-4677-af87-b2063c43c4ba`）、renderer JavaScript 32/32（run
+`4a83610c-54fb-42b4-a692-66c6b3aa4846`）、protocol JavaScript URL projection 2/2（run
+`b3bc0aa6-7954-47fe-9b0e-6492921afb92`）、renderer sandbox/activation 8/8（run
+`256c2acb-3041-4584-8ee5-5a0bf1ca5354`）和 protocol sandbox carrier 2/2（run
+`260759a2-6e1f-4277-acab-23e831d35328`）。
+
+第一次有效 full run `b4644ad3-9b19-4ba0-91f4-74426164aeca` 为 16133 passed、1 failed、
+18 skipped；唯一 failure 是
+`file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement`。这次没有沿用上一节
+“未复现 timing risk”的结论，而是用相同 binary、4 threads 做 50 轮压力：run
+`f0d8995c-c0bd-4a2d-9eb2-b19cdbda9b89` 为 47 passed、3 failed，失败落在第 32、36、43 轮，
+确认是可重复的 scheduler race。
+
+根因位于 file-chooser 的事件/DOM-agent 边界，不在 popup queue：renderer 在旧 input element 激活时已经
+冻结 exact source Document、frame 和 renderer backend node id，随后同一段脚本可同步调用
+`document.open()`。protocol 消费 owner action 时却异步向“当时的 current Document”查询/补登记 BiDi
+shared-id，并把登记是否成功当作 automation event 是否携带 `element` 的条件。Document-scoped DOM-agent
+binding 可能在 replacement reset 前登记后被清除，也可能在 reset 后落入新 Document，因此测试结果随调度
+变化；旧 backend id 在 replacement Document 中不可解析这一核心合同始终成立。
+
+修复没有增加 retry、sleep 或 protocol mirror registry，而是拆开两个不同 lifetime：
+
+- file-chooser event 的 typed `element_shared_id` 永远由 activation 已冻结的 renderer backend identity
+  推导并随事件保存；
+- renderer DOM-agent binding 仍是 live Document/session 的唯一事实源，登记保持 best-effort，只负责节点仍
+  current 时的后续 `input.setFiles` 等操作；`document.open()` 可以退休该 binding，但不能擦除已经接受的
+  event identity；
+- end-to-end 回归继续断言旧 backend id 对 replacement Document 返回 missing node；producer 回归改为直接
+  检查 typed automation sidecar，避免再把 Document-scoped 内部映射的竞态时刻误当成事件合同。
+
+修复后的证据：
+
+```bash
+cargo nextest run -p lightmount-protocol \
+  -E 'test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement) or \
+      test(file_chooser_opened_preserves_typed_automation_sidecar) or \
+      test(document_open_replacement_preserves_causal_file_chooser_activation)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run d89a8ca5-dc41-4738-ae32-c13e98261c2f：3 passed。
+
+cargo nextest run -p lightmount-protocol \
+  file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement \
+  --stress-count 50 --flaky-result fail --test-threads 4 --no-fail-fast
+# run d34eae85-3c81-442d-8a65-8c4fe4f2a1cd：50/50 iterations passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 567c0c47-dab8-4214-9a98-abde6c9c9738：16134 passed、18 skipped；
+# 执行阶段 98.589s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 35s。
+
+git diff --check
+# passed。
+```
+
+按本轮约定，提交修复后再次执行 `git pull -r origin master`。fetch 发现 master 从
+`413032799c` 前进到 `d74a055354`；最终相对第一轮 `f22f23462b` 多两项：CDP failed-navigation
+error-Document Python smoke，以及 runtime/dynamic script 的 Document referer / CDP `Script` initiator
+修复。51 个 popup 分支提交全部无冲突重放；`git range-diff f22f23462b..032a494799
+origin/master..HEAD` 的 51 项均为 `=`。最终关键提交为 E2N `967f431ced`、structured test-owner 适配
+`8c31e0bf15` 和 file-chooser identity 修复 `a728b5bb38`。
+
+由于第二项 master 增量修改了 E2N 邻接的 document-script scheduler，最终 tree 重新执行 Rust 门禁，
+没有把 clean rebase 当作行为证明：
+
+```bash
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+  -E 'test(runtime_script_uses_document_referer_and_script_cdp_initiator) or \
+      test(prepared_runtime_script_start_captures_document_and_base_urls_at_prepare_time)' \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run c1171701-ca84-4797-a0d1-d5e0398c1e3c：2 passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 javascript \
+  --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
+# run af1ff832-3535-42a0-9571-4c6323aaff64：32 passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run e5f6c4be-bea3-4804-95d1-99e2255362b7：16135 passed、18 skipped；
+# 执行阶段 98.733s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/e2n-build cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 33s。
+
+git diff --check
+# passed。
+```
+
+Chromium 对照基线仍是 `/home/donoughliu/chromium/src@a03603fe9af6`，本次 rebase 没有基线漂移；
+也没有把 master 新增的 Python smoke 当作本轮 popup 验收或重新运行外部 Chrome/WPT。
+
+Phase 5E2O 提交前集成与门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast
+# 首次 run 5ee77e9a-8af4-4d94-bcc3-6da87dd0ab41：16144 passed、1 failed、18 skipped。
+```
+
+唯一 failure 是 `lightmount-wpt-compat::concurrent_report_writes_never_expose_partial_payloads`。没有把它直接归类
+为 flaky：聚焦复跑的 stderr 明确为 temporary report write `ENOSPC`；`df` 显示 `/tmp` 是独立 44 GB tmpfs，
+当时可用空间只有 224 KB，而宿主磁盘仍有约 29 GB。该用例和 popup/Trusted Types/form-action 路径没有代码
+交集。没有删除 `/tmp` 中来源不明的历史目录，而是创建仓库磁盘上的独立 TMPDIR，再用同一代码重跑：
+
+```bash
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p lightmount-wpt-compat \
+  concurrent_report_writes_never_expose_partial_payloads \
+  --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
+  --failure-output immediate
+# run aaf6fa25-faa4-4f41-8b77-ef61c9ece2b7：20/20 iterations passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  window_open_named_lightweight_popup_reuses_without_recloning_session_storage \
+  existing_named_target_does_not_consume_popup_user_activation \
+  lightweight_popup_javascript_url_uses_inline_navigation_csp_not_eval_csp \
+  popup_policy_checks_keep_existing_and_new_target_order_distinct \
+  form_action_csp_runs_after_new_target_selection_and_skips_prevented_submission
+# run 44ebba6f-29d3-4c5e-89e0-db5affd00e70：5 passed；覆盖 existing lightweight endpoint
+# 不得退化为 creation miss 的最终审阅修正。
+
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# 最终 run 0d748d9c-1708-49f8-a68a-6246456dbcfe：16145 passed、18 skipped；
+# 执行阶段 98.851s。
+
+cargo fmt --all --check
+# passed。
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 30s。
+
+git diff --check
+# passed。
+```
+
+Chromium 对照仍固定为 `/home/donoughliu/chromium/src@a03603fe9af6`。本轮只阅读该 checkout 与 upstream WPT
+source，没有运行外部 Chrome/WPT，因此 focused WPT slice 仍保留为后续证据债。
+
+Phase 5E2O 最终 rebase 与相邻 owner-boundary 门禁结果：
+
+```bash
+git pull -r origin master
+# origin/master 从 d74a055354 前进到 25326b1c12；53 个 popup 分支提交无冲突重放。
+
+git range-diff d74a055354..a6edc570b1 25326b1c12..6f90fe1b3a
+# 53 项全部为 `=`。
+```
+
+这次 master 增量是 `7b6328faac test(wpt): refresh cross-engine case baseline`、
+`590ee6c64e fix(cache): remove response-path fsync` 与
+`25326b1c12 test(cdp): cover fetch runtime callback teardown`。它们没有修改 popup/Trusted Types/form-action
+实现；cache 聚焦回归 run `3b474bfd-9bd9-4e47-8c50-25ca01d937e9` 为 44 passed。rebase 后仍重新跑了
+最终 tree，而没有把 clean range-diff 当成行为证明。
+
+第一次 post-rebase full run `165d8b5b-59c4-47dc-b2df-0b2f97bfd336` 为 16144 passed、1 failed、
+18 skipped。唯一 failure 是
+`memory_cache_tee_drop_after_body_eof_cancels_pending_completion_and_releases_exact_runtime`；同一 binary 的
+50 轮压力 run `5df9db25-3bdd-4656-b3ed-7ba3b5c12c9e` 在第 22 轮再次失败，不能归为一次性资源抖动。
+根因位于 `StreamingRawResponse` 的 terminal/lifetime owner：字段声明顺序会先 drop completion receiver、后 drop
+exact transport runtime lease，producer 因此可以观察到 completion 已关闭，但 retired runtime 尚不能 reap。
+修复在 `StreamingRawResponse::Drop` 内先取消未完成传输、显式释放 lease，再允许字段析构关闭 completion；没有
+增加 sleep、retry 或测试等待。fetch owner 新增单测直接记录 lease-drop 时 completion 是否仍开放，renderer
+集成回归继续证明 memory-cache tee 会精确释放旧 runtime。修复后同一 renderer 回归 run
+`118e2863-0459-466f-9c40-0b689984a0c8` 为 100/100 iterations passed。
+
+第二次 full run `289ce9d4-db56-4424-ac93-952d4ddfafa4` 为 16144 passed、1 failed、18 skipped；唯一 failure
+是 `emitted_child_frame_unique_context_id_selects_that_realm`。该用例在 E2N full workspace 中也曾单次失败，
+但当时 20 轮未复现；本次相同 binary 的修改前压力 run
+`3ca3f774-3e7e-4f87-b91d-7f19718f5986` 又是 100/100 passed，结合第二次 full failure 说明问题只在
+workspace 调度竞争下暴露，不能继续保留“立即扫描测试缓冲区”的偶然假设。
+
+生产 owner 已有 `Runtime.enable` 等待**已经排队**的 exact-Document child-realm task 的 barrier，并有
+`runtime_enable_waits_for_queued_child_realm_before_reporting_contexts` 锁住该合同；这里竞态来自 fixture 的
+`srcdoc` replacement realm 也可以在 enable response 后通过真实 renderer publication 变成 current。回归现在
+在命令成功后从 `TestContext` 的真实 scheduler input 有界等待匹配 frame 的 current default-context event，再用
+其 `uniqueId` 做 target-realm evaluation；已有 command-local replay 仍立即满足等待，尚未排队的 replacement
+则走 live publication。没有 broad drain、poll budget、sleep 或伪造 context event。
+
+最终证据：
+
+```bash
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run \
+  -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol \
+  -E 'test(dropping_raw_response_releases_lifetime_lease_before_completion_receiver) or \
+      test(memory_cache_tee_drop_after_body_eof_cancels_pending_completion_and_releases_exact_runtime) or \
+      test(emitted_child_frame_unique_context_id_selects_that_realm) or \
+      test(runtime_enable_waits_for_queued_child_realm_before_reporting_contexts)' \
+  --no-fail-fast
+# run bd0108ae-f685-4669-be2a-056c128a788b：4 passed。
+
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p lightmount-protocol \
+  emitted_child_frame_unique_context_id_selects_that_realm \
+  --stress-count 100 --flaky-result fail --test-threads 4 --no-fail-fast
+# run 81eb99a1-0fcf-4794-9731-5ab676f2a60c：100/100 iterations passed。
+
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run d06465e3-e29f-484c-a335-8d7fd1bd4363：16146 passed、18 skipped；
+# 执行阶段 105.246s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 48s。
+
+git diff --check
+# passed。
+```
+
+Chromium 对照基线仍是 `/home/donoughliu/chromium/src@a03603fe9af6`；master 增量与相邻 owner 修复都没有改变
+E2O 的 Chromium/WPT 行为矩阵。本轮没有运行外部 Chrome 或 focused upstream WPT，因此不能把上述 Rust
+门禁写成 WPT pass。
+
+#### Phase 5E3 提交门禁与并发风险
+
+最终 Rust 树的提交门禁为：
+
+```bash
+TMPDIR=<repo>/tmp/phase5e cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 0804883b-b735-49ad-ad39-56c24d86fafb：16151 passed、18 skipped；
+# 测试执行阶段 96.907s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/phase5e cargo clippy --workspace --all-targets -- -D warnings
+# passed；43.65s。
+
+git diff --check
+# passed。
+
+git pull -r origin master
+# FETCH_HEAD / origin/master 为 25326b1c12；当前分支已经包含该提交，rebase 无冲突、无重写；
+# Phase 5E3 实现提交仍为 6aae060677。同步后相对 master 落后 0、领先 57。
+```
+
+同步后 `/home/donoughliu/chromium/src` 仍为 `a03603fe9af6`，没有 Chromium 对照基线漂移。因为 rebase
+没有改变任何代码或提交，最终树沿用上面的 full nextest/fmt/clippy 证据；本次只新增同步记录，不机械重跑
+无关 Rust 门禁。
+
+全量门禁中间有一项不能隐去的既有并发风险：run
+`4cdda0f7-af3b-43e7-a865-d378f2151081` 为 16150 passed、1 failed、18 skipped，唯一失败是
+`websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded` 未在目标 DCL 采样前观察到 parser
+script 的 `Network.requestWillBeSent`。本轮没有修改 `lightmount` WebSocket fixture；该用例也曾在 E2H、E2J、D1
+等 full-workspace 门禁中呈现相同的“workspace 并发失败、focused stress 通过”形状。当前复核为：
+
+```bash
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount \
+  websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded \
+  --stress-count 100 --flaky-result fail --test-threads 8 --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 6a6fceaa-c671-442c-ab65-c7b066536253：100/100 iterations passed。
+```
+
+随后两次默认并发 full run 均为 16151 passed、18 skipped；最后一次就是上面的提交门禁。现有证据只能说明它
+依赖 workspace 全局调度竞争，不能证明 parser-network backlog 与 DCL publication 的 owner 不变量已经稳定；也
+没有据此加入 sleep、retry、降低默认并发或放宽顺序断言。这项风险应在下一完整 lifecycle closure 中连同
+beforeunload/unload、close ACK 和通用 protocol publication fence 一起定位，不能把 focused 100/100 写成根因修复。
+
 ### Phase 6：删除 lightweight 专用模型
 
-当所有 production popup 都由真实 auxiliary Page 承担后删除：
+E3 已达到“所有已迁移 production creation producer 都创建真实 auxiliary Page”，但还没有达到安全删除条件：
+lifecycle/group/remote/identity 长尾仍可能调用 compatibility endpoint，测试和 standalone adapter 也仍把旧类型
+当作行为夹具。2026-08-06 的宽口径扫描为 110 个 Rust 文件、1365 处
+`lightweight_popup|LightweightPopup|lightweight popup` 命中；直接 creation symbol 只剩
+`native_bridge/element/activation/targets.rs`、`context_bootstrap/window_runtime/dialogs.rs` 与
+`native_bridge/context_host/popups.rs` 的 DOM compatibility/reopen 路径。这个数字包含测试、注释和投影，不能按
+命中数机械删除，但也足以否定“一次清理提交即可完成”。
+
+当 lifecycle/group/identity 前置条件满足后，按 owner dependency 顺序删除：
 
 - `LightweightPopupBrowsingContextRecord`；
 - popup shared-context alias registration；

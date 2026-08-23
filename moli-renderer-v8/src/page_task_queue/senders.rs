@@ -716,7 +716,7 @@ impl RendererTopLevelNavigationHandoffSender {
 
     /// Hand one exact request directly to the Page owner without manufacturing
     /// a Page scheduler task; the descriptor already occupies the ScriptVm's
-    /// unique pending-navigation slot.
+    /// replace-only ordinary slot or Document-local JavaScript URL task queue.
     pub(crate) fn send(&self, handoff: super::RendererTopLevelNavigationHandoff) -> bool {
         self.owner_wake
             .as_ref()

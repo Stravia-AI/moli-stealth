@@ -257,6 +257,7 @@ impl JsRuntime {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -557,6 +558,7 @@ impl JsRuntime {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -597,6 +599,7 @@ impl JsRuntime {
         main_document_commit: Option<crate::RendererMainDocumentCommit>,
         initial_document_referrer: Option<String>,
         initial_top_level_browsing_context_name: Option<String>,
+        auxiliary_browsing_context_policy: Option<crate::RendererAuxiliaryBrowsingContextPolicy>,
     ) -> Result<PendingHtmlPage> {
         let mut request = self
             .inner
@@ -638,6 +641,7 @@ impl JsRuntime {
         request.main_document_commit = main_document_commit;
         request.initial_document_referrer = initial_document_referrer;
         request.initial_top_level_browsing_context_name = initial_top_level_browsing_context_name;
+        request.auxiliary_browsing_context_policy = auxiliary_browsing_context_policy;
         let reply_rx = self
             .inner
             .renderer_owner

@@ -302,9 +302,11 @@ impl LivePageEntry {
         self.begin_standalone_navigation_follow_for_handoff(None)
     }
 
-    /// Claim a producer handoff only while the same request still occupies
-    /// the ScriptVm's unique pending navigation slot. A delayed wake for an
-    /// overwritten request therefore cannot start the replacement request.
+    /// Claim a producer handoff only while the same request is still at the
+    /// head of the ScriptVm's pending navigation owner queue. A delayed wake
+    /// for an overwritten/canceled request therefore cannot start a different
+    /// request, while FIFO JavaScript URL handoffs remain independently
+    /// claimable.
     pub(in crate::runtime) fn begin_standalone_navigation_follow_from_handoff(
         &mut self,
         handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,

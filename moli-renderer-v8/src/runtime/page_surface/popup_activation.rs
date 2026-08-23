@@ -6,11 +6,59 @@ use super::{
 };
 use crate::{
     SharedWebStorageStore,
+    document_runtime::{DocumentPolicyContainer, DocumentSandboxPolicy},
     runtime::{
         PageId, RendererOutputResidenceIdentity, RendererOwnerLocalHostId,
         RendererPendingAuxiliaryPage, RendererScriptAgentAdmission,
+        RendererServiceWorkerClientsOpenWindowContinuation,
     },
 };
+
+/// Renderer-owned frame policy frozen when a new auxiliary browsing context
+/// passes creator-side sandbox admission.
+///
+/// Browser/protocol owners may retain and return this value with each new
+/// Document build, but its sandbox representation stays private to the
+/// renderer. Opener suppression changes the browsing-context group and DOM
+/// opener surface; it does not discard this accepted frame policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RendererAuxiliaryBrowsingContextPolicy {
+    sandbox: DocumentSandboxPolicy,
+}
+
+impl RendererAuxiliaryBrowsingContextPolicy {
+    pub(crate) const fn from_sandbox(sandbox: DocumentSandboxPolicy) -> Self {
+        Self { sandbox }
+    }
+
+    pub(crate) const fn sandbox(self) -> DocumentSandboxPolicy {
+        self.sandbox
+    }
+
+    pub(crate) const fn forces_opaque_origin(self) -> bool {
+        self.sandbox.forces_opaque_origin
+    }
+
+    pub(crate) fn sandbox_with_response_content_security_policies(
+        self,
+        policies: &[String],
+    ) -> DocumentSandboxPolicy {
+        self.sandbox.with_response_content_security_policy(
+            DocumentSandboxPolicy::from_response_content_security_policies(policies),
+        )
+    }
+
+    pub(crate) fn with_response_content_security_policies(self, policies: &[String]) -> Self {
+        Self::from_sandbox(self.sandbox_with_response_content_security_policies(policies))
+    }
+
+    pub(crate) fn initial_document_policy_container(self) -> DocumentPolicyContainer {
+        DocumentPolicyContainer {
+            sandbox: self.sandbox,
+            ..DocumentPolicyContainer::default()
+        }
+    }
+}
 
 /// Exact already-live renderer Page selected for a popup navigation.
 ///
@@ -40,6 +88,41 @@ pub enum RendererPopupNewTargetDisposition {
     /// Opener suppression created a fresh group whose first realm must retain
     /// the requested ordinary browsing-context name.
     FreshNamed,
+}
+
+/// Frozen user-activation result for one admitted new auxiliary context.
+///
+/// The generation identifies the exact transient grant observed by the
+/// creation transaction. An admitted creation consumes that grant at most
+/// once; an embedder-policy bypass has no generation and consumes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RendererPopupCreationUserActivation {
+    transient_activation_generation: Option<u64>,
+    consumed_transient_activation_generation: Option<u64>,
+}
+
+impl RendererPopupCreationUserActivation {
+    pub(crate) fn new(
+        transient_activation_generation: Option<u64>,
+        consumed_transient_activation_generation: Option<u64>,
+    ) -> Self {
+        assert_eq!(
+            transient_activation_generation, consumed_transient_activation_generation,
+            "an admitted auxiliary creation must consume exactly the transient activation it observed"
+        );
+        Self {
+            transient_activation_generation,
+            consumed_transient_activation_generation,
+        }
+    }
+
+    pub(crate) const fn user_gesture(self) -> bool {
+        self.transient_activation_generation.is_some()
+    }
+
+    pub(crate) const fn consumed(self) -> bool {
+        self.consumed_transient_activation_generation.is_some()
+    }
 }
 
 impl RendererPopupNewTargetDisposition {
@@ -120,7 +203,18 @@ pub struct RendererPendingPopupActivation {
     source: RendererPopupActivationSource,
     disposition: RendererPopupDisposition,
     popup_id: Option<u64>,
-    request: Box<RendererTopLevelNavigationRequest>,
+    /// URL observed by synchronous target selection and `Page.windowOpen`.
+    ///
+    /// This remains present when form target selection creates an auxiliary
+    /// browsing context but a later source-Document policy check suppresses
+    /// the destination navigation.
+    requested_url: String,
+    destination_request: Option<Box<RendererTopLevelNavigationRequest>>,
+    /// Whether a newly created DevTools target reports `requested_url` even
+    /// though the URL is renderer-owned and has no browser destination work.
+    /// This is true for `javascript:` popup creation, but false for a
+    /// creation-only form action whose destination was denied.
+    reports_requested_url_without_destination: bool,
     target_name: String,
     /// Heap-owned so adding popup policy facts does not inflate every
     /// `RendererOwnerAction` variant and its async orchestration frames.
@@ -128,6 +222,14 @@ pub struct RendererPendingPopupActivation {
     pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
     resolved_target_page: Option<RendererResolvedPopupTarget>,
     new_target_disposition: Option<RendererPopupNewTargetDisposition>,
+    /// Heap-owned to keep two generation identities out of every owner-action
+    /// stack frame; only admitted new-context actions allocate it.
+    creation_user_activation: Option<Box<RendererPopupCreationUserActivation>>,
+    auxiliary_browsing_context_policy: Option<Box<RendererAuxiliaryBrowsingContextPolicy>>,
+    /// Once-only worker Promise completion bound to this activation's exact
+    /// Fresh Page reservation. Ordinary Window producers never carry it.
+    service_worker_clients_open_window_continuation:
+        Option<RendererServiceWorkerClientsOpenWindowContinuation>,
     session_storage_store: Option<SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
 }
@@ -176,12 +278,17 @@ impl RendererPendingPopupActivation {
             },
             disposition,
             popup_id,
-            request: Box::new(RendererTopLevelNavigationRequest::get(url)),
+            requested_url: url.clone(),
+            destination_request: Some(Box::new(RendererTopLevelNavigationRequest::get(url))),
+            reports_requested_url_without_destination: false,
             target_name,
             referrers: None,
             pending_auxiliary_page: None,
             resolved_target_page: None,
             new_target_disposition: None,
+            creation_user_activation: None,
+            auxiliary_browsing_context_policy: None,
+            service_worker_clients_open_window_continuation: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -201,12 +308,17 @@ impl RendererPendingPopupActivation {
             source: RendererPopupActivationSource::BrowserContext,
             disposition,
             popup_id,
-            request: Box::new(RendererTopLevelNavigationRequest::get(url)),
+            requested_url: url.clone(),
+            destination_request: Some(Box::new(RendererTopLevelNavigationRequest::get(url))),
+            reports_requested_url_without_destination: false,
             target_name,
             referrers: None,
             pending_auxiliary_page: None,
             resolved_target_page: None,
             new_target_disposition: None,
+            creation_user_activation: None,
+            auxiliary_browsing_context_policy: None,
+            service_worker_clients_open_window_continuation: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -239,11 +351,32 @@ impl RendererPendingPopupActivation {
     /// request whole is required for auxiliary form POSTs.
     pub fn with_navigation_request(mut self, request: RendererTopLevelNavigationRequest) -> Self {
         assert_eq!(
-            self.request.url(),
+            self.requested_url,
             request.url(),
             "popup target selection and navigation request must carry one URL"
         );
-        self.request = Box::new(request);
+        self.destination_request = Some(Box::new(request));
+        self
+    }
+
+    /// Retains the already-observed target-creation URL while suppressing the
+    /// destination navigation.
+    ///
+    /// Blink can reach this state for direct `form.submit()`: target lookup
+    /// (and therefore new auxiliary-context creation) precedes the late
+    /// sandboxed-forms check. The initial empty Document is not a substitute
+    /// navigation request and must not be represented as one.
+    pub fn without_destination_navigation(mut self) -> Self {
+        self.destination_request = None;
+        self.reports_requested_url_without_destination = false;
+        self
+    }
+
+    /// Keeps the renderer-owned requested URL as the new target's DevTools
+    /// creation projection without turning it back into browser navigation.
+    pub fn without_destination_navigation_with_requested_url_observation(mut self) -> Self {
+        self.destination_request = None;
+        self.reports_requested_url_without_destination = true;
         self
     }
 
@@ -322,7 +455,72 @@ impl RendererPendingPopupActivation {
             !disposition.is_fresh() || self.popup_id.is_none(),
             "a Fresh popup Page cannot retain an opener-local lightweight owner"
         );
+        assert_eq!(
+            disposition.is_fresh(),
+            self.auxiliary_browsing_context_policy.is_some(),
+            "Fresh popup admission must retain exactly one accepted auxiliary frame policy"
+        );
         self.new_target_disposition = Some(disposition);
+        self
+    }
+
+    /// Attaches the renderer-frozen sandbox policy for a newly admitted Fresh
+    /// auxiliary Page. The protocol target may retain this opaque value, but
+    /// only renderer Document construction interprets it.
+    pub fn with_auxiliary_browsing_context_policy(
+        mut self,
+        policy: RendererAuxiliaryBrowsingContextPolicy,
+    ) -> Self {
+        assert!(
+            self.pending_auxiliary_page.is_some(),
+            "accepted auxiliary frame policy requires its Page reservation"
+        );
+        assert!(
+            self.resolved_target_page.is_none(),
+            "existing popup targets already own their frame policy"
+        );
+        self.auxiliary_browsing_context_policy = Some(Box::new(policy));
+        self
+    }
+
+    /// Attaches the exact ServiceWorker `Clients.openWindow()` continuation
+    /// after its Fresh Page identity has been reserved.
+    pub fn with_service_worker_clients_open_window_continuation(
+        mut self,
+        continuation: RendererServiceWorkerClientsOpenWindowContinuation,
+    ) -> Self {
+        let pending = self
+            .pending_auxiliary_page
+            .expect("openWindow continuation requires its auxiliary Page reservation");
+        assert_eq!(
+            pending.page_reservation().page_id(),
+            continuation.expected_page_id(),
+            "openWindow continuation must bind the activation's exact Page"
+        );
+        assert!(
+            self.resolved_target_page.is_none(),
+            "openWindow continuation cannot complete from an existing target"
+        );
+        assert!(
+            self.service_worker_clients_open_window_continuation
+                .replace(continuation)
+                .is_none(),
+            "openWindow continuation must be attached once"
+        );
+        self
+    }
+
+    /// Attaches the renderer-owned activation decision made immediately before
+    /// creating this new auxiliary browsing context.
+    pub(crate) fn with_creation_user_activation(
+        mut self,
+        activation: RendererPopupCreationUserActivation,
+    ) -> Self {
+        assert!(
+            self.resolved_target_page.is_none(),
+            "existing popup targets must not carry a creation activation transaction"
+        );
+        self.creation_user_activation = Some(Box::new(activation));
         self
     }
 
@@ -355,23 +553,47 @@ impl RendererPendingPopupActivation {
     }
 
     pub fn url(&self) -> &str {
-        self.request.url()
+        &self.requested_url
     }
 
-    pub fn request_method(&self) -> &str {
-        self.request.request_method()
+    pub fn has_destination_navigation(&self) -> bool {
+        self.destination_request.is_some()
+    }
+
+    pub fn request_method(&self) -> Option<&str> {
+        self.destination_request
+            .as_deref()
+            .map(RendererTopLevelNavigationRequest::request_method)
     }
 
     pub fn request_body(&self) -> Option<&[u8]> {
-        self.request.request_body()
+        self.destination_request
+            .as_deref()
+            .and_then(RendererTopLevelNavigationRequest::request_body)
     }
 
-    pub fn request_headers(&self) -> &[(String, String)] {
-        self.request.request_headers()
+    pub fn request_headers(&self) -> Option<&[(String, String)]> {
+        self.destination_request
+            .as_deref()
+            .map(RendererTopLevelNavigationRequest::request_headers)
     }
 
-    pub fn browser_navigation_kind(&self) -> moli_fetch::BrowserNavigationRequestKind {
-        self.request.browser_navigation_kind()
+    pub fn browser_navigation_kind(&self) -> Option<moli_fetch::BrowserNavigationRequestKind> {
+        self.destination_request
+            .as_deref()
+            .map(RendererTopLevelNavigationRequest::browser_navigation_kind)
+    }
+
+    /// Returns the exact causal source retained by the destination request.
+    ///
+    /// Browser-context producers deliberately return a source without a
+    /// Window/Document owner. Keeping this accessor on the activation lets
+    /// protocol and regression code verify that those producers did not get
+    /// projected onto whichever root Window happened to host the handoff.
+    pub fn navigation_source(&self) -> Option<&super::RendererTopLevelNavigationSource> {
+        self.destination_request
+            .as_deref()
+            .and_then(RendererTopLevelNavigationRequest::source)
     }
 
     pub fn target_name(&self) -> &str {
@@ -408,6 +630,27 @@ impl RendererPendingPopupActivation {
         self.new_target_disposition
     }
 
+    pub fn creation_had_transient_user_activation(&self) -> Option<bool> {
+        self.creation_user_activation
+            .as_deref()
+            .copied()
+            .map(RendererPopupCreationUserActivation::user_gesture)
+    }
+
+    pub fn creation_consumed_transient_user_activation(&self) -> Option<bool> {
+        self.creation_user_activation
+            .as_deref()
+            .copied()
+            .map(RendererPopupCreationUserActivation::consumed)
+    }
+
+    pub fn service_worker_clients_open_window_continuation(
+        &self,
+    ) -> Option<&RendererServiceWorkerClientsOpenWindowContinuation> {
+        self.service_worker_clients_open_window_continuation
+            .as_ref()
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -415,7 +658,9 @@ impl RendererPendingPopupActivation {
         RendererPopupActivationSource,
         RendererPopupDisposition,
         Option<u64>,
-        RendererTopLevelNavigationRequest,
+        String,
+        Option<RendererTopLevelNavigationRequest>,
+        bool,
         String,
         Option<String>,
         Option<String>,
@@ -423,6 +668,8 @@ impl RendererPendingPopupActivation {
         Option<RendererPendingAuxiliaryPage>,
         Option<RendererResolvedPopupTarget>,
         Option<RendererPopupNewTargetDisposition>,
+        Option<RendererAuxiliaryBrowsingContextPolicy>,
+        Option<RendererServiceWorkerClientsOpenWindowContinuation>,
         Option<SharedWebStorageStore>,
         Option<moli_storage_key::MoliStorageKey>,
     ) {
@@ -440,7 +687,9 @@ impl RendererPendingPopupActivation {
             self.source,
             self.disposition,
             self.popup_id,
-            *self.request,
+            self.requested_url,
+            self.destination_request.map(|request| *request),
+            self.reports_requested_url_without_destination,
             self.target_name,
             navigation_referrer,
             initial_document_referrer,
@@ -448,6 +697,8 @@ impl RendererPendingPopupActivation {
             self.pending_auxiliary_page,
             self.resolved_target_page,
             self.new_target_disposition,
+            self.auxiliary_browsing_context_policy.map(|policy| *policy),
+            self.service_worker_clients_open_window_continuation,
             self.session_storage_store,
             self.initial_empty_document_storage_key,
         )
@@ -459,12 +710,19 @@ impl PartialEq for RendererPendingPopupActivation {
         self.source == other.source
             && self.disposition == other.disposition
             && self.popup_id == other.popup_id
-            && self.request == other.request
+            && self.requested_url == other.requested_url
+            && self.destination_request == other.destination_request
+            && self.reports_requested_url_without_destination
+                == other.reports_requested_url_without_destination
             && self.target_name == other.target_name
             && self.referrers == other.referrers
             && self.pending_auxiliary_page == other.pending_auxiliary_page
             && self.resolved_target_page == other.resolved_target_page
             && self.new_target_disposition == other.new_target_disposition
+            && self.creation_user_activation == other.creation_user_activation
+            && self.auxiliary_browsing_context_policy == other.auxiliary_browsing_context_policy
+            && self.service_worker_clients_open_window_continuation
+                == other.service_worker_clients_open_window_continuation
             && match (&self.session_storage_store, &other.session_storage_store) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),

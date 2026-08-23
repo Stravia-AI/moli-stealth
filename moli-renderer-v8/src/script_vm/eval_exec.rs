@@ -675,6 +675,40 @@ impl ScriptVm {
         })
     }
 
+    /// Applies the current top-level Document's inline-navigation CSP at the
+    /// selected JavaScript-URL Page-task boundary.
+    ///
+    /// The producer may belong to another related Page and performs its own
+    /// source-side check before target selection. This second check is
+    /// intentionally target-owned and delayed until execution: a superseding
+    /// navigation can retire the pending task, and a surviving task must use
+    /// the final target Document's policy and violation-event realm.
+    pub(crate) fn javascript_url_source_allowed_by_target_policy_selected_task_body(
+        &mut self,
+        url: &Url,
+    ) -> Result<Option<String>> {
+        let csp_source = crate::native_bridge::javascript_url_csp_source(url);
+        let script_source = crate::native_bridge::javascript_url_source(url);
+        self.with_default_context_scope(move |scope, host_ptr| {
+            let host = unsafe { &mut *host_ptr };
+            if !host.allows_inline_javascript_navigation_by_csp(
+                scope,
+                crate::native_bridge::OwnerDispatchScope::Top,
+                &csp_source,
+            ) {
+                return Ok(None);
+            }
+            let requirements = host.trusted_types_for_script_requirements(scope);
+            Ok(
+                crate::context_bootstrap::trusted_script_string_for_javascript_navigation(
+                    scope,
+                    &script_source,
+                    requirements,
+                ),
+            )
+        })
+    }
+
     #[cfg(test)]
     pub(crate) fn eval_with_child_record_sync(&mut self, source: &str) -> Result<String> {
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context as *const _;

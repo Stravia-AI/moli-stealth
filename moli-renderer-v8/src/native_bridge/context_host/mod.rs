@@ -123,6 +123,8 @@ mod layout_snapshot;
 mod layout_state;
 mod live_ranges;
 mod main_document_lifecycle;
+mod user_activation;
+use user_activation::TransientUserActivationLedger;
 mod media_element_events;
 mod media_loads;
 mod misc_platform_api_tasks;
@@ -136,6 +138,8 @@ mod message_ports;
 mod messages;
 mod module_owner_tasks;
 mod navigation;
+mod navigation_policy;
+pub(crate) use navigation_policy::BrowsingContextNavigationDenial;
 mod opfs_tasks;
 mod permissions;
 mod pointer_capture;
@@ -215,7 +219,7 @@ pub(crate) use popups::{
     LightweightPopupNavigationTaskToken, PopupClassicScriptLoadApplication,
     PopupDocumentLoadApplication, PopupDocumentLoadBodyActivity, active_lightweight_popup_id,
     defer_active_lightweight_popup_restore, enter_active_lightweight_popup_scope,
-    enter_top_level_lightweight_popup_scope, javascript_url_csp_source,
+    enter_top_level_lightweight_popup_scope, javascript_url_csp_source, javascript_url_source,
     lightweight_popup_id_from_window, restore_active_lightweight_popup_scope,
     restore_deferred_active_lightweight_popup_scope_if_present,
     set_renderer_owned_auxiliary_popup_id,
@@ -891,7 +895,7 @@ pub(crate) struct JsContextHost {
     locale_override: Option<String>,
     timezone_override: Option<String>,
     idle_override: Option<crate::protocol_types::EmulatedIdleOverride>,
-    protocol_user_gesture_activation_depth: usize,
+    transient_user_activation: TransientUserActivationLedger,
     current_input_event: Option<crate::native_bridge::CurrentInputEvent>,
     webdriver_bidi_file_prompt_handler_stack: Vec<String>,
     emulated_media: crate::protocol_types::EmulatedMediaOverrides,
@@ -909,8 +913,6 @@ pub(crate) struct JsContextHost {
     service_worker_registration_watchers: Vec<service_workers::ServiceWorkerRegistrationWatcher>,
     service_worker_lifecycle_watched_scopes: HashSet<(Url, String, WindowDocumentOwner)>,
     service_worker_popup_clients: HashMap<u64, ServiceWorkerClientId>,
-    pending_service_worker_clients_open_window_popups:
-        HashMap<u64, service_workers::PendingServiceWorkerClientsOpenWindowPopup>,
     pending_window_messages: VecDeque<QueuedWindowMessage>,
     next_window_message_task_id: crate::page_task_queue::RendererPageWindowMessageTaskId,
     indexed_db_context_tasks: IndexedDbContextState,
@@ -1028,7 +1030,7 @@ pub(crate) struct JsContextHost {
     /// command. DebugEvaluate can expose StackFrame objects whose location
     /// accessors are invalid, so callbacks use this scope to avoid probing them.
     active_inspector_dispatch: bool,
-    pending_top_level_navigation: Option<PendingTopLevelNavigation>,
+    pending_top_level_navigations: VecDeque<PendingTopLevelNavigation>,
     ordinary_page_turn_navigation_handoff_active: bool,
     pub(super) next_navigation_attempt_id: u64,
     pub(super) active_navigation_attempts: HashMap<u64, &'static str>,

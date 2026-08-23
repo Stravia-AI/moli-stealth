@@ -115,7 +115,7 @@ pub(in crate::context_bootstrap) fn child_browsing_context_handle_for_runtime_ow
         })
 }
 
-fn runtime_window_dispatch_scope<'s>(
+pub(crate) fn runtime_window_dispatch_scope<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     window: v8::Local<'s, v8::Object>,
 ) -> Option<crate::native_bridge::OwnerDispatchScope> {
@@ -186,7 +186,11 @@ pub(super) fn navigation_document_has_opaque_origin<'s>(
     };
     let host = unsafe { &*host_ptr };
     if runtime_window_is_global(scope, owner) {
-        return top_level_navigation_document_has_opaque_origin(host.document_url());
+        return host
+            .document_policy_container()
+            .sandbox
+            .forces_opaque_origin
+            || top_level_navigation_document_has_opaque_origin(host.document_url());
     }
     let Some(handle) = child_browsing_context_handle_for_runtime_owner(scope, owner) else {
         return false;

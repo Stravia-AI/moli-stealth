@@ -5,7 +5,8 @@ use crate::native_bridge::context_host::ChildBrowsingContextNavigationRequest;
 use crate::native_bridge::element::NodePublicEventDispatchOutcome;
 use crate::native_bridge::element::activation::{
     SpecialBrowsingContextTarget, element_popup_relations, navigate_form_auxiliary_target,
-    navigate_form_named_target,
+    navigate_form_named_target, source_node_can_navigate_top_level,
+    source_node_form_action_allowed_by_csp, source_node_javascript_url_allowed_by_csp,
 };
 use crate::util::{v8_string, v8str};
 use moli_dom::forms::normalize_form_submission_newlines;
@@ -92,6 +93,9 @@ pub(in crate::native_bridge) fn submit_form_with_submit_event(
         form_is_connected_or_in_detached_document(runtime, form_handle)
     };
     if !form_can_dispatch_submit_event {
+        return false;
+    }
+    if !unsafe { &*runtime_ptr }.document_allows_form_submission_for_node(form_handle) {
         return false;
     }
     if !unsafe { &mut *runtime_ptr }.begin_form_submission(form_handle) {
@@ -437,6 +441,9 @@ pub(in crate::native_bridge) fn submit_form_default_action(
     submitter: Option<DomHandle>,
     user_initiated: bool,
 ) -> bool {
+    if !form_is_connected_or_in_detached_document(unsafe { &*runtime_ptr }, form_handle) {
+        return false;
+    }
     let method = {
         let runtime = unsafe { &*runtime_ptr };
         resolve_form_submission_method(runtime, form_handle, submitter)
@@ -470,7 +477,9 @@ pub(in crate::native_bridge) fn submit_form_default_action(
     else {
         return false;
     };
-
+    if !form_is_connected_or_in_detached_document(unsafe { &*runtime_ptr }, form_handle) {
+        return false;
+    }
     let special_target = target_name
         .as_deref()
         .and_then(SpecialBrowsingContextTarget::parse);
@@ -501,6 +510,27 @@ pub(in crate::native_bridge) fn submit_form_default_action(
                 request,
                 user_initiated,
             )
+        }
+        _ if !unsafe { &*runtime_ptr }.document_allows_form_submission_for_node(form_handle) => {
+            false
+        }
+        _ if !source_node_javascript_url_allowed_by_csp(
+            scope,
+            runtime_ptr,
+            form_handle,
+            request.resolved_url(),
+        ) =>
+        {
+            true
+        }
+        _ if !source_node_form_action_allowed_by_csp(
+            scope,
+            runtime_ptr,
+            form_handle,
+            request.resolved_url(),
+        ) =>
+        {
+            true
         }
         _ => match request {
             FormSubmissionMethod::Get { resolved_url } => navigate_form_target_browsing_context(
@@ -656,6 +686,15 @@ enum FormSubmissionMethod {
     },
 }
 
+impl FormSubmissionMethod {
+    fn resolved_url(&self) -> &str {
+        match self {
+            Self::Get { resolved_url } => resolved_url,
+            Self::Post { resolved_url, .. } => resolved_url.as_str(),
+        }
+    }
+}
+
 fn submit_post_form_to_top_level_browsing_context(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
@@ -667,6 +706,9 @@ fn submit_post_form_to_top_level_browsing_context(
     form_data_entries: &[(String, v8::Global<v8::Value>)],
     user_initiated: bool,
 ) -> bool {
+    if !source_node_can_navigate_top_level(scope, runtime_ptr, form_handle, &resolved_url) {
+        return true;
+    }
     let Some(form_data) = form_data_object_from_entries(scope, form_data_entries) else {
         return false;
     };

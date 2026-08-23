@@ -484,7 +484,9 @@ impl PopupTargetOpenerIdentity {
 pub(crate) struct PopupTargetCreation {
     browser_context_id: String,
     popup_id: Option<u64>,
-    request: moli_core::page::RendererTopLevelNavigationRequest,
+    requested_url: String,
+    destination_request: Option<moli_core::page::RendererTopLevelNavigationRequest>,
+    reports_requested_url_without_destination: bool,
     target_name: String,
     opener: Option<PopupTargetOpenerIdentity>,
     can_access_opener: bool,
@@ -494,15 +496,22 @@ pub(crate) struct PopupTargetCreation {
     pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
     resolved_target_page: Option<moli_core::page::RendererResolvedPopupTarget>,
     new_target_disposition: Option<moli_core::page::RendererPopupNewTargetDisposition>,
+    auxiliary_browsing_context_policy:
+        Option<moli_core::page::RendererAuxiliaryBrowsingContextPolicy>,
+    service_worker_clients_open_window_continuation:
+        Option<moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation>,
     session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
+    drain_pending_javascript_tasks_before_commit: bool,
 }
 
 impl PopupTargetCreation {
     pub(crate) fn new(
         browser_context_id: String,
         popup_id: Option<u64>,
-        request: moli_core::page::RendererTopLevelNavigationRequest,
+        requested_url: String,
+        destination_request: Option<moli_core::page::RendererTopLevelNavigationRequest>,
+        reports_requested_url_without_destination: bool,
         target_name: String,
         opener: Option<PopupTargetOpenerIdentity>,
         can_access_opener: bool,
@@ -512,13 +521,22 @@ impl PopupTargetCreation {
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         resolved_target_page: Option<moli_core::page::RendererResolvedPopupTarget>,
         new_target_disposition: Option<moli_core::page::RendererPopupNewTargetDisposition>,
+        auxiliary_browsing_context_policy: Option<
+            moli_core::page::RendererAuxiliaryBrowsingContextPolicy,
+        >,
+        service_worker_clients_open_window_continuation: Option<
+            moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
+        >,
         session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
+        drain_pending_javascript_tasks_before_commit: bool,
     ) -> Self {
         Self {
             browser_context_id,
             popup_id,
-            request,
+            requested_url,
+            destination_request,
+            reports_requested_url_without_destination,
             target_name,
             opener,
             can_access_opener,
@@ -528,8 +546,11 @@ impl PopupTargetCreation {
             pending_auxiliary_page,
             resolved_target_page,
             new_target_disposition,
+            auxiliary_browsing_context_policy,
+            service_worker_clients_open_window_continuation,
             session_storage_store,
             initial_empty_document_storage_key,
+            drain_pending_javascript_tasks_before_commit,
         }
     }
 }
@@ -542,7 +563,9 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
     let PopupTargetCreation {
         browser_context_id,
         popup_id,
-        request,
+        requested_url,
+        destination_request,
+        reports_requested_url_without_destination,
         target_name,
         opener,
         can_access_opener,
@@ -552,10 +575,12 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         pending_auxiliary_page,
         resolved_target_page,
         new_target_disposition,
+        auxiliary_browsing_context_policy,
+        service_worker_clients_open_window_continuation,
         session_storage_store,
         initial_empty_document_storage_key,
+        drain_pending_javascript_tasks_before_commit,
     } = creation;
-    let requested_url = request.url().to_owned();
     let Some(browser_context) = conn.browser_context_by_id(&browser_context_id) else {
         tracing::debug!(
             browser_context_id,
@@ -594,7 +619,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
     };
 
     if let Some(existing_target_id) = existing_target_id {
-        let navigation =
+        let navigation = destination_request.as_ref().and_then(|request| {
             popup_target_has_loaded_page(conn, &browser_context_id, &existing_target_id)
                 .then(|| {
                     PopupTargetNavigationOwnerAction::capture(
@@ -605,9 +630,22 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
                         navigation_referrer.clone(),
                         document_referrer.clone(),
                         PopupTargetNavigationKind::NamedTargetReuse,
+                        service_worker_clients_open_window_continuation.clone(),
+                        drain_pending_javascript_tasks_before_commit,
                     )
                 })
-                .flatten();
+                .flatten()
+        });
+
+        if destination_request.is_none() {
+            return remember_resolved_popup_target(
+                conn,
+                &browser_context_id,
+                popup_id,
+                &existing_target_id,
+            )
+            .then_some(existing_target_id);
+        }
 
         let target_url_updated = conn
             .browser_context_by_id_mut(&browser_context_id)
@@ -673,10 +711,15 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         browser_context.stage_popup_background_target(
             target_id.clone(),
             auto_attached_background_session_id.clone(),
-            requested_url,
+            if destination_request.is_some() || reports_requested_url_without_destination {
+                requested_url.clone()
+            } else {
+                String::new()
+            },
             Some("about:blank".to_owned()),
             popup_creator,
             pending_auxiliary_page,
+            auxiliary_browsing_context_policy,
             session_storage_store,
             initial_empty_document_storage_key,
         );
@@ -735,6 +778,24 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         return None;
     };
 
+    if destination_request.is_none() {
+        if !conn.stage_popup_target_without_destination_navigation(&target_id) {
+            rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id)
+                .await;
+            return None;
+        }
+        return finish_popup_target_creation(
+            conn,
+            out,
+            &browser_context_id,
+            target_id,
+            tab_target_id,
+            auto_attached_tab_sessions,
+            auto_attached_page_sessions,
+        )
+        .await;
+    }
+    let request = destination_request.expect("destination request was checked");
     let navigation = if creation_diagnostics.top_level_browsing_context_closing {
         // `open(url); popup.close()` may run completely inside the opener's
         // synchronous V8 turn, before protocol admits the auxiliary Page. Its
@@ -750,6 +811,8 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
             navigation_referrer,
             document_referrer,
             PopupTargetNavigationKind::InitialDocument,
+            service_worker_clients_open_window_continuation,
+            drain_pending_javascript_tasks_before_commit,
         ) else {
             rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id)
                 .await;
@@ -777,15 +840,40 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         navigation
     };
 
+    let target_id = finish_popup_target_creation(
+        conn,
+        out,
+        &browser_context_id,
+        target_id,
+        tab_target_id,
+        auto_attached_tab_sessions,
+        auto_attached_page_sessions,
+    )
+    .await?;
+    if let Some(navigation) = navigation {
+        conn.publish_popup_target_navigation_owner_action(navigation);
+    }
+    Some(target_id)
+}
+
+async fn finish_popup_target_creation(
+    conn: &mut CdpConnection,
+    out: &mut Vec<BackgroundProtocolEvent>,
+    browser_context_id: &str,
+    target_id: String,
+    tab_target_id: String,
+    auto_attached_tab_sessions: Vec<(Option<String>, String)>,
+    auto_attached_page_sessions: Vec<(Option<String>, String)>,
+) -> Option<String> {
     let Some(target_info) = conn
-        .browser_context_by_id(&browser_context_id)
+        .browser_context_by_id(browser_context_id)
         .and_then(|browser_context| browser_context.devtools_target_info(&target_id))
     else {
-        rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
+        rollback_incomplete_popup_target_async(conn, Some(browser_context_id), &target_id).await;
         return None;
     };
     let Some(tab_target_info) = conn.tab_target_info(&tab_target_id) else {
-        rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
+        rollback_incomplete_popup_target_async(conn, Some(browser_context_id), &target_id).await;
         return None;
     };
     if conn.has_any_target_discovery() {
@@ -816,9 +904,6 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         &target_id,
         target_info,
     );
-    if let Some(navigation) = navigation {
-        conn.publish_popup_target_navigation_owner_action(navigation);
-    }
     Some(target_id)
 }
 
@@ -1054,7 +1139,7 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
     execution_session_id: Option<&str>,
     action: PopupTargetNavigationOwnerAction,
 ) -> bool {
-    let (owner_scope, claim) = action.into_parts();
+    let (owner_scope, claim, service_worker_clients_open_window_continuation) = action.into_parts();
     let browser_context_id = claim.browser_context_id().to_owned();
     let target_id = claim.target_id().to_owned();
     let request = claim.request().clone();
@@ -1062,6 +1147,8 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
     let referrer = claim.referrer().map(str::to_owned);
     let document_referrer = claim.document_referrer().map(str::to_owned);
     let kind = claim.kind();
+    let drain_pending_javascript_tasks_before_commit =
+        claim.drain_pending_javascript_tasks_before_commit();
     let mut route_scope = owner_scope.enter(conn);
     let conn = route_scope.conn_mut();
     if kind == PopupTargetNavigationKind::InitialDocument
@@ -1127,6 +1214,8 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
             request.request_body(),
             request.request_headers(),
             request.browser_navigation_kind(),
+            service_worker_clients_open_window_continuation,
+            drain_pending_javascript_tasks_before_commit,
         ),
     )
     .await;

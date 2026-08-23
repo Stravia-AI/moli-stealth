@@ -104,6 +104,34 @@ mod lifecycle_decision;
 
 use self::lifecycle_decision::PendingLifecycleNavigation;
 
+fn auxiliary_browsing_context_policy_for_document(
+    explicit: Option<RendererAuxiliaryBrowsingContextPolicy>,
+    main_document_commit: Option<&RendererMainDocumentCommit>,
+) -> Option<RendererAuxiliaryBrowsingContextPolicy> {
+    let committed =
+        main_document_commit.and_then(|commit| commit.auxiliary_browsing_context_policy);
+    if let (Some(explicit), Some(committed)) = (explicit, committed) {
+        assert_eq!(
+            explicit, committed,
+            "one Document build cannot carry conflicting auxiliary frame policies"
+        );
+    }
+    explicit.or(committed)
+}
+
+fn script_execution_disabled_with_auxiliary_policy(
+    script_execution_disabled: bool,
+    policy: Option<RendererAuxiliaryBrowsingContextPolicy>,
+    response_content_security_policies: &[String],
+) -> bool {
+    script_execution_disabled
+        || policy.is_some_and(|policy| {
+            !policy
+                .sandbox_with_response_content_security_policies(response_content_security_policies)
+                .allows_scripts
+        })
+}
+
 #[derive(Debug, Clone)]
 pub struct RendererPreparedDocumentCommitConfiguration {
     pub document_start_scripts: Vec<DocumentStartScript>,
@@ -147,6 +175,7 @@ pub struct RendererCreateHtmlPageRequest {
     /// This must be installed before document-start scripts. Related staged
     /// Pages already own their live name and leave this unset during adoption.
     pub initial_top_level_browsing_context_name: Option<String>,
+    pub auxiliary_browsing_context_policy: Option<RendererAuxiliaryBrowsingContextPolicy>,
     pub top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
     pub requested_url: Url,
     pub navigation_initiator_url: Option<Url>,
@@ -2290,6 +2319,7 @@ impl RendererOwnerHandle {
             main_document_commit: None,
             initial_document_referrer: None,
             initial_top_level_browsing_context_name: None,
+            auxiliary_browsing_context_policy: None,
             top_level_storage_key: None,
             requested_url,
             navigation_initiator_url,
@@ -5970,6 +6000,13 @@ impl RendererOwnerHandle {
                     },
                 ))
             }
+            RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation => {
+                self.run_pending_javascript_url_tasks_before_browser_navigation(
+                    token,
+                    capture_policy,
+                )
+                .await
+            }
             command => {
                 return self
                     .run_live_page_command_turn_inline(token, command, capture_policy)
@@ -6121,6 +6158,40 @@ impl RendererOwnerHandle {
             turn_records,
             replacement_lifecycle,
             capture_policy,
+        )
+        .await
+    }
+
+    async fn run_pending_javascript_url_tasks_before_browser_navigation(
+        &self,
+        token: RendererPageToken,
+        capture_policy: super::RendererPageStateCapturePolicy,
+    ) -> RenderRuntimeDispatchOutcome {
+        let entry = match take_entry_for_command_on_bound_owner_local_store(token) {
+            Ok(entry) => entry,
+            Err(error) => return Err(error).into(),
+        };
+        if entry
+            .page_vm()
+            .vm()
+            .pending_location_navigation_scheme_is("javascript")
+        {
+            return self.continue_live_page_pending_navigation(
+                token,
+                entry,
+                PageVmInitStage::Load,
+                0,
+                LivePagePendingNavigationCompletion::ReplyWithSnapshot {
+                    reply: Box::new(RendererPageReply::Unit),
+                    capture_policy,
+                },
+            );
+        }
+        self.finish_live_page_entry_with_page_state(
+            token,
+            entry,
+            RendererPageReply::Unit,
+            Vec::new(),
         )
         .await
     }
@@ -7610,6 +7681,7 @@ impl RendererOwnerHandle {
             main_document_commit,
             initial_document_referrer,
             initial_top_level_browsing_context_name,
+            auxiliary_browsing_context_policy,
             top_level_storage_key,
             requested_url,
             navigation_initiator_url,
@@ -7699,6 +7771,15 @@ impl RendererOwnerHandle {
             &final_url,
         )
         .with_content_security_policy_bypass(bypass_content_security_policy);
+        let auxiliary_browsing_context_policy = auxiliary_browsing_context_policy_for_document(
+            auxiliary_browsing_context_policy,
+            main_document_commit.as_ref(),
+        );
+        let script_execution_disabled = script_execution_disabled_with_auxiliary_policy(
+            script_execution_disabled,
+            auxiliary_browsing_context_policy,
+            &document_policy_container.response_content_security_policies,
+        );
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -7747,6 +7828,7 @@ impl RendererOwnerHandle {
                     main_document_commit,
                     initial_document_referrer,
                     initial_top_level_browsing_context_name,
+                    auxiliary_browsing_context_policy,
                     top_level_storage_key,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id,
@@ -8108,6 +8190,13 @@ impl RendererOwnerHandle {
             &final_url,
         )
         .with_content_security_policy_bypass(bypass_content_security_policy);
+        let auxiliary_browsing_context_policy =
+            auxiliary_browsing_context_policy_for_document(None, main_document_commit.as_ref());
+        let script_execution_disabled = script_execution_disabled_with_auxiliary_policy(
+            script_execution_disabled,
+            auxiliary_browsing_context_policy,
+            &document_policy_container.response_content_security_policies,
+        );
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -8189,6 +8278,7 @@ impl RendererOwnerHandle {
                     main_document_commit,
                     initial_document_referrer: None,
                     initial_top_level_browsing_context_name: None,
+                    auxiliary_browsing_context_policy,
                     top_level_storage_key: None,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id: reserved_service_worker_client

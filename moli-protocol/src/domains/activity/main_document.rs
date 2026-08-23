@@ -977,6 +977,7 @@ mod tests {
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 12.5,
             source_document_security: Default::default(),
+            service_worker_clients_open_window_continuation: None,
         }
     }
 

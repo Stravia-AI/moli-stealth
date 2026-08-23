@@ -2943,6 +2943,12 @@ impl CdpConnection {
         let (token, state, navigation, engine, background_document_continuation) =
             completion.into_parts();
         if !is_current {
+            if let Some(continuation) = state
+                .service_worker_clients_open_window_continuation
+                .as_ref()
+            {
+                continuation.resolve_null();
+            }
             crate::domains::page::push_superseded_navigation_result(out, &state);
             if let Some(completion) = background_document_continuation {
                 let _ = self.schedule_background_document_continuation_completion(completion, None);

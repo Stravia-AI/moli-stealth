@@ -792,12 +792,6 @@ impl JsContextHost {
         let policy = entry.document_sandbox_policy();
         (policy.sandboxes_document_domain && !policy.allows_popups_to_escape).then_some(policy)
     }
-
-    pub(crate) fn child_browsing_context_allows_top_navigation(&self, handle: DomHandle) -> bool {
-        self.dom_host()
-            .get_attribute(handle, "sandbox")
-            .is_none_or(|sandbox| sandbox_attribute_allows_top_navigation(&sandbox))
-    }
 }
 
 fn web_storage_key_for_origin_and_top_level_site_with_nonce(
@@ -865,9 +859,18 @@ pub(in crate::native_bridge::context_host) fn document_sandbox_policy_from_attri
         return crate::document_runtime::DocumentSandboxPolicy::default();
     };
     crate::document_runtime::DocumentSandboxPolicy {
+        sandboxes_navigation: true,
         forces_opaque_origin: sandbox_attribute_forces_opaque_origin(value),
         allows_scripts: sandbox_attribute_allows_scripts(value),
+        allows_forms: sandbox_attribute_allows_forms(value),
+        allows_popups: sandbox_attribute_allows_popups(value),
         allows_popups_to_escape: sandbox_attribute_allows_popups_to_escape(value),
+        allows_top_navigation: sandbox_attribute_allows_top_navigation(value),
+        allows_top_navigation_by_user_activation:
+            sandbox_attribute_allows_top_navigation_by_user_activation(value),
+        frame_owner_explicitly_allows_top_navigation: sandbox_attribute_allows_top_navigation(
+            value,
+        ),
         sandboxes_document_domain: sandbox_attribute_sets_document_domain_flag(value),
     }
 }
@@ -878,27 +881,39 @@ fn sandbox_attribute_sets_document_domain_flag(_value: &str) -> bool {
     true
 }
 
-fn sandbox_attribute_allows_same_origin(value: &str) -> bool {
+fn sandbox_attribute_tokens(value: &str) -> impl Iterator<Item = &str> {
     value
-        .split_ascii_whitespace()
-        .any(|token| token.eq_ignore_ascii_case("allow-same-origin"))
+        .split(['\t', '\n', '\u{000C}', '\r', ' '])
+        .filter(|token| !token.is_empty())
+}
+
+fn sandbox_attribute_allows_same_origin(value: &str) -> bool {
+    sandbox_attribute_tokens(value).any(|token| token.eq_ignore_ascii_case("allow-same-origin"))
 }
 
 fn sandbox_attribute_allows_scripts(value: &str) -> bool {
-    value
-        .split_ascii_whitespace()
-        .any(|token| token.eq_ignore_ascii_case("allow-scripts"))
+    sandbox_attribute_tokens(value).any(|token| token.eq_ignore_ascii_case("allow-scripts"))
+}
+
+fn sandbox_attribute_allows_forms(value: &str) -> bool {
+    sandbox_attribute_tokens(value).any(|token| token.eq_ignore_ascii_case("allow-forms"))
+}
+
+fn sandbox_attribute_allows_popups(value: &str) -> bool {
+    sandbox_attribute_tokens(value).any(|token| token.eq_ignore_ascii_case("allow-popups"))
 }
 
 fn sandbox_attribute_allows_top_navigation(value: &str) -> bool {
-    value
-        .split_ascii_whitespace()
-        .any(|token| token.eq_ignore_ascii_case("allow-top-navigation"))
+    sandbox_attribute_tokens(value).any(|token| token.eq_ignore_ascii_case("allow-top-navigation"))
+}
+
+fn sandbox_attribute_allows_top_navigation_by_user_activation(value: &str) -> bool {
+    sandbox_attribute_tokens(value)
+        .any(|token| token.eq_ignore_ascii_case("allow-top-navigation-by-user-activation"))
 }
 
 fn sandbox_attribute_allows_popups_to_escape(value: &str) -> bool {
-    value
-        .split_ascii_whitespace()
+    sandbox_attribute_tokens(value)
         .any(|token| token.eq_ignore_ascii_case("allow-popups-to-escape-sandbox"))
 }
 
@@ -952,5 +967,60 @@ mod tests {
         assert!(sandbox_attribute_sets_document_domain_flag(
             "allow-scripts ALLOW-SAME-ORIGIN"
         ));
+    }
+
+    #[test]
+    fn sandbox_attribute_policy_tracks_allow_forms_independently() {
+        assert!(document_sandbox_policy_from_attribute(None).allows_forms);
+        assert!(!document_sandbox_policy_from_attribute(Some("allow-scripts")).allows_forms);
+        assert!(
+            document_sandbox_policy_from_attribute(Some("allow-scripts ALLOW-FORMS")).allows_forms
+        );
+    }
+
+    #[test]
+    fn sandbox_attribute_policy_tracks_top_navigation_tokens_independently() {
+        let unrestricted = document_sandbox_policy_from_attribute(None);
+        assert!(!unrestricted.sandboxes_navigation);
+        assert!(unrestricted.allows_top_navigation);
+        assert!(unrestricted.allows_top_navigation_by_user_activation);
+
+        let activation_only = document_sandbox_policy_from_attribute(Some(
+            "allow-scripts allow-top-navigation-by-user-activation",
+        ));
+        assert!(activation_only.sandboxes_navigation);
+        assert!(!activation_only.allows_top_navigation);
+        assert!(activation_only.allows_top_navigation_by_user_activation);
+        assert!(!activation_only.frame_owner_explicitly_allows_top_navigation);
+
+        let unconditional = document_sandbox_policy_from_attribute(Some("ALLOW-TOP-NAVIGATION"));
+        assert!(unconditional.allows_top_navigation);
+        assert!(!unconditional.allows_top_navigation_by_user_activation);
+        assert!(unconditional.frame_owner_explicitly_allows_top_navigation);
+
+        let response_activation_only =
+            crate::document_runtime::DocumentSandboxPolicy::from_response_content_security_policies(
+                &[String::from(
+                    "sandbox allow-top-navigation-by-user-activation",
+                )],
+            );
+        let intersected =
+            unconditional.with_response_content_security_policy(response_activation_only);
+        assert!(!intersected.allows_top_navigation);
+        assert!(!intersected.allows_top_navigation_by_user_activation);
+        assert!(intersected.frame_owner_explicitly_allows_top_navigation);
+    }
+
+    #[test]
+    fn sandbox_attribute_tokens_use_html_space_characters() {
+        let form_feed =
+            document_sandbox_policy_from_attribute(Some("allow-scripts\u{000C}allow-forms"));
+        assert!(form_feed.allows_scripts);
+        assert!(form_feed.allows_forms);
+
+        let vertical_tab =
+            document_sandbox_policy_from_attribute(Some("allow-scripts\u{000B}allow-forms"));
+        assert!(!vertical_tab.allows_scripts);
+        assert!(!vertical_tab.allows_forms);
     }
 }

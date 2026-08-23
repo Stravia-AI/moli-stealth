@@ -729,6 +729,7 @@ impl JsContextHost {
                 credentialless_storage_nonce,
             );
         }
+        self.refresh_child_top_navigation_policy_after_commit(handle);
         let window_commit = self.plan_child_document_window_commit(
             handle,
             &snapshot,

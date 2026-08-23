@@ -3610,7 +3610,7 @@ document.querySelector("iframe").contentDocument.getElementById("submit").click(
     let source = pending
         .navigation_source
         .expect("child top-target form should retain its initiating Window/Document");
-    assert_eq!(source.root_document(), root_document);
+    assert_eq!(source.root_document(), Some(root_document));
     assert_eq!(
         source.source_url(),
         "https://child-form-top-source.test/root/page.html",
@@ -3618,11 +3618,11 @@ document.querySelector("iframe").contentDocument.getElementById("submit").click(
     );
     assert_eq!(
         source.window(),
-        &crate::RendererWindowDocumentSource::ChildFrame {
+        Some(&crate::RendererWindowDocumentSource::ChildFrame {
             frame_id: child.frame_id.0,
             local_window_id: child.local_window_id.0,
             document_id: child.document_id.0,
-        },
+        }),
         "target selection must not replace the child initiator with RootFrame"
     );
 }

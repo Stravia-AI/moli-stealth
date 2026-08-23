@@ -15,6 +15,7 @@ pub(crate) struct PopupTargetNavigationClaimIdentity {
     referrer: Option<String>,
     document_referrer: Option<String>,
     kind: PopupTargetNavigationKind,
+    drain_pending_javascript_tasks_before_commit: bool,
 }
 
 impl PopupTargetNavigationClaimIdentity {
@@ -49,6 +50,10 @@ impl PopupTargetNavigationClaimIdentity {
     pub(crate) fn kind(&self) -> PopupTargetNavigationKind {
         self.kind
     }
+
+    pub(crate) fn drain_pending_javascript_tasks_before_commit(&self) -> bool {
+        self.drain_pending_javascript_tasks_before_commit
+    }
 }
 
 /// Navigation requested by an already-accepted auxiliary browsing-context
@@ -67,6 +72,12 @@ impl PopupTargetNavigationClaimIdentity {
 pub(crate) struct PopupTargetNavigationOwnerAction {
     owner_scope: CommandOwnerScope,
     claim: PopupTargetNavigationClaimIdentity,
+    /// Move-only completion authority for a ServiceWorker `Clients.openWindow()`
+    /// producer. This deliberately does not live in `claim`: consumed claims
+    /// remain as target-local currentness tombstones for the lifetime of the
+    /// Page and must not retain a worker Promise completion carrier.
+    service_worker_clients_open_window_continuation:
+        Option<moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,13 +96,19 @@ pub(crate) enum PopupTargetNavigationAuthorityState {
     Held(PopupTargetNavigationOwnerAction),
     Published(PopupTargetNavigationClaimIdentity),
     Consumed(PopupTargetNavigationClaimIdentity),
+    /// The auxiliary target was created, but its producer explicitly carried
+    /// no destination navigation. This tombstone prevents generic Page entry
+    /// points from reconstructing a request from the target's observational
+    /// URL.
+    NoDestination(TargetPageResidenceIdentity),
 }
 
 impl PopupTargetNavigationAuthorityState {
-    pub(crate) fn claim_identity(&self) -> &PopupTargetNavigationClaimIdentity {
+    pub(crate) fn page_owner(&self) -> &TargetPageResidenceIdentity {
         match self {
-            Self::Held(action) => action.claim_identity(),
-            Self::Published(claim) | Self::Consumed(claim) => claim,
+            Self::Held(action) => action.page_owner(),
+            Self::Published(claim) | Self::Consumed(claim) => claim.page_owner(),
+            Self::NoDestination(page_owner) => page_owner,
         }
     }
 }
@@ -105,6 +122,10 @@ impl PopupTargetNavigationOwnerAction {
         referrer: Option<String>,
         document_referrer: Option<String>,
         kind: PopupTargetNavigationKind,
+        service_worker_clients_open_window_continuation: Option<
+            moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
+        >,
+        drain_pending_javascript_tasks_before_commit: bool,
     ) -> Option<Self> {
         let route = conn.target_session_route_for_target_id(target_id)?;
         if route.browser_context_id() != Some(browser_context_id) {
@@ -133,7 +154,9 @@ impl PopupTargetNavigationOwnerAction {
                 referrer,
                 document_referrer,
                 kind,
+                drain_pending_javascript_tasks_before_commit,
             },
+            service_worker_clients_open_window_continuation,
         })
     }
 
@@ -161,12 +184,41 @@ impl PopupTargetNavigationOwnerAction {
         &self.claim
     }
 
-    pub(crate) fn into_parts(self) -> (CommandOwnerScope, PopupTargetNavigationClaimIdentity) {
-        (self.owner_scope, self.claim)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        CommandOwnerScope,
+        PopupTargetNavigationClaimIdentity,
+        Option<moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation>,
+    ) {
+        (
+            self.owner_scope,
+            self.claim,
+            self.service_worker_clients_open_window_continuation,
+        )
     }
 }
 
 impl CdpConnection {
+    pub(crate) fn stage_popup_target_without_destination_navigation(
+        &mut self,
+        target_id: &str,
+    ) -> bool {
+        let Some(route) = self.target_session_route_for_target_id(target_id) else {
+            return false;
+        };
+        let mut route_scope = self.scoped_none_session_owner_route_override(route);
+        let conn = route_scope.conn_mut();
+        let Some(page_owner) = conn.target_page_residence_identity_for_session(None) else {
+            return false;
+        };
+        if page_owner.target_id() != Some(target_id) {
+            return false;
+        }
+        conn.runtime_session_owner_slot_mut(None)
+            .is_ok_and(|slot| slot.stage_popup_target_without_destination_navigation(page_owner))
+    }
+
     /// Installs the initial popup destination as target-local held authority.
     /// The action is accepted only while its exact Page residence is current.
     pub(crate) fn stage_initial_popup_target_navigation_owner_action(

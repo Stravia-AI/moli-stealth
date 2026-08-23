@@ -132,7 +132,10 @@ pub(crate) use location_navigation::{
     navigate_location_object_with_source_element, navigate_top_level_meta_refresh,
     navigate_top_level_same_document_from_browser,
 };
-pub(crate) use location_runtime::navigate_top_level_window_location_from_cross_origin;
+pub(crate) use location_runtime::{
+    navigate_top_level_window_location_from_cross_origin,
+    resolve_location_navigation_target_against_entered_base,
+};
 pub(crate) use navigation_cancellation::inform_about_canceled_navigation_for_window;
 pub(crate) use navigation_events::dispatch_cross_document_navigation_navigate_event_for_window_with_form_data;
 pub(crate) use navigation_events::{
@@ -147,6 +150,7 @@ pub(crate) use navigation_result::{
     NavigationFinishedResultApplication, apply_pending_navigation_finished_result,
 };
 pub(crate) use navigation_traversal_execution::apply_authorized_history_traversal_task;
+pub(crate) use navigation_window::runtime_window_dispatch_scope;
 pub(crate) use performance_runtime::PERFORMANCE_TIME_ORIGIN_SLOT;
 pub(crate) use performance_runtime::performance_slot_number;
 pub(crate) use selection_surface::{
@@ -427,6 +431,7 @@ pub(crate) use self::trusted_types::trusted_types_lazy_state_materialized;
 pub(crate) use self::trusted_types::{
     TrustedTypesCodeGenerationCheck, install_trusted_types_eval_runtime_state,
     install_trusted_types_runtime_state, trusted_html_string_or_throw, trusted_html_value_string,
+    trusted_script_string_for_javascript_navigation,
     trusted_script_string_for_script_element_execution, trusted_script_string_or_type_error,
     trusted_script_url_string_or_throw, trusted_types_code_generation_check,
     trusted_types_code_generation_check_callback,

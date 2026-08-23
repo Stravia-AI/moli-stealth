@@ -341,6 +341,14 @@ impl ChildBrowsingContextEntry {
         self.document_policy_container.sandbox = sandbox;
     }
 
+    pub(super) fn set_top_navigation_without_user_gesture_is_restricted(
+        &mut self,
+        restricted: bool,
+    ) {
+        self.document_policy_container
+            .top_navigation_without_user_gesture_is_restricted = restricted;
+    }
+
     pub(super) fn document_sandbox_forces_opaque_origin(&self) -> bool {
         self.document_sandbox_policy().forces_opaque_origin
     }

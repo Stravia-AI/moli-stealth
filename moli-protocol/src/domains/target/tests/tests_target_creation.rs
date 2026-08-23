@@ -942,6 +942,80 @@ async fn window_open_emits_page_event_before_creating_popup_target() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn page_window_open_observes_pre_consumption_activation_for_each_new_context() {
+    let mut ctx = TestContext::new();
+    load_bc_with_titled_page_async(
+        &mut ctx,
+        "BID-page-window-open-activation",
+        "TID-page-window-open-activation",
+        "<main>popup activation opener</main>",
+    )
+    .await;
+
+    ctx.process_async(json!({
+        "id": 1230,
+        "method": "Page.enable"
+    }))
+    .await;
+    ctx.expect_result(1230, json!({}), None);
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1231,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": r#"
+JSON.stringify((() => {
+  const first = window.open('https://example.com/activation-first', '_blank');
+  const afterFirst = [navigator.userActivation.isActive, navigator.userActivation.hasBeenActive];
+  const second = window.open('https://example.com/activation-second', '_blank');
+  return {
+    first: first !== null,
+    afterFirst,
+    second: second !== null,
+    afterSecond: [navigator.userActivation.isActive, navigator.userActivation.hasBeenActive]
+  };
+})())
+"#,
+            "userGesture": true
+        }
+    }))
+    .await;
+
+    ctx.expect_result(
+        1231,
+        json!({
+            "result": {
+                "type": "string",
+                "value": r#"{"first":true,"afterFirst":[false,true],"second":true,"afterSecond":[false,true]}"#
+            }
+        }),
+        None,
+    );
+    let sent = ctx.take_all();
+    let window_open_events = sent
+        .iter()
+        .filter(|message| message["method"] == json!("Page.windowOpen"))
+        .collect::<Vec<_>>();
+    assert_eq!(window_open_events.len(), 2, "events: {sent:?}");
+    assert_eq!(
+        window_open_events
+            .iter()
+            .map(|event| event["params"]["userGesture"].clone())
+            .collect::<Vec<_>>(),
+        vec![json!(true), json!(false)],
+        "Page.windowOpen must freeze activation before each admitted creation consumes it"
+    );
+    assert_eq!(
+        sent.iter()
+            .filter(|message| message["method"] == json!("Target.targetCreated"))
+            .count(),
+        2,
+        "the default automation policy admits both creations even though only the first consumes activation: {sent:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn timer_window_open_emits_page_event_from_runtime_work() {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
@@ -1689,6 +1763,424 @@ async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_re
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn noopener_popup_retains_creator_sandbox_policy_across_document_navigations() {
+    async fn sandboxed_opener() -> impl IntoResponse {
+        (
+            [
+                (CONTENT_TYPE.as_str(), "text/html"),
+                (
+                    "content-security-policy",
+                    "sandbox allow-scripts allow-popups",
+                ),
+            ],
+            "<!doctype html><main>sandboxed popup opener</main>",
+        )
+    }
+
+    async fn popup_document() -> impl IntoResponse {
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><main>fresh sandboxed popup</main>",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/opener", get(sandboxed_opener))
+                .route("/popup-first", get(popup_document))
+                .route("/popup-second", get(popup_document))
+                .route("/anchor-popup", get(popup_document)),
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut ctx = TestContext::new();
+            enable_root_target_discovery_for_test(&mut ctx);
+            let mut browser_context = ctx
+                .conn
+                .new_browser_context("BID-popup-sandbox-carrier".to_owned());
+            browser_context.set_active_target_id("TID-popup-sandbox-opener");
+            ctx.conn.browser_context = Some(browser_context);
+            let opener_url = format!("http://{addr}/opener");
+            let page = ctx
+                .conn
+                .load_page_via_runtime_async(&opener_url)
+                .await
+                .expect("sandboxed popup opener should load");
+            {
+                let browser_context = ctx.conn.browser_context.as_mut().unwrap();
+                browser_context.set_target_url(page.final_url().as_str().to_owned());
+                let _ = browser_context
+                    .active_target
+                    .runtime_slot
+                    .replace_loaded_page(Some(page));
+            }
+            ctx.enable_background_navigation_scheduler_for_test();
+            ctx.sent.clear();
+
+            let first_popup_url = format!("http://{addr}/popup-first");
+            ctx.process_async(json!({
+        "id": 12121,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": format!(
+                "window.open({first_popup_url:?}, '_blank', 'noopener') === null"
+            ),
+            "returnByValue": true
+        }
+            }))
+            .await;
+            ctx.expect_result(
+                12121,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let popup_target_id = ctx
+                .sent
+                .iter()
+                .find(|message| {
+                    message["method"] == json!("Target.targetCreated")
+                        && message["params"]["targetInfo"]["url"] == json!(first_popup_url)
+                })
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .unwrap_or_else(|| panic!("missing sandboxed noopener target: {:?}", ctx.sent))
+                .to_owned();
+            ctx.wait_until_scheduler_state("sandboxed noopener popup navigation commit", |conn| {
+                conn.browser_context_by_id("BID-popup-sandbox-carrier")
+                    .and_then(|browser_context| {
+                        browser_context.background_target(&popup_target_id)
+                    })
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == first_popup_url)
+            })
+            .await;
+
+            ctx.process_async(json!({
+        "id": 12122,
+        "method": "Target.attachToTarget",
+        "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 12122)["result"]["sessionId"]
+                .as_str()
+                .expect("sandboxed popup attachment session id")
+                .to_owned();
+
+            for (command_id, expected_url) in [
+                (12123, first_popup_url.clone()),
+                (12125, format!("http://{addr}/popup-second")),
+            ] {
+                if command_id == 12125 {
+                    ctx.process_and_wait_for_response_async(json!({
+                "id": 12124,
+                "sessionId": popup_session_id,
+                "method": "Page.navigate",
+                "params": { "url": expected_url }
+                    }))
+                    .await;
+                    let _ = take_response_by_id(&mut ctx, 12124);
+                    ctx.wait_until_scheduler_state(
+                        "sandboxed popup follow-up navigation commit",
+                        |conn| {
+                            conn.browser_context_by_id("BID-popup-sandbox-carrier")
+                                .and_then(|browser_context| {
+                                    browser_context.background_target(&popup_target_id)
+                                })
+                                .and_then(|target| target.loaded_page())
+                                .is_some_and(|page| page.final_url().as_str() == expected_url)
+                        },
+                    )
+                    .await;
+                }
+                ctx.process_async(json!({
+                    "id": command_id,
+                    "sessionId": popup_session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "(() => { let domainResult = 'allowed'; try { document.domain = document.domain; } catch (error) { domainResult = error.name; } return `${origin}|${location.origin}|${domainResult}`; })()",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    command_id,
+                    json!({
+                        "result": {
+                            "type": "string",
+                            "value": "null|null|SecurityError"
+                        }
+                    }),
+                    Some(&popup_session_id),
+                );
+            }
+
+            ctx.sent.clear();
+            let anchor_initial_url = "about:blank";
+            let anchor_popup_url = format!("http://{addr}/anchor-popup");
+            ctx.process_async(json!({
+                "id": 12126,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "(() => {{ const link = document.createElement('a'); link.href = {anchor_initial_url:?}; link.target = '_blank'; document.body.append(link); link.click(); return true; }})()"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                12126,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let anchor_popup_target_id = ctx
+                .sent
+                .iter()
+                .find(|message| {
+                    message["method"] == json!("Target.targetCreated")
+                        && message["params"]["targetInfo"]["url"] == json!(anchor_initial_url)
+                })
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .unwrap_or_else(|| panic!("missing sandboxed anchor target: {:?}", ctx.sent))
+                .to_owned();
+            ctx.wait_until_scheduler_state("sandboxed anchor popup navigation commit", |conn| {
+                conn.browser_context_by_id("BID-popup-sandbox-carrier")
+                    .and_then(|browser_context| {
+                        browser_context.background_target(&anchor_popup_target_id)
+                    })
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == anchor_initial_url)
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 12127,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": anchor_popup_target_id }
+            }))
+            .await;
+            let anchor_popup_session_id = take_response_by_id(&mut ctx, 12127)["result"]
+                ["sessionId"]
+                .as_str()
+                .expect("sandboxed anchor popup attachment session id")
+                .to_owned();
+            for (command_id, expected_url) in [
+                (12128, anchor_initial_url.to_owned()),
+                (12130, anchor_popup_url),
+            ] {
+                if command_id == 12130 {
+                    ctx.process_and_wait_for_response_async(json!({
+                        "id": 12129,
+                        "sessionId": anchor_popup_session_id,
+                        "method": "Page.navigate",
+                        "params": { "url": expected_url }
+                    }))
+                    .await;
+                    let _ = take_response_by_id(&mut ctx, 12129);
+                    ctx.wait_until_scheduler_state(
+                        "sandboxed anchor popup follow-up navigation commit",
+                        |conn| {
+                            conn.browser_context_by_id("BID-popup-sandbox-carrier")
+                                .and_then(|browser_context| {
+                                    browser_context.background_target(&anchor_popup_target_id)
+                                })
+                                .and_then(|target| target.loaded_page())
+                                .is_some_and(|page| page.final_url().as_str() == expected_url)
+                        },
+                    )
+                    .await;
+                }
+                ctx.process_async(json!({
+                    "id": command_id,
+                    "sessionId": anchor_popup_session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "(() => { let domainResult = 'allowed'; try { document.domain = document.domain; } catch (error) { domainResult = error.name; } return `${origin}|${location.origin}|${domainResult}`; })()",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    command_id,
+                    json!({
+                        "result": {
+                            "type": "string",
+                            "value": "null|null|SecurityError"
+                        }
+                    }),
+                    Some(&anchor_popup_session_id),
+                );
+            }
+
+        })
+        .await;
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_noopener_popup_applies_response_sandbox_before_realm_observation() {
+    async fn escaping_sandboxed_opener() -> impl IntoResponse {
+        (
+            [
+                (CONTENT_TYPE.as_str(), "text/html"),
+                (
+                    "content-security-policy",
+                    "sandbox allow-scripts allow-popups allow-popups-to-escape-sandbox",
+                ),
+            ],
+            "<!doctype html><main>escaping sandboxed popup opener</main>",
+        )
+    }
+
+    async fn response_sandboxed_popup_document() -> impl IntoResponse {
+        (
+            [
+                (CONTENT_TYPE.as_str(), "text/html"),
+                ("content-security-policy", "sandbox allow-scripts"),
+            ],
+            "<!doctype html><main>response sandboxed fresh popup</main>",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/opener", get(escaping_sandboxed_opener))
+                .route("/popup", get(response_sandboxed_popup_document)),
+        )
+        .await
+        .unwrap();
+    });
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let mut ctx = TestContext::new();
+            enable_root_target_discovery_for_test(&mut ctx);
+            let mut browser_context = ctx
+                .conn
+                .new_browser_context("BID-popup-response-sandbox-carrier".to_owned());
+            browser_context.set_active_target_id("TID-popup-response-sandbox-opener");
+            ctx.conn.browser_context = Some(browser_context);
+            let opener_url = format!("http://{addr}/opener");
+            let opener_page = ctx
+                .conn
+                .load_page_via_runtime_async(&opener_url)
+                .await
+                .expect("escaping sandboxed popup opener should load");
+            {
+                let browser_context = ctx.conn.browser_context.as_mut().unwrap();
+                browser_context.set_target_url(opener_page.final_url().as_str().to_owned());
+                let _ = browser_context
+                    .active_target
+                    .runtime_slot
+                    .replace_loaded_page(Some(opener_page));
+            }
+            ctx.enable_background_navigation_scheduler_for_test();
+            ctx.sent.clear();
+
+            let popup_url = format!("http://{addr}/popup");
+            ctx.process_async(json!({
+                "id": 12131,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "window.open({popup_url:?}, '_blank', 'noopener') === null"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                12131,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let popup_target_id = ctx
+                .sent
+                .iter()
+                .find(|message| {
+                    message["method"] == json!("Target.targetCreated")
+                        && message["params"]["targetInfo"]["url"] == json!(popup_url)
+                })
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .unwrap_or_else(|| {
+                    panic!("missing response-sandboxed noopener target: {:?}", ctx.sent)
+                })
+                .to_owned();
+            ctx.wait_until_scheduler_state(
+                "response-sandboxed noopener popup navigation commit",
+                |conn| {
+                    conn.browser_context_by_id("BID-popup-response-sandbox-carrier")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == popup_url)
+                },
+            )
+            .await;
+            ctx.process_async(json!({
+                "id": 12132,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 12132)["result"]["sessionId"]
+                .as_str()
+                .expect("response-sandboxed popup attachment session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 12133,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { let domainResult = 'allowed'; try { document.domain = document.domain; } catch (error) { domainResult = error.name; } return `${origin}|${location.origin}|${domainResult}`; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                12133,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "null|null|SecurityError"
+                    }
+                }),
+                Some(&popup_session_id),
+            );
+        })
+        .await;
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn puppeteer_window_open_uses_parent_context_and_reports_opener() {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(
@@ -2218,12 +2710,21 @@ async fn window_open_named_target_reuses_existing_popup_target() {
                 "method": "Runtime.evaluate",
                 "sessionId": opener_session_id,
                 "params": {
-                    "expression": "window.open('data:text/html,first-popup', 'reportWindow') !== null"
+                    "expression": "globalThis.__reportWindow = window.open('data:text/html,first-popup', 'reportWindow'); JSON.stringify({ opened: __reportWindow !== null, active: navigator.userActivation.isActive, sticky: navigator.userActivation.hasBeenActive })",
+                    "userGesture": true
                 }
             }))
             .await;
 
             let first_sent = ctx.take_all();
+            assert!(
+                first_sent.iter().any(|message| {
+                    message["id"] == json!(14)
+                        && message["result"]["result"]["value"]
+                            == json!(r#"{"opened":true,"active":false,"sticky":true}"#)
+                }),
+                "first named creation must consume the protocol gesture: {first_sent:?}"
+            );
             let created = first_sent
                 .iter()
                 .find(|message| message["method"] == json!("Target.targetCreated"))
@@ -2248,12 +2749,21 @@ async fn window_open_named_target_reuses_existing_popup_target() {
                 "method": "Runtime.evaluate",
                 "sessionId": opener_session_id,
                 "params": {
-                    "expression": "window.open('data:text/html,second-popup', 'reportWindow') !== null"
+                    "expression": "(() => { const reused = window.open('data:text/html,second-popup', 'reportWindow'); return JSON.stringify({ reused: reused === __reportWindow, active: navigator.userActivation.isActive, sticky: navigator.userActivation.hasBeenActive }); })()",
+                    "userGesture": true
                 }
             }))
             .await;
 
             let second_sent = ctx.take_all();
+            assert!(
+                second_sent.iter().any(|message| {
+                    message["id"] == json!(15)
+                        && message["result"]["result"]["value"]
+                            == json!(r#"{"reused":true,"active":true,"sticky":true}"#)
+                }),
+                "existing named navigation must preserve the new protocol gesture: {second_sent:?}"
+            );
             assert!(
                 !second_sent
                     .iter()
@@ -2874,6 +3384,27 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
                 1,
                 "one named form submission must create one target: {creation_messages:?}"
             );
+            assert_eq!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-related-form-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .map(|target| target.target_url()),
+                Some("about:blank?#related-form-first"),
+                "an allowed form must attach its destination request to the newly created target"
+            );
+            {
+                let route = ctx
+                    .conn
+                    .target_session_route_for_target_id(&target_id)
+                    .expect("created form target route");
+                let mut route_scope = ctx.conn.scoped_none_session_owner_route_override(route);
+                assert!(
+                    route_scope
+                        .conn_mut()
+                        .runtime_session_owner_has_popup_target_navigation_authority(None),
+                    "an allowed form destination must retain target-local navigation authority"
+                );
+            }
             ctx.wait_until_scheduler_state("related form initial navigation", |conn| {
                 conn.browser_context_by_id("BID-popup-related-form-name")
                     .and_then(|browser_context| browser_context.background_target(&target_id))

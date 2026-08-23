@@ -803,6 +803,7 @@ pub(super) struct ServiceWorkerClientsOpenWindowRequestCompletion {
     pub(super) request_id: u64,
     pub(super) source_version_id: crate::service_worker_runtime::ServiceWorkerVersionId,
     pub(super) source_run: crate::runtime::RendererServiceWorkerRunIdentity,
+    pub(super) source_script_url: url::Url,
     pub(super) url: url::Url,
 }
 
@@ -820,6 +821,7 @@ pub(super) struct ServiceWorkerClientsOpenWindowCompletion {
 #[derive(Debug)]
 pub(super) struct ServiceWorkerNotificationActionNavigateRequestCompletion {
     pub(super) host: ServiceWorkerWindowClientTarget,
+    pub(super) source_script_url: url::Url,
     pub(super) url: url::Url,
 }
 

@@ -37,13 +37,16 @@ use super::navigation_serialize::serialize_history_entries;
 use super::navigation_window::{
     child_browsing_context_handle_for_runtime_owner, navigation_document_can_update_current_entry,
     navigation_document_has_opaque_origin, navigation_document_is_initial_empty,
-    navigation_unload_event_active, runtime_window_is_global, runtime_window_owner,
-    runtime_window_uses_top_level_history_model, url_is_about_blank_document,
-    window_history_for_holder, window_location_for_holder,
+    navigation_unload_event_active, runtime_window_dispatch_scope, runtime_window_is_global,
+    runtime_window_owner, url_is_about_blank_document, window_history_for_holder,
+    window_location_for_holder,
 };
 use super::*;
 use crate::native_bridge::NavigationHistoryEntrySeed;
-use crate::util::{context_host_ptr_from_window_object, get_private_value, set_private_value};
+use crate::util::{
+    context_host_ptr_from_context_slot, context_host_ptr_from_window_object, get_private_value,
+    set_private_value,
+};
 use crate::webidl;
 use moli_page_types::{
     NavigationHistoryMutation, SameDocumentHistoryUpdate, cross_document_navigation_seed,
@@ -263,12 +266,14 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
     if navigation_unload_event_active(scope, owner) {
         return;
     }
-    if sandbox_blocks_ancestor_or_top_location_navigation(scope, owner) {
-        crate::context_bootstrap::throw_dom_exception_value(
-            scope,
-            "Blocked a sandboxed frame from navigating an ancestor browsing context.",
-            "SecurityError",
-        );
+    if let Some(denial) = browsing_context_navigation_denial(scope, owner, &resolved) {
+        if denial.is_sandbox_violation() {
+            crate::context_bootstrap::throw_dom_exception_value(
+                scope,
+                "Blocked a sandboxed frame from navigating another browsing context.",
+                "SecurityError",
+            );
+        }
         return;
     }
     if matches!(kind, LocationNavigationKind::Reload)
@@ -669,50 +674,41 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
         .record_pending_renderer_top_level_navigation_request(request, entry_seed);
 }
 
-fn sandbox_blocks_ancestor_or_top_location_navigation<'s>(
+fn browsing_context_navigation_denial<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     owner: v8::Local<'s, v8::Object>,
-) -> bool {
-    let Some(source_handle) =
-        crate::context_bootstrap::current_child_browsing_context_handle_for_runtime_scope(scope)
-    else {
-        return false;
+    destination_url: &url::Url,
+) -> Option<crate::native_bridge::BrowsingContextNavigationDenial> {
+    // Location lives in the target realm. V8 keeps the script that initiated
+    // the setter as the incumbent realm, which is the CanNavigate source.
+    let source_context = scope
+        .get_incumbent_context()
+        .unwrap_or_else(|| scope.get_current_context());
+    let Some(source_host_ptr) = context_host_ptr_from_context_slot(source_context) else {
+        return Some(crate::native_bridge::BrowsingContextNavigationDenial::StaleContext);
     };
-    let Some(host_ptr) = context_host_ptr_for_navigation_owner(scope, owner)
-        .or_else(|| context_host_ptr_from_global_bridge(scope))
+    let source_host = unsafe { &*source_host_ptr };
+    let Some(source_identity) =
+        source_host.window_execution_context_identity_for_access_check(source_context)
     else {
-        return false;
+        return Some(crate::native_bridge::BrowsingContextNavigationDenial::StaleContext);
     };
-    let host = unsafe { &*host_ptr };
-    if host.child_browsing_context_allows_top_navigation(source_handle) {
-        return false;
-    }
-    if let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, owner)
-        && host.lightweight_popup_id_for_node_owner_document(source_handle) != Some(popup_id)
-    {
-        return false;
-    }
-    match child_browsing_context_handle_for_runtime_owner(scope, owner) {
-        Some(target_handle) => {
-            child_browsing_context_is_ancestor(host, target_handle, source_handle)
-        }
-        None => runtime_window_uses_top_level_history_model(scope, owner),
-    }
-}
-
-fn child_browsing_context_is_ancestor(
-    host: &JsContextHost,
-    ancestor: crate::document_runtime::DomHandle,
-    child: crate::document_runtime::DomHandle,
-) -> bool {
-    let mut current = host.child_browsing_context_parent_handle(child);
-    while let Some(handle) = current {
-        if handle == ancestor {
-            return true;
-        }
-        current = host.child_browsing_context_parent_handle(handle);
-    }
-    false
+    let Some(target_host_ptr) = context_host_ptr_for_navigation_owner(scope, owner) else {
+        return Some(crate::native_bridge::BrowsingContextNavigationDenial::StaleContext);
+    };
+    let target_host = unsafe { &*target_host_ptr };
+    let Some(target_scope) = runtime_window_dispatch_scope(scope, owner) else {
+        return Some(crate::native_bridge::BrowsingContextNavigationDenial::StaleContext);
+    };
+    source_host
+        .can_navigate_browsing_context(
+            scope,
+            source_identity,
+            target_host,
+            target_scope,
+            destination_url,
+        )
+        .err()
 }
 
 fn window_for_child_cross_document_location_navigation<'s>(
@@ -1234,14 +1230,14 @@ fn context_host_ptr_for_navigation_owner(
     scope: &mut v8::PinScope<'_, '_>,
     owner: v8::Local<'_, v8::Object>,
 ) -> Option<*mut JsContextHost> {
-    context_host_ptr_from_global_bridge(scope)
-        .or_else(|| context_host_ptr_from_window_object(scope, owner))
+    context_host_ptr_from_window_object(scope, owner)
         .or_else(|| {
             owner
                 .get(scope, v8str(scope, "parent").into())
                 .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
                 .and_then(|parent| context_host_ptr_from_window_object(scope, parent))
         })
+        .or_else(|| context_host_ptr_from_global_bridge(scope))
 }
 
 #[cfg(test)]

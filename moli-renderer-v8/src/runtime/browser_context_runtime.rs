@@ -52,7 +52,8 @@ impl RendererOutputTransportSenderSlot {
 
 pub(crate) use crate::service_worker_runtime::ServiceWorkerControlState;
 pub use service_workers::{
-    RendererReservedServiceWorkerClient, RendererServiceWorkerMainResourceFetch,
+    RendererReservedServiceWorkerClient, RendererServiceWorkerClientsOpenWindowContinuation,
+    RendererServiceWorkerMainResourceFetch,
 };
 
 /// Browser-context/partition scoped renderer runtime state.
@@ -148,6 +149,24 @@ impl RendererProducerRegistrar {
     }
 }
 
+/// Embedder policy for script-created auxiliary browsing contexts.
+///
+/// Chromium keeps this decision outside Blink's frame activation state: Chrome
+/// normally requires a transient activation, while content embedders and
+/// automation profiles may allow script-created windows unconditionally. The
+/// renderer still consumes an available activation after either policy admits
+/// a new context.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RendererPopupBlockerPolicy {
+    /// Preserve Lightmount's headless-automation default and Chromium's
+    /// embedder/content-setting bypass behavior.
+    #[default]
+    AllowWithoutTransientActivation,
+    /// Block a new auxiliary context unless its source frame tree currently
+    /// owns an unconsumed transient user activation.
+    RequireTransientActivation,
+}
+
 /// Worker-thread view of browser-context runtime state.
 ///
 /// Workers inherit owner-scoped communication registries, but they are not
@@ -184,6 +203,7 @@ struct RendererBrowserContextRuntimeInner {
     dedicated_worker_devtools_handles: Mutex<HashMap<u64, crate::worker::WorkerDevToolsHandle>>,
     dedicated_worker_pause_on_start_for_devtools: AtomicBool,
     javascript_dialog_handler_enabled: AtomicBool,
+    popup_blocker_requires_transient_activation: AtomicBool,
     renderer_output_transport_tx: RendererOutputTransportSenderSlot,
 }
 
@@ -523,6 +543,7 @@ impl RendererBrowserContextRuntime {
                 dedicated_worker_devtools_handles: Mutex::new(HashMap::new()),
                 dedicated_worker_pause_on_start_for_devtools: AtomicBool::new(false),
                 javascript_dialog_handler_enabled: AtomicBool::new(false),
+                popup_blocker_requires_transient_activation: AtomicBool::new(false),
                 renderer_output_transport_tx,
             }),
         }
@@ -696,6 +717,27 @@ impl RendererBrowserContextRuntime {
         self.inner
             .javascript_dialog_handler_enabled
             .load(Ordering::Relaxed)
+    }
+
+    pub fn set_popup_blocker_policy(&self, policy: RendererPopupBlockerPolicy) {
+        self.inner
+            .popup_blocker_requires_transient_activation
+            .store(
+                policy == RendererPopupBlockerPolicy::RequireTransientActivation,
+                Ordering::Relaxed,
+            );
+    }
+
+    pub fn popup_blocker_policy(&self) -> RendererPopupBlockerPolicy {
+        if self
+            .inner
+            .popup_blocker_requires_transient_activation
+            .load(Ordering::Relaxed)
+        {
+            RendererPopupBlockerPolicy::RequireTransientActivation
+        } else {
+            RendererPopupBlockerPolicy::AllowWithoutTransientActivation
+        }
     }
 }
 

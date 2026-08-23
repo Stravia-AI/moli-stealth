@@ -44,8 +44,10 @@ impl Drop for PendingReservedServiceWorkerClient {
 }
 
 pub(crate) struct PendingLocationNavigation {
-    /// Exact producer-to-owner handoff identity for this value of the Page's
-    /// unique pending top-level navigation slot.
+    /// Exact producer-to-owner handoff identity for this value at the head of
+    /// the Page's pending top-level navigation owner queue. Ordinary/history
+    /// navigation remains replace-only; JavaScript URLs may coexist as FIFO
+    /// tasks of one target Document.
     pub(crate) handoff: RendererTopLevelNavigationHandoff,
     /// Exact Document that requested this navigation, retained as causal
     /// metadata across a possible `document.open()` replacement. Standalone
@@ -54,6 +56,13 @@ pub(crate) struct PendingLocationNavigation {
     /// than guessing an origin after the fact. Protocol apply authorization is
     /// established separately by the target-local Page residence.
     pub(crate) source_document: Option<RendererDocumentLifecycleIdentity>,
+    /// Exact target Document that owned the pending slot when it was queued.
+    ///
+    /// A JavaScript URL is a cancellable task of that Document, not merely a
+    /// URL waiting on the stable Page. If `document.open()` or another commit
+    /// replaces this identity before the Page owner selects the task, the
+    /// script must not execute in the replacement realm.
+    pub(crate) target_document: Option<RendererDocumentLifecycleIdentity>,
     /// Exact initiating Window/Document and its referrer-policy inputs. The
     /// target Page owns this pending slot, but must not substitute its root
     /// Document for these source-side facts.
@@ -154,45 +163,70 @@ impl JsContextHost {
 
     pub(crate) fn record_pending_renderer_top_level_navigation_request(
         &mut self,
-        mut request: RendererTopLevelNavigationRequest,
+        request: RendererTopLevelNavigationRequest,
         entry_seed: Option<NavigationHistoryEntrySeed>,
     ) {
+        let _ = self
+            .record_pending_renderer_top_level_navigation_request_with_handoff(request, entry_seed);
+    }
+
+    pub(crate) fn record_cross_page_renderer_top_level_navigation_request(
+        &mut self,
+        request: RendererTopLevelNavigationRequest,
+        entry_seed: Option<NavigationHistoryEntrySeed>,
+    ) -> bool {
+        let Some(handoff) = self
+            .record_pending_renderer_top_level_navigation_request_with_handoff(request, entry_seed)
+        else {
+            return false;
+        };
+        self.handoff_cross_page_top_level_navigation(handoff);
+        true
+    }
+
+    fn record_pending_renderer_top_level_navigation_request_with_handoff(
+        &mut self,
+        mut request: RendererTopLevelNavigationRequest,
+        entry_seed: Option<NavigationHistoryEntrySeed>,
+    ) -> Option<RendererTopLevelNavigationHandoff> {
         if let Some(source) = self.active_top_level_navigation_source.clone() {
             request = request.with_source(source);
         }
         let Ok(url) = Url::parse(request.url()) else {
-            return;
+            return None;
         };
-        self.clear_pending_top_level_navigation();
         let handoff = self.top_level_navigation_handoff_tx.next_handoff();
         let reserved_service_worker_client =
             self.pending_reserved_service_worker_top_level_client_for_navigation(&url);
         let navigation_source = request.source().cloned();
+        let target_document = self
+            .root_document_lifecycle
+            .as_ref()
+            .map(RendererDocumentLifecycleJournalHandle::identity);
         let source_document = navigation_source
             .as_ref()
-            .map(RendererTopLevelNavigationSource::root_document)
+            .and_then(RendererTopLevelNavigationSource::root_document)
             .or_else(|| {
                 self.root_document_lifecycle
                     .as_ref()
                     .map(RendererDocumentLifecycleJournalHandle::identity)
             });
-        self.pending_top_level_navigation = Some(PendingTopLevelNavigation::Location(Box::new(
-            PendingLocationNavigation {
-                handoff,
-                source_document,
-                navigation_source,
-                runtime_command_cause: self.active_runtime_command_cause.clone(),
-                url,
-                request_method: request.request_method().to_owned(),
-                request_body: request.request_body().map(ToOwned::to_owned),
-                request_headers: request.request_headers().to_vec(),
-                browser_navigation_kind: request.browser_navigation_kind(),
-                entry_seed,
-                reserved_service_worker_client,
-                service_worker_client_navigate: None,
-            },
-        )));
-        self.handoff_ordinary_page_turn_navigation(handoff);
+        self.enqueue_pending_location_navigation(PendingLocationNavigation {
+            handoff,
+            source_document,
+            target_document,
+            navigation_source,
+            runtime_command_cause: self.active_runtime_command_cause.clone(),
+            url,
+            request_method: request.request_method().to_owned(),
+            request_body: request.request_body().map(ToOwned::to_owned),
+            request_headers: request.request_headers().to_vec(),
+            browser_navigation_kind: request.browser_navigation_kind(),
+            entry_seed,
+            reserved_service_worker_client,
+            service_worker_client_navigate: None,
+        });
+        Some(handoff)
     }
 
     pub(crate) fn record_pending_service_worker_client_navigation(
@@ -200,42 +234,61 @@ impl JsContextHost {
         url: Url,
         continuation: crate::types::ServiceWorkerClientNavigateContinuation,
     ) {
-        self.clear_pending_top_level_navigation();
         let handoff = self.top_level_navigation_handoff_tx.next_handoff();
         let reserved_service_worker_client =
             self.pending_reserved_service_worker_top_level_client_for_navigation(&url);
-        self.pending_top_level_navigation = Some(PendingTopLevelNavigation::Location(Box::new(
-            PendingLocationNavigation {
-                handoff,
-                source_document: self
-                    .root_document_lifecycle
-                    .as_ref()
-                    .map(RendererDocumentLifecycleJournalHandle::identity),
-                navigation_source: None,
-                runtime_command_cause: None,
-                url,
-                request_method: "GET".to_owned(),
-                request_body: None,
-                request_headers: Vec::new(),
-                browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
-                entry_seed: None,
-                reserved_service_worker_client,
-                service_worker_client_navigate: Some(continuation),
-            },
-        )));
+        self.enqueue_pending_location_navigation(PendingLocationNavigation {
+            handoff,
+            source_document: self
+                .root_document_lifecycle
+                .as_ref()
+                .map(RendererDocumentLifecycleJournalHandle::identity),
+            target_document: self
+                .root_document_lifecycle
+                .as_ref()
+                .map(RendererDocumentLifecycleJournalHandle::identity),
+            navigation_source: None,
+            runtime_command_cause: None,
+            url,
+            request_method: "GET".to_owned(),
+            request_body: None,
+            request_headers: Vec::new(),
+            browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
+            entry_seed: None,
+            reserved_service_worker_client,
+            service_worker_client_navigate: Some(continuation),
+        });
+    }
+
+    fn enqueue_pending_location_navigation(&mut self, pending: PendingLocationNavigation) {
+        let is_javascript_url = pending.url.scheme() == "javascript";
+        let can_append_to_javascript_url_task_queue = is_javascript_url
+            && self.pending_top_level_navigations.iter().all(|pending| {
+                matches!(
+                    pending,
+                    PendingTopLevelNavigation::Location(pending)
+                        if pending.url.scheme() == "javascript"
+                )
+            });
+        if !can_append_to_javascript_url_task_queue {
+            self.clear_pending_top_level_navigation();
+        }
+        let handoff = pending.handoff;
+        self.pending_top_level_navigations
+            .push_back(PendingTopLevelNavigation::Location(Box::new(pending)));
         self.handoff_ordinary_page_turn_navigation(handoff);
     }
 
     pub(crate) fn has_pending_location_navigation(&self) -> bool {
         matches!(
-            self.pending_top_level_navigation.as_ref(),
+            self.pending_top_level_navigations.front(),
             Some(PendingTopLevelNavigation::Location(_))
         )
     }
 
     pub(crate) fn pending_location_navigation_scheme_is(&self, scheme: &str) -> bool {
-        self.pending_top_level_navigation
-            .as_ref()
+        self.pending_top_level_navigations
+            .front()
             .is_some_and(|pending| {
                 matches!(
                     pending,
@@ -249,7 +302,7 @@ impl JsContextHost {
         &self,
     ) -> Option<RendererRuntimeCommandCausalIdentity> {
         let Some(PendingTopLevelNavigation::Location(pending)) =
-            self.pending_top_level_navigation.as_ref()
+            self.pending_top_level_navigations.front()
         else {
             return None;
         };
@@ -260,7 +313,7 @@ impl JsContextHost {
         &self,
     ) -> Option<RendererTopLevelNavigationHandoff> {
         let Some(PendingTopLevelNavigation::Location(pending)) =
-            self.pending_top_level_navigation.as_ref()
+            self.pending_top_level_navigations.front()
         else {
             return None;
         };
@@ -272,11 +325,24 @@ impl JsContextHost {
             return None;
         }
         let Some(PendingTopLevelNavigation::Location(pending)) =
-            self.pending_top_level_navigation.take()
+            self.pending_top_level_navigations.pop_front()
         else {
             unreachable!("pending top-level navigation kind changed without an intervening call");
         };
         Some(*pending)
+    }
+
+    pub(crate) fn take_pending_javascript_location_navigation_batch(
+        &mut self,
+    ) -> Vec<PendingLocationNavigation> {
+        let mut pending = Vec::new();
+        while self.pending_location_navigation_scheme_is("javascript") {
+            pending.push(
+                self.take_pending_location_navigation()
+                    .expect("a JavaScript URL queue head must be a location navigation"),
+            );
+        }
+        pending
     }
 
     pub(crate) fn clear_pending_location_navigation(&mut self) {
@@ -295,8 +361,8 @@ impl JsContextHost {
         }
         #[cfg(test)]
         {
-            self.pending_top_level_navigation =
-                Some(PendingTopLevelNavigation::HistoryTraversal(traversal));
+            self.pending_top_level_navigations
+                .push_back(PendingTopLevelNavigation::HistoryTraversal(traversal));
         }
         #[cfg(not(test))]
         panic!("a production history traversal must have a concrete renderer output sink");
@@ -307,13 +373,13 @@ impl JsContextHost {
         &mut self,
     ) -> Option<RendererPendingTopLevelHistoryTraversal> {
         if !matches!(
-            self.pending_top_level_navigation.as_ref(),
+            self.pending_top_level_navigations.front(),
             Some(PendingTopLevelNavigation::HistoryTraversal(_))
         ) {
             return None;
         }
         let Some(PendingTopLevelNavigation::HistoryTraversal(pending)) =
-            self.pending_top_level_navigation.take()
+            self.pending_top_level_navigations.pop_front()
         else {
             unreachable!("pending top-level navigation kind changed without an intervening call");
         };
@@ -321,26 +387,32 @@ impl JsContextHost {
     }
 
     pub(crate) fn clear_pending_top_level_navigation(&mut self) {
-        let pending = self.pending_top_level_navigation.take();
-        let Some(PendingTopLevelNavigation::Location(pending)) = pending else {
-            return;
-        };
-        let pending = *pending;
-        let Some(continuation) = pending.service_worker_client_navigate else {
-            return;
-        };
-        self.browser_context_runtime
-            .service_worker_runtime()
-            .enqueue_client_navigate_completed(
-                crate::types::ServiceWorkerClientNavigateCompletion {
-                    request_id: continuation.request_id,
-                    source_version_id: continuation.source_version_id,
-                    source_run: continuation.source_run,
-                    result: Err(ServiceWorkerClientNavigateError::type_error(
-                        "The navigation was canceled.",
-                    )),
-                },
-            );
+        let pending = std::mem::take(&mut self.pending_top_level_navigations);
+        for pending in pending {
+            #[cfg(not(test))]
+            let PendingTopLevelNavigation::Location(pending) = pending;
+            #[cfg(test)]
+            let pending = match pending {
+                PendingTopLevelNavigation::Location(pending) => pending,
+                PendingTopLevelNavigation::HistoryTraversal(_) => continue,
+            };
+            let pending = *pending;
+            let Some(continuation) = pending.service_worker_client_navigate else {
+                continue;
+            };
+            self.browser_context_runtime
+                .service_worker_runtime()
+                .enqueue_client_navigate_completed(
+                    crate::types::ServiceWorkerClientNavigateCompletion {
+                        request_id: continuation.request_id,
+                        source_version_id: continuation.source_version_id,
+                        source_run: continuation.source_run,
+                        result: Err(ServiceWorkerClientNavigateError::type_error(
+                            "The navigation was canceled.",
+                        )),
+                    },
+                );
+        }
     }
 
     fn pending_reserved_service_worker_top_level_client_for_navigation(

@@ -119,8 +119,13 @@ use super::document::{
 };
 use activation::navigate_form_target_browsing_context;
 pub(crate) use activation::{
-    SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,
+    SpecialBrowsingContextTarget,
+    cancel_pending_renderer_owned_javascript_url_navigation_for_window,
+    existing_browsing_context_target_window, navigate_existing_browsing_context_target,
+    queue_renderer_owned_top_level_javascript_url_navigation_for_window,
     resolve_named_browsing_context_target_for_navigation,
+    source_javascript_url_allowed_by_csp_for_owner,
+    source_javascript_url_allows_new_context_by_policy,
 };
 pub(crate) use activation::{
     activate_handle_via_click, activate_handle_via_click_with_detail_and_modifiers,

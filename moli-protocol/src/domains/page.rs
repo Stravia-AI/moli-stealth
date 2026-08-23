@@ -2386,6 +2386,8 @@ pub(crate) async fn navigate_page_owned_top_level_location_background_events_asy
         navigation.request_body(),
         navigation.request_headers(),
         navigation.browser_navigation_kind(),
+        None,
+        false,
     )
     .await;
 }
@@ -2408,6 +2410,8 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
         None,
         &[],
         moli_fetch::BrowserNavigationRequestKind::Navigate,
+        None,
+        false,
     )
     .await;
 }
@@ -2424,6 +2428,10 @@ pub(crate) async fn navigate_session_owner_from_renderer_request_background_even
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    service_worker_clients_open_window_continuation: Option<
+        moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
+    >,
+    drain_pending_javascript_tasks_before_commit: bool,
 ) {
     let start = navigation::start_session_owner_navigation_from_renderer(
         conn,
@@ -2436,10 +2444,32 @@ pub(crate) async fn navigate_session_owner_from_renderer_request_background_even
         request_body,
         request_headers,
         browser_navigation_kind,
+        service_worker_clients_open_window_continuation,
     );
     let step =
         navigation::finish_started_navigation_command_for_parts(conn, None, session_id, start, &[]);
     complete_renderer_navigation_step_background_events_async(conn, out, step).await;
+    if drain_pending_javascript_tasks_before_commit {
+        // The ordinary navigation has already entered its cross-Document
+        // suspended state.  This internal causal command is intentionally
+        // allowed to enter that still-attached old Page; ordinary protocol
+        // commands remain behind `loaded_page_mut_for_protocol_access` and
+        // cannot observe it during replacement.
+        let result = match conn.loaded_page_mut_for_interruptible_protocol_access(session_id) {
+            Ok(page) => page
+                .run_pending_javascript_url_tasks_before_browser_navigation()
+                .await
+                .map(|_| ()),
+            Err(error) => Err(anyhow::anyhow!(error)),
+        };
+        if let Err(error) = result {
+            tracing::debug!(
+                session_id,
+                %error,
+                "target Page retired before its causally later javascript URL task could run"
+            );
+        }
+    }
 }
 
 pub(crate) async fn traverse_session_owner_history_from_renderer_background_events_async(
@@ -4892,6 +4922,97 @@ mod producer_tests {
                 if work.kind()
                     == crate::domains::activity::ProtocolSchedulerWorkKind::PopupTargetNavigationOwnerAction
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn creation_only_popup_keeps_initial_document_without_scheduling_or_url_rescan() {
+        let mut conn = CdpConnection::default();
+        conn.set_root_target_discovery_enabled(true);
+        let mut bc = BrowserContext::new("BID-creation-only".into());
+        bc.set_active_target_id("TID-opener");
+        bc.attach_active_session("SID-opener");
+        conn.browser_context = Some(bc);
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-opener");
+        let source_document = renderer_document_identity_for_test(1, 1);
+        let requested_url = "about:blank?#blocked-destination";
+        let mut out = Vec::new();
+        let mut prepared =
+            ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
+                super::PagePreparedOutputs::from_popup_activations_for_test(
+                    page_owner,
+                    vec![
+                        RendererPendingPopupActivation::window(
+                            source_document,
+                            RendererWindowDocumentSource::RootFrame,
+                            true,
+                            None,
+                            requested_url.to_owned(),
+                            "creationOnlyFormTarget".to_owned(),
+                        )
+                        .without_destination_navigation(),
+                    ],
+                ),
+            ));
+
+        super::emit_popup_activity_background_events_async(
+            &mut conn,
+            &mut out,
+            Some("SID-opener"),
+            Some(&mut prepared),
+        )
+        .await;
+
+        let events = out
+            .into_iter()
+            .map(BackgroundProtocolEvent::into_parts)
+            .collect::<Vec<_>>();
+        let (target_created, target_created_sidecar) = events
+            .iter()
+            .find(|(message, _)| message["method"] == json!("Target.targetCreated"))
+            .unwrap_or_else(|| panic!("missing creation-only targetCreated event: {events:?}"));
+        assert_eq!(target_created["params"]["targetInfo"]["url"], json!(""));
+        assert!(matches!(
+            target_created_sidecar,
+            Some(AutomationEvent::TargetCreated(event)) if event.url.is_empty()
+        ));
+        let popup_target_id = target_created["params"]["targetInfo"]["targetId"]
+            .as_str()
+            .expect("creation-only popup target id")
+            .to_owned();
+        let popup_target = conn
+            .browser_context
+            .as_ref()
+            .and_then(|browser_context| browser_context.background_target(&popup_target_id))
+            .expect("creation-only popup target");
+        assert_eq!(popup_target.target_url(), "");
+        assert!(
+            popup_target
+                .loaded_page()
+                .is_some_and(|page| moli_url::is_about_blank(page.final_url())),
+            "creation-only target must materialize only its initial empty Document"
+        );
+        assert!(
+            conn.take_scheduler_events().is_empty(),
+            "a creation-only action must not publish popup destination work"
+        );
+
+        let route = conn
+            .target_session_route_for_target_id(&popup_target_id)
+            .expect("creation-only popup target route");
+        let mut rescanned_events = Vec::new();
+        let restarted = {
+            let mut route_scope = conn.scoped_none_session_owner_route_override(route);
+            crate::domains::target::start_initial_document_target_url_navigation_if_needed_background_events_async(
+                route_scope.conn_mut(),
+                &mut rescanned_events,
+                None,
+            )
+            .await
+        };
+        assert!(
+            !restarted && rescanned_events.is_empty(),
+            "generic Page entry points must not reconstruct a navigation from the empty observable target URL"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

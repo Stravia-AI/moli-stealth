@@ -1561,6 +1561,9 @@ impl NavigationEngine {
         main_document_commit: Option<RendererMainDocumentCommit>,
         initial_document_referrer: Option<String>,
         initial_top_level_browsing_context_name: Option<String>,
+        auxiliary_browsing_context_policy: Option<
+            crate::page::RendererAuxiliaryBrowsingContextPolicy,
+        >,
     ) -> Result<PendingBuiltDocumentPage> {
         let loader = self.ensure_resource_request_client(cookie_store)?;
         loader.set_extra_http_headers(&extra_http_headers);
@@ -1603,6 +1606,7 @@ impl NavigationEngine {
                 main_document_commit,
                 initial_document_referrer,
                 initial_top_level_browsing_context_name,
+                auxiliary_browsing_context_policy,
             )?;
         Ok(PendingBuiltDocumentPage { pending })
     }
@@ -1665,6 +1669,7 @@ impl NavigationEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1701,6 +1706,9 @@ impl NavigationEngine {
         main_document_commit: Option<RendererMainDocumentCommit>,
         initial_document_referrer: Option<String>,
         initial_top_level_browsing_context_name: Option<String>,
+        auxiliary_browsing_context_policy: Option<
+            crate::page::RendererAuxiliaryBrowsingContextPolicy,
+        >,
     ) -> Result<PendingBuiltDocumentPage> {
         let (cookie_store, web_storage, indexed_db_manager, storage_bucket_store) =
             storage.into_parts();
@@ -1738,6 +1746,7 @@ impl NavigationEngine {
             main_document_commit,
             initial_document_referrer,
             initial_top_level_browsing_context_name,
+            auxiliary_browsing_context_policy,
         )
     }
 
