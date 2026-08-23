@@ -192,10 +192,9 @@ impl BrowserNavigationOwner {
     ///
     /// This is intentionally owner-private: a physical Page projector cannot
     /// claim that either the navigation or replacement happened.
-    /// `current_page` is carried by all three envelopes. The navigation
-    /// outcome is published before the topology transition, followed by the
-    /// frozen Target metadata, so consumers can depend on one stable
-    /// request-outcome -> Page-replacement -> metadata order without
+    /// `current_page` is carried by both envelopes. The atomic navigation/Page
+    /// replacement occurrence is followed by frozen Target metadata, so
+    /// consumers can depend on one stable commit -> metadata order without
     /// inventing another commit boundary.
     pub(super) fn record_loaded_navigation_commit_facts(
         &mut self,
@@ -225,10 +224,7 @@ impl BrowserNavigationOwner {
             vec![
                 BrowserFact::NavigationCommitted {
                     navigation: navigation.clone(),
-                },
-                BrowserFact::PageReplaced {
                     previous_page: previous_page.clone(),
-                    navigation: navigation.clone(),
                 },
                 BrowserFact::TargetMetadataChanged {
                     transition: metadata,

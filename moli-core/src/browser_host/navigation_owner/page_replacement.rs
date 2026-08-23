@@ -446,29 +446,13 @@ mod tests {
             committed_fact.fact(),
             &BrowserFact::NavigationCommitted {
                 navigation: navigation.clone(),
-            }
-        );
-        let replacement_fact = subscriber
-            .try_recv()
-            .expect("live Browser subscriber should receive Page replacement");
-        assert_eq!(replacement_fact.sequence().get(), 4);
-        assert_eq!(replacement_fact.browser_context_id().as_str(), "context-1");
-        assert_eq!(replacement_fact.target_id().as_str(), "target-1");
-        assert_eq!(
-            replacement_fact.page_residence(),
-            replacement.current_page()
-        );
-        assert_eq!(
-            replacement_fact.fact(),
-            &BrowserFact::PageReplaced {
                 previous_page: previous.clone(),
-                navigation: navigation.clone(),
             }
         );
         let metadata_fact = subscriber
             .try_recv()
             .expect("live Browser subscriber should receive Target metadata transition");
-        assert_eq!(metadata_fact.sequence().get(), 5);
+        assert_eq!(metadata_fact.sequence().get(), 4);
         assert_eq!(metadata_fact.page_residence(), replacement.current_page());
         assert_eq!(
             metadata_fact.fact(),
@@ -485,16 +469,15 @@ mod tests {
             .record_document_lifecycle_facts(replacement.current_page(), &[dcl_event()])
             .expect("successor lifecycle fact should publish");
         let facts = owner.browser_fact_snapshot();
-        assert_eq!(facts.len(), 6);
+        assert_eq!(facts.len(), 5);
         assert_eq!(facts[0].as_ref(), created_fact.as_ref());
         assert_eq!(facts[1].as_ref(), accepted_fact.as_ref());
         assert_eq!(facts[2].as_ref(), committed_fact.as_ref());
-        assert_eq!(facts[3].as_ref(), replacement_fact.as_ref());
-        assert_eq!(facts[4].as_ref(), metadata_fact.as_ref());
-        assert_eq!(facts[5].sequence().get(), 6);
-        assert_eq!(facts[5].page_residence(), replacement.current_page());
+        assert_eq!(facts[3].as_ref(), metadata_fact.as_ref());
+        assert_eq!(facts[4].sequence().get(), 5);
+        assert_eq!(facts[4].page_residence(), replacement.current_page());
         assert!(matches!(
-            facts[5].fact(),
+            facts[4].fact(),
             BrowserFact::DocumentLifecycleReached {
                 milestone: RendererDocumentLifecycleMilestone::DomContentLoaded,
                 ..
@@ -551,9 +534,7 @@ mod tests {
         assert!(
             owner.browser_fact_snapshot().iter().all(|fact| !matches!(
                 fact.fact(),
-                BrowserFact::NavigationCommitted { .. }
-                    | BrowserFact::PageReplaced { .. }
-                    | BrowserFact::TargetMetadataChanged { .. }
+                BrowserFact::NavigationCommitted { .. } | BrowserFact::TargetMetadataChanged { .. }
             )),
             "a stale replacement permit must not publish commit facts"
         );

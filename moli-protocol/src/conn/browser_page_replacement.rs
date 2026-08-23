@@ -357,42 +357,22 @@ mod tests {
         );
         assert!(conn.accepts_committed_document_navigation_for_session_owner(None, &navigation));
         let commit_facts = conn.browser_fact_snapshot_for_test();
-        let committed_fact = commit_facts
+        let commit_fact = commit_facts
             .iter()
             .find(|envelope| {
                 matches!(
                     envelope.fact(),
                     BrowserFact::NavigationCommitted {
                         navigation: fact_navigation,
+                        ..
                     } if fact_navigation == &navigation
                 )
             })
             .expect(
                 "Core commit must publish NavigationCommitted before predecessor disposal waits",
             );
-        let replacement_fact = commit_facts
-            .iter()
-            .find(|envelope| {
-                matches!(
-                    envelope.fact(),
-                    BrowserFact::PageReplaced {
-                        navigation: fact_navigation,
-                        ..
-                    } if fact_navigation == &navigation
-                )
-            })
-            .expect("Core commit must publish PageReplaced before predecessor disposal waits");
         assert_eq!(
-            committed_fact.sequence().get() + 1,
-            replacement_fact.sequence().get(),
-            "one Core transaction must publish commit before adjacent replacement"
-        );
-        assert_eq!(
-            committed_fact.page_residence(),
-            replacement_fact.page_residence()
-        );
-        assert_eq!(
-            replacement_fact.page_residence().loaded_page_generation(),
+            commit_fact.page_residence().loaded_page_generation(),
             previous_generation + 1
         );
 
@@ -423,13 +403,10 @@ mod tests {
             Some(replacement_renderer_page_id),
             "loaded replacement must transfer its renderer lifetime into Browser Core"
         );
-        assert_eq!(
-            replacement_fact.page_residence(),
-            replacement.current_page()
-        );
+        assert_eq!(commit_fact.page_residence(), replacement.current_page());
         assert!(matches!(
-            replacement_fact.fact(),
-            BrowserFact::PageReplaced {
+            commit_fact.fact(),
+            BrowserFact::NavigationCommitted {
                 previous_page,
                 navigation: fact_navigation,
             } if previous_page == replacement.previous_page()
@@ -583,21 +560,10 @@ mod tests {
                     envelope.fact(),
                     BrowserFact::NavigationCommitted {
                         navigation: fact_navigation,
-                    } if fact_navigation == &navigation_a
-                )),
-            "stale request A must not publish a navigation commit fact"
-        );
-        assert!(
-            conn.browser_fact_snapshot_for_test()
-                .iter()
-                .all(|envelope| !matches!(
-                    envelope.fact(),
-                    BrowserFact::PageReplaced {
-                        navigation: fact_navigation,
                         ..
                     } if fact_navigation == &navigation_a
                 )),
-            "stale request A must not publish a replacement fact"
+            "stale request A must not publish a navigation commit fact"
         );
     }
 }

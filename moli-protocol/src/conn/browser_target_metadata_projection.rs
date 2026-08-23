@@ -121,8 +121,8 @@ mod tests {
                 BrowserNavigationHistoryPageSnapshot::new(url, title),
             )
             .expect("current navigation should commit replacement");
-        conn.take_navigation_commit_facts(&navigation, replacement.current_page())
-            .expect("frontend should claim the exact commit fact pair");
+        conn.take_navigation_commit_fact(&navigation, replacement.current_page())
+            .expect("frontend should claim the exact commit fact");
         conn.take_navigation_target_metadata_changed_fact(&navigation, replacement.current_page())
             .expect("frontend should claim the exact committed metadata fact")
     }

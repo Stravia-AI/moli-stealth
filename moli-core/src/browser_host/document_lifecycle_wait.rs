@@ -108,7 +108,9 @@ impl BrowserDocumentLifecycleWaitShared {
             {
                 Some(BrowserDocumentLifecycleWaitOutcome::Superseded)
             }
-            BrowserFact::PageReplaced { previous_page, .. } if previous_page == expected_page => {
+            BrowserFact::NavigationCommitted { previous_page, .. }
+                if previous_page == expected_page =>
+            {
                 Some(BrowserDocumentLifecycleWaitOutcome::Superseded)
             }
             BrowserFact::TargetCrashed { previous_page } if previous_page == expected_page => {
@@ -478,7 +480,7 @@ mod tests {
         publish(
             &mut journal,
             page(3),
-            BrowserFact::PageReplaced {
+            BrowserFact::NavigationCommitted {
                 previous_page: expected_page.clone(),
                 navigation,
             },

@@ -76,14 +76,13 @@ pub(in crate::domains) async fn project_main_document_commit_async(
                 );
                 continue;
             };
-            match conn.take_navigation_commit_facts(navigation, &page) {
+            match conn.take_navigation_commit_fact(navigation, &page) {
                 Ok(projection) => {
                     tracing::trace!(
-                        browser_navigation_fact_sequence = projection.committed_sequence().get(),
-                        browser_replacement_fact_sequence = projection.replacement_sequence().get(),
+                        browser_navigation_fact_sequence = projection.sequence().get(),
                         frame_id = commit.frame_id,
                         loader_id = commit.loader_id,
-                        "projecting renderer commit from exact Browser facts"
+                        "projecting renderer commit from exact Browser fact"
                     );
                 }
                 Err(error) => {
@@ -91,7 +90,7 @@ pub(in crate::domains) async fn project_main_document_commit_async(
                         %error,
                         frame_id = commit.frame_id,
                         loader_id = commit.loader_id,
-                        "refusing to project a renderer commit without exact Browser facts"
+                        "refusing to project a renderer commit without an exact Browser fact"
                     );
                     continue;
                 }

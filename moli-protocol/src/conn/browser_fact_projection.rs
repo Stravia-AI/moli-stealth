@@ -67,7 +67,7 @@ pub enum BrowserFactProjectionError {
     MissingNavigationDownloadFact {
         navigation: BrowserDocumentNavigation,
     },
-    MissingNavigationCommitFacts {
+    MissingNavigationCommitFact {
         navigation: BrowserDocumentNavigation,
         page: PageResidenceIdentity,
     },
@@ -171,9 +171,9 @@ impl fmt::Display for BrowserFactProjectionError {
                 "download navigation {:?} has no exact Browser fact",
                 navigation
             ),
-            Self::MissingNavigationCommitFacts { navigation, page } => write!(
+            Self::MissingNavigationCommitFact { navigation, page } => write!(
                 formatter,
-                "committed navigation {:?} for Page {:?} has no exact adjacent Browser facts",
+                "committed navigation {:?} for Page {:?} has no exact Browser fact",
                 navigation, page
             ),
             Self::MissingTargetTerminationFact {
@@ -318,23 +318,19 @@ impl BrowserTargetMetadataFactProjection {
     }
 }
 
-/// Exact Browser facts authorizing one committed cross-Document projection.
+/// Exact Browser fact authorizing one committed cross-Document projection.
 ///
 /// The renderer commit supplies URL/security data later, but it cannot emit a
-/// top-level commit unless this pair was observed from the Browser journal.
+/// top-level commit unless this occurrence was observed from the Browser
+/// journal.
 #[derive(Clone, Debug)]
 pub(crate) struct BrowserNavigationCommitFactProjection {
     committed: Arc<BrowserFactEnvelope>,
-    replaced: Arc<BrowserFactEnvelope>,
 }
 
 impl BrowserNavigationCommitFactProjection {
-    pub(crate) fn committed_sequence(&self) -> BrowserFactSequence {
+    pub(crate) fn sequence(&self) -> BrowserFactSequence {
         self.committed.sequence()
-    }
-
-    pub(crate) fn replacement_sequence(&self) -> BrowserFactSequence {
-        self.replaced.sequence()
     }
 }
 
@@ -718,78 +714,43 @@ impl CdpBrowserFactProjector {
         Ok(downloaded.envelope)
     }
 
-    /// Claims the adjacent navigation-outcome/Page-topology fact pair before
-    /// a renderer commit is allowed to release the existing CDP event shape.
-    pub(crate) fn take_navigation_commit_facts(
+    /// Claims the atomic navigation-outcome/Page-topology fact before a
+    /// renderer commit is allowed to release the existing CDP event shape.
+    pub(crate) fn take_navigation_commit_fact(
         &mut self,
         navigation: &BrowserDocumentNavigation,
         page: &PageResidenceIdentity,
     ) -> Result<BrowserNavigationCommitFactProjection, BrowserFactProjectionError> {
         self.capture_available()?;
-        let committed_position = self.pending_facts.iter().position(|pending| {
+        let position = self.pending_facts.iter().position(|pending| {
             pending.envelope.page_residence() == page
                 && matches!(
                     pending.envelope.fact(),
                     BrowserFact::NavigationCommitted {
                         navigation: committed,
+                        ..
                     } if committed == navigation
                 )
         });
-        let replaced_position = self.pending_facts.iter().position(|pending| {
-            pending.envelope.page_residence() == page
-                && matches!(
-                    pending.envelope.fact(),
-                    BrowserFact::PageReplaced {
-                        navigation: replaced,
-                        ..
-                    } if replaced == navigation
-                )
-        });
-        let (Some(committed_position), Some(replaced_position)) =
-            (committed_position, replaced_position)
-        else {
+        let Some(position) = position else {
             return Err(
-                self.fail(BrowserFactProjectionError::MissingNavigationCommitFacts {
+                self.fail(BrowserFactProjectionError::MissingNavigationCommitFact {
                     navigation: navigation.clone(),
                     page: page.clone(),
                 }),
             );
         };
-        let committed_sequence = self.pending_facts[committed_position].envelope.sequence();
-        let replaced_sequence = self.pending_facts[replaced_position].envelope.sequence();
-        if committed_sequence.get().checked_add(1) != Some(replaced_sequence.get()) {
+        let Some(committed) = self.pending_facts.remove(position) else {
             return Err(
-                self.fail(BrowserFactProjectionError::MissingNavigationCommitFacts {
-                    navigation: navigation.clone(),
-                    page: page.clone(),
-                }),
-            );
-        }
-        let Some(replaced) = self.pending_facts.remove(replaced_position) else {
-            return Err(
-                self.fail(BrowserFactProjectionError::MissingNavigationCommitFacts {
+                self.fail(BrowserFactProjectionError::MissingNavigationCommitFact {
                     navigation: navigation.clone(),
                     page: page.clone(),
                 }),
             );
         };
-        let committed_position = if replaced_position < committed_position {
-            committed_position - 1
-        } else {
-            committed_position
-        };
-        let Some(committed) = self.pending_facts.remove(committed_position) else {
-            return Err(
-                self.fail(BrowserFactProjectionError::MissingNavigationCommitFacts {
-                    navigation: navigation.clone(),
-                    page: page.clone(),
-                }),
-            );
-        };
-        self.record_projected(replaced_sequence);
+        self.record_projected(committed.envelope.sequence());
         Ok(BrowserNavigationCommitFactProjection {
             committed: committed.envelope,
-            replaced: replaced.envelope,
         })
     }
 
@@ -1271,13 +1232,13 @@ impl CdpConnection {
             .take_navigation_download_fact(navigation)
     }
 
-    pub(crate) fn take_navigation_commit_facts(
+    pub(crate) fn take_navigation_commit_fact(
         &mut self,
         navigation: &DocumentNavigationToken,
         page: &PageResidenceIdentity,
     ) -> Result<BrowserNavigationCommitFactProjection, BrowserFactProjectionError> {
         self.browser_fact_projector
-            .take_navigation_commit_facts(navigation, page)
+            .take_navigation_commit_fact(navigation, page)
     }
 
     pub(crate) fn take_target_termination_fact(
@@ -1334,13 +1295,12 @@ fn retired_page_residence(fact: &BrowserFact) -> Option<&PageResidenceIdentity> 
             previous_page: Some(previous_page),
             ..
         }
-        | BrowserFact::PageReplaced { previous_page, .. }
+        | BrowserFact::NavigationCommitted { previous_page, .. }
         | BrowserFact::TargetCrashed { previous_page }
         | BrowserFact::TargetClosed { previous_page } => Some(previous_page),
         BrowserFact::TargetCreated
         | BrowserFact::TargetMetadataChanged { .. }
         | BrowserFact::NavigationAccepted { .. }
-        | BrowserFact::NavigationCommitted { .. }
         | BrowserFact::NavigationFailed {
             previous_page: None,
             ..
@@ -1583,18 +1543,14 @@ mod tests {
             )
             .expect("exact Page replacement commits");
         let commit_projection = projector
-            .take_navigation_commit_facts(&committed, replacement.current_page())
-            .expect("renderer commit should require the adjacent fact pair");
-        assert_eq!(
-            commit_projection.committed_sequence().get() + 1,
-            commit_projection.replacement_sequence().get()
-        );
+            .take_navigation_commit_fact(&committed, replacement.current_page())
+            .expect("renderer commit should require the atomic commit fact");
         let metadata_projection = projector
             .take_navigation_target_metadata_changed_fact(&committed, replacement.current_page())
             .expect("Target metadata should require the same committed navigation fact batch");
         assert_eq!(
             metadata_projection.envelope().sequence().get(),
-            commit_projection.replacement_sequence().get() + 1
+            commit_projection.sequence().get() + 1
         );
         assert_eq!(metadata_projection.transition().navigation(), &committed);
         assert_eq!(
@@ -1646,8 +1602,8 @@ mod tests {
             )
             .expect("successor Page should commit");
         projector
-            .take_navigation_commit_facts(&navigation, replacement.current_page())
-            .expect("successor commit should project from its exact fact pair");
+            .take_navigation_commit_fact(&navigation, replacement.current_page())
+            .expect("successor commit should project from its exact fact");
         projector
             .take_navigation_target_metadata_changed_fact(&navigation, replacement.current_page())
             .expect("successor metadata should project from the same commit batch");
@@ -1677,8 +1633,8 @@ mod tests {
             )
             .expect("first Page should commit");
         projector
-            .take_navigation_commit_facts(&first, first_replacement.current_page())
-            .expect("first commit pair should project");
+            .take_navigation_commit_fact(&first, first_replacement.current_page())
+            .expect("first commit fact should project");
         assert_eq!(projector.pending_fact_count(), 1);
 
         let second = owner
@@ -1697,8 +1653,8 @@ mod tests {
             )
             .expect("second Page should commit");
         projector
-            .take_navigation_commit_facts(&second, second_replacement.current_page())
-            .expect("second commit pair should project");
+            .take_navigation_commit_fact(&second, second_replacement.current_page())
+            .expect("second commit fact should project");
         let second_metadata = projector
             .take_navigation_target_metadata_changed_fact(
                 &second,
@@ -1746,8 +1702,8 @@ mod tests {
             )
             .expect("successor Page should commit");
         projector
-            .take_navigation_commit_facts(&navigation, replacement.current_page())
-            .expect("successor commit should project its exact fact pair");
+            .take_navigation_commit_fact(&navigation, replacement.current_page())
+            .expect("successor commit should project its exact fact");
         projector
             .take_navigation_target_metadata_changed_fact(&navigation, replacement.current_page())
             .expect("successor metadata should project from the same commit batch");

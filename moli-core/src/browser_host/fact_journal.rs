@@ -51,11 +51,13 @@ pub enum BrowserFact {
     NavigationAccepted {
         navigation: BrowserDocumentNavigation,
     },
-    /// One exact cross-Document request committed its successor Document.
-    /// The envelope carries the committed Page generation. Page topology is
-    /// reported separately by the adjacent `PageReplaced` fact.
+    /// One exact cross-Document request atomically committed its successor
+    /// Document and replaced the Target's previous Page generation. The
+    /// envelope carries the committed successor Page while the payload retains
+    /// the retired source Page.
     NavigationCommitted {
         navigation: BrowserDocumentNavigation,
+        previous_page: PageResidenceIdentity,
     },
     /// One exact accepted request reached a non-commit terminal state. The
     /// envelope carries the Page generation after the terminal transaction.
@@ -69,14 +71,6 @@ pub enum BrowserFact {
     /// One exact accepted navigation became a download and therefore did not
     /// create a successor Document. The current Page remains resident.
     NavigationConvertedToDownload {
-        navigation: BrowserDocumentNavigation,
-    },
-    /// One exact cross-Document request atomically replaced the Target's
-    /// previous Page generation. The envelope's Page residence is the
-    /// committed successor, while this payload retains the retired source and
-    /// protocol-neutral request identity.
-    PageReplaced {
-        previous_page: PageResidenceIdentity,
         navigation: BrowserDocumentNavigation,
     },
     /// One exact Target crash retired its current Page generation while
