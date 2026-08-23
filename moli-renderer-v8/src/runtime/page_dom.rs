@@ -1652,7 +1652,14 @@ impl PageVm {
         pending_call: Option<PendingRuntimeEvaluateCall>,
         remaining: std::time::Duration,
     ) -> Result<PageVmScriptTruthyWaitAdvance> {
-        let evaluation = self.advance_runtime_evaluate(None, expression, pending_call)?;
+        // Match the predicate convention used by browser automation APIs: a
+        // callable result is the predicate, not a truthy value in its own
+        // right. Keeping the invocation inside the evaluated expression also
+        // lets Runtime.evaluate await a Promise returned by the predicate.
+        // The source is evaluated exactly once per polling turn.
+        let predicate_expression = script_truthy_predicate_expression(expression);
+        let evaluation =
+            self.advance_runtime_evaluate(None, &predicate_expression, pending_call)?;
         let evaluation = match evaluation {
             RuntimeEvaluateOutcome::Pending(pending_call) => {
                 return self
@@ -4176,6 +4183,10 @@ fn renderer_geometry_quad(quad: moli_layout::LayoutQuad) -> RendererGeometryQuad
 
 fn rounded_css_integer(value: f32) -> i32 {
     value.round().clamp(i32::MIN as f32, i32::MAX as f32) as i32
+}
+
+fn script_truthy_predicate_expression(expression: &str) -> String {
+    format!("((value) => typeof value === 'function' ? value() : value)(\n(\n{expression}\n)\n)")
 }
 
 fn evaluation_payload_is_truthy(payload: &Value) -> bool {

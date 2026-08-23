@@ -85,9 +85,12 @@ pub struct FetchArgs {
     #[arg(long)]
     pub wait_selector: Option<String>,
 
+    /// Wait until a JavaScript expression is truthy. A function result is
+    /// invoked without arguments as the predicate on each polling turn.
     #[arg(long)]
     pub wait_script: Option<String>,
 
+    /// Read the JavaScript wait expression or function predicate from a file.
     #[arg(long)]
     pub wait_script_file: Option<String>,
 

@@ -1947,7 +1947,7 @@ fn cli_readiness_timeout_identifies_response_selector_and_script_phases() -> Res
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
     let url = server.url("/static");
-    let cases: [(&[&str], &str); 3] = [
+    let cases: [(&[&str], &str); 4] = [
         (
             &["--wait-response-url", "/response-that-never-arrives"],
             "fetch readiness timed out after 350 ms while waiting for a subresource response",
@@ -1958,6 +1958,10 @@ fn cli_readiness_timeout_identifies_response_selector_and_script_phases() -> Res
         ),
         (
             &["--wait-script", "globalThis.scriptThatNeverBecomesTruthy"],
+            "fetch readiness timed out after 350 ms while waiting for a script to become truthy",
+        ),
+        (
+            &["--wait-script", "() => false"],
             "fetch readiness timed out after 350 ms while waiting for a script to become truthy",
         ),
     ];

@@ -2779,6 +2779,59 @@ async fn wait_for_script_truthy_awaits_promise_result() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn wait_for_script_truthy_invokes_function_predicate_each_poll() -> Result<()> {
+    let server = FixtureServer::spawn().await?;
+    let browser = Browser::new(AppConfig::default())?;
+
+    let mut page = browser
+        .fetch_with_wait_until(
+            &server.url("/static"),
+            RenderedDomWaitUntil::Load,
+            Duration::from_secs(5),
+        )
+        .await?;
+
+    page.evaluate_runtime_expression_async("globalThis.__waitPredicateCalls = 0")
+        .await?;
+    browser
+        .wait_for_script_truthy(
+            &mut page,
+            "globalThis.__waitPredicateCalls += 1, globalThis.__waitPredicateCalls >= 2",
+            Duration::from_secs(2),
+        )
+        .await?;
+    let expression_calls = page
+        .evaluate_runtime_expression_async("globalThis.__waitPredicateCalls")
+        .await?["value"]
+        .as_f64()
+        .expect("expression call count should be numeric");
+    assert!(
+        expression_calls >= 2.0,
+        "comma expression changed meaning inside the predicate wrapper: {expression_calls}"
+    );
+
+    page.evaluate_runtime_expression_async("globalThis.__waitPredicateCalls = 0")
+        .await?;
+    browser
+        .wait_for_script_truthy(
+            &mut page,
+            "() => ++globalThis.__waitPredicateCalls >= 2",
+            Duration::from_secs(2),
+        )
+        .await?;
+
+    let calls = page
+        .evaluate_runtime_expression_async("globalThis.__waitPredicateCalls")
+        .await?["value"]
+        .as_f64()
+        .expect("predicate call count should be numeric");
+    assert!(calls >= 2.0, "function predicate was not polled: {calls}");
+
+    server.shutdown().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn wait_for_script_truthy_wakes_after_async_wasm_compile_tasks() -> Result<()> {
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
@@ -2819,7 +2872,8 @@ async fn wait_for_script_truthy_wakes_after_async_wasm_compile_tasks() -> Result
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn wait_for_script_truthy_times_out_for_false_predicate() -> Result<()> {
+async fn wait_for_script_truthy_times_out_for_false_expression_and_function_predicate() -> Result<()>
+{
     let server = FixtureServer::spawn().await?;
     let browser = Browser::new(AppConfig::default())?;
 
@@ -2831,15 +2885,18 @@ async fn wait_for_script_truthy_times_out_for_false_predicate() -> Result<()> {
         )
         .await?;
 
-    let error = browser
-        .wait_for_script_truthy(&mut page, "false", Duration::from_millis(150))
-        .await
-        .unwrap_err();
-    assert!(
-        error
-            .to_string()
-            .contains("timed out waiting for script to become truthy")
-    );
+    for predicate in ["false", "() => false", "async () => false"] {
+        let error = browser
+            .wait_for_script_truthy(&mut page, predicate, Duration::from_millis(150))
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("timed out waiting for script to become truthy"),
+            "unexpected error for `{predicate}`: {error:#}"
+        );
+    }
 
     server.shutdown().await;
     Ok(())

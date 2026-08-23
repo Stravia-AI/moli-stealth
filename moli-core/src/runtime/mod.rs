@@ -684,6 +684,9 @@ impl Browser {
             .await
     }
 
+    /// Waits until `expression` is truthy. When it evaluates to a function,
+    /// the function is invoked without arguments as the predicate on each
+    /// polling turn; a returned Promise is awaited.
     pub async fn wait_for_script_truthy(
         &self,
         page: &mut Page,
@@ -695,7 +698,8 @@ impl Browser {
     }
 
     /// Waits for a truthy script result using the unspent portion of
-    /// `deadline`.
+    /// `deadline`. Function results are invoked as zero-argument predicates,
+    /// and returned Promises are awaited.
     pub async fn wait_for_script_truthy_with_deadline(
         &self,
         page: &mut Page,
