@@ -15,6 +15,26 @@ fn finds_meta_charset() {
 }
 
 #[test]
+fn encoding_labels_allow_only_ascii_whitespace() {
+    for whitespace in [b'\t', b'\n', b'\x0C', b'\r', b' '] {
+        let input = [
+            br#"<meta charset=""#.as_slice(),
+            &[whitespace],
+            b"gbk",
+            &[whitespace],
+            br#"">"#.as_slice(),
+        ]
+        .concat();
+        assert_eq!(sniff_html_meta_charset(&input), Some(encoding_rs::GBK));
+    }
+
+    assert_eq!(
+        sniff_html_meta_charset(b"<meta charset=\"\xA0gbk\xA0\">"),
+        None
+    );
+}
+
+#[test]
 fn ignores_tag_name_prefixes_and_script_text() {
     assert_eq!(
         sniff_html_meta_charset(br#"<metadata charset="gbk"><meta charset="utf-8">"#)

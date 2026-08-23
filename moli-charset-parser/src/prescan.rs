@@ -186,7 +186,7 @@ fn html_token_attr_value(tag: &Tag, name: &str) -> Option<String> {
 }
 
 fn encoding_for_label(label: String) -> Option<&'static Encoding> {
-    Encoding::for_label(label.trim().as_bytes()).map(prescan_charset_override)
+    Encoding::for_label(label.as_bytes()).map(prescan_charset_override)
 }
 
 /// Applies the two charset rewrites the prescan performs before returning a
