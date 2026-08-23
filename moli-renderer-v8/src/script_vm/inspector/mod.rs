@@ -322,6 +322,7 @@ impl DocumentInspectorBinding {
         default_context: v8::Global<v8::Context>,
         registered_context: v8::Global<v8::Context>,
         final_url: &Url,
+        document_origin: &str,
         root_frame_id: Option<&str>,
     ) {
         self.agent.assert_isolate_backend(backend);
@@ -339,7 +340,7 @@ impl DocumentInspectorBinding {
         }
         let aux_data = serde_json::to_string(&Value::Object(aux_data))
             .expect("default execution context aux data should serialize");
-        let origin = inspector_execution_context_origin(final_url);
+        let origin = inspector_execution_context_origin(document_origin);
         let context_unique_id = backend.context_created_with_unique_id(
             context,
             context_group_id,
@@ -471,7 +472,8 @@ impl DocumentInspectorBinding {
             "frameId": frame_id,
         }))?;
         let context_group_id = self.agent.context_group_id();
-        let origin = inspector_execution_context_origin(document_url);
+        let document_origin = moli_url::origin_ascii_serialization(document_url);
+        let origin = inspector_execution_context_origin(&document_origin);
         let context_unique_id = backend.context_created_with_unique_id(
             context,
             context_group_id,
@@ -539,12 +541,11 @@ impl DocumentInspectorBinding {
     }
 }
 
-fn inspector_execution_context_origin(url: &Url) -> String {
-    let origin = moli_url::origin_ascii_serialization(url);
-    if origin == "null" {
+fn inspector_execution_context_origin(document_origin: &str) -> String {
+    if document_origin == "null" {
         "://".to_owned()
     } else {
-        origin
+        document_origin.to_owned()
     }
 }
 

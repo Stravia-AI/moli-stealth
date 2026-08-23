@@ -145,6 +145,26 @@ pub(super) fn reserve_renderer_document_isolate_on_bound_owner_local_store(
     })
 }
 
+pub(crate) fn stage_related_initial_empty_page_on_bound_owner_local_store(
+    owner: &RendererOwnerLocalContext,
+    scope: &mut v8::PinScope<'_, '_>,
+    pending: RendererPendingAuxiliaryPage,
+    source_environment: &RendererPageScriptEnvironment,
+    source_bridge_bindings: &crate::native_bridge::bindings::NativeBridgeBindings,
+    init: RendererRelatedInitialEmptyPageRealmInit,
+) -> Result<()> {
+    with_bound_render_runtime_owner_local_store_session(|session| {
+        session.store.stage_related_initial_empty_page_for_owner(
+            owner,
+            scope,
+            pending,
+            source_environment,
+            source_bridge_bindings,
+            init,
+        )
+    })
+}
+
 pub(super) fn remove_reserved_renderer_document_isolate_on_bound_owner_local_store(
     token: RendererPageToken,
     reservation_id: u64,
@@ -481,6 +501,66 @@ pub(in crate::runtime) async fn begin_post_parse_lifecycle_on_entry_via_local_ta
     .await
 }
 
+pub(in crate::runtime) async fn begin_prepared_document_replacement_on_entry_via_local_task(
+    local_executor: JsLocalExecutor,
+    entry: LivePageEntry,
+    bootstrap: RendererDocumentIsolateBootstrap,
+    reservation: RendererDocumentIsolateReservation,
+) -> (
+    LivePageEntry,
+    Result<(
+        PageVmRuntimeHooks,
+        crate::page_task_queue::RendererTopLevelNavigationHandoff,
+    )>,
+) {
+    run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
+        Box::pin(async move {
+            entry.retire_document_lifecycle_turn();
+            entry
+                .page_vm_mut()
+                .begin_prepared_document_replacement(bootstrap, reservation)
+        })
+    })
+    .await
+}
+
+pub(in crate::runtime) async fn install_prepared_replacement_page_vm_on_entry_via_local_task(
+    local_executor: JsLocalExecutor,
+    entry: LivePageEntry,
+    page_vm: PageVm,
+    navigation_handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
+    metadata: PreparedReplacementDocumentMetadata,
+) -> (LivePageEntry, Result<PublishedReplacementDocument>) {
+    run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
+        Box::pin(async move {
+            entry.install_prepared_replacement_page_vm(page_vm, navigation_handoff, metadata)
+        })
+    })
+    .await
+}
+
+pub(in crate::runtime) async fn install_prepared_replacement_pending_phase_one_on_entry_via_local_task(
+    local_executor: JsLocalExecutor,
+    entry: LivePageEntry,
+    pending: PageVmPendingPhaseOneNavigation,
+    navigation_handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
+    metadata: PreparedReplacementDocumentMetadata,
+) -> (
+    LivePageEntry,
+    Result<(RendererPageToken, PublishedReplacementDocument)>,
+) {
+    run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
+        Box::pin(async move {
+            entry.install_prepared_replacement_pending_phase_one(
+                pending,
+                navigation_handoff,
+                metadata,
+            )
+        })
+    })
+    .await
+}
+
 pub(in crate::runtime) async fn commit_page_state_on_entry_via_local_task(
     local_executor: JsLocalExecutor,
     entry: LivePageEntry,
@@ -505,6 +585,53 @@ pub(in crate::runtime) async fn commit_page_state_on_entry_via_local_task_with_p
                 capture_policy,
             )
             .map_err(|error| anyhow!("failed to refresh renderer owner page view: {error}"))
+        })
+    })
+    .await
+}
+
+pub(in crate::runtime) async fn finalize_prepared_page_replacement_on_entry_via_local_task(
+    local_executor: JsLocalExecutor,
+    token: RendererPageToken,
+    entry: LivePageEntry,
+) -> (
+    LivePageEntry,
+    Result<(
+        RendererPageReplacementCommit,
+        Option<RendererOutputPublication>,
+    )>,
+) {
+    run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
+        Box::pin(async move {
+            let page_state = RendererOwnerLocalStore::commit_current_vm_page_state_on_entry(entry)?;
+            let initial_runtime_realms = entry.page_vm_mut().vm_mut().runtime_realm_inventory();
+            let renderer_devtools_agent_token = entry.page_vm().devtools_agent_token();
+            let javascript_dialog_broker = entry.page_vm().javascript_dialog_broker();
+            let devtools_target = entry.page_vm().devtools_target();
+            let creation_artifacts = entry.page_vm_mut().take_page_creation_artifacts();
+            let renderer_output = entry.page_vm_mut().settle_renderer_output_publication();
+            let renderer_output_predecessor = entry
+                .page_vm()
+                .renderer_output_tail_cursor()
+                .map(|cursor| entry.page_vm().declare_renderer_output_fence(cursor));
+            Ok((
+                RendererPageReplacementCommit {
+                    local_host_id: token.local_host_id,
+                    page_id: token.page_id,
+                    renderer_devtools_agent_token,
+                    javascript_dialog_broker,
+                    devtools_target,
+                    page_state,
+                    creation_diagnostics: RendererPageCreationDiagnostics {
+                        initial_runtime_realms,
+                        renderer_output_predecessor,
+                        document_continuation_observer: None,
+                    },
+                    creation_artifacts,
+                    pending_download: None,
+                },
+                renderer_output,
+            ))
         })
     })
     .await

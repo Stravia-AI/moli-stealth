@@ -9,12 +9,12 @@ use super::owner_local_store::{
     LivePageNavigationFailureRecipient, LivePageNavigationFollowEntryAdvance,
     LivePageNavigationFollowOutcome, LivePageNavigationFollowTurn,
     LivePagePendingNavigationCompletion, LivePagePendingNavigationPhaseOneAdvance,
-    NavigationReplyPolicy, PendingPhaseOneEntryAdvance, RendererDisplacedOrdinaryTurn,
-    RendererDocumentIsolateAllocator, RendererDocumentIsolateReservation,
-    RendererOwnerLocalContext, RendererOwnerLocalStore, RendererPageCommandDispatch,
-    RendererPageCreationResolution, RendererPageScheduledTurn, RendererPageToken,
-    RendererPageTurnAdmission, RendererPageTurnCheckoutError, RendererPendingPageCreation,
-    RendererPreparedDocumentResidence, RetiringPageEntry,
+    NavigationReplyPolicy, PendingPhaseOneEntryAdvance, PreparedReplacementDocumentMetadata,
+    RendererDisplacedOrdinaryTurn, RendererDocumentIsolateAllocator,
+    RendererDocumentIsolateReservation, RendererOwnerLocalContext, RendererOwnerLocalStore,
+    RendererPageCommandDispatch, RendererPageCreationResolution, RendererPageScheduledTurn,
+    RendererPageToken, RendererPageTurnAdmission, RendererPageTurnCheckoutError,
+    RendererPendingPageCreation, RendererPreparedDocumentResidence, RetiringPageEntry,
     advance_document_lifecycle_one_page_turn_via_local_task,
     advance_dom_stable_wait_turn_on_entry_via_local_task,
     advance_network_idle_wait_turn_on_entry_via_local_task,
@@ -25,7 +25,9 @@ use super::owner_local_store::{
     advance_script_truthy_wait_turn_on_entry_via_local_task,
     advance_selector_wait_turn_on_entry_via_local_task,
     advance_subresource_response_wait_turn_on_entry_via_local_task,
-    begin_post_parse_lifecycle_on_entry_via_local_task, bind_render_runtime_owner_local_store,
+    begin_post_parse_lifecycle_on_entry_via_local_task,
+    begin_prepared_document_replacement_on_entry_via_local_task,
+    bind_render_runtime_owner_local_store,
     checkout_entry_for_owner_turn_on_bound_owner_local_store,
     checkout_scheduled_page_turn_on_bound_owner_local_store,
     claim_due_owner_maintenance_task_on_bound_owner_local_store,
@@ -33,9 +35,12 @@ use super::owner_local_store::{
     commit_page_state_on_entry_via_local_task_with_policy,
     dispatch_async_command_on_entry_via_local_task,
     finalize_pending_page_creation_on_bound_owner_local_store,
+    finalize_prepared_page_replacement_on_entry_via_local_task,
     follow_pending_location_navigation_one_turn_on_entry_via_local_task,
     has_pending_document_lifecycle_turn_on_entry, install_page_vm_on_bound_owner_local_store,
     install_phase_one_blocked_page_on_bound_owner_local_store,
+    install_prepared_replacement_page_vm_on_entry_via_local_task,
+    install_prepared_replacement_pending_phase_one_on_entry_via_local_task,
     next_owner_maintenance_deadline_on_bound_owner_local_store,
     next_page_task_deadline_on_bound_owner_local_store, observe_document_lifecycle_on_entry,
     owner_local_store_session, page_turn_readiness_after_restore_on_bound_owner_local_store,
@@ -221,6 +226,9 @@ pub struct RendererCreateStreamingRawPageRequest {
 
 pub enum RendererOwnerCommand {
     CreateHtmlPage(RendererCreateHtmlPageRequest),
+    ReserveLivePageReplacement {
+        token: RendererPageToken,
+    },
     PrepareStreamingRawDocument {
         token: RendererPageReservationToken,
         request: RendererCreateStreamingRawPageRequest,
@@ -230,6 +238,9 @@ pub enum RendererOwnerCommand {
         configuration: RendererPreparedDocumentCommitConfiguration,
     },
     CommitPreparedRendererDocument {
+        permit: RendererDocumentCommitPermit,
+    },
+    CommitPreparedRendererPageReplacement {
         permit: RendererDocumentCommitPermit,
     },
     CancelPreparedRendererDocument {
@@ -291,11 +302,13 @@ pub enum RendererOwnerCommand {
 
 pub enum RendererOwnerReply {
     PageCreated(Box<RendererAttachedPage>),
+    LivePageReplacementReserved(RendererPageReservationToken),
     PreparedRendererDocumentStored {
         renderer_devtools_agent_token: RendererDevToolsAgentToken,
     },
     PreparedRendererDocumentCommitConfigurationUpdated,
     PreparedRendererDocumentCanceled,
+    PageReplacementCommitted(Box<RendererPageReplacementCommit>),
     AsyncPageCommandRan(Box<RendererCommandTurnOutput>),
     RuntimeInspectorSessionResponseSettled {
         output: Box<RendererCommandTurnOutput>,
@@ -325,6 +338,10 @@ enum RenderRuntimeDispatchOutcome {
     PageCreatedAndContinueNavigation {
         page: Box<RendererAttachedPage>,
         continuation: RenderRuntimePageCreationContinuation,
+    },
+    ReplyAndContinueNavigation {
+        reply: Box<RendererOwnerReply>,
+        turn: Box<RenderRuntimeTurn>,
     },
     BackgroundComplete(Result<()>),
     PageCreationNavigationFailurePublished {
@@ -379,6 +396,17 @@ impl RenderRuntimePageCreationContinuation {
         }
     }
 
+    fn install_document_continuation_publisher(
+        &mut self,
+        publisher: RendererDocumentContinuationPublisher,
+    ) -> bool {
+        match self {
+            Self::NextTurn(turn) | Self::AfterCommittedDocumentResponse { turn, .. } => {
+                turn.install_document_continuation_publisher(publisher)
+            }
+        }
+    }
+
     fn requires_committed_document_response_release(&self) -> bool {
         matches!(self, Self::AfterCommittedDocumentResponse { .. })
     }
@@ -386,6 +414,7 @@ impl RenderRuntimePageCreationContinuation {
 
 enum LivePageNavigationFailureDisposition {
     ReturnToInitiator(anyhow::Error),
+    ReturnPageReplacementToInitiator(anyhow::Error),
     PublishToPageCreation(PageNavigationOwnerFailure),
     ReportBackground(PageNavigationOwnerFailure),
 }
@@ -393,7 +422,9 @@ enum LivePageNavigationFailureDisposition {
 impl std::fmt::Display for LivePageNavigationFailureDisposition {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ReturnToInitiator(error) => std::fmt::Display::fmt(error, f),
+            Self::ReturnToInitiator(error) | Self::ReturnPageReplacementToInitiator(error) => {
+                std::fmt::Display::fmt(error, f)
+            }
             Self::PublishToPageCreation(failure) | Self::ReportBackground(failure) => {
                 std::fmt::Display::fmt(failure, f)
             }
@@ -410,7 +441,9 @@ impl LivePageNavigationFailureDisposition {
             Self::PublishToPageCreation(failure) => Some(
                 publish_page_navigation_failure_on_bound_owner_local_store(token, *failure),
             ),
-            Self::ReturnToInitiator(_) | Self::ReportBackground(_) => None,
+            Self::ReturnToInitiator(_)
+            | Self::ReturnPageReplacementToInitiator(_)
+            | Self::ReportBackground(_) => None,
         }
     }
 
@@ -441,11 +474,24 @@ impl LivePageNavigationFailureDisposition {
                     Err(error) => RenderRuntimeDispatchOutcome::BackgroundComplete(Err(error)),
                 }
             }
-            Self::ReturnToInitiator(error) => Err(error).into(),
+            Self::ReturnToInitiator(error) | Self::ReturnPageReplacementToInitiator(error) => {
+                Err(error).into()
+            }
             Self::ReportBackground(failure) => {
                 RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(failure.to_string())))
             }
         }
+    }
+}
+
+fn live_page_navigation_initiator_failure(
+    completion: &LivePagePendingNavigationCompletion,
+    error: anyhow::Error,
+) -> LivePageNavigationFailureDisposition {
+    if completion.is_prepared_page_replacement_commit() {
+        LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error)
+    } else {
+        LivePageNavigationFailureDisposition::ReturnToInitiator(error)
     }
 }
 
@@ -643,6 +689,36 @@ fn checked_live_page_wait_deadline(timeout_ms: u64, operation: &str) -> Result<I
         .ok_or_else(|| anyhow!("{operation} timeout is too large"))
 }
 
+struct PreparedPageReplacementTarget {
+    token: RendererPageToken,
+    entry: LivePageEntry,
+    runtime_hooks: PageVmRuntimeHooks,
+    navigation_handoff: RendererTopLevelNavigationHandoff,
+}
+
+struct PreparedPageReplacementInstallation {
+    token: RendererPageToken,
+    entry: LivePageEntry,
+    navigation_handoff: RendererTopLevelNavigationHandoff,
+}
+
+#[derive(Clone, Copy)]
+enum PreparedPageReplacementAfterRestore {
+    None,
+    SignalPendingPhaseOne { wake_token: RendererPageToken },
+}
+
+struct PreparedInitialPageTarget {
+    isolate_allocator: RendererDocumentIsolateAllocator,
+    isolate_bootstrap: RendererDocumentIsolateBootstrap,
+    isolate_reservation: RendererDocumentIsolateReservation,
+}
+
+enum PreparedDocumentCommitTarget {
+    InitialPage(Box<PreparedInitialPageTarget>),
+    PageReplacement(Box<PreparedPageReplacementTarget>),
+}
+
 enum RenderRuntimeTurn {
     FinishHtmlCreatePage {
         requested_url: Url,
@@ -773,6 +849,15 @@ enum RenderRuntimeTurn {
         follow_count: usize,
         completion: LivePagePendingNavigationCompletion,
     },
+    BeginLivePageNavigationPostParseLifecycle {
+        token: RendererPageToken,
+        page_tasks: Vec<PostParsePageOwnedWork>,
+        stage: PageVmInitStage,
+        started: Instant,
+        target_stage: PageVmInitStage,
+        follow_count: usize,
+        completion: LivePagePendingNavigationCompletion,
+    },
     ContinueLivePageNavigationPostParseLifecycle {
         token: RendererPageToken,
         document: RendererDocumentLifecycleIdentity,
@@ -788,6 +873,33 @@ impl RenderRuntimeTurn {
             self,
             Self::DrainSharedWorkerServiceLane | Self::DrainServiceWorkerServiceLane
         )
+    }
+
+    /// A committed parser residence may yield because its next author-script
+    /// task was published, not because parsing is externally blocked. Keep
+    /// that exact navigation continuation ahead of ordinary commands until
+    /// phase one either finishes or parks on a real source wait. Inspector
+    /// pause commands use the isolate bridge and do not depend on this queue.
+    fn must_precede_ready_command(&self) -> bool {
+        matches!(
+            self,
+            Self::ContinueLivePagePendingLocationNavigationPhaseOne { .. }
+        )
+    }
+
+    fn install_document_continuation_publisher(
+        &mut self,
+        publisher: super::RendererDocumentContinuationPublisher,
+    ) -> bool {
+        match self {
+            Self::FollowLivePagePendingLocationNavigation { completion, .. }
+            | Self::ContinueLivePagePendingLocationNavigationPhaseOne { completion, .. }
+            | Self::BeginLivePageNavigationPostParseLifecycle { completion, .. }
+            | Self::ContinueLivePageNavigationPostParseLifecycle { completion, .. } => {
+                completion.install_document_continuation_publisher(publisher)
+            }
+            _ => false,
+        }
     }
 
     /// Return the Page whose committed view this host-facing command needs.
@@ -876,6 +988,29 @@ impl RenderRuntimeTurn {
                 (
                     Self::ContinueLivePagePendingLocationNavigationPhaseOne {
                         token,
+                        follow_count,
+                        completion,
+                    },
+                    detached,
+                )
+            }
+            Self::BeginLivePageNavigationPostParseLifecycle {
+                token,
+                page_tasks,
+                stage,
+                started,
+                target_stage,
+                follow_count,
+                completion,
+            } => {
+                let (completion, detached) = completion.detach_command_observer();
+                (
+                    Self::BeginLivePageNavigationPostParseLifecycle {
+                        token,
+                        page_tasks,
+                        stage,
+                        started,
+                        target_stage,
                         follow_count,
                         completion,
                     },
@@ -1415,6 +1550,7 @@ impl RendererOwnerHandle {
                             completion:
                                 LivePagePendingNavigationCompletion::PublishedPageCreation {
                                     navigation_reply_policy,
+                                    document_continuation_publisher: None,
                                 },
                         },
                     ),
@@ -1504,6 +1640,7 @@ impl RendererOwnerHandle {
                         follow_count: 0,
                         completion: LivePagePendingNavigationCompletion::PublishedPageCreation {
                             navigation_reply_policy,
+                            document_continuation_publisher: None,
                         },
                     },
                 ),
@@ -1591,9 +1728,15 @@ impl RendererOwnerHandle {
     async fn publish_pending_page_creation_and_continue(
         &self,
         pending: RendererPendingPageCreation,
-        continuation: RenderRuntimePageCreationContinuation,
+        mut continuation: RenderRuntimePageCreationContinuation,
     ) -> RenderRuntimeDispatchOutcome {
         let token = pending.token;
+        let (continuation_publisher, continuation_observer) =
+            super::renderer_document_continuation_channel();
+        assert!(
+            continuation.install_document_continuation_publisher(continuation_publisher),
+            "a DocumentCommit page-creation continuation must own its typed completion publisher"
+        );
         if matches!(
             continuation.turn(),
             RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
@@ -1612,10 +1755,15 @@ impl RendererOwnerHandle {
             .finalize_pending_page_creation_on_owner_lane(pending)
             .await
         {
-            Ok(attached_page) => RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
-                page: Box::new(attached_page),
-                continuation,
-            },
+            Ok(mut attached_page) => {
+                attached_page
+                    .creation_diagnostics
+                    .document_continuation_observer = Some(continuation_observer);
+                RenderRuntimeDispatchOutcome::PageCreatedAndContinueNavigation {
+                    page: Box::new(attached_page),
+                    continuation,
+                }
+            }
             Err(error) => self.retire_failed_page_creation(token, error).await,
         }
     }
@@ -1694,7 +1842,7 @@ impl RendererOwnerHandle {
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
         follow_count: usize,
-        completion: LivePagePendingNavigationCompletion,
+        mut completion: LivePagePendingNavigationCompletion,
     ) -> RenderRuntimeDispatchOutcome {
         let retire_page_on_failure = completion.retires_page_on_navigation_failure();
         let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
@@ -1722,7 +1870,12 @@ impl RendererOwnerHandle {
                     completion,
                 ),
             DocumentLifecycleObserverOutcome::Pending => {
-                self.restore_live_page_entry(token, entry);
+                self.restore_live_page_entry_and_settle_document_continuation(
+                    token,
+                    entry,
+                    &mut completion,
+                )
+                .await;
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
@@ -1737,7 +1890,12 @@ impl RendererOwnerHandle {
                 }
             }
             DocumentLifecycleObserverOutcome::DocumentReplaced { document } => {
-                self.restore_live_page_entry(token, entry);
+                self.restore_live_page_entry_and_settle_document_continuation(
+                    token,
+                    entry,
+                    &mut completion,
+                )
+                .await;
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
@@ -1919,12 +2077,13 @@ impl RendererOwnerHandle {
     }
 
     /// Completes the protocol-side owner reservation after renderer bootstrap
-    /// has either opened its concrete stream or failed before doing so.
+    /// has either established its output residence or failed before doing so.
     ///
-    /// The journal and this marker share one FIFO transport. Protocol therefore
-    /// observes `Opened` before this release on success, while an early failure
-    /// produces only the release. Never move this to the navigation completion
-    /// channel: that independent channel cannot order against stream opening.
+    /// Initial Page creation opens a concrete stream before this marker. A
+    /// same-Page replacement reuses the already-open stable Page stream. Never
+    /// move this to the navigation completion channel: that independent
+    /// channel cannot order against initial stream opening or replacement
+    /// validation.
     fn release_page_output_reservation(&self, reservation: RendererPageReservationToken) {
         if let Some(sender) = self
             .state
@@ -2398,6 +2557,12 @@ impl RendererOwnerHandle {
                 self.release_page_output_reservation(reservation);
                 outcome
             }
+            RendererOwnerCommand::ReserveLivePageReplacement { token } => {
+                owner_local_store_session(owner_local_store)
+                    .reserve_live_page_replacement(token)
+                    .map(RendererOwnerReply::LivePageReplacementReserved)
+                    .into()
+            }
             RendererOwnerCommand::PrepareStreamingRawDocument { token, request } => {
                 let outcome = self
                     .prepare_renderer_document_on_owner_local_store(
@@ -2440,16 +2605,60 @@ impl RendererOwnerHandle {
                     ))
                     .into();
                 }
+                if matches!(
+                    token.script_agent_admission(),
+                    RendererScriptAgentAdmission::ExistingPageReplacement { .. }
+                ) {
+                    owner_local_store.cancel_prepared_document(token);
+                    return Err(anyhow!(
+                        "prepared live Page replacement commit is not installed yet"
+                    ))
+                    .into();
+                }
                 match owner_local_store.take_prepared_document(token) {
                     Ok(residence) => {
                         self.create_page_reply_from_prepared_document_on_owner_local_store(
                             token.page_id(),
                             residence,
-                            owner_local_store,
                         )
                         .await
                     }
                     Err(error) => Err(error).into(),
+                }
+            }
+            RendererOwnerCommand::CommitPreparedRendererPageReplacement { permit } => {
+                let token = permit.prepared_document();
+                if token.local_host_id() != self.state.owner_local_host_id {
+                    return Err(anyhow!(
+                        "prepared Page replacement permit belongs to renderer owner {}, not {}",
+                        token.local_host_id().as_u64(),
+                        self.state.owner_local_host_id.as_u64()
+                    ))
+                    .into();
+                }
+                let RendererScriptAgentAdmission::ExistingPageReplacement {
+                    expected_vm_creation_id,
+                    ..
+                } = token.script_agent_admission()
+                else {
+                    owner_local_store.cancel_prepared_document(token);
+                    return Err(anyhow::Error::new(
+                        RendererPageReplacementCommitError::page_preserved(anyhow!(
+                            "prepared initial Document cannot commit as a live Page replacement"
+                        )),
+                    ))
+                    .into();
+                };
+                match owner_local_store.take_current_prepared_page_replacement(token) {
+                    Ok(residence) => {
+                        self.commit_prepared_page_replacement_on_owner_local_store(
+                            token,
+                            expected_vm_creation_id,
+                            residence,
+                        )
+                        .await
+                    }
+                    Err(error) => Err(anyhow::Error::new(error)).into(),
                 }
             }
             RendererOwnerCommand::CancelPreparedRendererDocument { token } => {
@@ -2903,6 +3112,34 @@ impl RendererOwnerHandle {
                                 }
                             }
                         }
+                        RenderRuntimeDispatchOutcome::ReplyAndContinueNavigation {
+                            reply,
+                            turn,
+                        } => match pending_turn.reply_tx {
+                            Some(reply_tx) => {
+                                if reply_tx.send(Ok(*reply)).is_ok() {
+                                    pending_turns.push_back(RenderRuntimePendingTurn {
+                                        reply_tx: None,
+                                        turn: *turn,
+                                        allow_command_overtake: false,
+                                        command_admission_output_predecessor: None,
+                                    });
+                                } else {
+                                    self.detach_navigation_or_cancel_pending_turn(
+                                        *turn,
+                                        &mut pending_turns,
+                                    );
+                                }
+                            }
+                            None => {
+                                pending_turns.push_back(RenderRuntimePendingTurn {
+                                    reply_tx: None,
+                                    turn: *turn,
+                                    allow_command_overtake: false,
+                                    command_admission_output_predecessor: None,
+                                });
+                            }
+                        },
                         RenderRuntimeDispatchOutcome::BackgroundComplete(result)
                         | RenderRuntimeDispatchOutcome::PageTurnComplete { result, .. } => {
                             if let Some(reply_tx) = pending_turn.reply_tx {
@@ -2949,10 +3186,11 @@ impl RendererOwnerHandle {
                                     &mut pending_turns,
                                 );
                             } else {
+                                let allow_command_overtake = !turn.must_precede_ready_command();
                                 pending_turns.push_back(RenderRuntimePendingTurn {
                                     reply_tx: pending_turn.reply_tx,
                                     turn: *turn,
-                                    allow_command_overtake: true,
+                                    allow_command_overtake,
                                     command_admission_output_predecessor: pending_turn
                                         .command_admission_output_predecessor
                                         .take(),
@@ -3224,6 +3462,18 @@ impl RendererOwnerHandle {
                     remove_page_on_bound_owner_local_store(token);
                 }
             }
+            RenderRuntimeDispatchOutcome::ReplyAndContinueNavigation { reply, turn } => {
+                if reply_tx.send(Ok(*reply)).is_ok() {
+                    pending_turns.push_back(RenderRuntimePendingTurn {
+                        reply_tx: None,
+                        turn: *turn,
+                        allow_command_overtake: false,
+                        command_admission_output_predecessor: None,
+                    });
+                } else {
+                    self.detach_navigation_or_cancel_pending_turn(*turn, pending_turns);
+                }
+            }
             RenderRuntimeDispatchOutcome::BackgroundComplete(result)
             | RenderRuntimeDispatchOutcome::PageTurnComplete { result, .. } => {
                 let reply = match result {
@@ -3321,7 +3571,8 @@ impl RendererOwnerHandle {
                 drop(page);
                 self.cancel_pending_turn_on_owner_local_store(continuation.into_turn());
             }
-            RenderRuntimeDispatchOutcome::ContinueNextTurn(turn)
+            RenderRuntimeDispatchOutcome::ReplyAndContinueNavigation { turn, .. }
+            | RenderRuntimeDispatchOutcome::ContinueNextTurn(turn)
             | RenderRuntimeDispatchOutcome::ContinueAfterPageWakeOrDeadline { turn, .. }
             | RenderRuntimeDispatchOutcome::ContinueAfterPageWake { turn, .. }
             | RenderRuntimeDispatchOutcome::ContinueCommittedDocumentParserAfterPageWake {
@@ -3366,15 +3617,53 @@ impl RendererOwnerHandle {
         }
     }
 
-    fn restore_live_page_entry(&self, token: RendererPageToken, mut entry: LivePageEntry) {
+    fn restore_live_page_entry(&self, token: RendererPageToken, entry: LivePageEntry) {
+        let _ = self.restore_live_page_entry_with_output_fence(token, entry);
+    }
+
+    fn restore_live_page_entry_with_output_fence(
+        &self,
+        token: RendererPageToken,
+        mut entry: LivePageEntry,
+    ) -> Option<RendererOutputFence> {
         // Freeze this owner turn before making the Page resident again. The
         // concrete publication is already source-bound, so a later lifecycle
         // turn never needs to rescan or publish output on this turn's behalf.
-        let output = entry.page_vm_mut().settle_renderer_output_publication();
+        let output = entry
+            .active_page_vm()
+            .is_some_and(PageVm::has_live_script_vm)
+            .then(|| entry.page_vm_mut().settle_renderer_output_publication())
+            .flatten();
+        // A DocumentCommit continuation can span several admitted owner
+        // turns. Earlier turns may already have settled Runtime/lifecycle
+        // output, so the terminal fence must cover the complete Page stream
+        // tail rather than only the optional batch settled by this turn.
+        let output_fence = entry
+            .page_vm()
+            .renderer_output_tail_cursor()
+            .map(|cursor| entry.page_vm().declare_renderer_output_fence(cursor));
         restore_entry_after_command_on_bound_owner_local_store(token, entry);
         if let Some(output) = output {
             self.publish_renderer_output(output);
         }
+        output_fence
+    }
+
+    async fn restore_live_page_entry_and_settle_document_continuation(
+        &self,
+        token: RendererPageToken,
+        entry: LivePageEntry,
+        completion: &mut LivePagePendingNavigationCompletion,
+    ) {
+        let Some(publisher) = completion.take_document_continuation_publisher() else {
+            self.restore_live_page_entry(token, entry);
+            return;
+        };
+        let (entry, page_state_result) =
+            commit_page_state_on_entry_via_local_task(self.state.local_executor.clone(), entry)
+                .await;
+        let output_fence = self.restore_live_page_entry_with_output_fence(token, entry);
+        publisher.settle(output_fence, page_state_result.ok());
     }
 
     fn retire_pending_phase_one_page_entry(
@@ -3477,7 +3766,41 @@ impl RendererOwnerHandle {
         }
         entry.settle_standalone_navigation_follow(false);
         self.restore_live_page_entry(token, entry);
-        disposition.into_dispatch_outcome(token, page_creation_publication)
+        match disposition {
+            LivePageNavigationFailureDisposition::PublishToPageCreation(failure) => {
+                match page_creation_publication
+                    .expect("Page-creation failure disposition must publish before retirement")
+                {
+                    Ok(PageCreationNavigationFailurePublication::Recorded) => {
+                        RenderRuntimeDispatchOutcome::PageCreationNavigationFailurePublished {
+                            token,
+                            failure,
+                        }
+                    }
+                    Ok(PageCreationNavigationFailurePublication::AlreadyRecorded) => {
+                        RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()))
+                    }
+                    Ok(PageCreationNavigationFailurePublication::NoActiveCreationObserver) => {
+                        RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(
+                            "unobserved background navigation failure: {failure}"
+                        )))
+                    }
+                    Err(error) => RenderRuntimeDispatchOutcome::BackgroundComplete(Err(error)),
+                }
+            }
+            LivePageNavigationFailureDisposition::ReturnToInitiator(error) => Err(error).into(),
+            LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error) => {
+                let error = if should_retire_page || had_uncommitted_page_vm {
+                    RendererPageReplacementCommitError::page_retired(error)
+                } else {
+                    RendererPageReplacementCommitError::page_preserved(error)
+                };
+                Err(anyhow::Error::new(error)).into()
+            }
+            LivePageNavigationFailureDisposition::ReportBackground(failure) => {
+                RenderRuntimeDispatchOutcome::BackgroundComplete(Err(anyhow!(failure.to_string())))
+            }
+        }
     }
 
     /// Compute the earliest Page-owned task deadline. This combines JavaScript
@@ -3966,7 +4289,8 @@ impl RendererOwnerHandle {
             self.detach_navigation_or_cancel_pending_turn(parked_turn.turn, pending_turns);
             None
         } else {
-            let allow_command_overtake = parked_turn.condition.allows_command_overtake();
+            let allow_command_overtake = parked_turn.condition.allows_command_overtake()
+                && !parked_turn.turn.must_precede_ready_command();
             Some(RenderRuntimePendingTurn {
                 reply_tx: parked_turn.reply_tx,
                 turn: parked_turn.turn,
@@ -4674,7 +4998,20 @@ impl RendererOwnerHandle {
                     );
                 }
             }
-            RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle { token, .. } => {
+            RenderRuntimeTurn::BeginLivePageNavigationPostParseLifecycle {
+                token,
+                completion,
+                ..
+            }
+            | RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
+                token,
+                completion,
+                ..
+            } => {
+                debug_assert!(
+                    completion.retires_page_on_navigation_failure(),
+                    "live navigation with a detached command observer should continue as background work"
+                );
                 remove_page_on_bound_owner_local_store(token);
             }
             RenderRuntimeTurn::FinishHtmlCreatePage { .. }
@@ -4900,12 +5237,24 @@ impl RendererOwnerHandle {
         &self,
         token: RendererPageToken,
         mut entry: LivePageEntry,
-        completion: LivePagePendingNavigationCompletion,
+        mut completion: LivePagePendingNavigationCompletion,
     ) -> RenderRuntimeDispatchOutcome {
         entry.settle_standalone_navigation_follow(true);
+        let document_continuation_publisher = match &mut completion {
+            LivePagePendingNavigationCompletion::PublishedPageCreation {
+                document_continuation_publisher,
+                ..
+            }
+            | LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement {
+                document_continuation_publisher,
+                ..
+            } => document_continuation_publisher.take(),
+            _ => None,
+        };
         match completion {
             LivePagePendingNavigationCompletion::Background
-            | LivePagePendingNavigationCompletion::PublishedPageCreation { .. } => {
+            | LivePagePendingNavigationCompletion::PublishedPageCreation { .. }
+            | LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement { .. } => {
                 let lifecycle_to_resume = entry.active_page_vm().and_then(|page_vm| {
                     let lifecycle = page_vm.document_lifecycle.current_snapshot();
                     (lifecycle.load.is_none() && lifecycle.terminated.is_none())
@@ -4916,7 +5265,10 @@ impl RendererOwnerHandle {
                     entry,
                 )
                 .await;
-                self.restore_live_page_entry(token, entry);
+                let output_fence = self.restore_live_page_entry_with_output_fence(token, entry);
+                if let Some(publisher) = document_continuation_publisher {
+                    publisher.settle(output_fence, page_state_result.as_ref().ok().cloned());
+                }
                 match page_state_result {
                     Ok(_) => {
                         if let Some(document) = lifecycle_to_resume {
@@ -4935,6 +5287,16 @@ impl RendererOwnerHandle {
             LivePagePendingNavigationCompletion::CompletePageCreation { pending, .. } => {
                 self.restore_live_page_entry(token, entry);
                 self.finish_pending_page_creation(pending).await
+            }
+            LivePagePendingNavigationCompletion::CommitPreparedPageReplacement { .. } => {
+                self.finish_prepared_page_replacement_reply(
+                    token,
+                    entry,
+                    None,
+                    PreparedPageReplacementAfterRestore::None,
+                    None,
+                )
+                .await
             }
             LivePagePendingNavigationCompletion::ReplyWithSnapshot {
                 reply,
@@ -4995,6 +5357,330 @@ impl RendererOwnerHandle {
         }
     }
 
+    fn signal_prepared_replacement_document_commit(
+        &self,
+        token: RendererPageToken,
+        document_commit: super::owner_local_store::PublishedReplacementDocument,
+    ) {
+        tracing::debug!(
+            page_id = token.page_id.as_u64(),
+            navigation_handoff = ?document_commit.navigation_handoff,
+            vm_creation_id = document_commit.vm_creation_id,
+            view_generation = document_commit.view_generation,
+            "published browser-prepared replacement Document"
+        );
+        self.signal_replacement_document_view_settled(token, document_commit.vm_creation_id);
+    }
+
+    async fn finish_prepared_page_replacement_reply(
+        &self,
+        token: RendererPageToken,
+        entry: LivePageEntry,
+        mut continuation: Option<RenderRuntimeTurn>,
+        after_restore: PreparedPageReplacementAfterRestore,
+        pending_download: Option<RendererPendingDownloadActivation>,
+    ) -> RenderRuntimeDispatchOutcome {
+        let continuation_observer = continuation.as_mut().map(|turn| {
+            let (publisher, observer) = super::renderer_document_continuation_channel();
+            assert!(
+                turn.install_document_continuation_publisher(publisher),
+                "a DocumentCommit replacement continuation must own its typed completion publisher"
+            );
+            observer
+        });
+        let (entry, result) = finalize_prepared_page_replacement_on_entry_via_local_task(
+            self.state.local_executor.clone(),
+            token,
+            entry,
+        )
+        .await;
+        match result {
+            Ok((mut replacement, renderer_output)) => {
+                replacement.pending_download = pending_download;
+                replacement
+                    .creation_diagnostics
+                    .document_continuation_observer = continuation_observer;
+                self.restore_live_page_entry(token, entry);
+                if let Some(output) = renderer_output {
+                    self.publish_renderer_output(output);
+                }
+                match after_restore {
+                    PreparedPageReplacementAfterRestore::None => {}
+                    PreparedPageReplacementAfterRestore::SignalPendingPhaseOne { wake_token } => {
+                        let admission =
+                            pending_phase_one_admission_after_restore_on_bound_owner_local_store(
+                                wake_token,
+                            );
+                        self.signal_pending_phase_one_admission(wake_token, admission);
+                    }
+                }
+                let reply = RendererOwnerReply::PageReplacementCommitted(Box::new(replacement));
+                match continuation {
+                    Some(turn) => RenderRuntimeDispatchOutcome::ReplyAndContinueNavigation {
+                        reply: Box::new(reply),
+                        turn: Box::new(turn),
+                    },
+                    None => Ok(reply).into(),
+                }
+            }
+            Err(error) => {
+                self.finish_live_page_navigation_failure(
+                    token,
+                    entry,
+                    false,
+                    LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn finish_prepared_page_replacement_bootstrap_failure(
+        &self,
+        target: PreparedPageReplacementInstallation,
+        error: anyhow::Error,
+    ) -> RenderRuntimeDispatchOutcome {
+        self.finish_live_page_navigation_failure(
+            target.token,
+            target.entry,
+            false,
+            LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+        )
+        .await
+    }
+
+    async fn install_streaming_prepared_page_replacement(
+        &self,
+        target: PreparedPageReplacementInstallation,
+        metadata: PreparedReplacementDocumentMetadata,
+        outcome: ParseTimePageVmCreationOutcome,
+        requested_stage: PageVmInitStage,
+        reply_boundary: crate::RendererReplyBoundary,
+        navigation_reply_policy: NavigationReplyPolicy,
+    ) -> RenderRuntimeDispatchOutcome {
+        let PreparedPageReplacementInstallation {
+            token,
+            mut entry,
+            navigation_handoff,
+        } = target;
+        let completion = LivePagePendingNavigationCompletion::CommitPreparedPageReplacement {
+            navigation_reply_policy,
+        };
+        match outcome {
+            ParseTimePageVmCreationOutcome::PendingPhaseOne(residence) => {
+                let pending = PageVmPendingPhaseOneNavigation::new(
+                    residence,
+                    PageVmFollowedNavigationMetadata::default(),
+                );
+                let (returned_entry, install_result) =
+                    install_prepared_replacement_pending_phase_one_on_entry_via_local_task(
+                        self.state.local_executor.clone(),
+                        entry,
+                        pending,
+                        navigation_handoff,
+                        metadata,
+                    )
+                    .await;
+                entry = returned_entry;
+                let (wake_token, document_commit) = match install_result {
+                    Ok(installed) => installed,
+                    Err(error) => {
+                        return self
+                            .finish_live_page_navigation_failure(
+                                token,
+                                entry,
+                                false,
+                                LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                            )
+                            .await;
+                    }
+                };
+                self.signal_prepared_replacement_document_commit(token, document_commit);
+                if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
+                    let turn =
+                        RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
+                            token,
+                            follow_count: 0,
+                            completion: LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement {
+                                navigation_reply_policy,
+                                document_continuation_publisher: None,
+                            },
+                        };
+                    self.finish_prepared_page_replacement_reply(
+                        token,
+                        entry,
+                        Some(turn),
+                        PreparedPageReplacementAfterRestore::SignalPendingPhaseOne { wake_token },
+                        None,
+                    )
+                    .await
+                } else {
+                    let turn =
+                        RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
+                            token,
+                            follow_count: 0,
+                            completion,
+                        };
+                    self.restore_live_page_entry(token, entry);
+                    let admission =
+                        pending_phase_one_admission_after_restore_on_bound_owner_local_store(
+                            wake_token,
+                        );
+                    self.signal_pending_phase_one_admission(wake_token, admission);
+                    RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
+                        turn: Box::new(turn),
+                        wake_token,
+                    }
+                }
+            }
+            ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage } => {
+                let (returned_entry, install_result) =
+                    install_prepared_replacement_page_vm_on_entry_via_local_task(
+                        self.state.local_executor.clone(),
+                        entry,
+                        page_vm,
+                        navigation_handoff,
+                        metadata,
+                    )
+                    .await;
+                entry = returned_entry;
+                let document_commit = match install_result {
+                    Ok(document_commit) => document_commit,
+                    Err(error) => {
+                        return self
+                            .finish_live_page_navigation_failure(
+                                token,
+                                entry,
+                                false,
+                                LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                            )
+                            .await;
+                    }
+                };
+                self.signal_prepared_replacement_document_commit(token, document_commit);
+                if navigation_reply_policy.returns_with_pending_navigation() {
+                    return self
+                        .finish_prepared_page_replacement_reply(
+                            token,
+                            entry,
+                            None,
+                            PreparedPageReplacementAfterRestore::None,
+                            None,
+                        )
+                        .await;
+                }
+                if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
+                    let turn = RenderRuntimeTurn::FollowLivePagePendingLocationNavigation {
+                        token,
+                        stage,
+                        follow_count: 0,
+                        completion:
+                            LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement {
+                                navigation_reply_policy,
+                                document_continuation_publisher: None,
+                            },
+                    };
+                    self.finish_prepared_page_replacement_reply(
+                        token,
+                        entry,
+                        Some(turn),
+                        PreparedPageReplacementAfterRestore::None,
+                        None,
+                    )
+                    .await
+                } else {
+                    self.continue_live_page_pending_navigation(token, entry, stage, 0, completion)
+                }
+            }
+            ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
+                page_vm,
+                page_tasks,
+                stage,
+                started,
+            } => {
+                let (returned_entry, install_result) =
+                    install_prepared_replacement_page_vm_on_entry_via_local_task(
+                        self.state.local_executor.clone(),
+                        entry,
+                        page_vm,
+                        navigation_handoff,
+                        metadata,
+                    )
+                    .await;
+                entry = returned_entry;
+                let document_commit = match install_result {
+                    Ok(document_commit) => document_commit,
+                    Err(error) => {
+                        return self
+                            .finish_live_page_navigation_failure(
+                                token,
+                                entry,
+                                false,
+                                LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                            )
+                            .await;
+                    }
+                };
+                self.signal_prepared_replacement_document_commit(token, document_commit);
+                if matches!(reply_boundary, crate::RendererReplyBoundary::DocumentCommit) {
+                    let continuation =
+                        RenderRuntimeTurn::BeginLivePageNavigationPostParseLifecycle {
+                            token,
+                            page_tasks,
+                            stage,
+                            started,
+                            target_stage: requested_stage,
+                            follow_count: 0,
+                            completion:
+                                LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement {
+                                    navigation_reply_policy,
+                                    document_continuation_publisher: None,
+                                },
+                        };
+                    return self
+                        .finish_prepared_page_replacement_reply(
+                            token,
+                            entry,
+                            Some(continuation),
+                            PreparedPageReplacementAfterRestore::None,
+                            None,
+                        )
+                        .await;
+                }
+                let (entry, lifecycle_result) = begin_post_parse_lifecycle_on_entry_via_local_task(
+                    self.state.local_executor.clone(),
+                    entry,
+                    page_tasks,
+                    stage,
+                    started,
+                )
+                .await;
+                let lifecycle_outcome = match lifecycle_result {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        return self
+                            .finish_live_page_navigation_failure(
+                                token,
+                                entry,
+                                false,
+                                LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                            )
+                            .await;
+                    }
+                };
+                self.handle_live_page_post_parse_lifecycle_outcome(
+                    token,
+                    entry,
+                    requested_stage,
+                    0,
+                    completion,
+                    lifecycle_outcome,
+                )
+                .await
+            }
+        }
+    }
+
     /// Capture the already-published replacement before a host-facing wait
     /// resumes. Cross-creation publication is deliberately forbidden here;
     /// it belongs to the typed response/Document commit transition.
@@ -5015,14 +5701,29 @@ impl RendererOwnerHandle {
         &self,
         token: RendererPageToken,
         mut entry: LivePageEntry,
-        completion: LivePagePendingNavigationCompletion,
+        mut completion: LivePagePendingNavigationCompletion,
         download: RendererPendingDownloadActivation,
     ) -> RenderRuntimeDispatchOutcome {
         entry.settle_standalone_navigation_follow(true);
+        let document_continuation_publisher = match &mut completion {
+            LivePagePendingNavigationCompletion::PublishedPageCreation {
+                document_continuation_publisher,
+                ..
+            }
+            | LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement {
+                document_continuation_publisher,
+                ..
+            } => document_continuation_publisher.take(),
+            _ => None,
+        };
         match completion {
             LivePagePendingNavigationCompletion::Background
-            | LivePagePendingNavigationCompletion::PublishedPageCreation { .. } => {
-                self.restore_live_page_entry(token, entry);
+            | LivePagePendingNavigationCompletion::PublishedPageCreation { .. }
+            | LivePagePendingNavigationCompletion::PublishedPreparedPageReplacement { .. } => {
+                let output_fence = self.restore_live_page_entry_with_output_fence(token, entry);
+                if let Some(publisher) = document_continuation_publisher {
+                    publisher.settle(output_fence, None);
+                }
                 drop(download);
                 RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()))
             }
@@ -5030,6 +5731,16 @@ impl RendererOwnerHandle {
                 self.restore_live_page_entry(token, entry);
                 self.finish_pending_page_creation(pending.with_pending_download(download))
                     .await
+            }
+            LivePagePendingNavigationCompletion::CommitPreparedPageReplacement { .. } => {
+                self.finish_prepared_page_replacement_reply(
+                    token,
+                    entry,
+                    None,
+                    PreparedPageReplacementAfterRestore::None,
+                    Some(download),
+                )
+                .await
             }
             LivePagePendingNavigationCompletion::ReplyWithSnapshot {
                 reply,
@@ -6118,9 +6829,10 @@ impl RendererOwnerHandle {
                     LivePageNavigationFailureDisposition::ReportBackground(failure)
                 }
                 LivePageNavigationFailureRecipient::Initiator => {
-                    LivePageNavigationFailureDisposition::ReturnToInitiator(anyhow!(
-                        failure.to_string()
-                    ))
+                    live_page_navigation_initiator_failure(
+                        &completion,
+                        anyhow!(failure.to_string()),
+                    )
                 }
             };
             return self
@@ -6159,7 +6871,7 @@ impl RendererOwnerHandle {
                         token,
                         entry,
                         retire_page_on_failure,
-                        LivePageNavigationFailureDisposition::ReturnToInitiator(error),
+                        live_page_navigation_initiator_failure(&completion, error),
                     )
                     .await;
             }
@@ -6233,7 +6945,7 @@ impl RendererOwnerHandle {
         entry: LivePageEntry,
         target_stage: PageVmInitStage,
         follow_count: usize,
-        completion: LivePagePendingNavigationCompletion,
+        mut completion: LivePagePendingNavigationCompletion,
         outcome: DocumentLifecycleTurnOutcome,
     ) -> RenderRuntimeDispatchOutcome {
         match outcome {
@@ -6277,7 +6989,12 @@ impl RendererOwnerHandle {
                 readiness: DocumentLifecycleTurnReadiness::Blocked { document },
                 ..
             } => {
-                self.restore_live_page_entry(token, entry);
+                self.restore_live_page_entry_and_settle_document_continuation(
+                    token,
+                    entry,
+                    &mut completion,
+                )
+                .await;
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
@@ -6297,6 +7014,53 @@ impl RendererOwnerHandle {
             } => {
                 self.finish_live_page_navigation_completion(token, entry, completion)
                     .await
+            }
+        }
+    }
+
+    async fn begin_live_page_navigation_post_parse_lifecycle_turn(
+        &self,
+        token: RendererPageToken,
+        page_tasks: Vec<PostParsePageOwnedWork>,
+        stage: PageVmInitStage,
+        started: Instant,
+        target_stage: PageVmInitStage,
+        follow_count: usize,
+        completion: LivePagePendingNavigationCompletion,
+    ) -> RenderRuntimeDispatchOutcome {
+        let retire_page_on_failure = completion.retires_page_on_navigation_failure();
+        let entry = match take_entry_for_command_on_bound_owner_local_store(token) {
+            Ok(entry) => entry,
+            Err(error) => return Err(error).into(),
+        };
+        let (entry, lifecycle_result) = begin_post_parse_lifecycle_on_entry_via_local_task(
+            self.state.local_executor.clone(),
+            entry,
+            page_tasks,
+            stage,
+            started,
+        )
+        .await;
+        match lifecycle_result {
+            Ok(outcome) => {
+                self.handle_live_page_post_parse_lifecycle_outcome(
+                    token,
+                    entry,
+                    target_stage,
+                    follow_count,
+                    completion,
+                    outcome,
+                )
+                .await
+            }
+            Err(error) => {
+                self.finish_live_page_navigation_failure(
+                    token,
+                    entry,
+                    retire_page_on_failure,
+                    live_page_navigation_initiator_failure(&completion, error),
+                )
+                .await
             }
         }
     }
@@ -6363,6 +7127,7 @@ impl RendererOwnerHandle {
                                         completion:
                                             LivePagePendingNavigationCompletion::PublishedPageCreation {
                                                 navigation_reply_policy,
+                                                document_continuation_publisher: None,
                                             },
                                     },
                                 ),
@@ -6402,6 +7167,7 @@ impl RendererOwnerHandle {
                                         completion:
                                             LivePagePendingNavigationCompletion::PublishedPageCreation {
                                                 navigation_reply_policy,
+                                                document_continuation_publisher: None,
                                             },
                                     },
                                 ),
@@ -6441,6 +7207,7 @@ impl RendererOwnerHandle {
                                             completion:
                                                 LivePagePendingNavigationCompletion::PublishedPageCreation {
                                                     navigation_reply_policy,
+                                                    document_continuation_publisher: None,
                                                 },
                                         },
                                     ),
@@ -6570,11 +7337,31 @@ impl RendererOwnerHandle {
                             token,
                             entry,
                             retire_page_on_failure,
-                            LivePageNavigationFailureDisposition::ReturnToInitiator(error),
+                            live_page_navigation_initiator_failure(&completion, error),
                         )
                         .await
                     }
                 }
+            }
+            RenderRuntimeTurn::BeginLivePageNavigationPostParseLifecycle {
+                token,
+                page_tasks,
+                stage,
+                started,
+                target_stage,
+                follow_count,
+                completion,
+            } => {
+                self.begin_live_page_navigation_post_parse_lifecycle_turn(
+                    token,
+                    page_tasks,
+                    stage,
+                    started,
+                    target_stage,
+                    follow_count,
+                    completion,
+                )
+                .await
             }
             RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
                 token,
@@ -6787,7 +7574,7 @@ impl RendererOwnerHandle {
     async fn create_page_reply_from_html_request_on_owner_local_store(
         &self,
         request: RendererCreateHtmlPageRequest,
-        _owner_local_store: &mut RendererOwnerLocalStore,
+        owner_local_store: &mut RendererOwnerLocalStore,
     ) -> RenderRuntimeDispatchOutcome {
         let RendererCreateHtmlPageRequest {
             page_reservation,
@@ -6864,6 +7651,19 @@ impl RendererOwnerHandle {
             ))
             .into();
         }
+        if owner_local_store.has_staged_related_initial_empty_page(page_reservation)
+            && (!moli_url::is_about_blank(&final_url) || !moli_url::is_about_blank(&requested_url))
+        {
+            return Err(anyhow!(
+                "staged auxiliary initial realm can only adopt its matching about:blank request"
+            ))
+            .into();
+        }
+        let staged_related_initial_empty_page =
+            match owner_local_store.take_staged_related_initial_empty_page(page_reservation) {
+                Ok(staged) => staged,
+                Err(error) => return Err(error).into(),
+            };
         let document_policy_container = DocumentPolicyContainer::from_navigation_response_headers(
             &response_headers,
             &final_url,
@@ -6873,22 +7673,17 @@ impl RendererOwnerHandle {
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
             crate::document_last_modified::document_last_modified_from_headers(&response_headers);
+        let reserved_service_worker_client_id = if staged_related_initial_empty_page.is_some() {
+            drop(reserved_service_worker_client);
+            None
+        } else {
+            reserved_service_worker_client.map(RendererReservedServiceWorkerClient::release)
+        };
         let owner = self.clone();
         let phase_one_result = self
             .run_owner_lane_local_task(async move {
                 let page_id = page_reservation.page_id();
                 let owner_local_context = owner.owner_local_context()?;
-                let owner_wake = owner.owner_wake_sender_for_page(&owner_local_context, page_id);
-                let renderer_document_isolate_allocator = RendererDocumentIsolateAllocator::new(
-                    owner_local_context.clone(),
-                    page_id,
-                    page_reservation.script_agent_admission(),
-                );
-                let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
-                    owner_wake,
-                    owner.state.browser_context_runtime.clone(),
-                )
-                .with_renderer_document_isolate_allocator(renderer_document_isolate_allocator);
                 let local_executor = owner.state.local_executor.clone();
                 debug!(stage = ?stage, %final_url, "starting page VM creation from html");
                 let env = PageVmEnvConfig {
@@ -6922,9 +7717,34 @@ impl RendererOwnerHandle {
                     main_document_commit,
                     top_level_storage_key,
                     navigation_bootstrap_entry: None,
-                    reserved_service_worker_client_id: reserved_service_worker_client
-                        .map(RendererReservedServiceWorkerClient::release),
+                    reserved_service_worker_client_id,
                 };
+                if let Some(mut page_vm) = staged_related_initial_empty_page {
+                    let started = Instant::now();
+                    let triggered_navigation =
+                        page_vm.adopt_staged_related_initial_empty(&loader, &env)?;
+                    return Ok(if triggered_navigation {
+                        ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage }
+                    } else {
+                        ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
+                            page_vm,
+                            page_tasks: Vec::new(),
+                            stage,
+                            started,
+                        }
+                    });
+                }
+                let owner_wake = owner.owner_wake_sender_for_page(&owner_local_context, page_id);
+                let renderer_document_isolate_allocator = RendererDocumentIsolateAllocator::new(
+                    owner_local_context,
+                    page_id,
+                    page_reservation.script_agent_admission(),
+                );
+                let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
+                    owner_wake,
+                    owner.state.browser_context_runtime.clone(),
+                )
+                .with_renderer_document_isolate_allocator(renderer_document_isolate_allocator);
                 let bootstrap = Box::pin(async move {
                     let started = Instant::now();
                     ConcurrentParseTimeRuntime::finish_creation_from_html_bootstrap(
@@ -7078,7 +7898,6 @@ impl RendererOwnerHandle {
         &self,
         page_id: PageId,
         residence: RendererPreparedDocumentResidence,
-        owner_local_store: &mut RendererOwnerLocalStore,
     ) -> RenderRuntimeDispatchOutcome {
         let RendererPreparedDocumentResidence {
             request,
@@ -7086,13 +7905,96 @@ impl RendererOwnerHandle {
             isolate_bootstrap,
             isolate_reservation,
         } = residence;
+        let commit_target =
+            PreparedDocumentCommitTarget::InitialPage(Box::new(PreparedInitialPageTarget {
+                isolate_allocator,
+                isolate_bootstrap,
+                isolate_reservation,
+            }));
         self.create_page_reply_from_streaming_raw_request_on_owner_local_store(
             page_id,
             request,
-            isolate_allocator,
+            commit_target,
+        )
+        .await
+    }
+
+    async fn commit_prepared_page_replacement_on_owner_local_store(
+        &self,
+        reservation_token: RendererPageReservationToken,
+        expected_vm_creation_id: u64,
+        residence: RendererPreparedDocumentResidence,
+    ) -> RenderRuntimeDispatchOutcome {
+        let owner_local_context = match self.owner_local_context() {
+            Ok(context) => context,
+            Err(error) => return Err(error).into(),
+        };
+        let token = renderer_page_token_for_owner_context(
+            &owner_local_context,
+            reservation_token.page_id(),
+        );
+        let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
+            Ok(entry) => entry,
+            Err(error) => {
+                drop(residence);
+                return Err(error).into();
+            }
+        };
+        if let Err(error) = entry.validate_prepared_replacement_generation(expected_vm_creation_id)
+        {
+            drop(residence);
+            return self
+                .finish_live_page_navigation_failure(
+                    token,
+                    entry,
+                    false,
+                    LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(error),
+                )
+                .await;
+        }
+
+        let top_level_navigation_dispatch = residence.request.top_level_navigation_dispatch;
+        entry.set_top_level_navigation_dispatch(top_level_navigation_dispatch);
+        let RendererPreparedDocumentResidence {
+            request,
+            isolate_allocator: _,
             isolate_bootstrap,
             isolate_reservation,
-            owner_local_store,
+        } = residence;
+        let (entry, begin_result) = begin_prepared_document_replacement_on_entry_via_local_task(
+            self.state.local_executor.clone(),
+            entry,
+            isolate_bootstrap,
+            isolate_reservation,
+        )
+        .await;
+        let (runtime_hooks, navigation_handoff) = match begin_result {
+            Ok(result) => result,
+            Err(error) => {
+                return self
+                    .finish_live_page_navigation_failure(
+                        token,
+                        entry,
+                        false,
+                        LivePageNavigationFailureDisposition::ReturnPageReplacementToInitiator(
+                            error,
+                        ),
+                    )
+                    .await;
+            }
+        };
+        let commit_target = PreparedDocumentCommitTarget::PageReplacement(Box::new(
+            PreparedPageReplacementTarget {
+                token,
+                entry,
+                runtime_hooks,
+                navigation_handoff,
+            },
+        ));
+        self.create_page_reply_from_streaming_raw_request_on_owner_local_store(
+            reservation_token.page_id(),
+            request,
+            commit_target,
         )
         .await
     }
@@ -7102,10 +8004,7 @@ impl RendererOwnerHandle {
         &self,
         page_id: PageId,
         request: RendererCreateStreamingRawPageRequest,
-        isolate_allocator: RendererDocumentIsolateAllocator,
-        isolate_bootstrap: RendererDocumentIsolateBootstrap,
-        isolate_reservation: RendererDocumentIsolateReservation,
-        _owner_local_store: &mut RendererOwnerLocalStore,
+        commit_target: PreparedDocumentCommitTarget,
     ) -> RenderRuntimeDispatchOutcome {
         let RendererCreateStreamingRawPageRequest {
             root_frame_id,
@@ -7181,17 +8080,51 @@ impl RendererOwnerHandle {
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
             crate::document_last_modified::document_last_modified_from_headers(&response_headers);
+        let (runtime_hooks, replacement_target) = match commit_target {
+            PreparedDocumentCommitTarget::InitialPage(target) => {
+                let PreparedInitialPageTarget {
+                    isolate_allocator,
+                    isolate_bootstrap,
+                    isolate_reservation,
+                } = *target;
+                let owner_local_context = match self.owner_local_context() {
+                    Ok(context) => context,
+                    Err(error) => return Err(error).into(),
+                };
+                let owner_wake = self.owner_wake_sender_for_page(&owner_local_context, page_id);
+                let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
+                    owner_wake,
+                    self.state.browser_context_runtime.clone(),
+                )
+                .with_renderer_document_isolate_allocator(isolate_allocator);
+                let runtime_hooks = match runtime_hooks
+                    .with_prepared_renderer_document_isolate(isolate_bootstrap, isolate_reservation)
+                {
+                    Ok(runtime_hooks) => runtime_hooks,
+                    Err(error) => return Err(error).into(),
+                };
+                (runtime_hooks, None)
+            }
+            PreparedDocumentCommitTarget::PageReplacement(target) => {
+                let PreparedPageReplacementTarget {
+                    token,
+                    entry,
+                    runtime_hooks,
+                    navigation_handoff,
+                } = *target;
+                (
+                    runtime_hooks,
+                    Some(PreparedPageReplacementInstallation {
+                        token,
+                        entry,
+                        navigation_handoff,
+                    }),
+                )
+            }
+        };
         let owner = self.clone();
         let phase_one_result = self
             .run_owner_lane_local_task(async move {
-                let owner_local_context = owner.owner_local_context()?;
-                let owner_wake = owner.owner_wake_sender_for_page(&owner_local_context, page_id);
-                let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
-                    owner_wake,
-                    owner.state.browser_context_runtime.clone(),
-                )
-                .with_renderer_document_isolate_allocator(isolate_allocator)
-                .with_prepared_renderer_document_isolate(isolate_bootstrap, isolate_reservation)?;
                 let local_executor = owner.state.local_executor.clone();
                 let env = PageVmEnvConfig {
                     web_storage,
@@ -7254,16 +8187,43 @@ impl RendererOwnerHandle {
             })
             .await;
         match phase_one_result {
-            Ok(StreamingNavigationPageCreationResult::Download(_)) => Err(anyhow!(
-                "external raw streaming page request produced a download; CDP navigation must branch downloads before renderer page creation"
-            ))
-            .into(),
+            Ok(StreamingNavigationPageCreationResult::Download(_)) => {
+                let error = anyhow!(
+                    "external raw streaming page request produced a download; CDP navigation must branch downloads before renderer page creation"
+                );
+                match replacement_target {
+                    Some(target) => {
+                        self.finish_prepared_page_replacement_bootstrap_failure(target, error)
+                            .await
+                    }
+                    None => Err(error).into(),
+                }
+            }
             Ok(StreamingNavigationPageCreationResult::Html(result)) => {
                 let StreamingHtmlPageCreationResult {
                     response_status,
                     response_headers,
                     outcome,
                 } = *result;
+                if let Some(target) = replacement_target {
+                    return self
+                        .install_streaming_prepared_page_replacement(
+                            target,
+                            PreparedReplacementDocumentMetadata {
+                                requested_url,
+                                navigation_initiator_url,
+                                navigation_redirected,
+                                navigation_redirect_count,
+                                response_status,
+                                response_headers,
+                            },
+                            outcome,
+                            stage,
+                            reply_boundary,
+                            navigation_reply_policy,
+                        )
+                        .await;
+                }
                 match outcome {
                     ParseTimePageVmCreationOutcome::PendingPhaseOne(residence) => {
                         let committed_navigation_response = Some(PageVmNavigationResponse {
@@ -7296,10 +8256,7 @@ impl RendererOwnerHandle {
                         )
                         .await
                     }
-                    ParseTimePageVmCreationOutcome::TriggeredNavigation {
-                        mut page_vm,
-                        stage,
-                    } => {
+                    ParseTimePageVmCreationOutcome::TriggeredNavigation { mut page_vm, stage } => {
                         page_vm::attach_navigation_response_to_page_vm(
                             &mut page_vm,
                             PageVmNavigationResponse {
@@ -7365,10 +8322,17 @@ impl RendererOwnerHandle {
                     }
                 }
             }
-            Err(error) => Err(error).into(),
+            Err(error) => match replacement_target {
+                Some(target) => {
+                    self.finish_prepared_page_replacement_bootstrap_failure(target, error)
+                        .await
+                }
+                None => Err(error).into(),
+            },
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn record(&self, page_id: PageId) -> Option<RendererPageRecord> {
         self.state.page_table.record(page_id)
     }

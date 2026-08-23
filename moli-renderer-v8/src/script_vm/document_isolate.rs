@@ -10,7 +10,7 @@ use super::{
 };
 use crate::{
     browsing_context_model::ScriptAgentId,
-    context_bootstrap::ContextBootstrapAssets,
+    context_bootstrap::{ContextBootstrapAssets, WINDOW_OPENER_SLOT},
     document_runtime::DocumentRuntime,
     exception_reporting::v8_message_listener,
     module_runtime::{
@@ -27,7 +27,11 @@ use crate::{
         RendererPageV8ForegroundTaskSender,
     },
     resource_owner::ResourceOwnerId,
-    runtime::RendererPageContextCancelSender,
+    runtime::{
+        RendererAuxiliaryPageReservationAllocator, RendererPageContextCancelSender,
+        RendererStagedAuxiliaryWindowProxy,
+    },
+    util::{get_private_value, set_private_value},
     v8_platform::{
         RendererScriptAgentPageMembership, RendererScriptAgentV8ForegroundTaskRouter,
         V8ForegroundTaskWake, V8PlatformIsolateRegistration,
@@ -129,6 +133,7 @@ pub(crate) struct RendererDocumentIsolateBootstrap {
     pub(super) renderer_document_isolate: RendererDocumentIsolateHandle,
     pub(super) bridge_bindings: NativeBridgeBindings,
     pub(super) renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
+    pub(super) inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
     pub(super) page_inspector: DocumentInspectorBinding,
     pub(super) script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     pub(super) renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
@@ -157,8 +162,7 @@ impl RendererDocumentIsolateBootstrap {
     }
 
     pub(crate) fn inspector_isolate_backend_handle(&self) -> RendererInspectorIsolateBackendHandle {
-        self.renderer_document_isolate
-            .inspector_isolate_backend_handle()
+        self.inspector_isolate_backend.clone()
     }
 
     pub(crate) fn with_renderer_page_script_environment(
@@ -173,16 +177,26 @@ impl RendererDocumentIsolateBootstrap {
         self.page_inspector = page_inspector;
         self
     }
+
+    pub(crate) fn with_reused_main_window_proxy(mut self) -> Self {
+        self.reuse_main_window_proxy = true;
+        self
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct RendererPageScriptEnvironment {
     page_id: u64,
+    auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
     renderer_document_isolate: RendererDocumentIsolateHandle,
+    inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
     script_agent_page_membership: RendererScriptAgentPageMembership,
     page_runtime_task_source: PageRuntimeTaskSource,
     output_journal: crate::runtime::RendererTurnOutputJournal,
     global_proxy: Rc<OnceCell<v8::Global<v8::Object>>>,
+    initial_global_proxy_facade_context: Rc<RefCell<Option<v8::Global<v8::Context>>>>,
+    initial_global_proxy_security_token: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
+    navigation_persistent_opener: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
 }
 
 impl std::fmt::Debug for RendererPageScriptEnvironment {
@@ -200,6 +214,10 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
             )
             .field("output_stream", &self.output_journal.stream())
             .field("has_global_proxy", &self.global_proxy.get().is_some())
+            .field(
+                "has_navigation_persistent_opener",
+                &self.navigation_persistent_opener.borrow().is_some(),
+            )
             .finish()
     }
 }
@@ -207,7 +225,9 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
 impl RendererPageScriptEnvironment {
     pub(crate) fn new(
         page_id: u64,
+        auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
         renderer_document_isolate: RendererDocumentIsolateHandle,
+        inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
         script_agent_page_membership: RendererScriptAgentPageMembership,
         page_runtime_task_source: PageRuntimeTaskSource,
         output_journal: crate::runtime::RendererTurnOutputJournal,
@@ -218,16 +238,27 @@ impl RendererPageScriptEnvironment {
         );
         Ok(Self {
             page_id,
+            auxiliary_page_reservation_allocator,
             renderer_document_isolate,
+            inspector_isolate_backend,
             script_agent_page_membership,
             page_runtime_task_source,
             output_journal,
             global_proxy: Rc::new(OnceCell::new()),
+            initial_global_proxy_facade_context: Rc::new(RefCell::new(None)),
+            initial_global_proxy_security_token: Rc::new(RefCell::new(None)),
+            navigation_persistent_opener: Rc::new(RefCell::new(None)),
         })
     }
 
     pub(crate) fn page_id(&self) -> u64 {
         self.page_id
+    }
+
+    pub(crate) fn auxiliary_page_reservation_allocator(
+        &self,
+    ) -> RendererAuxiliaryPageReservationAllocator {
+        self.auxiliary_page_reservation_allocator.clone()
     }
 
     pub(crate) fn page_runtime_task_source(&self) -> PageRuntimeTaskSource {
@@ -236,6 +267,23 @@ impl RendererPageScriptEnvironment {
 
     pub(crate) fn output_journal(&self) -> crate::runtime::RendererTurnOutputJournal {
         self.output_journal.clone()
+    }
+
+    pub(crate) fn stage_related_initial_empty_page_in_scope(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        source_bridge_bindings: &NativeBridgeBindings,
+        pending: crate::runtime::RendererPendingAuxiliaryPage,
+        init: crate::runtime::RendererRelatedInitialEmptyPageRealmInit,
+    ) -> Result<()> {
+        self.auxiliary_page_reservation_allocator
+            .stage_related_initial_empty_page_in_scope(
+                scope,
+                pending,
+                self,
+                source_bridge_bindings,
+                init,
+            )
     }
 
     pub(crate) fn clear_page_runtime_tasks(&self) {
@@ -263,15 +311,13 @@ impl RendererPageScriptEnvironment {
         &self,
     ) -> Result<RendererDocumentIsolateBootstrap> {
         let bridge_bindings = self.renderer_document_isolate.build_bridge_bindings()?;
-        let isolate_backend = self
-            .renderer_document_isolate
-            .inspector_isolate_backend_handle();
         Ok(RendererDocumentIsolateBootstrap {
             renderer_document_isolate: self.renderer_document_isolate.clone(),
             bridge_bindings,
             renderer_document_isolate_teardown:
                 RendererDocumentIsolateTeardown::owner_reserved_page(),
-            page_inspector: DocumentInspectorBinding::new(isolate_backend)
+            inspector_isolate_backend: self.inspector_isolate_backend.clone(),
+            page_inspector: DocumentInspectorBinding::new(self.inspector_isolate_backend.clone())
                 .with_output_journal(self.output_journal()),
             script_agent_page_membership: None,
             renderer_page_script_environment: Some(self.clone()),
@@ -279,13 +325,62 @@ impl RendererPageScriptEnvironment {
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn bootstrap_related_page_document_isolate_for_experiment(
+    pub(crate) fn bootstrap_related_page_document_isolate(
         &self,
         v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
     ) -> Result<RendererDocumentIsolateBootstrap> {
-        self.renderer_document_isolate
-            .bootstrap_related_page_document_isolate(v8_foreground_task_sender)
+        let script_agent_page_membership = self
+            .script_agent_page_membership
+            .admit_related_page(v8_foreground_task_sender)?;
+        let bridge_bindings = match self.renderer_document_isolate.build_bridge_bindings() {
+            Ok(bindings) => bindings,
+            Err(error) => {
+                script_agent_page_membership.retire();
+                return Err(error);
+            }
+        };
+        Ok(self
+            .related_page_document_isolate_bootstrap(bridge_bindings, script_agent_page_membership))
+    }
+
+    /// Prepares an explicitly related Page isolate bootstrap without
+    /// re-entering or re-borrowing the document-isolate holder.
+    ///
+    /// This is the admission half of synchronous auxiliary realm creation.
+    /// The caller owns an already-entered opener scope, so the source Page's
+    /// retained membership and bridge templates are the only authorities this
+    /// operation may use.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn bootstrap_related_page_document_isolate_in_scope(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        source_bridge_bindings: &NativeBridgeBindings,
+        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
+    ) -> Result<RendererDocumentIsolateBootstrap> {
+        let script_agent_page_membership = self
+            .script_agent_page_membership
+            .admit_related_page(v8_foreground_task_sender)?;
+        let bridge_bindings = source_bridge_bindings.build_peer_in_scope(scope);
+        Ok(self
+            .related_page_document_isolate_bootstrap(bridge_bindings, script_agent_page_membership))
+    }
+
+    fn related_page_document_isolate_bootstrap(
+        &self,
+        bridge_bindings: NativeBridgeBindings,
+        script_agent_page_membership: RendererScriptAgentPageMembership,
+    ) -> RendererDocumentIsolateBootstrap {
+        RendererDocumentIsolateBootstrap {
+            renderer_document_isolate: self.renderer_document_isolate.clone(),
+            bridge_bindings,
+            renderer_document_isolate_teardown:
+                RendererDocumentIsolateTeardown::owner_reserved_page(),
+            inspector_isolate_backend: self.inspector_isolate_backend.clone(),
+            page_inspector: DocumentInspectorBinding::new(self.inspector_isolate_backend.clone()),
+            script_agent_page_membership: Some(script_agent_page_membership),
+            renderer_page_script_environment: None,
+            reuse_main_window_proxy: false,
+        }
     }
 
     pub(super) fn install_initial_main_window_proxy(
@@ -297,6 +392,43 @@ impl RendererPageScriptEnvironment {
             .map_err(|_| anyhow!("page script environment already retains its main WindowProxy"))
     }
 
+    pub(crate) fn install_staged_initial_main_window_proxy(
+        &self,
+        staged: RendererStagedAuxiliaryWindowProxy,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.initial_global_proxy_facade_context.borrow().is_none(),
+            "page script environment already retains a WindowProxy facade context"
+        );
+        let (window_proxy, facade_context, security_token) = staged.into_parts();
+        self.install_initial_main_window_proxy(window_proxy)?;
+        *self.initial_global_proxy_facade_context.borrow_mut() = Some(facade_context);
+        *self.initial_global_proxy_security_token.borrow_mut() = security_token;
+        Ok(())
+    }
+
+    pub(super) fn take_main_window_proxy_for_context<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_, ()>,
+    ) -> Result<v8::Local<'s, v8::Object>> {
+        let window_proxy =
+            self.with_main_window_proxy(|window_proxy| v8::Local::new(scope, window_proxy))?;
+        if let Some(facade_context) = self.initial_global_proxy_facade_context.borrow_mut().take() {
+            v8::Local::new(scope, &facade_context).detach_global();
+        }
+        Ok(window_proxy)
+    }
+
+    pub(super) fn take_initial_main_window_security_token<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_, ()>,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        self.initial_global_proxy_security_token
+            .borrow_mut()
+            .take()
+            .map(|token| v8::Local::new(scope, &token))
+    }
+
     pub(super) fn with_main_window_proxy<T>(
         &self,
         op: impl FnOnce(&v8::Global<v8::Object>) -> T,
@@ -305,6 +437,29 @@ impl RendererPageScriptEnvironment {
             anyhow!("replacement context is missing its page-owned main WindowProxy")
         })?;
         Ok(op(global_proxy))
+    }
+
+    pub(super) fn capture_main_window_opener_for_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        window_proxy: v8::Local<'s, v8::Object>,
+    ) {
+        *self.navigation_persistent_opener.borrow_mut() =
+            get_private_value(scope, window_proxy, WINDOW_OPENER_SLOT)
+                .map(|opener| v8::Global::new(scope, opener));
+    }
+
+    pub(super) fn restore_main_window_opener_after_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        window_proxy: v8::Local<'s, v8::Object>,
+    ) {
+        let opener = self.navigation_persistent_opener.borrow();
+        let Some(opener) = opener.as_ref() else {
+            return;
+        };
+        let opener = v8::Local::new(scope, opener);
+        set_private_value(scope, window_proxy, WINDOW_OPENER_SLOT, opener);
     }
 }
 
@@ -320,14 +475,29 @@ pub(crate) struct ScriptVmDefaultWorldBootstrap {
     pub(super) bridge_ref: JsContextHostBridgeRef,
     pub(super) runtime_observable_context_token: RuntimeObservableContextToken,
     pub(super) baseline_globals: super::ScriptGlobalsBaseline,
-    pub(super) document_runtime: Box<DocumentRuntime>,
     pub(super) root_frame_id: Option<String>,
-    pub(super) context_host: Rc<RefCell<JsContextHost>>,
     pub(super) prebootstrapped_child_default_contexts: SharedPrebootstrappedChildDefaultContexts,
+    // `JsContextHost` stores a non-owning pointer into `document_runtime`.
+    // Keep every realm/bridge owner before the host and the host before the
+    // runtime so cancellation of a staged preinspector bootstrap is safe.
+    pub(super) context_host: Rc<RefCell<JsContextHost>>,
+    pub(super) document_runtime: Box<DocumentRuntime>,
     pub(super) page_context_cancel_tx: RendererPageContextCancelSender,
     pub(super) post_domcontentloaded_page_task_tx: PageTaskSender,
     pub(super) page_runtime_wake_tx: PageRuntimeWakeSender,
     pub(super) storage_bucket_store: crate::context_bootstrap::SharedStorageBucketStore,
+}
+
+/// A fully bootstrapped main Page realm whose Inspector default-context
+/// registration has deliberately not happened yet.
+///
+/// The V8 Context, stable WindowProxy, native bridge, and Document host are
+/// already live at this boundary. Keeping Inspector attachment as a distinct
+/// materialization step mirrors child-frame prebootstrap and is what makes it
+/// possible to create an auxiliary realm synchronously from an opener callback
+/// without re-entering the shared document isolate.
+pub(crate) struct ScriptVmPreinspectorDefaultWorldBootstrap {
+    pub(super) inner: ScriptVmDefaultWorldBootstrap,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -429,30 +599,7 @@ impl RendererDocumentIsolateHandle {
             renderer_document_isolate,
             bridge_bindings,
             renderer_document_isolate_teardown,
-            page_inspector: DocumentInspectorBinding::new(isolate_backend),
-            script_agent_page_membership: Some(script_agent_page_membership),
-            renderer_page_script_environment: None,
-            reuse_main_window_proxy: false,
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn bootstrap_related_page_document_isolate(
-        &self,
-        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
-    ) -> Result<RendererDocumentIsolateBootstrap> {
-        let script_agent_page_membership = self
-            .inner
-            .borrow()
-            .script_agent_foreground_router
-            .admit_related_page(v8_foreground_task_sender)?;
-        let bridge_bindings = self.build_bridge_bindings()?;
-        let isolate_backend = self.inspector_isolate_backend_handle();
-        Ok(RendererDocumentIsolateBootstrap {
-            renderer_document_isolate: self.clone(),
-            bridge_bindings,
-            renderer_document_isolate_teardown:
-                RendererDocumentIsolateTeardown::owner_reserved_page(),
+            inspector_isolate_backend: isolate_backend.clone(),
             page_inspector: DocumentInspectorBinding::new(isolate_backend),
             script_agent_page_membership: Some(script_agent_page_membership),
             renderer_page_script_environment: None,
@@ -566,6 +713,17 @@ impl RendererDocumentIsolateHandle {
             isolate, bootstrap, ..
         } = &mut *holder;
         with_entered_owned_isolate(isolate, |isolate| op(isolate, &*bootstrap))
+    }
+
+    pub(super) fn with_renderer_document_isolate_and_bootstrap_mut<T>(
+        &self,
+        op: impl FnOnce(&mut v8::OwnedIsolate, &IsolateBootstrapCache) -> T,
+    ) -> T {
+        let mut holder = self.inner.borrow_mut();
+        let RendererDocumentIsolateHolder {
+            isolate, bootstrap, ..
+        } = &mut *holder;
+        with_entered_owned_isolate_value(isolate, |isolate| op(isolate, &*bootstrap))
     }
 
     pub(super) fn unregister_renderer_document_isolate_platform(&self) {

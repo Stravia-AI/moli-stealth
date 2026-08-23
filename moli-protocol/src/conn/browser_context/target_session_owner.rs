@@ -1,11 +1,11 @@
 use super::session_owner::TargetSessionOwner;
 use super::*;
 use crate::conn::state::{
-    BrowserContextPageStorageHandles, BrowserContextResourceStorageHandles, DevToolsSessionState,
-    PageNavigationHistoryEntry, RendererMainDocumentCommitSeed, TargetFetchConfig,
-    TargetNetworkPolicyState, TargetOwnerState, TargetPageAbsenceReason,
-    TargetPageResidenceIdentity, TargetRuntimeSessionState, TargetRuntimeSlot,
-    page_bypass_csp_enabled_for_devtools_sessions,
+    BrowserContextPageStorageHandles, BrowserContextResourceStorageHandles,
+    CommittedRendererAgentAttachment, DevToolsSessionState, PageNavigationHistoryEntry,
+    RendererMainDocumentCommitSeed, TargetFetchConfig, TargetNetworkPolicyState, TargetOwnerState,
+    TargetPageAbsenceReason, TargetPageResidenceIdentity, TargetRuntimeSessionState,
+    TargetRuntimeSlot, page_bypass_csp_enabled_for_devtools_sessions,
     prepare_renderer_call_replacements_for_devtools_sessions, runtime_bindings_for_renderer,
 };
 use crate::conn::{
@@ -205,6 +205,10 @@ pub(crate) struct TargetNavigationLoadInputs {
 }
 
 impl TargetNavigationLoadInputs {
+    pub(crate) fn has_main_document_commit_seed(&self) -> bool {
+        self.main_document_commit_seed.is_some()
+    }
+
     pub(crate) fn with_main_document_commit_seed(
         mut self,
         seed: RendererMainDocumentCommitSeed,
@@ -2242,6 +2246,31 @@ impl<'a> TargetSessionOwnerMut<'a> {
         }
     }
 
+    pub(super) fn resolve_no_commit_response_navigation_history(&mut self) -> Option<()> {
+        match self {
+            Self::ActiveTarget {
+                browser_context, ..
+            } => {
+                browser_context
+                    .active_target
+                    .owner_state
+                    .resolve_no_commit_response_navigation_history();
+                Some(())
+            }
+            Self::BackgroundTarget {
+                browser_context,
+                target_id,
+                ..
+            } => {
+                browser_context.mutate_parked_target_owner_state(target_id, |owner_state| {
+                    owner_state.resolve_no_commit_response_navigation_history()
+                });
+                Some(())
+            }
+            Self::NoLoadedBrowserContext => None,
+        }
+    }
+
     pub(super) async fn commit_loaded_navigation_page_async(
         &mut self,
         mut page: Page,
@@ -2385,6 +2414,102 @@ impl<'a> TargetSessionOwnerMut<'a> {
             Self::NoLoadedBrowserContext => None,
         }
     }
+
+    pub(super) fn commit_loaded_navigation_document_replacement(
+        &mut self,
+        renderer_attachment_commit: CommittedRendererAgentAttachment,
+        history_url: &Url,
+    ) -> Option<anyhow::Result<LoadedNavigationPageCommit>> {
+        match self {
+            Self::ActiveTarget {
+                browser_context, ..
+            } => {
+                if let Some(target_id) = browser_context.active_target_id_owned() {
+                    browser_context.mark_target_initial_empty_document_exited(&target_id);
+                }
+                Some(
+                    browser_context.commit_loaded_navigation_document_replacement(
+                        renderer_attachment_commit,
+                        history_url,
+                    ),
+                )
+            }
+            Self::BackgroundTarget {
+                browser_context,
+                target_id,
+                ..
+            } => {
+                let primary_session_id = browser_context
+                    .background_target(target_id)?
+                    .session_id()
+                    .map(str::to_owned);
+                let page_snapshot = browser_context
+                    .background_target(target_id)?
+                    .loaded_page()
+                    .map(|page| (history_url.to_string(), page.document_title()))?;
+                browser_context.mutate_parked_target_owner_state(target_id, |owner_state| {
+                    owner_state.mark_initial_empty_document_exited();
+                    owner_state.record_loaded_page_navigation_history(page_snapshot);
+                    owner_state.clear_committed_document_navigation_state();
+                });
+                browser_context.mutate_parked_page_session_state(target_id, |state| {
+                    clear_parked_page_loaded_document_session_state(state);
+                });
+                let (
+                    previous_attachment,
+                    new_attachment_id,
+                    committed_document_post_response_continuation,
+                ) = {
+                    let target = browser_context.background_target_mut(target_id)?;
+                    let previous_attachment = match target
+                        .runtime_slot
+                        .commit_loaded_navigation_document_replacement(&renderer_attachment_commit)
+                    {
+                        Ok(previous) => previous,
+                        Err(error) => return Some(Err(error.into())),
+                    };
+                    let page = target
+                        .runtime_slot
+                        .loaded_page_mut()
+                        .expect("committed stable navigation must retain its Page");
+                    let new_attachment_id = page
+                        .renderer_agent_attachment_id()
+                        .expect("committed navigation Page must have a renderer attachment");
+                    let continuation = page.take_committed_document_post_response_continuation();
+                    (previous_attachment, new_attachment_id, continuation)
+                };
+                if let Some(previous_attachment) = previous_attachment
+                    && previous_attachment.id() != new_attachment_id
+                {
+                    let replacements =
+                        match browser_context.mutate_parked_page_session_state(target_id, |state| {
+                            prepare_renderer_call_replacements_for_devtools_sessions(
+                                primary_session_id.as_deref(),
+                                &mut state.devtools_session_state,
+                                &mut state.auxiliary_devtools_session_states,
+                                previous_attachment.id(),
+                                new_attachment_id,
+                            )
+                        }) {
+                            Ok(replacements) => replacements,
+                            Err(error) => return Some(Err(error.into())),
+                        };
+                    browser_context
+                        .background_target_mut(target_id)?
+                        .runtime_slot
+                        .install_pending_renderer_call_replacements(replacements);
+                }
+                let target = browser_context.background_target_mut(target_id)?;
+                target.runtime_slot.reset_subresource_cursor();
+                target.runtime_slot.clear_websocket_artifacts();
+                Some(Ok(LoadedNavigationPageCommit {
+                    replaced_page_owner: None,
+                    committed_document_post_response_continuation,
+                }))
+            }
+            Self::NoLoadedBrowserContext => None,
+        }
+    }
 }
 
 impl CdpConnection {
@@ -2481,6 +2606,16 @@ impl CdpConnection {
         self.target_session_owner_mut(session_id)?
             .commit_loaded_navigation_page_async(page, renderer_attachment_commit, history_url)
             .await
+    }
+
+    pub(crate) fn commit_loaded_navigation_document_replacement_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        renderer_attachment_commit: CommittedRendererAgentAttachment,
+        history_url: &Url,
+    ) -> Option<anyhow::Result<LoadedNavigationPageCommit>> {
+        self.target_session_owner_mut(session_id)?
+            .commit_loaded_navigation_document_replacement(renderer_attachment_commit, history_url)
     }
 
     pub(crate) fn initial_document_page_owner_for_session(
@@ -2588,6 +2723,14 @@ impl CdpConnection {
     ) -> Option<()> {
         self.target_session_owner_mut(session_id)?
             .clear_pending_navigation_history_update()
+    }
+
+    pub(crate) fn resolve_no_commit_response_navigation_history_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+    ) -> Option<()> {
+        self.target_session_owner_mut(session_id)?
+            .resolve_no_commit_response_navigation_history()
     }
 
     pub(crate) async fn mark_target_crashed_for_session_owner_async(
@@ -3508,6 +3651,34 @@ impl CdpConnection {
             .frame_tree_loader_id()
     }
 
+    pub(crate) fn apply_renderer_document_continuation_page_state(
+        &mut self,
+        gate_key: &crate::conn::BackgroundNavigationGateKey,
+        page_state: std::sync::Arc<moli_core::page::RendererPageState>,
+    ) -> bool {
+        let session_id = gate_key.session_id();
+        let Some((_, routed_target_id)) = self.target_owner_identity_for_session(session_id) else {
+            return false;
+        };
+        if gate_key.target_id() != routed_target_id.as_deref()
+            || self
+                .target_session_owner_frame_tree_loader_id(session_id)
+                .as_deref()
+                != Some(gate_key.loader_id())
+        {
+            return false;
+        }
+        let Some(page) = self
+            .target_session_owner_mut(session_id)
+            .and_then(TargetSessionOwnerMut::into_runtime_slot_mut)
+            .and_then(TargetRuntimeSlot::loaded_page_mut)
+        else {
+            return false;
+        };
+        page.apply_renderer_document_continuation_state(page_state);
+        true
+    }
+
     pub(crate) fn target_session_owner_emulated_device_metrics(
         &self,
         session_id: Option<&str>,
@@ -4367,6 +4538,7 @@ mod tests {
                     source: "globalThis.fromParkedPreload = true;".to_owned(),
                     world_name: Some("utility".to_owned()),
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
             ));

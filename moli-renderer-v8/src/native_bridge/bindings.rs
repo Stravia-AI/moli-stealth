@@ -190,6 +190,26 @@ impl NativeBridgeBindings {
         v8::Local::new(scope, &self.window_global_template)
     }
 
+    /// Builds per-Context bridge bindings while the owning isolate is already
+    /// entered by an outer native callback.
+    ///
+    /// Related auxiliary Pages share the opener's script-agent isolate but
+    /// require independent wrapper templates for their own `JsContextHost`.
+    /// Reusing only the isolate-level Window templates is intentional; every
+    /// mutable bridge/cache object below that boundary is rebuilt per realm.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn build_peer_in_scope(&self, scope: &mut v8::PinScope<'_, '_>) -> Self {
+        let window_global_template = v8::Local::new(scope, &self.window_global_template);
+        let cross_origin_window_global_template =
+            v8::Local::new(scope, &self.cross_origin_window_global_template);
+        Self::build(
+            scope,
+            self.isolate_ptr,
+            window_global_template,
+            cross_origin_window_global_template,
+        )
+    }
+
     /// Install the native bridge global object with two internal fields:
     /// - field 0: `*mut JsContextHost` (for `runtime_ptr_from_object` compatibility)
     /// - field 1: `*const RefCell<JsContextHost>` from the per-context bridge-ref token
@@ -349,6 +369,40 @@ impl NativeBridgeBindings {
             },
         );
         context.set_security_token(parent_security_token);
+        let global = context.global(scope);
+        (global, v8::Global::new(scope, context))
+    }
+
+    pub(super) fn instantiate_same_origin_window_proxy_shell<'s, 'i>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, 'i>,
+        host_ptr: *mut JsContextHost,
+    ) -> (v8::Local<'s, v8::Object>, v8::Global<v8::Context>) {
+        // An accepted same-agent popup needs a real V8 global proxy before
+        // protocol has materialized its auxiliary Page. A temporary context
+        // owns that proxy synchronously; the related Page later detaches it
+        // and supplies the exact object as ContextOptions::global_object.
+        let global_template = v8::Local::new(scope, &self.window_global_template);
+        let parent_security_token = scope.get_current_context().get_security_token(scope);
+        let context = v8::Context::new(
+            scope,
+            v8::ContextOptions {
+                global_template: Some(global_template),
+                ..Default::default()
+            },
+        );
+        context.set_security_token(parent_security_token);
+        crate::util::install_context_host_pointer_slot(context, host_ptr);
+        {
+            let facade_scope = &mut v8::ContextScope::new(scope, context);
+            let global = context.global(facade_scope);
+            crate::context_bootstrap::exposed_interfaces::capture_eager_intrinsic_interfaces(
+                facade_scope,
+                global,
+                crate::context_bootstrap::exposed_interfaces::RealmKind::Window,
+            )
+            .expect("same-origin WindowProxy facade must initialize intrinsic interfaces");
+        }
         let global = context.global(scope);
         (global, v8::Global::new(scope, context))
     }

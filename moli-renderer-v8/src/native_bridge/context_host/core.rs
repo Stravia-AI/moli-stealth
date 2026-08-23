@@ -76,6 +76,78 @@ impl JsContextHost {
         }
     }
 
+    pub(crate) fn bind_page_script_environment(
+        &mut self,
+        environment: crate::script_vm::RendererPageScriptEnvironment,
+    ) {
+        assert!(
+            self.page_script_environment.is_none(),
+            "context host Page script environment must be bound only once"
+        );
+        self.bind_auxiliary_page_reservation_allocator(
+            environment.auxiliary_page_reservation_allocator(),
+        );
+        self.page_script_environment = Some(environment);
+    }
+
+    pub(crate) fn bind_auxiliary_page_reservation_allocator(
+        &mut self,
+        allocator: RendererAuxiliaryPageReservationAllocator,
+    ) {
+        assert!(
+            self.auxiliary_page_reservation_allocator
+                .replace(allocator)
+                .is_none(),
+            "context host auxiliary Page allocator must be bound only once"
+        );
+    }
+
+    pub(crate) fn reserve_pending_auxiliary_page(
+        &self,
+        exposes_opener: bool,
+    ) -> Option<RendererPendingAuxiliaryPage> {
+        self.auxiliary_page_reservation_allocator
+            .as_ref()
+            .map(|allocator| allocator.reserve(exposes_opener))
+    }
+
+    pub(crate) fn stage_pending_auxiliary_window_proxy(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        pending: RendererPendingAuxiliaryPage,
+        window_proxy: v8::Global<v8::Object>,
+        facade_context: v8::Global<v8::Context>,
+        inherits_creator_security_token: bool,
+    ) -> anyhow::Result<()> {
+        let inherited_security_token = inherits_creator_security_token.then(|| {
+            let facade_context = v8::Local::new(scope, &facade_context);
+            v8::Global::new(scope, facade_context.get_security_token(scope))
+        });
+        self.auxiliary_page_reservation_allocator
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("context host is missing its auxiliary Page allocator"))?
+            .stage_related_window_proxy(
+                pending,
+                RendererStagedAuxiliaryWindowProxy::new(
+                    window_proxy,
+                    facade_context,
+                    inherited_security_token,
+                ),
+            )
+    }
+
+    pub(crate) fn stage_related_initial_empty_page_in_scope(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        pending: RendererPendingAuxiliaryPage,
+        init: crate::runtime::RendererRelatedInitialEmptyPageRealmInit,
+    ) -> anyhow::Result<()> {
+        self.page_script_environment
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("context host is missing its Page script environment"))?
+            .stage_related_initial_empty_page_in_scope(scope, &self.bridge.bindings, pending, init)
+    }
+
     pub(crate) fn install_page_default_context(
         &mut self,
         scope: &mut v8::PinScope<'_, '_, ()>,
@@ -209,7 +281,10 @@ impl JsContextHost {
             #[cfg(test)]
             force_fresh_layout_reads_for_test: false,
             root_document_lifecycle: None,
+            root_document_is_initial_empty: false,
             output_journal: None,
+            auxiliary_page_reservation_allocator: None,
+            page_script_environment: None,
             page_context_resources_closed: false,
             page_default_context: None,
             v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry::default(),
@@ -484,6 +559,18 @@ impl JsContextHost {
         self.root_document_lifecycle = Some(lifecycle);
     }
 
+    pub(crate) fn mark_root_document_initial_empty(&mut self) {
+        debug_assert!(
+            moli_url::is_about_blank(self.document_url()),
+            "only an about:blank root Document can be marked initial empty"
+        );
+        self.root_document_is_initial_empty = true;
+    }
+
+    pub(crate) fn root_document_is_initial_empty(&self) -> bool {
+        self.root_document_is_initial_empty
+    }
+
     /// Returns the exact root Document that owns Page-scoped protocol
     /// handoffs produced by this host.
     ///
@@ -499,6 +586,11 @@ impl JsContextHost {
     }
 
     pub(crate) fn open_root_document(&mut self, scope: &mut v8::PinScope<'_, '_>) {
+        // Blink's Document::open() explicitly makes an initial empty Document
+        // cease to be initial. Keep this state on the Document owner rather
+        // than inferring it from the current URL, which same-document
+        // navigation is allowed to change.
+        self.root_document_is_initial_empty = false;
         let descendant_count_before = self.child_browsing_contexts.len();
         for child_handle in self.top_level_child_browsing_context_handles_in_document_order() {
             self.drop_child_browsing_context_subtree_with_window_realm(scope, child_handle);

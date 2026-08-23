@@ -5045,6 +5045,11 @@ async fn same_context_loaded_background_window_open_self_navigates_owner_without
             })
     })
     .await;
+    ctx.wait_for_document_continuation_for_test(
+        Some(&owner.session_id),
+        "background _self Document continuation",
+    )
+    .await;
     let emitted = ctx.take_all();
     assert!(
         !emitted
@@ -5132,6 +5137,11 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
                         )
                 })
         },
+    )
+    .await;
+    ctx.wait_for_document_continuation_for_test(
+        Some(&owner.session_id),
+        "named background popup Document continuation",
     )
     .await;
     let emitted = ctx.take_all();

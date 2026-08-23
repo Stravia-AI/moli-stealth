@@ -60,6 +60,13 @@ pub(crate) const ORIGINAL_WEBASSEMBLY_GLOBAL_VALUE_GETTER_SLOT: &str =
 const WINDOW_INDEXED_DB_SURFACE_SLOT: &str = "moli.Window.indexedDB";
 const WINDOW_ORIGIN_RUNTIME_SLOT: &str = "__moliWindowOriginRuntime";
 const WINDOW_INTRINSIC_EVAL_SLOT: &str = "__moliWindowIntrinsicEval";
+const AUXILIARY_WINDOW_VIEWPORT_SURFACE_PROPERTIES: &[&str] = &[
+    "innerWidth",
+    "innerHeight",
+    "outerWidth",
+    "outerHeight",
+    "devicePixelRatio",
+];
 pub(in crate::context_bootstrap) const WINDOW_SECURE_CONTEXT_AVAILABLE_SLOT: &str =
     "__moliWindowSecureContextAvailable";
 
@@ -2058,6 +2065,30 @@ pub(crate) fn set_window_origin_runtime_state(
         origin_value.into(),
     );
     Ok(())
+}
+
+pub(crate) fn inherit_auxiliary_window_viewport_surface<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    opener: v8::Local<'s, v8::Object>,
+    window: v8::Local<'s, v8::Object>,
+) {
+    for property in AUXILIARY_WINDOW_VIEWPORT_SURFACE_PROPERTIES {
+        let Some(value) = opener.get(scope, v8str(scope, property).into()) else {
+            continue;
+        };
+        if value.is_number() {
+            native_bridge::set_object_slot(scope, window, property, value);
+        }
+    }
+}
+
+pub(crate) fn window_origin_runtime_state<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    window: v8::Local<'s, v8::Object>,
+) -> Option<String> {
+    get_private_value(scope, window, WINDOW_ORIGIN_RUNTIME_SLOT)
+        .and_then(|value| value.to_string(scope))
+        .map(|value| value.to_rust_string_lossy(scope))
 }
 
 pub(crate) fn install_webassembly_runtime_state<'s>(

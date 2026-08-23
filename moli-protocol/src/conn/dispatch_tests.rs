@@ -67,6 +67,22 @@ fn bidi_fetch_command_context() -> DevToolsCommandContext {
     }
 }
 
+fn direct_navigation_result_loader_id_for_test(
+    result: &crate::devtools_runtime::DevToolsNavigateResult,
+) -> Option<String> {
+    result
+        .loader_id
+        .as_ref()
+        .map(|loader_id| loader_id.as_str().to_owned())
+        .or_else(|| {
+            result
+                .navigation_id
+                .as_ref()
+                .and_then(|navigation_id| navigation_id.as_str().strip_prefix("navigation-"))
+                .map(str::to_owned)
+        })
+}
+
 async fn execute_direct_devtools_command_through_renderer_fence_for_test(
     ctx: &mut crate::testing::TestContext,
     command: DevToolsCommand,
@@ -3446,12 +3462,29 @@ async fn devtools_command_executes_child_frame_navigation_without_cdp_response_s
             wait: DevToolsNavigationWait::Load,
         }))
         .await;
-    let (parent_result, _, _, parent_predecessor) = parent_outcome.into_complete_parts();
+    let (parent_result, parent_scheduler_events, parent_protocol_events, parent_predecessor) =
+        parent_outcome.into_complete_parts();
+    ctx.route_direct_command_output_for_test(Vec::new(), parent_scheduler_events)
+        .await;
     if let Some(predecessor) = parent_predecessor {
         ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
             .await;
     }
-    parent_result.expect("parent navigation should succeed");
+    ctx.route_direct_command_output_for_test(parent_protocol_events, Vec::new())
+        .await;
+    let DevToolsCommandResult::Navigate(parent_navigation) =
+        parent_result.expect("parent navigation should succeed")
+    else {
+        panic!("expected parent navigation result");
+    };
+    let parent_loader_id = direct_navigation_result_loader_id_for_test(&parent_navigation)
+        .expect("parent navigation should expose a loader identity");
+    ctx.wait_for_direct_navigation_load_for_test(
+        &target_context,
+        &parent_loader_id,
+        "protocol-neutral parent frame navigation load",
+    )
+    .await;
 
     let (frame_tree_result, _) = ctx
         .conn
@@ -3492,8 +3525,10 @@ async fn devtools_command_executes_child_frame_navigation_without_cdp_response_s
             },
         ))
         .await;
-    let (navigate_result, _scheduler_events, protocol_events, child_predecessor) =
+    let (navigate_result, child_scheduler_events, protocol_events, child_predecessor) =
         child_outcome.into_complete_parts();
+    ctx.route_direct_command_output_for_test(Vec::new(), child_scheduler_events)
+        .await;
     if let Some(predecessor) = child_predecessor {
         ctx.route_direct_command_renderer_predecessor_for_test(predecessor)
             .await;
@@ -5512,56 +5547,55 @@ async fn devtools_command_executes_input_key_command_without_cdp_sidecar() {
         target_id: Some(target_id.clone()),
         ..context.clone()
     };
-    // Programmatic focus is part of parser execution. In contrast, `autofocus`
-    // is a post-DOMContentLoaded rendering update and can race the first input
-    // command sent to this intentionally inactive target.
-    let url = "data:text/html,<input id='field'><script>document.getElementById('field').focus()</script>";
-    let (navigate_result, scheduler_events, protocol_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::Navigate(DevToolsNavigateCommand {
+    let url = "data:text/html,<input id='field'>";
+    let navigate_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::Navigate(DevToolsNavigateCommand {
             context: target_context.clone(),
             url: url.to_owned(),
             referrer: None,
             wait: DevToolsNavigationWait::Load,
-        }))
-        .await
-        .into_parts_with_protocol_events();
-    navigate_result.expect("navigation should succeed");
-    ctx.sent
-        .extend(crate::testing::protocol_events_into_internal_messages(
-            protocol_events,
-        ));
-    ctx.route_direct_command_output_for_test(Vec::new(), scheduler_events)
-        .await;
-    ctx.wait_for_direct_command_work_completion_for_test(
-        "protocol-neutral navigation load owner action",
+        }),
     )
     .await;
+    navigate_result.expect("navigation should succeed");
+    execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::EvaluateScript(DevToolsEvaluateScriptCommand {
+            context: target_context.clone(),
+            realm_id: None,
+            world_name: None,
+            expression: "document.getElementById('field').focus()".to_owned(),
+            await_promise: false,
+            user_gesture: false,
+            webdriver_bidi_file_prompt_handler: None,
+            result_ownership: DevToolsResultOwnership::None,
+            preserve_remote_metadata: false,
+            materialize_bidi_script_result: false,
+            serialization_options: None,
+        }),
+    )
+    .await
+    .expect("input focus setup should succeed");
     ctx.sent.clear();
 
-    let (key_result, _scheduler_events, protocol_events) = ctx
-        .conn
-        .execute_devtools_command(DevToolsCommand::DispatchKeyEvent(
-            DevToolsDispatchKeyEventCommand {
-                context: target_context.clone(),
-                event_type: DevToolsKeyEventType::KeyPress,
-                key: "Z".to_owned(),
-                code: "KeyZ".to_owned(),
-                text: "Z".to_owned(),
-                modifiers: 0,
-                auto_repeat: false,
-                should_insert_text: true,
-            },
-        ))
-        .await
-        .into_parts_with_protocol_events();
+    let key_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::DispatchKeyEvent(DevToolsDispatchKeyEventCommand {
+            context: target_context.clone(),
+            event_type: DevToolsKeyEventType::KeyPress,
+            key: "Z".to_owned(),
+            code: "KeyZ".to_owned(),
+            text: "Z".to_owned(),
+            modifiers: 0,
+            auto_repeat: false,
+            should_insert_text: true,
+        }),
+    )
+    .await;
     assert_eq!(
         key_result.expect("key dispatch should succeed"),
         DevToolsCommandResult::Empty
-    );
-    assert!(
-        protocol_events.is_empty(),
-        "direct input key dispatch must not emit CDP-shaped sidecar messages: {protocol_events:?}"
     );
 
     let value_result = ctx

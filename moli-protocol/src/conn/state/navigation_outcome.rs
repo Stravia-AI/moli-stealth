@@ -13,6 +13,7 @@ use crate::conn::ResponseCommitReady;
 use crate::devtools_runtime::DevToolsProtocol;
 use crate::domains::network::{
     CompletedDocumentProgressTransfer, CompletedDownloadProgressTransfer,
+    CompletedNoCommitResponseProgressTransfer,
 };
 
 use super::browser_context::BrowserContext;
@@ -193,6 +194,8 @@ pub struct LoadedNavigation {
     pub initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
     pub renderer_output_predecessor: Option<moli_core::RendererOutputFence>,
     pub(crate) main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
+    pub(crate) document_continuation_observer:
+        Option<moli_core::page::RendererDocumentContinuationObserver>,
     pub(crate) document_progress_transfer: CompletedDocumentProgressTransfer,
     pub(crate) navigation_engine: Option<NavigationEngine>,
     pub(crate) network_error_page: Option<NetworkErrorPageNavigation>,
@@ -228,11 +231,24 @@ pub struct DownloadNavigation {
     pub(crate) progress_transfer: CompletedDownloadProgressTransfer,
 }
 
+/// A navigation response that is observable on the network but cannot commit
+/// a new Document.
+///
+/// HTTP 204 and 205 are the current producers. Keeping this distinct from a
+/// transport failure is important: the response and redirect chain remain
+/// observable, while the previously committed Document must stay resident.
+#[derive(Debug)]
+pub struct NoCommitResponseNavigation {
+    pub final_url: Url,
+    pub(crate) progress_transfer: CompletedNoCommitResponseProgressTransfer,
+}
+
 #[derive(Debug)]
 pub enum NavigationLoadOutcome {
     ResponseCommitReady(Box<ResponseCommitReady>),
     Loaded(Box<LoadedNavigation>),
     Download(Box<DownloadNavigation>),
+    NoCommitResponse(Box<NoCommitResponseNavigation>),
     NetworkFailure(String),
 }
 
@@ -249,6 +265,10 @@ impl NavigationLoadOutcome {
         Self::Download(Box::new(navigation))
     }
 
+    pub(crate) fn no_commit_response(navigation: NoCommitResponseNavigation) -> Self {
+        Self::NoCommitResponse(Box::new(navigation))
+    }
+
     pub(crate) fn network_failure(error_text: String) -> Self {
         Self::NetworkFailure(error_text)
     }
@@ -260,6 +280,7 @@ impl NavigationLoadOutcome {
             }
             Self::Loaded(navigation) => Self::loaded(navigation.with_navigation_engine(engine)),
             Self::Download(navigation) => Self::Download(navigation),
+            Self::NoCommitResponse(navigation) => Self::NoCommitResponse(navigation),
             Self::NetworkFailure(error_text) => Self::NetworkFailure(error_text),
         }
     }

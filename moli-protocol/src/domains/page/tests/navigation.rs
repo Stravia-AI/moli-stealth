@@ -58,6 +58,38 @@ fn assert_runtime_navigation_context_reset(
     );
 }
 
+async fn wait_until_runtime_navigation_context_resets(
+    ctx: &mut TestContext,
+    session_ids: &[&str],
+    frame_id: &str,
+) {
+    let description = format!(
+        "Runtime context replacement for {} in {frame_id}",
+        session_ids.join(", ")
+    );
+    wait_until_messages(
+        ctx,
+        session_ids.first().copied(),
+        &description,
+        |messages| {
+            session_ids.iter().all(|session_id| {
+                let cleared = messages.iter().any(|message| {
+                    message["sessionId"] == json!(session_id)
+                        && message["method"] == json!("Runtime.executionContextsCleared")
+                });
+                let default_created = messages.iter().any(|message| {
+                    message["sessionId"] == json!(session_id)
+                        && message["method"] == json!("Runtime.executionContextCreated")
+                        && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+                        && message["params"]["context"]["auxData"]["frameId"] == json!(frame_id)
+                });
+                cleared && default_created
+            })
+        },
+    )
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn data_url_commit_applies_preloads_worlds_and_bindings_before_author_script() {
     let mut ctx = TestContext::new();
@@ -126,6 +158,16 @@ async fn data_url_commit_applies_preloads_worlds_and_bindings_before_author_scri
         take_response_by_id(&mut ctx, 90_104)["result"]["frameId"],
         json!("TID-1")
     );
+    wait_until_message(
+        &mut ctx,
+        Some("SID-1"),
+        "data URL named-world execution context",
+        |message| {
+            message["method"] == json!("Runtime.executionContextCreated")
+                && message["params"]["context"]["name"] == json!("data-world")
+        },
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 90_105,
@@ -179,7 +221,8 @@ async fn data_url_commit_applies_preloads_worlds_and_bindings_before_author_scri
     assert_eq!(
         binding_payloads,
         vec![json!("named-preload"), json!("author-script")],
-        "data URL named-world preload must run before its first author script"
+        "data URL named-world preload must run before its first author script: sent={:#?}",
+        ctx.sent
     );
 }
 
@@ -223,6 +266,204 @@ async fn page_navigate_file_url_fails_before_navigation_events_or_document_repla
             .expect("browser context")
             .target_url(),
         "about:blank"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_document_page_navigate_replaces_realm_in_stable_page_residence() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
+    ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
+
+    ctx.process_async(json!({
+        "id": 90_110,
+        "method": "Runtime.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    assert_eq!(take_response_by_id(&mut ctx, 90_110)["result"], json!({}));
+    let old_context_id = ctx
+        .sent
+        .iter()
+        .rev()
+        .find(|message| {
+            message["method"] == json!("Runtime.executionContextCreated")
+                && message["sessionId"] == json!("SID-1")
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+        })
+        .and_then(|message| message["params"]["context"]["id"].as_i64())
+        .expect("initial default execution context id");
+    ctx.process_async(json!({
+        "id": 90_111,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "contextId": old_context_id,
+            "expression": "globalThis.__stablePageOldRealm = 'old'",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 90_111)["result"]["result"]["value"],
+        json!("old")
+    );
+
+    let before_target_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("initial target Page residence");
+    let before_renderer_page = ctx
+        .conn
+        .renderer_page_residence_identity_for_session_owner(Some("SID-1"))
+        .expect("initial renderer Page residence");
+    let before_page_attachment = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .and_then(BrowserContext::page_attachment_id)
+        .expect("initial target Page attachment");
+    let before_renderer_attachment = ctx
+        .conn
+        .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1"))
+        .expect("initial renderer agent attachment");
+    let (before_devtools_agent, before_runtime) = {
+        let page = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .and_then(|browser_context| {
+                browser_context.active_target.runtime_slot.loaded_page_mut()
+            })
+            .expect("initial loaded Page");
+        let devtools_agent = page.renderer_devtools_agent_token();
+        let runtime = page
+            .runtime_heap_usage_async()
+            .await
+            .expect("initial Page runtime diagnostics")
+            .moli
+            .runtime;
+        (devtools_agent, runtime)
+    };
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 90_112,
+        "method": "Page.navigate",
+        "sessionId": "SID-1",
+        "params": {
+            "url": "data:text/html,<!doctype html><body><main id='stable-page-replacement'>replacement document</main><script>globalThis.__stablePageNewRealm='new'</script></body>"
+        }
+    }))
+    .await;
+    let navigate = take_response_by_id(&mut ctx, 90_112);
+    let replacement_loader_id = navigate["result"]["loaderId"]
+        .as_str()
+        .expect("replacement navigation loader id")
+        .to_owned();
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1"], "TID-1").await;
+    wait_until_renderer_document_load(&mut ctx, Some("SID-1"), "TID-1", &replacement_loader_id)
+        .await;
+    assert_runtime_navigation_context_reset(&ctx.sent, "SID-1", "TID-1");
+    let new_context_id = ctx
+        .sent
+        .iter()
+        .rev()
+        .find(|message| {
+            message["method"] == json!("Runtime.executionContextCreated")
+                && message["sessionId"] == json!("SID-1")
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+        })
+        .and_then(|message| message["params"]["context"]["id"].as_i64())
+        .expect("replacement default execution context id");
+    assert_ne!(new_context_id, old_context_id);
+
+    let after_target_page = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-1"))
+        .expect("replacement target Page residence");
+    let after_renderer_page = ctx
+        .conn
+        .renderer_page_residence_identity_for_session_owner(Some("SID-1"))
+        .expect("replacement renderer Page residence");
+    let after_page_attachment = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .and_then(BrowserContext::page_attachment_id)
+        .expect("replacement target Page attachment");
+    let after_renderer_attachment = ctx
+        .conn
+        .current_renderer_agent_attachment_id_for_session_owner(Some("SID-1"))
+        .expect("replacement renderer agent attachment");
+    let (after_devtools_agent, after_runtime) = {
+        let page = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .and_then(|browser_context| {
+                browser_context.active_target.runtime_slot.loaded_page_mut()
+            })
+            .expect("replacement loaded Page");
+        let devtools_agent = page.renderer_devtools_agent_token();
+        let runtime = page
+            .runtime_heap_usage_async()
+            .await
+            .expect("replacement Page runtime diagnostics")
+            .moli
+            .runtime;
+        (devtools_agent, runtime)
+    };
+
+    assert_eq!(after_target_page, before_target_page);
+    assert_eq!(after_renderer_page, before_renderer_page);
+    assert_eq!(after_page_attachment, before_page_attachment);
+    assert_ne!(after_renderer_attachment, before_renderer_attachment);
+    assert_ne!(after_devtools_agent, before_devtools_agent);
+    assert_eq!(
+        after_runtime.script_agent_id,
+        before_runtime.script_agent_id
+    );
+    assert_ne!(
+        after_runtime.inspector_context_group_id,
+        before_runtime.inspector_context_group_id
+    );
+    assert_eq!(
+        after_runtime.main_window_proxy_identity_hash,
+        before_runtime.main_window_proxy_identity_hash
+    );
+    assert!(after_runtime.main_window_proxy_identity_hash.is_some());
+
+    ctx.process_async(json!({
+        "id": 90_113,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "expression": "JSON.stringify([document.querySelector('#stable-page-replacement').textContent, typeof globalThis.__stablePageOldRealm, globalThis.__stablePageNewRealm])",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 90_113)["result"]["result"]["value"],
+        json!(r#"["replacement document","undefined","new"]"#)
+    );
+    ctx.process_async(json!({
+        "id": 90_114,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-1",
+        "params": {
+            "contextId": old_context_id,
+            "expression": "globalThis.__stablePageOldRealm",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let stale_context = take_response_by_id(&mut ctx, 90_114);
+    assert_eq!(stale_context["error"]["code"], json!(-32000));
+    assert_eq!(
+        stale_context["error"]["message"],
+        json!("Cannot find context with specified id")
     );
 }
 
@@ -3390,6 +3631,8 @@ async fn navigate_after_real_runtime_enable_resets_before_creating_default_conte
     }))
     .await;
 
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1"], "TID-1").await;
+
     let sent = ctx.take_all();
     assert_runtime_navigation_context_reset(&sent, "SID-1", "TID-1");
 }
@@ -3433,6 +3676,8 @@ async fn navigate_after_real_runtime_enable_fans_out_context_reset_to_auxiliary_
     }))
     .await;
 
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1", "SID-aux"], "TID-1").await;
+
     let sent = ctx.take_all();
     for session_id in ["SID-1", "SID-aux"] {
         assert_runtime_navigation_context_reset(&sent, session_id, "TID-1");
@@ -3469,6 +3714,8 @@ async fn navigate_from_auxiliary_session_keeps_primary_and_auxiliary_runtime_eve
         "params": { "url": "data:text/html,<body>aux-session-nav</body>" }
     }))
     .await;
+
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1", "SID-aux"], "TID-1").await;
 
     let sent = ctx.take_all();
     for session_id in ["SID-1", "SID-aux"] {
@@ -3518,6 +3765,8 @@ async fn navigate_after_auxiliary_runtime_disable_keeps_primary_runtime_enabled(
         "params": { "url": "data:text/html,<body>aux-runtime-disabled</body>" }
     }))
     .await;
+
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1"], "TID-1").await;
 
     let sent = ctx.take_all();
     assert_runtime_navigation_context_reset(&sent, "SID-1", "TID-1");
@@ -5075,6 +5324,13 @@ async fn navigate_failure_commits_error_document_with_visible_unreachable_url() 
             .accepts_document_body_completion_event(&committed_document_token),
         "ordinary navigation load failures must invalidate the previously committed document"
     );
+    wait_until_message(
+        &mut ctx,
+        Some("SID-1"),
+        "network error Document stopped loading",
+        |message| message["method"] == json!("Page.frameStoppedLoading"),
+    )
+    .await;
 
     let messages = ctx.take_all();
     let frame_navigated = messages
@@ -5117,21 +5373,37 @@ async fn navigate_failure_commits_error_document_with_visible_unreachable_url() 
 
     ctx.process_async(json!({
         "id": 233,
+        "method": "Page.getFrameTree",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    let frame_tree = take_response_by_id(&mut ctx, 233);
+    assert_eq!(
+        frame_tree["result"]["frameTree"]["frame"]["url"],
+        NETWORK_ERROR_PAGE_URL
+    );
+    assert_eq!(
+        frame_tree["result"]["frameTree"]["frame"]["unreachableUrl"],
+        unreachable_url
+    );
+
+    ctx.process_async(json!({
+        "id": 234,
         "method": "Page.getNavigationHistory",
         "sessionId": "SID-1"
     }))
     .await;
-    let history = take_response_by_id(&mut ctx, 233);
+    let history = take_response_by_id(&mut ctx, 234);
     let current_index = history["result"]["currentIndex"]
         .as_u64()
         .expect("current history index") as usize;
     assert_eq!(
-        history["result"]["entries"][current_index]["url"],
-        unreachable_url
+        history["result"]["entries"][current_index]["url"], unreachable_url,
+        "history should expose the failed requested URL, not the internal error URL"
     );
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
+async fn navigate_failure_replaces_runtime_context_and_completes_lifecycle() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
@@ -5139,19 +5411,29 @@ async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
     ctx.enable_page_events_for_test(Some("SID-1"));
-    let bc = ctx.conn.browser_context.as_mut().unwrap();
-    bc.devtools_session_state
-        .runtime_session_state
-        .runtime_frontend_enabled = true;
-    bc.devtools_session_state
+    ensure_initial_document_for_session(&mut ctx, Some("SID-1")).await;
+    ctx.process_async(json!({
+        "id": 230,
+        "method": "Runtime.enable",
+        "sessionId": "SID-1"
+    }))
+    .await;
+    let _ = take_response_by_id(&mut ctx, 230);
+    ctx.conn
+        .browser_context
+        .as_mut()
+        .unwrap()
+        .devtools_session_state
         .page_session_state
         .page_lifecycle_events = true;
+    ctx.sent.clear();
 
+    let unreachable_url = format!("http://{addr}/missing");
     ctx.process_async(json!({
         "id": 232,
         "method": "Page.navigate",
         "sessionId": "SID-1",
-        "params": { "url": format!("http://{addr}/missing") }
+        "params": { "url": unreachable_url }
     }))
     .await;
     wait_until_message(
@@ -5162,8 +5444,8 @@ async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
     )
     .await;
 
-    let response = ctx
-        .sent
+    let messages = ctx.take_all();
+    let response = messages
         .iter()
         .find(|message| message["id"] == json!(232))
         .expect("Page.navigate response");
@@ -5173,23 +5455,52 @@ async fn navigate_failure_creates_runtime_context_and_completes_lifecycle() {
     assert_eq!(response["result"]["isDownload"], false);
     assert!(response["result"]["errorText"].is_string());
 
-    let messages = ctx.take_all();
-    assert!(
-        messages.iter().any(|message| {
+    assert_runtime_navigation_context_reset(&messages, "SID-1", "TID-1");
+    let frame_index = messages
+        .iter()
+        .position(|message| message["method"] == json!("Page.frameNavigated"))
+        .unwrap_or_else(|| panic!("missing error frame commit: {messages:?}"));
+    let default_context_index = messages
+        .iter()
+        .position(|message| {
             message["method"] == json!("Runtime.executionContextCreated")
                 && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
-        }),
-        "error Document should create a default runtime context: {messages:?}"
-    );
+        })
+        .unwrap_or_else(|| panic!("missing replacement default context: {messages:?}"));
+    let dom_content_loaded_index = messages
+        .iter()
+        .position(|message| message["method"] == json!("Page.domContentEventFired"))
+        .unwrap_or_else(|| panic!("missing error Document DCL: {messages:?}"));
+    let load_index = messages
+        .iter()
+        .position(|message| message["method"] == json!("Page.loadEventFired"))
+        .unwrap_or_else(|| panic!("missing error Document load: {messages:?}"));
     assert!(
-        messages.iter().any(|message| {
-            message["method"] == json!("Page.lifecycleEvent")
-                && message["params"]["name"] == json!("DOMContentLoaded")
-        }) && messages.iter().any(|message| {
-            message["method"] == json!("Page.lifecycleEvent")
-                && message["params"]["name"] == json!("load")
-        }),
-        "error Document should complete lifecycle: {messages:?}"
+        frame_index < default_context_index
+            && default_context_index < dom_content_loaded_index
+            && dom_content_loaded_index < load_index,
+        "error Document commit/context/lifecycle ordering should match a real replacement Document: {messages:?}"
+    );
+    assert_eq!(
+        messages[frame_index]["params"]["frame"]["url"],
+        NETWORK_ERROR_PAGE_URL
+    );
+    assert_eq!(
+        messages[frame_index]["params"]["frame"]["unreachableUrl"],
+        unreachable_url
+    );
+    assert!(messages.iter().any(|message| {
+        message["method"] == json!("Page.lifecycleEvent")
+            && message["params"]["name"] == json!("DOMContentLoaded")
+    }));
+    assert!(messages.iter().any(|message| {
+        message["method"] == json!("Page.lifecycleEvent")
+            && message["params"]["name"] == json!("load")
+    }));
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["method"] == json!("Page.frameStoppedLoading"))
     );
 }
 #[tokio::test(flavor = "multi_thread")]
@@ -6069,6 +6380,29 @@ async fn reload_targets_background_owner_without_promotion() {
         initial_html.contains(">1<"),
         "expected first background load to contain counter 1"
     );
+    let target_page_before = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-background"))
+        .expect("background target Page residence before reload");
+    let renderer_page_before = ctx
+        .conn
+        .renderer_page_residence_identity_for_session_owner(Some("SID-background"))
+        .expect("background renderer Page residence before reload");
+    let (page_attachment_before, devtools_agent_before) = ctx
+        .conn
+        .browser_context
+        .as_ref()
+        .and_then(|browser_context| browser_context.background_target("TID-background"))
+        .map(|target| {
+            (
+                target.page_attachment_id(),
+                target
+                    .loaded_page()
+                    .expect("background loaded Page before reload")
+                    .renderer_devtools_agent_token(),
+            )
+        })
+        .expect("background target before reload");
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -6090,6 +6424,19 @@ async fn reload_targets_background_owner_without_promotion() {
     let background = browser_context
         .background_target_mut("TID-background")
         .expect("background target should remain parked");
+    assert_eq!(
+        background.page_attachment_id(),
+        page_attachment_before,
+        "background reload must retain its target Page attachment"
+    );
+    assert_ne!(
+        background
+            .loaded_page()
+            .expect("background loaded Page after reload")
+            .renderer_devtools_agent_token(),
+        devtools_agent_before,
+        "background reload must install a new renderer Document agent"
+    );
     let reloaded_html = background
         .loaded_page_mut()
         .expect("loaded background page after reload")
@@ -6099,6 +6446,16 @@ async fn reload_targets_background_owner_without_promotion() {
     assert!(
         reloaded_html.contains(">2<"),
         "expected background reload html to contain counter 2, got {reloaded_html}"
+    );
+    assert_eq!(
+        ctx.conn
+            .target_page_residence_identity_for_session(Some("SID-background")),
+        Some(target_page_before)
+    );
+    assert_eq!(
+        ctx.conn
+            .renderer_page_residence_identity_for_session_owner(Some("SID-background")),
+        Some(renderer_page_before)
     );
 
     server.abort();
@@ -6348,6 +6705,8 @@ async fn repeated_http_navigation_after_runtime_enable_replaces_the_context_grou
         .expect("second HTTP navigation should have a loader")
         .to_owned();
 
+    wait_until_runtime_navigation_context_resets(&mut ctx, &["SID-1"], "TID-1").await;
+
     assert_ne!(first_loader_id, second_loader_id);
     assert_eq!(
         request_count.load(std::sync::atomic::Ordering::SeqCst),
@@ -6546,66 +6905,76 @@ async fn parser_script_location_navigation_suppresses_aborted_document_dcl() {
 
     let mut ctx = TestContext::new();
     load_bc_with_session(&mut ctx, "BID-1", "TID-1", "SID-1", "about:blank");
-    ctx.process_async(json!({
-        "id": 251,
-        "method": "Page.navigate",
-        "sessionId": "SID-1",
-        "params": { "url": format!("http://{addr}/challenge") }
-    }))
-    .await;
-    let _ = take_response_by_id(&mut ctx, 251);
-    wait_until_messages(
-        &mut ctx,
-        Some("SID-1"),
-        "successor document lifecycle after parser-script navigation",
-        |messages| {
-            messages
-                .iter()
-                .filter(|message| message["method"] == json!("Page.frameNavigated"))
-                .count()
-                >= 2
-                && messages
-                    .iter()
-                    .any(|message| message["method"] == json!("Page.domContentEventFired"))
-        },
-    )
-    .await;
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            ctx.process_and_wait_for_response_async(json!({
+                "id": 251,
+                "method": "Page.navigate",
+                "sessionId": "SID-1",
+                "params": { "url": format!("http://{addr}/challenge") }
+            }))
+            .await;
+            let _ = take_response_by_id(&mut ctx, 251);
+            ctx.wait_for_document_continuation_for_test(
+                Some("SID-1"),
+                "parser-script successor navigation",
+            )
+            .await;
+            wait_until_messages(
+                &mut ctx,
+                Some("SID-1"),
+                "successor document lifecycle after parser-script navigation",
+                |messages| {
+                    messages
+                        .iter()
+                        .filter(|message| message["method"] == json!("Page.frameNavigated"))
+                        .count()
+                        >= 2
+                        && messages
+                            .iter()
+                            .any(|message| message["method"] == json!("Page.domContentEventFired"))
+                },
+            )
+            .await;
 
-    let events = ctx.take_all();
-    let domcontentloaded = events
-        .iter()
-        .filter(|message| message["method"] == json!("Page.domContentEventFired"))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        domcontentloaded.len(),
-        1,
-        "the synchronously aborted challenge document must not emit DCL: {events:?}"
-    );
-    let final_frame_commit_index = events
-        .iter()
-        .rposition(|message| message["method"] == json!("Page.frameNavigated"))
-        .expect("final document frame commit");
-    let domcontentloaded_index = events
-        .iter()
-        .position(|message| message["method"] == json!("Page.domContentEventFired"))
-        .expect("final document DCL");
-    assert!(
-        final_frame_commit_index < domcontentloaded_index,
-        "the only DCL must belong to the final document: {events:?}"
-    );
-    assert_eq!(
-        ctx.conn
-            .browser_context
-            .as_ref()
-            .expect("browser context")
-            .target_url(),
-        format!("http://{addr}/final")
-    );
-    assert!(
-        loaded_page_html_for_test(&mut ctx)
-            .await
-            .contains("final content")
-    );
+            let events = ctx.take_all();
+            let domcontentloaded = events
+                .iter()
+                .filter(|message| message["method"] == json!("Page.domContentEventFired"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                domcontentloaded.len(),
+                1,
+                "the synchronously aborted challenge document must not emit DCL: {events:?}"
+            );
+            let final_frame_commit_index = events
+                .iter()
+                .rposition(|message| message["method"] == json!("Page.frameNavigated"))
+                .expect("final document frame commit");
+            let domcontentloaded_index = events
+                .iter()
+                .position(|message| message["method"] == json!("Page.domContentEventFired"))
+                .expect("final document DCL");
+            assert!(
+                final_frame_commit_index < domcontentloaded_index,
+                "the only DCL must belong to the final document: {events:?}"
+            );
+            assert_eq!(
+                ctx.conn
+                    .browser_context
+                    .as_ref()
+                    .expect("browser context")
+                    .target_url(),
+                format!("http://{addr}/final")
+            );
+            assert!(
+                loaded_page_html_for_test(&mut ctx)
+                    .await
+                    .contains("final content")
+            );
+        })
+        .await;
 
     server.abort();
 }

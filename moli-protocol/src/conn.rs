@@ -506,6 +506,7 @@ pub(crate) use output::{
 pub(crate) use page_state::{LoadedNavigationPageCommit, LoadedNavigationRendererAttachmentCommit};
 pub(crate) use popup_activation_work::PopupTargetActivationAction;
 pub(crate) use popup_navigation_work::{
+    PopupTargetNavigationAuthorityState, PopupTargetNavigationClaimIdentity,
     PopupTargetNavigationKind, PopupTargetNavigationOwnerAction,
 };
 pub(crate) use runtime_eval::{
@@ -526,13 +527,16 @@ pub use runtime_eval::{
 pub(crate) use runtime_load::decode_data_url_response;
 pub(crate) use runtime_load::{
     BackgroundNavigationBodyCompletionSink, BackgroundNavigationEarlyResult,
-    BackgroundNavigationLoadJob, CompletedInitialDocumentPageBuild, FailedInitialDocumentPageBuild,
-    InitialDocumentPageInstallResult, InitialDocumentPageOwner, PausedResponsePreparedDocument,
-    PendingInitialDocumentPageBuild, ResponseCommitReady,
+    BackgroundNavigationLoadJob, CommittedStablePageNavigation, CompletedInitialDocumentPageBuild,
+    FailedInitialDocumentPageBuild, InitialDocumentPageInstallResult, InitialDocumentPageOwner,
+    PausedResponsePreparedDocument, PendingInitialDocumentPageBuild, ResponseCommitReady,
+    StablePageNavigationCommitTarget,
 };
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
-pub use scheduler_state::{CdpRendererOwnerTurnOutcome, CdpSchedulerEvent, CdpTurnOutcome};
+pub use scheduler_state::{
+    BackgroundNavigationGateKey, CdpRendererOwnerTurnOutcome, CdpSchedulerEvent, CdpTurnOutcome,
+};
 #[cfg(test)]
 pub(crate) use site_data_manager_surface::{
     BrowserContextReservedSiteDataOwnerState, BrowserContextSiteDataManagerOwnerState,
@@ -542,8 +546,9 @@ pub use state::{
     DocumentStartScript, DownloadNavigation, EmulatedDeviceMetrics, EmulatedGeolocationOverride,
     EmulatedGeolocationOverrideState, EmulatedMediaOverrides, IsolatedWorldDefinition,
     LoadedNavigation, NavigationDispatchState, NavigationLoadOutcome, NavigationRequestLoadPolicy,
-    PageNavigationHistoryEntry, ParkedFetchState, ParkedNetworkArtifacts, ParkedPageSessionState,
-    PendingNavigationHistoryUpdate, RuntimeBindingDefinition, TargetInfo, URL_BASE,
+    NoCommitResponseNavigation, PageNavigationHistoryEntry, ParkedFetchState,
+    ParkedNetworkArtifacts, ParkedPageSessionState, PendingNavigationHistoryUpdate,
+    RuntimeBindingDefinition, TargetInfo, URL_BASE,
 };
 pub(crate) use state::{
     BrowserContextPageStorageHandles, BrowserContextResourceStorageHandles,
@@ -1420,6 +1425,16 @@ impl CdpConnection {
     ) {
         self.scheduler_hooks
             .set_background_navigation_completion_sender(sender);
+    }
+
+    pub fn set_document_continuation_completion_sender(
+        &mut self,
+        sender: tokio::sync::mpsc::UnboundedSender<
+            crate::domains::page::BackgroundDocumentContinuationCompletion,
+        >,
+    ) {
+        self.scheduler_hooks
+            .set_document_continuation_completion_sender(sender);
     }
 
     pub fn set_renderer_publication_sender(
@@ -2321,9 +2336,13 @@ impl CdpConnection {
     }
 
     fn can_run_background_navigation_for_session_owner(&self, session_id: Option<&str>) -> bool {
-        if !self
-            .scheduler_hooks
-            .has_background_navigation_completion_sender()
+        if !self.scheduler_hooks.has_background_event_sender()
+            || !self
+                .scheduler_hooks
+                .has_background_navigation_completion_sender()
+            || !self
+                .scheduler_hooks
+                .has_document_continuation_completion_sender()
         {
             return false;
         }
@@ -2332,9 +2351,13 @@ impl CdpConnection {
     }
 
     fn can_run_background_navigation_for_active_session(&self) -> bool {
-        if !self
-            .scheduler_hooks
-            .has_background_navigation_completion_sender()
+        if !self.scheduler_hooks.has_background_event_sender()
+            || !self
+                .scheduler_hooks
+                .has_background_navigation_completion_sender()
+            || !self
+                .scheduler_hooks
+                .has_document_continuation_completion_sender()
             || !self.inactive_browser_contexts.is_empty()
         {
             return false;
@@ -2401,6 +2424,32 @@ impl CdpConnection {
                 }
                 return command_context.take_protocol_events();
             }
+            crate::domains::page::BackgroundNavigationCompletion::DocumentContinuation(
+                completion,
+            ) => {
+                let gate_key = completion.document_continuation_gate_key();
+                let target_id = gate_key.target_id().map(str::to_owned);
+                let session_id = gate_key.session_id().map(str::to_owned);
+                let (renderer_output_predecessor, renderer_page_state) =
+                    completion.into_renderer_completion_parts();
+                if let Some(predecessor) = renderer_output_predecessor {
+                    command_context.set_renderer_output_predecessor(predecessor);
+                }
+                let page_state_applied = renderer_page_state.is_some_and(|page_state| {
+                    self.apply_renderer_document_continuation_page_state(&gate_key, page_state)
+                });
+                if page_state_applied {
+                    let _ = self
+                        .target_session_owner_navigation_history_snapshot(session_id.as_deref());
+                    if let Some(target_id) = target_id {
+                        command_context.protocol_events_mut().extend(
+                            self.exact_target_info_changed_event_plan_for_target_delta(&target_id)
+                                .into_background_events(),
+                        );
+                    }
+                }
+                return command_context.take_protocol_events();
+            }
         };
         let previous_none_session_owner_route =
             completion.navigate_session_id().is_none().then(|| {
@@ -2438,6 +2487,31 @@ impl CdpConnection {
             self.replace_none_session_owner_route_override(previous);
         }
         protocol_events
+    }
+
+    pub(crate) fn schedule_background_document_continuation_completion(
+        &mut self,
+        completion: crate::domains::page::BackgroundDocumentContinuationCompletion,
+        observer: Option<moli_core::page::RendererDocumentContinuationObserver>,
+    ) -> Option<moli_core::page::RendererDocumentContinuationObserver> {
+        let Some(sender) = self
+            .scheduler_hooks
+            .document_continuation_completion_sender()
+        else {
+            return observer;
+        };
+        let key = completion.document_continuation_gate_key();
+        self.scheduler_state
+            .push_scheduler_event(CdpSchedulerEvent::DocumentContinuationStarted { key });
+        let Some(observer) = observer else {
+            let _ = sender.send(completion);
+            return None;
+        };
+        tokio::spawn(async move {
+            let renderer_completion = observer.wait().await;
+            let _ = sender.send(completion.with_renderer_completion(renderer_completion));
+        });
+        None
     }
 
     pub(crate) fn replace_navigation_engine(&mut self, engine: NavigationEngine) {
@@ -2850,9 +2924,13 @@ impl CdpConnection {
             );
         }
         let is_current = completion.is_current_for_connection(self);
-        let (token, state, navigation, engine) = completion.into_parts();
+        let (token, state, navigation, engine, background_document_continuation) =
+            completion.into_parts();
         if !is_current {
             crate::domains::page::push_superseded_navigation_result(out, &state);
+            if let Some(completion) = background_document_continuation {
+                let _ = self.schedule_background_document_continuation_completion(completion, None);
+            }
             return;
         }
         let navigation_session_id = state.navigate_session_id.clone();
@@ -2863,6 +2941,7 @@ impl CdpConnection {
             state,
             navigation,
             command_context,
+            background_document_continuation,
         )
         .await;
         if let Some(engine) = engine {
@@ -3098,11 +3177,12 @@ impl CdpConnection {
                 "documentIsolateAccounting": document_isolate_accounting,
                 "estimatedWorkerIsolateCount": estimated_worker_isolate_count,
                 "estimatedLiveV8IsolateCount": estimated_live_v8_isolate_count,
-                "runtimeGetHeapUsageV8HeapScope": "page-vm-document-isolate",
-                "runtimeGetHeapUsageV8HeapIsTargetLocal": true,
+                "runtimeGetHeapUsageV8HeapScope": "script-agent-document-isolate",
+                "runtimeGetHeapUsageV8HeapIsTargetLocal": false,
+                "runtimeGetHeapUsageV8HeapMayIncludeRelatedPages": true,
                 "runtimeGetHeapUsageMoliCountersScope": "target-document",
-                "runtimeCollectGarbageScope": "page-vm-document-isolate",
-                "v8ForegroundTaskWakeScope": "page-vm-document-isolate",
+                "runtimeCollectGarbageScope": "script-agent-document-isolate",
+                "v8ForegroundTaskWakeScope": "script-agent-document-isolate",
                 "v8ForegroundTaskWakeContextGroupIdAvailable": false,
                 "v8ForegroundTaskWakeInternalPolicy": "page-runtime-queue-and-owner-page-tick",
                 "v8ForegroundTaskWakeExternalPolicy": "page-owner-runtime-wake",

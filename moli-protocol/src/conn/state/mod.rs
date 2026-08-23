@@ -138,7 +138,7 @@ pub(crate) use emulation::{
 pub(crate) use navigation_outcome::{CompletedDownloadBody, CompletedDownloadBodyArtifact};
 pub use navigation_outcome::{
     DownloadNavigation, LoadedNavigation, NavigationDispatchState, NavigationLoadOutcome,
-    NavigationRequestLoadPolicy, TargetInfo,
+    NavigationRequestLoadPolicy, NoCommitResponseNavigation, TargetInfo,
 };
 pub(crate) use navigation_outcome::{
     NETWORK_ERROR_PAGE_URL, NavigationResultProjection, NavigationSourceDocumentSecurityContext,

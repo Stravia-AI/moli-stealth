@@ -115,6 +115,7 @@ impl fmt::Debug for ProtocolSchedulerWork {
                 debug
                     .field("browser_context_id", &action.browser_context_id())
                     .field("target_id", &action.target_id())
+                    .field("page_owner", &action.page_owner())
                     .field("url", &action.url())
                     .field("navigation_kind", &action.kind());
             }

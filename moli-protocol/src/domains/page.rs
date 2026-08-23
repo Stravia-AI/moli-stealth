@@ -98,10 +98,10 @@ pub(in crate::domains) use main_document_commit::{
     MainDocumentCommitPreparedOutput, append_renderer_main_document_commit_to_output_sink,
     project_main_document_commit_async,
 };
-pub use navigation::BackgroundNavigationCompletion;
 #[cfg(test)]
 pub(crate) use navigation::emit_prepared_child_frame_tree_background_events;
 pub(crate) use navigation::navigation_cookie_access_report;
+pub use navigation::{BackgroundDocumentContinuationCompletion, BackgroundNavigationCompletion};
 pub(crate) use navigation::{
     MaterializedNavigationCompletion, complete_materialized_navigation_into_buffer_async,
     emit_prepared_child_frame_activity, push_superseded_navigation_result,
@@ -2560,6 +2560,23 @@ mod producer_tests {
         work
     }
 
+    fn take_popup_target_navigation_work_for_test(
+        conn: &mut CdpConnection,
+    ) -> crate::domains::activity::ProtocolSchedulerWork {
+        let [event]: [crate::conn::CdpSchedulerEvent; 1] = conn
+            .take_scheduler_events()
+            .try_into()
+            .expect("popup activation should publish one concrete scheduler action");
+        let crate::conn::CdpSchedulerEvent::ProtocolWorkPublished { work } = event else {
+            panic!("popup activation must publish a protocol owner action");
+        };
+        assert_eq!(
+            work.kind(),
+            crate::domains::activity::ProtocolSchedulerWorkKind::PopupTargetNavigationOwnerAction
+        );
+        work
+    }
+
     fn root_document_attachment_for_test(
         conn: &CdpConnection,
         session_id: &str,
@@ -4805,6 +4822,103 @@ mod producer_tests {
                 if work.kind()
                     == crate::domains::activity::ProtocolSchedulerWorkKind::PopupTargetNavigationOwnerAction
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn popup_navigation_owner_action_rejects_replaced_page_and_cannot_be_rescanned() {
+        let mut conn = CdpConnection::default();
+        conn.set_root_target_discovery_enabled(true);
+        let mut bc = BrowserContext::new("BID-stale-popup".into());
+        bc.set_active_target_id("TID-stale-opener");
+        bc.attach_active_session("SID-stale-opener");
+        conn.browser_context = Some(bc);
+        let page_owner = page_residence_identity_for_test(&mut conn, "SID-stale-opener");
+        let source_document = renderer_document_identity_for_test(1, 1);
+        let popup_url = "data:text/html,%3Cmain%3Estale-popup%3C/main%3E";
+        let mut prepared =
+            ProtocolOutputPayloads::from_slot(super::PagePreparedOutputSlot::from_outputs(
+                super::PagePreparedOutputs::from_popup_activations_for_test(
+                    page_owner,
+                    vec![RendererPendingPopupActivation::window(
+                        source_document,
+                        RendererWindowDocumentSource::RootFrame,
+                        true,
+                        None,
+                        popup_url.to_owned(),
+                        "_blank".to_owned(),
+                    )],
+                ),
+            ));
+        let mut out = Vec::new();
+
+        super::emit_popup_activity_background_events_async(
+            &mut conn,
+            &mut out,
+            Some("SID-stale-opener"),
+            Some(&mut prepared),
+        )
+        .await;
+
+        let popup_target_id = out
+            .into_iter()
+            .map(BackgroundProtocolEvent::into_protocol_message)
+            .find(|message| message["method"] == json!("Target.targetCreated"))
+            .and_then(|message| {
+                message["params"]["targetInfo"]["targetId"]
+                    .as_str()
+                    .map(str::to_owned)
+            })
+            .expect("popup target should be observable before its navigation runs");
+        let work = take_popup_target_navigation_work_for_test(&mut conn);
+
+        let route = conn
+            .target_session_route_for_target_id(&popup_target_id)
+            .expect("popup target should retain an exact route");
+        {
+            let mut route_scope = conn.scoped_none_session_owner_route_override(route);
+            route_scope
+                .conn_mut()
+                .runtime_session_owner_slot_mut(None)
+                .expect("popup target should retain its runtime slot")
+                .replace_page_attachment_id_for_test();
+        }
+
+        let outcome = conn.complete_ready_protocol_scheduler_work_turn(work).await;
+        let (protocol_events, scheduler_events) = outcome.into_parts();
+        assert!(
+            protocol_events.is_empty(),
+            "an activation captured for the retired Page residence must not navigate its replacement: {protocol_events:?}"
+        );
+        assert!(
+            scheduler_events.is_empty(),
+            "rejecting stale popup authority must not manufacture replacement work: {scheduler_events:?}"
+        );
+
+        let route = conn
+            .target_session_route_for_target_id(&popup_target_id)
+            .expect("popup target should remain addressable after stale work is rejected");
+        let mut rescanned_events = Vec::new();
+        let restarted = {
+            let mut route_scope = conn.scoped_none_session_owner_route_override(route);
+            crate::domains::target::start_initial_document_target_url_navigation_if_needed_background_events_async(
+                route_scope.conn_mut(),
+                &mut rescanned_events,
+                None,
+            )
+            .await
+        };
+        assert!(
+            !restarted && rescanned_events.is_empty(),
+            "generic initial-navigation entry points must respect the consumed popup authority tombstone"
+        );
+        assert!(
+            conn.browser_context
+                .as_ref()
+                .and_then(|browser_context| { browser_context.background_target(&popup_target_id) })
+                .and_then(|target| target.loaded_page())
+                .is_some_and(|page| moli_url::is_about_blank(page.final_url())),
+            "neither the stale claim nor a later target-URL scan may navigate the replacement Page"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]

@@ -1295,6 +1295,93 @@ fn history_navigation_arguments_use_webidl_conversion() {
 }
 
 #[test]
+fn root_initial_empty_document_replaces_same_and_cross_document_history_updates() {
+    let mut vm = new_storage_test_vm("about:blank");
+    vm.mark_root_document_initial_empty();
+
+    let same_document = vm
+        .eval(
+            r##"
+(() => {
+  location.hash = "#fragment";
+  const fragmentLength = history.length;
+  history.pushState({ step: "state" }, "", "#state");
+  return JSON.stringify({
+    href: location.href,
+    fragmentLength,
+    historyLength: history.length,
+    navigationLength: navigation.entries().length,
+    state: history.state.step
+  });
+})()
+"##,
+        )
+        .expect("initial empty same-document navigation should evaluate");
+    assert_eq!(
+        same_document,
+        r##"{"href":"about:blank#state","fragmentLength":1,"historyLength":1,"navigationLength":1,"state":"state"}"##
+    );
+
+    assert_eq!(
+        vm.eval(r#"location.href = "https://initial-empty-next.test/committed"; "queued""#)
+            .expect("initial empty cross-document navigation should queue"),
+        "queued"
+    );
+    let pending = vm
+        .take_pending_location_navigation_with_seed()
+        .expect("initial empty cross-document navigation should be pending");
+    let seed = pending
+        .entry_seed
+        .expect("initial empty cross-document navigation should carry a seed");
+    assert_eq!(seed.current_index, 0);
+    assert_eq!(seed.entries.len(), 1);
+    assert_eq!(
+        seed.entries[0].url,
+        "https://initial-empty-next.test/committed"
+    );
+    assert_eq!(
+        seed.activation
+            .as_ref()
+            .and_then(|activation| activation.navigation_type.as_deref()),
+        Some("replace")
+    );
+}
+
+#[test]
+fn document_open_exits_root_initial_empty_history_replacement_mode() {
+    let mut vm = new_storage_test_vm("about:blank");
+    vm.mark_root_document_initial_empty();
+
+    assert_eq!(
+        vm.eval(
+            r#"
+document.open();
+document.close();
+location.href = "https://after-document-open.test/committed";
+"queued"
+"#,
+        )
+        .expect("document.open initial-empty history probe should evaluate"),
+        "queued"
+    );
+
+    let pending = vm
+        .take_pending_location_navigation_with_seed()
+        .expect("post-document.open navigation should be pending");
+    let seed = pending
+        .entry_seed
+        .expect("post-document.open navigation should carry a seed");
+    assert_eq!(seed.current_index, 1);
+    assert_eq!(seed.entries.len(), 2);
+    assert_eq!(
+        seed.activation
+            .as_ref()
+            .and_then(|activation| activation.navigation_type.as_deref()),
+        Some("push")
+    );
+}
+
+#[test]
 fn history_state_preserves_structured_clone_values_not_representable_as_json() {
     let mut vm = new_storage_test_vm("https://example.com/base");
 

@@ -1,5 +1,7 @@
 use super::super::tests_cdp_smoke_fixture::SmokeFixtureServer;
 use super::super::*;
+use crate::conn::NETWORK_ERROR_PAGE_URL;
+use crate::testing::spawn_connection_drop_server;
 use crate::{CdpCommandTaskStep, CommandDispatchContext, ParsedCdpCommand};
 use serde_json::{Value, json};
 
@@ -961,6 +963,724 @@ async fn rust_cdp_chromium_target_window_open_waiting_popup_routes_initial_docum
         take_response_by_id(&mut ctx, 260_222)["result"]["result"]["value"],
         "routed-popup"
     );
+}
+
+// Chromium source/runtime evidence:
+// content/browser/renderer_host/navigation_request.cc::CommitErrorPage
+// content/browser/renderer_host/navigation_request_browsertest.cc
+// A failed popup destination replaces the initial empty Document while the
+// auxiliary browsing context, stable Page, WindowProxy, and opener relation survive.
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page() {
+    let (failing_addr, failing_server) = spawn_connection_drop_server().await;
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-network-error",
+                "TID-popup-network-error-opener",
+                "<main>opener</main>",
+            )
+            .await;
+            set_auto_attach_waiting_for_debugger(&mut ctx, 260_223).await;
+            ctx.take_all();
+
+            let unreachable_url = format!("http://{failing_addr}/popup-error");
+            let messages = open_popup_from_runtime(
+                &mut ctx,
+                260_224,
+                &format!(
+                    "(() => {{ const popup = window.open('{unreachable_url}', '_blank'); globalThis.__networkErrorPopup = popup; globalThis.__networkErrorPopupAlias = popup; popup.__openerImmediateMutation = 'old realm'; popup.document.body.dataset.openerMutation = 'old document'; return popup !== null; }})()"
+                ),
+            )
+            .await;
+            assert_eq!(
+                response(&messages, 260_224)["result"]["result"]["value"],
+                true
+            );
+            let popup = event(&messages, "Target.targetCreated");
+            let popup_target_id = popup["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("popup target id")
+                .to_owned();
+            assert_eq!(popup["params"]["targetInfo"]["url"], unreachable_url);
+            assert_eq!(
+                popup["params"]["targetInfo"]["openerId"],
+                "TID-popup-network-error-opener"
+            );
+            assert_eq!(popup["params"]["targetInfo"]["canAccessOpener"], true);
+            let attached = event(&messages, "Target.attachedToTarget");
+            let popup_session_id = attached["params"]["sessionId"]
+                .as_str()
+                .expect("popup session id")
+                .to_owned();
+
+            for (id, method, params) in [
+                (260_225, "Page.enable", json!({})),
+                (260_226, "Network.enable", json!({})),
+                (260_227, "Runtime.enable", json!({})),
+                (
+                    260_228,
+                    "Page.setLifecycleEventsEnabled",
+                    json!({ "enabled": true }),
+                ),
+            ] {
+                ctx.process_async(json!({
+                    "id": id,
+                    "method": method,
+                    "sessionId": popup_session_id,
+                    "params": params
+                }))
+                .await;
+                ctx.expect_result(id, json!({}), Some(&popup_session_id));
+            }
+
+            ctx.process_async(json!({
+                "id": 260_229,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, marker: __openerImmediateMutation, bodyMarker: document.body.dataset.openerMutation, historyLength: history.length })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_229)["result"]["result"]["value"],
+                json!({
+                    "href": "about:blank",
+                    "marker": "old realm",
+                    "bodyMarker": "old document",
+                    "historyLength": 1
+                })
+            );
+
+            let before_target_page = ctx
+                .conn
+                .target_page_residence_identity_for_session(Some(&popup_session_id))
+                .expect("popup target Page residence");
+            let before_renderer_page = ctx
+                .conn
+                .renderer_page_residence_identity_for_session_owner(Some(&popup_session_id))
+                .expect("popup renderer Page residence");
+            let before_renderer_attachment = ctx
+                .conn
+                .current_renderer_agent_attachment_id_for_session_owner(Some(&popup_session_id))
+                .expect("popup renderer attachment");
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 260_230,
+                "method": "Runtime.runIfWaitingForDebugger",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            take_response_by_id(&mut ctx, 260_230);
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "popup network error Document load",
+                |message| {
+                    message["method"] == json!("Page.loadEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("popup network error commit", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                    && conn
+                        .browser_context_by_id("BID-popup-network-error")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
+            })
+            .await;
+
+            let request_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Network.requestWillBeSent")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["request"]["url"] == json!(unreachable_url)
+                })
+                .unwrap_or_else(|| panic!("missing popup request: {:?}", ctx.sent));
+            let request_id = ctx.sent[request_index]["params"]["requestId"]
+                .as_str()
+                .expect("popup request id")
+                .to_owned();
+            let failed_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Network.loadingFailed")
+                        && message["params"]["requestId"] == json!(request_id)
+                })
+                .unwrap_or_else(|| panic!("missing popup loadingFailed: {:?}", ctx.sent));
+            let frame_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Page.frameNavigated")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["frame"]["url"]
+                            == json!(NETWORK_ERROR_PAGE_URL)
+                })
+                .unwrap_or_else(|| panic!("missing popup error frame: {:?}", ctx.sent));
+            let finished_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Network.loadingFinished")
+                        && message["params"]["requestId"] == json!(request_id)
+                })
+                .unwrap_or_else(|| panic!("missing popup loadingFinished: {:?}", ctx.sent));
+            let dom_content_loaded_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Page.domContentEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                })
+                .expect("popup error Document DCL");
+            assert!(
+                request_index < failed_index
+                    && failed_index < frame_index
+                    && frame_index < finished_index
+                    && finished_index < dom_content_loaded_index,
+                "popup error-page event order should match Chromium: {:?}",
+                ctx.sent
+            );
+            assert_eq!(
+                ctx.sent[frame_index]["params"]["frame"]["unreachableUrl"],
+                unreachable_url
+            );
+            assert_eq!(ctx.sent[failed_index]["params"]["canceled"], false);
+            assert!(!ctx.sent.iter().any(|message| {
+                message["method"] == json!("Network.responseReceived")
+                    && message["params"]["requestId"] == json!(request_id)
+            }));
+
+            ctx.process_async(json!({
+                "id": 260_231,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, origin: location.origin, oldMarkerType: typeof __openerImmediateMutation, oldBodyMarkerType: typeof document.body.dataset.openerMutation, title: document.title, readyState: document.readyState, historyLength: history.length, hasOpener: opener !== null })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_231)["result"]["result"]["value"],
+                json!({
+                    "href": NETWORK_ERROR_PAGE_URL,
+                    "origin": "null",
+                    "oldMarkerType": "undefined",
+                    "oldBodyMarkerType": "undefined",
+                    "title": "127.0.0.1",
+                    "readyState": "complete",
+                    "historyLength": 1,
+                    "hasOpener": true
+                })
+            );
+
+            ctx.process_async(json!({
+                "id": 260_232,
+                "method": "Page.getNavigationHistory",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            let history = take_response_by_id(&mut ctx, 260_232);
+            assert_eq!(history["result"]["currentIndex"], json!(0));
+            assert_eq!(
+                history["result"]["entries"]
+                    .as_array()
+                    .expect("popup error history entries")
+                    .len(),
+                1
+            );
+            assert_eq!(history["result"]["entries"][0]["url"], unreachable_url);
+
+            ctx.process_async(json!({
+                "id": 260_233,
+                "method": "Target.getTargetInfo",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let target_info = take_response_by_id(&mut ctx, 260_233);
+            assert_eq!(target_info["result"]["targetInfo"]["url"], unreachable_url);
+            assert_eq!(
+                target_info["result"]["targetInfo"]["openerId"],
+                "TID-popup-network-error-opener"
+            );
+            assert_eq!(
+                target_info["result"]["targetInfo"]["canAccessOpener"],
+                true
+            );
+
+            assert_eq!(
+                ctx.conn
+                    .target_page_residence_identity_for_session(Some(&popup_session_id)),
+                Some(before_target_page),
+                "popup error navigation should keep its target Page residence"
+            );
+            assert_eq!(
+                ctx.conn
+                    .renderer_page_residence_identity_for_session_owner(Some(&popup_session_id)),
+                Some(before_renderer_page),
+                "popup error navigation should keep its renderer Page/WindowProxy residence"
+            );
+            assert_ne!(
+                ctx.conn
+                    .current_renderer_agent_attachment_id_for_session_owner(Some(
+                        &popup_session_id,
+                    )),
+                Some(before_renderer_attachment),
+                "popup error navigation should replace only the renderer Document/realm"
+            );
+
+            ctx.process_async(json!({
+                "id": 260_234,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "({ retainedWindowProxy: __networkErrorPopup !== null && __networkErrorPopup === __networkErrorPopupAlias })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            let opener_probe = take_response_by_id(&mut ctx, 260_234);
+            assert_eq!(
+                opener_probe["result"]["result"]["value"],
+                json!({ "retainedWindowProxy": true }),
+                "opener-side stable popup WindowProxy probe failed: {opener_probe:?}"
+            );
+        })
+        .await;
+    failing_server.abort();
+}
+
+// Chromium/WPT sources:
+// third_party/blink/web_tests/external/wpt/html/browsers/browsing-the-web/
+// navigating-across-documents/initial-empty-document/window-open-204-fragment.html
+// navigating-across-documents/initial-empty-document/
+// window-open-204-pushState-replaceState.html
+// third_party/blink/web_tests/http/tests/inspector-protocol/page/navigate-204.js
+// third_party/blink/web_tests/http/tests/inspector-protocol/network/
+// navigation-204-loading-failed.js
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_no_commit_responses_preserve_initial_document_before_redirect_replacement() {
+    let fixture = SmokeFixtureServer::start().await;
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-terminal",
+                "TID-popup-terminal-opener",
+                "<main>opener</main>",
+            )
+            .await;
+            set_auto_attach_waiting_for_debugger(&mut ctx, 260_230).await;
+            ctx.take_all();
+
+            let no_content_url = fixture.url("/no-content");
+            let messages = open_popup_from_runtime(
+                &mut ctx,
+                260_231,
+                &format!(
+                    "(() => {{ const popup = window.open('{no_content_url}', '_blank'); popup.__openerImmediateMutation = 'kept'; popup.document.body.dataset.openerMutation = 'kept'; return popup !== null; }})()"
+                ),
+            )
+            .await;
+            assert_eq!(
+                response(&messages, 260_231)["result"]["result"]["value"],
+                true
+            );
+            let popup = event(&messages, "Target.targetCreated");
+            let popup_target_id = popup["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("popup target id")
+                .to_owned();
+            let attached = event(&messages, "Target.attachedToTarget");
+            let popup_session_id = attached["params"]["sessionId"]
+                .as_str()
+                .expect("popup session id")
+                .to_owned();
+
+            for (id, method, params) in [
+                (260_232, "Page.enable", json!({})),
+                (260_233, "Network.enable", json!({})),
+                (
+                    260_234,
+                    "Page.setLifecycleEventsEnabled",
+                    json!({ "enabled": true }),
+                ),
+            ] {
+                ctx.process_async(json!({
+                    "id": id,
+                    "method": method,
+                    "sessionId": popup_session_id,
+                    "params": params
+                }))
+                .await;
+                ctx.expect_result(id, json!({}), Some(&popup_session_id));
+            }
+
+            ctx.process_async(json!({
+                "id": 260_235,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, globalMarker: __openerImmediateMutation, bodyMarker: document.body.dataset.openerMutation, historyLength: history.length })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_235)["result"]["result"]["value"],
+                json!({
+                    "href": "about:blank",
+                    "globalMarker": "kept",
+                    "bodyMarker": "kept",
+                    "historyLength": 1
+                })
+            );
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 260_236,
+                "method": "Runtime.runIfWaitingForDebugger",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            take_response_by_id(&mut ctx, 260_236);
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "popup 204 navigation abort",
+                |message| {
+                    message["method"] == json!("Network.loadingFailed")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["errorText"] == json!("net::ERR_ABORTED")
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("popup 204 terminal completion", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+            })
+            .await;
+
+            let response_204_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Network.responseReceived")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["response"]["url"] == json!(no_content_url)
+                        && message["params"]["response"]["status"] == json!(204)
+                })
+                .unwrap_or_else(|| panic!("missing popup 204 response: {:?}", ctx.sent));
+            let request_204 = ctx.sent[response_204_index]["params"]["requestId"]
+                .as_str()
+                .expect("204 request id")
+                .to_owned();
+            let failed_204_index = ctx
+                .sent
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Network.loadingFailed")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["requestId"] == json!(request_204)
+                        && message["params"]["errorText"] == json!("net::ERR_ABORTED")
+                        && message["params"]["canceled"] == json!(true)
+                })
+                .unwrap_or_else(|| panic!("missing popup 204 loadingFailed: {:?}", ctx.sent));
+            assert!(response_204_index < failed_204_index);
+            assert!(!ctx.sent.iter().any(|message| {
+                message["method"] == json!("Network.loadingFinished")
+                    && message["params"]["requestId"] == json!(request_204)
+            }));
+            assert!(!ctx.sent.iter().any(|message| {
+                (message["method"] == json!("Page.frameNavigated")
+                    && message["params"]["frame"]["url"] == json!(no_content_url))
+                    || (message["method"] == json!("Page.lifecycleEvent")
+                        && matches!(
+                            message["params"]["name"].as_str(),
+                            Some("DOMContentLoaded" | "load")
+                        ))
+            }));
+
+            ctx.process_async(json!({
+                "id": 260_237,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "location.hash = 'after-204'; const fragmentHistoryLength = history.length; history.pushState({ source: 'initial-empty' }, '', '#after-push-state'); ({ href: location.href, globalMarker: __openerImmediateMutation, bodyMarker: document.body.dataset.openerMutation, fragmentHistoryLength, historyLength: history.length, historyState: history.state.source })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_237)["result"]["result"]["value"],
+                json!({
+                    "href": "about:blank#after-push-state",
+                    "globalMarker": "kept",
+                    "bodyMarker": "kept",
+                    "fragmentHistoryLength": 1,
+                    "historyLength": 1,
+                    "historyState": "initial-empty"
+                })
+            );
+
+            ctx.process_async(json!({
+                "id": 260_243,
+                "method": "Page.getNavigationHistory",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            let fragment_history = take_response_by_id(&mut ctx, 260_243);
+            assert_eq!(fragment_history["result"]["currentIndex"], json!(0));
+            assert_eq!(
+                fragment_history["result"]["entries"]
+                    .as_array()
+                    .expect("post-204 fragment history entries")
+                    .len(),
+                1
+            );
+            assert_eq!(
+                fragment_history["result"]["entries"][0]["url"],
+                "about:blank#after-push-state"
+            );
+
+            ctx.sent.clear();
+            let reset_content_url = fixture.url("/reset-content");
+            ctx.process_async(json!({
+                "id": 260_238,
+                "method": "Page.navigate",
+                "sessionId": popup_session_id,
+                "params": { "url": reset_content_url }
+            }))
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "popup 205 Page.navigate result",
+                |message| message["id"] == json!(260_238),
+            )
+            .await;
+            let reset_result = take_response_by_id(&mut ctx, 260_238);
+            assert_eq!(reset_result["result"]["frameId"], popup_target_id);
+            assert!(reset_result["result"]["loaderId"].as_str().is_some());
+            assert_eq!(
+                reset_result["result"]["errorText"],
+                json!("net::ERR_ABORTED")
+            );
+            assert_eq!(reset_result["result"]["isDownload"], json!(false));
+            let response_205 = ctx
+                .sent
+                .iter()
+                .find(|message| {
+                    message["method"] == json!("Network.responseReceived")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["response"]["url"] == json!(reset_content_url)
+                        && message["params"]["response"]["status"] == json!(205)
+                })
+                .unwrap_or_else(|| panic!("missing popup 205 response: {:?}", ctx.sent));
+            let request_205 = response_205["params"]["requestId"]
+                .as_str()
+                .expect("205 request id");
+            assert!(ctx.sent.iter().any(|message| {
+                message["method"] == json!("Network.loadingFailed")
+                    && message["params"]["requestId"] == json!(request_205)
+                    && message["params"]["errorText"] == json!("net::ERR_ABORTED")
+                    && message["params"]["canceled"] == json!(true)
+            }));
+
+            ctx.process_async(json!({
+                "id": 260_239,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, marker: __openerImmediateMutation, historyLength: history.length })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_239)["result"]["result"]["value"],
+                json!({
+                    "href": "about:blank#after-push-state",
+                    "marker": "kept",
+                    "historyLength": 1
+                })
+            );
+
+            ctx.sent.clear();
+            let redirect_start_url = fixture.url("/redirect-start");
+            let redirect_final_url = fixture.url("/redirect-final");
+            ctx.process_async(json!({
+                "id": 260_240,
+                "method": "Page.navigate",
+                "sessionId": popup_session_id,
+                "params": { "url": redirect_start_url }
+            }))
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "popup redirect Page.navigate result",
+                |message| message["id"] == json!(260_240),
+            )
+            .await;
+            let redirect_result = take_response_by_id(&mut ctx, 260_240);
+            let redirect_loader_id = redirect_result["result"]["loaderId"]
+                .as_str()
+                .expect("redirect loader id")
+                .to_owned();
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "popup redirect load lifecycle",
+                |message| {
+                    message["method"] == json!("Page.lifecycleEvent")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["frameId"] == json!(popup_target_id)
+                        && message["params"]["loaderId"] == json!(redirect_loader_id)
+                        && message["params"]["name"] == json!("load")
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("popup redirect authoritative load", |conn| {
+                conn.renderer_document_lifecycle_authoritative_state_for_session_owner(Some(
+                    &popup_session_id,
+                ))
+                .is_some_and(|(binding, snapshot)| {
+                    binding.loader_id == redirect_loader_id && snapshot.load.is_some()
+                })
+            })
+            .await;
+
+            let document_requests = ctx
+                .sent
+                .iter()
+                .filter(|message| {
+                    message["method"] == json!("Network.requestWillBeSent")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["type"] == json!("Document")
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                document_requests
+                    .iter()
+                    .filter(|message| {
+                        message["params"]["request"]["url"] == json!(redirect_start_url)
+                    })
+                    .count(),
+                1,
+                "redirect start must have one authoritative hop: {:?}",
+                ctx.sent
+            );
+            assert_eq!(
+                document_requests
+                    .iter()
+                    .filter(|message| {
+                        message["params"]["request"]["url"] == json!(redirect_final_url)
+                    })
+                    .count(),
+                1,
+                "redirect final must have one authoritative hop: {:?}",
+                ctx.sent
+            );
+            let start_request = document_requests
+                .iter()
+                .find(|message| {
+                    message["params"]["request"]["url"] == json!(redirect_start_url)
+                })
+                .expect("redirect start request");
+            let final_request = document_requests
+                .iter()
+                .find(|message| {
+                    message["params"]["request"]["url"] == json!(redirect_final_url)
+                })
+                .expect("redirect final request");
+            assert_eq!(
+                start_request["params"]["requestId"],
+                final_request["params"]["requestId"]
+            );
+            assert_eq!(
+                final_request["params"]["redirectResponse"]["url"],
+                redirect_start_url
+            );
+            assert_eq!(
+                ctx.sent
+                    .iter()
+                    .filter(|message| {
+                        message["method"] == json!("Page.frameNavigated")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["frame"]["loaderId"]
+                                == json!(redirect_loader_id)
+                            && message["params"]["frame"]["url"] == json!(redirect_final_url)
+                    })
+                    .count(),
+                1
+            );
+            for lifecycle_name in ["DOMContentLoaded", "load"] {
+                assert_eq!(
+                    ctx.sent
+                        .iter()
+                        .filter(|message| {
+                            message["method"] == json!("Page.lifecycleEvent")
+                                && message["sessionId"] == json!(popup_session_id)
+                                && message["params"]["loaderId"] == json!(redirect_loader_id)
+                                && message["params"]["name"] == json!(lifecycle_name)
+                        })
+                        .count(),
+                    1,
+                    "{lifecycle_name} must be published once: {:?}",
+                    ctx.sent
+                );
+            }
+
+            ctx.process_async(json!({
+                "id": 260_241,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, text: document.querySelector('main').textContent, historyLength: history.length, readyState: document.readyState, oldMarkerType: typeof __openerImmediateMutation })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_241)["result"]["result"]["value"],
+                json!({
+                    "href": redirect_final_url,
+                    "text": "redirect final",
+                    "historyLength": 1,
+                    "readyState": "complete",
+                    "oldMarkerType": "undefined"
+                })
+            );
+
+            ctx.process_async(json!({
+                "id": 260_242,
+                "method": "Page.getNavigationHistory",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            let history = take_response_by_id(&mut ctx, 260_242);
+            assert_eq!(history["result"]["currentIndex"], json!(0));
+            assert_eq!(
+                history["result"]["entries"]
+                    .as_array()
+                    .expect("popup history entries")
+                    .len(),
+                1
+            );
+            assert_eq!(history["result"]["entries"][0]["url"], redirect_final_url);
+        })
+        .await;
 }
 
 // Chromium source:

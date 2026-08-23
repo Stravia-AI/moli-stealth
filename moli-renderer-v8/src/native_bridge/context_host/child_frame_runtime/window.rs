@@ -350,7 +350,7 @@ impl ChildWindowProxyRecords {
     ) -> bool {
         // A replacement Document reuses the browsing-context handle. Its context
         // binding must survive delayed retirement of the previous LocalWindow.
-        let Some(record) = self.records.get_mut(&handle) else {
+        let Some(record) = self.existing_record_mut(handle) else {
             return false;
         };
         if record.default_execution_context_id != Some(expected_execution_context_id) {

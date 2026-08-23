@@ -341,16 +341,12 @@ async fn failed_heap_profiler_sampling_command_does_not_create_typed_projection(
 #[tokio::test(flavor = "multi_thread")]
 async fn heap_profiler_sampling_and_tracking_are_restored_on_replacement_page_isolate() {
     let mut ctx = TestContext::new();
-    with_loaded_document_async(
+    with_loaded_document_for_target_async(
         &mut ctx,
         "<!doctype html><script>globalThis.__heapBefore = []</script>",
+        "TID-heap-profiler-restore",
     )
     .await;
-    ctx.conn
-        .browser_context
-        .as_mut()
-        .expect("browser context should exist")
-        .set_active_target_id("TID-heap-profiler-restore");
 
     for command in [
         json!({"id": 206_840, "method": "HeapProfiler.enable"}),
@@ -665,13 +661,13 @@ async fn heap_profiler_moli_diagnostics_reports_connection_state_without_loaded_
     );
     assert_eq!(
         isolate_scope["runtimeGetHeapUsageV8HeapScope"],
-        json!("page-vm-document-isolate"),
+        json!("script-agent-document-isolate"),
         "diagnostics should label Runtime.getHeapUsage heap scope: {response:?}"
     );
     assert_eq!(
         isolate_scope["runtimeGetHeapUsageV8HeapIsTargetLocal"],
-        json!(true),
-        "diagnostics should make PageVM-local heap stats explicit: {response:?}"
+        json!(false),
+        "heap stats may include explicitly related Pages in the same script agent: {response:?}"
     );
     assert_eq!(
         isolate_scope["runtimeGetHeapUsageMoliCountersScope"],
@@ -680,12 +676,12 @@ async fn heap_profiler_moli_diagnostics_reports_connection_state_without_loaded_
     );
     assert_eq!(
         isolate_scope["runtimeCollectGarbageScope"],
-        json!("page-vm-document-isolate"),
+        json!("script-agent-document-isolate"),
         "diagnostics should label collectGarbage scope: {response:?}"
     );
     assert_eq!(
         isolate_scope["v8ForegroundTaskWakeScope"],
-        json!("page-vm-document-isolate"),
+        json!("script-agent-document-isolate"),
         "diagnostics should label V8 foreground task wake scope: {response:?}"
     );
     assert_eq!(

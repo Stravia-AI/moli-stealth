@@ -310,12 +310,16 @@ fn host_lightweight_popup_id_for_object_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+        rv.set_null();
+        return;
+    };
     let Some(object) = args.get(0).to_object(scope) else {
         rv.set_null();
         return;
     };
-    let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, object)
-    else {
+    let host = unsafe { &mut *host_ptr };
+    let Some(popup_id) = host.lightweight_popup_id_for_window_proxy(scope, object) else {
         rv.set_null();
         return;
     };

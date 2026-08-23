@@ -6079,6 +6079,7 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
     let mut ctx = TestContext::new();
     let attached = create_attached_page_session_async(&mut ctx, 240, 241, 242, 2393, 243).await;
     let session_id = attached.session_id;
+    let target_id = attached.target_id;
 
     ctx.process_async(json!({
         "id": 244,
@@ -6125,7 +6126,7 @@ async fn playwright_over_cdp_script_execution_disabled_blocks_page_scripts_but_n
     crate::testing::wait_until_renderer_document_load(
         &mut ctx,
         Some(session_id.as_str()),
-        &attached.target_id,
+        &target_id,
         &loader_id,
     )
     .await;

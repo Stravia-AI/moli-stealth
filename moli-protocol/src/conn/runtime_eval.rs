@@ -1,4 +1,8 @@
-use std::{collections::hash_map::Entry, future::Future, pin::Pin};
+use std::{
+    collections::{HashSet, hash_map::Entry},
+    future::Future,
+    pin::Pin,
+};
 
 use moli_page_types::{FrontendCommandId, RendererCallId, RendererInspectorResponseDelivery};
 use moli_protocol_cdp::CdpRendererCommandReplayDispatch;
@@ -1791,9 +1795,8 @@ impl CdpConnection {
         }
     }
 
-    pub(crate) fn fail_pending_inspector_awaits_for_session_owner_background_events_into(
+    pub(crate) fn fail_claimed_pending_inspector_awaits_for_session_owner_background_events_into(
         &mut self,
-        out: &mut Vec<BackgroundProtocolEvent>,
         claimed_background_events: &mut Vec<BackgroundProtocolEvent>,
         session_id: Option<&str>,
         reason: &'static str,
@@ -1802,6 +1805,20 @@ impl CdpConnection {
         self.push_claimed_pending_inspector_await_owner_errors(
             claimed_background_events,
             claimed,
+            reason,
+        );
+    }
+
+    pub(crate) fn fail_pending_inspector_awaits_for_session_owner_background_events_into(
+        &mut self,
+        out: &mut Vec<BackgroundProtocolEvent>,
+        claimed_background_events: &mut Vec<BackgroundProtocolEvent>,
+        session_id: Option<&str>,
+        reason: &'static str,
+    ) {
+        self.fail_claimed_pending_inspector_awaits_for_session_owner_background_events_into(
+            claimed_background_events,
+            session_id,
             reason,
         );
         if let Some(owner_session_id) = session_id
@@ -4274,6 +4291,8 @@ impl CdpConnection {
         let mut isolated_world_context_count = 0;
         let mut child_default_context_count = 0;
         let mut failed_page_snapshot_count = 0;
+        let mut loaded_document_script_agent_ids = HashSet::new();
+        let mut loaded_document_missing_script_agent_id_count = 0;
 
         for completed in completed.completed {
             let Some(page) = self
@@ -4299,6 +4318,12 @@ impl CdpConnection {
                 failed_page_snapshot_count += 1;
                 continue;
             };
+            match snapshot.diagnostics.script_agent_id {
+                Some(script_agent_id) => {
+                    loaded_document_script_agent_ids.insert(script_agent_id);
+                }
+                None => loaded_document_missing_script_agent_id_count += 1,
+            }
             document_context_count += snapshot.diagnostics.document_context_count;
             isolated_world_context_count += snapshot.diagnostics.isolated_world_context_count;
             child_default_context_count += snapshot.diagnostics.child_default_context_count;
@@ -4308,13 +4333,15 @@ impl CdpConnection {
                 .dedicated_worker_running_worker_isolate_count;
         }
 
-        let estimated_document_isolate_count = self
+        let pending_document_page_build_count = self
             .browser_contexts()
-            .map(|browser_context| {
-                browser_context.loaded_document_page_count()
-                    + browser_context.pending_document_page_build_count()
-            })
+            .map(BrowserContext::pending_document_page_build_count)
             .sum::<usize>();
+        let loaded_document_script_agent_count = loaded_document_script_agent_ids.len();
+        let estimated_document_isolate_count = loaded_document_script_agent_count
+            + loaded_document_missing_script_agent_id_count
+            + failed_page_snapshot_count
+            + pending_document_page_build_count;
         let shared_worker_running_worker_isolate_count = self
             .browser_contexts()
             .map(|browser_context| {
@@ -4334,6 +4361,12 @@ impl CdpConnection {
             json!(isolated_world_context_count);
         diagnostics["isolateScope"]["childDefaultContextCount"] =
             json!(child_default_context_count);
+        diagnostics["isolateScope"]["loadedDocumentScriptAgentCount"] =
+            json!(loaded_document_script_agent_count);
+        diagnostics["isolateScope"]["loadedDocumentMissingScriptAgentIdCount"] =
+            json!(loaded_document_missing_script_agent_id_count);
+        diagnostics["isolateScope"]["estimatedDocumentIsolateCount"] =
+            json!(estimated_document_isolate_count);
         diagnostics["isolateScope"]["dedicatedWorkerLoadingCount"] =
             json!(dedicated_worker_loading_count);
         diagnostics["isolateScope"]["dedicatedWorkerRunningWorkerIsolateCount"] =

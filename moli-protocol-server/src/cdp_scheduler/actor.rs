@@ -23,11 +23,11 @@ use crate::{
 use super::frontend_control::CdpFrontendControlState;
 use super::{
     CdpBackgroundEventReceiver, CdpBackgroundNavigationCompletionReceiver, CdpCookieSnapshot,
-    CdpOwnerActorLifecycle, CdpRendererPublicationReceiver, CdpScheduler,
-    CdpSchedulerEventReceivers, CommandDispatchState, CommandDispatchStepOutput,
-    CommandOutputReleasePermit, CommandStartAction, CommandTaskStep, CommandTurnOutput,
-    ProtocolAdapterScheduler, ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput,
-    ProtocolOutputSequence,
+    CdpDocumentContinuationCompletionReceiver, CdpOwnerActorLifecycle,
+    CdpRendererPublicationReceiver, CdpScheduler, CdpSchedulerEventReceivers, CommandDispatchState,
+    CommandDispatchStepOutput, CommandOutputReleasePermit, CommandStartAction, CommandTaskStep,
+    CommandTurnOutput, ProtocolAdapterScheduler, ProtocolAdapterSchedulerAdvance,
+    ProtocolAdapterSchedulerInput, ProtocolOutputSequence,
 };
 
 struct PendingRuntimeDeferredReplyState {
@@ -90,6 +90,7 @@ enum SchedulerInput {
 struct SchedulerInputReceivers {
     background_event_rx: CdpBackgroundEventReceiver,
     background_navigation_completion_rx: CdpBackgroundNavigationCompletionReceiver,
+    document_continuation_completion_rx: CdpDocumentContinuationCompletionReceiver,
     renderer_publication_rx: CdpRendererPublicationReceiver,
     buffered_renderer_publications: VecDeque<RendererOutputTransportMessage>,
     ready_background_inputs_before_runtime_response: VecDeque<SchedulerInput>,
@@ -100,6 +101,7 @@ impl SchedulerInputReceivers {
         Self {
             background_event_rx: receivers.background_event_rx,
             background_navigation_completion_rx: receivers.background_navigation_completion_rx,
+            document_continuation_completion_rx: receivers.document_continuation_completion_rx,
             renderer_publication_rx: receivers.renderer_publication_rx,
             buffered_renderer_publications: VecDeque::new(),
             ready_background_inputs_before_runtime_response: VecDeque::new(),
@@ -119,6 +121,12 @@ impl SchedulerInputReceivers {
         // A correlated response carries an exact concrete output cursor; the
         // cursor fence below consumes only concrete stream traffic until that
         // position is admitted.
+        while let Ok(completion) = self.document_continuation_completion_rx.try_recv() {
+            self.ready_background_inputs_before_runtime_response
+                .push_back(SchedulerInput::BackgroundNavigationCompletion(
+                    BackgroundNavigationCompletion::document_continuation(completion),
+                ));
+        }
         while let Ok(completion) = self.background_navigation_completion_rx.try_recv() {
             self.ready_background_inputs_before_runtime_response
                 .push_back(SchedulerInput::BackgroundNavigationCompletion(completion));
@@ -177,6 +185,13 @@ impl SchedulerInputReceivers {
                     self.queue_ready_background_inputs_before_runtime_response(response);
                     self.ready_background_inputs_before_runtime_response.pop_front()
                 }
+                maybe_continuation = self.document_continuation_completion_rx.recv() => {
+                    maybe_continuation.map(|completion| {
+                        SchedulerInput::BackgroundNavigationCompletion(
+                            BackgroundNavigationCompletion::document_continuation(completion),
+                        )
+                    })
+                }
                 maybe_completion = self.background_navigation_completion_rx.recv() => {
                     maybe_completion.map(SchedulerInput::BackgroundNavigationCompletion)
                 }
@@ -193,6 +208,13 @@ impl SchedulerInputReceivers {
         } else {
             tokio::select! {
                 biased;
+                maybe_continuation = self.document_continuation_completion_rx.recv() => {
+                    maybe_continuation.map(|completion| {
+                        SchedulerInput::BackgroundNavigationCompletion(
+                            BackgroundNavigationCompletion::document_continuation(completion),
+                        )
+                    })
+                }
                 maybe_completion = self.background_navigation_completion_rx.recv() => {
                     maybe_completion.map(SchedulerInput::BackgroundNavigationCompletion)
                 }
@@ -2093,11 +2115,14 @@ mod tests {
         let (background_event_tx, background_event_rx) = mpsc::unbounded_channel();
         let (_background_navigation_tx, background_navigation_completion_rx) =
             mpsc::unbounded_channel();
+        let (_document_continuation_tx, document_continuation_completion_rx) =
+            mpsc::unbounded_channel();
         let (_renderer_publication_tx, renderer_publication_rx) =
             moli_core::renderer_output_transport_channel();
         let mut receivers = SchedulerInputReceivers::new(CdpSchedulerEventReceivers {
             background_event_rx,
             background_navigation_completion_rx,
+            document_continuation_completion_rx,
             renderer_publication_rx,
         });
         let (runtime_response_tx, mut runtime_response_rx) = mpsc::unbounded_channel();

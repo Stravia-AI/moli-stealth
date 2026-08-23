@@ -107,6 +107,33 @@ enum RendererPageCommandPendingDispatch {
     InspectorMain(Box<RendererRuntimeInspectorMainCommandRoute>),
 }
 
+/// A non-owning request for reserving the next Document in one exact live
+/// renderer Page.
+///
+/// This carries only the renderer owner route and stable Page token. It may be
+/// moved into protocol background work without cloning the Page handle or its
+/// close authority.
+pub struct RendererPageReplacementReservationPending {
+    render_runtime: RenderRuntimeHandle,
+    token: RendererPageToken,
+    _not_send: PhantomData<Rc<()>>,
+}
+
+impl RendererPageReplacementReservationPending {
+    pub async fn await_ready(self) -> Result<RendererPageReservationToken> {
+        match self
+            .render_runtime
+            .dispatch(RendererOwnerCommand::ReserveLivePageReplacement { token: self.token })
+            .await?
+        {
+            RendererOwnerReply::LivePageReplacementReserved(reservation) => Ok(reservation),
+            _ => Err(anyhow!(
+                "renderer owner returned non-reservation reply for live Page replacement"
+            )),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RendererPageTestingHandle {
     render_runtime: RenderRuntimeHandle,
@@ -170,6 +197,52 @@ impl RendererPageHandle {
         &mut self,
     ) -> Option<RendererPageCommandPostResponseContinuation> {
         self.committed_document_post_response_continuation.take()
+    }
+
+    /// Adopts the current Document's inspector identity without replacing the
+    /// Page handle or its close/command authority.
+    pub fn adopt_page_replacement(
+        &mut self,
+        replacement: &RendererPageReplacementCommit,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            replacement.owner_local_host_id() == self.owner_local_host_id()
+                && replacement.page_id() == self.renderer_page_id(),
+            "renderer Page replacement belongs to a different stable Page"
+        );
+        self.devtools_target.detach_page(
+            self.renderer_page_id(),
+            "Inspector Page document was replaced",
+        );
+        self.javascript_dialog_broker.dismiss_pending();
+        self.devtools_agent_token = replacement.renderer_devtools_agent_token();
+        self.javascript_dialog_broker = replacement.javascript_dialog_broker.clone();
+        self.devtools_target = replacement.devtools_target.clone();
+        Ok(())
+    }
+
+    /// Reserves a replacement Document for this exact live Page generation.
+    ///
+    /// The renderer owner serializes this snapshot with Page turns. Preparing
+    /// the replacement fails closed if another cross-document commit changes
+    /// the resident `PageVm` before the reservation is consumed. A newer
+    /// unconsumed reservation for the same Page supersedes an older one.
+    pub async fn reserve_replacement_document_for_navigation(
+        &self,
+    ) -> Result<RendererPageReservationToken> {
+        self.start_replacement_document_reservation()
+            .await_ready()
+            .await
+    }
+
+    pub fn start_replacement_document_reservation(
+        &self,
+    ) -> RendererPageReplacementReservationPending {
+        RendererPageReplacementReservationPending {
+            render_runtime: self.render_runtime.clone(),
+            token: self.token(),
+            _not_send: PhantomData,
+        }
     }
 
     pub fn take_pending_modal_javascript_dialogs(&self) -> Vec<RendererPendingJavaScriptDialog> {

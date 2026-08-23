@@ -987,7 +987,7 @@ impl PageVm {
         })
     }
 
-    fn prepare_replacement_document_commit(
+    pub(in crate::runtime) fn prepare_replacement_document_commit(
         &mut self,
         handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
     ) -> Result<()> {

@@ -40,6 +40,7 @@ impl BrowserContext {
             initial_empty_document_url,
             creator,
             None,
+            None,
             session_storage_namespace,
         );
     }
@@ -51,6 +52,7 @@ impl BrowserContext {
         url: String,
         initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
+        pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         session_storage_store: Option<SharedWebStorageStore>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
     ) {
@@ -63,6 +65,7 @@ impl BrowserContext {
             url,
             initial_empty_document_url,
             creator,
+            pending_auxiliary_page,
             initial_empty_document_storage_key,
             session_storage_namespace,
         );
@@ -88,6 +91,7 @@ impl BrowserContext {
         url: String,
         initial_empty_document_url: Option<String>,
         creator: Option<TargetInitialEmptyDocumentCreator>,
+        pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
         session_storage_namespace: Option<TargetSessionStorageNamespace>,
     ) {
@@ -101,6 +105,14 @@ impl BrowserContext {
             );
         });
         let mut target = BackgroundTarget::with_identity(target_id, session_id, target_identity);
+        if let Some(pending_auxiliary_page) = pending_auxiliary_page {
+            assert!(
+                target
+                    .runtime_slot
+                    .stage_pending_auxiliary_page(pending_auxiliary_page),
+                "new popup target must accept its renderer-owned auxiliary Page reservation"
+            );
+        }
         if let Some(namespace) = session_storage_namespace {
             target.replace_session_storage_namespace(namespace);
         }
@@ -2284,6 +2296,7 @@ mod tests {
                     source: "globalThis.fromDocumentStart = true".to_owned(),
                     world_name: None,
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
             ));
@@ -2414,6 +2427,7 @@ mod tests {
                     source: "globalThis.demoted = true".to_owned(),
                     world_name: None,
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
             ));

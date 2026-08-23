@@ -344,6 +344,18 @@ impl ScriptVm {
             if script.source.trim().is_empty() {
                 continue;
             }
+            if script.browser_internal {
+                activity = ChildRealmMaterializationBodyActivity::DocumentStartScript;
+                if let Err(error) = self
+                    .exec_browser_internal_bootstrap_script_in_execution_context(
+                        execution_context_id,
+                        &script.source,
+                    )
+                {
+                    return (activity, Err(error));
+                }
+                continue;
+            }
             let job = match self.child_frame_source_script_job_for_execution_context_id(
                 execution_context_id,
                 crate::frame_owner_model::FrameScriptJobKind::Eval,
@@ -540,8 +552,15 @@ impl ScriptVm {
                 }
             };
             activity = ChildRealmMaterializationBodyActivity::DocumentStartScript;
-            if let Err(error) = self.exec_in_execution_context(execution_context_id, &script.source)
-            {
+            let execution = if script.browser_internal {
+                self.exec_browser_internal_bootstrap_script_in_execution_context(
+                    execution_context_id,
+                    &script.source,
+                )
+            } else {
+                self.exec_in_execution_context(execution_context_id, &script.source)
+            };
+            if let Err(error) = execution {
                 self.record_runtime_warning(format_args!(
                     "child preload script in world `{world_name}` failed: {error}"
                 ));

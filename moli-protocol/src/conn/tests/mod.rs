@@ -17,7 +17,7 @@ use crate::devtools_runtime::{
     DevToolsTargetId, NavigationFrameEvent, NavigationFrameEventKind,
 };
 use crate::domains::network::{
-    FailedNavigationDocumentPolicy, FailedNavigationResponseMode,
+    FailedNavigationDocumentPolicy, FailedNavigationHistoryPolicy, FailedNavigationResponseMode,
     MaterializedFailedDocumentProgress, MaterializedNavigationLoadOutcome,
     empty_main_document_progress_gate_for_test,
 };
@@ -249,8 +249,12 @@ fn background_navigation_completion_sender_routes_explicit_session_owners() {
     inactive.attach_active_session("SID-inactive");
     conn.inactive_browser_contexts.push(inactive);
 
-    let (sender, _receiver) = tokio::sync::mpsc::unbounded_channel();
-    conn.set_background_navigation_completion_sender(sender);
+    let (event_sender, _event_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (completion_sender, _completion_receiver) = tokio::sync::mpsc::unbounded_channel();
+    let (continuation_sender, _continuation_receiver) = tokio::sync::mpsc::unbounded_channel();
+    conn.set_background_event_sender(event_sender);
+    conn.set_background_navigation_completion_sender(completion_sender);
+    conn.set_document_continuation_completion_sender(continuation_sender);
 
     assert!(
         conn.background_navigation_completion_sender_for_session_owner(Some("SID-active"))
@@ -414,7 +418,7 @@ async fn removing_active_browser_context_switches_engine_to_promoted_context() {
 }
 
 #[tokio::test]
-async fn memory_diagnostics_reports_page_vm_document_isolate_model() {
+async fn memory_diagnostics_reports_script_agent_document_isolate_model() {
     let mut conn = CdpConnection::new();
     conn.replace_navigation_engine(
         NavigationEngine::new_with_page_vm_document_isolate_for_diagnostics(),
@@ -465,7 +469,7 @@ async fn memory_diagnostics_reports_page_vm_document_isolate_model() {
 
     assert_eq!(
         diagnostics["isolateScope"]["documentIsolateModel"],
-        json!("page-vm")
+        json!("script-agent")
     );
     assert_eq!(
         diagnostics["isolateScope"]["loadedDocumentPageCount"],
@@ -482,7 +486,7 @@ async fn memory_diagnostics_reports_page_vm_document_isolate_model() {
     assert_eq!(
         diagnostics["isolateScope"]["estimatedDocumentIsolateCount"],
         json!(2),
-        "page-vm diagnostics should count one document isolate per loaded page"
+        "independent Pages should retain distinct document script agents"
     );
     assert_eq!(
         diagnostics["isolateScope"]["estimatedWorkerIsolateCount"],
@@ -1229,6 +1233,7 @@ async fn materialized_navigation_completion_drops_stale_token() {
         MaterializedNavigationLoadOutcome::Failed(MaterializedFailedDocumentProgress {
             error_text: "stale navigation should not emit".to_owned(),
             document_policy: FailedNavigationDocumentPolicy::InvalidateCommittedDocument,
+            history_policy: FailedNavigationHistoryPolicy::DiscardPendingUpdate,
             response_mode: FailedNavigationResponseMode::ProtocolError,
             progress_gate: empty_main_document_progress_gate_for_test(),
         });
@@ -1281,6 +1286,7 @@ async fn materialized_navigation_completion_drops_stale_token_without_navigate_i
         MaterializedNavigationLoadOutcome::Failed(MaterializedFailedDocumentProgress {
             error_text: "stale navigation should not emit without a navigate id".to_owned(),
             document_policy: FailedNavigationDocumentPolicy::InvalidateCommittedDocument,
+            history_policy: FailedNavigationHistoryPolicy::DiscardPendingUpdate,
             response_mode: FailedNavigationResponseMode::ProtocolError,
             progress_gate: empty_main_document_progress_gate_for_test(),
         });
@@ -1315,6 +1321,7 @@ async fn materialized_navigation_completion_drains_current_token() {
         MaterializedNavigationLoadOutcome::Failed(MaterializedFailedDocumentProgress {
             error_text: "current navigation should emit".to_owned(),
             document_policy: FailedNavigationDocumentPolicy::InvalidateCommittedDocument,
+            history_policy: FailedNavigationHistoryPolicy::DiscardPendingUpdate,
             response_mode: FailedNavigationResponseMode::ProtocolError,
             progress_gate: empty_main_document_progress_gate_for_test(),
         });

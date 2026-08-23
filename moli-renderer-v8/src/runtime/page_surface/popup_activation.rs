@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use super::{RendererDocumentLifecycleIdentity, RendererWindowDocumentSource};
-use crate::SharedWebStorageStore;
+use crate::{SharedWebStorageStore, runtime::RendererPendingAuxiliaryPage};
 
 /// Exact renderer-side initiator of one auxiliary browsing-context action.
 ///
@@ -49,6 +49,7 @@ pub struct RendererPendingPopupActivation {
     popup_id: Option<u64>,
     url: String,
     target_name: String,
+    pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
     session_storage_store: Option<SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
 }
@@ -77,6 +78,7 @@ impl RendererPendingPopupActivation {
             popup_id,
             url,
             target_name,
+            pending_auxiliary_page: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -98,6 +100,7 @@ impl RendererPendingPopupActivation {
             popup_id,
             url,
             target_name,
+            pending_auxiliary_page: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -122,6 +125,16 @@ impl RendererPendingPopupActivation {
         self
     }
 
+    /// Binds the renderer-owned browsing-context and Page identities reserved
+    /// when this action synchronously created a new auxiliary context.
+    pub fn with_pending_auxiliary_page(
+        mut self,
+        pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
+    ) -> Self {
+        self.pending_auxiliary_page = pending_auxiliary_page;
+        self
+    }
+
     pub fn source(&self) -> &RendererPopupActivationSource {
         &self.source
     }
@@ -142,6 +155,10 @@ impl RendererPendingPopupActivation {
         &self.target_name
     }
 
+    pub fn pending_auxiliary_page(&self) -> Option<RendererPendingAuxiliaryPage> {
+        self.pending_auxiliary_page
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -151,6 +168,7 @@ impl RendererPendingPopupActivation {
         Option<u64>,
         String,
         String,
+        Option<RendererPendingAuxiliaryPage>,
         Option<SharedWebStorageStore>,
         Option<moli_storage_key::MoliStorageKey>,
     ) {
@@ -160,6 +178,7 @@ impl RendererPendingPopupActivation {
             self.popup_id,
             self.url,
             self.target_name,
+            self.pending_auxiliary_page,
             self.session_storage_store,
             self.initial_empty_document_storage_key,
         )
@@ -173,6 +192,7 @@ impl PartialEq for RendererPendingPopupActivation {
             && self.popup_id == other.popup_id
             && self.url == other.url
             && self.target_name == other.target_name
+            && self.pending_auxiliary_page == other.pending_auxiliary_page
             && match (&self.session_storage_store, &other.session_storage_store) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),

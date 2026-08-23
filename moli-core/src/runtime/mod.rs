@@ -44,10 +44,10 @@ pub use moli_renderer_v8::{
     RendererServiceWorkerMainResourceFetch, RendererSharedWorkerRuntimeDiagnostics,
 };
 pub use navigation_engine::{
-    BuiltDocumentPage, CommittedDocumentResourceSource, NavigationEngine,
-    NavigationPageStorageHandles, NavigationResourceStorageHandles, NavigationRuntimeConfig,
-    PendingBuiltDocumentPage, PreparedDocumentPage, PreparedDocumentPageCommitConfiguration,
-    PreparedDocumentPageCommitPermit,
+    BuiltDocumentPage, CommittedDocumentPageReplacement, CommittedDocumentResourceSource,
+    NavigationEngine, NavigationPageStorageHandles, NavigationResourceStorageHandles,
+    NavigationRuntimeConfig, PendingBuiltDocumentPage, PreparedDocumentPage,
+    PreparedDocumentPageCommitConfiguration, PreparedDocumentPageCommitPermit,
 };
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
@@ -1102,6 +1102,7 @@ impl Browser {
                 source,
                 world_name: None,
                 has_bidi_channel_argument: false,
+                browser_internal: false,
                 bidi_channel_handoffs: Vec::new(),
             })
             .collect::<Vec<_>>();
@@ -1230,6 +1231,7 @@ impl Browser {
                 source,
                 world_name: None,
                 has_bidi_channel_argument: false,
+                browser_internal: false,
                 bidi_channel_handoffs: Vec::new(),
             })
             .collect::<Vec<_>>();

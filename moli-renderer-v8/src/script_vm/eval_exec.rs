@@ -718,6 +718,28 @@ impl ScriptVm {
         .into_inner_for_internal_snapshot()
     }
 
+    /// Executes browser-owned realm bootstrap without exposing an
+    /// implementation script to page-facing Inspector instrumentation.
+    pub(super) fn exec_browser_internal_bootstrap_script_in_context_ptr(
+        &mut self,
+        context_ptr: *const v8::Global<v8::Context>,
+        source: &str,
+    ) -> Result<()> {
+        self.eval_string_in_context_ptr_without_turn_drain_with_kind(
+            context_ptr,
+            source,
+            ContextStringEvaluationKind::InspectorInternal,
+            EvalStringMicrotaskCheckpoint::Perform,
+        )
+        .into_inner_for_internal_snapshot()
+        .map(drop)
+    }
+
+    pub(crate) fn exec_browser_internal_bootstrap_script(&mut self, source: &str) -> Result<()> {
+        let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context as *const _;
+        self.exec_browser_internal_bootstrap_script_in_context_ptr(context_ptr, source)
+    }
+
     /// Read a test probe without manufacturing an intervening task checkpoint.
     ///
     /// P5 body/completion witnesses use this only between an already-selected

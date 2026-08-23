@@ -1,13 +1,18 @@
 use moli_core::page::{
     Page, RendererAgentAttachmentId, RendererDevToolsAgentToken, RendererDocumentLifecycleIdentity,
-    RendererRuntimeInspectorMessageBatch, ScriptNetworkOutputItem, SubresourceNetworkRequestHandle,
+    RendererPendingAuxiliaryPage, RendererRuntimeInspectorMessageBatch, ScriptNetworkOutputItem,
+    SubresourceNetworkRequestHandle,
 };
 #[cfg(test)]
 use moli_core::page::{RendererPageDiagnosticsSnapshot, RendererRuntimeObservableSourceSummary};
+use moli_core::runtime::RendererPageReservationToken;
 use serde_json::{Value, json};
 
 use crate::{
-    conn::{CapturedBody, ConnectionNetworkRequestIdAllocator},
+    conn::{
+        CapturedBody, ConnectionNetworkRequestIdAllocator, PopupTargetNavigationAuthorityState,
+        PopupTargetNavigationClaimIdentity, PopupTargetNavigationOwnerAction,
+    },
     domains::{
         log_output_state::{TargetLogOutputQueueState, TargetNetworkLogEntry},
         network::{
@@ -56,6 +61,7 @@ pub(in crate::conn::state) struct TargetNetworkRequestCounters {
 #[derive(Debug, Default)]
 pub(crate) struct TargetRuntimeSlot {
     page_slot: TargetPageSlot,
+    popup_target_navigation_authority: Option<PopupTargetNavigationAuthorityState>,
     devtools_renderer_channel: DevToolsRendererChannel,
     pending_renderer_call_replacements: PreparedRendererCallReplacements,
     javascript_dialog_scope: TargetJavaScriptDialogScope,
@@ -151,6 +157,59 @@ impl TargetRuntimeSlot {
         self.page_slot.has_loaded_page()
     }
 
+    pub(crate) fn stage_initial_popup_target_navigation_owner_action(
+        &mut self,
+        action: PopupTargetNavigationOwnerAction,
+    ) -> bool {
+        if self.popup_target_navigation_authority.is_some() {
+            return false;
+        }
+        self.popup_target_navigation_authority =
+            Some(PopupTargetNavigationAuthorityState::Held(action));
+        true
+    }
+
+    pub(crate) fn take_held_initial_popup_target_navigation_owner_action(
+        &mut self,
+    ) -> Option<PopupTargetNavigationOwnerAction> {
+        let authority = self.popup_target_navigation_authority.take()?;
+        match authority {
+            PopupTargetNavigationAuthorityState::Held(action) => {
+                self.popup_target_navigation_authority = Some(
+                    PopupTargetNavigationAuthorityState::Published(action.claim_identity().clone()),
+                );
+                Some(action)
+            }
+            authority => {
+                self.popup_target_navigation_authority = Some(authority);
+                None
+            }
+        }
+    }
+
+    pub(crate) fn consume_published_popup_target_navigation_claim(
+        &mut self,
+        expected: &PopupTargetNavigationClaimIdentity,
+    ) -> bool {
+        let matches = matches!(
+            self.popup_target_navigation_authority.as_ref(),
+            Some(PopupTargetNavigationAuthorityState::Published(actual)) if actual == expected
+        );
+        if matches {
+            self.popup_target_navigation_authority = Some(
+                PopupTargetNavigationAuthorityState::Consumed(expected.clone()),
+            );
+        }
+        matches
+    }
+
+    pub(crate) fn has_popup_target_navigation_authority(&self) -> bool {
+        self.popup_target_navigation_authority
+            .as_ref()
+            .map(PopupTargetNavigationAuthorityState::claim_identity)
+            .is_some()
+    }
+
     pub(crate) fn has_pending_initial_document_page_build(&self) -> bool {
         matches!(
             self.page_slot.loaded_page_absence_reason(),
@@ -174,6 +233,19 @@ impl TargetRuntimeSlot {
 
     pub(crate) fn start_initial_document_page_build(&mut self) {
         self.page_slot.start_initial_document_page_build();
+    }
+
+    pub(crate) fn stage_pending_auxiliary_page(
+        &mut self,
+        pending: RendererPendingAuxiliaryPage,
+    ) -> bool {
+        self.page_slot.stage_pending_auxiliary_page(pending)
+    }
+
+    pub(crate) fn take_initial_document_page_reservation(
+        &mut self,
+    ) -> Option<RendererPageReservationToken> {
+        self.page_slot.take_initial_document_page_reservation()
     }
 
     pub(crate) fn bind_initial_document_page_build_renderer_page(
@@ -438,6 +510,27 @@ impl TargetRuntimeSlot {
         Ok(())
     }
 
+    pub(crate) fn commit_loaded_navigation_document_replacement(
+        &mut self,
+        transaction: &CommittedRendererAgentAttachment,
+    ) -> Result<Option<RendererAgentAttachment>, DevToolsRendererChannelError> {
+        let current = transaction.current();
+        let page = self
+            .page_slot
+            .loaded_page_mut()
+            .ok_or(DevToolsRendererChannelError::CommittedCandidateMismatch)?;
+        if self.devtools_renderer_channel.current() != Some(current)
+            || page.renderer_devtools_agent_token() != current.agent_token()
+        {
+            return Err(DevToolsRendererChannelError::CommittedCandidateMismatch);
+        }
+        page.bind_renderer_agent_attachment(current.id());
+        self.javascript_dialog_scope.retire();
+        self.reset_document_output_state();
+        self.ingest_owner_page_observable_output_updates();
+        Ok(transaction.previous())
+    }
+
     pub(crate) fn commit_loaded_navigation_renderer_attachment(
         &mut self,
         page: &mut Page,
@@ -604,6 +697,10 @@ impl TargetRuntimeSlot {
                 .loaded_page_absence_reason()
                 .map(TargetPageAbsenceReason::label),
             "pageAttachmentId": self.page_attachment_id().map(TargetPageAttachmentId::get),
+            "auxiliaryBrowsingContextId": self.page_slot.auxiliary_browsing_context_id(),
+            "hasStagedInitialDocumentPageReservation": self
+                .page_slot
+                .has_staged_initial_document_page_reservation(),
             "hasPendingDocumentNavigation": self.has_pending_document_navigation(),
             "rendererChannelClosed": self.devtools_renderer_channel.is_closed(),
             "rendererChannelHasCurrentAttachment":

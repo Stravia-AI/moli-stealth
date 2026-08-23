@@ -353,11 +353,13 @@ use self::range_live::{
     update_live_ranges_for_text_split,
 };
 pub(super) use self::runtime_state::finish_context_bootstrap;
+pub(crate) use self::runtime_state::inherit_auxiliary_window_viewport_surface;
 pub(crate) use self::runtime_state::install_child_window_eval_runtime_state;
 pub(crate) use self::runtime_state::install_webassembly_runtime_state;
 #[cfg(feature = "wpt-extensions")]
 pub(crate) use self::runtime_state::install_wpt_webdriver_runtime_state;
 pub(crate) use self::runtime_state::set_window_origin_runtime_state;
+pub(crate) use self::runtime_state::window_origin_runtime_state;
 pub(crate) use self::runtime_state::{
     ORIGINAL_WEBASSEMBLY_COMPILE_ERROR_CONSTRUCTOR_SLOT,
     ORIGINAL_WEBASSEMBLY_GLOBAL_VALUE_GETTER_SLOT, ORIGINAL_WEBASSEMBLY_INSTANCE_CONSTRUCTOR_SLOT,
@@ -371,7 +373,7 @@ pub(in crate::context_bootstrap) use self::shared::*;
 pub(crate) use self::shared::{
     CHILD_BROWSING_CONTEXT_HANDLE_SLOT, DOCUMENT_SELECTION_CHANGE_LISTENER_SLOT,
     READABLE_STREAM_CHILD_REALM_HANDLED_REJECTION_SLOT, WINDOW_CUSTOM_ELEMENTS_SLOT,
-    WINDOW_NAME_SLOT,
+    WINDOW_NAME_SLOT, WINDOW_OPENER_SLOT,
 };
 pub(crate) use self::shared::{
     RuntimeMessageSourceSecurity, current_runtime_message_agent_cluster,

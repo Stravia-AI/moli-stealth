@@ -37,9 +37,17 @@ pub(super) fn dynamic_script_execute_is_runnable_before_dom_content_loaded(
 }
 
 impl ScriptVmContextBootstrap {
-    pub(super) fn new_main_default(
-        isolate: &mut v8::OwnedIsolate,
-        isolate_bootstrap: &IsolateBootstrapCache,
+    /// Creates a main default world inside a V8 scope that is already entered.
+    ///
+    /// Native callbacks such as `window.open()` cannot borrow the owning
+    /// document isolate a second time while author script is on the stack.
+    /// Keeping the in-scope primitive next to the child-default equivalent
+    /// lets a caller prebootstrap a distinct Page realm without re-entering
+    /// the isolate; Inspector materialization remains a later owner action.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_main_default_in_scope<'s>(
+        scope: &mut v8::PinScope<'s, '_, ()>,
+        global_template: v8::Local<'s, v8::ObjectTemplate>,
         context_host: Rc<RefCell<JsContextHost>>,
         resource_owner_id: ResourceOwnerId,
         promise_reject_dispatch: &PromiseRejectDispatchSlot,
@@ -48,9 +56,9 @@ impl ScriptVmContextBootstrap {
         renderer_page_script_environment: Option<crate::script_vm::RendererPageScriptEnvironment>,
         reuse_main_window_proxy: bool,
     ) -> Result<Self> {
-        Self::new_with_mode(
-            isolate,
-            isolate_bootstrap,
+        Self::new_in_scope(
+            scope,
+            global_template,
             context_host,
             resource_owner_id,
             promise_reject_dispatch,
@@ -171,7 +179,7 @@ impl ScriptVmContextBootstrap {
                             "replacement main context is missing its page script environment"
                         )
                     })?
-                    .with_main_window_proxy(|proxy| v8::Local::new(scope, proxy))?,
+                    .take_main_window_proxy_for_context(scope)?,
             ),
             WindowContextBootstrapMode::MainDefault => None,
             WindowContextBootstrapMode::ChildDefault { child_handle, .. } => {
@@ -236,6 +244,18 @@ impl ScriptVmContextBootstrap {
                 ?mode,
                 "failed to allocate internalized Window security token; using unique context token"
             );
+        }
+        if matches!(mode, WindowContextBootstrapMode::MainDefault)
+            && reusable_window_proxy.is_some()
+            && let Some(security_token) = renderer_page_script_environment
+                .as_ref()
+                .and_then(|environment| environment.take_initial_main_window_security_token(scope))
+        {
+            // Initial about:blank inherits its creator's exact effective
+            // origin. Reusing the creator-visible proxy is insufficient for
+            // opaque or document.domain-mutated origins because V8 otherwise
+            // assigns the new context a distinct default token.
+            local_context.set_security_token(security_token);
         }
         if matches!(
             mode,
@@ -304,6 +324,12 @@ impl ScriptVmContextBootstrap {
             } => unsafe { &*host_ptr }.document_url().clone(),
         };
         finish_context_bootstrap(scope, unsafe { &mut *host_ptr }, &secure_context_url)?;
+        if matches!(mode, WindowContextBootstrapMode::MainDefault)
+            && reusable_window_proxy.is_some()
+            && let Some(environment) = renderer_page_script_environment.as_ref()
+        {
+            environment.restore_main_window_opener_after_navigation(scope, global);
+        }
         match mode {
             WindowContextBootstrapMode::Isolated {
                 child_handle: Some(child_handle),

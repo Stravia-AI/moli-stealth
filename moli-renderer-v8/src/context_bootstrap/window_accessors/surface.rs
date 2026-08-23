@@ -104,9 +104,13 @@ pub(in crate::context_bootstrap) fn window_opener_getter<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if window_receiver(scope, &args).is_some() {
-        rv.set_null();
-    }
+    let Some(receiver) = window_receiver(scope, &args) else {
+        return;
+    };
+    rv.set(
+        window_hidden_value(scope, receiver, WINDOW_OPENER_SLOT)
+            .unwrap_or_else(|| v8::null(scope).into()),
+    );
 }
 
 pub(in crate::context_bootstrap) fn window_inner_width_getter<'s>(

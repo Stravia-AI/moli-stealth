@@ -171,7 +171,7 @@ async fn get_target_info_reports_background_target_in_same_browser_context() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
+async fn popup_initial_about_blank_adopts_renderer_page_and_related_script_agent() {
     let mut ctx = TestContext::new();
     ctx.conn.auto_attach = true;
     let browser_context = ctx
@@ -195,6 +195,7 @@ async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
         )
         .await
         .expect("opener page should load");
+    let opener_renderer_page_id = opener_page.renderer_page_id().as_u64();
     let opener_url = opener_page.final_url().as_str().to_owned();
     {
         let browser_context = ctx
@@ -251,25 +252,60 @@ async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
         })
         .cloned()
         .unwrap_or_else(|| panic!("popup target should be auto-attached: {:?}", ctx.sent));
-    let popup_session_id = attached["params"]["sessionId"]
-        .as_str()
-        .expect("popup session id should be present")
-        .to_owned();
+    assert!(
+        attached["params"]["sessionId"].as_str().is_some(),
+        "popup session id should be present"
+    );
     ctx.sent.clear();
 
-    ctx.process_async(json!({
-        "id": 104_216,
-        "method": "Page.navigate",
-        "sessionId": popup_session_id,
-        "params": {
-            "url": "data:text/html,<!doctype html><title>popup</title><body>popup</body>"
-        }
-    }))
-    .await;
-    consume_main_document_navigation_start(&mut ctx);
-    let navigation = take_response_by_id(&mut ctx, 104_216);
-    assert_eq!(navigation["result"]["frameId"], json!(popup_target_id));
-    ctx.sent.clear();
+    let opener_script_agent_id = ctx
+        .conn
+        .browser_context
+        .as_mut()
+        .and_then(|browser_context| browser_context.active_target.runtime_slot.loaded_page_mut())
+        .expect("opener should remain loaded")
+        .runtime_heap_usage_async()
+        .await
+        .expect("opener heap diagnostics should be available")
+        .moli
+        .runtime
+        .script_agent_id;
+    let (popup_renderer_page_id, popup_browsing_context_id, popup_script_agent_id) = {
+        let popup = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .and_then(|browser_context| browser_context.background_target_mut(&popup_target_id))
+            .expect("popup target should remain staged");
+        let popup_browsing_context_id = popup
+            .auxiliary_browsing_context_id()
+            .expect("popup target should retain its renderer browsing-context identity");
+        let popup_page = popup
+            .loaded_page_mut()
+            .expect("popup initial empty Document should be loaded");
+        let popup_renderer_page_id = popup_page.renderer_page_id().as_u64();
+        let popup_script_agent_id = popup_page
+            .runtime_heap_usage_async()
+            .await
+            .expect("popup heap diagnostics should be available")
+            .moli
+            .runtime
+            .script_agent_id;
+        (
+            popup_renderer_page_id,
+            popup_browsing_context_id,
+            popup_script_agent_id,
+        )
+    };
+    assert_ne!(popup_renderer_page_id, opener_renderer_page_id);
+    assert_eq!(
+        popup_renderer_page_id, popup_browsing_context_id,
+        "protocol must build the popup's initial Document with the renderer-reserved Page identity"
+    );
+    assert_eq!(
+        popup_script_agent_id, opener_script_agent_id,
+        "the renderer-reserved initial popup Page should join its opener's script agent"
+    );
 
     ctx.process_async(json!({
         "id": 104_217,
@@ -285,14 +321,19 @@ async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
         "opener and loaded popup target should share one renderer owner: {diagnostics:?}"
     );
     assert_eq!(
+        isolate_scope["loadedDocumentScriptAgentCount"],
+        json!(1),
+        "the renderer-reserved popup Page should join its opener's explicit script agent: {diagnostics:?}"
+    );
+    assert_eq!(
         isolate_scope["estimatedDocumentIsolateCount"],
-        json!(2),
-        "loaded popup PageVM must own a distinct document isolate: {diagnostics:?}"
+        json!(1),
+        "two related PageVM realms should be hosted by one document script-agent isolate: {diagnostics:?}"
     );
     assert_eq!(
         isolate_scope["estimatedLiveV8IsolateCount"],
-        json!(2),
-        "opener plus popup without workers should report two live page document isolates: {diagnostics:?}"
+        json!(1),
+        "opener plus related popup without workers should report one live script-agent isolate: {diagnostics:?}"
     );
     assert_eq!(
         isolate_scope["documentContextCount"],
@@ -304,6 +345,79 @@ async fn popup_target_diagnostics_report_distinct_page_vm_document_isolates() {
         json!(1),
         "the popup should remain a loaded background target"
     );
+
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 104_218,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-popup-opener",
+        "params": {
+            "expression": "window.open('about:blank#diagnostics-noopener', '_blank', 'noopener') === null",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let noopener_response = take_response_by_id(&mut ctx, 104_218);
+    assert_eq!(
+        noopener_response["result"]["result"]["value"],
+        json!(true),
+        "noopener window.open should return null after accepting the popup"
+    );
+    let noopener_target = ctx
+        .sent
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Target.targetCreated")
+                && message["params"]["targetInfo"]["canAccessOpener"] == json!(false)
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("noopener popup target should be created: {:?}", ctx.sent));
+    let noopener_target_id = noopener_target["params"]["targetInfo"]["targetId"]
+        .as_str()
+        .expect("noopener popup target id should be present")
+        .to_owned();
+    let noopener_script_agent_id = {
+        let popup = ctx
+            .conn
+            .browser_context
+            .as_mut()
+            .and_then(|browser_context| browser_context.background_target_mut(&noopener_target_id))
+            .expect("noopener popup target should remain staged");
+        let popup_browsing_context_id = popup
+            .auxiliary_browsing_context_id()
+            .expect("noopener popup should retain its auxiliary browsing-context identity");
+        let popup_page = popup
+            .loaded_page_mut()
+            .expect("noopener popup initial empty Document should be loaded");
+        assert_eq!(
+            popup_page.renderer_page_id().as_u64(),
+            popup_browsing_context_id,
+            "noopener popup must also adopt its renderer-reserved Page identity"
+        );
+        popup_page
+            .runtime_heap_usage_async()
+            .await
+            .expect("noopener popup heap diagnostics should be available")
+            .moli
+            .runtime
+            .script_agent_id
+    };
+    assert_ne!(
+        noopener_script_agent_id, opener_script_agent_id,
+        "opener suppression must keep the auxiliary Page in a fresh script agent"
+    );
+
+    ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 104_219,
+        "method": "HeapProfiler.moliDiagnostics"
+    }))
+    .await;
+    let diagnostics = take_response_by_id(&mut ctx, 104_219);
+    let isolate_scope = &diagnostics["result"]["isolateScope"];
+    assert_eq!(isolate_scope["loadedDocumentPageCount"], json!(3));
+    assert_eq!(isolate_scope["loadedDocumentScriptAgentCount"], json!(2));
+    assert_eq!(isolate_scope["estimatedDocumentIsolateCount"], json!(2));
 }
 
 #[tokio::test(flavor = "multi_thread")]

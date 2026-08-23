@@ -44,6 +44,15 @@ pub(super) fn runtime_window_is_global<'s>(
     }
 }
 
+pub(super) fn navigation_document_is_initial_empty<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    owner: v8::Local<'s, v8::Object>,
+) -> bool {
+    runtime_window_is_global(scope, owner)
+        && context_host_ptr_from_global_bridge(scope)
+            .is_some_and(|host_ptr| unsafe { &*host_ptr }.root_document_is_initial_empty())
+}
+
 pub(super) fn runtime_window_uses_top_level_history_model<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     window: v8::Local<'s, v8::Object>,

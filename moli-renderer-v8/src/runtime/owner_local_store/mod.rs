@@ -314,13 +314,30 @@ impl RendererPageCreationCommit {
 
 pub(super) type NavigationReplyPolicy = RendererNavigationReplyPolicy;
 
+pub(super) struct PreparedReplacementDocumentMetadata {
+    pub(super) requested_url: Url,
+    pub(super) navigation_initiator_url: Option<Url>,
+    pub(super) navigation_redirected: bool,
+    pub(super) navigation_redirect_count: usize,
+    pub(super) response_status: u16,
+    pub(super) response_headers: Vec<(String, String)>,
+}
+
 pub(super) enum LivePagePendingNavigationCompletion {
     Background,
     PublishedPageCreation {
         navigation_reply_policy: NavigationReplyPolicy,
+        document_continuation_publisher: Option<RendererDocumentContinuationPublisher>,
+    },
+    PublishedPreparedPageReplacement {
+        navigation_reply_policy: NavigationReplyPolicy,
+        document_continuation_publisher: Option<RendererDocumentContinuationPublisher>,
     },
     CompletePageCreation {
         pending: RendererPendingPageCreation,
+        navigation_reply_policy: NavigationReplyPolicy,
+    },
+    CommitPreparedPageReplacement {
         navigation_reply_policy: NavigationReplyPolicy,
     },
     ReplyWithSnapshot {
@@ -351,16 +368,63 @@ pub(super) enum LivePageNavigationFailureRecipient {
 }
 
 impl LivePagePendingNavigationCompletion {
+    pub(super) fn install_document_continuation_publisher(
+        &mut self,
+        publisher: RendererDocumentContinuationPublisher,
+    ) -> bool {
+        let slot = match self {
+            Self::PublishedPageCreation {
+                document_continuation_publisher,
+                ..
+            }
+            | Self::PublishedPreparedPageReplacement {
+                document_continuation_publisher,
+                ..
+            } => document_continuation_publisher,
+            _ => return false,
+        };
+        assert!(
+            slot.is_none(),
+            "a DocumentCommit continuation publisher may be installed only once"
+        );
+        *slot = Some(publisher);
+        true
+    }
+
+    pub(super) fn take_document_continuation_publisher(
+        &mut self,
+    ) -> Option<RendererDocumentContinuationPublisher> {
+        match self {
+            Self::PublishedPageCreation {
+                document_continuation_publisher,
+                ..
+            }
+            | Self::PublishedPreparedPageReplacement {
+                document_continuation_publisher,
+                ..
+            } => document_continuation_publisher.take(),
+            _ => None,
+        }
+    }
+
+    pub(super) fn is_prepared_page_replacement_commit(&self) -> bool {
+        matches!(self, Self::CommitPreparedPageReplacement { .. })
+    }
+
     pub(super) fn continues_committed_document_parser_prefix(&self) -> bool {
-        matches!(self, Self::PublishedPageCreation { .. })
+        matches!(
+            self,
+            Self::PublishedPageCreation { .. } | Self::PublishedPreparedPageReplacement { .. }
+        )
     }
 
     pub(super) fn chain_limit_error_context(&self) -> &'static str {
         match self {
-            Self::Background | Self::PublishedPageCreation { .. } => {
-                "running background navigation"
-            }
+            Self::Background
+            | Self::PublishedPageCreation { .. }
+            | Self::PublishedPreparedPageReplacement { .. } => "running background navigation",
             Self::CompletePageCreation { .. } => "creating page",
+            Self::CommitPreparedPageReplacement { .. } => "committing prepared Page replacement",
             Self::ReplyWithSnapshot { .. } => "refreshing page",
             Self::ContinueNetworkIdle { .. } => "waiting for networkidle",
             Self::ContinueDomStable { .. } => "waiting for domstable",
@@ -375,8 +439,11 @@ impl LivePagePendingNavigationCompletion {
     pub(super) fn failure_recipient(&self) -> LivePageNavigationFailureRecipient {
         match self {
             Self::Background => LivePageNavigationFailureRecipient::PageCreationObserver,
-            Self::PublishedPageCreation { .. } => LivePageNavigationFailureRecipient::Background,
+            Self::PublishedPageCreation { .. } | Self::PublishedPreparedPageReplacement { .. } => {
+                LivePageNavigationFailureRecipient::Background
+            }
             Self::CompletePageCreation { .. }
+            | Self::CommitPreparedPageReplacement { .. }
             | Self::ReplyWithSnapshot { .. }
             | Self::ContinueNetworkIdle { .. }
             | Self::ContinueDomStable { .. }
@@ -390,10 +457,18 @@ impl LivePagePendingNavigationCompletion {
         match self {
             Self::PublishedPageCreation {
                 navigation_reply_policy,
+                ..
+            }
+            | Self::PublishedPreparedPageReplacement {
+                navigation_reply_policy,
+                ..
             }
             | Self::CompletePageCreation {
                 navigation_reply_policy,
                 ..
+            }
+            | Self::CommitPreparedPageReplacement {
+                navigation_reply_policy,
             } => navigation_reply_policy.returns_with_pending_navigation(),
             Self::Background
             | Self::ReplyWithSnapshot { .. }
@@ -408,6 +483,8 @@ impl LivePagePendingNavigationCompletion {
             Self::CompletePageCreation { .. } => (self, false),
             Self::Background
             | Self::PublishedPageCreation { .. }
+            | Self::PublishedPreparedPageReplacement { .. }
+            | Self::CommitPreparedPageReplacement { .. }
             | Self::ReplyWithSnapshot { .. }
             | Self::ContinueNetworkIdle { .. }
             | Self::ContinueDomStable { .. }
@@ -440,10 +517,16 @@ impl Clone for RendererOwnerLocalContext {
 pub(super) struct RendererOwnerLocalStore {
     page_hosts: HashMap<RendererOwnerLocalHostId, RendererOwnerLocalPageHost>,
     prepared_documents: HashMap<RendererPageReservationToken, RendererPreparedDocumentResidence>,
+    pending_live_page_replacement_reservations:
+        HashMap<(RendererOwnerLocalHostId, PageId), RendererLivePageReplacementReservation>,
+    latest_live_page_replacement_reservations:
+        HashMap<(RendererOwnerLocalHostId, PageId), RendererLivePageReplacementReservation>,
+    staged_related_initial_empty_pages: HashMap<(RendererOwnerLocalHostId, PageId), PageVm>,
     page_task_deadline_index: OwnerDeadlineIndex<RendererPageToken>,
     owner_maintenance_deadline_index: OwnerDeadlineIndex<RendererPageToken>,
     next_host_instance_key: usize,
     next_renderer_document_isolate_reservation_id: u64,
+    next_live_page_replacement_reservation_nonce: u64,
 }
 
 pub(super) struct RendererPreparedDocumentResidence {
@@ -631,16 +714,24 @@ impl Drop for RendererOwnerLocalPageSlot {
 struct RendererDocumentIsolateReservationEntry {
     id: u64,
     handle: RendererDocumentIsolateHandle,
-    /// The stream opens together with the isolate reservation, before that
-    /// isolate is attached to a stable Page slot. Until attachment transfers
-    /// lifetime ownership to `RendererPageScriptEnvironmentPin`, this entry
-    /// must close the stream on every cancellation/failure path.
+    /// Initial creation opens a stream before its isolate is attached to a
+    /// stable Page slot. Replacement preparation instead borrows the stream
+    /// already owned by `RendererPageScriptEnvironmentPin`.
     output_journal: RendererTurnOutputJournal,
+    /// A replacement reservation borrows the stable Page's journal. Dropping
+    /// that reservation must not close the still-live Page output stream.
+    retire_output_journal_on_drop: bool,
     /// Initial page creation owns the not-yet-attached consumer set here.
     /// A same-Page replacement reservation reuses the live slot's producer
     /// routes and therefore must not manufacture a second consumer set.
     initial_task_sources: Option<RendererPageOwnedTaskSources>,
     _accounting: RendererDocumentIsolateReservationAccounting,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RendererLivePageReplacementReservation {
+    expected_vm_creation_id: u64,
+    reservation_nonce: u64,
 }
 
 #[derive(Clone)]
@@ -703,6 +794,11 @@ impl RendererDocumentIsolateReservation {
         self.inner.active.set(false);
     }
 
+    fn rearm_after_staged_construction(&self) {
+        debug_assert!(!self.inner.active.get());
+        self.inner.active.set(true);
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.inner.active.get()
     }
@@ -731,6 +827,13 @@ impl Drop for RendererDocumentIsolateReservationState {
 }
 
 impl RendererOwnerLocalStoreSession<'_> {
+    pub(super) fn reserve_live_page_replacement(
+        &mut self,
+        token: RendererPageToken,
+    ) -> Result<RendererPageReservationToken> {
+        self.store.reserve_live_page_replacement(token)
+    }
+
     fn reserve_renderer_document_isolate(
         &mut self,
         owner: &RendererOwnerLocalContext,
@@ -891,6 +994,198 @@ impl RendererOwnerLocalStoreSession<'_> {
 }
 
 impl RendererOwnerLocalStore {
+    fn stage_related_initial_empty_page_for_owner(
+        &mut self,
+        owner: &RendererOwnerLocalContext,
+        scope: &mut v8::PinScope<'_, '_>,
+        pending: RendererPendingAuxiliaryPage,
+        source_environment: &RendererPageScriptEnvironment,
+        source_bridge_bindings: &crate::native_bridge::bindings::NativeBridgeBindings,
+        init: RendererRelatedInitialEmptyPageRealmInit,
+    ) -> Result<()> {
+        let RendererRelatedInitialEmptyPageRealmInit {
+            dom_host,
+            loader,
+            env,
+            inherited_origin,
+            policy_container,
+            auxiliary_popup_id,
+            staged_window_proxy,
+            opener,
+            window_name,
+        } = init;
+        debug_assert!(
+            is_on_named_owner_execution_lane_for(&owner.owner_state.local_executor),
+            "synchronous auxiliary Page staging must run on its named owner lane"
+        );
+        let reservation = pending.page_reservation();
+        ensure!(
+            reservation.local_host_id() == owner.local_host_id,
+            "auxiliary Page realm reservation belongs to a different renderer owner"
+        );
+        let page_id = reservation.page_id();
+        ensure!(
+            matches!(
+                reservation.script_agent_admission(),
+                RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id }
+                    if opener_page_id.as_u64() == source_environment.page_id()
+            ),
+            "synchronous auxiliary Page realm requires its exact related opener admission"
+        );
+        let key = (owner.local_host_id, page_id);
+        ensure!(
+            !self.staged_related_initial_empty_pages.contains_key(&key),
+            "auxiliary Page already has a staged initial realm"
+        );
+        ensure!(
+            self.page_hosts
+                .get(&owner.local_host_id)
+                .and_then(|host| host.pages.get(&page_id))
+                .is_none(),
+            "cannot stage an auxiliary initial realm for an already resident Page"
+        );
+
+        let token = renderer_page_token_for_owner_context(owner, page_id);
+        let owner_wake = crate::page_task_queue::RendererOwnerWakeSender::new(
+            owner.owner_state.page_wake_tx.clone(),
+            token,
+        );
+        let page_runtime_task_source =
+            crate::page_task_queue::PageRuntimeTaskSource::new(Some(owner_wake.clone()));
+        let (runtime_wake, stable_owner_wake) = page_runtime_task_source
+            .owner_attached_page_source_wakes()
+            .ok_or_else(|| anyhow!("staged auxiliary Page is missing its stable owner wake"))?;
+        let (initial_task_sources, producer_routes) =
+            RendererPageOwnedTaskSources::new(runtime_wake, stable_owner_wake);
+        page_runtime_task_source.bind_page_task_producer_routes(producer_routes)?;
+        let v8_foreground_task_sender = page_runtime_task_source
+            .v8_foreground_task_sender()
+            .ok_or_else(|| anyhow!("staged auxiliary Page is missing its V8 foreground route"))?;
+        let bootstrap = source_environment.bootstrap_related_page_document_isolate_in_scope(
+            scope,
+            source_bridge_bindings,
+            v8_foreground_task_sender,
+        )?;
+        let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
+        let inspector_isolate_backend = bootstrap.inspector_isolate_backend_handle();
+        let page_inspector = DocumentInspectorBinding::new(inspector_isolate_backend.clone());
+        let output_stream = RendererOutputStreamIdentity::new_page(
+            owner.local_host_id,
+            page_id,
+            page_inspector.agent_token(),
+        );
+        let output_journal = match owner
+            .owner_state
+            .browser_context_runtime
+            .renderer_output_transport_sender()
+        {
+            Some(transport) => {
+                RendererTurnOutputJournal::new_with_transport(output_stream, transport)
+            }
+            None => RendererTurnOutputJournal::new(output_stream),
+        };
+        let page_inspector = page_inspector.with_output_journal(output_journal.clone());
+        let script_agent_page_membership = bootstrap
+            .script_agent_page_membership()
+            .ok_or_else(|| anyhow!("related auxiliary bootstrap lost its agent membership"))?;
+        let auxiliary_page_reservation_allocator =
+            RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
+        let page_script_environment = RendererPageScriptEnvironment::new(
+            page_id.as_u64(),
+            auxiliary_page_reservation_allocator,
+            host_handle.clone(),
+            inspector_isolate_backend,
+            script_agent_page_membership,
+            page_runtime_task_source,
+            output_journal.clone(),
+        )?;
+        page_script_environment.install_staged_initial_main_window_proxy(staged_window_proxy)?;
+        let bootstrap = bootstrap
+            .with_page_inspector(page_inspector)
+            .with_renderer_page_script_environment(page_script_environment)
+            .with_reused_main_window_proxy();
+
+        let reservation_id = self.next_renderer_document_isolate_reservation_id;
+        self.next_renderer_document_isolate_reservation_id = self
+            .next_renderer_document_isolate_reservation_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("renderer document isolate reservation id exhausted"))?;
+        self.host_for_id(owner.local_host_id)
+            .reserved_renderer_document_isolates
+            .entry(page_id)
+            .or_default()
+            .push(RendererDocumentIsolateReservationEntry {
+                id: reservation_id,
+                handle: host_handle,
+                output_journal,
+                retire_output_journal_on_drop: true,
+                initial_task_sources: Some(initial_task_sources),
+                _accounting: RendererDocumentIsolateReservationAccounting::new(),
+            });
+        let isolate_reservation = RendererDocumentIsolateReservation {
+            inner: Rc::new(RendererDocumentIsolateReservationState {
+                token,
+                reservation_id,
+                active: std::cell::Cell::new(true),
+            }),
+        };
+        let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
+            owner_wake,
+            owner.owner_state.browser_context_runtime.clone(),
+        )
+        .with_validated_staged_renderer_document_isolate(bootstrap, isolate_reservation.clone());
+        // PageVm construction owns another clone. Keep its exceptional drop
+        // local to this store session, then retire the reservation directly
+        // instead of recursively borrowing the bound owner-local store.
+        isolate_reservation.disarm_for_attach();
+        let page_vm = match PageVm::new_related_initial_empty_in_scope(
+            scope,
+            page_id,
+            owner.owner_state.local_executor.clone(),
+            &loader,
+            &env,
+            runtime_hooks,
+            dom_host,
+            opener.as_ref(),
+            &window_name,
+            &inherited_origin,
+            policy_container,
+            auxiliary_popup_id,
+            std::time::Instant::now(),
+        ) {
+            Ok(page_vm) => page_vm,
+            Err(error) => {
+                self.remove_reserved_renderer_document_isolate(token, reservation_id);
+                return Err(error);
+            }
+        };
+        isolate_reservation.rearm_after_staged_construction();
+        let previous = self.staged_related_initial_empty_pages.insert(key, page_vm);
+        debug_assert!(previous.is_none());
+        Ok(())
+    }
+
+    pub(super) fn take_staged_related_initial_empty_page(
+        &mut self,
+        reservation: RendererPageReservationToken,
+    ) -> Result<Option<PageVm>> {
+        let RendererScriptAgentAdmission::RelatedAuxiliaryPage { .. } =
+            reservation.script_agent_admission()
+        else {
+            return Ok(None);
+        };
+        let key = (reservation.local_host_id(), reservation.page_id());
+        Ok(self.staged_related_initial_empty_pages.remove(&key))
+    }
+
+    pub(super) fn has_staged_related_initial_empty_page(
+        &self,
+        reservation: RendererPageReservationToken,
+    ) -> bool {
+        self.staged_related_initial_empty_pages
+            .contains_key(&(reservation.local_host_id(), reservation.page_id()))
+    }
+
     pub(super) fn store_prepared_document(
         &mut self,
         token: RendererPageReservationToken,
@@ -917,6 +1212,50 @@ impl RendererOwnerLocalStore {
                 "renderer owner no longer tracks prepared document for page {}",
                 token.page_id().as_u64()
             )
+        })
+    }
+
+    pub(super) fn take_current_prepared_page_replacement(
+        &mut self,
+        token: RendererPageReservationToken,
+    ) -> std::result::Result<
+        RendererPreparedDocumentResidence,
+        crate::runtime::RendererPageReplacementCommitError,
+    > {
+        let RendererScriptAgentAdmission::ExistingPageReplacement {
+            expected_vm_creation_id,
+            reservation_nonce,
+        } = token.script_agent_admission()
+        else {
+            self.cancel_prepared_document(token);
+            return Err(
+                crate::runtime::RendererPageReplacementCommitError::page_preserved(anyhow!(
+                    "prepared initial Document cannot commit as a live Page replacement"
+                )),
+            );
+        };
+        let key = (token.local_host_id(), token.page_id());
+        let expected = RendererLivePageReplacementReservation {
+            expected_vm_creation_id,
+            reservation_nonce,
+        };
+        if self
+            .latest_live_page_replacement_reservations
+            .get(&key)
+            .copied()
+            != Some(expected)
+        {
+            self.cancel_prepared_document(token);
+            return Err(
+                crate::runtime::RendererPageReplacementCommitError::page_preserved(anyhow!(
+                    "renderer Page {} prepared Document was superseded by a newer replacement",
+                    token.page_id().as_u64()
+                )),
+            );
+        }
+        self.latest_live_page_replacement_reservations.remove(&key);
+        self.take_prepared_document(token).map_err(|error| {
+            crate::runtime::RendererPageReplacementCommitError::page_preserved(error)
         })
     }
 
@@ -963,6 +1302,25 @@ impl RendererOwnerLocalStore {
     }
 
     pub(super) fn cancel_prepared_document(&mut self, token: RendererPageReservationToken) {
+        if let RendererScriptAgentAdmission::ExistingPageReplacement {
+            expected_vm_creation_id,
+            reservation_nonce,
+        } = token.script_agent_admission()
+        {
+            let key = (token.local_host_id(), token.page_id());
+            let expected = RendererLivePageReplacementReservation {
+                expected_vm_creation_id,
+                reservation_nonce,
+            };
+            if self
+                .latest_live_page_replacement_reservations
+                .get(&key)
+                .copied()
+                == Some(expected)
+            {
+                self.latest_live_page_replacement_reservations.remove(&key);
+            }
+        }
         if let Some(residence) = self.prepared_documents.remove(&token) {
             self.drop_prepared_document_residence(residence);
         }
@@ -1109,6 +1467,177 @@ impl RendererOwnerLocalStore {
         })
     }
 
+    fn reserve_live_page_replacement(
+        &mut self,
+        token: RendererPageToken,
+    ) -> Result<RendererPageReservationToken> {
+        #[cfg(debug_assertions)]
+        Self::ensure_token_thread(&token)?;
+        let expected_vm_creation_id = {
+            let host = self.page_hosts.get(&token.local_host_id).ok_or_else(|| {
+                anyhow!(
+                    "renderer owner local runtime no longer tracks host {}",
+                    token.local_host_id.as_u64()
+                )
+            })?;
+            let page_slot = host.pages.get(&token.page_id).ok_or_else(|| {
+                anyhow!(
+                    "renderer owner local runtime no longer tracks page {}",
+                    token.page_id.as_u64()
+                )
+            })?;
+            let resident = page_slot.resident_entry().ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} is not resident while reserving a replacement Document",
+                    token.page_id.as_u64()
+                )
+            })?;
+            let stable = page_slot.owner_slot.entry();
+            ensure!(
+                stable.is_active(),
+                "renderer Page {} is retiring while reserving a replacement Document",
+                token.page_id.as_u64()
+            );
+            ensure!(
+                !resident.has_uncommitted_page_vm(),
+                "renderer Page {} already has an uncommitted replacement Document",
+                token.page_id.as_u64()
+            );
+            ensure!(
+                stable.vm_creation_id() == resident.page_vm().creation_id,
+                "renderer Page {} stable PageVm generation does not match its resident runtime",
+                token.page_id.as_u64()
+            );
+            stable.vm_creation_id()
+        };
+        let reservation_nonce = self.next_live_page_replacement_reservation_nonce;
+        self.next_live_page_replacement_reservation_nonce = self
+            .next_live_page_replacement_reservation_nonce
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("renderer live Page replacement reservation nonce exhausted"))?;
+        let key = (token.local_host_id, token.page_id);
+        let reservation = RendererLivePageReplacementReservation {
+            expected_vm_creation_id,
+            reservation_nonce,
+        };
+        self.pending_live_page_replacement_reservations
+            .insert(key, reservation);
+        self.latest_live_page_replacement_reservations
+            .insert(key, reservation);
+        Ok(RendererPageReservationToken::new_existing_page_replacement(
+            token.local_host_id,
+            token.page_id,
+            expected_vm_creation_id,
+            reservation_nonce,
+        ))
+    }
+
+    fn reserve_existing_page_replacement_document_isolate_for_owner(
+        &mut self,
+        owner: &RendererOwnerLocalContext,
+        page_id: PageId,
+        expected_vm_creation_id: u64,
+        reservation_nonce: u64,
+    ) -> Result<(
+        RendererDocumentIsolateBootstrap,
+        RendererDocumentIsolateReservation,
+    )> {
+        let key = (owner.local_host_id, page_id);
+        let expected_reservation = RendererLivePageReplacementReservation {
+            expected_vm_creation_id,
+            reservation_nonce,
+        };
+        let issued_reservation = self
+            .pending_live_page_replacement_reservations
+            .get(&key)
+            .copied()
+            .ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} replacement reservation is no longer current",
+                    page_id.as_u64()
+                )
+            })?;
+        ensure!(
+            issued_reservation == expected_reservation,
+            "renderer Page {} replacement reservation was superseded",
+            page_id.as_u64()
+        );
+        self.pending_live_page_replacement_reservations.remove(&key);
+
+        let page_script_environment = {
+            let host = self.page_hosts.get(&owner.local_host_id).ok_or_else(|| {
+                anyhow!(
+                    "renderer owner local runtime no longer tracks host {}",
+                    owner.local_host_id.as_u64()
+                )
+            })?;
+            let page_slot = host.pages.get(&page_id).ok_or_else(|| {
+                anyhow!(
+                    "renderer owner local runtime no longer tracks page {}",
+                    page_id.as_u64()
+                )
+            })?;
+            let resident = page_slot.resident_entry().ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} is not resident while preparing its replacement Document",
+                    page_id.as_u64()
+                )
+            })?;
+            let stable = page_slot.owner_slot.entry();
+            ensure!(
+                stable.is_active(),
+                "renderer Page {} retired before its replacement Document was prepared",
+                page_id.as_u64()
+            );
+            ensure!(
+                !resident.has_uncommitted_page_vm(),
+                "renderer Page {} acquired another uncommitted replacement Document",
+                page_id.as_u64()
+            );
+            ensure!(
+                stable.vm_creation_id() == expected_vm_creation_id
+                    && resident.page_vm().creation_id == expected_vm_creation_id,
+                "stale renderer Page {} replacement reservation expected PageVm {}, current stable PageVm {} and resident PageVm {}",
+                page_id.as_u64(),
+                expected_vm_creation_id,
+                stable.vm_creation_id(),
+                resident.page_vm().creation_id
+            );
+            page_slot.script_environment_pin.environment.clone()
+        };
+        let bootstrap = page_script_environment.bootstrap_replacement_document_isolate()?;
+        let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
+        let output_journal = page_script_environment.output_journal();
+        let reservation_id = self.next_renderer_document_isolate_reservation_id;
+        self.next_renderer_document_isolate_reservation_id = self
+            .next_renderer_document_isolate_reservation_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("renderer document isolate reservation id exhausted"))?;
+        let token = renderer_page_token_for_owner_context(owner, page_id);
+        self.host_for_id(owner.local_host_id)
+            .reserved_renderer_document_isolates
+            .entry(page_id)
+            .or_default()
+            .push(RendererDocumentIsolateReservationEntry {
+                id: reservation_id,
+                handle: host_handle,
+                output_journal,
+                retire_output_journal_on_drop: false,
+                initial_task_sources: None,
+                _accounting: RendererDocumentIsolateReservationAccounting::new(),
+            });
+        Ok((
+            bootstrap,
+            RendererDocumentIsolateReservation {
+                inner: Rc::new(RendererDocumentIsolateReservationState {
+                    token,
+                    reservation_id,
+                    active: std::cell::Cell::new(true),
+                }),
+            },
+        ))
+    }
+
     fn reserve_renderer_document_isolate_for_owner(
         &mut self,
         owner: &RendererOwnerLocalContext,
@@ -1126,6 +1655,18 @@ impl RendererOwnerLocalStore {
         let token = renderer_page_token_for_owner_context(owner, page_id);
         #[cfg(debug_assertions)]
         Self::ensure_token_thread(&token)?;
+        if let RendererScriptAgentAdmission::ExistingPageReplacement {
+            expected_vm_creation_id,
+            reservation_nonce,
+        } = script_agent_admission
+        {
+            return self.reserve_existing_page_replacement_document_isolate_for_owner(
+                owner,
+                page_id,
+                expected_vm_creation_id,
+                reservation_nonce,
+            );
+        }
         let existing_page_routes = self
             .page_hosts
             .get(&owner.local_host_id)
@@ -1146,40 +1687,49 @@ impl RendererOwnerLocalStore {
         let v8_foreground_task_sender = page_runtime_task_source
             .v8_foreground_task_sender()
             .ok_or_else(|| anyhow!("owner-reserved Page is missing its V8 foreground source"))?;
-        let bootstrap = match script_agent_admission {
-            RendererScriptAgentAdmission::Fresh => {
-                RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?
-            }
-            #[cfg(test)]
-            RendererScriptAgentAdmission::RelatedPageForExperiment { source_page_id } => {
+        let (bootstrap, staged_window_proxy) = match script_agent_admission {
+            RendererScriptAgentAdmission::Fresh => (
+                RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?,
+                None,
+            ),
+            RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id } => {
                 ensure!(
-                    source_page_id != page_id,
+                    opener_page_id != page_id,
                     "a Page cannot use itself as its related script-agent source"
                 );
                 let source_environment = self
                     .page_hosts
                     .get(&owner.local_host_id)
-                    .and_then(|host| host.pages.get(&source_page_id))
+                    .and_then(|host| host.pages.get(&opener_page_id))
                     .map(|slot| slot.script_environment_pin.environment.clone())
                     .ok_or_else(|| {
                         anyhow!(
                             "related script-agent source Page {} is not live on renderer owner {}",
-                            source_page_id.as_u64(),
+                            opener_page_id.as_u64(),
                             owner.local_host_id.as_u64()
                         )
                     })?;
-                source_environment.bootstrap_related_page_document_isolate_for_experiment(
-                    v8_foreground_task_sender,
-                )?
+                let staged_window_proxy = source_environment
+                    .auxiliary_page_reservation_allocator()
+                    .take_related_window_proxy(page_id);
+                (
+                    source_environment
+                        .bootstrap_related_page_document_isolate(v8_foreground_task_sender)?,
+                    staged_window_proxy,
+                )
+            }
+            RendererScriptAgentAdmission::ExistingPageReplacement { .. } => {
+                unreachable!("live Page replacement admission returns before fresh allocation")
             }
         };
         let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
         let reservation_id = self.next_renderer_document_isolate_reservation_id;
         self.next_renderer_document_isolate_reservation_id = self
             .next_renderer_document_isolate_reservation_id
-            .saturating_add(1);
-        let page_inspector =
-            DocumentInspectorBinding::new(bootstrap.inspector_isolate_backend_handle());
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("renderer document isolate reservation id exhausted"))?;
+        let inspector_isolate_backend = bootstrap.inspector_isolate_backend_handle();
+        let page_inspector = DocumentInspectorBinding::new(inspector_isolate_backend.clone());
         let output_stream = RendererOutputStreamIdentity::new_page(
             owner.local_host_id,
             page_id,
@@ -1200,13 +1750,24 @@ impl RendererOwnerLocalStore {
             bootstrap.script_agent_page_membership().ok_or_else(|| {
                 anyhow!("initial Page isolate bootstrap is missing its script-agent membership")
             })?;
+        let auxiliary_page_reservation_allocator =
+            RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
         let page_script_environment = RendererPageScriptEnvironment::new(
             page_id.as_u64(),
+            auxiliary_page_reservation_allocator,
             host_handle.clone(),
+            inspector_isolate_backend,
             script_agent_page_membership,
             page_runtime_task_source,
             output_journal.clone(),
         )?;
+        let bootstrap = if let Some(staged_window_proxy) = staged_window_proxy {
+            page_script_environment
+                .install_staged_initial_main_window_proxy(staged_window_proxy)?;
+            bootstrap.with_reused_main_window_proxy()
+        } else {
+            bootstrap
+        };
         let host = self.host_for_id(owner.local_host_id);
         host.reserved_renderer_document_isolates
             .entry(page_id)
@@ -1215,6 +1776,7 @@ impl RendererOwnerLocalStore {
                 id: reservation_id,
                 handle: host_handle,
                 output_journal,
+                retire_output_journal_on_drop: true,
                 initial_task_sources,
                 _accounting: RendererDocumentIsolateReservationAccounting::new(),
             });
@@ -1289,9 +1851,11 @@ impl RendererOwnerLocalStore {
         reservations: impl IntoIterator<Item = RendererDocumentIsolateReservationEntry>,
     ) {
         for reservation in reservations {
-            reservation
-                .output_journal
-                .retire(RendererOutputStreamCloseReason::ResidenceRetired);
+            if reservation.retire_output_journal_on_drop {
+                reservation
+                    .output_journal
+                    .retire(RendererOutputStreamCloseReason::ResidenceRetired);
+            }
         }
     }
 
@@ -1863,6 +2427,7 @@ impl RendererOwnerLocalStore {
             let creation_diagnostics = RendererPageCreationDiagnostics {
                 initial_runtime_realms,
                 renderer_output_predecessor: None,
+                document_continuation_observer: None,
             };
             let creation_artifacts = entry.page_vm_mut().take_page_creation_artifacts();
             Ok((
@@ -1939,6 +2504,10 @@ impl RendererOwnerLocalStore {
                 return;
             }
         }
+        self.pending_live_page_replacement_reservations
+            .remove(&(token.local_host_id, token.page_id));
+        self.latest_live_page_replacement_reservations
+            .remove(&(token.local_host_id, token.page_id));
         self.page_task_deadline_index.remove(token);
         self.owner_maintenance_deadline_index.remove(token);
         let should_remove_host = if let Ok(host) = self.host_by_id_mut(token.local_host_id) {
@@ -2362,9 +2931,14 @@ impl RendererOwnerLocalStore {
             initial_task_sources,
             handle: _,
             output_journal: _,
+            retire_output_journal_on_drop,
             id: _,
             _accounting: _,
         } = reserved_isolate;
+        debug_assert!(
+            retire_output_journal_on_drop,
+            "initial renderer Page attach must own its reserved output stream"
+        );
         let task_sources = initial_task_sources
             .expect("initial renderer page attach must own its reserved Page task sources");
         reservation.disarm_for_attach();
@@ -2528,10 +3102,15 @@ impl RendererOwnerLocalStore {
             initial_task_sources,
             handle: _,
             output_journal: _,
+            retire_output_journal_on_drop,
             id: _,
             _accounting: _,
         } = reserved_isolate;
         debug_assert!(initial_task_sources.is_none());
+        debug_assert!(
+            !retire_output_journal_on_drop,
+            "replacement renderer isolate reservation must borrow its stable Page output stream"
+        );
         reservation.disarm_for_attach();
         Ok(Some(RendererPageScriptEnvironmentPin::new(
             page_script_environment,
@@ -2626,6 +3205,30 @@ impl RendererOwnerLocalStore {
             .page_vm_mut()
             .capture_page_state_on_named_owner_lane_with_policy(capture_policy)?;
         Self::commit_vm_state_capture_as_page_state_on_entry(entry, state_capture)?;
+        entry.slot.active_page_state()
+    }
+
+    fn commit_active_vm_page_state_on_entry_with_metadata(
+        entry: &mut LivePageEntry,
+        metadata: PreparedReplacementDocumentMetadata,
+    ) -> Result<Arc<RendererPageState>> {
+        debug_assert_eq!(
+            entry.slot.page_id().as_u64(),
+            entry.page_vm().page_id.as_u64()
+        );
+        let state_capture = entry
+            .page_vm_mut()
+            .capture_page_state_on_named_owner_lane()?;
+        let page_state = RendererPageState::from_vm_state_capture(
+            metadata.requested_url,
+            metadata.navigation_initiator_url,
+            metadata.navigation_redirected,
+            metadata.navigation_redirect_count,
+            metadata.response_status,
+            metadata.response_headers,
+            state_capture,
+        );
+        Self::commit_next_page_state_on_entry(entry, entry.page_vm().creation_id, page_state)?;
         entry.slot.active_page_state()
     }
 
@@ -2923,6 +3526,19 @@ impl RendererOwnerLocalStore {
 
 impl Drop for RendererOwnerLocalStore {
     fn drop(&mut self) {
+        let staged_pages = std::mem::take(&mut self.staged_related_initial_empty_pages);
+        for (_, mut page_vm) in staged_pages {
+            if let Some(reservation) =
+                page_vm.take_renderer_document_isolate_reservation_for_attach()
+            {
+                self.remove_reserved_renderer_document_isolate(
+                    reservation.token(),
+                    reservation.reservation_id(),
+                );
+                reservation.disarm_for_attach();
+            }
+            drop(page_vm);
+        }
         let prepared_documents = std::mem::take(&mut self.prepared_documents);
         for (_, residence) in prepared_documents {
             self.drop_prepared_document_residence(residence);

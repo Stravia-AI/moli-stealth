@@ -2217,7 +2217,7 @@ document.body.setAttribute('data-error-state', [
     }
 
     #[test]
-    fn buffered_modulepreload_does_not_feed_later_module_script_text_cache() {
+    fn buffered_module_requests_do_not_feed_later_module_script_text_cache() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2230,14 +2230,17 @@ document.body.setAttribute('data-error-state', [
 
             cache.append_to_main_document_scan(
                 &final_url,
-                r#"<link rel="modulepreload" href="/entry.mjs">"#,
+                r#"
+                    <link rel="modulepreload" href="/entry.mjs">
+                    <script type="module" src="/entry.mjs"></script>
+                "#,
                 &loader,
             );
 
             let consumer = prepared_external_module("https://example.test/entry.mjs");
             assert!(
                 cache.shared_preload_for_script(&consumer).is_none(),
-                "modulepreload should reserve the native module map entry instead of becoming reusable script text"
+                "modulepreload and module-script roots must stay out of the legacy script-text preload cache"
             );
         });
     }
@@ -2287,7 +2290,6 @@ document.body.setAttribute('data-error-state', [
             vec![
                 Url::parse("https://example.test/normal.js").expect("normal url"),
                 Url::parse("https://example.test/defer.js").expect("defer url"),
-                Url::parse("https://example.test/module.mjs").expect("module url"),
             ]
         );
     }

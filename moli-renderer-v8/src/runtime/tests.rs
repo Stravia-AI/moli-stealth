@@ -9,13 +9,14 @@ use super::{
     RendererPageTestingHandle, RendererPendingPopupActivation, RendererPointerEventProperties,
     RendererPreparedDocumentCommitConfiguration, RendererProtocolObservation,
     RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
-    RendererRuntimeInspectorResponseSender,
+    RendererRuntimeInspectorResponseSender, RendererScriptAgentAdmission,
 };
 use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_js_local_executor};
 use crate::network::ResourceRequestClient;
 use crate::{
     RendererDocumentLifecycleEventKind, RendererDocumentLifecycleMilestone,
-    RendererNavigationReplyPolicy, RendererReplyBoundary, RendererTopLevelNavigationDispatch,
+    RendererNavigationReplyPolicy, RendererPageReplacementCommitFailureDisposition,
+    RendererReplyBoundary, RendererTopLevelNavigationDispatch,
 };
 use parking_lot::Mutex;
 use std::collections::HashSet;
@@ -34,12 +35,52 @@ async fn prepare_test_external_raw_document(
     url: url::Url,
     raw_body: ExternalRawDocumentBodyStream,
 ) -> PreparedRendererDocument {
-    prepare_test_external_raw_document_with_content_type(
+    prepare_test_external_raw_document_with_reservation(
         runtime,
+        runtime.reserve_page_for_creation(),
         loader,
         url,
-        "text/html",
         raw_body,
+    )
+    .await
+    .expect("external raw document should prepare")
+}
+
+async fn prepare_test_external_raw_document_with_reservation(
+    runtime: &JsRuntime,
+    reservation: super::RendererPageReservationToken,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    raw_body: ExternalRawDocumentBodyStream,
+) -> anyhow::Result<PreparedRendererDocument> {
+    prepare_test_external_raw_document_with_reservation_and_boundary(
+        runtime,
+        reservation,
+        loader,
+        url,
+        raw_body,
+        RendererReplyBoundary::Stage,
+    )
+    .await
+}
+
+async fn prepare_test_external_raw_document_with_reservation_and_boundary(
+    runtime: &JsRuntime,
+    reservation: super::RendererPageReservationToken,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    raw_body: ExternalRawDocumentBodyStream,
+    reply_boundary: RendererReplyBoundary,
+) -> anyhow::Result<PreparedRendererDocument> {
+    prepare_test_external_raw_document_with_reservation_boundary_and_navigation_policy(
+        runtime,
+        reservation,
+        loader,
+        url,
+        raw_body,
+        reply_boundary,
+        RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+        RendererNavigationReplyPolicy::FollowBeforeReply,
     )
     .await
 }
@@ -70,9 +111,60 @@ async fn prepare_test_external_raw_document_with_content_type_and_reply_boundary
     raw_body: ExternalRawDocumentBodyStream,
     reply_boundary: RendererReplyBoundary,
 ) -> PreparedRendererDocument {
+    prepare_test_external_raw_document_with_reservation_content_type_boundary_and_navigation_policy(
+        runtime,
+        runtime.reserve_page_for_creation(),
+        loader,
+        url,
+        content_type,
+        raw_body,
+        reply_boundary,
+        RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+        RendererNavigationReplyPolicy::FollowBeforeReply,
+    )
+    .await
+    .expect("external raw document should prepare")
+}
+
+async fn prepare_test_external_raw_document_with_reservation_boundary_and_navigation_policy(
+    runtime: &JsRuntime,
+    reservation: super::RendererPageReservationToken,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    raw_body: ExternalRawDocumentBodyStream,
+    reply_boundary: RendererReplyBoundary,
+    top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
+    navigation_reply_policy: RendererNavigationReplyPolicy,
+) -> anyhow::Result<PreparedRendererDocument> {
+    prepare_test_external_raw_document_with_reservation_content_type_boundary_and_navigation_policy(
+        runtime,
+        reservation,
+        loader,
+        url,
+        "text/html",
+        raw_body,
+        reply_boundary,
+        top_level_navigation_dispatch,
+        navigation_reply_policy,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn prepare_test_external_raw_document_with_reservation_content_type_boundary_and_navigation_policy(
+    runtime: &JsRuntime,
+    reservation: super::RendererPageReservationToken,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    content_type: &str,
+    raw_body: ExternalRawDocumentBodyStream,
+    reply_boundary: RendererReplyBoundary,
+    top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
+    navigation_reply_policy: RendererNavigationReplyPolicy,
+) -> anyhow::Result<PreparedRendererDocument> {
     runtime
         .prepare_streaming_raw_document_from_external_body_with_inspector_session_restores(
-            runtime.reserve_page_for_creation(),
+            reservation,
             url.clone(),
             url,
             None,
@@ -104,15 +196,41 @@ async fn prepare_test_external_raw_document_with_content_type_and_reply_boundary
             false,
             PageVmInitStage::Load,
             reply_boundary,
-            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
-            RendererNavigationReplyPolicy::FollowBeforeReply,
+            top_level_navigation_dispatch,
+            navigation_reply_policy,
             None,
             None,
             None,
             None,
         )
         .await
-        .expect("external raw document should prepare")
+}
+
+fn completed_empty_external_raw_document_body() -> ExternalRawDocumentBodyStream {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
+    drop(body_tx);
+    completion_tx
+        .send(Ok(()))
+        .expect("empty external raw document completion should send");
+    raw_body
+}
+
+fn completed_external_raw_document_body(html: &str) -> ExternalRawDocumentBodyStream {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
+    let body = html.as_bytes().to_vec();
+    tokio::spawn(async move {
+        body_tx
+            .send(body)
+            .await
+            .expect("external raw document body should send");
+        drop(body_tx);
+        completion_tx
+            .send(Ok(()))
+            .expect("external raw document completion should send");
+    });
+    raw_body
 }
 
 struct RendererExternalActivityTestReceiver(RendererOutputTransportReceiver);
@@ -1493,6 +1611,7 @@ async fn streaming_unstyled_xml_converts_live_document_before_domcontentloaded()
                 )
                 .to_owned(),
                 world_name: None,
+                browser_internal: false,
                 has_bidi_channel_argument: false,
                 bidi_channel_handoffs: Vec::new(),
             }],
@@ -1602,6 +1721,7 @@ async fn prepared_streaming_xml_document_waits_for_permit_and_uses_latest_config
                     source: r#"globalThis.__nativePreload = "ready";"#.to_owned(),
                     world_name: None,
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
                 crate::DocumentStartScript {
@@ -1609,6 +1729,7 @@ async fn prepared_streaming_xml_document_waits_for_permit_and_uses_latest_config
                     source: r#"globalThis.__nativeWorldPreload = "ready";"#.to_owned(),
                     world_name: Some("native-world".to_owned()),
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
             ],
@@ -2485,6 +2606,7 @@ globalThis.__preparedCommitObserved = JSON.stringify([
                     source: r#"globalThis.__latestPreload = "ready";"#.to_owned(),
                     world_name: None,
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
                 crate::DocumentStartScript {
@@ -2492,6 +2614,7 @@ globalThis.__preparedCommitObserved = JSON.stringify([
                     source: r#"globalThis.__latestWorld = "ready";"#.to_owned(),
                     world_name: Some("latest-world".to_owned()),
                     has_bidi_channel_argument: false,
+                    browser_internal: false,
                     bidi_channel_handoffs: Vec::new(),
                 },
             ],
@@ -2798,6 +2921,976 @@ async fn canceled_prepared_document_closes_its_ordered_output_stream() {
             },
         ) if stream == opened_stream
     ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/live-replacement-cancel").expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>stable live Page</body>",
+    )
+    .await;
+    let page_residence = RendererOutputResidenceIdentity::Page {
+        owner_local_host_id: page.owner_local_host_id(),
+        page_id: page.renderer_page_id(),
+    };
+    let mut live_stream = None;
+    let mut initial_reservation_released = false;
+    while live_stream.is_none() || !initial_reservation_released {
+        match output_rx.recv_message().await {
+            RendererOutputTransportMessage::StreamControl(
+                super::RendererOutputStreamControl::Opened { stream },
+            ) if stream.residence() == page_residence => live_stream = Some(stream),
+            RendererOutputTransportMessage::PageReservationReleased {
+                owner_local_host_id,
+                page_id,
+            } if owner_local_host_id == page.owner_local_host_id()
+                && page_id == page.renderer_page_id() =>
+            {
+                initial_reservation_released = true;
+            }
+            _ => {}
+        }
+    }
+    let live_stream = live_stream.expect("initial Page output stream should open");
+    let testing = RendererPageTestingHandle::new_for_testing(&page);
+    let initial_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("initial live Page view");
+    let initial_heap = runtime_heap_usage_for_test(&page).await;
+    let initial_runtime = &initial_heap["moli"]["runtime"];
+    let initial_script_agent_id = initial_runtime["scriptAgentId"].clone();
+    let initial_window_proxy = initial_runtime["mainWindowProxyIdentityHash"].clone();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+
+    let replacement = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("live Page replacement should reserve");
+    assert_eq!(replacement.page_id(), page.renderer_page_id());
+    assert_eq!(replacement.local_host_id(), page.owner_local_host_id());
+    assert!(matches!(
+        replacement.script_agent_admission(),
+        RendererScriptAgentAdmission::ExistingPageReplacement {
+            expected_vm_creation_id,
+            ..
+        } if expected_vm_creation_id == initial_view.vm_creation_id
+    ));
+    let prepared = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        replacement,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-cancel/next")
+            .expect("replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("live Page replacement should prepare in its existing environment");
+    let prepared_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(prepared_isolates.created, baseline_isolates.created);
+    assert_eq!(prepared_isolates.destroyed, baseline_isolates.destroyed);
+    assert_eq!(prepared_isolates.live, baseline_isolates.live);
+    assert_eq!(prepared_isolates.reserved, baseline_isolates.reserved + 1);
+
+    loop {
+        match output_rx.recv_message().await {
+            RendererOutputTransportMessage::PageReservationReleased {
+                owner_local_host_id,
+                page_id,
+            } if owner_local_host_id == page.owner_local_host_id()
+                && page_id == page.renderer_page_id() =>
+            {
+                break;
+            }
+            RendererOutputTransportMessage::StreamControl(
+                super::RendererOutputStreamControl::Opened { stream },
+            ) if stream.residence() == page_residence => {
+                panic!("replacement prepare must reuse the live Page output stream")
+            }
+            RendererOutputTransportMessage::StreamControl(
+                super::RendererOutputStreamControl::Closed { stream, .. },
+            ) if stream == live_stream => {
+                panic!("replacement prepare must not close the live Page output stream")
+            }
+            _ => {}
+        }
+    }
+    prepared
+        .cancel()
+        .await
+        .expect("prepared live Page replacement should cancel");
+    let canceled_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(canceled_isolates.created, baseline_isolates.created);
+    assert_eq!(canceled_isolates.destroyed, baseline_isolates.destroyed);
+    assert_eq!(canceled_isolates.live, baseline_isolates.live);
+    assert_eq!(canceled_isolates.reserved, baseline_isolates.reserved);
+    while let Ok(message) = output_rx.0.try_recv() {
+        assert!(
+            !matches!(
+                message,
+                RendererOutputTransportMessage::StreamControl(
+                    super::RendererOutputStreamControl::Closed { stream, .. }
+                ) if stream == live_stream
+            ),
+            "canceling a borrowed replacement residence must not retire the stable Page stream"
+        );
+    }
+
+    let canceled_heap = runtime_heap_usage_for_test(&page).await;
+    let canceled_runtime = &canceled_heap["moli"]["runtime"];
+    assert_eq!(canceled_runtime["scriptAgentId"], initial_script_agent_id);
+    assert_eq!(
+        canceled_runtime["mainWindowProxyIdentityHash"],
+        initial_window_proxy
+    );
+    let uninstalled_commit_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("the live Page should remain reservable after cancellation");
+    let uninstalled_commit = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        uninstalled_commit_reservation,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-cancel/uninstalled-commit")
+            .expect("uninstalled commit URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("the follow-up live Page replacement should prepare");
+    let permit = uninstalled_commit.issue_commit_permit();
+    let commit_error = match uninstalled_commit.commit(permit).await {
+        Ok(_) => panic!("the not-yet-installed live replacement commit must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        commit_error.to_string().contains("is not installed yet"),
+        "the provisional commit boundary should return an explicit error: {commit_error:#}"
+    );
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "rejecting the provisional commit must release only its borrowed reservation"
+    );
+    while let Ok(message) = output_rx.0.try_recv() {
+        assert!(
+            !matches!(
+                message,
+                RendererOutputTransportMessage::StreamControl(
+                    super::RendererOutputStreamControl::Closed { stream, .. }
+                ) if stream == live_stream
+            ),
+            "rejecting an uninstalled replacement commit must not retire the stable Page stream"
+        );
+    }
+    let (reply, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "console.log('live-after-replacement-cancel'); 'alive'".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the original Page should remain executable after replacement cancellation");
+    assert_eq!(renderer_json_value(reply), Some(serde_json::json!("alive")));
+    loop {
+        match output_rx.recv_message().await {
+            RendererOutputTransportMessage::Publication(publication)
+                if publication.cursor().stream() == live_stream =>
+            {
+                break;
+            }
+            RendererOutputTransportMessage::StreamControl(
+                super::RendererOutputStreamControl::Closed { stream, .. },
+            ) if stream == live_stream => {
+                panic!("the stable Page stream retired after replacement cancellation")
+            }
+            _ => {}
+        }
+    }
+    page.close_async()
+        .await
+        .expect("live Page should close after cancellation probe");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_live_page_replacement_commits_in_stable_page_slot_without_new_handle() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/prepared-replacement/initial").expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>old Document</body>",
+    )
+    .await;
+    let page_id = page.renderer_page_id();
+    let owner_local_host_id = page.owner_local_host_id();
+    let initial_devtools_agent = page.devtools_agent_token();
+    let testing = RendererPageTestingHandle::new_for_testing(&page);
+    let initial_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("initial Page view");
+    let initial_heap = runtime_heap_usage_for_test(&page).await;
+    let initial_runtime = &initial_heap["moli"]["runtime"];
+    let initial_script_agent_id = initial_runtime["scriptAgentId"].clone();
+    let initial_context_group_id = initial_runtime["inspectorContextGroupId"].clone();
+    let initial_window_proxy = initial_runtime["mainWindowProxyIdentityHash"].clone();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let (old_marker, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__preparedReplacementOldRealm = 'old'; 'old'".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("old realm marker should evaluate");
+    assert_eq!(
+        renderer_json_value(old_marker),
+        Some(serde_json::json!("old"))
+    );
+
+    let replacement_url =
+        url::Url::parse("https://example.test/prepared-replacement/next").expect("replacement URL");
+    let replacement_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("replacement should reserve the current Page generation");
+    let prepared = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        replacement_reservation,
+        &loader,
+        replacement_url.clone(),
+        completed_external_raw_document_body(
+            "<!doctype html><body data-prepared-replacement='yes'><main id='replacement-body'>new Document</main><script>globalThis.__preparedReplacementNewRealm = 'new'</script></body>",
+        ),
+    )
+    .await
+    .expect("replacement should prepare in the stable Page environment");
+    let replacement_devtools_agent = prepared.renderer_devtools_agent_token();
+    assert_ne!(replacement_devtools_agent, initial_devtools_agent);
+    let permit = prepared.issue_commit_permit();
+    let replacement = prepared
+        .commit_page_replacement(permit)
+        .await
+        .expect("prepared replacement should commit in the stable Page slot");
+
+    assert_eq!(replacement.page_id(), page_id);
+    assert_eq!(replacement.owner_local_host_id(), owner_local_host_id);
+    assert_eq!(
+        replacement.renderer_devtools_agent_token(),
+        replacement_devtools_agent
+    );
+    assert_eq!(
+        page.devtools_agent_token(),
+        initial_devtools_agent,
+        "replacement commit must not manufacture or silently mutate a second Page handle"
+    );
+    page.adopt_page_replacement(&replacement)
+        .expect("the original Page handle should adopt the new Document agent");
+    assert_eq!(page.devtools_agent_token(), replacement_devtools_agent);
+    let (committed_agent, page_state, creation_diagnostics, creation_artifacts, pending_download) =
+        replacement.into_parts();
+    assert_eq!(committed_agent, replacement_devtools_agent);
+    assert_eq!(page_state.requested_url, replacement_url);
+    assert_eq!(page_state.status, 200);
+    assert!(pending_download.is_none());
+    assert!(
+        creation_diagnostics
+            .initial_runtime_realms
+            .iter()
+            .any(|realm| realm.is_default),
+        "replacement reply should expose its new default realm"
+    );
+    assert!(
+        creation_artifacts.lifecycle_snapshot.load.is_some(),
+        "LifecycleTarget replacement commit should wait for load"
+    );
+
+    let committed_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("committed replacement Page view");
+    assert_eq!(committed_view.page_id, initial_view.page_id);
+    assert_ne!(committed_view.vm_creation_id, initial_view.vm_creation_id);
+    assert!(committed_view.view_generation > initial_view.view_generation);
+    assert_eq!(committed_view.page_state.final_url, replacement_url);
+
+    let (replacement_observation, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify([document.querySelector('#replacement-body').textContent, document.body.getAttribute('data-prepared-replacement'), typeof globalThis.__preparedReplacementOldRealm, globalThis.__preparedReplacementNewRealm])".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("replacement Document should remain executable through the original handle");
+    assert_eq!(
+        renderer_json_value(replacement_observation),
+        Some(serde_json::json!(
+            "[\"new Document\",\"yes\",\"undefined\",\"new\"]"
+        ))
+    );
+    let replacement_heap = runtime_heap_usage_for_test(&page).await;
+    let replacement_runtime = &replacement_heap["moli"]["runtime"];
+    assert_eq!(
+        replacement_runtime["scriptAgentId"],
+        initial_script_agent_id
+    );
+    assert_ne!(
+        replacement_runtime["inspectorContextGroupId"],
+        initial_context_group_id
+    );
+    assert_eq!(
+        replacement_runtime["mainWindowProxyIdentityHash"],
+        initial_window_proxy
+    );
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "same-Page replacement must reuse its isolate and consume its borrowed reservation"
+    );
+
+    page.close_async()
+        .await
+        .expect("stable replacement Page should close through its original handle");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_live_page_replacement_document_commit_replies_before_stream_completion() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url = url::Url::parse("https://example.test/prepared-document-commit/initial")
+        .expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>initial Document</body>",
+    )
+    .await;
+    output_rx.drain();
+
+    let replacement_url = url::Url::parse("https://example.test/prepared-document-commit/next")
+        .expect("replacement URL");
+    let reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("replacement should reserve");
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
+    let (first_chunk_sent_tx, first_chunk_sent_rx) = oneshot::channel();
+    let (release_tail_tx, release_tail_rx) = oneshot::channel();
+    let producer = tokio::spawn(async move {
+        body_tx
+            .send(b"<!doctype html><html><body><main id='document-commit'>replacement".to_vec())
+            .await
+            .expect("replacement first chunk should send");
+        first_chunk_sent_tx
+            .send(())
+            .expect("first chunk barrier should send");
+        release_tail_rx
+            .await
+            .expect("replacement tail should be released");
+        body_tx
+            .send(b" complete</main><script>globalThis.__documentCommitTailRan = 'yes'</script></body></html>".to_vec())
+            .await
+            .expect("replacement tail should send");
+        drop(body_tx);
+        completion_tx
+            .send(Ok(()))
+            .expect("replacement body completion should send");
+    });
+    first_chunk_sent_rx
+        .await
+        .expect("replacement first chunk should become available");
+    let prepared = prepare_test_external_raw_document_with_reservation_and_boundary(
+        &runtime,
+        reservation,
+        &loader,
+        replacement_url,
+        raw_body,
+        RendererReplyBoundary::DocumentCommit,
+    )
+    .await
+    .expect("streaming replacement should prepare");
+    let permit = prepared.issue_commit_permit();
+    let replacement = match tokio::time::timeout(
+        Duration::from_secs(1),
+        prepared.commit_page_replacement(permit),
+    )
+    .await
+    {
+        Ok(result) => result.expect("DocumentCommit replacement should commit"),
+        Err(_) => {
+            let _ = release_tail_tx.send(());
+            let _ = producer.await;
+            panic!("DocumentCommit replacement waited for the still-open response body");
+        }
+    };
+    assert!(
+        replacement
+            .creation_artifacts
+            .lifecycle_snapshot
+            .load
+            .is_none(),
+        "DocumentCommit reply must not pretend the still-open Document reached load"
+    );
+    page.adopt_page_replacement(&replacement)
+        .expect("original handle should adopt the committed replacement");
+    release_tail_tx
+        .send(())
+        .expect("replacement tail should be released after commit reply");
+    producer
+        .await
+        .expect("replacement body producer should finish");
+    let lifecycle_events = recv_page_lifecycle_until(
+        &mut output_rx,
+        &page,
+        RendererDocumentLifecycleMilestone::Load,
+    )
+    .await;
+    assert!(lifecycle_events.iter().any(|event| {
+        event.kind
+            == RendererDocumentLifecycleEventKind::Milestone(
+                RendererDocumentLifecycleMilestone::DomContentLoaded,
+            )
+    }));
+    let (tail_observation, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify([document.querySelector('#document-commit').textContent, globalThis.__documentCommitTailRan])".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("background phase-one continuation should finish the replacement Document");
+    assert_eq!(
+        renderer_json_value(tail_observation),
+        Some(serde_json::json!("[\"replacement complete\",\"yes\"]"))
+    );
+    page.close_async()
+        .await
+        .expect("DocumentCommit replacement Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_live_page_replacement_document_commit_preserves_browser_owned_tail_navigation() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url = url::Url::parse("https://example.test/prepared-tail-navigation/initial")
+        .expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>initial Document</body>",
+    )
+    .await;
+    let testing = RendererPageTestingHandle::new_for_testing(&page);
+    output_rx.drain();
+
+    let replacement_url =
+        url::Url::parse("https://example.test/prepared-tail-navigation/replacement")
+            .expect("replacement URL");
+    let reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("replacement should reserve");
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
+    let (first_chunk_sent_tx, first_chunk_sent_rx) = oneshot::channel();
+    let (release_tail_tx, release_tail_rx) = oneshot::channel();
+    let producer = tokio::spawn(async move {
+        body_tx
+            .send(b"<!doctype html><html><body><main>replacement".to_vec())
+            .await
+            .expect("replacement first chunk should send");
+        first_chunk_sent_tx
+            .send(())
+            .expect("first chunk barrier should send");
+        release_tail_rx
+            .await
+            .expect("replacement tail should be released");
+        body_tx
+            .send(
+                b"</main><script>location.href = '/protocol-owned-next'</script></body></html>"
+                    .to_vec(),
+            )
+            .await
+            .expect("replacement navigation tail should send");
+        drop(body_tx);
+        completion_tx
+            .send(Ok(()))
+            .expect("replacement body completion should send");
+    });
+    first_chunk_sent_rx
+        .await
+        .expect("replacement first chunk should become available");
+    let prepared =
+        prepare_test_external_raw_document_with_reservation_boundary_and_navigation_policy(
+            &runtime,
+            reservation,
+            &loader,
+            replacement_url.clone(),
+            raw_body,
+            RendererReplyBoundary::DocumentCommit,
+            RendererTopLevelNavigationDispatch::DelegateToBrowser,
+            RendererNavigationReplyPolicy::ReturnWithPendingNavigation,
+        )
+        .await
+        .expect("protocol-owned streaming replacement should prepare");
+    let permit = prepared.issue_commit_permit();
+    let replacement = tokio::time::timeout(
+        Duration::from_secs(1),
+        prepared.commit_page_replacement(permit),
+    )
+    .await
+    .expect("DocumentCommit replacement should reply before its tail")
+    .expect("DocumentCommit replacement should commit");
+    let expected_source_document = replacement.creation_artifacts.lifecycle_snapshot.into();
+    page.adopt_page_replacement(&replacement)
+        .expect("original handle should adopt the committed replacement");
+
+    release_tail_tx
+        .send(())
+        .expect("navigation tail should be released after commit reply");
+    producer
+        .await
+        .expect("replacement body producer should finish");
+    let navigation = tokio::time::timeout(
+        Duration::from_secs(1),
+        output_rx.recv_top_level_location_navigation(),
+    )
+    .await
+    .expect("tail navigation should publish without standalone follow")
+    .expect("renderer output transport should stay open");
+    assert_eq!(navigation.source_document(), expected_source_document);
+    assert_eq!(navigation.url(), "https://example.test/protocol-owned-next");
+    assert_eq!(
+        has_pending_location_navigation_for_test(&page).await,
+        Some(false),
+        "browser-owned navigation must settle into concrete output instead of being followed"
+    );
+    assert_eq!(
+        testing
+            .renderer_page_view_async()
+            .await
+            .expect("replacement Page view")
+            .page_state
+            .final_url,
+        replacement_url,
+        "background continuation must not install a standalone-followed Document"
+    );
+    page.close_async()
+        .await
+        .expect("protocol-owned replacement Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn prepared_live_page_replacement_revalidates_generation_at_commit() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/prepared-commit-stale/initial").expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>initial generation</body>",
+    )
+    .await;
+    let testing = RendererPageTestingHandle::new_for_testing(&page);
+    let initial_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("initial Page view");
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("replacement should reserve");
+    let prepared = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        reservation,
+        &loader,
+        url::Url::parse("https://example.test/prepared-commit-stale/external")
+            .expect("external replacement URL"),
+        completed_external_raw_document_body(
+            "<!doctype html><body>stale externally prepared Document</body>",
+        ),
+    )
+    .await
+    .expect("replacement should prepare before the generation changes");
+    assert_eq!(
+        runtime
+            .document_isolate_accounting_for_diagnostics()
+            .reserved,
+        baseline_isolates.reserved + 1
+    );
+
+    let internal_url = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cbody%3Ecurrent%20internal%20generation%3C/body%3E";
+    page.run_async_command(
+        RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+            expression: format!("location.href = {internal_url:?}; 'navigating'"),
+            await_promise: false,
+        },
+    )
+    .await
+    .expect("an internal navigation should supersede the prepared generation");
+    let current_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("current Page view");
+    assert_ne!(current_view.vm_creation_id, initial_view.vm_creation_id);
+
+    let permit = prepared.issue_commit_permit();
+    let error = match prepared.commit_page_replacement(permit).await {
+        Ok(_) => panic!("commit must reject a prepared previous PageVm generation"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("stale prepared replacement"),
+        "commit-time rejection should identify its exact generation boundary: {error:#}"
+    );
+    assert_eq!(
+        error.disposition(),
+        RendererPageReplacementCommitFailureDisposition::PagePreserved,
+        "a generation mismatch detected before old-realm teardown must preserve the live Page"
+    );
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "stale commit rejection must release the borrowed isolate reservation"
+    );
+    let (body, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.body.textContent".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the current generation should survive stale prepared commit rejection");
+    assert_eq!(
+        renderer_json_value(body),
+        Some(serde_json::json!("current internal generation"))
+    );
+    let final_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("final current Page view");
+    assert_eq!(final_view.vm_creation_id, current_view.vm_creation_id);
+    page.close_async()
+        .await
+        .expect("stale commit probe Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_live_page_replacement_reservation_fails_before_isolate_bootstrap() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/live-replacement-stale").expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>stale reservation probe</body>",
+    )
+    .await;
+    let testing = RendererPageTestingHandle::new_for_testing(&page);
+    let initial_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("initial live Page view");
+    let stale_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("live Page replacement should reserve");
+    assert!(matches!(
+        stale_reservation.script_agent_admission(),
+        RendererScriptAgentAdmission::ExistingPageReplacement {
+            expected_vm_creation_id,
+            ..
+        } if expected_vm_creation_id == initial_view.vm_creation_id
+    ));
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let replacement_url =
+        "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cbody%3Enew%20generation%3C/body%3E";
+    page.run_async_command(
+        RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+            expression: format!("location.href = {replacement_url:?}; 'navigating'"),
+            await_promise: false,
+        },
+    )
+    .await
+    .expect("an internal navigation should replace the live Document");
+    let navigated_view = testing
+        .renderer_page_view_async()
+        .await
+        .expect("navigated live Page view");
+    assert_ne!(navigated_view.vm_creation_id, initial_view.vm_creation_id);
+
+    let error = match prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        stale_reservation,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-stale/external")
+            .expect("stale replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    {
+        Ok(_) => panic!("a reservation for the previous PageVm generation must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("stale renderer Page"),
+        "stale replacement failure should identify its generation boundary: {error:#}"
+    );
+    let after_stale = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(after_stale.created, baseline_isolates.created);
+    assert_eq!(after_stale.destroyed, baseline_isolates.destroyed);
+    assert_eq!(after_stale.live, baseline_isolates.live);
+    assert_eq!(after_stale.reserved, baseline_isolates.reserved);
+
+    let current_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("the current Page generation should remain reservable");
+    let prepared = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        current_reservation,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-stale/current")
+            .expect("current replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("the current Page generation should prepare");
+    prepared
+        .cancel()
+        .await
+        .expect("current replacement probe should cancel");
+    let (reply, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.body.textContent".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the navigated Page should remain usable after stale rejection");
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!("new generation"))
+    );
+    page.close_async()
+        .await
+        .expect("stale reservation probe Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn newer_live_page_replacement_reservation_supersedes_unconsumed_nonce() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/live-replacement-supersede").expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>superseded reservation probe</body>",
+    )
+    .await;
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let first = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("first live Page replacement should reserve");
+    let current = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("newer live Page replacement should reserve");
+    assert_ne!(
+        first, current,
+        "same-generation reservations need distinct capabilities"
+    );
+    let first_admission = first.script_agent_admission();
+    let current_admission = current.script_agent_admission();
+    assert!(matches!(
+        (first_admission, current_admission),
+        (
+            RendererScriptAgentAdmission::ExistingPageReplacement {
+                expected_vm_creation_id: first_generation,
+                reservation_nonce: first_nonce,
+            },
+            RendererScriptAgentAdmission::ExistingPageReplacement {
+                expected_vm_creation_id: current_generation,
+                reservation_nonce: current_nonce,
+            },
+        ) if first_generation == current_generation && first_nonce != current_nonce
+    ));
+
+    let superseded_error = match prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        first,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-supersede/old")
+            .expect("superseded replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    {
+        Ok(_) => panic!("an older same-generation reservation must fail closed"),
+        Err(error) => error,
+    };
+    assert!(
+        superseded_error.to_string().contains("was superseded"),
+        "superseded replacement failure should identify the exact capability: {superseded_error:#}"
+    );
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "rejecting an unconsumed nonce must not allocate or reserve an isolate"
+    );
+
+    let prepared = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        current,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-supersede/current")
+            .expect("current replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("the newest same-generation reservation should prepare");
+    prepared
+        .cancel()
+        .await
+        .expect("current replacement probe should cancel");
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "preparing and canceling the current replacement must preserve isolate accounting"
+    );
+    page.close_async()
+        .await
+        .expect("superseded reservation probe Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn newer_live_page_replacement_supersedes_prepared_candidate_without_retiring_page() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let initial_url =
+        url::Url::parse("https://example.test/live-replacement-prepared-supersede/initial")
+            .expect("initial URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        initial_url,
+        "<!doctype html><body>live Document survives prepared supersede</body>",
+    )
+    .await;
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+
+    let first_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("first live Page replacement should reserve");
+    let first = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        first_reservation,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-prepared-supersede/first")
+            .expect("first replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("first replacement should prepare");
+
+    let current_reservation = page
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("newer replacement should reserve while the first is prepared");
+    let current = prepare_test_external_raw_document_with_reservation(
+        &runtime,
+        current_reservation,
+        &loader,
+        url::Url::parse("https://example.test/live-replacement-prepared-supersede/current")
+            .expect("current replacement URL"),
+        completed_empty_external_raw_document_body(),
+    )
+    .await
+    .expect("newer replacement should prepare beside the superseded candidate");
+    assert_eq!(
+        runtime
+            .document_isolate_accounting_for_diagnostics()
+            .reserved,
+        baseline_isolates.reserved + 2,
+        "both pre-commit candidates retain isolated reservations until their owner settles them"
+    );
+
+    let first_permit = first.issue_commit_permit();
+    let error = match first.commit_page_replacement(first_permit).await {
+        Ok(_) => panic!("the older prepared candidate must not commit"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("superseded"),
+        "the rejected candidate should identify its supersede boundary: {error:#}"
+    );
+    assert_eq!(
+        error.disposition(),
+        RendererPageReplacementCommitFailureDisposition::PagePreserved
+    );
+    assert_eq!(
+        runtime
+            .document_isolate_accounting_for_diagnostics()
+            .reserved,
+        baseline_isolates.reserved + 1,
+        "rejecting the old candidate should release only its isolate reservation"
+    );
+    let (body, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.body.textContent".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the live Document should remain usable after prepared supersede");
+    assert_eq!(
+        renderer_json_value(body),
+        Some(serde_json::json!(
+            "live Document survives prepared supersede"
+        ))
+    );
+
+    current
+        .cancel()
+        .await
+        .expect("the current replacement probe should cancel");
+    assert_eq!(
+        runtime.document_isolate_accounting_for_diagnostics(),
+        baseline_isolates,
+        "settling both candidates must restore isolate accounting"
+    );
+    page.close_async()
+        .await
+        .expect("prepared supersede probe Page should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3781,6 +4874,16 @@ async fn per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts() 
     let second_heap = runtime_heap_usage_for_test(&second_page).await;
     let first_runtime = &first_heap["moli"]["runtime"];
     let second_runtime = &second_heap["moli"]["runtime"];
+    assert_eq!(
+        first_heap["moli"]["scope"]["v8HeapIsTargetLocal"],
+        serde_json::json!(true),
+        "a fresh single-Page script agent should expose target-local heap scope"
+    );
+    assert_eq!(
+        second_heap["moli"]["scope"]["v8HeapIsTargetLocal"],
+        serde_json::json!(true),
+        "an unrelated Page's fresh agent should remain target-local"
+    );
     let first_script_agent_id = first_runtime["scriptAgentId"]
         .as_u64()
         .expect("first page should expose a script-agent id");
@@ -3833,13 +4936,13 @@ async fn per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts() 
     );
     assert_eq!(
         first_runtime["inspectorDefaultContextRegistryScope"],
-        serde_json::json!("page-vm-document-isolate"),
-        "default context registry should be page-isolate scoped: {first_heap:?}"
+        serde_json::json!("script-agent-document-isolate"),
+        "default context registry should be script-agent scoped: {first_heap:?}"
     );
     assert_eq!(
         first_runtime["v8ForegroundTaskWakeScope"],
-        serde_json::json!("page-vm-document-isolate"),
-        "V8 foreground task wakes should be labelled as page-isolate scoped: {first_heap:?}"
+        serde_json::json!("script-agent-document-isolate"),
+        "V8 foreground task wakes should be labelled as script-agent scoped: {first_heap:?}"
     );
     assert_eq!(
         first_runtime["v8ForegroundTaskWakeContextGroupIdAvailable"],
@@ -4000,8 +5103,8 @@ async fn per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts() 
 #[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_experiment_shares_isolate_and_survives_source_close() {
     let runtime = JsRuntime::initialize();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://example.test/related-agent-a").unwrap();
     let second_url = url::Url::parse("https://example.test/related-agent-b").unwrap();
     let mut first_page = create_test_html_page(
@@ -4034,8 +5137,18 @@ async fn related_page_script_agent_experiment_shares_isolate_and_survives_source
 
     let first_heap = runtime_heap_usage_for_test(&first_page).await;
     let second_heap = runtime_heap_usage_for_test(&second_page).await;
-    let first_runtime = &first_heap["lightmount"]["runtime"];
-    let second_runtime = &second_heap["lightmount"]["runtime"];
+    let first_runtime = &first_heap["moli"]["runtime"];
+    let second_runtime = &second_heap["moli"]["runtime"];
+    assert_eq!(
+        first_heap["moli"]["scope"]["v8HeapIsTargetLocal"],
+        serde_json::json!(false),
+        "a related multi-Page agent heap is not target-local"
+    );
+    assert_eq!(
+        second_heap["moli"]["scope"]["v8HeapIsTargetLocal"],
+        serde_json::json!(false),
+        "each related Page should report the shared agent heap scope"
+    );
     let script_agent_id = first_runtime["scriptAgentId"]
         .as_u64()
         .expect("related source Page should expose a script-agent id");
@@ -4158,7 +5271,7 @@ globalThis.__lm_related_agent_marker"#
         .await
         .expect("related source Page should close independently");
     let remaining_heap = runtime_heap_usage_for_test(&second_page).await;
-    let remaining_runtime = &remaining_heap["lightmount"]["runtime"];
+    let remaining_runtime = &remaining_heap["moli"]["runtime"];
     assert_eq!(
         remaining_runtime["scriptAgentId"],
         serde_json::json!(script_agent_id),
@@ -4197,7 +5310,7 @@ globalThis.__lm_related_agent_marker"#
         Some(serde_json::json!("navigating"))
     );
     let after_navigation_heap = runtime_heap_usage_for_test(&second_page).await;
-    let after_navigation_runtime = &after_navigation_heap["lightmount"]["runtime"];
+    let after_navigation_runtime = &after_navigation_heap["moli"]["runtime"];
     assert_eq!(
         after_navigation_runtime["scriptAgentId"],
         serde_json::json!(script_agent_id),
@@ -4247,8 +5360,8 @@ globalThis.__lm_related_agent_marker"#
 #[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_keeps_async_work_and_rejections_page_local() {
     let runtime = JsRuntime::initialize();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://example.test/related-async-a").unwrap();
     let second_url = url::Url::parse("https://example.test/related-async-b").unwrap();
     let mut first_page = create_test_html_page(
@@ -4338,8 +5451,8 @@ async fn related_page_script_agent_keeps_inspector_objects_and_bindings_page_loc
     let runtime = JsRuntime::initialize();
     let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
     runtime.set_renderer_output_transport_sender(output_tx);
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://example.test/related-inspector-a").unwrap();
     let second_url = url::Url::parse("https://example.test/related-inspector-b").unwrap();
     let mut first_page = create_test_html_page(
@@ -4547,8 +5660,8 @@ async fn related_page_script_agent_keeps_inspector_objects_and_bindings_page_loc
 #[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers() {
     let runtime = JsRuntime::initialize();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let (base_url, replacement_server) = spawn_owner_wake_server_with_content_type(
         "/replacement",
         r#"<!doctype html>
@@ -4712,8 +5825,8 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
 #[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_keeps_dedicated_worker_events_page_local_after_source_close() {
     let runtime = JsRuntime::initialize();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://example.test/related-worker-a").unwrap();
     let second_url = url::Url::parse("https://example.test/related-worker-b").unwrap();
     let mut first_page = create_test_html_page(
@@ -4827,13 +5940,12 @@ async fn related_page_script_agent_keeps_dedicated_worker_events_page_local_afte
 #[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_keeps_indexed_db_manager_routes_page_local() {
     let runtime = JsRuntime::initialize();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://related-idb.example/app-a").unwrap();
     let second_url = url::Url::parse("https://related-idb.example/app-b").unwrap();
-    let storage_key =
-        lightmount_storage_key::LightmountStorageKey::first_party_from_url(&first_url, None)
-            .serialized_storage_key();
+    let storage_key = moli_storage_key::MoliStorageKey::first_party_from_url(&first_url, None)
+        .serialized_storage_key();
     let first_root = runtime_indexed_db_test_root("related-agent-a");
     let second_root = runtime_indexed_db_test_root("related-agent-b");
     let first_manager = crate::new_indexed_db_manager(Some(first_root.clone()))
@@ -4895,8 +6007,8 @@ async fn related_page_script_agent_keeps_indexed_db_manager_routes_page_local() 
 async fn related_page_script_agent_survives_non_lifo_member_churn() {
     let runtime = JsRuntime::initialize();
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let first_url = url::Url::parse("https://example.test/related-churn-a").unwrap();
     let second_url = url::Url::parse("https://example.test/related-churn-b").unwrap();
     let third_url = url::Url::parse("https://example.test/related-churn-c").unwrap();
@@ -4935,7 +6047,7 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
     );
     let three_member_heap = runtime_heap_usage_for_test(&third_page).await;
     assert_eq!(
-        three_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        three_member_heap["moli"]["runtime"]["scriptAgentPageCount"],
         serde_json::json!(3)
     );
     let three_member_accounting = runtime.document_isolate_accounting_for_diagnostics();
@@ -4955,7 +6067,7 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
         .expect("middle related Page should close first");
     let after_middle_close = runtime_heap_usage_for_test(&third_page).await;
     assert_eq!(
-        after_middle_close["lightmount"]["runtime"]["scriptAgentPageCount"],
+        after_middle_close["moli"]["runtime"]["scriptAgentPageCount"],
         serde_json::json!(2),
         "non-LIFO retirement must remove only the middle Page route"
     );
@@ -4966,7 +6078,7 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
         .expect("original admission source should close second");
     let after_source_close = runtime_heap_usage_for_test(&third_page).await;
     assert_eq!(
-        after_source_close["lightmount"]["runtime"]["scriptAgentPageCount"],
+        after_source_close["moli"]["runtime"]["scriptAgentPageCount"],
         serde_json::json!(1)
     );
 
@@ -4988,7 +6100,7 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
     );
     let replacement_member_heap = runtime_heap_usage_for_test(&fourth_page).await;
     assert_eq!(
-        replacement_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        replacement_member_heap["moli"]["runtime"]["scriptAgentPageCount"],
         serde_json::json!(2)
     );
     let replacement_member_accounting = runtime.document_isolate_accounting_for_diagnostics();
@@ -5015,7 +6127,7 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
     );
     let final_member_heap = runtime_heap_usage_for_test(&fourth_page).await;
     assert_eq!(
-        final_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        final_member_heap["moli"]["runtime"]["scriptAgentPageCount"],
         serde_json::json!(1)
     );
 
@@ -5033,8 +6145,8 @@ async fn related_page_script_agent_survives_non_lifo_member_churn() {
 async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
     let runtime = JsRuntime::initialize();
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let anchor_url = url::Url::parse("https://example.test/related-realm-anchor").unwrap();
     let mut anchor_page = create_test_html_page(
         &runtime,
@@ -5049,7 +6161,7 @@ async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
     let anchor_detached_contexts =
         related_script_agent_memory_u64(&anchor_heap, &["numberOfDetachedContexts"]);
     let script_agent_id =
-        related_script_agent_memory_u64(&anchor_heap, &["lightmount", "runtime", "scriptAgentId"]);
+        related_script_agent_memory_u64(&anchor_heap, &["moli", "runtime", "scriptAgentId"]);
 
     for iteration in 1..=3 {
         let peer_url = url::Url::parse(&format!(
@@ -5071,10 +6183,7 @@ async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
             "iteration {iteration} should add exactly one live peer realm"
         );
         assert_eq!(
-            related_script_agent_memory_u64(
-                &active_heap,
-                &["lightmount", "runtime", "scriptAgentId"]
-            ),
+            related_script_agent_memory_u64(&active_heap, &["moli", "runtime", "scriptAgentId"]),
             script_agent_id
         );
 
@@ -5129,18 +6238,14 @@ async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
         assert_eq!(
             related_script_agent_memory_u64(
                 &post_close_heap,
-                &["lightmount", "runtime", "scriptAgentPageCount"]
+                &["moli", "runtime", "scriptAgentPageCount"]
             ),
             1
         );
         assert_eq!(
             related_script_agent_memory_u64(
                 &post_close_heap,
-                &[
-                    "lightmount",
-                    "runtime",
-                    "inspectorDefaultContextRegistryCount",
-                ]
+                &["moli", "runtime", "inspectorDefaultContextRegistryCount",]
             ),
             1
         );
@@ -5168,8 +6273,8 @@ async fn related_page_script_agent_release_memory_acceptance() {
     let started = Instant::now();
     let runtime = JsRuntime::initialize();
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
-    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
-        .expect("default loader");
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let anchor_url = url::Url::parse("https://example.test/related-memory-anchor").unwrap();
     let mut anchor_page = create_test_html_page(
         &runtime,
@@ -5180,7 +6285,7 @@ async fn related_page_script_agent_release_memory_acceptance() {
     .await;
     let anchor_heap = runtime_heap_usage_for_test(&anchor_page).await;
     let script_agent_id =
-        related_script_agent_memory_u64(&anchor_heap, &["lightmount", "runtime", "scriptAgentId"]);
+        related_script_agent_memory_u64(&anchor_heap, &["moli", "runtime", "scriptAgentId"]);
     let anchor_native_contexts =
         related_script_agent_memory_u64(&anchor_heap, &["numberOfNativeContexts"]);
     let anchor_detached_contexts =
@@ -5190,11 +6295,7 @@ async fn related_page_script_agent_release_memory_acceptance() {
     assert_eq!(
         related_script_agent_memory_u64(
             &anchor_heap,
-            &[
-                "lightmount",
-                "runtime",
-                "inspectorDefaultContextRegistryCount",
-            ],
+            &["moli", "runtime", "inspectorDefaultContextRegistryCount",],
         ),
         1
     );
@@ -5353,7 +6454,7 @@ async fn related_page_script_agent_release_memory_acceptance() {
             .expect("test executable path")
             .display()
             .to_string(),
-        "sourceCommit": std::env::var("LIGHTMOUNT_RELATED_AGENT_MEMORY_COMMIT")
+        "sourceCommit": std::env::var("MOLI_RELATED_AGENT_MEMORY_COMMIT")
             .unwrap_or_else(|_| "unknown".to_owned()),
         "configuration": configuration,
         "anchorRealmBaseline": {
@@ -6028,6 +7129,87 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
             ..
         }
     ));
+    let pending_auxiliary_page = second_popups[0]
+        .pending_auxiliary_page()
+        .expect("new opener-preserving popup should reserve its renderer Page identity");
+    let popup_page_reservation = pending_auxiliary_page.page_reservation();
+    assert_eq!(
+        pending_auxiliary_page.browsing_context_id(),
+        popup_page_reservation.page_id().as_u64(),
+        "the first auxiliary identity slice should bind one typed browsing context to its exact reserved Page"
+    );
+    assert_ne!(
+        popup_page_reservation.page_id(),
+        second_page.renderer_page_id(),
+        "popup and opener must retain distinct Page identities"
+    );
+    assert!(matches!(
+        popup_page_reservation.script_agent_admission(),
+        RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id }
+            if opener_page_id == second_page.renderer_page_id()
+    ));
+
+    let (noopener_result, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"window.open("about:blank#fresh-agent", "_blank", "noopener") === null"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("noopener window.open should run");
+    assert_eq!(
+        renderer_json_value(noopener_result),
+        Some(serde_json::json!(true))
+    );
+    let noopener_publications = output_rx.drain();
+    let noopener_popups = popup_activations_for_page(&noopener_publications, &second_page);
+    assert_eq!(noopener_popups.len(), 1);
+    let noopener_page_reservation = noopener_popups[0]
+        .pending_auxiliary_page()
+        .expect("new noopener popup should still reserve a renderer Page")
+        .page_reservation();
+    assert_eq!(
+        noopener_page_reservation.script_agent_admission(),
+        RendererScriptAgentAdmission::Fresh,
+        "opener suppression must not admit the popup to the opener's script agent"
+    );
+
+    let (first_named_result, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"window.open("about:blank#named-first", "stable-popup") !== null"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("first named window.open should run");
+    assert_eq!(
+        renderer_json_value(first_named_result),
+        Some(serde_json::json!(true))
+    );
+    let first_named_publications = output_rx.drain();
+    let first_named_popups = popup_activations_for_page(&first_named_publications, &second_page);
+    assert_eq!(first_named_popups.len(), 1);
+    assert!(first_named_popups[0].pending_auxiliary_page().is_some());
+
+    let (reused_named_result, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"window.open("about:blank#named-reused", "stable-popup") !== null"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("reused named window.open should run");
+    assert_eq!(
+        renderer_json_value(reused_named_result),
+        Some(serde_json::json!(true))
+    );
+    let reused_named_publications = output_rx.drain();
+    let reused_named_popups = popup_activations_for_page(&reused_named_publications, &second_page);
+    assert_eq!(reused_named_popups.len(), 1);
+    assert!(
+        reused_named_popups[0].pending_auxiliary_page().is_none(),
+        "named target reuse must not manufacture another auxiliary Page reservation"
+    );
 
     let (self_result, _) = first_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
@@ -12209,6 +13391,7 @@ async fn per_page_isolate_policy_scopes_document_start_scripts_to_page_worlds() 
         source: r#"globalThis.__sharedPreloadOwner = "first-page";"#.to_owned(),
         world_name: Some("shared-preload-world".to_owned()),
         has_bidi_channel_argument: false,
+        browser_internal: false,
         bidi_channel_handoffs: Vec::new(),
     };
     let first_preload_result = first_page
@@ -12356,6 +13539,7 @@ async fn per_page_isolate_policy_keeps_stored_document_start_scripts_page_local(
         source: r#"globalThis.__sharedStoredPreloadOwner = "first-page";"#.to_owned(),
         world_name: Some("shared-stored-preload-world".to_owned()),
         has_bidi_channel_argument: false,
+        browser_internal: false,
         bidi_channel_handoffs: Vec::new(),
     };
     set_stored_document_start_scripts_for_test(&first_page, vec![stored_script])
@@ -12494,6 +13678,7 @@ async fn stored_document_start_script_remove_uses_registry_key_namespace() {
                 source: r#"globalThis.__defaultPreload = "default";"#.to_owned(),
                 world_name: Some("registry-key-world".to_owned()),
                 has_bidi_channel_argument: false,
+                browser_internal: false,
                 bidi_channel_handoffs: Vec::new(),
             },
             crate::DocumentStartScript {
@@ -12501,6 +13686,7 @@ async fn stored_document_start_script_remove_uses_registry_key_namespace() {
                 source: r#"globalThis.__targetPreload = "target";"#.to_owned(),
                 world_name: Some("registry-key-world".to_owned()),
                 has_bidi_channel_argument: false,
+                browser_internal: false,
                 bidi_channel_handoffs: Vec::new(),
             },
         ],
@@ -17752,14 +18938,17 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
     let (body_tx, raw_body) = ExternalRawDocumentBodyStream::channel(completion_rx);
     let producer = tokio::spawn(async move {
         body_tx
-            .send(b"<!doctype html><body>ready</body>".to_vec())
+            .send(
+                b"<!doctype html><body>ready<script>continuationBinding('author-script')</script></body>"
+                    .to_vec(),
+            )
             .await
-            .expect("html chunk should send");
+            .expect("document-commit body should send");
         drop(body_tx);
         completion_tx.send(Ok(())).expect("completion should send");
     });
 
-    let (mut page, _, _, creation_artifacts, pending_download) = runtime
+    let (mut page, _, mut creation_diagnostics, creation_artifacts, pending_download) = runtime
         .create_streaming_raw_page_from_external_body_with_inspector_session_restores(
             page_url.clone(),
             page_url,
@@ -17775,7 +18964,10 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
             None,
             None,
             Vec::new(),
-            Vec::new(),
+            vec![crate::protocol_types::RuntimeBindingRegistration {
+                name: "continuationBinding".to_owned(),
+                execution_context_name: None,
+            }],
             Vec::new(),
             None,
             None,
@@ -17801,7 +18993,6 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
         )
         .await
         .expect("page should attach at document commit");
-    producer.await.expect("producer should finish");
     assert!(pending_download.is_none());
     assert!(
         creation_artifacts
@@ -17810,6 +19001,10 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
             .is_none()
     );
     assert!(creation_artifacts.lifecycle_snapshot.load.is_none());
+    let continuation = creation_diagnostics
+        .document_continuation_observer
+        .take()
+        .expect("DocumentCommit must expose its exact renderer continuation");
     predecessor
         .close_async()
         .await
@@ -17817,6 +19012,61 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
     page.take_committed_document_post_response_continuation()
         .expect("DocumentCommit should defer parser continuation")
         .release();
+
+    producer.await.expect("producer should finish");
+    let continuation = tokio::time::timeout(Duration::from_millis(500), continuation.wait())
+        .await
+        .expect("document continuation should settle at DOMContentLoaded");
+    let (continuation_fence, continuation_page_state) = continuation.into_parts();
+    let continuation_fence =
+        continuation_fence.expect("a live Document continuation should retain its output fence");
+    assert_eq!(
+        continuation_page_state
+            .expect("a live Document continuation should capture its settled PageState")
+            .document_title(),
+        ""
+    );
+
+    let mut continuation_milestones = Vec::new();
+    let mut continuation_binding_payloads = Vec::new();
+    loop {
+        let publication = tokio::time::timeout(Duration::from_millis(500), activity_wake_rx.recv())
+            .await
+            .expect("continuation fence publication should arrive")
+            .expect("renderer output transport should remain open");
+        if !publication_is_for_page(&publication, &page) {
+            continue;
+        }
+        for record in publication.records() {
+            match record.item() {
+                RendererOutputItem::Observation(
+                    RendererProtocolObservation::DocumentLifecycle(event),
+                ) => {
+                    if let RendererDocumentLifecycleEventKind::Milestone(milestone) = event.kind {
+                        continuation_milestones.push(milestone);
+                    }
+                }
+                RendererOutputItem::Observation(RendererProtocolObservation::RuntimeBinding(
+                    call,
+                )) if call.name == "continuationBinding" => {
+                    continuation_binding_payloads.push(call.payload.clone());
+                }
+                _ => {}
+            }
+        }
+        if publication.cursor() == continuation_fence.cursor() {
+            break;
+        }
+    }
+    assert_eq!(
+        continuation_binding_payloads,
+        vec!["author-script".to_owned()],
+        "the continuation fence must cover author-script binding output"
+    );
+    assert!(
+        continuation_milestones.contains(&RendererDocumentLifecycleMilestone::DomContentLoaded),
+        "the continuation terminal must include its requested DOMContentLoaded milestone"
+    );
 
     let observed = tokio::time::timeout(
         Duration::from_millis(500),
@@ -17835,13 +19085,7 @@ async fn document_commit_background_dcl_completion_resumes_owner_to_load() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        milestones,
-        vec![
-            RendererDocumentLifecycleMilestone::DomContentLoaded,
-            RendererDocumentLifecycleMilestone::Load,
-        ]
-    );
+    assert_eq!(milestones, vec![RendererDocumentLifecycleMilestone::Load]);
 
     page.close_async()
         .await
@@ -18743,37 +19987,37 @@ struct RelatedScriptAgentMemoryConfiguration {
 impl RelatedScriptAgentMemoryConfiguration {
     fn from_environment() -> Self {
         let iterations = related_script_agent_memory_environment_usize(
-            "LIGHTMOUNT_RELATED_AGENT_MEMORY_ITERATIONS",
+            "MOLI_RELATED_AGENT_MEMORY_ITERATIONS",
             120,
         );
         assert!(
             iterations >= 4,
-            "LIGHTMOUNT_RELATED_AGENT_MEMORY_ITERATIONS must be at least 4"
+            "MOLI_RELATED_AGENT_MEMORY_ITERATIONS must be at least 4"
         );
         let peer_navigation_every = related_script_agent_memory_environment_usize(
-            "LIGHTMOUNT_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY",
+            "MOLI_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY",
             12,
         );
         assert!(
             peer_navigation_every > 0,
-            "LIGHTMOUNT_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY must be positive"
+            "MOLI_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY must be positive"
         );
-        let output_path = std::env::var_os("LIGHTMOUNT_RELATED_AGENT_MEMORY_OUTPUT")
+        let output_path = std::env::var_os("MOLI_RELATED_AGENT_MEMORY_OUTPUT")
             .map(std::path::PathBuf::from)
-            .expect("LIGHTMOUNT_RELATED_AGENT_MEMORY_OUTPUT is required for the ignored test");
+            .expect("MOLI_RELATED_AGENT_MEMORY_OUTPUT is required for the ignored test");
         Self {
             iterations,
             peer_navigation_every,
             payload_objects: related_script_agent_memory_environment_usize(
-                "LIGHTMOUNT_RELATED_AGENT_MEMORY_PAYLOAD_OBJECTS",
+                "MOLI_RELATED_AGENT_MEMORY_PAYLOAD_OBJECTS",
                 24_000,
             ),
             dom_nodes: related_script_agent_memory_environment_usize(
-                "LIGHTMOUNT_RELATED_AGENT_MEMORY_DOM_NODES",
+                "MOLI_RELATED_AGENT_MEMORY_DOM_NODES",
                 4_000,
             ),
             promises: related_script_agent_memory_environment_usize(
-                "LIGHTMOUNT_RELATED_AGENT_MEMORY_PROMISES",
+                "MOLI_RELATED_AGENT_MEMORY_PROMISES",
                 1_000,
             ),
             output_path,
@@ -18965,19 +20209,15 @@ async fn related_script_agent_memory_sample(
         ),
         script_agent_id: related_script_agent_memory_u64(
             &heap,
-            &["lightmount", "runtime", "scriptAgentId"],
+            &["moli", "runtime", "scriptAgentId"],
         ),
         script_agent_page_count: related_script_agent_memory_u64(
             &heap,
-            &["lightmount", "runtime", "scriptAgentPageCount"],
+            &["moli", "runtime", "scriptAgentPageCount"],
         ),
         inspector_default_context_registry_count: related_script_agent_memory_u64(
             &heap,
-            &[
-                "lightmount",
-                "runtime",
-                "inspectorDefaultContextRegistryCount",
-            ],
+            &["moli", "runtime", "inspectorDefaultContextRegistryCount"],
         ),
     }
 }
@@ -19387,7 +20627,7 @@ async fn create_related_test_html_page_with_optional_indexed_db_manager_for_scri
     indexed_db_manager: Option<crate::WeakIndexedDbManager>,
 ) -> RendererPageHandle {
     let reservation = runtime
-        .reserve_related_page_for_creation_experiment(source_page)
+        .reserve_related_page_for_creation_for_test(source_page)
         .expect("related Page reservation should use the source renderer owner");
     let pending = runtime
         .start_create_html_page_from_response_with_inspector_session_restores(

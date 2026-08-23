@@ -24,9 +24,9 @@ use std::sync::{
 };
 
 /// Isolate-lifetime routing authority for the Pages admitted to one script
-/// agent. The production policy currently installs one member; the Phase 2
-/// experiment can add explicitly related Pages without widening admission to
-/// the whole renderer owner.
+/// agent. Fresh Pages install one member. A renderer-accepted, opener-related
+/// auxiliary Page may explicitly join that agent without widening admission
+/// to the whole renderer owner.
 #[derive(Clone)]
 pub(crate) struct RendererScriptAgentV8ForegroundTaskRouter {
     inner: Arc<Mutex<RendererScriptAgentV8ForegroundTaskRouterState>>,
@@ -68,10 +68,7 @@ impl RendererScriptAgentV8ForegroundTaskCompletion {
         self.router.enqueue_peer_checkpoints(task_page_id);
     }
 
-    pub(crate) fn redispatch_after_page_retirement(
-        self,
-        task: moli_v8_platform::V8ForegroundTask,
-    ) {
+    pub(crate) fn redispatch_after_page_retirement(self, task: moli_v8_platform::V8ForegroundTask) {
         self.router.dispatch(task);
     }
 }
@@ -86,6 +83,23 @@ struct RendererScriptAgentPageMembershipState {
 impl RendererScriptAgentPageMembership {
     pub(crate) fn page_id(&self) -> PageId {
         self.inner.page_id
+    }
+
+    /// Admits one explicitly related Page through the capability retained by
+    /// a live source Page.
+    ///
+    /// Native callbacks can invoke this while the shared document isolate is
+    /// already mutably borrowed. Keeping admission on the membership avoids a
+    /// second borrow of the isolate holder merely to reach its router.
+    pub(crate) fn admit_related_page(
+        &self,
+        page_route: RendererPageV8ForegroundTaskSender,
+    ) -> anyhow::Result<RendererScriptAgentPageMembership> {
+        self.inner.router.admit_related_page_from(
+            self.inner.page_id,
+            &self.inner.active,
+            page_route,
+        )
     }
 
     pub(crate) fn retire(&self) {
@@ -121,12 +135,26 @@ impl RendererScriptAgentV8ForegroundTaskRouter {
         (router, membership)
     }
 
-    #[cfg(test)]
-    pub(crate) fn admit_related_page(
+    fn admit_related_page_from(
         &self,
+        source_page_id: PageId,
+        source_active: &AtomicBool,
         page_route: RendererPageV8ForegroundTaskSender,
     ) -> anyhow::Result<RendererScriptAgentPageMembership> {
-        self.admit_page(page_route, ScriptAgentScope::RelatedPageGroup)
+        let mut state = self.inner.lock();
+        anyhow::ensure!(
+            source_active.load(Ordering::Acquire)
+                && state
+                    .page_routes
+                    .iter()
+                    .any(|(page_id, _)| *page_id == source_page_id),
+            "retired script-agent Page membership cannot admit a related Page"
+        );
+        self.admit_page_with_locked_state(
+            &mut state,
+            page_route,
+            ScriptAgentScope::RelatedPageGroup,
+        )
     }
 
     fn admit_page(
@@ -134,8 +162,17 @@ impl RendererScriptAgentV8ForegroundTaskRouter {
         page_route: RendererPageV8ForegroundTaskSender,
         scope: ScriptAgentScope,
     ) -> anyhow::Result<RendererScriptAgentPageMembership> {
-        let page_id = page_route.page_id();
         let mut state = self.inner.lock();
+        self.admit_page_with_locked_state(&mut state, page_route, scope)
+    }
+
+    fn admit_page_with_locked_state(
+        &self,
+        state: &mut RendererScriptAgentV8ForegroundTaskRouterState,
+        page_route: RendererPageV8ForegroundTaskSender,
+        scope: ScriptAgentScope,
+    ) -> anyhow::Result<RendererScriptAgentPageMembership> {
+        let page_id = page_route.page_id();
         anyhow::ensure!(
             !state
                 .page_routes
@@ -147,7 +184,6 @@ impl RendererScriptAgentV8ForegroundTaskRouter {
         );
         state.scope = scope;
         state.page_routes.push((page_id, page_route));
-        drop(state);
         Ok(RendererScriptAgentPageMembership {
             inner: Arc::new(RendererScriptAgentPageMembershipState {
                 router: self.clone(),

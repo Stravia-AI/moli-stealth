@@ -19,6 +19,7 @@ Promise.resolve().then(() => {
             .to_owned(),
             world_name: None,
             has_bidi_channel_argument: false,
+            browser_internal: false,
             bidi_channel_handoffs: Vec::new(),
         },
         crate::DocumentStartScript {
@@ -29,6 +30,7 @@ parent.__childRealmCompletionOrder.push("second-body");
             .to_owned(),
             world_name: None,
             has_bidi_channel_argument: false,
+            browser_internal: false,
             bidi_channel_handoffs: Vec::new(),
         },
     ]);
@@ -137,6 +139,7 @@ async fn child_realm_materialization_creates_named_preload_world_in_the_selected
             source: "globalThis.__childNamedWorldReady = 'ready';".to_owned(),
             world_name: Some("child-utility".to_owned()),
             has_bidi_channel_argument: false,
+            browser_internal: false,
             bidi_channel_handoffs: Vec::new(),
         }]);
         page_vm.set_stored_runtime_bindings(&[
@@ -256,6 +259,7 @@ Promise.resolve().then(() => {
                 .to_owned(),
                 world_name: None,
                 has_bidi_channel_argument: false,
+                browser_internal: false,
                 bidi_channel_handoffs: Vec::new(),
             }]);
         page_vm

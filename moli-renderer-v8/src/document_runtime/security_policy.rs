@@ -503,6 +503,15 @@ impl DocumentRuntime {
         self.policy_container = policy;
     }
 
+    /// Installs the creator-derived policy state for a real initial-empty
+    /// Document before its realm becomes observable to author code.
+    pub(crate) fn set_initial_document_policy_container(
+        &mut self,
+        policy_container: DocumentPolicyContainer,
+    ) {
+        self.policy_container = policy_container;
+    }
+
     pub(crate) fn set_bypass_content_security_policy(&mut self, bypass: bool) {
         self.bypass_content_security_policy = bypass;
     }

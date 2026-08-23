@@ -36,9 +36,10 @@ use super::navigation_seed::history_entry_seed_for_reload;
 use super::navigation_serialize::serialize_history_entries;
 use super::navigation_window::{
     child_browsing_context_handle_for_runtime_owner, navigation_document_can_update_current_entry,
-    navigation_document_has_opaque_origin, navigation_unload_event_active,
-    runtime_window_is_global, runtime_window_owner, runtime_window_uses_top_level_history_model,
-    url_is_about_blank_document, window_history_for_holder, window_location_for_holder,
+    navigation_document_has_opaque_origin, navigation_document_is_initial_empty,
+    navigation_unload_event_active, runtime_window_is_global, runtime_window_owner,
+    runtime_window_uses_top_level_history_model, url_is_about_blank_document,
+    window_history_for_holder, window_location_for_holder,
 };
 use super::*;
 use crate::native_bridge::NavigationHistoryEntrySeed;
@@ -305,6 +306,11 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
             super::navigation_window::window_navigation_for_holder(scope, owner)
         };
         let effective_kind = match kind {
+            LocationNavigationKind::Assign
+                if navigation_document_is_initial_empty(scope, owner) =>
+            {
+                LocationNavigationKind::Replace
+            }
             LocationNavigationKind::Assign if source_element.is_some() && exact_same_href => {
                 LocationNavigationKind::Replace
             }
@@ -1193,6 +1199,9 @@ fn history_entry_seed_for_cross_document_location<'s>(
     let current_index = history_index(scope, history);
     let current_navigation_index = navigation_current_entry_index(scope, owner).unwrap_or(0);
     let mutation = match kind {
+        LocationNavigationKind::Assign if navigation_document_is_initial_empty(scope, owner) => {
+            NavigationHistoryMutation::Replace
+        }
         LocationNavigationKind::Assign => NavigationHistoryMutation::Push,
         LocationNavigationKind::Replace => NavigationHistoryMutation::Replace,
         LocationNavigationKind::Reload => return None,

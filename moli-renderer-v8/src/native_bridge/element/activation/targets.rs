@@ -226,6 +226,7 @@ fn navigate_hyperlink_popup_target(
         None,
         target_name,
         resolved_url,
+        Some(!relations.suppress_opener),
         creator.base_url,
         creator.policy_container,
     ) else {
@@ -253,6 +254,7 @@ fn navigate_hyperlink_popup_target(
     let session_storage_store = runtime.lightweight_popup_session_storage_store(popup_id);
     let initial_empty_document_storage_key =
         runtime.lightweight_popup_initial_empty_document_storage_key(popup_id);
+    let pending_auxiliary_page = opened_popup.pending_auxiliary_page;
     let user_gesture = runtime.protocol_user_gesture_activation();
     let window_open_event = opened_popup.created_new_browsing_context.then(|| {
         RendererPendingWindowOpenEvent::browser_window(resolved_url, target_name, user_gesture)
@@ -267,7 +269,8 @@ fn navigate_hyperlink_popup_target(
             target_name.to_owned(),
             disposition,
         )
-        .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key),
+        .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key)
+        .with_pending_auxiliary_page(pending_auxiliary_page),
         window_open_event,
     );
     true

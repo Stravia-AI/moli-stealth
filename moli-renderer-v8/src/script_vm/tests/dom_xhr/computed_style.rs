@@ -1376,6 +1376,7 @@ fn document_start_run_immediately_drains_pending_style_invalidations_without_com
             source: "globalThis.__runImmediatelyDrainTarget.className = 'active';".to_owned(),
             world_name: None,
             has_bidi_channel_argument: false,
+            browser_internal: false,
             bidi_channel_handoffs: Vec::new(),
         })
         .expect("run-immediately document-start script should execute");

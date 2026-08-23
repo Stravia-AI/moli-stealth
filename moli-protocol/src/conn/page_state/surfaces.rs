@@ -612,6 +612,7 @@ impl BrowserContext {
             source,
             world_name: None,
             has_bidi_channel_argument: false,
+            browser_internal: true,
             bidi_channel_handoffs: Vec::new(),
         })
     }

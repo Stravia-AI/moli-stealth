@@ -244,14 +244,21 @@ pub(crate) fn window_open_callback<'s>(
             opener_child_handle,
             &parsed.target_name,
             &url,
+            Some(!suppress_opener),
             entered_base_url,
             creator_policy_container,
         )
     {
         let popup_id = opened_popup.popup_id;
-        let session_storage_store = host.lightweight_popup_session_storage_store(popup_id);
-        let initial_empty_document_storage_key =
-            host.lightweight_popup_initial_empty_document_storage_key(popup_id);
+        let session_storage_store = opened_popup
+            .captured_session_storage_store
+            .clone()
+            .or_else(|| host.lightweight_popup_session_storage_store(popup_id));
+        let initial_empty_document_storage_key = opened_popup
+            .captured_initial_empty_document_storage_key
+            .clone()
+            .or_else(|| host.lightweight_popup_initial_empty_document_storage_key(popup_id));
+        let pending_auxiliary_page = opened_popup.pending_auxiliary_page;
         let window_open_event = opened_popup
             .created_new_browsing_context
             .then_some(window_open_event);
@@ -265,10 +272,8 @@ pub(crate) fn window_open_callback<'s>(
                 parsed.target_name,
                 popup_disposition,
             )
-            .with_initial_auxiliary_state(
-                session_storage_store,
-                initial_empty_document_storage_key,
-            ),
+            .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key)
+            .with_pending_auxiliary_page(pending_auxiliary_page),
             window_open_event,
         );
         if suppress_opener {

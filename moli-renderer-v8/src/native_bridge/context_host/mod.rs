@@ -29,8 +29,10 @@ use crate::{
         reflector::ReflectorId,
         renderer_resource_scheduler::RendererResourceScheduler,
         runtime::{
-            RendererBrowserContextRuntime, RendererDocumentLifecycleJournalHandle,
-            RendererPageContextCancelReceiver, SharedRendererBackendNodeRegistry,
+            RendererAuxiliaryPageReservationAllocator, RendererBrowserContextRuntime,
+            RendererDocumentLifecycleJournalHandle, RendererPageContextCancelReceiver,
+            RendererPendingAuxiliaryPage, RendererStagedAuxiliaryWindowProxy,
+            SharedRendererBackendNodeRegistry,
         },
         script_provenance::CompiledStringProvenance,
         shared_worker_runtime::SharedWorkerClientEndpointOwner,
@@ -208,6 +210,7 @@ pub(crate) use popups::{
     enter_top_level_lightweight_popup_scope, javascript_url_csp_source,
     lightweight_popup_id_from_window, restore_active_lightweight_popup_scope,
     restore_deferred_active_lightweight_popup_scope_if_present,
+    set_renderer_owned_auxiliary_popup_id,
 };
 pub(crate) use range_records::{RangeBoundarySide, RangeRecordHandle};
 pub(crate) use runtime_observable::{
@@ -810,7 +813,10 @@ pub(crate) struct JsContextHost {
     #[cfg(test)]
     force_fresh_layout_reads_for_test: bool,
     root_document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,
+    root_document_is_initial_empty: bool,
     output_journal: Option<crate::runtime::RendererTurnOutputJournal>,
+    auxiliary_page_reservation_allocator: Option<RendererAuxiliaryPageReservationAllocator>,
+    page_script_environment: Option<crate::script_vm::RendererPageScriptEnvironment>,
     page_context_resources_closed: bool,
     page_default_context: Option<v8::Weak<v8::Context>>,
     pub(crate) v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry,

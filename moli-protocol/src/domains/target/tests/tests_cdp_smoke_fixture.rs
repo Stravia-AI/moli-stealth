@@ -400,6 +400,18 @@ async fn fixture_handler(
         }
         "/redirect-start" => redirect("/redirect-final", &[("cache-control", "no-store")]),
         "/redirect-final" => html("<!doctype html><main>redirect final</main>"),
+        "/no-content" => response(
+            StatusCode::NO_CONTENT,
+            "text/plain; charset=utf-8",
+            Vec::new(),
+            &[("x-smoke-navigation-terminal", "no-content")],
+        ),
+        "/reset-content" => response(
+            StatusCode::RESET_CONTENT,
+            "text/plain; charset=utf-8",
+            Vec::new(),
+            &[("x-smoke-navigation-terminal", "reset-content")],
+        ),
         "/history-a" => html("<!doctype html><main>history a</main>"),
         "/history-b" => html("<!doctype html><main>history b</main>"),
         "/document-continue" => {
@@ -745,6 +757,19 @@ async fn rust_smoke_fixture_serves_all_document_and_control_routes() {
                 .is_some_and(|value| value.starts_with("text/html")),
             "route {path} should be html: {:?}",
             response.headers
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rust_smoke_fixture_serves_navigation_no_commit_routes() {
+    let fixture = SmokeFixtureServer::start().await;
+    for (path, expected_status) in [("/no-content", 204), ("/reset-content", 205)] {
+        let response = fixture_get(&fixture, path).await;
+        assert_eq!(response.status, expected_status, "route {path}");
+        assert!(
+            response.body.is_empty(),
+            "route {path} must not carry a body"
         );
     }
 }

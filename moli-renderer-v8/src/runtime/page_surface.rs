@@ -821,6 +821,7 @@ pub struct RendererMainDocumentCommit {
 pub struct RendererPageCreationDiagnostics {
     pub initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
     pub renderer_output_predecessor: Option<RendererOutputFence>,
+    pub document_continuation_observer: Option<RendererDocumentContinuationObserver>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1694,6 +1695,7 @@ pub struct RendererDocumentIsolateAccountingDiagnostics {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RendererActivityDiagnostics {
+    pub script_agent_id: Option<u64>,
     pub document_context_count: usize,
     pub isolated_world_context_count: usize,
     pub child_default_context_count: usize,

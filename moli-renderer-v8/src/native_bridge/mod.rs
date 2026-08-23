@@ -16,6 +16,7 @@ pub(crate) use current_input::{
 pub(crate) mod document;
 pub(crate) mod element;
 mod helpers;
+pub(crate) use helpers::set_object_slot;
 mod history_queue;
 pub(super) mod identity;
 mod node;
@@ -61,7 +62,8 @@ pub(crate) use context_host::{
     install_runtime_observable_context_token_for_context, is_cross_origin_top_window_proxy,
     lightweight_popup_id_from_window, restore_active_lightweight_popup_scope,
     restore_deferred_active_lightweight_popup_scope_if_present,
-    throw_cross_origin_location_security_error, throw_cross_origin_type_error,
+    set_renderer_owned_auxiliary_popup_id, throw_cross_origin_location_security_error,
+    throw_cross_origin_type_error,
 };
 
 pub(crate) const ACTIVE_CHILD_WINDOW_HANDLE_SLOT: &str = "__moliActiveChildWindowHandle";

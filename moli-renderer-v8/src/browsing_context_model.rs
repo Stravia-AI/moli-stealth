@@ -28,10 +28,10 @@ pub(crate) struct BrowsingContextId {
 
 /// Stable identity of the V8/script execution agent hosting one or more realms.
 ///
-/// The current production policy assigns one agent to each concurrently live
-/// top-level Page, while nested realms and same-Page navigation generations
-/// reuse that agent. Related auxiliary Pages may share an id only after the
-/// selective shared-agent admission path is implemented.
+/// Fresh top-level Pages receive a new agent, while nested realms and
+/// same-Page navigation generations reuse their Page's agent. An explicitly
+/// related auxiliary Page may join its opener's agent; unrelated and
+/// opener-suppressed Pages stay isolated.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct ScriptAgentId(u64);
 
@@ -47,13 +47,9 @@ impl ScriptAgentId {
 }
 
 /// Admission scope currently retaining a script agent.
-///
-/// `RelatedPageGroup` is used only by the Phase 2 feasibility path until
-/// auxiliary browsing-context admission becomes a production policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ScriptAgentScope {
     PageScriptEnvironment,
-    #[cfg(test)]
     RelatedPageGroup,
 }
 
@@ -61,7 +57,6 @@ impl ScriptAgentScope {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::PageScriptEnvironment => "page-script-environment",
-            #[cfg(test)]
             Self::RelatedPageGroup => "related-page-group",
         }
     }
@@ -83,7 +78,6 @@ impl BrowsingContextId {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) const fn auxiliary_top_level(value: u64) -> Self {
         assert!(value != 0, "auxiliary browsing-context id must be non-zero");
         Self {
@@ -96,7 +90,6 @@ impl BrowsingContextId {
         self.kind
     }
 
-    #[cfg(test)]
     pub(crate) const fn value(self) -> u64 {
         self.value
     }

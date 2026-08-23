@@ -6286,6 +6286,7 @@ async fn pending_child_navigation_does_not_materialize_initial_empty_preload_rea
         source: "globalThis.__documentStartUrl = document.URL;".to_owned(),
         world_name: None,
         has_bidi_channel_argument: false,
+        browser_internal: false,
         bidi_channel_handoffs: Vec::new(),
     }]);
 

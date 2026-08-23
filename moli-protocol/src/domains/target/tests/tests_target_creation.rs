@@ -1004,7 +1004,10 @@ async fn timer_window_open_emits_page_event_from_runtime_work() {
 async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key() {
     async fn opener() -> impl IntoResponse {
         (
-            [(CONTENT_TYPE.as_str(), "text/html")],
+            [
+                (CONTENT_TYPE.as_str(), "text/html"),
+                ("content-security-policy", "script-src 'self'"),
+            ],
             "<!doctype html><main>session storage opener</main>",
         )
     }
@@ -1017,17 +1020,13 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
             Arc<tokio::sync::Semaphore>,
         )>,
     ) -> impl IntoResponse {
-        // The opener's lightweight WindowProxy facade starts its mirrored
-        // load before the concrete popup action can reach protocol. Let that
-        // renderer-local request finish; gate the second request, which is the
-        // real auxiliary target navigation whose lifetime this test covers.
+        // The real auxiliary Page owns the only navigation. Gate that request
+        // so the test can inspect the synchronously created initial realm
+        // after target admission but before the replacement Document commits.
         let request_index = request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        if request_index == 0 {
-            return opener().await;
-        }
         assert_eq!(
-            request_index, 1,
-            "popup URL must have exactly two load owners"
+            request_index, 0,
+            "popup URL must have exactly one authoritative navigation owner"
         );
         request_started.add_permits(1);
         let permit = response_release
@@ -1108,7 +1107,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         "id": 1201,
         "method": "Runtime.evaluate",
         "params": {
-            "expression": "(() => { localStorage.clear(); localStorage.setItem('shared', 'opener'); sessionStorage.clear(); sessionStorage.setItem('phase', 'before'); const popup = window.open('about:blank', '_blank'); sessionStorage.setItem('phase', 'after'); return `${popup.sessionStorage.getItem('phase')}|${sessionStorage.getItem('phase')}|${popup.localStorage.getItem('shared')}`; })()",
+            "expression": "(() => { const openerOrigin = location.origin; const openerHref = location.href; const openerBase = document.baseURI; localStorage.clear(); localStorage.setItem('shared', 'opener'); sessionStorage.clear(); sessionStorage.setItem('phase', 'before'); const popup = window.open('about:blank', '_blank'); let popupEvalBlocked = false; try { popup.eval('1'); } catch (error) { popupEvalBlocked = error.name === 'EvalError'; } sessionStorage.setItem('phase', 'after'); return `${popup.sessionStorage.getItem('phase')}|${sessionStorage.getItem('phase')}|${popup.localStorage.getItem('shared')}|${popup.location.origin === openerOrigin}|${popup.origin === openerOrigin}|${popup.document.referrer === openerHref}|${popup.document.baseURI === openerBase}|${popup.name === ''}|${popupEvalBlocked}`; })()",
             "returnByValue": true
         }
     }))
@@ -1118,7 +1117,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         json!({
             "result": {
                 "type": "string",
-                "value": "before|after|opener"
+                "value": "before|after|opener|true|true|true|true|true|true"
             }
         }),
         None,
@@ -1151,11 +1150,39 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
     ctx.sent.clear();
 
     ctx.process_async(json!({
+        "id": 12021,
+        "sessionId": popup_session_id,
+        "method": "Runtime.enable"
+    }))
+    .await;
+    ctx.expect_result(12021, json!({}), Some(&popup_session_id));
+    let default_context = ctx
+        .sent
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Runtime.executionContextCreated")
+                && message["sessionId"] == json!(popup_session_id)
+                && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+        })
+        .unwrap_or_else(|| panic!("popup default execution context: {:?}", ctx.sent));
+    assert_eq!(
+        default_context["params"]["context"]["origin"],
+        json!(format!("http://{addr}")),
+        "CDP must expose the creator-inherited origin for the real initial about:blank realm: {default_context:?}"
+    );
+    assert_eq!(
+        default_context["params"]["context"]["auxData"]["frameId"],
+        json!(popup_target_id)
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
         "id": 1203,
         "sessionId": popup_session_id,
         "method": "Runtime.evaluate",
         "params": {
-            "expression": "`${String(sessionStorage.getItem('phase'))}|${String(localStorage.getItem('shared'))}`",
+            "expression": "(() => { let evalBlocked = false; try { eval('1'); } catch (error) { evalBlocked = error.name === 'EvalError'; } return `${String(sessionStorage.getItem('phase'))}|${String(localStorage.getItem('shared'))}|${evalBlocked}`; })()",
+            "allowUnsafeEvalBlockedByCSP": false,
             "returnByValue": true
         }
     }))
@@ -1165,7 +1192,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         json!({
             "result": {
                 "type": "string",
-                "value": "before|opener"
+                "value": "before|opener|true"
             }
         }),
         Some(&popup_session_id),
@@ -1216,6 +1243,19 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
     );
 
     ctx.sent.clear();
+    ctx.process_async(json!({
+        "id": 12033,
+        "method": "Target.setAutoAttach",
+        "params": {
+            "autoAttach": true,
+            "waitForDebuggerOnStart": true,
+            "flatten": true
+        }
+    }))
+    .await;
+    ctx.expect_result(12033, json!({}), None);
+
+    ctx.sent.clear();
     let cross_origin_url = format!("http://{cross_origin_addr}/popup");
     ctx.process_async(json!({
         "id": 1204,
@@ -1223,7 +1263,7 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         "sessionId": opener_session_id,
         "params": {
             "expression": format!(
-                "(() => {{ sessionStorage.setItem('cross-origin-secret', 'opener-only'); return window.open({cross_origin_url:?}, '_blank') !== null; }})()"
+                "(() => {{ sessionStorage.setItem('cross-origin-secret', 'opener-only'); const popup = window.open({cross_origin_url:?}, '_blank'); if (popup === null) return false; popup.__initialNonEmptyMarker = 'before-navigation'; popup.document.body.setAttribute('data-before-navigation', 'preserved'); window.__pendingNonEmptyPopup = popup; window.__pendingNonEmptyDocument = popup.document; return popup.location.href === 'about:blank'; }})()"
             ),
             "returnByValue": true
         }
@@ -1251,6 +1291,67 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         .as_str()
         .expect("cross-origin popup target id")
         .to_owned();
+    let cross_origin_attached = ctx
+        .sent
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Target.attachedToTarget")
+                && message["params"]["targetInfo"]["targetId"]
+                    == json!(cross_origin_target_id)
+        })
+        .unwrap_or_else(|| panic!("cross-origin popup auto-attach event: {:?}", ctx.sent));
+    assert_eq!(
+        cross_origin_attached["params"]["waitingForDebugger"],
+        json!(true)
+    );
+    let cross_origin_session_id = cross_origin_attached["params"]["sessionId"]
+        .as_str()
+        .expect("cross-origin popup session id")
+        .to_owned();
+    ctx.sent.clear();
+
+    assert!(
+        !ctx.conn
+            .browser_context_by_id("BID-popup-storage")
+            .is_some_and(|browser_context| browser_context
+                .has_pending_document_navigation_for_target(Some(&cross_origin_target_id))),
+        "waitForDebuggerOnStart must hold the target-owned navigation before it starts"
+    );
+    assert_eq!(
+        cross_origin_request_count.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "target admission must precede the only popup network request"
+    );
+
+    ctx.process_async(json!({
+        "id": 12051,
+        "sessionId": cross_origin_session_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "`${window.opener.__pendingNonEmptyPopup === window}|${window.opener.__pendingNonEmptyDocument === document}|${window.__initialNonEmptyMarker}|${document.body.getAttribute('data-before-navigation')}|${sessionStorage.getItem('cross-origin-secret')}`",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    ctx.expect_result(
+        12051,
+        json!({
+            "result": {
+                "type": "string",
+                "value": "true|true|before-navigation|preserved|opener-only"
+            }
+        }),
+        Some(&cross_origin_session_id),
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 12052,
+        "sessionId": cross_origin_session_id,
+        "method": "Runtime.runIfWaitingForDebugger"
+    }))
+    .await;
+    ctx.expect_result(12052, json!({}), Some(&cross_origin_session_id));
     ctx.sent.clear();
 
     ctx.wait_until_scheduler_state("cross-origin popup navigation starts", |conn| {
@@ -1270,28 +1371,6 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
     .expect("cross-origin popup request gate must remain open");
     request_started.forget();
 
-    // Attach while the target's requested URL is still loading. Session
-    // attachment belongs to the browsing context and must not race the
-    // replacement Document's commit.
-    ctx.process_and_wait_for_response_async(json!({
-        "id": 1205,
-        "method": "Target.attachToTarget",
-        "params": { "targetId": cross_origin_target_id }
-    }))
-    .await;
-    let attach_response = take_response_by_id(&mut ctx, 1205);
-    let cross_origin_session_id = attach_response["result"]["sessionId"]
-        .as_str()
-        .unwrap_or_else(|| panic!("cross-origin popup session id: {attach_response:?}"))
-        .to_owned();
-    assert!(
-        ctx.conn
-            .browser_context_by_id("BID-popup-storage")
-            .is_some_and(|browser_context| browser_context
-                .has_pending_document_navigation_for_target(Some(&cross_origin_target_id))),
-        "attaching a DevTools session must not replace the target-owned navigation"
-    );
-    ctx.sent.clear();
     cross_origin_response_release.add_permits(1);
     let response_returned = tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -1313,6 +1392,12 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
         },
     )
     .await;
+
+    assert_eq!(
+        cross_origin_request_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "non-empty popup navigation must issue exactly one network request"
+    );
 
     ctx.process_async(json!({
         "id": 1206,
@@ -1609,6 +1694,118 @@ async fn popup_initial_empty_document_frame_tree_inherits_opener_origin() {
         .and_then(|owner_state| owner_state.initial_empty_document_state())
         .expect("popup target should still record initial empty document");
     assert!(initial.is_on_initial_empty_document());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
+    let mut ctx = TestContext::new();
+    load_bc_with_titled_page_async(
+        &mut ctx,
+        "BID-popup-window-proxy",
+        "TID-opener-window-proxy",
+        "<main>popup WindowProxy opener</main>",
+    )
+    .await;
+
+    ctx.process_async(json!({
+        "id": 1250,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "(() => { const popup = window.open('about:blank', '_blank'); globalThis.__lmPopupWindow = popup; globalThis.__lmPopupDocument = popup.document; popup.__lmSynchronousRealmMarker = 'before-target-activation'; popup.document.body.textContent = 'synchronous-document'; return `${popup !== null}|${__lmPopupDocument === popup.document}|${popup.__lmSynchronousRealmMarker}|${popup.document.body.textContent}|${popup.name === ''}|${popup.location.origin === location.origin}|${popup.document.referrer === location.href}|${popup.document.baseURI === document.baseURI}`; })()",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let open_response = take_response_by_id(&mut ctx, 1250);
+    assert_eq!(
+        open_response["result"]["result"]["value"],
+        json!("true|true|before-target-activation|synchronous-document|true|true|true|true")
+    );
+    let popup_target_id = ctx
+        .sent
+        .iter()
+        .find(|message| message["method"] == json!("Target.targetCreated"))
+        .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+        .expect("window.open should create its auxiliary target")
+        .to_owned();
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1251,
+        "method": "Target.attachToTarget",
+        "params": { "targetId": popup_target_id }
+    }))
+    .await;
+    let popup_session_id = take_response_by_id(&mut ctx, 1251)["result"]["sessionId"]
+        .as_str()
+        .expect("popup session id")
+        .to_owned();
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1252,
+        "sessionId": popup_session_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "const synchronousDocumentSurvived = window.opener.__lmPopupDocument === document; const synchronousRealmSurvived = __lmSynchronousRealmMarker === 'before-target-activation'; globalThis.__lmAuxiliaryRealmMarker = 'renderer-owned'; document.body.textContent = 'auxiliary-document'; `${synchronousDocumentSurvived}|${synchronousRealmSurvived}|${__lmAuxiliaryRealmMarker}|${document.body.textContent}|${window === globalThis}|${name === ''}|${document.referrer === window.opener.location.href}|${document.baseURI === window.opener.document.baseURI}`",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let popup_evaluate = take_response_by_id(&mut ctx, 1252);
+    assert_eq!(
+        popup_evaluate["result"]["result"]["value"],
+        json!("true|true|renderer-owned|auxiliary-document|true|true|true|true"),
+        "target adoption must retain the exact Document and realm created synchronously by window.open: {popup_evaluate:?}"
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1253,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "`${__lmPopupDocument === __lmPopupWindow.document}|${__lmPopupWindow.__lmAuxiliaryRealmMarker}|${__lmPopupDocument.body.textContent}|${__lmPopupWindow === __lmPopupWindow.window}`",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let opener_projection = take_response_by_id(&mut ctx, 1253);
+    assert_eq!(
+        opener_projection["result"]["result"]["value"],
+        json!("true|renderer-owned|auxiliary-document|true"),
+        "the opener-retained objects must be the auxiliary Page's actual stable WindowProxy and Document: {opener_projection:?}"
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1254,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "__lmPopupWindow.__lmProjectedFromOpener = 'same-proxy'; true",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 1254)["result"]["result"]["value"],
+        json!(true)
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1255,
+        "sessionId": popup_session_id,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "String(globalThis.__lmProjectedFromOpener)",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 1255)["result"]["result"]["value"],
+        json!("same-proxy")
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -3265,6 +3462,12 @@ async fn create_target_without_debugger_wait_starts_requested_url_navigation() {
         }),
         "Target.createTarget response should retain the created target id: {messages:?}"
     );
+
+    ctx.wait_for_document_continuation_for_test(
+        Some(session_id),
+        "created target requested-URL Document continuation",
+    )
+    .await;
 
     ctx.process_async(json!({
         "id": 9010,

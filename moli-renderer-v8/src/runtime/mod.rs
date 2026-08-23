@@ -4,6 +4,7 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt,
+    rc::Rc,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
@@ -14,6 +15,7 @@ use crate::DocumentStartScript;
 #[cfg(test)]
 use crate::dom::native::NativeDom;
 use crate::{
+    browsing_context_model::BrowsingContextId,
     dom::NodeId,
     network::{ResourceRequestClient, context::DocumentResourceLoader},
 };
@@ -286,7 +288,8 @@ pub use self::owner::{
 };
 pub use self::owner_local::RendererPageTestingHandle;
 pub use self::owner_local::{
-    RendererPageCommandPending, RendererPageHandle, RendererRuntimeInspectorSessionDetachGuard,
+    RendererPageCommandPending, RendererPageHandle, RendererPageReplacementReservationPending,
+    RendererRuntimeInspectorSessionDetachGuard,
 };
 pub(crate) use self::owner_local_store::RendererPageToken;
 pub use self::page::{JsRuntime, JsRuntimeOwner, PendingHtmlPage, PreparedRendererDocument};
@@ -528,21 +531,27 @@ impl PageId {
     }
 }
 
-/// Opaque owner-local reservation for one renderer Page identity.
-///
-/// The reservation is allocated before a queued full-body build or prepared
-/// document can enter parser or author-script execution. This lets external
-/// observers bind work to the future Page without guessing from the currently
-/// installed Page.
+/// Selects the script environment admitted when a Page reservation is
+/// consumed by document bootstrap.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RendererScriptAgentAdmission {
     Fresh,
-    #[cfg(test)]
-    RelatedPageForExperiment {
-        source_page_id: PageId,
+    RelatedAuxiliaryPage {
+        opener_page_id: PageId,
+    },
+    ExistingPageReplacement {
+        expected_vm_creation_id: u64,
+        reservation_nonce: u64,
     },
 }
 
+/// Opaque owner-local reservation for one renderer Page admission.
+///
+/// Initial creation reserves a future Page identity. A live replacement
+/// reserves one exact committed `PageVm` generation of an existing identity.
+/// Both are allocated before a queued full-body build or prepared document can
+/// enter parser or author-script execution, so external observers never infer
+/// ownership from whichever Page happens to be installed later.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RendererPageReservationToken {
     local_host_id: RendererOwnerLocalHostId,
@@ -559,17 +568,32 @@ impl RendererPageReservationToken {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn new_related_page_for_experiment(
+    pub(crate) fn new_related_auxiliary_page(
         local_host_id: RendererOwnerLocalHostId,
         page_id: PageId,
-        source_page_id: PageId,
+        opener_page_id: PageId,
     ) -> Self {
         Self {
             local_host_id,
             page_id,
-            script_agent_admission: RendererScriptAgentAdmission::RelatedPageForExperiment {
-                source_page_id,
+            script_agent_admission: RendererScriptAgentAdmission::RelatedAuxiliaryPage {
+                opener_page_id,
+            },
+        }
+    }
+
+    pub(crate) fn new_existing_page_replacement(
+        local_host_id: RendererOwnerLocalHostId,
+        page_id: PageId,
+        expected_vm_creation_id: u64,
+        reservation_nonce: u64,
+    ) -> Self {
+        Self {
+            local_host_id,
+            page_id,
+            script_agent_admission: RendererScriptAgentAdmission::ExistingPageReplacement {
+                expected_vm_creation_id,
+                reservation_nonce,
             },
         }
     }
@@ -587,6 +611,228 @@ impl RendererPageReservationToken {
     }
 }
 
+/// Renderer-owned identity reserved synchronously for a newly accepted
+/// auxiliary top-level browsing context.
+///
+/// The typed browsing-context identity remains stable across Document
+/// replacements, while the Page reservation is consumed exactly once by the
+/// protocol target's initial empty-Document build. Reserving here prevents
+/// protocol code from manufacturing a second Page identity for a popup the
+/// renderer has already accepted.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RendererPendingAuxiliaryPage {
+    browsing_context_id: BrowsingContextId,
+    page_reservation: RendererPageReservationToken,
+}
+
+impl RendererPendingAuxiliaryPage {
+    pub fn browsing_context_id(self) -> u64 {
+        self.browsing_context_id.value()
+    }
+
+    pub fn page_reservation(self) -> RendererPageReservationToken {
+        self.page_reservation
+    }
+}
+
+/// Owner-local V8 state staged between synchronous popup acceptance and the
+/// related auxiliary Page's initial realm bootstrap.
+pub(crate) struct RendererStagedAuxiliaryWindowProxy {
+    window_proxy: v8::Global<v8::Object>,
+    facade_context: v8::Global<v8::Context>,
+    inherited_security_token: Option<v8::Global<v8::Value>>,
+}
+
+/// Inputs captured from the creator Document for one real synchronous
+/// auxiliary initial-empty Page realm.
+pub(crate) struct RendererRelatedInitialEmptyPageRealmInit {
+    pub(crate) dom_host: crate::dom::native::DomHost,
+    pub(crate) loader: ResourceRequestClient,
+    pub(crate) env: PageVmEnvConfig,
+    pub(crate) inherited_origin: String,
+    pub(crate) policy_container: crate::document_runtime::DocumentPolicyContainer,
+    pub(crate) auxiliary_popup_id: u64,
+    pub(crate) staged_window_proxy: RendererStagedAuxiliaryWindowProxy,
+    pub(crate) opener: Option<v8::Global<v8::Object>>,
+    pub(crate) window_name: String,
+}
+
+impl RendererStagedAuxiliaryWindowProxy {
+    pub(crate) fn new(
+        window_proxy: v8::Global<v8::Object>,
+        facade_context: v8::Global<v8::Context>,
+        inherited_security_token: Option<v8::Global<v8::Value>>,
+    ) -> Self {
+        Self {
+            window_proxy,
+            facade_context,
+            inherited_security_token,
+        }
+    }
+
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        v8::Global<v8::Object>,
+        v8::Global<v8::Context>,
+        Option<v8::Global<v8::Value>>,
+    ) {
+        (
+            self.window_proxy,
+            self.facade_context,
+            self.inherited_security_token,
+        )
+    }
+}
+
+#[derive(Default)]
+struct RendererStagedAuxiliaryWindowProxyRegistry {
+    by_page_id: HashMap<PageId, RendererStagedAuxiliaryWindowProxy>,
+}
+
+/// Page-local allocation and handoff capability for auxiliary browsing
+/// contexts created synchronously by one opener realm.
+///
+/// The registry intentionally stays owner-local: V8 handles never cross the
+/// renderer/protocol transport carried by [`RendererPendingAuxiliaryPage`]. A
+/// related Page admitted to the same script agent consumes its exact staged
+/// proxy once during its initial realm bootstrap.
+#[derive(Clone)]
+pub(crate) struct RendererAuxiliaryPageReservationAllocator {
+    owner: Option<owner_local_store::RendererOwnerLocalContext>,
+    local_host_id: RendererOwnerLocalHostId,
+    opener_page_id: PageId,
+    next_page_id: Arc<AtomicU64>,
+    staged_window_proxies: Rc<RefCell<RendererStagedAuxiliaryWindowProxyRegistry>>,
+}
+
+impl fmt::Debug for RendererAuxiliaryPageReservationAllocator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RendererAuxiliaryPageReservationAllocator")
+            .field("local_host_id", &self.local_host_id)
+            .field("opener_page_id", &self.opener_page_id)
+            .field(
+                "staged_window_proxy_count",
+                &self.staged_window_proxies.borrow().by_page_id.len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl RendererAuxiliaryPageReservationAllocator {
+    pub(in crate::runtime) fn new_for_owner(
+        owner: owner_local_store::RendererOwnerLocalContext,
+        opener_page_id: PageId,
+    ) -> Self {
+        let local_host_id = owner.local_host_id;
+        let next_page_id = owner.owner_state.next_page_id.clone();
+        Self {
+            owner: Some(owner),
+            local_host_id,
+            opener_page_id,
+            next_page_id,
+            staged_window_proxies: Rc::new(RefCell::new(
+                RendererStagedAuxiliaryWindowProxyRegistry::default(),
+            )),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        local_host_id: RendererOwnerLocalHostId,
+        opener_page_id: PageId,
+        next_page_id: Arc<AtomicU64>,
+    ) -> Self {
+        Self {
+            owner: None,
+            local_host_id,
+            opener_page_id,
+            next_page_id,
+            staged_window_proxies: Rc::new(RefCell::new(
+                RendererStagedAuxiliaryWindowProxyRegistry::default(),
+            )),
+        }
+    }
+
+    pub(crate) fn reserve(&self, exposes_opener: bool) -> RendererPendingAuxiliaryPage {
+        let page_id = PageId::new(self.next_page_id.fetch_add(1, Ordering::Relaxed));
+        let page_reservation = if exposes_opener {
+            RendererPageReservationToken::new_related_auxiliary_page(
+                self.local_host_id,
+                page_id,
+                self.opener_page_id,
+            )
+        } else {
+            RendererPageReservationToken::new(self.local_host_id, page_id)
+        };
+        RendererPendingAuxiliaryPage {
+            browsing_context_id: BrowsingContextId::auxiliary_top_level(page_id.as_u64()),
+            page_reservation,
+        }
+    }
+
+    pub(crate) fn stage_related_window_proxy(
+        &self,
+        pending: RendererPendingAuxiliaryPage,
+        staged: RendererStagedAuxiliaryWindowProxy,
+    ) -> Result<()> {
+        let reservation = pending.page_reservation();
+        ensure!(
+            reservation.local_host_id() == self.local_host_id,
+            "auxiliary WindowProxy reservation belongs to a different renderer owner"
+        );
+        ensure!(
+            matches!(
+                reservation.script_agent_admission(),
+                RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id }
+                    if opener_page_id == self.opener_page_id
+            ),
+            "only a related auxiliary Page may adopt its opener-created WindowProxy"
+        );
+        let mut registry = self.staged_window_proxies.borrow_mut();
+        let std::collections::hash_map::Entry::Vacant(entry) =
+            registry.by_page_id.entry(reservation.page_id())
+        else {
+            return Err(anyhow!(
+                "auxiliary Page already has a staged opener WindowProxy"
+            ));
+        };
+        entry.insert(staged);
+        Ok(())
+    }
+
+    pub(crate) fn take_related_window_proxy(
+        &self,
+        page_id: PageId,
+    ) -> Option<RendererStagedAuxiliaryWindowProxy> {
+        self.staged_window_proxies
+            .borrow_mut()
+            .by_page_id
+            .remove(&page_id)
+    }
+
+    pub(crate) fn stage_related_initial_empty_page_in_scope(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        pending: RendererPendingAuxiliaryPage,
+        source_environment: &crate::script_vm::RendererPageScriptEnvironment,
+        source_bridge_bindings: &crate::native_bridge::bindings::NativeBridgeBindings,
+        init: RendererRelatedInitialEmptyPageRealmInit,
+    ) -> Result<()> {
+        let owner = self.owner.as_ref().ok_or_else(|| {
+            anyhow!("standalone auxiliary allocator cannot stage a production Page realm")
+        })?;
+        owner_local_store::stage_related_initial_empty_page_on_bound_owner_local_store(
+            owner,
+            scope,
+            pending,
+            source_environment,
+            source_bridge_bindings,
+            init,
+        )
+    }
+}
+
 /// Typed authority to consume one matching prepared document and enter its
 /// renderer bootstrap.
 #[derive(Debug)]
@@ -601,6 +847,233 @@ impl RendererDocumentCommitPermit {
 
     fn prepared_document(&self) -> RendererPageReservationToken {
         self.prepared_document
+    }
+}
+
+/// Result of committing a prepared Document into an already-owned renderer
+/// Page.
+///
+/// Unlike initial Page creation, this value deliberately carries no
+/// [`RendererPageHandle`]. The existing handle remains the sole Page close and
+/// command authority; callers only adopt the replacement Document's state and
+/// DevTools agent identity.
+pub struct RendererPageReplacementCommit {
+    pub(crate) local_host_id: RendererOwnerLocalHostId,
+    pub(crate) page_id: PageId,
+    pub(crate) renderer_devtools_agent_token: RendererDevToolsAgentToken,
+    pub(crate) javascript_dialog_broker: RendererJavaScriptDialogBroker,
+    pub(crate) devtools_target: crate::devtools::target::RendererDevToolsTargetHandle,
+    pub(crate) page_state: Arc<RendererPageState>,
+    pub(crate) creation_diagnostics: RendererPageCreationDiagnostics,
+    pub(crate) creation_artifacts: RendererPageCreationArtifacts,
+    pub(crate) pending_download: Option<RendererPendingDownloadActivation>,
+}
+
+#[derive(Clone, Debug)]
+enum RendererDocumentContinuationState {
+    Pending,
+    Settled(RendererDocumentContinuationCompletion),
+}
+
+/// State captured by the exact owner turn that settles a committed Document's
+/// requested continuation target.
+///
+/// The output predecessor and PageState belong to the same owner turn. This
+/// lets protocol adapters first project every lifecycle/Inspector record up to
+/// the target and then replace their cached Page view without issuing a later
+/// renderer command that could observe a different turn.
+#[derive(Clone, Debug)]
+pub struct RendererDocumentContinuationCompletion {
+    renderer_output_predecessor: Option<RendererOutputFence>,
+    page_state: Option<Arc<RendererPageState>>,
+}
+
+impl RendererDocumentContinuationCompletion {
+    fn settled(
+        renderer_output_predecessor: Option<RendererOutputFence>,
+        page_state: Option<Arc<RendererPageState>>,
+    ) -> Self {
+        Self {
+            renderer_output_predecessor,
+            page_state,
+        }
+    }
+
+    fn canceled() -> Self {
+        Self::settled(None, None)
+    }
+
+    pub fn into_parts(self) -> (Option<RendererOutputFence>, Option<Arc<RendererPageState>>) {
+        (self.renderer_output_predecessor, self.page_state)
+    }
+}
+
+/// Exact observer for the owner turn that finishes a DocumentCommit
+/// continuation at its requested lifecycle target.
+///
+/// The lifecycle journal may publish DOMContentLoaded while that owner turn is
+/// still committing PageState and settling Inspector output. This observer is
+/// resolved only after that concrete output publication has been sent, and
+/// carries its fence when one exists.
+#[derive(Clone)]
+pub struct RendererDocumentContinuationObserver {
+    receiver: tokio::sync::watch::Receiver<RendererDocumentContinuationState>,
+}
+
+impl std::fmt::Debug for RendererDocumentContinuationObserver {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RendererDocumentContinuationObserver")
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for RendererDocumentContinuationObserver {
+    fn eq(&self, other: &Self) -> bool {
+        self.receiver.same_channel(&other.receiver)
+    }
+}
+
+impl RendererDocumentContinuationObserver {
+    pub async fn wait(mut self) -> RendererDocumentContinuationCompletion {
+        loop {
+            match self.receiver.borrow_and_update().clone() {
+                RendererDocumentContinuationState::Pending => {}
+                RendererDocumentContinuationState::Settled(completion) => return completion,
+            }
+            if self.receiver.changed().await.is_err() {
+                return RendererDocumentContinuationCompletion::canceled();
+            }
+        }
+    }
+}
+
+pub(in crate::runtime) struct RendererDocumentContinuationPublisher {
+    sender: Option<tokio::sync::watch::Sender<RendererDocumentContinuationState>>,
+}
+
+impl RendererDocumentContinuationPublisher {
+    fn channel() -> (Self, RendererDocumentContinuationObserver) {
+        let (sender, receiver) =
+            tokio::sync::watch::channel(RendererDocumentContinuationState::Pending);
+        (
+            Self {
+                sender: Some(sender),
+            },
+            RendererDocumentContinuationObserver { receiver },
+        )
+    }
+
+    pub(in crate::runtime) fn settle(
+        mut self,
+        renderer_output_predecessor: Option<RendererOutputFence>,
+        page_state: Option<Arc<RendererPageState>>,
+    ) {
+        if let Some(sender) = self.sender.take() {
+            sender.send_replace(RendererDocumentContinuationState::Settled(
+                RendererDocumentContinuationCompletion::settled(
+                    renderer_output_predecessor,
+                    page_state,
+                ),
+            ));
+        }
+    }
+}
+
+impl Drop for RendererDocumentContinuationPublisher {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            sender.send_replace(RendererDocumentContinuationState::Settled(
+                RendererDocumentContinuationCompletion::canceled(),
+            ));
+        }
+    }
+}
+
+pub(in crate::runtime) fn renderer_document_continuation_channel() -> (
+    RendererDocumentContinuationPublisher,
+    RendererDocumentContinuationObserver,
+) {
+    RendererDocumentContinuationPublisher::channel()
+}
+
+/// Whether a failed prepared replacement left the stable Page's old Document
+/// usable or crossed the renderer's irreversible retirement boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RendererPageReplacementCommitFailureDisposition {
+    PagePreserved,
+    PageRetired,
+}
+
+#[derive(Debug)]
+pub struct RendererPageReplacementCommitError {
+    disposition: RendererPageReplacementCommitFailureDisposition,
+    source: anyhow::Error,
+}
+
+impl RendererPageReplacementCommitError {
+    #[doc(hidden)]
+    pub fn page_preserved(source: anyhow::Error) -> Self {
+        Self {
+            disposition: RendererPageReplacementCommitFailureDisposition::PagePreserved,
+            source,
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn page_retired(source: anyhow::Error) -> Self {
+        Self {
+            disposition: RendererPageReplacementCommitFailureDisposition::PageRetired,
+            source,
+        }
+    }
+
+    pub fn disposition(&self) -> RendererPageReplacementCommitFailureDisposition {
+        self.disposition
+    }
+}
+
+impl std::fmt::Display for RendererPageReplacementCommitError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.source, formatter)
+    }
+}
+
+impl std::error::Error for RendererPageReplacementCommitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+impl RendererPageReplacementCommit {
+    pub fn owner_local_host_id(&self) -> RendererOwnerLocalHostId {
+        self.local_host_id
+    }
+
+    pub fn page_id(&self) -> PageId {
+        self.page_id
+    }
+
+    pub fn renderer_devtools_agent_token(&self) -> RendererDevToolsAgentToken {
+        self.renderer_devtools_agent_token
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        RendererDevToolsAgentToken,
+        Arc<RendererPageState>,
+        RendererPageCreationDiagnostics,
+        RendererPageCreationArtifacts,
+        Option<RendererPendingDownloadActivation>,
+    ) {
+        (
+            self.renderer_devtools_agent_token,
+            self.page_state,
+            self.creation_diagnostics,
+            self.creation_artifacts,
+            self.pending_download,
+        )
     }
 }
 

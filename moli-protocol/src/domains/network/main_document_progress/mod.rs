@@ -18,8 +18,9 @@ use url::Url;
 
 use crate::conn::{
     BackgroundEventSender, BackgroundProtocolEvent, CapturedBody, CdpConnection,
-    CompletedDownloadBodyArtifact, DownloadNavigation, LoadedNavigation, NavigationDispatchState,
-    NavigationLoadOutcome, ResponseCommitReady, TargetRuntimeSlot,
+    CommittedStablePageNavigation, CompletedDownloadBodyArtifact, DownloadNavigation,
+    LoadedNavigation, NavigationDispatchState, NavigationLoadOutcome, NoCommitResponseNavigation,
+    ResponseCommitReady, StablePageNavigationCommitTarget, TargetRuntimeSlot,
 };
 
 #[cfg(test)]
@@ -41,6 +42,26 @@ pub(crate) struct MaterializedLoadedDocumentProgress {
     pub(crate) initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
     pub(crate) renderer_output_predecessor: Option<RendererOutputFence>,
     pub(crate) main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
+    pub(crate) document_continuation_observer:
+        Option<moli_core::page::RendererDocumentContinuationObserver>,
+    pub(crate) progress_gate: MainDocumentProgressGate,
+    pub(crate) navigation_engine: Option<NavigationEngine>,
+    pub(crate) network_error_page: Option<crate::conn::NetworkErrorPageNavigation>,
+}
+
+pub(crate) struct MaterializedStablePageDocumentProgress {
+    pub(crate) stable_page_target: StablePageNavigationCommitTarget,
+    pub(crate) pending_download: Option<RendererPendingDownloadActivation>,
+    pub(crate) page_creation_artifacts: RendererPageCreationArtifacts,
+    pub(crate) final_url: Url,
+    pub(crate) response_headers: Vec<(String, String)>,
+    pub(crate) response_from_cache: bool,
+    pub(crate) main_document_body: Option<CapturedBody>,
+    pub(crate) initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
+    pub(crate) renderer_output_predecessor: Option<RendererOutputFence>,
+    pub(crate) main_document_commit: Option<Arc<RendererMainDocumentCommit>>,
+    pub(crate) document_continuation_observer:
+        Option<moli_core::page::RendererDocumentContinuationObserver>,
     pub(crate) progress_gate: MainDocumentProgressGate,
     pub(crate) navigation_engine: Option<NavigationEngine>,
     pub(crate) network_error_page: Option<crate::conn::NetworkErrorPageNavigation>,
@@ -55,6 +76,7 @@ pub(crate) struct MaterializedDownloadDocumentProgress {
 pub(crate) struct MaterializedFailedDocumentProgress {
     pub(crate) error_text: String,
     pub(crate) document_policy: FailedNavigationDocumentPolicy,
+    pub(crate) history_policy: FailedNavigationHistoryPolicy,
     pub(crate) response_mode: FailedNavigationResponseMode,
     pub(crate) progress_gate: MainDocumentProgressGate,
 }
@@ -69,6 +91,12 @@ pub(crate) enum FailedNavigationResponseMode {
 pub(crate) enum FailedNavigationDocumentPolicy {
     InvalidateCommittedDocument,
     PreserveCommittedDocument,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FailedNavigationHistoryPolicy {
+    DiscardPendingUpdate,
+    RetainInitialEmptyDocumentReplacement,
 }
 
 impl FailedNavigationDocumentPolicy {
@@ -170,6 +198,41 @@ impl CompletedDocumentProgressTransfer {
 pub(crate) struct CompletedDownloadProgressTransfer {
     body: CompletedDownloadProgressBody,
     network_events: CompletedMainDocumentNetworkEvents,
+}
+
+#[derive(Debug)]
+pub(crate) struct CompletedNoCommitResponseProgressTransfer {
+    network_progress: MainDocumentBodyNetworkProgress,
+}
+
+impl CompletedNoCommitResponseProgressTransfer {
+    pub(crate) fn new(network_progress: MainDocumentBodyNetworkProgress) -> Self {
+        Self { network_progress }
+    }
+
+    fn into_progress_gate(
+        self,
+        conn: &mut CdpConnection,
+        state: &NavigationDispatchState,
+        final_url: &Url,
+        error_text: &str,
+    ) -> MainDocumentProgressGate {
+        record_failed_main_document_response_body(conn, state, error_text.to_owned());
+        let mut progress_gate =
+            MainDocumentProgressGate::from_queue(completed_no_commit_response_progress_queue(
+                self.network_progress,
+                conn,
+                state,
+                final_url,
+                error_text,
+            ));
+        // Unlike a committed Document, a no-commit response has no renderer
+        // lifecycle boundary that can reveal response/body phases later. Its
+        // terminal command turn must release responseReceived and
+        // loadingFailed together, in source order.
+        progress_gate.make_body_finished_visible();
+        progress_gate
+    }
 }
 
 #[derive(Debug)]
@@ -288,6 +351,7 @@ fn materialize_failed_navigation_progress(
     MaterializedFailedDocumentProgress {
         error_text,
         document_policy,
+        history_policy: FailedNavigationHistoryPolicy::DiscardPendingUpdate,
         response_mode,
         progress_gate,
     }
@@ -308,6 +372,7 @@ pub(crate) fn materialize_loaded_navigation_progress(
         initial_runtime_realms,
         renderer_output_predecessor,
         main_document_commit,
+        document_continuation_observer,
         document_progress_transfer,
         navigation_engine,
         network_error_page,
@@ -329,6 +394,50 @@ pub(crate) fn materialize_loaded_navigation_progress(
         initial_runtime_realms,
         renderer_output_predecessor,
         main_document_commit,
+        document_continuation_observer,
+        progress_gate,
+        navigation_engine,
+        network_error_page,
+    }
+}
+
+pub(crate) fn materialize_stable_page_navigation_progress(
+    conn: &mut CdpConnection,
+    state: &NavigationDispatchState,
+    navigation: CommittedStablePageNavigation,
+) -> MaterializedStablePageDocumentProgress {
+    let CommittedStablePageNavigation {
+        stable_page_target,
+        pending_download,
+        page_creation_artifacts,
+        final_url,
+        response_headers,
+        response_from_cache,
+        initial_runtime_realms,
+        renderer_output_predecessor,
+        main_document_commit,
+        document_continuation_observer,
+        document_progress_transfer,
+        navigation_engine,
+        network_error_page,
+    } = navigation;
+    let main_document_body = document_progress_transfer.captured_body();
+    let progress_gate = match network_error_page.as_ref() {
+        Some(error_page) => network_error_page_progress_gate(conn, state, error_page.error_text()),
+        None => document_progress_transfer.into_progress_gate(conn, state, &final_url),
+    };
+    MaterializedStablePageDocumentProgress {
+        stable_page_target,
+        pending_download,
+        page_creation_artifacts,
+        final_url,
+        response_headers,
+        response_from_cache,
+        main_document_body,
+        initial_runtime_realms,
+        renderer_output_predecessor,
+        main_document_commit,
+        document_continuation_observer,
         progress_gate,
         navigation_engine,
         network_error_page,
@@ -352,6 +461,23 @@ fn materialize_navigation_load_outcome(
         NavigationLoadOutcome::Download(navigation) => MaterializedNavigationLoadOutcome::Download(
             materialize_download_navigation_progress(conn, state, *navigation),
         ),
+        NavigationLoadOutcome::NoCommitResponse(navigation) => {
+            let NoCommitResponseNavigation {
+                final_url,
+                progress_transfer,
+            } = *navigation;
+            let error_text = moli_fetch::NET_ERR_ABORTED_ERROR_TEXT.to_owned();
+            let progress_gate =
+                progress_transfer.into_progress_gate(conn, state, &final_url, &error_text);
+            MaterializedNavigationLoadOutcome::Failed(MaterializedFailedDocumentProgress {
+                error_text,
+                document_policy: FailedNavigationDocumentPolicy::PreserveCommittedDocument,
+                history_policy:
+                    FailedNavigationHistoryPolicy::RetainInitialEmptyDocumentReplacement,
+                response_mode: FailedNavigationResponseMode::CdpErrorTextResult,
+                progress_gate,
+            })
+        }
         NavigationLoadOutcome::NetworkFailure(error_text) => {
             MaterializedNavigationLoadOutcome::Failed(materialize_failed_navigation_progress(
                 conn,
@@ -500,6 +626,36 @@ fn completed_download_body_progress_queue(
         final_url,
         encoded_data_length,
     )
+}
+
+fn completed_no_commit_response_progress_queue(
+    progress: MainDocumentBodyNetworkProgress,
+    conn: &CdpConnection,
+    state: &NavigationDispatchState,
+    final_url: &Url,
+    error_text: &str,
+) -> MainDocumentProgressQueueHandle {
+    let Some(events) = progress.into_completed_body_events() else {
+        return MainDocumentProgressQueueHandle::from_source(
+            MainDocumentProgressSource::streaming(),
+        );
+    };
+    let network_observed = main_document_network_observed(conn, state.session_id.as_deref());
+    let context = CompletedMainDocumentProgressContext::new(
+        main_document_network_event_session_ids(conn, state.session_id.as_deref()),
+        completed_body_main_document_network_request_id(network_observed, state.request_id.clone()),
+        state.request_announced,
+        state.requested_url.clone(),
+        state.request_method.clone(),
+        state.request_body.clone(),
+        state.request_headers.clone(),
+        state.loader_id.clone(),
+        state.frame_id.clone(),
+        state.timestamp,
+    );
+    MainDocumentProgressQueueHandle::from_source(MainDocumentProgressSource::completed_body(
+        context.no_commit_response_event_batches(&events, final_url, error_text),
+    ))
 }
 
 fn completed_or_streaming_document_progress_queue(
@@ -770,6 +926,12 @@ impl MainDocumentBodyProgressSource {
     pub(crate) fn emit_body_finished(&self, encoded_data_length: usize) {
         if let Some(live_source) = self.live_source.as_ref() {
             live_source.emit_body_finished(encoded_data_length);
+        }
+    }
+
+    pub(crate) fn emit_body_failed(&self, error_text: &str) {
+        if let Some(live_source) = self.live_source.as_ref() {
+            live_source.emit_body_failed(error_text);
         }
     }
 
@@ -1221,6 +1383,16 @@ impl MainDocumentLiveNetworkProgressSource {
         );
     }
 
+    fn emit_body_failed(&self, error_text: &str) {
+        self.send_progress_events(
+            MainDocumentProgressPhase::BodyFinished,
+            vec![MainDocumentNavigationProgressEvent::LoadingFailed {
+                target: self.progress_target(),
+                error_text: error_text.to_owned(),
+            }],
+        );
+    }
+
     fn progress_target(&self) -> MainDocumentProgressEventTarget {
         MainDocumentProgressEventTarget {
             session_ids: self.session_ids.clone(),
@@ -1599,6 +1771,19 @@ impl CompletedMainDocumentProgressContext {
         )
     }
 
+    fn no_commit_response_event_batches(
+        &self,
+        events: &CompletedMainDocumentNetworkEvents,
+        final_url: &Url,
+        error_text: &str,
+    ) -> MainDocumentNavigationProgressEventBatches {
+        MainDocumentNavigationProgressEventBatches::new(
+            self.request_and_redirect_progress_events(events),
+            self.response_received_progress_events(events, final_url, 0),
+            self.loading_failed_progress_events(error_text),
+        )
+    }
+
     fn request_and_redirect_progress_events(
         &self,
         events: &CompletedMainDocumentNetworkEvents,
@@ -1789,6 +1974,19 @@ impl CompletedMainDocumentProgressContext {
         vec![MainDocumentNavigationProgressEvent::LoadingFinished {
             target,
             encoded_data_length,
+        }]
+    }
+
+    fn loading_failed_progress_events(
+        &self,
+        error_text: &str,
+    ) -> Vec<MainDocumentNavigationProgressEvent> {
+        let Some(target) = self.progress_target() else {
+            return Vec::new();
+        };
+        vec![MainDocumentNavigationProgressEvent::LoadingFailed {
+            target,
+            error_text: error_text.to_owned(),
         }]
     }
 

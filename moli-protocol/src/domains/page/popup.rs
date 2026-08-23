@@ -93,6 +93,7 @@ pub(super) async fn emit_prepared(
             popup_id,
             url,
             target_name,
+            pending_auxiliary_page,
             session_storage_store,
             initial_empty_document_storage_key,
         ) = activation.into_parts();
@@ -112,6 +113,7 @@ pub(super) async fn emit_prepared(
             opener,
             can_access_opener,
             disposition,
+            pending_auxiliary_page,
             session_storage_store,
             initial_empty_document_storage_key,
         );

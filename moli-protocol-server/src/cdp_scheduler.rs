@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, atomic::AtomicU64},
     time::{Duration, Instant},
 };
@@ -11,7 +11,8 @@ use moli_core::{
     runtime::NavigationRuntimeConfig,
 };
 use moli_protocol::{
-    BackgroundNavigationCompletion, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
+    BackgroundDocumentContinuationCompletion, BackgroundNavigationCompletion,
+    BackgroundNavigationGateKey, BackgroundProtocolEvent, CdpCommandTaskStep, CdpConnection,
     CdpInitialStoragePartition, CdpRendererCommandAccess, CdpSchedulerEvent,
     CdpTargetHostLifecycleObserver, CommandDispatchContext, CompletedCdpCommandDispatch,
     CompletedDeferredMainDocumentLoadCompletion, DeferredMainDocumentLoadCompletionOutputAction,
@@ -112,6 +113,7 @@ pub(crate) enum CommandStartAction {
 
 pub(crate) struct CdpScheduler {
     conn: CdpConnection,
+    document_continuation_gate: DocumentContinuationGate,
     pending_navigation_background_events: VecDeque<PendingNavigationBackgroundEvent>,
     runtime_command_output_barriers: RuntimeCommandOutputBarriers,
     queues: SchedulerQueues,
@@ -163,6 +165,32 @@ fn append_unique_target_ids(target_ids: &mut Vec<String>, additional: Vec<String
         if !target_ids.contains(&target_id) {
             target_ids.push(target_id);
         }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DocumentContinuationGate {
+    pending: HashSet<BackgroundNavigationGateKey>,
+}
+
+impl DocumentContinuationGate {
+    fn note_navigation_started(&mut self, key: BackgroundNavigationGateKey) {
+        self.pending.insert(key);
+    }
+
+    fn note_navigation_completion_drained(&mut self, key: &BackgroundNavigationGateKey) {
+        if !self.pending.remove(key) {
+            tracing::debug!(
+                ?key,
+                "document continuation completion did not match any pending gate"
+            );
+        }
+    }
+
+    fn has_inflight_navigation_for_session_owner(&self, session_id: Option<&str>) -> bool {
+        self.pending
+            .iter()
+            .any(|key| key.matches_session_owner(session_id))
     }
 }
 
@@ -220,10 +248,13 @@ impl ForegroundNavigationNetworkBarrier {
 pub(crate) type CdpBackgroundEventReceiver = mpsc::UnboundedReceiver<BackgroundProtocolEvent>;
 pub(crate) type CdpBackgroundNavigationCompletionReceiver =
     mpsc::UnboundedReceiver<BackgroundNavigationCompletion>;
+pub(crate) type CdpDocumentContinuationCompletionReceiver =
+    mpsc::UnboundedReceiver<BackgroundDocumentContinuationCompletion>;
 pub(crate) type CdpRendererPublicationReceiver = moli_core::RendererOutputTransportReceiver;
 pub(crate) struct CdpSchedulerEventReceivers {
     pub(crate) background_event_rx: CdpBackgroundEventReceiver,
     pub(crate) background_navigation_completion_rx: CdpBackgroundNavigationCompletionReceiver,
+    pub(crate) document_continuation_completion_rx: CdpDocumentContinuationCompletionReceiver,
     pub(crate) renderer_publication_rx: CdpRendererPublicationReceiver,
 }
 
@@ -244,9 +275,42 @@ pub(crate) enum CdpSchedulerInterleavedInput {
 }
 
 impl CdpSchedulerEventReceivers {
+    pub(crate) async fn recv_navigation_completion(
+        &mut self,
+    ) -> Option<BackgroundNavigationCompletion> {
+        tokio::select! {
+            biased;
+            maybe_continuation = self.document_continuation_completion_rx.recv() => {
+                maybe_continuation.map(
+                    BackgroundNavigationCompletion::document_continuation,
+                )
+            }
+            maybe_completion = self.background_navigation_completion_rx.recv() => {
+                maybe_completion
+            }
+        }
+    }
+
+    pub(crate) fn try_recv_navigation_completion(
+        &mut self,
+    ) -> Option<BackgroundNavigationCompletion> {
+        self.document_continuation_completion_rx
+            .try_recv()
+            .ok()
+            .map(BackgroundNavigationCompletion::document_continuation)
+            .or_else(|| self.background_navigation_completion_rx.try_recv().ok())
+    }
+
     pub(crate) async fn recv_interleaved_input(&mut self) -> Option<CdpSchedulerInterleavedInput> {
         tokio::select! {
             biased;
+            maybe_continuation = self.document_continuation_completion_rx.recv() => {
+                maybe_continuation.map(|completion| {
+                    CdpSchedulerInterleavedInput::BackgroundNavigationCompletion(
+                        BackgroundNavigationCompletion::document_continuation(completion),
+                    )
+                })
+            }
             maybe_completion = self.background_navigation_completion_rx.recv() => {
                 maybe_completion.map(
                     CdpSchedulerInterleavedInput::BackgroundNavigationCompletion,
@@ -692,6 +756,7 @@ impl CdpScheduler {
     fn new(conn: CdpConnection) -> Self {
         Self {
             conn,
+            document_continuation_gate: DocumentContinuationGate::default(),
             pending_navigation_background_events: VecDeque::new(),
             runtime_command_output_barriers: RuntimeCommandOutputBarriers::default(),
             queues: SchedulerQueues::default(),
@@ -735,6 +800,11 @@ impl CdpScheduler {
         scheduler
             .conn
             .set_background_navigation_completion_sender(background_navigation_completion_tx);
+        let (document_continuation_completion_tx, document_continuation_completion_rx) =
+            mpsc::unbounded_channel();
+        scheduler
+            .conn
+            .set_document_continuation_completion_sender(document_continuation_completion_tx);
         let (renderer_publication_tx, renderer_publication_rx) =
             moli_core::renderer_output_transport_channel();
         scheduler
@@ -745,6 +815,7 @@ impl CdpScheduler {
             CdpSchedulerEventReceivers {
                 background_event_rx,
                 background_navigation_completion_rx,
+                document_continuation_completion_rx,
                 renderer_publication_rx,
             },
         )
@@ -1968,10 +2039,14 @@ impl CdpScheduler {
     }
 
     pub(crate) fn command_waits_for_navigation_flush(&self, command: &ParsedCdpCommand) -> bool {
-        command.renderer_access() == CdpRendererCommandAccess::MainThread
+        (command.renderer_access() == CdpRendererCommandAccess::MainThread
             && self
                 .conn
-                .renderer_document_navigation_is_suspended_for_session_owner(command.session_id())
+                .renderer_document_navigation_is_suspended_for_session_owner(command.session_id()))
+            || (command.waits_for_document_continuation_to_finish()
+                && self
+                    .document_continuation_gate
+                    .has_inflight_navigation_for_session_owner(command.session_id()))
     }
 
     pub(crate) fn route_background_event_around_inflight_navigation(
@@ -2102,6 +2177,9 @@ impl CdpScheduler {
                 );
             }
             match event {
+                CdpSchedulerEvent::DocumentContinuationStarted { key } => {
+                    self.document_continuation_gate.note_navigation_started(key);
+                }
                 CdpSchedulerEvent::ProtocolWorkPublished { work } => {
                     if moli_trace::cdp_nav_timing_enabled() {
                         tracing::info!(
@@ -2669,6 +2747,10 @@ impl CdpScheduler {
         Option<moli_core::RendererOutputFence>,
     ) {
         let trace_started = moli_trace::cdp_runtime_trace_enabled().then(Instant::now);
+        if let Some(key) = completion.document_continuation_gate_key() {
+            self.document_continuation_gate
+                .note_navigation_completion_drained(&key);
+        }
         let outcome = self
             .conn
             .drain_background_navigation_completion_turn_async(completion)
@@ -2711,9 +2793,10 @@ impl CdpScheduler {
             self.drain_background_navigation_completion(completion)
                 .await;
         assert!(
-            renderer_output_predecessor.is_none(),
-            "navigation completion must use its exact insertion boundary, not a command predecessor"
+            renderer_output_boundary.is_none() || renderer_output_predecessor.is_none(),
+            "navigation completion cannot carry both an insertion boundary and a continuation predecessor"
         );
+        let renderer_output_fence = renderer_output_boundary.or(renderer_output_predecessor);
         prefix.append(completion_prefix);
         // The completion can still carry a renderer insertion boundary. While
         // that boundary is projected, later publications may contain the
@@ -2722,7 +2805,7 @@ impl CdpScheduler {
         // prefix so those later publications cannot overtake it.
         self.append_navigation_gate_release_before_renderer_boundary(&mut prefix);
         suffix.append(self.drain_background_events_around_inflight_navigation(background_event_rx));
-        (prefix, suffix, renderer_output_boundary)
+        (prefix, suffix, renderer_output_fence)
     }
 
     /// Completes one navigation owner turn together with the exact concrete
