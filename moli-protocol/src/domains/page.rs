@@ -120,10 +120,11 @@ const DEFAULT_PRINT_PAGE_WIDTH_INCHES: f64 = 8.5;
 const DEFAULT_PRINT_PAGE_HEIGHT_INCHES: f64 = 11.0;
 const CAPTURE_SCREENSHOT_UNSUPPORTED_MESSAGE: &str =
     "Page.captureScreenshot is not supported: renderer screenshots are not implemented.";
+const CAPTURE_SCREENSHOT_LAYOUT_DISABLED_MESSAGE: &str = "Page.captureScreenshot is not supported: renderer layout is disabled; start Moli with --layout.";
 const START_SCREENCAST_LAYOUT_DISABLED_MESSAGE: &str =
     "Page.startScreencast is not supported: renderer layout is disabled.";
 const PRINT_TO_PDF_LAYOUT_DISABLED_MESSAGE: &str =
-    "Page.printToPDF is not supported: renderer layout is disabled.";
+    "Page.printToPDF is not supported: renderer layout is disabled; start Moli with --layout.";
 const PRINT_TO_PDF_UNSUPPORTED_MESSAGE: &str =
     "Page.printToPDF is not supported: PDF generation is not implemented.";
 
@@ -6669,7 +6670,7 @@ fn start_devtools_capture_screenshot_command(
     if conn.layout_policy() == moli_core::LayoutPolicy::Mock {
         return PageCommandTaskStep::Complete(CommandOutputPlan::error(
             -32000,
-            CAPTURE_SCREENSHOT_UNSUPPORTED_MESSAGE,
+            CAPTURE_SCREENSHOT_LAYOUT_DISABLED_MESSAGE,
         ));
     }
 
@@ -7331,7 +7332,9 @@ mod protocol_neutral_tests {
         assert_eq!(out[0]["error"]["code"], json!(-32000));
         assert_eq!(
             out[0]["error"]["message"],
-            json!("Page.printToPDF is not supported: renderer layout is disabled.")
+            json!(
+                "Page.printToPDF is not supported: renderer layout is disabled; start Moli with --layout."
+            )
         );
     }
 
@@ -7803,7 +7806,7 @@ async fn complete_pending_page_command_inner(
                     )
                 }
                 Ok(RendererCaptureScreenshotReply::LayoutDisabled) => {
-                    CommandOutputPlan::error(-32000, CAPTURE_SCREENSHOT_UNSUPPORTED_MESSAGE)
+                    CommandOutputPlan::error(-32000, CAPTURE_SCREENSHOT_LAYOUT_DISABLED_MESSAGE)
                 }
                 Ok(RendererCaptureScreenshotReply::NoDocument) => {
                     CommandOutputPlan::error(-32000, "NoDocumentLoaded")

@@ -337,7 +337,9 @@ async fn websocket_cdp_capture_screenshot_preserves_default_mock_boundary() {
     assert_eq!(response["error"]["code"], json!(-32000));
     assert_eq!(
         response["error"]["message"],
-        json!("Page.captureScreenshot is not supported: renderer screenshots are not implemented.")
+        json!(
+            "Page.captureScreenshot is not supported: renderer layout is disabled; start Moli with --layout."
+        )
     );
     assert!(response.get("result").is_none());
 
