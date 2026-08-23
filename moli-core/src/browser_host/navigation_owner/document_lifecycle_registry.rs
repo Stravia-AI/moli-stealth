@@ -116,6 +116,10 @@ impl BrowserDocumentLifecycleRegistry {
             self.records.remove(owner);
         }
     }
+
+    pub(super) fn forget_target(&mut self, owner: &BrowserPageOwnerKey) {
+        self.records.remove(owner);
+    }
 }
 
 fn milestone_satisfies(
@@ -161,6 +165,7 @@ mod tests {
             RendererDocumentTerminationReason, RendererDocumentToken, RendererFrameToken,
             RendererLifecycleEpoch, RendererLifecycleStartReason,
         },
+        runtime::NavigationEngine,
     };
 
     fn page(generation: u64) -> PageResidenceIdentity {
@@ -321,6 +326,58 @@ mod tests {
                 &owner,
                 &page,
                 identity(load),
+                RendererDocumentLifecycleMilestone::Load,
+            ),
+            Some(BrowserDocumentLifecycleWaitOutcome::Reached)
+        );
+    }
+
+    #[test]
+    fn forgetting_target_runtime_state_retires_only_the_exact_lifecycle_record() {
+        let forgotten_owner = BrowserPageOwnerKey::new("context-1", "target-1");
+        let retained_owner = BrowserPageOwnerKey::new("context-1", "target-2");
+        let forgotten_page = page(2);
+        let retained_page =
+            PageResidenceIdentity::new("context-1".to_owned(), Some("target-2".to_owned()), 3);
+        let forgotten_load = event(
+            2,
+            3,
+            RendererDocumentLifecycleEventKind::Milestone(RendererDocumentLifecycleMilestone::Load),
+        );
+        let retained_load = event(
+            3,
+            4,
+            RendererDocumentLifecycleEventKind::Milestone(RendererDocumentLifecycleMilestone::Load),
+        );
+        let mut navigation_owner =
+            super::super::BrowserNavigationOwner::new(NavigationEngine::new());
+        navigation_owner.document_lifecycles.record(
+            &forgotten_owner,
+            &forgotten_page,
+            &[forgotten_load],
+        );
+        navigation_owner.document_lifecycles.record(
+            &retained_owner,
+            &retained_page,
+            &[retained_load],
+        );
+
+        let _ = navigation_owner.forget_target_runtime_state(&forgotten_owner);
+
+        assert_eq!(
+            navigation_owner.document_lifecycles.outcome(
+                &forgotten_owner,
+                &forgotten_page,
+                identity(forgotten_load),
+                RendererDocumentLifecycleMilestone::Load,
+            ),
+            None
+        );
+        assert_eq!(
+            navigation_owner.document_lifecycles.outcome(
+                &retained_owner,
+                &retained_page,
+                identity(retained_load),
                 RendererDocumentLifecycleMilestone::Load,
             ),
             Some(BrowserDocumentLifecycleWaitOutcome::Reached)

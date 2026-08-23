@@ -171,6 +171,7 @@ impl BrowserNavigationOwner {
         let target_id = owner.target_id();
         self.target_engines.forget_target(target_id);
         let retired_renderer_page_owner = self.page_residences.forget_target(owner);
+        self.document_lifecycles.forget_target(owner);
         self.initial_empty_documents.forget_target(target_id);
         self.document_navigations.forget_target(target_id);
         self.navigation_histories.forget_target(target_id);
