@@ -2772,6 +2772,72 @@ fn cli_http_redirect_with_location_does_not_consume_redirect_wait() -> Result<()
     Ok(())
 }
 
+fn assert_cli_request_redirect_preserves_method_body_and_headers(status: u16) -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url(&format!("/request-redirect/{status}"));
+    let final_url = server.url("/request-redirect/final");
+    let body = format!("payload-{status}");
+    let content_type = format!("application/x-moli-{status}");
+    let content_type_header = format!("Content-Type: {content_type}");
+    let marker = format!("redirect-{status}");
+    let marker_header = format!("X-Moli-Redirect-Test: {marker}");
+    let output = run_fetch_cli_with_dump_and_args(
+        &url,
+        "json",
+        &[
+            "--method",
+            "POST",
+            "--body",
+            &body,
+            "--header",
+            &content_type_header,
+            "--header",
+            &marker_header,
+        ],
+    )?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &final_url, 200);
+    let html = payload["html"].as_str().expect("html must be a string");
+    assert!(html.contains("method=POST"), "stdout={stdout}");
+    assert!(html.contains(&format!("body={body}")), "stdout={stdout}");
+    assert!(
+        html.contains(&format!("content-type={content_type}")),
+        "stdout={stdout}"
+    );
+    assert!(
+        html.contains(&format!("marker={marker}")),
+        "stdout={stdout}"
+    );
+    let redirects = payload["redirect_chain"]
+        .as_array()
+        .expect("redirect_chain must be an array");
+    assert_eq!(redirects.len(), 1, "stdout={stdout}");
+    assert_eq!(redirects[0]["status"], status);
+    assert_eq!(redirects[0]["from_url"], url);
+    assert_eq!(redirects[0]["to_url"], final_url);
+    Ok(())
+}
+
+#[test]
+fn cli_307_redirect_preserves_initial_request_method_body_and_headers() -> Result<()> {
+    assert_cli_request_redirect_preserves_method_body_and_headers(307)
+}
+
+#[test]
+fn cli_308_redirect_preserves_initial_request_method_body_and_headers() -> Result<()> {
+    assert_cli_request_redirect_preserves_method_body_and_headers(308)
+}
+
 #[test]
 fn cli_dump_json_includes_title_headers_and_redirect_chain() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
