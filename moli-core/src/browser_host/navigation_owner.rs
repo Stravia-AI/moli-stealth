@@ -20,6 +20,7 @@ mod request_registry;
 mod target_creation;
 mod target_metadata;
 mod target_registry;
+mod target_runtime_registry;
 mod target_snapshot;
 mod target_termination;
 mod target_transaction;
@@ -30,6 +31,7 @@ use initial_document_registry::BrowserInitialEmptyDocumentRegistry;
 use page_registry::BrowserPageResidenceRegistry;
 use request_registry::BrowserDocumentNavigationRegistry;
 use target_registry::BrowserTargetRegistry;
+use target_runtime_registry::BrowserTargetRuntimeRegistry;
 
 use super::fact_journal::BrowserFactJournal;
 use context_registry::BrowserContextRegistry;
@@ -105,6 +107,7 @@ pub struct BrowserNavigationOwner {
     browser_facts: BrowserFactJournal,
     browser_contexts: BrowserContextRegistry,
     targets: BrowserTargetRegistry,
+    target_runtimes: BrowserTargetRuntimeRegistry,
     target_engines: BrowserTargetEngineRegistry,
     page_residences: BrowserPageResidenceRegistry,
     document_lifecycles: BrowserDocumentLifecycleRegistry,
@@ -122,13 +125,14 @@ impl BrowserNavigationOwner {
             browser_facts: BrowserFactJournal::new(browser_instance_id),
             browser_contexts: BrowserContextRegistry::default(),
             targets: BrowserTargetRegistry::default(),
+            target_runtimes: BrowserTargetRuntimeRegistry::default(),
             target_engines: BrowserTargetEngineRegistry::new(active_engine),
-            page_residences: BrowserPageResidenceRegistry::default(),
-            document_lifecycles: BrowserDocumentLifecycleRegistry::default(),
-            initial_empty_documents: BrowserInitialEmptyDocumentRegistry::default(),
-            navigation_histories: BrowserNavigationHistoryRegistry::default(),
-            document_navigations: BrowserDocumentNavigationRegistry::default(),
-            target_terminations: Default::default(),
+            page_residences: BrowserPageResidenceRegistry,
+            document_lifecycles: BrowserDocumentLifecycleRegistry,
+            initial_empty_documents: BrowserInitialEmptyDocumentRegistry,
+            navigation_histories: BrowserNavigationHistoryRegistry,
+            document_navigations: BrowserDocumentNavigationRegistry,
+            target_terminations: target_termination::BrowserTargetTerminationRegistry,
         }
     }
 
@@ -144,10 +148,16 @@ impl BrowserNavigationOwner {
     /// already exposes the physical slot's successor generation.
     #[cfg(test)]
     pub(super) fn discard_target_page_runtime(&mut self, target_id: &str) {
-        self.target_engines.discard_target_page_runtime(target_id);
-        self.document_navigations.forget_target(target_id);
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines.discard_target_page_runtime(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
+            target_id,
+        );
+        self.document_navigations
+            .forget_target(&mut self.target_runtimes, target_id);
         self.initial_empty_documents
-            .mark_exited_for_target(target_id);
+            .mark_exited_for_target(&mut self.target_runtimes, target_id);
     }
 
     /// Retires every navigation-owner state entry for internal fixture or
@@ -168,14 +178,9 @@ impl BrowserNavigationOwner {
         &mut self,
         owner: &BrowserPageOwnerKey,
     ) -> Option<crate::page::RendererPageLifetimeOwner> {
-        let target_id = owner.target_id();
-        self.target_engines.forget_target(target_id);
-        let retired_renderer_page_owner = self.page_residences.forget_target(owner);
-        self.document_lifecycles.forget_target(owner);
-        self.initial_empty_documents.forget_target(target_id);
-        self.document_navigations.forget_target(target_id);
-        self.navigation_histories.forget_target(target_id);
-        self.target_terminations.forget_target(target_id);
-        retired_renderer_page_owner
+        self.target_runtimes
+            .remove(owner)
+            .and_then(|runtime| runtime.page_residence)
+            .and_then(page_registry::BrowserPageResidenceRecord::into_renderer_page_owner)
     }
 }

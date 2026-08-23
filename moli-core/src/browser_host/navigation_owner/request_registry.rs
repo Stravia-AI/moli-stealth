@@ -1,10 +1,9 @@
-use std::collections::HashMap;
-
 use crate::browser_host::BrowserContextId;
 
 use super::{
     BrowserDocumentNavigation, BrowserNavigationFailure, BrowserNavigationOwner,
     BrowserNavigationTraceContext, BrowserNavigationTraceEvent, BrowserPageOwnerKey,
+    target_runtime_registry::BrowserTargetRuntimeRegistry,
 };
 
 #[derive(Clone)]
@@ -24,7 +23,7 @@ impl BrowserDocumentNavigationRecord {
 }
 
 #[derive(Default)]
-struct BrowserTargetDocumentNavigationState {
+pub(super) struct BrowserTargetDocumentNavigationState {
     pending: Option<BrowserDocumentNavigationRecord>,
     committed: Option<BrowserDocumentNavigationRecord>,
 }
@@ -40,13 +39,12 @@ pub(super) struct BrowserDocumentNavigationCommitRollback {
 /// Renderer attachment and lifecycle projections may retain the immutable
 /// request token, but pending/committed acceptance is decided only here.
 #[derive(Default)]
-pub(super) struct BrowserDocumentNavigationRegistry {
-    entries: HashMap<BrowserPageOwnerKey, BrowserTargetDocumentNavigationState>,
-}
+pub(super) struct BrowserDocumentNavigationRegistry;
 
 impl BrowserDocumentNavigationRegistry {
     fn start(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         loader_id: String,
         trace: Option<BrowserNavigationTraceContext>,
@@ -65,18 +63,18 @@ impl BrowserDocumentNavigationRegistry {
             navigation: navigation.clone(),
             trace: trace.filter(|trace| trace.addresses_owner(key)),
         };
-        let state = self.entries.entry(key.clone()).or_default();
+        let state = self.state_mut_or_default(runtimes, key);
         let superseded = state.pending.replace(record);
         (navigation, superseded)
     }
 
     pub(super) fn accepts_pending(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        self.entries
-            .get(key)
+        self.state(runtimes, key)
             .and_then(|state| state.pending.as_ref())
             .map(BrowserDocumentNavigationRecord::navigation)
             == Some(navigation)
@@ -84,10 +82,11 @@ impl BrowserDocumentNavigationRegistry {
 
     fn accepts_body_completion(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        let Some(state) = self.entries.get(key) else {
+        let Some(state) = self.state(runtimes, key) else {
             return false;
         };
         match state.pending.as_ref() {
@@ -101,22 +100,23 @@ impl BrowserDocumentNavigationRegistry {
 
     fn accepts_committed(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        self.entries
-            .get(key)
+        self.state(runtimes, key)
             .and_then(|state| state.committed.as_ref())
             .map(BrowserDocumentNavigationRecord::navigation)
             == Some(navigation)
     }
 
-    pub(super) fn trace_context(
+    pub(super) fn trace_context<'a>(
         &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
-    ) -> Option<&BrowserNavigationTraceContext> {
-        let state = self.entries.get(key)?;
+    ) -> Option<&'a BrowserNavigationTraceContext> {
+        let state = self.state(runtimes, key)?;
         if state
             .pending
             .as_ref()
@@ -131,14 +131,21 @@ impl BrowserDocumentNavigationRegistry {
             .and_then(|committed| committed.trace())
     }
 
-    pub(super) fn has_pending(&self, key: &BrowserPageOwnerKey) -> bool {
-        self.entries
-            .get(key)
+    pub(super) fn has_pending(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> bool {
+        self.state(runtimes, key)
             .is_some_and(|state| state.pending.is_some())
     }
 
-    fn current_loader_id(&self, key: &BrowserPageOwnerKey) -> Option<String> {
-        let state = self.entries.get(key)?;
+    fn current_loader_id(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<String> {
+        let state = self.state(runtimes, key)?;
         state
             .pending
             .as_ref()
@@ -146,9 +153,12 @@ impl BrowserDocumentNavigationRegistry {
             .map(|record| record.navigation().loader_id().to_owned())
     }
 
-    fn committed_loader_id(&self, key: &BrowserPageOwnerKey) -> Option<String> {
-        self.entries
-            .get(key)?
+    fn committed_loader_id(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<String> {
+        self.state(runtimes, key)?
             .committed
             .as_ref()
             .map(|record| record.navigation().loader_id().to_owned())
@@ -156,10 +166,11 @@ impl BrowserDocumentNavigationRegistry {
 
     pub(super) fn commit_if_matches(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        let Some(state) = self.entries.get_mut(key) else {
+        let Some(state) = self.state_mut(runtimes, key) else {
             return false;
         };
         if state
@@ -175,10 +186,11 @@ impl BrowserDocumentNavigationRegistry {
 
     pub(super) fn commit_with_rollback_if_matches(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> Option<BrowserDocumentNavigationCommitRollback> {
-        let state = self.entries.get_mut(key)?;
+        let state = self.state_mut(runtimes, key)?;
         if state
             .pending
             .as_ref()
@@ -195,11 +207,12 @@ impl BrowserDocumentNavigationRegistry {
 
     pub(super) fn rollback_commit(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
         rollback: BrowserDocumentNavigationCommitRollback,
     ) -> bool {
-        let Some(state) = self.entries.get_mut(key) else {
+        let Some(state) = self.state_mut(runtimes, key) else {
             return false;
         };
         if state.pending.is_some()
@@ -217,10 +230,11 @@ impl BrowserDocumentNavigationRegistry {
 
     pub(super) fn take_pending_if_matches(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> Option<BrowserDocumentNavigationRecord> {
-        let state = self.entries.get_mut(key)?;
+        let state = self.state_mut(runtimes, key)?;
         if state
             .pending
             .as_ref()
@@ -233,10 +247,11 @@ impl BrowserDocumentNavigationRegistry {
 
     pub(super) fn restore_pending_if_vacant(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         record: BrowserDocumentNavigationRecord,
     ) -> bool {
-        let state = self.entries.entry(key.clone()).or_default();
+        let state = self.state_mut_or_default(runtimes, key);
         if state.pending.is_some() {
             return false;
         }
@@ -244,15 +259,60 @@ impl BrowserDocumentNavigationRegistry {
         true
     }
 
-    pub(super) fn pending_record(
+    pub(super) fn pending_record<'a>(
         &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
-    ) -> Option<&BrowserDocumentNavigationRecord> {
-        self.entries.get(key)?.pending.as_ref()
+    ) -> Option<&'a BrowserDocumentNavigationRecord> {
+        self.state(runtimes, key)?.pending.as_ref()
     }
 
-    pub(super) fn forget_target(&mut self, target_id: &str) {
-        self.entries.retain(|key, _| key.target_id() != target_id);
+    pub(super) fn forget_target(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        target_id: &str,
+    ) {
+        for (owner, runtime) in &mut runtimes.entries {
+            if owner.target_id() == target_id {
+                runtime.document_navigation = None;
+            }
+        }
+        runtimes.prune_empty();
+    }
+
+    fn state<'a>(
+        &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<&'a BrowserTargetDocumentNavigationState> {
+        runtimes
+            .entries
+            .get(key)
+            .and_then(|runtime| runtime.document_navigation.as_ref())
+    }
+
+    fn state_mut<'a>(
+        &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<&'a mut BrowserTargetDocumentNavigationState> {
+        runtimes
+            .entries
+            .get_mut(key)
+            .and_then(|runtime| runtime.document_navigation.as_mut())
+    }
+
+    fn state_mut_or_default<'a>(
+        &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> &'a mut BrowserTargetDocumentNavigationState {
+        runtimes
+            .entries
+            .entry(key.clone())
+            .or_default()
+            .document_navigation
+            .get_or_insert_default()
     }
 }
 
@@ -297,8 +357,11 @@ impl BrowserNavigationOwner {
             return None;
         }
         let fact_page = self.capture_page_residence(key.browser_context_id(), key.target_id());
-        let (navigation, superseded) = self.document_navigations.start(key, loader_id, trace);
-        self.target_terminations.begin_navigation(key, &navigation);
+        let (navigation, superseded) =
+            self.document_navigations
+                .start(&mut self.target_runtimes, key, loader_id, trace);
+        self.target_terminations
+            .begin_navigation(&mut self.target_runtimes, key, &navigation);
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) = self.record_navigation_admission_facts(
                 key,
@@ -340,7 +403,10 @@ impl BrowserNavigationOwner {
                 .with_navigation(superseded.navigation()),
             );
         }
-        if let Some(trace) = self.document_navigations.trace_context(key, &navigation) {
+        if let Some(trace) =
+            self.document_navigations
+                .trace_context(&self.target_runtimes, key, &navigation)
+        {
             trace.emit(
                 BrowserNavigationTraceEvent::new(
                     "navigation_request_started",
@@ -362,7 +428,7 @@ impl BrowserNavigationOwner {
         navigation: &BrowserDocumentNavigation,
     ) -> Option<BrowserNavigationTraceContext> {
         self.document_navigations
-            .trace_context(key, navigation)
+            .trace_context(&self.target_runtimes, key, navigation)
             .cloned()
     }
 
@@ -371,7 +437,8 @@ impl BrowserNavigationOwner {
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        self.document_navigations.accepts_pending(key, navigation)
+        self.document_navigations
+            .accepts_pending(&self.target_runtimes, key, navigation)
     }
 
     pub fn accepts_document_body_completion(
@@ -380,7 +447,7 @@ impl BrowserNavigationOwner {
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
         self.document_navigations
-            .accepts_body_completion(key, navigation)
+            .accepts_body_completion(&self.target_runtimes, key, navigation)
     }
 
     /// Returns whether `navigation` is the exact request that committed the
@@ -390,19 +457,23 @@ impl BrowserNavigationOwner {
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        self.document_navigations.accepts_committed(key, navigation)
+        self.document_navigations
+            .accepts_committed(&self.target_runtimes, key, navigation)
     }
 
     pub fn has_pending_document_navigation(&self, key: &BrowserPageOwnerKey) -> bool {
-        self.document_navigations.has_pending(key)
+        self.document_navigations
+            .has_pending(&self.target_runtimes, key)
     }
 
     pub fn current_document_loader_id(&self, key: &BrowserPageOwnerKey) -> Option<String> {
-        self.document_navigations.current_loader_id(key)
+        self.document_navigations
+            .current_loader_id(&self.target_runtimes, key)
     }
 
     pub fn committed_document_loader_id(&self, key: &BrowserPageOwnerKey) -> Option<String> {
-        self.document_navigations.committed_loader_id(key)
+        self.document_navigations
+            .committed_loader_id(&self.target_runtimes, key)
     }
 
     pub fn commit_document_navigation_if_matches(
@@ -410,10 +481,14 @@ impl BrowserNavigationOwner {
         key: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        let committed = self.document_navigations.commit_if_matches(key, navigation);
+        let committed =
+            self.document_navigations
+                .commit_if_matches(&mut self.target_runtimes, key, navigation);
         if committed {
-            self.target_terminations.commit_navigation(key, navigation);
-            self.initial_empty_documents.mark_exited(key);
+            self.target_terminations
+                .commit_navigation(&mut self.target_runtimes, key, navigation);
+            self.initial_empty_documents
+                .mark_exited(&mut self.target_runtimes, key);
         }
         committed
     }
@@ -428,14 +503,18 @@ impl BrowserNavigationOwner {
         failure: BrowserNavigationFailure,
     ) -> bool {
         let fact_page = self.capture_page_residence(key.browser_context_id(), key.target_id());
-        let Some(record) = self
-            .document_navigations
-            .take_pending_if_matches(key, navigation)
-        else {
+        let Some(record) = self.document_navigations.take_pending_if_matches(
+            &mut self.target_runtimes,
+            key,
+            navigation,
+        ) else {
             return false;
         };
-        self.target_terminations
-            .cancel_navigation_if_matches(key, navigation);
+        self.target_terminations.cancel_navigation_if_matches(
+            &mut self.target_runtimes,
+            key,
+            navigation,
+        );
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) =
                 self.record_navigation_failed_fact(key, navigation, failure.clone(), None, page)
@@ -485,14 +564,18 @@ impl BrowserNavigationOwner {
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
         let fact_page = self.capture_page_residence(key.browser_context_id(), key.target_id());
-        let Some(record) = self
-            .document_navigations
-            .take_pending_if_matches(key, navigation)
-        else {
+        let Some(record) = self.document_navigations.take_pending_if_matches(
+            &mut self.target_runtimes,
+            key,
+            navigation,
+        ) else {
             return false;
         };
-        self.target_terminations
-            .cancel_navigation_if_matches(key, navigation);
+        self.target_terminations.cancel_navigation_if_matches(
+            &mut self.target_runtimes,
+            key,
+            navigation,
+        );
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) = self.record_navigation_download_fact(key, navigation, page) {
                 tracing::error!(

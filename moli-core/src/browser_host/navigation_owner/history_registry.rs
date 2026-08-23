@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::browser_host::PageResidenceIdentity;
 use crate::page::SameDocumentHistoryUpdate;
 
@@ -8,7 +6,7 @@ use super::{
     BrowserHistoryTraversalResolutionError, BrowserNavigationHistory,
     BrowserNavigationHistoryEntry, BrowserNavigationHistoryPageSnapshot,
     BrowserNavigationHistorySeed, BrowserNavigationOwner, BrowserPageOwnerKey,
-    BrowserSameDocumentHistoryUpdateError,
+    BrowserSameDocumentHistoryUpdateError, target_runtime_registry::BrowserTargetRuntimeRegistry,
 };
 
 /// Exact reason an actor-selected Page could not resolve a history traversal.
@@ -91,12 +89,10 @@ impl From<BrowserSameDocumentHistoryUpdateError> for BrowserSameDocumentNavigati
 /// target lookup and lifecycle only, so neither concern grows into the main
 /// navigation-owner registry.
 #[derive(Default)]
-pub(super) struct BrowserNavigationHistoryRegistry {
-    entries: HashMap<BrowserPageOwnerKey, BrowserTargetNavigationHistory>,
-}
+pub(super) struct BrowserNavigationHistoryRegistry;
 
 #[derive(Clone)]
-struct BrowserTargetNavigationHistory {
+pub(super) struct BrowserTargetNavigationHistory {
     history: BrowserNavigationHistory,
     accepts_initial_seed: bool,
 }
@@ -111,8 +107,25 @@ impl Default for BrowserTargetNavigationHistory {
 }
 
 impl BrowserNavigationHistoryRegistry {
-    fn history_mut(&mut self, key: &BrowserPageOwnerKey) -> &mut BrowserNavigationHistory {
-        &mut self.entries.entry(key.clone()).or_default().history
+    fn target_history_mut<'a>(
+        &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> &'a mut BrowserTargetNavigationHistory {
+        runtimes
+            .entries
+            .entry(key.clone())
+            .or_default()
+            .navigation_history
+            .get_or_insert_default()
+    }
+
+    fn history_mut<'a>(
+        &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> &'a mut BrowserNavigationHistory {
+        &mut self.target_history_mut(runtimes, key).history
     }
 
     fn ensure_seeded(
@@ -132,68 +145,92 @@ impl BrowserNavigationHistoryRegistry {
 
     fn snapshot(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
     ) -> (usize, Vec<BrowserNavigationHistoryEntry>) {
-        let target_history = self.entries.entry(key.clone()).or_default();
+        let target_history = self.target_history_mut(runtimes, key);
         Self::ensure_seeded(target_history, seed);
         target_history.history.snapshot()
     }
 
     fn resolve_traversal(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
         destination: BrowserHistoryTraversalDestination,
     ) -> Result<BrowserHistoryTraversalResolution, BrowserHistoryTraversalResolutionError> {
-        let target_history = self.entries.entry(key.clone()).or_default();
+        let target_history = self.target_history_mut(runtimes, key);
         Self::ensure_seeded(target_history, seed);
         target_history.history.resolve_traversal(destination)
     }
 
     fn reset(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
     ) -> bool {
-        let target_history = self.entries.entry(key.clone()).or_default();
+        let target_history = self.target_history_mut(runtimes, key);
         Self::ensure_seeded(target_history, seed);
         target_history.history.prune_all_but_current()
     }
 
     fn can_reset(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
     ) -> bool {
-        let target_history = self.entries.entry(key.clone()).or_default();
+        let target_history = self.target_history_mut(runtimes, key);
         Self::ensure_seeded(target_history, seed);
         target_history.history.can_prune_all_but_current()
     }
 
-    fn mark_replace_current(&mut self, key: &BrowserPageOwnerKey) {
-        self.history_mut(key).mark_replace_current();
+    fn mark_replace_current(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) {
+        self.history_mut(runtimes, key).mark_replace_current();
     }
 
-    fn mark_replace_initial_empty_document(&mut self, key: &BrowserPageOwnerKey) {
-        self.history_mut(key).mark_replace_initial_empty_document();
+    fn mark_replace_initial_empty_document(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) {
+        self.history_mut(runtimes, key)
+            .mark_replace_initial_empty_document();
     }
 
-    fn mark_traverse_to_entry(&mut self, key: &BrowserPageOwnerKey, entry_id: i32) {
-        self.history_mut(key).mark_traverse_to_entry(entry_id);
+    fn mark_traverse_to_entry(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+        entry_id: i32,
+    ) {
+        self.history_mut(runtimes, key)
+            .mark_traverse_to_entry(entry_id);
     }
 
-    fn clear_pending_update(&mut self, key: &BrowserPageOwnerKey) {
-        self.history_mut(key).clear_pending_update();
+    fn clear_pending_update(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) {
+        self.history_mut(runtimes, key).clear_pending_update();
     }
 
     pub(super) fn record_loaded_page(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
         page: BrowserNavigationHistoryPageSnapshot,
     ) {
-        let target_history = self.entries.entry(key.clone()).or_default();
+        let target_history = self.target_history_mut(runtimes, key);
         Self::ensure_seeded(target_history, seed);
         let entry_id = target_history.history.allocate_entry_id();
         target_history
@@ -202,24 +239,36 @@ impl BrowserNavigationHistoryRegistry {
         target_history.accepts_initial_seed = false;
     }
 
-    fn update_current_title(&mut self, key: &BrowserPageOwnerKey, title: String) -> Option<bool> {
-        self.entries
+    fn update_current_title(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+        title: String,
+    ) -> Option<bool> {
+        runtimes
+            .entries
             .get_mut(key)?
+            .navigation_history
+            .as_mut()?
             .history
             .update_current_entry_title(title)
     }
 
     fn record_same_document(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         seed: Option<BrowserNavigationHistorySeed>,
         url: String,
         title: String,
         update: SameDocumentHistoryUpdate,
     ) -> Result<(), BrowserSameDocumentHistoryUpdateError> {
-        let entry_already_existed = self.entries.contains_key(key);
+        let entry_already_existed = runtimes
+            .entries
+            .get(key)
+            .is_some_and(|runtime| runtime.navigation_history.is_some());
         let recorded = {
-            let target_history = self.entries.entry(key.clone()).or_default();
+            let target_history = self.target_history_mut(runtimes, key);
             let seeded_for_this_update = target_history.accepts_initial_seed
                 && target_history.history.is_empty()
                 && seed.is_some();
@@ -236,19 +285,22 @@ impl BrowserNavigationHistoryRegistry {
             recorded
         };
         if recorded.is_err() && !entry_already_existed {
-            self.entries.remove(key);
+            if let Some(runtime) = runtimes.entries.get_mut(key) {
+                runtime.navigation_history = None;
+            }
+            runtimes.prune_empty();
         }
         recorded
     }
 
-    pub(super) fn clear(&mut self, key: &BrowserPageOwnerKey) {
-        let target_history = self.entries.entry(key.clone()).or_default();
+    pub(super) fn clear(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) {
+        let target_history = self.target_history_mut(runtimes, key);
         target_history.history.clear();
         target_history.accepts_initial_seed = false;
-    }
-
-    pub(super) fn forget_target(&mut self, target_id: &str) {
-        self.entries.retain(|key, _| key.target_id() != target_id);
     }
 }
 
@@ -260,9 +312,10 @@ impl BrowserNavigationOwner {
     ) -> (usize, Vec<BrowserNavigationHistoryEntry>) {
         let seed = self
             .initial_empty_documents
-            .history_seed(key)
+            .history_seed(&self.target_runtimes, key)
             .or(fallback_page_seed);
-        self.navigation_histories.snapshot(key, seed)
+        self.navigation_histories
+            .snapshot(&mut self.target_runtimes, key, seed)
     }
 
     pub fn resolve_navigation_history_traversal(
@@ -273,10 +326,14 @@ impl BrowserNavigationOwner {
     ) -> Result<BrowserHistoryTraversalResolution, BrowserHistoryTraversalResolutionError> {
         let seed = self
             .initial_empty_documents
-            .history_seed(key)
+            .history_seed(&self.target_runtimes, key)
             .or(fallback_page_seed);
-        self.navigation_histories
-            .resolve_traversal(key, seed, destination)
+        self.navigation_histories.resolve_traversal(
+            &mut self.target_runtimes,
+            key,
+            seed,
+            destination,
+        )
     }
 
     /// Resolves one actor-selected history command against its exact Page.
@@ -309,9 +366,10 @@ impl BrowserNavigationOwner {
     ) -> bool {
         let seed = self
             .initial_empty_documents
-            .history_seed(key)
+            .history_seed(&self.target_runtimes, key)
             .or(fallback_page_seed);
-        self.navigation_histories.reset(key, seed)
+        self.navigation_histories
+            .reset(&mut self.target_runtimes, key, seed)
     }
 
     pub fn can_reset_navigation_history(
@@ -321,13 +379,15 @@ impl BrowserNavigationOwner {
     ) -> bool {
         let seed = self
             .initial_empty_documents
-            .history_seed(key)
+            .history_seed(&self.target_runtimes, key)
             .or(fallback_page_seed);
-        self.navigation_histories.can_reset(key, seed)
+        self.navigation_histories
+            .can_reset(&mut self.target_runtimes, key, seed)
     }
 
     pub fn mark_next_navigation_history_replace_current(&mut self, key: &BrowserPageOwnerKey) {
-        self.navigation_histories.mark_replace_current(key);
+        self.navigation_histories
+            .mark_replace_current(&mut self.target_runtimes, key);
     }
 
     pub fn mark_next_navigation_history_replace_initial_empty_document(
@@ -335,7 +395,7 @@ impl BrowserNavigationOwner {
         key: &BrowserPageOwnerKey,
     ) {
         self.navigation_histories
-            .mark_replace_initial_empty_document(key);
+            .mark_replace_initial_empty_document(&mut self.target_runtimes, key);
     }
 
     pub fn mark_next_navigation_history_traverse_to_entry(
@@ -344,11 +404,12 @@ impl BrowserNavigationOwner {
         entry_id: i32,
     ) {
         self.navigation_histories
-            .mark_traverse_to_entry(key, entry_id);
+            .mark_traverse_to_entry(&mut self.target_runtimes, key, entry_id);
     }
 
     pub fn clear_pending_navigation_history_update(&mut self, key: &BrowserPageOwnerKey) {
-        self.navigation_histories.clear_pending_update(key);
+        self.navigation_histories
+            .clear_pending_update(&mut self.target_runtimes, key);
     }
 
     pub fn record_loaded_page_navigation_history(
@@ -356,9 +417,11 @@ impl BrowserNavigationOwner {
         key: &BrowserPageOwnerKey,
         page: BrowserNavigationHistoryPageSnapshot,
     ) {
-        let seed = self.initial_empty_documents.history_seed(key);
+        let seed = self
+            .initial_empty_documents
+            .history_seed(&self.target_runtimes, key);
         self.navigation_histories
-            .record_loaded_page(key, seed, page);
+            .record_loaded_page(&mut self.target_runtimes, key, seed, page);
     }
 
     /// Updates the current history entry from renderer title output for one
@@ -372,7 +435,8 @@ impl BrowserNavigationOwner {
         title: String,
     ) -> Option<bool> {
         let key = self.page_owner_key_if_current(expected_page)?;
-        self.navigation_histories.update_current_title(&key, title)
+        self.navigation_histories
+            .update_current_title(&mut self.target_runtimes, &key, title)
     }
 
     /// Atomically commits a renderer same-Document history fact for one exact
@@ -398,10 +462,10 @@ impl BrowserNavigationOwner {
         };
         let seed = self
             .initial_empty_documents
-            .history_seed(&key)
+            .history_seed(&self.target_runtimes, &key)
             .or(fallback_page_seed);
         self.navigation_histories
-            .record_same_document(&key, seed, url, title, update)
+            .record_same_document(&mut self.target_runtimes, &key, seed, url, title, update)
             .map_err(Into::into)
     }
 }
@@ -527,10 +591,22 @@ mod tests {
         owner.record_loaded_page_navigation_history(&key, page("https://example.test/"));
 
         owner.discard_target_page_runtime("target-1");
-        assert!(owner.navigation_histories.entries.contains_key(&key));
+        assert!(
+            owner
+                .target_runtimes
+                .entries
+                .get(&key)
+                .is_some_and(|runtime| runtime.navigation_history.is_some())
+        );
 
         owner.forget_target("target-1");
-        assert!(!owner.navigation_histories.entries.contains_key(&key));
+        assert!(
+            owner
+                .target_runtimes
+                .entries
+                .get(&key)
+                .is_none_or(|runtime| runtime.navigation_history.is_none())
+        );
     }
 
     #[test]

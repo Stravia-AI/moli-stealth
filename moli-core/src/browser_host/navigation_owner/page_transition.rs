@@ -188,7 +188,9 @@ impl BrowserNavigationOwner {
             return None;
         }
         self.targets.validate_target_owner(owner).ok()?;
-        let previous_page = self.page_residences.prepare_replacement(owner)?;
+        let previous_page = self
+            .page_residences
+            .prepare_replacement(&self.target_runtimes, owner)?;
         Some(BrowserPageResidenceTransitionPermit {
             owner: owner.clone(),
             previous_page,
@@ -203,7 +205,10 @@ impl BrowserNavigationOwner {
         &self,
         owner: &BrowserPageOwnerKey,
     ) -> Option<BrowserPageResidenceTransitionPermit> {
-        if !self.initial_empty_documents.accepts_materialization(owner) {
+        if !self
+            .initial_empty_documents
+            .accepts_materialization(&self.target_runtimes, owner)
+        {
             return None;
         }
         self.prepare_page_residence_transition(
@@ -221,7 +226,9 @@ impl BrowserNavigationOwner {
         failure: BrowserNavigationFailure,
     ) -> Option<BrowserPageResidenceTransitionPermit> {
         if navigation.target_id() != owner.target_id()
-            || !self.document_navigations.accepts_pending(owner, navigation)
+            || !self
+                .document_navigations
+                .accepts_pending(&self.target_runtimes, owner, navigation)
         {
             return None;
         }
@@ -254,7 +261,7 @@ impl BrowserNavigationOwner {
         if kind == BrowserPageResidenceTransitionKind::InitialDocumentMaterialization
             && !self
                 .initial_empty_documents
-                .accepts_materialization(&permit.owner)
+                .accepts_materialization(&self.target_runtimes, &permit.owner)
         {
             return Err(
                 BrowserPageResidenceTransitionCommitError::InitialDocumentNoLongerMaterializable(
@@ -267,10 +274,11 @@ impl BrowserNavigationOwner {
             BrowserPageResidenceTransitionRequest::FailedNavigationDiscard {
                 navigation, ..
             } => {
-                let Some(record) = self
-                    .document_navigations
-                    .take_pending_if_matches(&permit.owner, navigation)
-                else {
+                let Some(record) = self.document_navigations.take_pending_if_matches(
+                    &mut self.target_runtimes,
+                    &permit.owner,
+                    navigation,
+                ) else {
                     return Err(
                         BrowserPageResidenceTransitionCommitError::NavigationNoLongerPending {
                             owner: permit.owner,
@@ -287,7 +295,7 @@ impl BrowserNavigationOwner {
         if materialization_precommitted
             && !self
                 .initial_empty_documents
-                .mark_materialized(&permit.owner)
+                .mark_materialized(&mut self.target_runtimes, &permit.owner)
         {
             return Err(
                 BrowserPageResidenceTransitionCommitError::InitialDocumentNoLongerMaterializable(
@@ -298,6 +306,7 @@ impl BrowserNavigationOwner {
         let (current_page, retired_renderer_page_owner, current_page_runtime) = match self
             .page_residences
             .commit_transition_with_page_owners(
+                &mut self.target_runtimes,
                 &permit.owner,
                 &permit.previous_page,
                 successor_renderer_page_owner,
@@ -308,16 +317,18 @@ impl BrowserNavigationOwner {
                 if materialization_precommitted {
                     let rolled_back = self
                         .initial_empty_documents
-                        .rollback_materialized(&permit.owner);
+                        .rollback_materialized(&mut self.target_runtimes, &permit.owner);
                     debug_assert!(
                         rolled_back,
                         "same-turn stale Page generation must restore initial Document state"
                     );
                 }
                 if let Some(record) = failed_navigation_record {
-                    let rolled_back = self
-                        .document_navigations
-                        .restore_pending_if_vacant(&permit.owner, record);
+                    let rolled_back = self.document_navigations.restore_pending_if_vacant(
+                        &mut self.target_runtimes,
+                        &permit.owner,
+                        record,
+                    );
                     debug_assert!(
                         rolled_back,
                         "same-turn stale Page generation must restore failed navigation authority"
@@ -332,13 +343,21 @@ impl BrowserNavigationOwner {
             BrowserPageResidenceTransitionRequest::FailedNavigationDiscard {
                 navigation, ..
             } => {
-                self.target_engines
-                    .discard_target_page_runtime(permit.owner.target_id());
+                let selected_engine_owner = self.selected_target_engine_owner().cloned();
+                self.target_engines.discard_target_page_runtime(
+                    &mut self.target_runtimes,
+                    selected_engine_owner.as_ref(),
+                    permit.owner.target_id(),
+                );
                 self.document_navigations
-                    .forget_target(permit.owner.target_id());
-                self.target_terminations
-                    .cancel_navigation_if_matches(&permit.owner, navigation);
-                self.initial_empty_documents.mark_exited(&permit.owner);
+                    .forget_target(&mut self.target_runtimes, permit.owner.target_id());
+                self.target_terminations.cancel_navigation_if_matches(
+                    &mut self.target_runtimes,
+                    &permit.owner,
+                    navigation,
+                );
+                self.initial_empty_documents
+                    .mark_exited(&mut self.target_runtimes, &permit.owner);
             }
         }
 

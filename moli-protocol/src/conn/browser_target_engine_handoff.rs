@@ -662,26 +662,36 @@ mod tests {
     }
 
     #[test]
-    fn idle_engine_reset_reports_owner_divergence_without_replacing_selected_engine() {
+    fn topology_rejects_engine_owner_divergence_before_idle_reset() {
         let mut conn = CdpConnection::new();
         let divergent = BrowserPageOwnerKey::new("missing-context", "missing-target");
-        conn.browser_host_state
+        let selected_renderer_owner = conn
+            .browser_host_state
+            .navigation_owner()
+            .active_renderer_owner_id_for_diagnostics();
+        let error = conn
+            .browser_host_state
             .navigation_owner_mut()
             .adopt_target_engine(
                 divergent.clone(),
                 BrowserTargetEngineResidence::Selected,
                 NavigationEngine::new_with_page_vm_document_isolate_for_diagnostics(),
             )
-            .expect("test fixture should inject a divergent selected engine owner");
-        let selected_renderer_owner = conn
-            .browser_host_state
-            .navigation_owner()
-            .active_renderer_owner_id_for_diagnostics();
+            .expect_err("selected engine identity must come from Browser topology");
+        assert_eq!(error.selected(), None);
+        assert_eq!(error.requested(), Some(&divergent));
+        assert_eq!(
+            conn.browser_host_state
+                .navigation_owner()
+                .active_renderer_owner_id_for_diagnostics(),
+            selected_renderer_owner,
+            "rejected injection must preserve the unbound engine"
+        );
 
         let result = conn.release_idle_navigation_engine_memory_if_idle();
 
-        assert!(!result.reset);
-        assert_eq!(result.reason, "engine-owner-diverged");
+        assert!(result.reset);
+        assert_eq!(result.reason, "idle-engine-replaced");
         assert_eq!(result.loaded_browser_context_count, 0);
         assert_eq!(result.live_target_browser_context_count, 0);
         assert_eq!(result.retained_background_navigation_engine_count, 0);
@@ -689,14 +699,7 @@ mod tests {
             conn.browser_host_state
                 .navigation_owner()
                 .selected_target_engine_owner(),
-            Some(&divergent)
-        );
-        assert_eq!(
-            conn.browser_host_state
-                .navigation_owner()
-                .active_renderer_owner_id_for_diagnostics(),
-            selected_renderer_owner,
-            "rejected idle reset must preserve the selected engine payload"
+            None
         );
     }
 

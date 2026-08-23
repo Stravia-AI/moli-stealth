@@ -1,5 +1,3 @@
-use std::collections::hash_map::Entry;
-
 use super::*;
 
 #[derive(Debug)]
@@ -34,10 +32,11 @@ impl BrowserPageTargetRegistrationTransaction {
 impl BrowserPageResidenceRegistry {
     pub(in crate::browser_host::navigation_owner) fn begin_context_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         browser_context_id: &BrowserContextId,
         projection: &BrowserTargetTopologyProjection,
     ) -> Result<BrowserPageContextRegistrationTransaction, BrowserPageResidenceRegistryError> {
-        self.validate_context_registration(browser_context_id, projection)?;
+        self.validate_context_registration(runtimes, browser_context_id, projection)?;
         let registrations = projection
             .slots()
             .map(|slot| BrowserPageResidenceRegistration {
@@ -47,26 +46,26 @@ impl BrowserPageResidenceRegistry {
             .collect::<Vec<_>>();
 
         for (index, registration) in registrations.iter().enumerate() {
-            match self.entries.entry(registration.owner.clone()) {
-                Entry::Vacant(entry) => {
-                    entry.insert(BrowserPageResidenceRecord::staged(
-                        registration.handle.clone(),
-                    ));
+            let runtime = runtimes
+                .entries
+                .entry(registration.owner.clone())
+                .or_default();
+            if runtime.page_residence.is_some() {
+                let mut exact = true;
+                for staged in registrations[..index].iter().rev() {
+                    exact &= self.remove_staged_exact(runtimes, staged);
                 }
-                Entry::Occupied(_) => {
-                    let mut exact = true;
-                    for staged in registrations[..index].iter().rev() {
-                        exact &= self.remove_staged_exact(staged);
-                    }
-                    debug_assert!(
-                        exact,
-                        "same-turn Page context registration rejection must remove every staged entry"
-                    );
-                    return Err(BrowserPageResidenceRegistryError::DuplicateTarget(
-                        registration.owner.clone(),
-                    ));
-                }
+                debug_assert!(
+                    exact,
+                    "same-turn Page context registration rejection must remove every staged entry"
+                );
+                return Err(BrowserPageResidenceRegistryError::DuplicateTarget(
+                    registration.owner.clone(),
+                ));
             }
+            runtime.page_residence = Some(BrowserPageResidenceRecord::staged(
+                registration.handle.clone(),
+            ));
         }
 
         Ok(BrowserPageContextRegistrationTransaction { registrations })
@@ -74,11 +73,12 @@ impl BrowserPageResidenceRegistry {
 
     pub(in crate::browser_host::navigation_owner) fn rollback_context_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         transaction: BrowserPageContextRegistrationTransaction,
     ) -> bool {
         let mut exact = true;
         for registration in transaction.registrations.iter().rev() {
-            exact &= self.remove_staged_exact(registration);
+            exact &= self.remove_staged_exact(runtimes, registration);
         }
         debug_assert!(
             exact,
@@ -89,17 +89,17 @@ impl BrowserPageResidenceRegistry {
 
     pub(in crate::browser_host::navigation_owner) fn commit_context_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         transaction: BrowserPageContextRegistrationTransaction,
     ) {
         let exact = transaction
             .registrations
             .iter()
-            .all(|registration| self.is_staged_exact(registration));
+            .all(|registration| self.is_staged_exact(runtimes, registration));
         if exact {
             for registration in &transaction.registrations {
                 let published = self
-                    .entries
-                    .get_mut(&registration.owner)
+                    .record_mut(runtimes, &registration.owner)
                     .is_some_and(|record| record.publish_if_staged_exact(&registration.handle));
                 debug_assert!(published, "validated Page registration must publish");
             }
@@ -112,17 +112,15 @@ impl BrowserPageResidenceRegistry {
 
     pub(in crate::browser_host::navigation_owner) fn begin_target_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: BrowserPageOwnerKey,
     ) -> Result<BrowserPageTargetRegistrationTransaction, BrowserPageResidenceRegistryError> {
         let handle = BrowserPageResidenceHandle::default();
-        match self.entries.entry(owner.clone()) {
-            Entry::Vacant(entry) => {
-                entry.insert(BrowserPageResidenceRecord::staged(handle.clone()));
-            }
-            Entry::Occupied(_) => {
-                return Err(BrowserPageResidenceRegistryError::DuplicateTarget(owner));
-            }
+        let runtime = runtimes.entries.entry(owner.clone()).or_default();
+        if runtime.page_residence.is_some() {
+            return Err(BrowserPageResidenceRegistryError::DuplicateTarget(owner));
         }
+        runtime.page_residence = Some(BrowserPageResidenceRecord::staged(handle.clone()));
         Ok(BrowserPageTargetRegistrationTransaction {
             registration: BrowserPageResidenceRegistration { owner, handle },
         })
@@ -130,9 +128,10 @@ impl BrowserPageResidenceRegistry {
 
     pub(in crate::browser_host::navigation_owner) fn rollback_target_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         transaction: BrowserPageTargetRegistrationTransaction,
     ) -> bool {
-        let exact = self.remove_staged_exact(&transaction.registration);
+        let exact = self.remove_staged_exact(runtimes, &transaction.registration);
         debug_assert!(
             exact,
             "same-turn Target Page registration rollback must remove its exact staged entry"
@@ -142,12 +141,12 @@ impl BrowserPageResidenceRegistry {
 
     pub(in crate::browser_host::navigation_owner) fn commit_target_registration(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         transaction: BrowserPageTargetRegistrationTransaction,
     ) -> BrowserPageResidenceHandle {
         let registration = transaction.registration;
         let published = self
-            .entries
-            .get_mut(&registration.owner)
+            .record_mut(runtimes, &registration.owner)
             .is_some_and(|record| record.publish_if_staged_exact(&registration.handle));
         debug_assert!(
             published,
@@ -156,19 +155,31 @@ impl BrowserPageResidenceRegistry {
         registration.handle
     }
 
-    fn is_staged_exact(&self, registration: &BrowserPageResidenceRegistration) -> bool {
-        self.entries
-            .get(&registration.owner)
+    fn is_staged_exact(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        registration: &BrowserPageResidenceRegistration,
+    ) -> bool {
+        self.record(runtimes, &registration.owner)
             .is_some_and(|record| record.is_staged_exact(&registration.handle))
     }
 
-    fn remove_staged_exact(&mut self, registration: &BrowserPageResidenceRegistration) -> bool {
-        match self.entries.entry(registration.owner.clone()) {
-            Entry::Occupied(entry) if entry.get().is_staged_exact(&registration.handle) => {
-                entry.remove();
-                true
-            }
-            Entry::Occupied(_) | Entry::Vacant(_) => false,
+    fn remove_staged_exact(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        registration: &BrowserPageResidenceRegistration,
+    ) -> bool {
+        let exact = self
+            .record(runtimes, &registration.owner)
+            .is_some_and(|record| record.is_staged_exact(&registration.handle));
+        if exact {
+            let removed = runtimes
+                .entries
+                .get_mut(&registration.owner)
+                .and_then(|runtime| runtime.page_residence.take());
+            debug_assert!(removed.is_some());
+            runtimes.prune_empty();
         }
+        exact
     }
 }

@@ -227,7 +227,8 @@ impl BrowserNavigationOwner {
     }
 
     pub fn retained_renderer_owner_ids_for_diagnostics(&self) -> impl Iterator<Item = u64> + '_ {
-        self.target_engines.retained_renderer_owner_ids()
+        self.target_engines
+            .retained_renderer_owner_ids(&self.target_runtimes, self.selected_target_engine_owner())
     }
 
     pub fn active_document_isolate_model_for_diagnostics(&self) -> &'static str {

@@ -158,8 +158,11 @@ impl BrowserNavigationOwner {
         }
         self.targets
             .validate_projection(&browser_context_id, &topology_projection)?;
-        self.page_residences
-            .validate_projection(&browser_context_id, &topology_projection)?;
+        self.page_residences.validate_projection(
+            &self.target_runtimes,
+            &browser_context_id,
+            &topology_projection,
+        )?;
         let registration = self.targets.begin_background_registration(
             &browser_context_id,
             &target_id,
@@ -170,7 +173,7 @@ impl BrowserNavigationOwner {
         let owner = BrowserPageOwnerKey::new(browser_context_id.as_str(), target_id.as_str());
         let page_registration = match self
             .page_residences
-            .begin_target_registration(owner.clone())
+            .begin_target_registration(&mut self.target_runtimes, owner.clone())
         {
             Ok(registration) => registration,
             Err(error) => {
@@ -185,7 +188,7 @@ impl BrowserNavigationOwner {
         self.install_target_creation_metadata(&owner, &creation_metadata);
         let page_residence = self
             .page_residences
-            .commit_target_registration(page_registration);
+            .commit_target_registration(&mut self.target_runtimes, page_registration);
         self.targets.commit_target_registration(registration);
         let page_residence_identity = page_residence.identity(
             owner.browser_context_id().to_owned(),
@@ -250,6 +253,7 @@ impl BrowserNavigationOwner {
             selection_projection.target_engine().clone(),
             owner.clone(),
         )?;
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         let registration = self.targets.begin_active_registration(
             &browser_context_id,
             &target_id,
@@ -260,7 +264,7 @@ impl BrowserNavigationOwner {
         let previous_active_target_id = registration.previous_active_target_id().cloned();
         let page_registration = match self
             .page_residences
-            .begin_target_registration(owner.clone())
+            .begin_target_registration(&mut self.target_runtimes, owner.clone())
         {
             Ok(page_registration) => page_registration,
             Err(error) => {
@@ -272,15 +276,17 @@ impl BrowserNavigationOwner {
                 return Err(error.into());
             }
         };
-        let engine_outcome = match self
-            .target_engines
-            .handoff_target_engine(handoff, create_replacement)
-        {
+        let engine_outcome = match self.target_engines.handoff_target_engine(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
+            handoff,
+            create_replacement,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 let page_rolled_back = self
                     .page_residences
-                    .rollback_target_registration(page_registration);
+                    .rollback_target_registration(&mut self.target_runtimes, page_registration);
                 let rolled_back = self.targets.rollback_target_registration(registration);
                 debug_assert!(
                     page_rolled_back,
@@ -296,7 +302,7 @@ impl BrowserNavigationOwner {
         self.install_target_creation_metadata(&owner, &creation_metadata);
         let page_residence = self
             .page_residences
-            .commit_target_registration(page_registration);
+            .commit_target_registration(&mut self.target_runtimes, page_registration);
         self.targets.commit_target_registration(registration);
         let page_residence_identity = page_residence.identity(
             owner.browser_context_id().to_owned(),
@@ -368,7 +374,7 @@ impl BrowserNavigationOwner {
             BrowserPageOwnerKey::new(browser_context_id.as_str(), expected_target_id.as_str());
         if self
             .page_residences
-            .renderer_page_id_for_target(&expected_owner)
+            .renderer_page_id_for_target(&self.target_runtimes, &expected_owner)
             .is_some()
         {
             return Err(BrowserTargetRegistryError::TargetHasCommittedRendererPage(
@@ -381,6 +387,7 @@ impl BrowserNavigationOwner {
             selection_projection.target_engine().clone(),
             owner.clone(),
         )?;
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         let replacement = self.targets.begin_active_replacement(
             &browser_context_id,
             &expected_target_id,
@@ -391,7 +398,7 @@ impl BrowserNavigationOwner {
         let session_storage_access = replacement.replacement_session_storage_access().clone();
         let page_registration = match self
             .page_residences
-            .begin_target_registration(owner.clone())
+            .begin_target_registration(&mut self.target_runtimes, owner.clone())
         {
             Ok(page_registration) => page_registration,
             Err(error) => {
@@ -403,15 +410,17 @@ impl BrowserNavigationOwner {
                 return Err(error.into());
             }
         };
-        let engine_outcome = match self
-            .target_engines
-            .handoff_target_engine(handoff, create_replacement)
-        {
+        let engine_outcome = match self.target_engines.handoff_target_engine(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
+            handoff,
+            create_replacement,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 let page_rolled_back = self
                     .page_residences
-                    .rollback_target_registration(page_registration);
+                    .rollback_target_registration(&mut self.target_runtimes, page_registration);
                 let rolled_back = self.targets.rollback_active_replacement(replacement);
                 debug_assert!(
                     page_rolled_back,
@@ -432,7 +441,7 @@ impl BrowserNavigationOwner {
         self.install_target_creation_metadata(&owner, &creation_metadata);
         let page_residence = self
             .page_residences
-            .commit_target_registration(page_registration);
+            .commit_target_registration(&mut self.target_runtimes, page_registration);
         self.targets.commit_active_replacement(replacement);
         let page_residence_identity = page_residence.identity(
             owner.browser_context_id().to_owned(),
@@ -484,11 +493,14 @@ impl BrowserNavigationOwner {
             selection_projection.target_engine().clone(),
             owner.clone(),
         )?;
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         let activation = self.targets.begin_activation(&owner)?;
-        let engine_outcome = match self
-            .target_engines
-            .handoff_target_engine(handoff, create_replacement)
-        {
+        let engine_outcome = match self.target_engines.handoff_target_engine(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
+            handoff,
+            create_replacement,
+        ) {
             Ok(outcome) => outcome,
             Err(error) => {
                 let rolled_back = self.targets.rollback_activation(activation);
@@ -520,8 +532,11 @@ impl BrowserNavigationOwner {
         let browser_context_id = BrowserContextId::new(browser_context_id);
         self.targets
             .validate_projection(&browser_context_id, &topology_projection)?;
-        self.page_residences
-            .validate_projection(&browser_context_id, &topology_projection)?;
+        self.page_residences.validate_projection(
+            &self.target_runtimes,
+            &browser_context_id,
+            &topology_projection,
+        )?;
         let owner = BrowserPageOwnerKey::new(browser_context_id.as_str(), target_id);
         if self.targets.validate_target_owner(&owner)? != BrowserTargetResidence::Background {
             return Err(BrowserTargetRegistryError::TargetIsNotBackground(owner));
@@ -548,7 +563,7 @@ impl BrowserNavigationOwner {
             .into());
         }
         self.browser_contexts
-            .validate_projection(&self.target_engines, selection_projection)?;
+            .validate_projection(self.selected_target_engine_owner(), selection_projection)?;
         if self.browser_contexts.selected() != Some(browser_context_id) {
             return Err(BrowserTargetRegistryError::SelectedBrowserContextRequired {
                 requested: browser_context_id.clone(),
@@ -557,8 +572,11 @@ impl BrowserNavigationOwner {
         }
         self.targets
             .validate_projection(browser_context_id, topology_projection)?;
-        self.page_residences
-            .validate_projection(browser_context_id, topology_projection)?;
+        self.page_residences.validate_projection(
+            &self.target_runtimes,
+            browser_context_id,
+            topology_projection,
+        )?;
         self.browser_contexts.validate_selected_target(
             selection_projection,
             browser_context_id,

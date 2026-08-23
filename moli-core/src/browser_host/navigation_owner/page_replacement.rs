@@ -140,15 +140,21 @@ impl BrowserNavigationOwner {
         navigation: &BrowserDocumentNavigation,
     ) -> Option<BrowserPageReplacementPermit> {
         if !self.browser_context_accepts_owner_work(owner.browser_context_id())
-            || !self
-                .target_terminations
-                .accepts_page_replacement(owner, navigation)
+            || !self.target_terminations.accepts_page_replacement(
+                &self.target_runtimes,
+                owner,
+                navigation,
+            )
             || owner.target_id() != navigation.target_id()
-            || !self.document_navigations.accepts_pending(owner, navigation)
+            || !self
+                .document_navigations
+                .accepts_pending(&self.target_runtimes, owner, navigation)
         {
             return None;
         }
-        let previous_page = self.page_residences.prepare_replacement(owner)?;
+        let previous_page = self
+            .page_residences
+            .prepare_replacement(&self.target_runtimes, owner)?;
         Some(BrowserPageReplacementPermit {
             owner: owner.clone(),
             navigation: navigation.clone(),
@@ -166,10 +172,11 @@ impl BrowserNavigationOwner {
         successor_renderer_page_owner: &mut Option<RendererPageLifetimeOwner>,
         successor_page_runtime_owner: &mut Option<BrowserPageRuntimeOwner>,
     ) -> Result<BrowserPageReplacement, BrowserPageReplacementCommitError> {
-        if !self
-            .document_navigations
-            .accepts_pending(&permit.owner, &permit.navigation)
-        {
+        if !self.document_navigations.accepts_pending(
+            &self.target_runtimes,
+            &permit.owner,
+            &permit.navigation,
+        ) {
             return Err(
                 BrowserPageReplacementCommitError::NavigationNoLongerPending {
                     owner: permit.owner,
@@ -178,9 +185,11 @@ impl BrowserNavigationOwner {
             );
         }
         if !self.browser_context_accepts_owner_work(permit.owner.browser_context_id())
-            || !self
-                .target_terminations
-                .accepts_page_replacement(&permit.owner, &permit.navigation)
+            || !self.target_terminations.accepts_page_replacement(
+                &self.target_runtimes,
+                &permit.owner,
+                &permit.navigation,
+            )
         {
             return Err(
                 BrowserPageReplacementCommitError::TargetNoLongerAcceptsReplacement {
@@ -189,10 +198,11 @@ impl BrowserNavigationOwner {
                 },
             );
         }
-        let Some(request_rollback) = self
-            .document_navigations
-            .commit_with_rollback_if_matches(&permit.owner, &permit.navigation)
-        else {
+        let Some(request_rollback) = self.document_navigations.commit_with_rollback_if_matches(
+            &mut self.target_runtimes,
+            &permit.owner,
+            &permit.navigation,
+        ) else {
             return Err(
                 BrowserPageReplacementCommitError::NavigationNoLongerPending {
                     owner: permit.owner,
@@ -202,6 +212,7 @@ impl BrowserNavigationOwner {
         };
         let (current_page, retired_renderer_page_owner, current_page_runtime) =
             match self.page_residences.commit_transition_with_page_owners(
+                &mut self.target_runtimes,
                 &permit.owner,
                 &permit.previous_page,
                 successor_renderer_page_owner,
@@ -210,6 +221,7 @@ impl BrowserNavigationOwner {
                 Ok(committed) => committed,
                 Err(error) => {
                     let rolled_back = self.document_navigations.rollback_commit(
+                        &mut self.target_runtimes,
                         &permit.owner,
                         &permit.navigation,
                         request_rollback,
@@ -226,16 +238,27 @@ impl BrowserNavigationOwner {
             history_page.url().to_owned(),
             history_page.title().to_owned(),
         );
-        let history_seed = self.initial_empty_documents.history_seed(&permit.owner);
-        self.navigation_histories
-            .record_loaded_page(&permit.owner, history_seed, history_page);
-        self.target_terminations
-            .commit_navigation(&permit.owner, &permit.navigation);
-        self.initial_empty_documents.mark_exited(&permit.owner);
-        if let Some(trace) = self
-            .document_navigations
-            .trace_context(&permit.owner, &permit.navigation)
-        {
+        let history_seed = self
+            .initial_empty_documents
+            .history_seed(&self.target_runtimes, &permit.owner);
+        self.navigation_histories.record_loaded_page(
+            &mut self.target_runtimes,
+            &permit.owner,
+            history_seed,
+            history_page,
+        );
+        self.target_terminations.commit_navigation(
+            &mut self.target_runtimes,
+            &permit.owner,
+            &permit.navigation,
+        );
+        self.initial_empty_documents
+            .mark_exited(&mut self.target_runtimes, &permit.owner);
+        if let Some(trace) = self.document_navigations.trace_context(
+            &self.target_runtimes,
+            &permit.owner,
+            &permit.navigation,
+        ) {
             trace.emit(
                 BrowserNavigationTraceEvent::new(
                     "page_replacement_committed",

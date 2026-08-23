@@ -223,7 +223,9 @@ impl BrowserNavigationOwner {
         if !moli_trace::browser_owner_trace_enabled() {
             return None;
         }
-        let source_page = self.page_residences.identity(owner)?;
+        let source_page = self
+            .page_residences
+            .identity(&self.target_runtimes, owner)?;
         Some(BrowserNavigationTraceContext::new(
             self.browser_instance_id,
             browser_action_id,

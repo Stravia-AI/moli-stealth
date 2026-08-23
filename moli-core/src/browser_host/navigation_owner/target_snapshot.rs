@@ -170,9 +170,12 @@ impl BrowserNavigationOwner {
                 }
                 let owner =
                     BrowserPageOwnerKey::new(browser_context_id.as_str(), target.target_id());
-                let page_residence = self.page_residences.identity(&owner).ok_or_else(|| {
-                    BrowserPageResidenceRegistryError::UnknownTarget(owner.clone())
-                })?;
+                let page_residence = self
+                    .page_residences
+                    .identity(&self.target_runtimes, &owner)
+                    .ok_or_else(|| {
+                        BrowserPageResidenceRegistryError::UnknownTarget(owner.clone())
+                    })?;
                 targets.push(BrowserTargetStateSnapshot {
                     browser_instance_id: self.browser_instance_id,
                     browser_context: browser_context.clone(),

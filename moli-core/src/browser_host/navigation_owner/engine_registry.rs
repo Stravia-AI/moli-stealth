@@ -1,9 +1,8 @@
-use std::collections::HashMap;
-
 use crate::{RendererOutputTransportSender, runtime::NavigationEngine};
 
 use super::{
-    BrowserNavigationOwner, BrowserPageOwnerKey, BrowserTargetRegistryError, BrowserTargetResidence,
+    BrowserNavigationOwner, BrowserPageOwnerKey, BrowserTargetRegistryError,
+    BrowserTargetResidence, target_runtime_registry::BrowserTargetRuntimeRegistry,
 };
 
 /// Strong owner of one renderer/navigation runtime.
@@ -11,8 +10,8 @@ use super::{
 /// Runtime work stays behind semantic operations on `BrowserNavigationOwner`;
 /// frontend adapters may transfer an engine into the registry, but cannot
 /// borrow the selected engine back out.
-struct BrowserPageOwner {
-    engine: NavigationEngine,
+pub(super) struct BrowserPageOwner {
+    pub(super) engine: NavigationEngine,
 }
 
 impl BrowserPageOwner {
@@ -210,57 +209,96 @@ impl From<BrowserTargetEngineOwnerMismatch> for BrowserTargetEngineAdoptionError
     }
 }
 
-/// Browser-owned active/parked NavigationEngine registry.
+/// Browser-owned coordinator for unbound and per-Target NavigationEngines.
 ///
-/// `selected_owner == None` is reserved for startup or an active
-/// BrowserContext with no Target. Every selected Target engine is otherwise
-/// keyed by `{browser_context_id, target_id}`; CDP session identity never
-/// participates in lookup or handoff authorization.
+/// Target-backed engines live in `BrowserTargetRuntimeRegistry`; selection is
+/// derived from BrowserContext and Target topology. Only the startup/empty-
+/// Context engine has no Target runtime record.
 pub(super) struct BrowserTargetEngineRegistry {
-    selected: BrowserPageOwner,
-    selected_owner: Option<BrowserPageOwnerKey>,
-    retained: HashMap<BrowserPageOwnerKey, BrowserPageOwner>,
+    unbound: Option<BrowserPageOwner>,
     renderer_output_transport_sender: Option<RendererOutputTransportSender>,
 }
 
 impl BrowserTargetEngineRegistry {
     pub(super) fn new(engine: NavigationEngine) -> Self {
         Self {
-            selected: BrowserPageOwner::new(engine),
-            selected_owner: None,
-            retained: HashMap::new(),
+            unbound: Some(BrowserPageOwner::new(engine)),
             renderer_output_transport_sender: None,
         }
     }
 
-    pub(super) fn selected_engine(&self) -> &NavigationEngine {
-        &self.selected.engine
+    pub(super) fn selected_engine<'a>(
+        &'a self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
+    ) -> &'a NavigationEngine {
+        if let Some(owner) = selected_owner {
+            return &runtimes
+                .entries
+                .get(owner)
+                .and_then(|runtime| runtime.engine.as_ref())
+                .expect("selected Target topology must own an engine")
+                .engine;
+        }
+        &self
+            .unbound
+            .as_ref()
+            .expect("unbound selection must own an engine")
+            .engine
     }
 
-    pub(super) fn selected_engine_mut(&mut self) -> &mut NavigationEngine {
-        &mut self.selected.engine
+    pub(super) fn selected_engine_mut<'a>(
+        &'a mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
+    ) -> &'a mut NavigationEngine {
+        if let Some(owner) = selected_owner {
+            return &mut runtimes
+                .entries
+                .get_mut(owner)
+                .and_then(|runtime| runtime.engine.as_mut())
+                .expect("selected Target topology must own an engine")
+                .engine;
+        }
+        &mut self
+            .unbound
+            .as_mut()
+            .expect("unbound selection must own an engine")
+            .engine
     }
 
-    pub(super) fn retained_engine_mut(
+    pub(super) fn retained_engine_mut<'a>(
         &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         owner: &BrowserPageOwnerKey,
-    ) -> Option<&mut NavigationEngine> {
-        self.retained.get_mut(owner).map(|owner| &mut owner.engine)
-    }
-
-    pub(super) fn selected_owner(&self) -> Option<&BrowserPageOwnerKey> {
-        self.selected_owner.as_ref()
+    ) -> Option<&'a mut NavigationEngine> {
+        if selected_owner == Some(owner) {
+            return None;
+        }
+        runtimes
+            .entries
+            .get_mut(owner)
+            .and_then(|runtime| runtime.engine.as_mut())
+            .map(|owner| &mut owner.engine)
     }
 
     pub(super) fn set_renderer_output_transport_sender(
         &mut self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         sender: RendererOutputTransportSender,
     ) {
         self.renderer_output_transport_sender = Some(sender.clone());
-        self.selected
-            .engine
-            .set_renderer_output_transport_sender(sender.clone());
-        for owner in self.retained.values() {
+        if let Some(unbound) = self.unbound.as_ref() {
+            unbound
+                .engine
+                .set_renderer_output_transport_sender(sender.clone());
+        }
+        for owner in runtimes
+            .entries
+            .values()
+            .filter_map(|runtime| runtime.engine.as_ref())
+        {
             owner
                 .engine
                 .set_renderer_output_transport_sender(sender.clone());
@@ -279,45 +317,77 @@ impl BrowserTargetEngineRegistry {
     }
 
     pub(super) fn validate_current(
-        &self,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         requested: &BrowserSelectedTargetEngineDisposition,
     ) -> Result<(), BrowserTargetEngineOwnerMismatch> {
         let requested_owner = requested.expected_owner();
-        if self.selected_owner.as_ref() == requested_owner {
+        if selected_owner == requested_owner {
             return Ok(());
         }
         Err(BrowserTargetEngineOwnerMismatch {
-            selected: self.selected_owner.clone(),
+            selected: selected_owner.cloned(),
             requested: requested_owner.cloned(),
         })
     }
 
-    fn retain_previous_if_requested(
+    fn clear_discarded_current(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         disposition: &BrowserSelectedTargetEngineDisposition,
-        previous: BrowserPageOwner,
     ) {
-        if let Some(owner) = disposition.owner_to_retain() {
-            self.retained.insert(owner.clone(), previous);
+        match disposition {
+            BrowserSelectedTargetEngineDisposition::Unbound => {
+                self.unbound = None;
+            }
+            BrowserSelectedTargetEngineDisposition::Discard(owner) => {
+                if let Some(runtime) = runtimes.entries.get_mut(owner) {
+                    runtime.engine = None;
+                }
+            }
+            BrowserSelectedTargetEngineDisposition::Retain(_) => {}
+        }
+    }
+
+    fn take_reusable_current(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        disposition: &BrowserSelectedTargetEngineDisposition,
+    ) -> BrowserPageOwner {
+        match disposition {
+            BrowserSelectedTargetEngineDisposition::Unbound => self
+                .unbound
+                .take()
+                .expect("unbound engine handoff must own its runtime"),
+            BrowserSelectedTargetEngineDisposition::Discard(owner) => runtimes
+                .entries
+                .get_mut(owner)
+                .and_then(|runtime| runtime.engine.take())
+                .expect("discardable selected Target must own its runtime"),
+            BrowserSelectedTargetEngineDisposition::Retain(_) => {
+                unreachable!("retained engine cannot be moved into its successor")
+            }
         }
     }
 
     pub(super) fn install_unbound_engine(
         &mut self,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         engine: NavigationEngine,
     ) -> Result<(), BrowserTargetEngineOwnerMismatch> {
-        if self.selected_owner.is_some() {
+        if selected_owner.is_some() {
             return Err(BrowserTargetEngineOwnerMismatch {
-                selected: self.selected_owner.clone(),
+                selected: selected_owner.cloned(),
                 requested: None,
             });
         }
-        self.selected = self.configure_and_wrap(engine);
+        self.unbound = Some(self.configure_and_wrap(engine));
         Ok(())
     }
 
     pub(super) fn adopt_target_engine(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         owner: BrowserPageOwnerKey,
         residence: BrowserTargetEngineResidence,
         engine: NavigationEngine,
@@ -325,28 +395,23 @@ impl BrowserTargetEngineRegistry {
         let engine = self.configure_and_wrap(engine);
         match residence {
             BrowserTargetEngineResidence::Selected => {
-                if self
-                    .selected_owner
-                    .as_ref()
-                    .is_some_and(|selected| selected != &owner)
-                {
+                if selected_owner != Some(&owner) {
                     return Err(BrowserTargetEngineOwnerMismatch {
-                        selected: self.selected_owner.clone(),
+                        selected: selected_owner.cloned(),
                         requested: Some(owner),
                     });
                 }
-                self.retained.remove(&owner);
-                self.selected = engine;
-                self.selected_owner = Some(owner);
+                runtimes.entries.entry(owner).or_default().engine = Some(engine);
+                self.unbound = None;
             }
             BrowserTargetEngineResidence::Retained => {
-                if self.selected_owner.as_ref() == Some(&owner) {
+                if selected_owner == Some(&owner) {
                     return Err(BrowserTargetEngineOwnerMismatch {
-                        selected: self.selected_owner.clone(),
+                        selected: selected_owner.cloned(),
                         requested: None,
                     });
                 }
-                self.retained.insert(owner, engine);
+                runtimes.entries.entry(owner).or_default().engine = Some(engine);
             }
         }
         Ok(())
@@ -354,141 +419,190 @@ impl BrowserTargetEngineRegistry {
 
     pub(super) fn handoff_target_engine<F>(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         handoff: BrowserTargetEngineHandoff,
         create_replacement: F,
     ) -> Result<BrowserTargetEngineHandoffOutcome, BrowserTargetEngineOwnerMismatch>
     where
         F: FnOnce() -> NavigationEngine,
     {
-        self.validate_current(&handoff.current)?;
+        Self::validate_current(selected_owner, &handoff.current)?;
         if handoff.current.expected_owner() == Some(&handoff.next) {
-            self.selected_owner = Some(handoff.next);
             return Ok(BrowserTargetEngineHandoffOutcome::ReusedSelected);
         }
 
-        if let Some(next) = self.retained.remove(&handoff.next) {
-            let previous = std::mem::replace(&mut self.selected, next);
-            self.retain_previous_if_requested(&handoff.current, previous);
-            self.selected_owner = Some(handoff.next);
+        if runtimes
+            .entries
+            .get(&handoff.next)
+            .is_some_and(|runtime| runtime.engine.is_some())
+        {
+            self.clear_discarded_current(runtimes, &handoff.current);
+            self.unbound = None;
+            runtimes.prune_empty();
             return Ok(BrowserTargetEngineHandoffOutcome::RestoredRetained);
         }
 
         if handoff.current.owner_to_retain().is_some() {
             let replacement = self.configure_and_wrap(create_replacement());
-            let previous = std::mem::replace(&mut self.selected, replacement);
-            self.retain_previous_if_requested(&handoff.current, previous);
-            self.selected_owner = Some(handoff.next);
+            runtimes.entries.entry(handoff.next).or_default().engine = Some(replacement);
+            self.unbound = None;
             return Ok(BrowserTargetEngineHandoffOutcome::CreatedReplacement);
         }
 
         // No Page is resident in the current Target, so its selected engine
         // can become the next Target's engine without manufacturing a second
         // renderer owner.
-        self.selected_owner = Some(handoff.next);
+        let previous = self.take_reusable_current(runtimes, &handoff.current);
+        runtimes.entries.entry(handoff.next).or_default().engine = Some(previous);
+        runtimes.prune_empty();
         Ok(BrowserTargetEngineHandoffOutcome::ReusedSelected)
     }
 
     pub(super) fn handoff_browser_context_engine<F>(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         handoff: BrowserContextEngineHandoff,
         create_replacement: F,
     ) -> Result<BrowserTargetEngineHandoffOutcome, BrowserTargetEngineOwnerMismatch>
     where
         F: FnOnce() -> NavigationEngine,
     {
-        self.validate_current(&handoff.current)?;
-        let (next, outcome) = match handoff
+        Self::validate_current(selected_owner, &handoff.current)?;
+        let next_is_retained = handoff
             .next
             .as_ref()
-            .and_then(|owner| self.retained.remove(owner))
-        {
-            Some(next) => (next, BrowserTargetEngineHandoffOutcome::RestoredRetained),
-            None => (
-                self.configure_and_wrap(create_replacement()),
-                BrowserTargetEngineHandoffOutcome::CreatedReplacement,
-            ),
+            .and_then(|owner| runtimes.entries.get(owner))
+            .is_some_and(|runtime| runtime.engine.is_some());
+        let replacement =
+            (!next_is_retained).then(|| self.configure_and_wrap(create_replacement()));
+        self.clear_discarded_current(runtimes, &handoff.current);
+        match handoff.next {
+            Some(next) => {
+                if let Some(replacement) = replacement {
+                    runtimes.entries.entry(next).or_default().engine = Some(replacement);
+                }
+                self.unbound = None;
+            }
+            None => {
+                self.unbound = replacement;
+            }
+        }
+        runtimes.prune_empty();
+        let outcome = if next_is_retained {
+            BrowserTargetEngineHandoffOutcome::RestoredRetained
+        } else {
+            BrowserTargetEngineHandoffOutcome::CreatedReplacement
         };
-        let previous = std::mem::replace(&mut self.selected, next);
-        self.retain_previous_if_requested(&handoff.current, previous);
-        self.selected_owner = handoff.next;
         Ok(outcome)
     }
 
-    pub(super) fn discard_target_page_runtime(&mut self, target_id: &str) {
-        self.retained
-            .retain(|owner, _| owner.target_id() != target_id);
-    }
-
-    pub(super) fn forget_target(&mut self, target_id: &str) {
-        self.discard_target_page_runtime(target_id);
-        if self
-            .selected_owner
-            .as_ref()
-            .is_some_and(|owner| owner.target_id() == target_id)
-        {
-            self.selected_owner = None;
+    pub(super) fn discard_target_page_runtime(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
+        target_id: &str,
+    ) {
+        for (owner, runtime) in &mut runtimes.entries {
+            if owner.target_id() == target_id && selected_owner != Some(owner) {
+                runtime.engine = None;
+            }
         }
+        runtimes.prune_empty();
     }
 
-    pub(super) fn forget_browser_context(&mut self, browser_context_id: &str) {
-        self.retained
-            .retain(|owner, _| owner.browser_context_id() != browser_context_id);
-        if self
-            .selected_owner
-            .as_ref()
-            .is_some_and(|owner| owner.browser_context_id() == browser_context_id)
-        {
-            self.selected_owner = None;
+    pub(super) fn retire_target(
+        &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
+        owner: &BrowserPageOwnerKey,
+        unbind_selected: bool,
+    ) {
+        if let Some(runtime) = runtimes.entries.get_mut(owner) {
+            if unbind_selected && selected_owner == Some(owner) {
+                if let Some(engine) = runtime.engine.take() {
+                    self.unbound = Some(engine);
+                }
+            } else if selected_owner != Some(owner) {
+                runtime.engine = None;
+            }
         }
+        runtimes.prune_empty();
     }
 
-    pub(super) fn retire_target(&mut self, owner: &BrowserPageOwnerKey, unbind_selected: bool) {
-        self.retained.remove(owner);
-        if unbind_selected && self.selected_owner.as_ref() == Some(owner) {
-            self.selected_owner = None;
-        }
+    pub(super) fn retained_count(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
+    ) -> usize {
+        self.retained_keys(runtimes, selected_owner).count()
     }
 
-    pub(super) fn retained_count(&self) -> usize {
-        self.retained.len()
-    }
-
-    pub(super) fn retained_keys(&self) -> impl Iterator<Item = &BrowserPageOwnerKey> {
-        self.retained.keys()
+    pub(super) fn retained_keys<'a>(
+        &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&'a BrowserPageOwnerKey>,
+    ) -> impl Iterator<Item = &'a BrowserPageOwnerKey> {
+        runtimes.entries.iter().filter_map(move |(owner, runtime)| {
+            (runtime.engine.is_some() && selected_owner != Some(owner)).then_some(owner)
+        })
     }
 
     pub(super) fn clone_retained_engine(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&BrowserPageOwnerKey>,
         owner: &BrowserPageOwnerKey,
     ) -> Option<NavigationEngine> {
-        self.retained.get(owner).map(|owner| owner.engine.clone())
+        if selected_owner == Some(owner) {
+            return None;
+        }
+        runtimes
+            .entries
+            .get(owner)
+            .and_then(|runtime| runtime.engine.as_ref())
+            .map(|owner| owner.engine.clone())
     }
 
-    pub(super) fn retained_renderer_owner_ids(&self) -> impl Iterator<Item = u64> + '_ {
-        self.retained
-            .values()
+    pub(super) fn retained_renderer_owner_ids<'a>(
+        &'a self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        selected_owner: Option<&'a BrowserPageOwnerKey>,
+    ) -> impl Iterator<Item = u64> + 'a {
+        self.retained_keys(runtimes, selected_owner)
+            .filter_map(|owner| runtimes.entries.get(owner))
+            .filter_map(|runtime| runtime.engine.as_ref())
             .map(|owner| owner.engine.renderer_owner_id_for_diagnostics())
     }
 }
 
 impl BrowserNavigationOwner {
     pub(super) fn active_engine(&self) -> &NavigationEngine {
-        self.target_engines.selected_engine()
+        self.target_engines
+            .selected_engine(&self.target_runtimes, self.selected_target_engine_owner())
     }
 
     pub(super) fn active_engine_mut(&mut self) -> &mut NavigationEngine {
-        self.target_engines.selected_engine_mut()
+        let selected_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines
+            .selected_engine_mut(&mut self.target_runtimes, selected_owner.as_ref())
     }
 
     pub fn selected_target_engine_owner(&self) -> Option<&BrowserPageOwnerKey> {
-        self.target_engines.selected_owner()
+        let browser_context_id = self.browser_contexts.selected()?;
+        let target_id = self.targets.active_target(browser_context_id)?;
+        self.target_runtimes.entries.keys().find(|owner| {
+            owner.browser_context_id() == browser_context_id.as_str()
+                && owner.target_id() == target_id.as_str()
+        })
     }
 
     /// Transitional exact-engine access for activity-source routing. The
     /// caller has already resolved the physical active Target; new operations
     /// should be expressed as semantic Browser Owner methods instead.
     pub fn active_engine_for_activity_source_mut(&mut self) -> &mut NavigationEngine {
-        self.target_engines.selected_engine_mut()
+        self.active_engine_mut()
     }
 
     /// Transitional exact retained-engine access for activity-source routing.
@@ -497,13 +611,17 @@ impl BrowserNavigationOwner {
         browser_context_id: &str,
         target_id: &str,
     ) -> Option<&mut NavigationEngine> {
-        self.target_engines
-            .retained_engine_mut(&BrowserPageOwnerKey::new(browser_context_id, target_id))
+        let selected_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines.retained_engine_mut(
+            &mut self.target_runtimes,
+            selected_owner.as_ref(),
+            &BrowserPageOwnerKey::new(browser_context_id, target_id),
+        )
     }
 
     pub fn set_renderer_output_transport_sender(&mut self, sender: RendererOutputTransportSender) {
         self.target_engines
-            .set_renderer_output_transport_sender(sender);
+            .set_renderer_output_transport_sender(&self.target_runtimes, sender);
     }
 
     pub fn configure_detached_engine(&self, engine: &NavigationEngine) {
@@ -514,7 +632,9 @@ impl BrowserNavigationOwner {
         &mut self,
         engine: NavigationEngine,
     ) -> Result<(), BrowserTargetEngineOwnerMismatch> {
-        self.target_engines.install_unbound_engine(engine)
+        let selected_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines
+            .install_unbound_engine(selected_owner.as_ref(), engine)
     }
 
     pub fn adopt_target_engine(
@@ -523,8 +643,14 @@ impl BrowserNavigationOwner {
         residence: BrowserTargetEngineResidence,
         engine: NavigationEngine,
     ) -> Result<(), BrowserTargetEngineOwnerMismatch> {
-        self.target_engines
-            .adopt_target_engine(owner, residence, engine)
+        let selected_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines.adopt_target_engine(
+            &mut self.target_runtimes,
+            selected_owner.as_ref(),
+            owner,
+            residence,
+            engine,
+        )
     }
 
     /// Adopts a loaded engine for one exact registered Target.
@@ -550,8 +676,7 @@ impl BrowserNavigationOwner {
         } else {
             BrowserTargetEngineResidence::Retained
         };
-        self.target_engines
-            .adopt_target_engine(owner, engine_residence, engine)?;
+        self.adopt_target_engine(owner, engine_residence, engine)?;
         Ok(engine_residence)
     }
 
@@ -581,7 +706,7 @@ impl BrowserNavigationOwner {
             );
         }
         let Some(owner) = authoritative_owner else {
-            self.target_engines.install_unbound_engine(engine)?;
+            self.install_unbound_engine(engine)?;
             return Ok(None);
         };
         self.adopt_registered_target_engine(owner, engine).map(Some)
@@ -595,16 +720,23 @@ impl BrowserNavigationOwner {
     where
         F: FnOnce() -> NavigationEngine,
     {
-        self.target_engines
-            .handoff_target_engine(handoff, create_replacement)
+        let selected_owner = self.selected_target_engine_owner().cloned();
+        self.target_engines.handoff_target_engine(
+            &mut self.target_runtimes,
+            selected_owner.as_ref(),
+            handoff,
+            create_replacement,
+        )
     }
 
     pub fn retained_background_engine_count(&self) -> usize {
-        self.target_engines.retained_count()
+        self.target_engines
+            .retained_count(&self.target_runtimes, self.selected_target_engine_owner())
     }
 
     pub fn retained_background_engine_keys(&self) -> impl Iterator<Item = &BrowserPageOwnerKey> {
-        self.target_engines.retained_keys()
+        self.target_engines
+            .retained_keys(&self.target_runtimes, self.selected_target_engine_owner())
     }
 
     pub fn clone_retained_background_engine(
@@ -612,8 +744,11 @@ impl BrowserNavigationOwner {
         browser_context_id: &str,
         target_id: &str,
     ) -> Option<NavigationEngine> {
-        self.target_engines
-            .clone_retained_engine(&BrowserPageOwnerKey::new(browser_context_id, target_id))
+        self.target_engines.clone_retained_engine(
+            &self.target_runtimes,
+            self.selected_target_engine_owner(),
+            &BrowserPageOwnerKey::new(browser_context_id, target_id),
+        )
     }
 }
 
@@ -654,25 +789,65 @@ mod tests {
         (owner, key)
     }
 
+    fn topology_for(
+        owner: &BrowserNavigationOwner,
+        active: &BrowserPageOwnerKey,
+        background: &[&BrowserPageOwnerKey],
+    ) -> BrowserTargetTopologyProjection {
+        let slot = |key: &BrowserPageOwnerKey| {
+            BrowserTargetSlotProjection::new(
+                owner
+                    .target_handle(key.target_id())
+                    .expect("test Target handle"),
+                owner
+                    .page_residence_handle(key)
+                    .expect("test Page residence handle"),
+            )
+        };
+        BrowserTargetTopologyProjection::new(
+            active.browser_context_id(),
+            Some(slot(active)),
+            background.iter().map(|key| slot(key)).collect::<Vec<_>>(),
+        )
+    }
+
+    fn register_background_target(
+        owner: &mut BrowserNavigationOwner,
+        active: &BrowserPageOwnerKey,
+        background: &BrowserPageOwnerKey,
+    ) {
+        let projection = topology_for(owner, active, &[]);
+        owner
+            .register_background_target(
+                background.browser_context_id(),
+                background.target_id(),
+                projection,
+            )
+            .expect("test background Target should register");
+    }
+
     #[test]
-    fn registered_engine_adoption_rejects_owner_divergence_without_mutation() {
+    fn registered_engine_adoption_rejects_non_selected_owner_without_mutation() {
         let (mut owner, target_a) = owner_with_selected_target();
         let divergent = BrowserPageOwnerKey::new("context-1", "target-b");
-        owner.target_engines.selected_owner = Some(divergent.clone());
         let selected_renderer_owner = owner.active_renderer_owner_id_for_diagnostics();
 
         let error = owner
-            .adopt_registered_target_engine(target_a.clone(), engine())
-            .expect_err("divergent selected engine owner must reject adoption");
+            .adopt_target_engine(
+                divergent.clone(),
+                BrowserTargetEngineResidence::Selected,
+                engine(),
+            )
+            .expect_err("topology must reject a different selected engine owner");
 
         assert_eq!(
             error,
-            BrowserTargetEngineAdoptionError::EngineOwner(BrowserTargetEngineOwnerMismatch {
-                selected: Some(divergent.clone()),
-                requested: Some(target_a),
-            })
+            BrowserTargetEngineOwnerMismatch {
+                selected: Some(target_a.clone()),
+                requested: Some(divergent),
+            }
         );
-        assert_eq!(owner.selected_target_engine_owner(), Some(&divergent));
+        assert_eq!(owner.selected_target_engine_owner(), Some(&target_a));
         assert_eq!(
             owner.active_renderer_owner_id_for_diagnostics(),
             selected_renderer_owner,
@@ -683,8 +858,7 @@ mod tests {
 
     #[test]
     fn target_handoff_parks_loaded_current_and_restores_exact_retained_engine() {
-        let mut owner = BrowserNavigationOwner::new(engine());
-        let target_a = BrowserPageOwnerKey::new("context-1", "target-a");
+        let (mut owner, target_a) = owner_with_selected_target();
         let target_b = BrowserPageOwnerKey::new("context-1", "target-b");
         owner
             .adopt_target_engine(
@@ -694,6 +868,7 @@ mod tests {
             )
             .expect("target A should bind selected engine");
         let target_a_renderer_owner = owner.active_renderer_owner_id_for_diagnostics();
+        register_background_target(&mut owner, &target_a, &target_b);
         owner
             .adopt_target_engine(
                 target_b.clone(),
@@ -706,18 +881,24 @@ mod tests {
             .next()
             .expect("retained target B renderer owner");
 
-        let outcome = owner
-            .handoff_target_engine(
-                BrowserTargetEngineHandoff::new(
+        let projection = topology_for(&owner, &target_a, &[&target_b]);
+        let activation = owner
+            .activate_target(
+                target_b.browser_context_id(),
+                target_b.target_id(),
+                projection,
+                BrowserContextSelectionProjection::new(
+                    Some(target_a.browser_context_id().to_owned()),
                     BrowserSelectedTargetEngineDisposition::Retain(target_a.clone()),
-                    target_b.clone(),
-                )
-                .expect("test targets share one BrowserContext"),
+                ),
                 engine,
             )
             .expect("exact target handoff should commit");
 
-        assert_eq!(outcome, BrowserTargetEngineHandoffOutcome::RestoredRetained);
+        assert_eq!(
+            activation.engine_outcome(),
+            Some(BrowserTargetEngineHandoffOutcome::RestoredRetained)
+        );
         assert_eq!(owner.selected_target_engine_owner(), Some(&target_b));
         assert_eq!(
             owner.active_renderer_owner_id_for_diagnostics(),
@@ -732,8 +913,7 @@ mod tests {
 
     #[test]
     fn target_handoff_reuses_unloaded_current_without_creating_replacement() {
-        let mut owner = BrowserNavigationOwner::new(engine());
-        let target_a = BrowserPageOwnerKey::new("context-1", "target-a");
+        let (mut owner, target_a) = owner_with_selected_target();
         let target_b = BrowserPageOwnerKey::new("context-1", "target-b");
         owner
             .adopt_target_engine(
@@ -743,15 +923,19 @@ mod tests {
             )
             .expect("target A should bind selected engine");
         let renderer_owner = owner.active_renderer_owner_id_for_diagnostics();
+        register_background_target(&mut owner, &target_a, &target_b);
         let mut replacement_created = false;
 
-        let outcome = owner
-            .handoff_target_engine(
-                BrowserTargetEngineHandoff::new(
+        let projection = topology_for(&owner, &target_a, &[&target_b]);
+        let activation = owner
+            .activate_target(
+                target_b.browser_context_id(),
+                target_b.target_id(),
+                projection,
+                BrowserContextSelectionProjection::new(
+                    Some(target_a.browser_context_id().to_owned()),
                     BrowserSelectedTargetEngineDisposition::Discard(target_a),
-                    target_b.clone(),
-                )
-                .expect("test targets share one BrowserContext"),
+                ),
                 || {
                     replacement_created = true;
                     engine()
@@ -759,7 +943,10 @@ mod tests {
             )
             .expect("unloaded target handoff should commit");
 
-        assert_eq!(outcome, BrowserTargetEngineHandoffOutcome::ReusedSelected);
+        assert_eq!(
+            activation.engine_outcome(),
+            Some(BrowserTargetEngineHandoffOutcome::ReusedSelected)
+        );
         assert!(!replacement_created);
         assert_eq!(owner.selected_target_engine_owner(), Some(&target_b));
         assert_eq!(
@@ -786,17 +973,9 @@ mod tests {
 
     #[test]
     fn stale_handoff_cannot_move_another_targets_engine() {
-        let mut owner = BrowserNavigationOwner::new(engine());
-        let target_a = BrowserPageOwnerKey::new("context-1", "target-a");
-        let target_b = BrowserPageOwnerKey::new("context-1", "target-b");
+        let (mut owner, selected) = owner_with_selected_target();
+        let target_a = BrowserPageOwnerKey::new("context-1", "target-stale");
         let target_c = BrowserPageOwnerKey::new("context-1", "target-c");
-        owner
-            .adopt_target_engine(
-                target_b.clone(),
-                BrowserTargetEngineResidence::Selected,
-                engine(),
-            )
-            .expect("target B should bind selected engine");
         let renderer_owner = owner.active_renderer_owner_id_for_diagnostics();
 
         let error = owner
@@ -810,9 +989,9 @@ mod tests {
             )
             .expect_err("stale target A handoff must be rejected");
 
-        assert_eq!(error.selected(), Some(&target_b));
+        assert_eq!(error.selected(), Some(&selected));
         assert_eq!(error.requested(), Some(&target_a));
-        assert_eq!(owner.selected_target_engine_owner(), Some(&target_b));
+        assert_eq!(owner.selected_target_engine_owner(), Some(&selected));
         assert_eq!(
             owner.active_renderer_owner_id_for_diagnostics(),
             renderer_owner

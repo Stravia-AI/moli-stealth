@@ -1,12 +1,10 @@
-use std::collections::HashMap;
-
 use crate::browser_host::PageResidenceIdentity;
 use crate::page::RendererPageLifetimeOwner;
 
 use super::{
     BrowserDocumentNavigation, BrowserNavigationOwner, BrowserNavigationTraceEvent,
     BrowserPageOwnerKey, BrowserPageResidenceRegistryError, BrowserTargetRegistryError,
-    BrowserTargetResidence,
+    BrowserTargetResidence, target_runtime_registry::BrowserTargetRuntimeRegistry,
 };
 
 /// Browser-level terminal transition for one exact Target residence.
@@ -143,7 +141,7 @@ impl From<BrowserPageResidenceRegistryError> for BrowserTargetTerminationCommitE
 }
 
 #[derive(Clone, Debug)]
-enum BrowserTargetTerminationState {
+pub(super) enum BrowserTargetTerminationState {
     Crashed,
     Recovering(BrowserDocumentNavigation),
     Closed,
@@ -162,20 +160,19 @@ struct BrowserTargetTerminationCommitRollback {
 /// failed/superseded recovery from accidentally authorizing an unrelated Page
 /// replacement.
 #[derive(Default)]
-pub(super) struct BrowserTargetTerminationRegistry {
-    states: HashMap<BrowserPageOwnerKey, BrowserTargetTerminationState>,
-}
+pub(super) struct BrowserTargetTerminationRegistry;
 
 impl BrowserTargetTerminationRegistry {
     pub(super) fn accepts_termination(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         kind: BrowserTargetTerminationKind,
     ) -> bool {
         match kind {
-            BrowserTargetTerminationKind::Crash => !self.states.contains_key(owner),
+            BrowserTargetTerminationKind::Crash => self.state(runtimes, owner).is_none(),
             BrowserTargetTerminationKind::Close => !matches!(
-                self.states.get(owner),
+                self.state(runtimes, owner),
                 Some(BrowserTargetTerminationState::Closed)
             ),
         }
@@ -183,10 +180,11 @@ impl BrowserTargetTerminationRegistry {
 
     pub(super) fn accepts_page_replacement(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) -> bool {
-        match self.states.get(owner) {
+        match self.state(runtimes, owner) {
             None => true,
             Some(
                 BrowserTargetTerminationState::Crashed | BrowserTargetTerminationState::Closed,
@@ -197,78 +195,97 @@ impl BrowserTargetTerminationRegistry {
 
     pub(super) fn begin_navigation(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) {
         if matches!(
-            self.states.get(owner),
+            self.state(runtimes, owner),
             Some(
                 BrowserTargetTerminationState::Crashed
                     | BrowserTargetTerminationState::Recovering(_)
             )
         ) {
-            self.states.insert(
-                owner.clone(),
-                BrowserTargetTerminationState::Recovering(navigation.clone()),
-            );
+            runtimes
+                .entries
+                .entry(owner.clone())
+                .or_default()
+                .termination = Some(BrowserTargetTerminationState::Recovering(
+                navigation.clone(),
+            ));
         }
     }
 
     pub(super) fn cancel_navigation_if_matches(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) {
-        if self.states.get(owner).is_some_and(|state| {
+        if self.state(runtimes, owner).is_some_and(|state| {
             matches!(
                 state,
                 BrowserTargetTerminationState::Recovering(expected) if expected == navigation
             )
         }) {
-            self.states
-                .insert(owner.clone(), BrowserTargetTerminationState::Crashed);
+            runtimes
+                .entries
+                .entry(owner.clone())
+                .or_default()
+                .termination = Some(BrowserTargetTerminationState::Crashed);
         }
     }
 
     pub(super) fn commit_navigation(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         navigation: &BrowserDocumentNavigation,
     ) {
-        if self.states.get(owner).is_some_and(|state| {
+        if self.state(runtimes, owner).is_some_and(|state| {
             matches!(
                 state,
                 BrowserTargetTerminationState::Recovering(expected) if expected == navigation
             )
         }) {
-            self.states.remove(owner);
+            if let Some(runtime) = runtimes.entries.get_mut(owner) {
+                runtime.termination = None;
+            }
+            runtimes.prune_empty();
         }
     }
 
     fn commit_with_rollback_if_accepted(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         kind: BrowserTargetTerminationKind,
     ) -> Option<BrowserTargetTerminationCommitRollback> {
-        if !self.accepts_termination(owner, kind) {
+        if !self.accepts_termination(runtimes, owner, kind) {
             return None;
         }
         let state = match kind {
             BrowserTargetTerminationKind::Crash => BrowserTargetTerminationState::Crashed,
             BrowserTargetTerminationKind::Close => BrowserTargetTerminationState::Closed,
         };
-        let previous = self.states.insert(owner.clone(), state);
+        let previous = runtimes
+            .entries
+            .entry(owner.clone())
+            .or_default()
+            .termination
+            .replace(state);
         Some(BrowserTargetTerminationCommitRollback { previous })
     }
 
     fn rollback_commit(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         kind: BrowserTargetTerminationKind,
         rollback: BrowserTargetTerminationCommitRollback,
     ) -> bool {
         let current_matches = matches!(
-            (kind, self.states.get(owner)),
+            (kind, self.state(runtimes, owner)),
             (
                 BrowserTargetTerminationKind::Crash,
                 Some(BrowserTargetTerminationState::Crashed)
@@ -280,17 +297,22 @@ impl BrowserTargetTerminationRegistry {
         if !current_matches {
             return false;
         }
-        if let Some(previous) = rollback.previous {
-            self.states.insert(owner.clone(), previous);
-        } else {
-            self.states.remove(owner);
+        if let Some(runtime) = runtimes.entries.get_mut(owner) {
+            runtime.termination = rollback.previous;
         }
+        runtimes.prune_empty();
         true
     }
 
-    pub(super) fn forget_target(&mut self, target_id: &str) {
-        self.states
-            .retain(|owner, _| owner.target_id() != target_id);
+    fn state<'a>(
+        &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        owner: &BrowserPageOwnerKey,
+    ) -> Option<&'a BrowserTargetTerminationState> {
+        runtimes
+            .entries
+            .get(owner)
+            .and_then(|runtime| runtime.termination.as_ref())
     }
 }
 
@@ -303,11 +325,15 @@ impl BrowserNavigationOwner {
         kind: BrowserTargetTerminationKind,
     ) -> Option<BrowserTargetTerminationRequest> {
         if self.targets.validate_target_owner(owner).is_err()
-            || !self.target_terminations.accepts_termination(owner, kind)
+            || !self
+                .target_terminations
+                .accepts_termination(&self.target_runtimes, owner, kind)
         {
             return None;
         }
-        let page = self.page_residences.capture_termination(owner)?;
+        let page = self
+            .page_residences
+            .capture_termination(&self.target_runtimes, owner)?;
         Some(BrowserTargetTerminationRequest {
             owner: owner.clone(),
             page,
@@ -319,15 +345,18 @@ impl BrowserNavigationOwner {
         &self,
         request: BrowserTargetTerminationRequest,
     ) -> Option<BrowserTargetTerminationPermit> {
-        if !self
-            .target_terminations
-            .accepts_termination(request.owner(), request.kind())
-            || self.targets.validate_target_owner(request.owner()).is_err()
+        if !self.target_terminations.accepts_termination(
+            &self.target_runtimes,
+            request.owner(),
+            request.kind(),
+        ) || self.targets.validate_target_owner(request.owner()).is_err()
             || request.page().browser_context_id() != request.owner().browser_context_id()
             || request.page().target_id() != Some(request.owner().target_id())
-            || !self
-                .page_residences
-                .accepts_transition(request.owner(), request.page())
+            || !self.page_residences.accepts_transition(
+                &self.target_runtimes,
+                request.owner(),
+                request.page(),
+            )
         {
             return None;
         }
@@ -343,10 +372,12 @@ impl BrowserNavigationOwner {
         let request = permit.request;
         let kind = request.kind();
         self.targets.validate_target_owner(request.owner())?;
-        let Some(termination_rollback) = self
-            .target_terminations
-            .commit_with_rollback_if_accepted(request.owner(), kind)
-        else {
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
+        let Some(termination_rollback) = self.target_terminations.commit_with_rollback_if_accepted(
+            &mut self.target_runtimes,
+            request.owner(),
+            kind,
+        ) else {
             return Err(
                 BrowserTargetTerminationCommitError::TargetNoLongerAcceptsTermination {
                     owner: request.owner().clone(),
@@ -359,6 +390,7 @@ impl BrowserNavigationOwner {
                 Ok(removal) => Some(removal),
                 Err(error) => {
                     let rolled_back = self.target_terminations.rollback_commit(
+                        &mut self.target_runtimes,
                         request.owner(),
                         kind,
                         termination_rollback,
@@ -375,6 +407,7 @@ impl BrowserNavigationOwner {
         };
         let (terminal_page, retired_renderer_page_owner) =
             match self.page_residences.commit_termination(
+                &mut self.target_runtimes,
                 request.owner(),
                 request.page(),
                 kind == BrowserTargetTerminationKind::Close,
@@ -389,6 +422,7 @@ impl BrowserNavigationOwner {
                         );
                     }
                     let rolled_back = self.target_terminations.rollback_commit(
+                        &mut self.target_runtimes,
                         request.owner(),
                         kind,
                         termination_rollback,
@@ -407,19 +441,29 @@ impl BrowserNavigationOwner {
         let target_id = request.owner().target_id();
         let pending_navigation = self
             .document_navigations
-            .pending_record(request.owner())
+            .pending_record(&self.target_runtimes, request.owner())
             .cloned();
-        self.target_engines
-            .retire_target(request.owner(), kind == BrowserTargetTerminationKind::Close);
-        self.document_navigations.forget_target(target_id);
+        self.target_engines.retire_target(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
+            request.owner(),
+            kind == BrowserTargetTerminationKind::Close,
+        );
         match kind {
             BrowserTargetTerminationKind::Crash => {
-                self.navigation_histories.clear(request.owner());
-                self.initial_empty_documents.mark_exited(request.owner());
+                self.document_navigations
+                    .forget_target(&mut self.target_runtimes, target_id);
+                self.navigation_histories
+                    .clear(&mut self.target_runtimes, request.owner());
+                self.initial_empty_documents
+                    .mark_exited(&mut self.target_runtimes, request.owner());
             }
             BrowserTargetTerminationKind::Close => {
-                self.navigation_histories.forget_target(target_id);
-                self.initial_empty_documents.forget_target(target_id);
+                let removed = self.target_runtimes.remove(request.owner());
+                debug_assert!(
+                    removed.is_some(),
+                    "closed Target must retire its exact aggregate runtime record"
+                );
             }
         }
         let termination = BrowserTargetTermination {
@@ -566,6 +610,10 @@ mod tests {
         );
         assert!(!owner.accepts_pending_document_navigation(&key, &navigation));
         assert_eq!(owner.retained_background_engine_count(), 0);
+        assert!(
+            !owner.target_runtimes.entries.contains_key(&key),
+            "Target close must remove its aggregate runtime record"
+        );
         assert!(target_handle.is_retired());
         assert!(owner.target_initial_empty_document(&key).is_none());
         let created = subscriber

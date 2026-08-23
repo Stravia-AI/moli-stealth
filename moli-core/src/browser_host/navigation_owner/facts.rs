@@ -55,10 +55,13 @@ impl BrowserNavigationOwner {
                 BrowserDocumentLifecycleWaitOutcome::Superseded,
             );
         }
-        if let Some(outcome) =
-            self.document_lifecycles
-                .outcome(&owner, &expected_page, expected_document, milestone)
-        {
+        if let Some(outcome) = self.document_lifecycles.outcome(
+            &self.target_runtimes,
+            &owner,
+            &expected_page,
+            expected_document,
+            milestone,
+        ) {
             return BrowserDocumentLifecycleWaitTicket::resolved(
                 Some(expected_page),
                 Some(expected_document),
@@ -152,7 +155,8 @@ impl BrowserNavigationOwner {
         );
         debug_assert_eq!(current_page.target_id(), Some(owner.target_id()));
         if let Some(previous_page) = previous_page.as_ref() {
-            self.document_lifecycles.retire_page(owner, previous_page);
+            self.document_lifecycles
+                .retire_page(&mut self.target_runtimes, owner, previous_page);
         }
         self.browser_facts.publish_batch(
             current_page.clone(),
@@ -218,7 +222,8 @@ impl BrowserNavigationOwner {
             self.page_owner_key_for_same_slot(previous_page).as_ref(),
             Some(owner)
         );
-        self.document_lifecycles.retire_page(owner, previous_page);
+        self.document_lifecycles
+            .retire_page(&mut self.target_runtimes, owner, previous_page);
         self.browser_facts.publish_batch(
             current_page.clone(),
             vec![
@@ -297,7 +302,8 @@ impl BrowserNavigationOwner {
             });
         }
         facts.push(target_fact);
-        self.document_lifecycles.retire_page(owner, previous_page);
+        self.document_lifecycles
+            .retire_page(&mut self.target_runtimes, owner, previous_page);
         self.browser_facts
             .publish_batch(terminal_page.clone(), facts)
     }
@@ -330,7 +336,7 @@ impl BrowserNavigationOwner {
         );
         debug_assert_eq!(owner.target_id(), target_id);
         self.document_lifecycles
-            .record(&owner, expected_page, events);
+            .record(&mut self.target_runtimes, &owner, expected_page, events);
         let facts = events
             .iter()
             .filter_map(|event| {
@@ -419,11 +425,11 @@ mod tests {
         let page_owner = BrowserPageOwnerKey::new("context-1", "target-1");
         let registration = owner
             .page_residences
-            .begin_target_registration(page_owner.clone())
+            .begin_target_registration(&mut owner.target_runtimes, page_owner.clone())
             .expect("test Page should stage");
         owner
             .page_residences
-            .commit_target_registration(registration);
+            .commit_target_registration(&mut owner.target_runtimes, registration);
         let page = owner
             .capture_page_residence(page_owner.browser_context_id(), page_owner.target_id())
             .expect("test Page should be live");
@@ -461,11 +467,11 @@ mod tests {
         let page_owner = BrowserPageOwnerKey::new("context-1", "target-1");
         let registration = owner
             .page_residences
-            .begin_target_registration(page_owner.clone())
+            .begin_target_registration(&mut owner.target_runtimes, page_owner.clone())
             .expect("test Page should stage");
         let handle = owner
             .page_residences
-            .commit_target_registration(registration);
+            .commit_target_registration(&mut owner.target_runtimes, registration);
         let original = owner
             .capture_page_residence(page_owner.browser_context_id(), page_owner.target_id())
             .expect("test Page should be live");
@@ -484,11 +490,11 @@ mod tests {
         let page_owner = BrowserPageOwnerKey::new("context-1", "target-1");
         let registration = owner
             .page_residences
-            .begin_target_registration(page_owner.clone())
+            .begin_target_registration(&mut owner.target_runtimes, page_owner.clone())
             .expect("test Page should stage");
         let handle = owner
             .page_residences
-            .commit_target_registration(registration);
+            .commit_target_registration(&mut owner.target_runtimes, registration);
         let page = owner
             .capture_page_residence(page_owner.browser_context_id(), page_owner.target_id())
             .expect("test Page should be live");

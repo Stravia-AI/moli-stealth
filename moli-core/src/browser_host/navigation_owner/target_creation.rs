@@ -46,7 +46,8 @@ impl BrowserNavigationOwner {
         creation_metadata: &BrowserTargetCreationMetadata,
     ) {
         if let Some(seed) = creation_metadata.initial_empty_document().cloned() {
-            self.initial_empty_documents.begin(owner, seed);
+            self.initial_empty_documents
+                .begin(&mut self.target_runtimes, owner, seed);
         }
     }
 }

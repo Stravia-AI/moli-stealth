@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::{
     browser_host::{BrowserDocumentLifecycleWaitOutcome, PageResidenceIdentity},
     page::{
@@ -9,7 +7,7 @@ use crate::{
     },
 };
 
-use super::BrowserPageOwnerKey;
+use super::{BrowserPageOwnerKey, target_runtime_registry::BrowserTargetRuntimeRegistry};
 
 /// Small Browser-owned current-state index used to bootstrap lifecycle fact
 /// waits after the bounded journal has evicted an older milestone occurrence.
@@ -18,11 +16,9 @@ use super::BrowserPageOwnerKey;
 /// exact Page/Document record per live top-level Target; it does not retain
 /// protocol events, subscribers, physical Pages, or renderer callbacks.
 #[derive(Default)]
-pub(super) struct BrowserDocumentLifecycleRegistry {
-    records: HashMap<BrowserPageOwnerKey, BrowserDocumentLifecycleRecord>,
-}
+pub(super) struct BrowserDocumentLifecycleRegistry;
 
-struct BrowserDocumentLifecycleRecord {
+pub(super) struct BrowserDocumentLifecycleRecord {
     page: PageResidenceIdentity,
     document: RendererDocumentLifecycleIdentity,
     last_reached: Option<RendererDocumentLifecycleMilestone>,
@@ -32,6 +28,7 @@ struct BrowserDocumentLifecycleRecord {
 impl BrowserDocumentLifecycleRegistry {
     pub(super) fn record(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         page: &PageResidenceIdentity,
         events: &[RendererDocumentLifecycleEvent],
@@ -42,14 +39,17 @@ impl BrowserDocumentLifecycleRegistry {
                 document: event.document,
                 epoch: event.epoch,
             };
-            let record = self.records.entry(owner.clone()).or_insert_with(|| {
-                BrowserDocumentLifecycleRecord {
+            let record = runtimes
+                .entries
+                .entry(owner.clone())
+                .or_default()
+                .document_lifecycle
+                .get_or_insert_with(|| BrowserDocumentLifecycleRecord {
                     page: page.clone(),
                     document,
                     last_reached: None,
                     termination: None,
-                }
-            });
+                });
             if record.page != *page || record.document != document {
                 *record = BrowserDocumentLifecycleRecord {
                     page: page.clone(),
@@ -80,12 +80,13 @@ impl BrowserDocumentLifecycleRegistry {
 
     pub(super) fn outcome(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         page: &PageResidenceIdentity,
         document: RendererDocumentLifecycleIdentity,
         milestone: RendererDocumentLifecycleMilestone,
     ) -> Option<BrowserDocumentLifecycleWaitOutcome> {
-        let record = self.records.get(owner)?;
+        let record = runtimes.entries.get(owner)?.document_lifecycle.as_ref()?;
         if record.page != *page || record.document != document {
             return None;
         }
@@ -105,20 +106,21 @@ impl BrowserDocumentLifecycleRegistry {
 
     pub(super) fn retire_page(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         page: &PageResidenceIdentity,
     ) {
-        if self
-            .records
+        if runtimes
+            .entries
             .get(owner)
+            .and_then(|record| record.document_lifecycle.as_ref())
             .is_some_and(|record| record.page == *page)
         {
-            self.records.remove(owner);
+            if let Some(record) = runtimes.entries.get_mut(owner) {
+                record.document_lifecycle = None;
+            }
+            runtimes.prune_empty();
         }
-    }
-
-    pub(super) fn forget_target(&mut self, owner: &BrowserPageOwnerKey) {
-        self.records.remove(owner);
     }
 }
 
@@ -226,11 +228,13 @@ mod tests {
                 reason: RendererDocumentTerminationReason::Stopped,
             },
         );
-        let mut registry = BrowserDocumentLifecycleRegistry::default();
-        registry.record(&owner, &page, &[started, dcl, terminated]);
+        let mut registry = BrowserDocumentLifecycleRegistry;
+        let mut runtimes = BrowserTargetRuntimeRegistry::default();
+        registry.record(&mut runtimes, &owner, &page, &[started, dcl, terminated]);
 
         assert_eq!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(started),
@@ -240,6 +244,7 @@ mod tests {
         );
         assert!(matches!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(started),
@@ -250,9 +255,10 @@ mod tests {
                 ..
             })
         ));
-        registry.retire_page(&owner, &page);
+        registry.retire_page(&mut runtimes, &owner, &page);
         assert_eq!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(started),
@@ -279,11 +285,13 @@ mod tests {
                 reason: RendererLifecycleStartReason::ExplicitDocumentOpen,
             },
         );
-        let mut registry = BrowserDocumentLifecycleRegistry::default();
-        registry.record(&owner, &page, &[first, successor]);
+        let mut registry = BrowserDocumentLifecycleRegistry;
+        let mut runtimes = BrowserTargetRuntimeRegistry::default();
+        registry.record(&mut runtimes, &owner, &page, &[first, successor]);
 
         assert_eq!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(first),
@@ -293,6 +301,7 @@ mod tests {
         );
         assert_eq!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(successor),
@@ -318,11 +327,13 @@ mod tests {
                 RendererDocumentLifecycleMilestone::DomContentLoaded,
             ),
         );
-        let mut registry = BrowserDocumentLifecycleRegistry::default();
-        registry.record(&owner, &page, &[load, delayed_dcl]);
+        let mut registry = BrowserDocumentLifecycleRegistry;
+        let mut runtimes = BrowserTargetRuntimeRegistry::default();
+        registry.record(&mut runtimes, &owner, &page, &[load, delayed_dcl]);
 
         assert_eq!(
             registry.outcome(
+                &runtimes,
                 &owner,
                 &page,
                 identity(load),
@@ -352,11 +363,13 @@ mod tests {
         let mut navigation_owner =
             super::super::BrowserNavigationOwner::new(NavigationEngine::new());
         navigation_owner.document_lifecycles.record(
+            &mut navigation_owner.target_runtimes,
             &forgotten_owner,
             &forgotten_page,
             &[forgotten_load],
         );
         navigation_owner.document_lifecycles.record(
+            &mut navigation_owner.target_runtimes,
             &retained_owner,
             &retained_page,
             &[retained_load],
@@ -366,6 +379,7 @@ mod tests {
 
         assert_eq!(
             navigation_owner.document_lifecycles.outcome(
+                &navigation_owner.target_runtimes,
                 &forgotten_owner,
                 &forgotten_page,
                 identity(forgotten_load),
@@ -375,6 +389,7 @@ mod tests {
         );
         assert_eq!(
             navigation_owner.document_lifecycles.outcome(
+                &navigation_owner.target_runtimes,
                 &retained_owner,
                 &retained_page,
                 identity(retained_load),

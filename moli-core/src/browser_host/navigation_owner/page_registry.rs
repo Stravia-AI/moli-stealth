@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use crate::browser_host::page_residence::BrowserPageResidenceAdvanceError;
 use crate::browser_host::{
     BrowserContextId, BrowserPageResidenceHandle, BrowserPageRuntimeAccess,
@@ -7,7 +5,10 @@ use crate::browser_host::{
 };
 use crate::page::RendererPageLifetimeOwner;
 
-use super::{BrowserNavigationOwner, BrowserPageOwnerKey, BrowserTargetTopologyProjection};
+use super::{
+    BrowserNavigationOwner, BrowserPageOwnerKey, BrowserTargetTopologyProjection,
+    target_runtime_registry::BrowserTargetRuntimeRegistry,
+};
 
 /// Exact Page-slot registration or physical projection mismatch.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -105,9 +106,7 @@ impl std::error::Error for BrowserPageResidenceRegistryError {}
 /// invalidatable Page access; it cannot register, replace, or retire either
 /// Browser-owned lifetime by dropping that projection.
 #[derive(Default)]
-pub(super) struct BrowserPageResidenceRegistry {
-    entries: HashMap<BrowserPageOwnerKey, BrowserPageResidenceRecord>,
-}
+pub(super) struct BrowserPageResidenceRegistry;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BrowserPageResidenceRegistrationState {
@@ -115,7 +114,7 @@ enum BrowserPageResidenceRegistrationState {
     Live,
 }
 
-struct BrowserPageResidenceRecord {
+pub(super) struct BrowserPageResidenceRecord {
     handle: BrowserPageResidenceHandle,
     registration_state: BrowserPageResidenceRegistrationState,
     renderer_page_owner: Option<RendererPageLifetimeOwner>,
@@ -148,23 +147,37 @@ impl BrowserPageResidenceRecord {
         self.registration_state = BrowserPageResidenceRegistrationState::Live;
         true
     }
+
+    pub(super) fn into_renderer_page_owner(self) -> Option<RendererPageLifetimeOwner> {
+        let Self {
+            renderer_page_owner,
+            page_runtime_owner,
+            ..
+        } = self;
+        drop(page_runtime_owner);
+        renderer_page_owner
+    }
 }
 
 impl BrowserPageResidenceRegistry {
     pub(super) fn validate_context_registration(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         browser_context_id: &BrowserContextId,
         projection: &BrowserTargetTopologyProjection,
     ) -> Result<(), BrowserPageResidenceRegistryError> {
         let mut projected = Vec::<(BrowserPageOwnerKey, BrowserPageResidenceHandle)>::new();
         for slot in projection.slots() {
             let owner = BrowserPageOwnerKey::new(browser_context_id.as_str(), slot.target_id());
-            if self.entries.contains_key(&owner) {
+            if runtimes
+                .entries
+                .get(&owner)
+                .is_some_and(|runtime| runtime.page_residence.is_some())
+            {
                 return Err(BrowserPageResidenceRegistryError::DuplicateTarget(owner));
             }
             if let Some((first, _)) = self
-                .entries
-                .iter()
+                .page_records(runtimes)
                 .find(|(_, record)| record.handle.same_instance(slot.page_residence_handle()))
             {
                 return Err(
@@ -192,12 +205,12 @@ impl BrowserPageResidenceRegistry {
 
     pub(super) fn validate_projection(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         browser_context_id: &BrowserContextId,
         projection: &BrowserTargetTopologyProjection,
     ) -> Result<(), BrowserPageResidenceRegistryError> {
         let authoritative_count = self
-            .entries
-            .iter()
+            .page_records(runtimes)
             .filter(|(owner, record)| {
                 owner.browser_context_id() == browser_context_id.as_str() && record.is_live()
             })
@@ -211,7 +224,7 @@ impl BrowserPageResidenceRegistry {
         }
         for slot in projection.slots() {
             let owner = BrowserPageOwnerKey::new(browser_context_id.as_str(), slot.target_id());
-            let Some(authoritative) = self.entries.get(&owner) else {
+            let Some(authoritative) = self.record(runtimes, &owner) else {
                 return Err(BrowserPageResidenceRegistryError::UnknownTarget(owner));
             };
             if !authoritative.is_live() {
@@ -227,11 +240,12 @@ impl BrowserPageResidenceRegistry {
         Ok(())
     }
 
-    fn live_handle(
+    fn live_handle<'a>(
         &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
-    ) -> Result<&BrowserPageResidenceHandle, BrowserPageResidenceRegistryError> {
-        let Some(record) = self.entries.get(key) else {
+    ) -> Result<&'a BrowserPageResidenceHandle, BrowserPageResidenceRegistryError> {
+        let Some(record) = self.record(runtimes, key) else {
             return Err(BrowserPageResidenceRegistryError::UnknownTarget(
                 key.clone(),
             ));
@@ -244,24 +258,36 @@ impl BrowserPageResidenceRegistry {
         Ok(&record.handle)
     }
 
-    fn resolve(&self, expected: &PageResidenceIdentity) -> Option<BrowserPageOwnerKey> {
+    fn resolve(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        expected: &PageResidenceIdentity,
+    ) -> Option<BrowserPageOwnerKey> {
         let target_id = expected.target_id()?;
         let key = BrowserPageOwnerKey::new(expected.browser_context_id(), target_id);
-        self.live_handle(&key)
+        self.live_handle(runtimes, &key)
             .is_ok_and(|handle| handle.is_current(expected))
             .then_some(key)
     }
 
-    fn resolve_slot(&self, expected: &PageResidenceIdentity) -> Option<BrowserPageOwnerKey> {
+    fn resolve_slot(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        expected: &PageResidenceIdentity,
+    ) -> Option<BrowserPageOwnerKey> {
         let target_id = expected.target_id()?;
         let key = BrowserPageOwnerKey::new(expected.browser_context_id(), target_id);
-        self.live_handle(&key)
+        self.live_handle(runtimes, &key)
             .is_ok_and(|handle| handle.owns_identity_instance(expected))
             .then_some(key)
     }
 
-    pub(super) fn identity(&self, key: &BrowserPageOwnerKey) -> Option<PageResidenceIdentity> {
-        self.live_handle(key).ok().map(|handle| {
+    pub(super) fn identity(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<PageResidenceIdentity> {
+        self.live_handle(runtimes, key).ok().map(|handle| {
             handle.identity(
                 key.browser_context_id().to_owned(),
                 Some(key.target_id().to_owned()),
@@ -269,35 +295,43 @@ impl BrowserPageResidenceRegistry {
         })
     }
 
-    fn prepare_exact_transition(&self, key: &BrowserPageOwnerKey) -> Option<PageResidenceIdentity> {
-        self.identity(key)
+    fn prepare_exact_transition(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        key: &BrowserPageOwnerKey,
+    ) -> Option<PageResidenceIdentity> {
+        self.identity(runtimes, key)
     }
 
     pub(super) fn prepare_replacement(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
     ) -> Option<PageResidenceIdentity> {
-        self.prepare_exact_transition(key)
+        self.prepare_exact_transition(runtimes, key)
     }
 
     pub(super) fn capture_termination(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
     ) -> Option<PageResidenceIdentity> {
-        self.prepare_exact_transition(key)
+        self.prepare_exact_transition(runtimes, key)
     }
 
     pub(super) fn accepts_transition(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         expected: &PageResidenceIdentity,
     ) -> bool {
-        self.live_handle(key)
+        self.live_handle(runtimes, key)
             .is_ok_and(|handle| handle.is_current(expected))
     }
 
     fn commit_replacement_with_page_owners(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         expected: &PageResidenceIdentity,
         successor_renderer_owner: &mut Option<RendererPageLifetimeOwner>,
@@ -310,7 +344,11 @@ impl BrowserPageResidenceRegistry {
         ),
         BrowserPageResidenceRegistryError,
     > {
-        let Some(record) = self.entries.get_mut(key) else {
+        let Some(record) = runtimes
+            .entries
+            .get_mut(key)
+            .and_then(|runtime| runtime.page_residence.as_mut())
+        else {
             return Err(BrowserPageResidenceRegistryError::UnknownTarget(
                 key.clone(),
             ));
@@ -372,6 +410,7 @@ impl BrowserPageResidenceRegistry {
 
     pub(super) fn commit_transition_with_page_owners(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         expected: &PageResidenceIdentity,
         successor_renderer_owner: &mut Option<RendererPageLifetimeOwner>,
@@ -385,6 +424,7 @@ impl BrowserPageResidenceRegistry {
         BrowserPageResidenceRegistryError,
     > {
         self.commit_replacement_with_page_owners(
+            runtimes,
             key,
             expected,
             successor_renderer_owner,
@@ -394,6 +434,7 @@ impl BrowserPageResidenceRegistry {
 
     pub(super) fn commit_termination(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         key: &BrowserPageOwnerKey,
         expected: &PageResidenceIdentity,
         remove_target: bool,
@@ -404,6 +445,7 @@ impl BrowserPageResidenceRegistry {
         let mut no_successor_renderer = None;
         let mut no_successor_runtime = None;
         let (terminal, retired, no_successor_access) = self.commit_replacement_with_page_owners(
+            runtimes,
             key,
             expected,
             &mut no_successor_renderer,
@@ -411,39 +453,51 @@ impl BrowserPageResidenceRegistry {
         )?;
         debug_assert!(no_successor_access.is_none());
         if remove_target {
-            let removed = self.entries.remove(key);
+            let removed = runtimes
+                .entries
+                .get_mut(key)
+                .and_then(|runtime| runtime.page_residence.take());
             debug_assert!(
                 removed.is_some(),
                 "same-turn terminal Page commit must remove its exact registry entry"
             );
+            runtimes.prune_empty();
         }
         Ok((terminal, retired))
     }
 
+    #[cfg(test)]
     pub(super) fn forget_target(
         &mut self,
+        runtimes: &mut BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
     ) -> Option<RendererPageLifetimeOwner> {
-        let record = self.entries.remove(owner)?;
-        let BrowserPageResidenceRecord {
-            renderer_page_owner,
-            page_runtime_owner,
-            ..
-        } = record;
-        drop(page_runtime_owner);
+        let record = runtimes
+            .entries
+            .get_mut(owner)
+            .and_then(|runtime| runtime.page_residence.take())?;
+        let renderer_page_owner = record.into_renderer_page_owner();
+        runtimes.prune_empty();
         renderer_page_owner
     }
 
     pub(super) fn handle_for_target(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
     ) -> Option<BrowserPageResidenceHandle> {
-        self.live_handle(owner).ok().cloned()
+        self.live_handle(runtimes, owner).ok().cloned()
     }
 
-    pub(super) fn renderer_page_id_for_target(&self, owner: &BrowserPageOwnerKey) -> Option<u64> {
-        self.entries
+    pub(super) fn renderer_page_id_for_target(
+        &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
+        owner: &BrowserPageOwnerKey,
+    ) -> Option<u64> {
+        runtimes
+            .entries
             .get(owner)
+            .and_then(|runtime| runtime.page_residence.as_ref())
             .filter(|record| record.is_live())
             .and_then(|record| record.renderer_page_owner.as_ref())
             .map(RendererPageLifetimeOwner::page_id)
@@ -451,11 +505,46 @@ impl BrowserPageResidenceRegistry {
 
     pub(super) fn handle_is_current(
         &self,
+        runtimes: &BrowserTargetRuntimeRegistry,
         owner: &BrowserPageOwnerKey,
         handle: &BrowserPageResidenceHandle,
     ) -> bool {
-        self.live_handle(owner)
+        self.live_handle(runtimes, owner)
             .is_ok_and(|current| current.same_instance(handle))
+    }
+
+    fn record<'a>(
+        &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+        owner: &BrowserPageOwnerKey,
+    ) -> Option<&'a BrowserPageResidenceRecord> {
+        runtimes
+            .entries
+            .get(owner)
+            .and_then(|runtime| runtime.page_residence.as_ref())
+    }
+
+    fn record_mut<'a>(
+        &mut self,
+        runtimes: &'a mut BrowserTargetRuntimeRegistry,
+        owner: &BrowserPageOwnerKey,
+    ) -> Option<&'a mut BrowserPageResidenceRecord> {
+        runtimes
+            .entries
+            .get_mut(owner)
+            .and_then(|runtime| runtime.page_residence.as_mut())
+    }
+
+    fn page_records<'a>(
+        &self,
+        runtimes: &'a BrowserTargetRuntimeRegistry,
+    ) -> impl Iterator<Item = (&'a BrowserPageOwnerKey, &'a BrowserPageResidenceRecord)> {
+        runtimes.entries.iter().filter_map(|(owner, runtime)| {
+            runtime
+                .page_residence
+                .as_ref()
+                .map(|record| (owner, record))
+        })
     }
 }
 
@@ -468,8 +557,10 @@ impl BrowserNavigationOwner {
         browser_context_id: impl Into<String>,
         target_id: impl Into<String>,
     ) -> Option<PageResidenceIdentity> {
-        self.page_residences
-            .identity(&BrowserPageOwnerKey::new(browser_context_id, target_id))
+        self.page_residences.identity(
+            &self.target_runtimes,
+            &BrowserPageOwnerKey::new(browser_context_id, target_id),
+        )
     }
 
     /// Resolves an exact live Page residence to its protocol-neutral owner key.
@@ -477,7 +568,8 @@ impl BrowserNavigationOwner {
         &self,
         expected: &PageResidenceIdentity,
     ) -> Option<BrowserPageOwnerKey> {
-        self.page_residences.resolve(expected)
+        self.page_residences
+            .resolve(&self.target_runtimes, expected)
     }
 
     /// Resolves the live Target that still owns the same physical Page slot.
@@ -490,7 +582,8 @@ impl BrowserNavigationOwner {
         &self,
         expected: &PageResidenceIdentity,
     ) -> Option<BrowserPageOwnerKey> {
-        self.page_residences.resolve_slot(expected)
+        self.page_residences
+            .resolve_slot(&self.target_runtimes, expected)
     }
 
     /// Returns the registered Page capability for diagnostics/projection.
@@ -498,7 +591,8 @@ impl BrowserNavigationOwner {
         &self,
         owner: &BrowserPageOwnerKey,
     ) -> Option<BrowserPageResidenceHandle> {
-        self.page_residences.handle_for_target(owner)
+        self.page_residences
+            .handle_for_target(&self.target_runtimes, owner)
     }
 
     /// Verifies that a physical slot carries the exact Core-owned Page handle.
@@ -507,13 +601,15 @@ impl BrowserNavigationOwner {
         owner: &BrowserPageOwnerKey,
         handle: &BrowserPageResidenceHandle,
     ) -> bool {
-        self.page_residences.handle_is_current(owner, handle)
+        self.page_residences
+            .handle_is_current(&self.target_runtimes, owner, handle)
     }
 
     /// Returns the physical renderer Page id owned by this exact Browser Page
     /// residence. Frontend projections deliberately do not affect it.
     pub fn renderer_page_id_for_owner(&self, owner: &BrowserPageOwnerKey) -> Option<u64> {
-        self.page_residences.renderer_page_id_for_target(owner)
+        self.page_residences
+            .renderer_page_id_for_target(&self.target_runtimes, owner)
     }
 }
 

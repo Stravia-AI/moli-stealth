@@ -503,7 +503,7 @@ impl BrowserContextRegistry {
 
     pub(super) fn validate_projection(
         &self,
-        target_engines: &BrowserTargetEngineRegistry,
+        selected_engine_owner: Option<&BrowserPageOwnerKey>,
         projection: &BrowserContextSelectionProjection,
     ) -> Result<(), BrowserContextRegistryError> {
         if let Some(engine_owner) = projection.target_engine.expected_owner()
@@ -526,7 +526,10 @@ impl BrowserContextRegistry {
                 projected: projection.browser_context_id.clone(),
             });
         }
-        target_engines.validate_current(&projection.target_engine)?;
+        BrowserTargetEngineRegistry::validate_current(
+            selected_engine_owner,
+            &projection.target_engine,
+        )?;
         Ok(())
     }
 
@@ -678,8 +681,9 @@ impl BrowserNavigationOwner {
                 browser_context_id,
             ));
         }
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         self.browser_contexts
-            .validate_projection(&self.target_engines, &projection)?;
+            .validate_projection(selected_engine_owner.as_ref(), &projection)?;
         self.targets
             .validate_context_registration(&browser_context_id, &target_topology)?;
         let next = target_topology
@@ -746,10 +750,11 @@ impl BrowserNavigationOwner {
                 return Err(error);
             }
         };
-        let page_registration = match self
-            .page_residences
-            .begin_context_registration(&browser_context_id, &target_topology)
-        {
+        let page_registration = match self.page_residences.begin_context_registration(
+            &mut self.target_runtimes,
+            &browser_context_id,
+            &target_topology,
+        ) {
             Ok(registration) => registration,
             Err(error) => {
                 let rolled_back = self
@@ -766,14 +771,17 @@ impl BrowserNavigationOwner {
 
         let (selected, engine_outcome) = if self.browser_contexts.selected.is_none() {
             let outcome = match self.target_engines.handoff_browser_context_engine(
+                &mut self.target_runtimes,
+                selected_engine_owner.as_ref(),
                 BrowserContextEngineHandoff::new(projection.target_engine, next.clone()),
                 create_replacement,
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    let page_rolled_back = self
-                        .page_residences
-                        .rollback_context_registration(page_registration);
+                    let page_rolled_back = self.page_residences.rollback_context_registration(
+                        &mut self.target_runtimes,
+                        page_registration,
+                    );
                     let rolled_back = self
                         .targets
                         .rollback_context_registration(target_registration);
@@ -804,7 +812,7 @@ impl BrowserNavigationOwner {
             self.install_target_creation_metadata(owner, creation_metadata);
         }
         self.page_residences
-            .commit_context_registration(page_registration);
+            .commit_context_registration(&mut self.target_runtimes, page_registration);
         let target_session_storage_accesses = self
             .targets
             .commit_context_registration(target_registration);
@@ -867,8 +875,9 @@ impl BrowserNavigationOwner {
                 browser_context_id,
             ));
         }
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         self.browser_contexts
-            .validate_projection(&self.target_engines, &projection)?;
+            .validate_projection(selected_engine_owner.as_ref(), &projection)?;
         let previous = self
             .browser_contexts
             .selected
@@ -903,6 +912,8 @@ impl BrowserNavigationOwner {
                 BrowserPageOwnerKey::new(browser_context_id.as_str(), target_id.as_str())
             });
         let engine_outcome = self.target_engines.handoff_browser_context_engine(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
             BrowserContextEngineHandoff::new(projection.target_engine, next),
             create_replacement,
         )?;
@@ -1084,8 +1095,9 @@ impl BrowserNavigationOwner {
         F: FnOnce() -> NavigationEngine,
     {
         self.browser_contexts.validate_removal_permit(&permit)?;
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         self.browser_contexts
-            .validate_projection(&self.target_engines, &projection)?;
+            .validate_projection(selected_engine_owner.as_ref(), &projection)?;
         if permit.was_selected && permit.successor_browser_context_id.is_some() {
             return Err(BrowserContextRegistryError::RemovalSuccessorRequired(
                 permit.browser_context_id,
@@ -1127,16 +1139,14 @@ impl BrowserNavigationOwner {
 
         let engine_outcome = if permit.was_selected {
             let outcome = self.target_engines.handoff_browser_context_engine(
+                &mut self.target_runtimes,
+                selected_engine_owner.as_ref(),
                 BrowserContextEngineHandoff::new(projection.target_engine, None),
                 create_unbound_replacement,
             )?;
-            self.target_engines
-                .forget_browser_context(permit.browser_context_id.as_str());
             self.browser_contexts.selected = None;
             Some(outcome)
         } else {
-            self.target_engines
-                .forget_browser_context(permit.browser_context_id.as_str());
             if let Some(index) = inactive_index {
                 self.browser_contexts.inactive.swap_remove(index);
             }
@@ -1184,8 +1194,9 @@ impl BrowserNavigationOwner {
         F: FnOnce() -> NavigationEngine,
     {
         self.browser_contexts.validate_removal_permit(&permit)?;
+        let selected_engine_owner = self.selected_target_engine_owner().cloned();
         self.browser_contexts
-            .validate_projection(&self.target_engines, &projection)?;
+            .validate_projection(selected_engine_owner.as_ref(), &projection)?;
         let Some(successor_browser_context_id) = permit.successor_browser_context_id.clone() else {
             return Err(BrowserContextRegistryError::UnexpectedRemovalSuccessor(
                 permit.browser_context_id,
@@ -1230,6 +1241,8 @@ impl BrowserNavigationOwner {
             }
         };
         let engine_outcome = match self.target_engines.handoff_browser_context_engine(
+            &mut self.target_runtimes,
+            selected_engine_owner.as_ref(),
             BrowserContextEngineHandoff::new(projection.target_engine, next),
             create_replacement,
         ) {
@@ -1246,8 +1259,6 @@ impl BrowserNavigationOwner {
                 return Err(error.into());
             }
         };
-        self.target_engines
-            .forget_browser_context(permit.browser_context_id.as_str());
         let removed_target_ids = self.targets.commit_context_removal(target_removal);
         let mut retired_renderer_page_owners = Vec::new();
         for target_id in removed_target_ids {
