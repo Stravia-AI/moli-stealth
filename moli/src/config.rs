@@ -10,9 +10,7 @@ use moli_fetch::{FetchConfig, WebBotAuthProfile, WebBotAuthSigner};
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use crate::cli::{
-    Cli, Commands, CommonArgs, DumpFormat, LogFormat, StripOptions, WebBotAuthProfileChoice,
-};
+use crate::cli::{Cli, Commands, CommonArgs, DumpFormat, StripOptions, WebBotAuthProfileChoice};
 use crate::network_trace::NetworkTraceConfigSummary;
 
 pub use moli_protocol_server::ServerConfig;
@@ -200,7 +198,6 @@ fn apply_common_args(config: &mut AppConfig, common: &CommonArgs) -> Result<()> 
         config.add_document_start_script(source);
     }
 
-    config.fetch.log_format = common.log_format;
     config.fetch.log_filter_scopes = common.log_filter_scopes.clone();
     Ok(())
 }
@@ -293,7 +290,6 @@ pub struct FetchCommandConfig {
     pub cookie_files: Vec<String>,
     // CLI request headers only apply to the top-level fetch command.
     pub request_headers: Vec<(String, String)>,
-    pub log_format: Option<LogFormat>,
     pub log_filter_scopes: Option<String>,
 }
 
