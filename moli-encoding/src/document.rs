@@ -4,6 +4,8 @@ use moli_charset_parser::{HtmlMetaCharsetParser, HtmlMetaCharsetScanResult};
 use crate::{charset_from_headers, encoding_for_label};
 
 const DEFAULT_HTML_DOCUMENT_ENCODING: &str = "windows-1252";
+const UTF16LE_XML_PREFIX: &[u8; 6] = b"<\0?\0x\0";
+const UTF16BE_XML_PREFIX: &[u8; 6] = b"\0<\0?\0x";
 
 pub fn decode_html_document(bytes: &[u8], headers: &[(String, String)]) -> (String, &'static str) {
     decode_html_document_with_fallback(bytes, headers, None)
@@ -189,6 +191,7 @@ impl HtmlDocumentStreamingDecoder {
     fn take_safe_ascii_sniff_prefix(&mut self) -> String {
         if self.emitted_sniff_len >= self.sniff_buffer.len()
             || bytes_could_still_be_bom_prefix(&self.sniff_buffer)
+            || bytes_could_still_be_utf16_xml_prefix(&self.sniff_buffer)
         {
             return String::new();
         }
@@ -221,6 +224,11 @@ fn bytes_could_still_be_bom_prefix(bytes: &[u8]) -> bool {
     matches!(bytes, [] | [0xEF] | [0xEF, 0xBB] | [0xFF] | [0xFE])
 }
 
+fn bytes_could_still_be_utf16_xml_prefix(bytes: &[u8]) -> bool {
+    bytes.len() < UTF16LE_XML_PREFIX.len()
+        && (UTF16LE_XML_PREFIX.starts_with(bytes) || UTF16BE_XML_PREFIX.starts_with(bytes))
+}
+
 fn encoding_for_document_bom(bytes: &[u8]) -> Option<&'static Encoding> {
     if bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
         return Some(encoding_rs::UTF_8);
@@ -242,24 +250,10 @@ fn encoding_for_document_bom(bytes: &[u8]) -> Option<&'static Encoding> {
 ///
 /// These match the start of `<?xml` without requiring a BOM or transport charset.
 fn encoding_for_document_xml_declaration(bytes: &[u8]) -> Option<&'static Encoding> {
-    if bytes.len() >= 6
-        && bytes[0] == 0x3C
-        && bytes[1] == 0x00
-        && bytes[2] == 0x3F
-        && bytes[3] == 0x00
-        && bytes[4] == 0x78
-        && bytes[5] == 0x00
-    {
+    if bytes.starts_with(UTF16LE_XML_PREFIX) {
         return Some(encoding_rs::UTF_16LE);
     }
-    if bytes.len() >= 6
-        && bytes[0] == 0x00
-        && bytes[1] == 0x3C
-        && bytes[2] == 0x00
-        && bytes[3] == 0x3F
-        && bytes[4] == 0x00
-        && bytes[5] == 0x78
-    {
+    if bytes.starts_with(UTF16BE_XML_PREFIX) {
         return Some(encoding_rs::UTF_16BE);
     }
     None

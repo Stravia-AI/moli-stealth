@@ -527,6 +527,77 @@ fn utf16be_bytes(input: &str) -> Vec<u8> {
         .collect()
 }
 
+fn assert_bom_less_utf16_xml_decodes_across_signature_splits(
+    input: &[u8],
+    expected_text: &str,
+    expected_encoding: &str,
+) {
+    for split in 1..6 {
+        let mut decoder = HtmlDocumentStreamingDecoder::new(&[]);
+        assert_eq!(
+            decoder.push(&input[..split]),
+            Vec::<String>::new(),
+            "split after signature byte {split} must remain buffered"
+        );
+
+        let mut decoded = decoder.push(&input[split..]).concat();
+        if let Some(tail) = decoder.finish() {
+            decoded.push_str(&tail);
+        }
+
+        assert_eq!(
+            decoder.selected_encoding_name(),
+            Some(expected_encoding),
+            "wrong encoding after signature byte {split} split"
+        );
+        assert_eq!(
+            decoded, expected_text,
+            "misdecoded document after signature byte {split} split"
+        );
+    }
+}
+
+#[test]
+fn bom_less_utf16le_xml_signature_survives_every_streaming_split() {
+    let source = "<?xml version=\"1.0\"?><html><head></head><body>little endian</body></html>";
+    let input = utf16le_bytes(source);
+
+    assert_bom_less_utf16_xml_decodes_across_signature_splits(&input, source, "UTF-16LE");
+}
+
+#[test]
+fn bom_less_utf16be_xml_signature_survives_every_streaming_split() {
+    let source = "<?xml version=\"1.0\"?><html><head></head><body>big endian</body></html>";
+    let input = utf16be_bytes(source);
+
+    assert_bom_less_utf16_xml_decodes_across_signature_splits(&input, source, "UTF-16BE");
+}
+
+#[test]
+fn diverged_utf16_xml_signature_prefix_resumes_ascii_streaming() {
+    let mut decoder = HtmlDocumentStreamingDecoder::new(&[]);
+
+    assert!(decoder.push(b"<").is_empty());
+    assert_eq!(
+        decoder.push(b"!doctype html><p>ordinary html"),
+        vec!["<!doctype html><p>ordinary html"]
+    );
+    assert_eq!(decoder.finish(), None);
+    assert_eq!(decoder.selected_encoding_name(), Some("windows-1252"));
+}
+
+#[test]
+fn transport_charset_does_not_wait_for_a_utf16_xml_signature_prefix() {
+    let headers = vec![(
+        "Content-Type".to_owned(),
+        "text/html; charset=windows-1252".to_owned(),
+    )];
+    let mut decoder = HtmlDocumentStreamingDecoder::new(&headers);
+
+    assert_eq!(decoder.push(b"<"), vec!["<"]);
+    assert_eq!(decoder.selected_encoding_name(), Some("windows-1252"));
+}
+
 #[test]
 fn bom_less_utf16be_xml_declaration_is_detected() {
     let input = utf16be_bytes(
@@ -561,9 +632,10 @@ fn bom_less_utf16le_uppercase_x_not_detected() {
 fn bom_less_utf16le_truncated_not_detected() {
     let input: Vec<u8> = vec![0x3C, 0x00, 0x3F, 0x00];
 
-    let (_, encoding) = decode_html_document(&input, &[]);
+    let (text, encoding) = decode_html_document(&input, &[]);
 
     assert_eq!(encoding, "windows-1252");
+    assert_eq!(text, "<\0?\0");
 }
 
 #[test]
@@ -588,7 +660,8 @@ fn bom_less_utf16be_uppercase_x_not_detected() {
 fn bom_less_utf16be_truncated_not_detected() {
     let input: Vec<u8> = vec![0x00, 0x3C, 0x00, 0x3F];
 
-    let (_, encoding) = decode_html_document(&input, &[]);
+    let (text, encoding) = decode_html_document(&input, &[]);
 
     assert_eq!(encoding, "windows-1252");
+    assert_eq!(text, "\0<\0?");
 }
