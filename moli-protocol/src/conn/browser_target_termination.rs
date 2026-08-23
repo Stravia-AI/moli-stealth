@@ -805,7 +805,13 @@ mod tests {
             .into_iter()
             .find(|fact| matches!(fact.fact(), BrowserFact::TargetClosed { .. }))
             .expect("Page.close production path should publish TargetClosed");
-        assert_eq!(fact.fact(), &BrowserFact::TargetClosed { previous_page });
+        assert_eq!(
+            fact.fact(),
+            &BrowserFact::TargetClosed {
+                previous_page,
+                pending_navigation: None,
+            }
+        );
         assert_eq!(
             fact.page_residence().loaded_page_generation(),
             previous_generation + 1
@@ -849,7 +855,13 @@ mod tests {
             .into_iter()
             .find(|fact| matches!(fact.fact(), BrowserFact::TargetCrashed { .. }))
             .expect("Page.crash production path should publish TargetCrashed");
-        assert_eq!(fact.fact(), &BrowserFact::TargetCrashed { previous_page });
+        assert_eq!(
+            fact.fact(),
+            &BrowserFact::TargetCrashed {
+                previous_page,
+                pending_navigation: None,
+            }
+        );
         assert_eq!(
             fact.page_residence().loaded_page_generation(),
             previous_generation + 1
@@ -1123,7 +1135,13 @@ mod tests {
                     && matches!(fact.fact(), BrowserFact::TargetClosed { .. })
             })
             .expect("Core TargetClosed fact must precede retired Page disposal");
-        assert_eq!(fact.fact(), &BrowserFact::TargetClosed { previous_page });
+        assert_eq!(
+            fact.fact(),
+            &BrowserFact::TargetClosed {
+                previous_page,
+                pending_navigation: None,
+            }
+        );
 
         assert!(conn.activate_browser_context_by_id("context-c"));
         let completed = pending.wait().await;

@@ -1633,7 +1633,7 @@ async fn materialized_navigation_completion_drops_stale_token() {
     let stale = conn
         .start_document_navigation_for_session_owner(None, "LOADER-1".to_owned())
         .expect("active target should produce stale token");
-    let _current = conn
+    let current = conn
         .start_document_navigation_for_session_owner(None, "LOADER-2".to_owned())
         .expect("active target should produce current token");
     let state =
@@ -1650,7 +1650,7 @@ async fn materialized_navigation_completion_drops_stale_token() {
     let mut command_context = CommandDispatchContext::default();
     conn.drain_materialized_navigation_completion_into(
         &mut out,
-        MaterializedNavigationCompletion::new(stale, state, navigation),
+        MaterializedNavigationCompletion::new(stale.clone(), state, navigation),
         &mut command_context,
     )
     .await;
@@ -1668,13 +1668,23 @@ async fn materialized_navigation_completion_drops_stale_token() {
         "stale completion must emit a command reply, not an event"
     );
     let facts = conn.browser_fact_snapshot_for_test();
-    assert_eq!(
-        facts
-            .iter()
-            .filter(|fact| matches!(fact.fact(), BrowserFact::NavigationFailed { .. }))
-            .count(),
-        1,
-        "the successor admission, not the delayed completion, owns the old request terminal"
+    assert!(facts.iter().any(|fact| {
+        matches!(
+            fact.fact(),
+            BrowserFact::NavigationAccepted {
+                navigation,
+                superseded_navigation: Some(superseded),
+            } if navigation == &current && superseded == &stale
+        )
+    }));
+    assert!(
+        !facts.iter().any(|fact| {
+            matches!(
+                fact.fact(),
+                BrowserFact::NavigationFailed { navigation, .. } if navigation == &stale
+            )
+        }),
+        "the successor admission owns the old request terminal without a second occurrence"
     );
 }
 

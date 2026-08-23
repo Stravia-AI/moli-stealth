@@ -113,12 +113,12 @@ impl BrowserDocumentLifecycleWaitShared {
             {
                 Some(BrowserDocumentLifecycleWaitOutcome::Superseded)
             }
-            BrowserFact::TargetCrashed { previous_page } if previous_page == expected_page => {
+            BrowserFact::TargetCrashed { previous_page, .. } if previous_page == expected_page => {
                 Some(BrowserDocumentLifecycleWaitOutcome::Unavailable(
                     BrowserDocumentLifecycleWaitUnavailableReason::TargetCrashed,
                 ))
             }
-            BrowserFact::TargetClosed { previous_page } if previous_page == expected_page => {
+            BrowserFact::TargetClosed { previous_page, .. } if previous_page == expected_page => {
                 Some(BrowserDocumentLifecycleWaitOutcome::Unavailable(
                     BrowserDocumentLifecycleWaitUnavailableReason::TargetClosed,
                 ))
@@ -462,6 +462,7 @@ mod tests {
             expected_page,
             BrowserFact::NavigationAccepted {
                 navigation: BrowserDocumentNavigation::new("target-1", "loader-next"),
+                superseded_navigation: None,
             },
         );
 
@@ -504,6 +505,7 @@ mod tests {
             page(7),
             BrowserFact::TargetClosed {
                 previous_page: page(6),
+                pending_navigation: None,
             },
         );
         assert!(!ticket.is_terminal());
@@ -512,6 +514,7 @@ mod tests {
             page(3),
             BrowserFact::TargetClosed {
                 previous_page: expected_page,
+                pending_navigation: None,
             },
         );
 
@@ -539,6 +542,7 @@ mod tests {
                         "target-1",
                         format!("unrelated-{generation}"),
                     ),
+                    superseded_navigation: None,
                 },
             );
         }

@@ -47,9 +47,12 @@ pub enum BrowserFact {
         transition: BrowserTargetMetadataTransition,
     },
     /// One exact cross-Document request became the Target's pending request.
-    /// The envelope carries the Page generation that the request supersedes.
+    /// The envelope carries the Page generation it targets, while
+    /// `superseded_navigation` identifies the predecessor retired by this
+    /// same admission occurrence, if any.
     NavigationAccepted {
         navigation: BrowserDocumentNavigation,
+        superseded_navigation: Option<BrowserDocumentNavigation>,
     },
     /// One exact cross-Document request atomically committed its successor
     /// Document and replaced the Target's previous Page generation. The
@@ -78,12 +81,14 @@ pub enum BrowserFact {
     /// envelope carries the terminal Page generation.
     TargetCrashed {
         previous_page: PageResidenceIdentity,
+        pending_navigation: Option<BrowserDocumentNavigation>,
     },
     /// One exact Target close atomically retired both the Target and its
     /// current Page generation. The envelope carries the terminal Page
     /// identity even though that residence is no longer live in the registry.
     TargetClosed {
         previous_page: PageResidenceIdentity,
+        pending_navigation: Option<BrowserDocumentNavigation>,
     },
     DocumentLifecycleReached {
         document: RendererDocumentLifecycleIdentity,

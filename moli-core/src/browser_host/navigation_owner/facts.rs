@@ -108,9 +108,9 @@ impl BrowserNavigationOwner {
     }
 
     /// Publishes one accepted cross-Document request against the exact Page
-    /// generation that it supersedes. If another request was already pending,
-    /// its terminal fact is adjacent and ordered before the successor's
-    /// acceptance in the same Browser Owner batch.
+    /// generation that it supersedes. A predecessor retired by this admission
+    /// is carried by the same occurrence, so consumers never reconstruct the
+    /// transaction from adjacent journal entries.
     pub(super) fn record_navigation_admission_facts(
         &mut self,
         owner: &BrowserPageOwnerKey,
@@ -122,20 +122,13 @@ impl BrowserNavigationOwner {
         debug_assert_eq!(page.browser_context_id(), owner.browser_context_id());
         debug_assert_eq!(page.target_id(), Some(owner.target_id()));
         debug_assert_eq!(self.page_owner_key_if_current(page).as_ref(), Some(owner));
-        let mut facts = Vec::with_capacity(1 + usize::from(superseded.is_some()));
-        if let Some(superseded) = superseded {
-            facts.push(BrowserFact::NavigationFailed {
-                navigation: superseded.clone(),
-                failure: BrowserNavigationFailure::Superseded {
-                    replacement: navigation.clone(),
-                },
-                previous_page: None,
-            });
-        }
-        facts.push(BrowserFact::NavigationAccepted {
-            navigation: navigation.clone(),
-        });
-        self.browser_facts.publish_batch(page.clone(), facts)
+        self.browser_facts.publish_batch(
+            page.clone(),
+            vec![BrowserFact::NavigationAccepted {
+                navigation: navigation.clone(),
+                superseded_navigation: superseded.cloned(),
+            }],
+        )
     }
 
     /// Publishes the unique non-commit terminal fact for one exact request
@@ -276,6 +269,7 @@ impl BrowserNavigationOwner {
                 debug_assert!(self.has_target(owner.target_id()));
                 BrowserFact::TargetCrashed {
                     previous_page: previous_page.clone(),
+                    pending_navigation: pending_navigation.cloned(),
                 }
             }
             BrowserTargetTerminationKind::Close => {
@@ -286,26 +280,14 @@ impl BrowserNavigationOwner {
                 debug_assert!(!self.has_target(owner.target_id()));
                 BrowserFact::TargetClosed {
                     previous_page: previous_page.clone(),
+                    pending_navigation: pending_navigation.cloned(),
                 }
             }
         };
-        let mut facts = Vec::with_capacity(1 + usize::from(pending_navigation.is_some()));
-        if let Some(navigation) = pending_navigation {
-            let failure = match termination.kind() {
-                BrowserTargetTerminationKind::Crash => BrowserNavigationFailure::TargetCrashed,
-                BrowserTargetTerminationKind::Close => BrowserNavigationFailure::TargetClosed,
-            };
-            facts.push(BrowserFact::NavigationFailed {
-                navigation: navigation.clone(),
-                failure,
-                previous_page: Some(previous_page.clone()),
-            });
-        }
-        facts.push(target_fact);
         self.document_lifecycles
             .retire_page(&mut self.target_runtimes, owner, previous_page);
         self.browser_facts
-            .publish_batch(terminal_page.clone(), facts)
+            .publish_batch(terminal_page.clone(), vec![target_fact])
     }
 
     /// Records lifecycle current state plus reached/terminated facts accepted
@@ -516,6 +498,7 @@ mod tests {
                             "target-noise",
                             format!("loader-noise-{sequence}"),
                         ),
+                        superseded_navigation: None,
                     }],
                 )
                 .expect("noise fact should publish");

@@ -55,11 +55,6 @@ pub enum BrowserFactProjectionError {
     MissingNavigationAdmissionFact {
         navigation: BrowserDocumentNavigation,
     },
-    NonAdjacentNavigationAdmissionFacts {
-        navigation: BrowserDocumentNavigation,
-        superseded: BrowserFactSequence,
-        accepted: BrowserFactSequence,
-    },
     MissingNavigationFailureFact {
         navigation: BrowserDocumentNavigation,
         failure: BrowserNavigationFailure,
@@ -76,11 +71,6 @@ pub enum BrowserFactProjectionError {
         previous_page: Box<PageResidenceIdentity>,
         terminal_page: Box<PageResidenceIdentity>,
         kind: BrowserTargetTerminationKind,
-    },
-    NonAdjacentTargetTerminationFacts {
-        target_id: String,
-        navigation_failure: BrowserFactSequence,
-        terminal: BrowserFactSequence,
     },
     NoCurrentPageForDocumentLifecycle {
         document: RendererDocumentLifecycleIdentity,
@@ -147,17 +137,6 @@ impl fmt::Display for BrowserFactProjectionError {
                 "accepted navigation {:?} has no exact Browser fact",
                 navigation
             ),
-            Self::NonAdjacentNavigationAdmissionFacts {
-                navigation,
-                superseded,
-                accepted,
-            } => write!(
-                formatter,
-                "accepted navigation {:?} has non-adjacent superseded/accepted Browser facts {} and {}",
-                navigation,
-                superseded.get(),
-                accepted.get()
-            ),
             Self::MissingNavigationFailureFact {
                 navigation,
                 failure,
@@ -185,16 +164,6 @@ impl fmt::Display for BrowserFactProjectionError {
                 formatter,
                 "Target {target_id:?} {kind:?} from Page {:?} to terminal Page {:?} has no exact Browser fact",
                 previous_page, terminal_page
-            ),
-            Self::NonAdjacentTargetTerminationFacts {
-                target_id,
-                navigation_failure,
-                terminal,
-            } => write!(
-                formatter,
-                "Target {target_id:?} has non-adjacent navigation-terminal/Target-terminal Browser facts {} and {}",
-                navigation_failure.get(),
-                terminal.get()
             ),
             Self::NoCurrentPageForDocumentLifecycle {
                 document,
@@ -570,11 +539,7 @@ impl CdpBrowserFactProjector {
         })
     }
 
-    /// Claims the exact fact batch produced by one accepted request.
-    ///
-    /// A superseded predecessor, when present, is consumed with the successor
-    /// acceptance. CDP has no standalone wire event for that Browser terminal;
-    /// retaining it would only leak one pending projection per replacement.
+    /// Claims the self-contained occurrence produced by one accepted request.
     pub(crate) fn take_navigation_admission_fact(
         &mut self,
         navigation: &BrowserDocumentNavigation,
@@ -585,6 +550,7 @@ impl CdpBrowserFactProjector {
                 pending.envelope.fact(),
                 BrowserFact::NavigationAccepted {
                     navigation: accepted,
+                    ..
                 } if accepted == navigation
             )
         }) else {
@@ -594,36 +560,6 @@ impl CdpBrowserFactProjector {
                 }),
             );
         };
-        let accepted_sequence = self.pending_facts[position].envelope.sequence();
-        let superseded = self
-            .pending_facts
-            .iter()
-            .position(|pending| {
-                pending.envelope.sequence() < accepted_sequence
-                    && matches!(
-                        pending.envelope.fact(),
-                        BrowserFact::NavigationFailed {
-                            failure: BrowserNavigationFailure::Superseded { replacement },
-                            ..
-                        } if replacement == navigation
-                    )
-            })
-            .map(|superseded_position| {
-                let superseded_sequence =
-                    self.pending_facts[superseded_position].envelope.sequence();
-                (superseded_position, superseded_sequence)
-            });
-        if let Some((_, superseded_sequence)) = superseded
-            && superseded_sequence.get().checked_add(1) != Some(accepted_sequence.get())
-        {
-            return Err(self.fail(
-                BrowserFactProjectionError::NonAdjacentNavigationAdmissionFacts {
-                    navigation: navigation.clone(),
-                    superseded: superseded_sequence,
-                    accepted: accepted_sequence,
-                },
-            ));
-        }
         let Some(accepted) = self.pending_facts.remove(position) else {
             return Err(
                 self.fail(BrowserFactProjectionError::MissingNavigationAdmissionFact {
@@ -631,18 +567,6 @@ impl CdpBrowserFactProjector {
                 }),
             );
         };
-        if let Some((superseded_position, superseded_sequence)) = superseded {
-            let Some(superseded) = self.pending_facts.remove(superseded_position) else {
-                return Err(self.fail(
-                    BrowserFactProjectionError::NonAdjacentNavigationAdmissionFacts {
-                        navigation: navigation.clone(),
-                        superseded: superseded_sequence,
-                        accepted: accepted_sequence,
-                    },
-                ));
-            };
-            self.record_projected(superseded.envelope.sequence());
-        }
         self.record_projected(accepted.envelope.sequence());
         Ok(accepted.envelope)
     }
@@ -754,8 +678,7 @@ impl CdpBrowserFactProjector {
         })
     }
 
-    /// Claims a Target terminal and its optional adjacent pending-navigation
-    /// terminal as one projection unit.
+    /// Claims one self-contained Target terminal occurrence.
     pub(crate) fn take_target_termination_fact(
         &mut self,
         termination: &BrowserTargetTermination,
@@ -767,11 +690,11 @@ impl CdpBrowserFactProjector {
                 && match (termination.kind(), pending.envelope.fact()) {
                     (
                         BrowserTargetTerminationKind::Crash,
-                        BrowserFact::TargetCrashed { previous_page },
+                        BrowserFact::TargetCrashed { previous_page, .. },
                     )
                     | (
                         BrowserTargetTerminationKind::Close,
-                        BrowserFact::TargetClosed { previous_page },
+                        BrowserFact::TargetClosed { previous_page, .. },
                     ) => previous_page == termination.previous_page(),
                     _ => false,
                 }
@@ -786,38 +709,6 @@ impl CdpBrowserFactProjector {
                 }),
             );
         };
-        let terminal_sequence = self.pending_facts[terminal_position].envelope.sequence();
-        let expected_navigation_failure = match termination.kind() {
-            BrowserTargetTerminationKind::Crash => BrowserNavigationFailure::TargetCrashed,
-            BrowserTargetTerminationKind::Close => BrowserNavigationFailure::TargetClosed,
-        };
-        let navigation_failure_position = self.pending_facts.iter().position(|pending| {
-            pending.envelope.sequence() < terminal_sequence
-                && pending.envelope.page_residence() == termination.terminal_page()
-                && matches!(
-                    pending.envelope.fact(),
-                    BrowserFact::NavigationFailed {
-                        failure,
-                        previous_page: Some(previous_page),
-                        ..
-                    } if *failure == expected_navigation_failure
-                        && previous_page == termination.previous_page()
-                )
-        });
-        if let Some(navigation_failure_position) = navigation_failure_position {
-            let navigation_failure_sequence = self.pending_facts[navigation_failure_position]
-                .envelope
-                .sequence();
-            if navigation_failure_sequence.get().checked_add(1) != Some(terminal_sequence.get()) {
-                return Err(self.fail(
-                    BrowserFactProjectionError::NonAdjacentTargetTerminationFacts {
-                        target_id: termination.owner().target_id().to_owned(),
-                        navigation_failure: navigation_failure_sequence,
-                        terminal: terminal_sequence,
-                    },
-                ));
-            }
-        }
         let Some(terminal) = self.pending_facts.remove(terminal_position) else {
             return Err(
                 self.fail(BrowserFactProjectionError::MissingTargetTerminationFact {
@@ -828,21 +719,7 @@ impl CdpBrowserFactProjector {
                 }),
             );
         };
-        if let Some(navigation_failure_position) = navigation_failure_position {
-            let Some(navigation_failure) = self.pending_facts.remove(navigation_failure_position)
-            else {
-                return Err(
-                    self.fail(BrowserFactProjectionError::MissingTargetTerminationFact {
-                        target_id: termination.owner().target_id().to_owned(),
-                        previous_page: Box::new(termination.previous_page().clone()),
-                        terminal_page: Box::new(termination.terminal_page().clone()),
-                        kind: termination.kind(),
-                    }),
-                );
-            };
-            self.record_projected(navigation_failure.envelope.sequence());
-        }
-        self.record_projected(terminal_sequence);
+        self.record_projected(terminal.envelope.sequence());
         Ok(BrowserTargetTerminationFactProjection {
             terminal: terminal.envelope,
         })
@@ -1295,8 +1172,8 @@ fn retired_page_residence(fact: &BrowserFact) -> Option<&PageResidenceIdentity> 
             ..
         }
         | BrowserFact::NavigationCommitted { previous_page, .. }
-        | BrowserFact::TargetCrashed { previous_page }
-        | BrowserFact::TargetClosed { previous_page } => Some(previous_page),
+        | BrowserFact::TargetCrashed { previous_page, .. }
+        | BrowserFact::TargetClosed { previous_page, .. } => Some(previous_page),
         BrowserFact::TargetCreated
         | BrowserFact::TargetMetadataChanged { .. }
         | BrowserFact::NavigationAccepted { .. }
@@ -1493,15 +1370,25 @@ mod tests {
             .expect("accepted request should project from its Browser fact");
         assert!(matches!(
             first_admission.fact(),
-            BrowserFact::NavigationAccepted { navigation } if navigation == &first
+            BrowserFact::NavigationAccepted {
+                navigation,
+                superseded_navigation: None,
+            } if navigation == &first
         ));
 
         let replacement = owner
             .try_start_document_navigation_with_trace(&key, "loader-replacement".to_owned(), None)
             .expect("replacement navigation");
-        projector
+        let replacement_admission = projector
             .take_navigation_admission_fact(&replacement)
-            .expect("successor admission should consume its adjacent superseded terminal");
+            .expect("successor admission should carry its superseded request");
+        assert!(matches!(
+            replacement_admission.fact(),
+            BrowserFact::NavigationAccepted {
+                navigation,
+                superseded_navigation: Some(superseded),
+            } if navigation == &replacement && superseded == &first
+        ));
         assert_eq!(projector.pending_fact_count(), 0);
 
         let failure = BrowserNavigationFailure::Canceled {
@@ -1711,7 +1598,7 @@ mod tests {
     }
 
     #[test]
-    fn target_terminal_consumes_its_adjacent_navigation_terminal_on_the_common_cursor() {
+    fn target_terminal_carries_its_pending_navigation_on_the_common_cursor() {
         let (mut owner, key, page) = owner_with_target();
         let (mut projector, _) = projector_after_target_creation(&owner, &page);
         let navigation = owner
@@ -1736,7 +1623,10 @@ mod tests {
 
         assert!(matches!(
             projected.envelope().fact(),
-            BrowserFact::TargetClosed { .. }
+            BrowserFact::TargetClosed {
+                pending_navigation: Some(pending),
+                ..
+            } if pending == &navigation
         ));
         assert_eq!(projector.pending_fact_count(), 0);
     }

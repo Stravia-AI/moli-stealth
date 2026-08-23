@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn superseded_request_fails_before_successor_acceptance_in_one_page_generation() {
+    fn successor_acceptance_carries_superseded_request_in_one_page_generation() {
         let (mut owner, key) = owner_with_target();
         let mut subscriber = owner.subscribe_browser_facts();
         let first = owner.start_document_navigation(&key, "loader-1".to_owned());
@@ -797,34 +797,21 @@ mod tests {
 
         let created = subscriber.try_recv().expect("Target creation occurrence");
         let accepted_first = subscriber.try_recv().expect("first acceptance fact");
-        let failed_first = subscriber.try_recv().expect("superseded terminal fact");
         let accepted_second = subscriber.try_recv().expect("successor acceptance fact");
         assert_eq!(created.sequence().get(), 1);
         assert!(matches!(created.fact(), BrowserFact::TargetCreated));
         assert_eq!(accepted_first.sequence().get(), 2);
-        assert_eq!(failed_first.sequence().get(), 3);
-        assert_eq!(accepted_second.sequence().get(), 4);
+        assert_eq!(accepted_second.sequence().get(), 3);
         assert_eq!(
             accepted_first.page_residence(),
-            failed_first.page_residence()
-        );
-        assert_eq!(
-            failed_first.page_residence(),
             accepted_second.page_residence()
         );
         assert_eq!(
-            failed_first.fact(),
-            &BrowserFact::NavigationFailed {
-                navigation: first,
-                failure: BrowserNavigationFailure::Superseded {
-                    replacement: second.clone(),
-                },
-                previous_page: None,
-            }
-        );
-        assert_eq!(
             accepted_second.fact(),
-            &BrowserFact::NavigationAccepted { navigation: second }
+            &BrowserFact::NavigationAccepted {
+                navigation: second,
+                superseded_navigation: Some(first),
+            }
         );
     }
 

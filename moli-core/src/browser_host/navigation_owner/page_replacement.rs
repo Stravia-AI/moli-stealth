@@ -456,6 +456,7 @@ mod tests {
             accepted_fact.fact(),
             &BrowserFact::NavigationAccepted {
                 navigation: navigation.clone(),
+                superseded_navigation: None,
             }
         );
         let committed_fact = subscriber

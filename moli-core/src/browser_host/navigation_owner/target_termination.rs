@@ -631,25 +631,13 @@ mod tests {
             accepted.fact(),
             &BrowserFact::NavigationAccepted {
                 navigation: navigation.clone(),
-            }
-        );
-        let failed = subscriber
-            .try_recv()
-            .expect("close commit should terminate its pending navigation first");
-        assert_eq!(failed.sequence().get(), 3);
-        assert_eq!(failed.page_residence(), termination.terminal_page());
-        assert_eq!(
-            failed.fact(),
-            &BrowserFact::NavigationFailed {
-                navigation: navigation.clone(),
-                failure: crate::browser_host::BrowserNavigationFailure::TargetClosed,
-                previous_page: Some(previous.clone()),
+                superseded_navigation: None,
             }
         );
         let fact = subscriber
             .try_recv()
-            .expect("close commit should publish its adjacent TargetClosed fact");
-        assert_eq!(fact.sequence().get(), 4);
+            .expect("close commit should publish its self-contained TargetClosed fact");
+        assert_eq!(fact.sequence().get(), 3);
         assert_eq!(fact.browser_context_id().as_str(), "context-1");
         assert_eq!(fact.target_id().as_str(), "target-1");
         assert_eq!(fact.page_residence(), termination.terminal_page());
@@ -657,6 +645,7 @@ mod tests {
             fact.fact(),
             &BrowserFact::TargetClosed {
                 previous_page: previous.clone(),
+                pending_navigation: Some(navigation),
             }
         );
         let (_, reseeded) = owner.navigation_history_snapshot(
@@ -737,30 +726,19 @@ mod tests {
             accepted.fact(),
             &BrowserFact::NavigationAccepted {
                 navigation: navigation.clone(),
-            }
-        );
-        let failed = subscriber
-            .try_recv()
-            .expect("crash commit should terminate its pending navigation first");
-        assert_eq!(failed.sequence().get(), 3);
-        assert_eq!(failed.page_residence(), termination.terminal_page());
-        assert_eq!(
-            failed.fact(),
-            &BrowserFact::NavigationFailed {
-                navigation,
-                failure: crate::browser_host::BrowserNavigationFailure::TargetCrashed,
-                previous_page: Some(previous.clone()),
+                superseded_navigation: None,
             }
         );
         let fact = subscriber
             .try_recv()
-            .expect("crash commit should publish its adjacent TargetCrashed fact");
-        assert_eq!(fact.sequence().get(), 4);
+            .expect("crash commit should publish its self-contained TargetCrashed fact");
+        assert_eq!(fact.sequence().get(), 3);
         assert_eq!(fact.page_residence(), termination.terminal_page());
         assert_eq!(
             fact.fact(),
             &BrowserFact::TargetCrashed {
                 previous_page: previous,
+                pending_navigation: Some(navigation),
             }
         );
     }
@@ -893,12 +871,12 @@ mod tests {
         assert!(matches!(facts[0].fact(), BrowserFact::TargetCreated));
         assert!(matches!(
             facts[1].fact(),
-            BrowserFact::TargetCrashed { previous_page }
+            BrowserFact::TargetCrashed { previous_page, .. }
                 if previous_page.loaded_page_generation() == 0
         ));
         assert!(matches!(
             facts[2].fact(),
-            BrowserFact::TargetClosed { previous_page }
+            BrowserFact::TargetClosed { previous_page, .. }
                 if previous_page == facts[1].page_residence()
         ));
         assert_eq!(facts[2].page_residence(), closed.terminal_page());
