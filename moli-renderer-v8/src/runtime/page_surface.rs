@@ -40,7 +40,8 @@ pub use popup_activation::{
     RendererPopupDisposition, RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
 };
 pub(crate) use remote_window_proxy::{
-    RendererRemoteFrameNavigationId, RendererRemoteWindowProxyChannel,
+    RendererRemoteFrameNavigationId, RendererRemoteJavaScriptUrlSource,
+    RendererRemoteJavaScriptUrlSourceWorld, RendererRemoteWindowProxyChannel,
     RendererRemoteWindowProxyCommandKind, RendererRemoteWindowProxyMessage,
     RendererRemoteWindowProxyNavigationKind,
 };

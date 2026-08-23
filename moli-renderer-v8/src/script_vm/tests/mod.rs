@@ -6782,95 +6782,6 @@ async fn child_document_script_owner_hooks_select_current_realm() {
 }
 
 #[tokio::test]
-async fn child_dynamic_execution_action_requires_materialized_current_realm() {
-    use crate::frame_owner_model::{
-        FrameDocumentTaskOwner, FrameRealmId, PendingChildDynamicDocumentScript,
-    };
-
-    let mut vm = new_storage_test_vm("https://child-dynamic-current-realm.test/");
-
-    vm.eval(
-        r#"
-(() => {
-  const root = document.documentElement || document.appendChild(document.createElement("html"));
-  const body = document.body || root.appendChild(document.createElement("body"));
-  const frame = document.createElement("iframe");
-  body.appendChild(frame);
-})()
-"#,
-    )
-    .expect("child dynamic current-realm setup should evaluate");
-    assert_initial_about_blank_child_completed_synchronously_for_test(
-        &mut vm,
-        "child dynamic current-realm setup",
-    )
-    .await;
-    let child_context_id = materialize_single_child_default_realm_for_test(
-        &mut vm,
-        "child dynamic current-realm setup",
-    );
-    let (child_handle, task_owner, owner_realm_id) = {
-        let realm = vm
-            .child_frame_realm_store
-            .get(&child_context_id)
-            .expect("child realm record should exist");
-        let snapshot = vm
-            ._context_host
-            .borrow()
-            .frame_owner_current_child_snapshot(realm.child_handle)
-            .expect("child frame should expose a current owner snapshot");
-        (
-            realm.child_handle,
-            FrameDocumentTaskOwner::new(
-                snapshot.scheduler_lane_id,
-                snapshot.local_window_id,
-                snapshot.document_id,
-            ),
-            realm.owner_realm_id,
-        )
-    };
-    let script_handle = DomHandle::new(9001);
-    let work_without_realm = PendingChildDynamicDocumentScript {
-        child_handle,
-        owner: task_owner,
-        realm_id: None,
-        script_handle,
-        source: "globalThis.__childDynamicMaterializedRealm = true;".to_owned(),
-        script_nonce: Some("captured-nonce".to_owned()),
-        script_integrity: Some("sha256-captured-integrity".to_owned()),
-    };
-
-    let action = vm
-        ._context_host
-        .borrow()
-        .child_dynamic_classic_script_execution_action_for_owner(
-            &work_without_realm,
-            owner_realm_id,
-        )
-        .expect("current dynamic work should materialize an execution action");
-    assert_eq!(action.target().task_owner(), task_owner);
-    assert_eq!(action.target().realm_id(), owner_realm_id);
-    let job = action.into_job();
-    assert_eq!(job.script_nonce.as_deref(), Some("captured-nonce"));
-    assert_eq!(
-        job.script_integrity.as_deref(),
-        Some("sha256-captured-integrity")
-    );
-
-    let stale_work = PendingChildDynamicDocumentScript {
-        realm_id: Some(FrameRealmId(owner_realm_id.0 + 1)),
-        ..work_without_realm
-    };
-    assert!(
-        vm._context_host
-            .borrow()
-            .child_dynamic_classic_script_execution_action_for_owner(&stale_work, owner_realm_id)
-            .is_none(),
-        "stale dynamic child work must not produce an execution action"
-    );
-}
-
-#[tokio::test]
 async fn function_constructor_frame_script_job_returns_child_realm_function() {
     let mut vm = new_storage_test_vm("https://child-function-job.test/");
 
@@ -10371,6 +10282,449 @@ async fn child_frame_realm_location_navigation_queues_child_navigation() {
             .child_browsing_context_pending_live_navigation_for_test(child_handle)
             .is_none(),
         "NavigationCommit should clear the pending navigation after commit"
+    );
+}
+
+#[tokio::test]
+async fn child_window_name_survives_owner_refresh_and_self_navigation() {
+    let mut vm = new_storage_test_vm("https://child-window-name.test/");
+
+    vm.eval(
+        r#"
+(() => {
+  const root = document.documentElement || document.appendChild(document.createElement("html"));
+  const body = document.body || root.appendChild(document.createElement("body"));
+  const frame = document.createElement("iframe");
+  frame.id = "named-child";
+  frame.name = "owner-name";
+  body.appendChild(frame);
+  void frame.contentWindow;
+})()
+"#,
+    )
+    .expect("named child setup should evaluate");
+    assert_initial_about_blank_child_completed_synchronously_for_test(
+        &mut vm,
+        "named child initial-empty setup",
+    )
+    .await;
+    let initial_context_id =
+        materialize_single_child_default_realm_for_test(&mut vm, "named child initial realm");
+
+    assert_eq!(
+        vm.eval_in_child_default_context(
+            initial_context_id,
+            r#"window.name = "runtime-name"; window.name"#,
+        )
+        .expect("child window.name assignment should evaluate"),
+        "runtime-name"
+    );
+    assert_eq!(
+        vm.eval(
+            r#"
+(() => {
+  const frame = document.getElementById("named-child");
+  const before = frame.contentWindow.name;
+  frame.name = "owner-renamed";
+  const afterRename = frame.contentWindow.name;
+  frame.removeAttribute("name");
+  return [before, afterRename, frame.contentWindow.name].join("|");
+})()
+"#,
+        )
+        .expect("frame owner name mutation probe should evaluate"),
+        "runtime-name|runtime-name|runtime-name",
+        "an attached frame owner attribute must not overwrite its browsing-context name"
+    );
+
+    assert_eq!(
+        vm.eval_in_child_default_context(
+            initial_context_id,
+            r#"
+(() => {
+  const target = URL.createObjectURL(new Blob(
+    ["<!doctype html><p>replacement child</p>"],
+    { type: "text/html" }
+  ));
+  return window.open(target, "_self") === window;
+})()
+"#,
+        )
+        .expect("child window.open(_self) should evaluate"),
+        "true"
+    );
+    run_child_navigation_commit_and_host_load_for_test(&mut vm, "named child self navigation")
+        .await;
+
+    let replacement_context_id = vm
+        .live_child_default_runtime_realm_inventory()
+        .into_iter()
+        .map(|realm| realm.context_id)
+        .next()
+        .expect("replacement named child realm should exist");
+    assert_eq!(
+        vm.eval_in_child_default_context(replacement_context_id, "window.name")
+            .expect("replacement child window.name should evaluate"),
+        "runtime-name",
+        "the browsing-context name must survive a cross-document self navigation"
+    );
+}
+
+#[test]
+fn cross_realm_location_uses_entry_base_and_incumbent_navigation_source() {
+    let mut vm = new_storage_test_vm("https://multiple-globals.test/root/page.html");
+
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "entry";
+  frame.name = "entry";
+  frame.srcdoc = '<base href="https://multiple-globals.test/entry/"><body></body>';
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("entry realm setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let entry_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handle_by_name("entry")
+        .expect("entry child browsing context should exist");
+    let entry_context_id = vm
+        .live_child_default_runtime_realm_inventory()
+        .into_iter()
+        .find(|realm| {
+            vm.child_frame_realm_store
+                .get(&realm.context_id)
+                .is_some_and(|record| record.child_handle == entry_handle)
+        })
+        .map(|realm| realm.context_id)
+        .expect("entry child realm should exist");
+
+    vm.eval_in_child_default_context(
+        entry_context_id,
+        r#"
+(() => {
+  const incumbent = document.createElement("iframe");
+  incumbent.name = "incumbent";
+  incumbent.srcdoc = '<base href="https://multiple-globals.test/incumbent/"><body></body>';
+  const relevant = document.createElement("iframe");
+  relevant.name = "relevant";
+  relevant.srcdoc = '<base href="https://multiple-globals.test/relevant/"><body></body>';
+  document.body.append(incumbent, relevant);
+})()
+"#,
+    )
+    .expect("incumbent and relevant realm setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let (incumbent_handle, relevant_handle) = {
+        let host = vm._context_host.borrow();
+        (
+            host.child_browsing_context_handle_by_name("incumbent")
+                .expect("incumbent child browsing context should exist"),
+            host.child_browsing_context_handle_by_name("relevant")
+                .expect("relevant child browsing context should exist"),
+        )
+    };
+    let (incumbent_context_id, relevant_context_id) = {
+        let realms = vm.live_child_default_runtime_realm_inventory();
+        let context_for_handle = |handle| {
+            realms
+                .iter()
+                .find(|realm| {
+                    vm.child_frame_realm_store
+                        .get(&realm.context_id)
+                        .is_some_and(|record| record.child_handle == handle)
+                })
+                .map(|realm| realm.context_id)
+                .expect("named child realm should exist")
+        };
+        (
+            context_for_handle(incumbent_handle),
+            context_for_handle(relevant_handle),
+        )
+    };
+
+    vm.eval_in_child_default_context(
+        incumbent_context_id,
+        r#"
+function navigateRelevant() {
+  parent.frames.relevant.location.assign("target.html");
+}
+"#,
+    )
+    .expect("incumbent navigation function should install");
+    vm.eval(
+        r#"
+globalThis.__invokeIncumbentNavigation = function() {
+  document.getElementById("entry").contentWindow.frames.incumbent.navigateRelevant();
+};
+"#,
+    )
+    .expect("top-level call bridge should install");
+    vm.eval_in_child_default_context(entry_context_id, "top.__invokeIncumbentNavigation()")
+        .expect("entry realm should invoke the incumbent navigation function");
+
+    let pending = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_pending_live_navigation_for_test(relevant_handle)
+        .expect("relevant child should receive one pending navigation");
+    let crate::native_bridge::ChildBrowsingContextBootstrap::Request(request) = pending else {
+        panic!(
+            "cross-realm Location navigation must retain an explicit request carrier, got {pending:?}"
+        );
+    };
+    assert_eq!(
+        request.url.as_str(),
+        "https://multiple-globals.test/entry/target.html",
+        "relative Location input must resolve against the entry settings object"
+    );
+    assert_eq!(
+        request.initiator_url().map(url::Url::as_str),
+        Some("about:srcdoc"),
+        "the request carrier must retain the incumbent child Document as its source"
+    );
+    assert_ne!(incumbent_context_id, relevant_context_id);
+}
+
+#[test]
+fn cross_realm_window_open_uses_receiver_target_and_entry_request_policy() {
+    let mut vm = new_storage_test_vm("https://multiple-globals-open.test/root/page.html");
+
+    vm.eval(
+        r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.id = "entry-open";
+  frame.name = "entry-open";
+  frame.srcdoc = '<base href="https://multiple-globals-open.test/entry/"><body></body>';
+  (document.body || document.documentElement || document).appendChild(frame);
+})()
+"#,
+    )
+    .expect("window.open entry realm setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let entry_handle = vm
+        ._context_host
+        .borrow()
+        .child_browsing_context_handle_by_name("entry-open")
+        .expect("window.open entry child browsing context should exist");
+    let entry_context_id = vm
+        .live_child_default_runtime_realm_inventory()
+        .into_iter()
+        .find(|realm| {
+            vm.child_frame_realm_store
+                .get(&realm.context_id)
+                .is_some_and(|record| record.child_handle == entry_handle)
+        })
+        .map(|realm| realm.context_id)
+        .expect("window.open entry child realm should exist");
+
+    vm.eval_in_child_default_context(
+        entry_context_id,
+        r#"
+(() => {
+  history.replaceState(null, "", "https://multiple-globals-open.test/entry/source.html");
+  const incumbent = document.createElement("iframe");
+  incumbent.name = "incumbent-open";
+  incumbent.srcdoc = '<base href="https://multiple-globals-open.test/incumbent/"><body></body>';
+  const relevant = document.createElement("iframe");
+  relevant.name = "relevant-open";
+  relevant.sandbox = "allow-scripts allow-same-origin";
+  relevant.srcdoc = '<base href="https://multiple-globals-open.test/relevant/"><body></body>';
+  const popupReceiver = document.createElement("iframe");
+  popupReceiver.name = "popup-receiver-open";
+  popupReceiver.sandbox = "allow-scripts allow-same-origin allow-popups";
+  popupReceiver.srcdoc = '<base href="https://multiple-globals-open.test/receiver/"><body></body>';
+  document.body.append(incumbent, relevant, popupReceiver);
+})()
+"#,
+    )
+    .expect("window.open incumbent and relevant realm setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let (incumbent_handle, relevant_handle, popup_receiver_handle, popup_receiver_frame_id) = {
+        let host = vm._context_host.borrow();
+        let incumbent_handle = host
+            .child_browsing_context_handle_by_name("incumbent-open")
+            .expect("window.open incumbent child browsing context should exist");
+        let relevant_handle = host
+            .child_browsing_context_handle_by_name("relevant-open")
+            .expect("window.open relevant child browsing context should exist");
+        let popup_receiver_handle = host
+            .child_browsing_context_handle_by_name("popup-receiver-open")
+            .expect("window.open popup receiver child browsing context should exist");
+        let popup_receiver_frame_id = host
+            .child_browsing_context_request_scope(popup_receiver_handle)
+            .expect("window.open popup receiver request scope should exist")
+            .0;
+        (
+            incumbent_handle,
+            relevant_handle,
+            popup_receiver_handle,
+            popup_receiver_frame_id,
+        )
+    };
+    let (incumbent_context_id, relevant_context_id) = {
+        let realms = vm.live_child_default_runtime_realm_inventory();
+        let context_for_handle = |handle| {
+            realms
+                .iter()
+                .find(|realm| {
+                    vm.child_frame_realm_store
+                        .get(&realm.context_id)
+                        .is_some_and(|record| record.child_handle == handle)
+                })
+                .map(|realm| realm.context_id)
+                .expect("window.open named child realm should exist")
+        };
+        (
+            context_for_handle(incumbent_handle),
+            context_for_handle(relevant_handle),
+        )
+    };
+
+    vm.eval_in_child_default_context(
+        incumbent_context_id,
+        r#"
+history.replaceState(null, "", "https://multiple-globals-open.test/incumbent/source.html");
+function openRelevant() {
+  const relevant = parent.frames["relevant-open"];
+  return relevant.open("target.html", "_self") === relevant;
+}
+function openBlockedRelevantPopup() {
+  const relevant = parent.frames["relevant-open"];
+  return relevant.open("about:blank", "receiver-policy-popup") === null;
+}
+function openAllowedReceiverPopup() {
+  const receiver = parent.frames["popup-receiver-open"];
+  receiver.open("popup-target.html", "receiver-source-popup");
+}
+"#,
+    )
+    .expect("window.open incumbent function should install");
+    vm.eval_in_child_default_context(
+        relevant_context_id,
+        r#"history.replaceState(null, "", "https://multiple-globals-open.test/relevant/source.html")"#,
+    )
+    .expect("window.open relevant history URL should install");
+    vm.eval(
+        r#"
+globalThis.__invokeIncumbentWindowOpen = function() {
+  return document.getElementById("entry-open")
+    .contentWindow.frames["incumbent-open"].openRelevant();
+};
+globalThis.__invokeIncumbentBlockedWindowOpen = function() {
+  return document.getElementById("entry-open")
+    .contentWindow.frames["incumbent-open"].openBlockedRelevantPopup();
+};
+globalThis.__invokeIncumbentAllowedWindowOpen = function() {
+  return document.getElementById("entry-open")
+    .contentWindow.frames["incumbent-open"].openAllowedReceiverPopup();
+};
+"#,
+    )
+    .expect("window.open top-level call bridge should install");
+    assert_eq!(
+        vm.eval_in_child_default_context(
+            entry_context_id,
+            "String(top.__invokeIncumbentWindowOpen())",
+        )
+        .expect("entry realm should invoke incumbent window.open"),
+        "true",
+        "window.open(_self) must return the relevant receiver WindowProxy"
+    );
+    assert_eq!(
+        vm.eval_in_child_default_context(
+            entry_context_id,
+            "String(top.__invokeIncumbentBlockedWindowOpen())",
+        )
+        .expect("entry realm should invoke the sandboxed receiver window.open"),
+        "true",
+        "new-context admission must use the receiver's sandbox policy"
+    );
+    assert!(
+        vm.take_pending_popup_activations().is_empty(),
+        "an unsandboxed entry realm must not bypass the receiver's popup sandbox gate"
+    );
+    vm.eval_in_child_default_context(entry_context_id, "top.__invokeIncumbentAllowedWindowOpen()")
+        .expect("entry realm should invoke the popup-allowed receiver window.open");
+    let activations = vm.take_pending_popup_activations();
+    assert_eq!(activations.len(), 1);
+    let crate::RendererPopupActivationSource::Window {
+        window,
+        exposes_opener,
+        ..
+    } = activations[0].source()
+    else {
+        panic!("window.open must retain a Window receiver source");
+    };
+    assert_eq!(
+        window,
+        &crate::RendererWindowDocumentSource::ChildFrame {
+            frame_id: popup_receiver_frame_id,
+            local_window_id: vm
+                ._context_host
+                .borrow()
+                .current_child_document_task_owner(popup_receiver_handle)
+                .expect("popup receiver owner should remain current")
+                .local_window_id
+                .0,
+            document_id: vm
+                ._context_host
+                .borrow()
+                .current_child_document_task_owner(popup_receiver_handle)
+                .expect("popup receiver owner should remain current")
+                .document_id
+                .0,
+        },
+        "popup opener projection must identify the receiver frame"
+    );
+    assert!(*exposes_opener);
+    assert_eq!(
+        activations[0]
+            .navigation_source()
+            .map(crate::RendererTopLevelNavigationSource::source_url),
+        Some("https://multiple-globals-open.test/entry/source.html"),
+        "popup destination request must retain the separate entry Window source"
+    );
+
+    assert!(
+        !vm.has_pending_location_navigation(),
+        "a child receiver's _self target must not queue a top-level navigation"
+    );
+    let host = vm._context_host.borrow();
+    assert!(
+        host.child_browsing_context_pending_live_navigation_for_test(entry_handle)
+            .is_none(),
+        "the entry Window supplies request policy but is not the _self target"
+    );
+    assert!(
+        host.child_browsing_context_pending_live_navigation_for_test(incumbent_handle)
+            .is_none(),
+        "the incumbent Window supplies neither the target nor request policy"
+    );
+    let pending = host
+        .child_browsing_context_pending_live_navigation_for_test(relevant_handle)
+        .expect("the relevant receiver should receive the _self navigation");
+    let crate::native_bridge::ChildBrowsingContextBootstrap::Request(request) = pending else {
+        panic!("window.open must retain an explicit entry request carrier, got {pending:?}");
+    };
+    assert_eq!(
+        request.url.as_str(),
+        "https://multiple-globals-open.test/entry/target.html",
+        "window.open URL conversion must use the entry settings object's base URL"
+    );
+    assert_eq!(
+        request.initiator_url().map(url::Url::as_str),
+        Some("https://multiple-globals-open.test/entry/source.html"),
+        "window.open navigation policy must come from the entry Document"
     );
 }
 

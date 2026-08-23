@@ -1,4 +1,4 @@
-use super::{JsContextHost, OwnerDispatchScope};
+use super::{JsContextHost, OwnerDispatchScope, WindowExecutionContextIdentity};
 use crate::{
     content_security_policy::{
         ContentSecurityPolicyNonUrlKind, ContentSecurityPolicyRedirectStatus,
@@ -11,10 +11,7 @@ use crate::{
         DocumentSubresourceCspKind, DomHandle, create_content_security_policy_violation_event,
     },
     dom::native::Node,
-    native_bridge::{
-        active_child_window_handle, child_window_handle_from_marker_data,
-        entered_child_window_handle,
-    },
+    native_bridge::{active_child_window_handle, child_window_handle_from_marker_data},
     util::get_private_value,
 };
 
@@ -74,6 +71,15 @@ impl JsContextHost {
                 self.child_browsing_context_policy_container_snapshot(handle)?
             }
         })
+    }
+
+    pub(crate) fn document_policy_container_snapshot_for_identity(
+        &self,
+        identity: WindowExecutionContextIdentity,
+    ) -> Option<crate::document_runtime::DocumentPolicyContainer> {
+        self.window_execution_context_identity_is_current(identity)
+            .then(|| identity.dispatch_scope())
+            .and_then(|owner| self.document_policy_container_snapshot_for_owner(owner))
     }
 
     /// Reads the active policy of the Document that owns `node`.
@@ -383,14 +389,16 @@ impl JsContextHost {
         }
     }
 
-    pub(crate) fn entered_owner_dispatch_scope(
+    /// Returns the exact owner registered to the currently executing V8 realm.
+    ///
+    /// This deliberately does not infer an entry/incumbent realm. Web APIs that
+    /// need either identity must capture that concrete V8 Context themselves.
+    pub(crate) fn current_realm_owner_dispatch_scope(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
-    ) -> OwnerDispatchScope {
-        if let Some(handle) = entered_child_window_handle(scope) {
-            return OwnerDispatchScope::Child(handle);
-        }
-        OwnerDispatchScope::Top
+    ) -> Option<OwnerDispatchScope> {
+        self.current_runtime_window_execution_context_identity(scope)
+            .map(|identity| identity.dispatch_scope())
     }
 
     pub(crate) fn check_document_connect_csp_for_owner<'s>(

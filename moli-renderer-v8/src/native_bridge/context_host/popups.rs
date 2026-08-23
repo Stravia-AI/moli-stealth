@@ -4,8 +4,9 @@ use crate::{
         SharedWebStorageStore, deep_clone_shared_web_storage_store,
         web_storage_area_key_for_storage_key,
     },
-    document_runtime::{DocumentPolicyContainer, DocumentSandboxPolicy, DomHandle},
+    document_runtime::{DocumentPolicyContainer, DomHandle},
     native_bridge::element::SpecialBrowsingContextTarget,
+    network::context::DocumentResourceLoader,
     runtime::{
         PageVmEnvConfig, RendererPendingAuxiliaryPage, RendererPendingPopupActivation,
         RendererRelatedInitialEmptyPageRealmInit, RendererStagedAuxiliaryWindowProxy,
@@ -64,25 +65,6 @@ pub(crate) struct OpenedAuxiliaryBrowsingContext<'scope> {
     pub(crate) captured_initial_empty_document_storage_key: MoliStorageKey,
 }
 
-fn inherit_auxiliary_page_opener_sandbox(
-    target: &mut DocumentSandboxPolicy,
-    opener: Option<DocumentSandboxPolicy>,
-) {
-    let Some(opener) = opener else {
-        return;
-    };
-    target.sandboxes_navigation |= opener.sandboxes_navigation;
-    target.forces_opaque_origin |= opener.forces_opaque_origin;
-    target.allows_scripts &= opener.allows_scripts;
-    target.allows_forms &= opener.allows_forms;
-    target.allows_popups &= opener.allows_popups;
-    target.allows_popups_to_escape &= opener.allows_popups_to_escape;
-    target.allows_top_navigation &= opener.allows_top_navigation;
-    target.allows_top_navigation_by_user_activation &=
-        opener.allows_top_navigation_by_user_activation;
-    target.sandboxes_document_domain |= opener.sandboxes_document_domain;
-}
-
 impl JsContextHost {
     /// Creates the synchronous WindowProxy and the authoritative initial
     /// Document directly inside a reserved related auxiliary Page.
@@ -102,12 +84,11 @@ impl JsContextHost {
         href: &str,
         creator_base_url: Url,
         creator_policy_container: DocumentPolicyContainer,
+        creator_resource_authority: DocumentResourceLoader,
     ) -> Option<OpenedAuxiliaryBrowsingContext<'s>> {
         let pending_auxiliary_page = self.reserve_pending_auxiliary_page(true)?;
-        let opener_sandbox_policy = opener_child_handle
-            .and_then(|handle| self.child_browsing_context_popup_opener_sandbox_policy(handle));
-        let inherits_creator_security_token =
-            !opener_sandbox_policy.is_some_and(|policy| policy.forces_opaque_origin);
+        let accepted_sandbox_policy = creator_policy_container.sandbox;
+        let inherits_creator_security_token = !accepted_sandbox_policy.forces_opaque_origin;
         let requested_url = Url::parse(href).ok()?;
         self.create_renderer_owned_initial_empty_window(
             scope,
@@ -117,9 +98,9 @@ impl JsContextHost {
             target_name,
             requested_url,
             pending_auxiliary_page,
-            opener_sandbox_policy,
             creator_base_url,
             creator_policy_container,
+            creator_resource_authority,
             inherits_creator_security_token,
         )
     }
@@ -134,9 +115,9 @@ impl JsContextHost {
         target_name: &str,
         requested_url: Url,
         pending_auxiliary_page: RendererPendingAuxiliaryPage,
-        opener_sandbox_policy: Option<DocumentSandboxPolicy>,
         creator_base_url: Url,
-        mut creator_policy_container: DocumentPolicyContainer,
+        creator_policy_container: DocumentPolicyContainer,
+        creator_resource_authority: DocumentResourceLoader,
         inherits_creator_security_token: bool,
     ) -> Option<OpenedAuxiliaryBrowsingContext<'s>> {
         let initial_url = if moli_url::is_about_blank(&requested_url) {
@@ -148,17 +129,10 @@ impl JsContextHost {
             about_blank_url()
         };
         let initial_base_url = auxiliary_page_initial_base_url(&initial_url, creator_base_url);
-        inherit_auxiliary_page_opener_sandbox(
-            &mut creator_policy_container.sandbox,
-            opener_sandbox_policy,
-        );
-        let creator_resource_authority = self
-            .document_resource_loader_for_dispatch_scope(self.entered_owner_dispatch_scope(scope))?
-            .clone();
         let storage_scope = self.auxiliary_page_storage_scope_for_initiated_navigation(
             opener_child_handle,
             &initial_url,
-            opener_sandbox_policy.is_some_and(|policy| policy.forces_opaque_origin),
+            creator_policy_container.sandbox.forces_opaque_origin,
         );
         let session_storage_store =
             self.clone_auxiliary_page_session_storage_store(opener_child_handle, &storage_scope);

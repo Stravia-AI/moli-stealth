@@ -110,6 +110,12 @@ impl JsContextHost {
         std::mem::replace(&mut self.active_top_level_navigation_source, source)
     }
 
+    pub(crate) fn active_top_level_navigation_source_snapshot(
+        &self,
+    ) -> Option<RendererTopLevelNavigationSource> {
+        self.active_top_level_navigation_source.clone()
+    }
+
     pub(crate) fn replace_active_inspector_dispatch(&mut self, active: bool) -> bool {
         std::mem::replace(&mut self.active_inspector_dispatch, active)
     }

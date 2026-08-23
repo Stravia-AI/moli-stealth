@@ -380,7 +380,8 @@ pub(crate) use self::page_surface::{
     RendererRuntimeInspectorSessionResponseSettlement, RendererRuntimeObservableSourceQueue,
 };
 pub(crate) use self::page_surface::{
-    RendererRemoteFrameNavigationId, RendererRemoteWindowProxyChannel,
+    RendererRemoteFrameNavigationId, RendererRemoteJavaScriptUrlSource,
+    RendererRemoteJavaScriptUrlSourceWorld, RendererRemoteWindowProxyChannel,
     RendererRemoteWindowProxyCommandKind, RendererRemoteWindowProxyMessage,
     RendererRemoteWindowProxyNavigationKind,
 };

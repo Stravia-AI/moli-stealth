@@ -571,6 +571,17 @@ impl JsContextHost {
         self.document_resource_loader_for_window_owner(target.owner())
     }
 
+    pub(crate) fn document_resource_loader_for_window_execution_context_identity(
+        &self,
+        identity: crate::native_bridge::WindowExecutionContextIdentity,
+    ) -> Option<DocumentResourceLoader> {
+        self.window_execution_context_identity_is_current(identity)
+            .then(|| identity.dispatch_scope())
+            .and_then(|dispatch_scope| {
+                self.document_resource_loader_for_dispatch_scope(dispatch_scope)
+            })
+    }
+
     pub(crate) fn parent_document_resource_loader_for_child_context(
         &self,
         handle: DomHandle,

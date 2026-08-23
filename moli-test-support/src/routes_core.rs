@@ -1229,7 +1229,7 @@ pub(super) async fn window_child_browsing_context_external_script_cookie_child_p
       if (event.data.type === 'mutate-nested-children') {
         try {
           const nested = document.getElementById('nested');
-          nested.name = 'renamedNested';
+          nested.contentWindow.name = 'renamedNested';
           document.getElementById('document-collision').remove();
           const thenFrame = document.createElement('iframe');
           thenFrame.name = 'then';
@@ -1238,7 +1238,7 @@ pub(super) async fn window_child_browsing_context_external_script_cookie_child_p
           parent.postMessage({
             type: event.data.replyType,
             childLength: length,
-            renamedName: nested.name,
+            renamedName: nested.contentWindow.name,
             thenName: thenFrame.name
           }, '*');
         } catch (error) {

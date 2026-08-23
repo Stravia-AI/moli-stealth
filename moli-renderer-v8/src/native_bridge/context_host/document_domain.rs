@@ -45,7 +45,15 @@ impl JsContextHost {
             if !document_domain_is_allowed_for_host(&current_host, &domain) {
                 return false;
             }
-            self.document_domain_override = Some(domain);
+            self.document_domain_override = Some(domain.clone());
+            if let Some(environment) = self.page_script_environment.as_ref() {
+                environment.replicate_current_top_level_document(
+                    self.document_url(),
+                    &self.main_document_serialized_origin,
+                    self.main_window_opaque_origin_nonce(),
+                    Some(domain),
+                );
+            }
             return true;
         }
         if let Some(child_handle) =
@@ -98,7 +106,17 @@ impl JsContextHost {
             return false;
         };
         match origin_owner {
-            ChildSecurityOriginOwner::Main => self.document_domain_override = Some(domain),
+            ChildSecurityOriginOwner::Main => {
+                self.document_domain_override = Some(domain.clone());
+                if let Some(environment) = self.page_script_environment.as_ref() {
+                    environment.replicate_current_top_level_document(
+                        self.document_url(),
+                        &self.main_document_serialized_origin,
+                        self.main_window_opaque_origin_nonce(),
+                        Some(domain),
+                    );
+                }
+            }
             ChildSecurityOriginOwner::Child(owner) => {
                 let Some(entry) = self.child_browsing_contexts.get_mut(&owner) else {
                     return false;

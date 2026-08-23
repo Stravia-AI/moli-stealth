@@ -1,4 +1,7 @@
-use super::{JsContextHost, OwnerDispatchScope, WindowDocumentOwner, WindowDocumentTaskTarget};
+use super::{
+    JsContextHost, OwnerDispatchScope, WindowDocumentOwner, WindowDocumentTaskTarget,
+    WindowExecutionContextIdentity,
+};
 use crate::document_runtime::DomHandle;
 use crate::runtime::{
     RendererDocumentLifecycleIdentity, RendererTopLevelNavigationSource,
@@ -197,6 +200,19 @@ impl JsContextHost {
         Some((target, root_document, source))
     }
 
+    pub(crate) fn renderer_window_document_source_for_identity(
+        &self,
+        identity: WindowExecutionContextIdentity,
+    ) -> Option<(
+        WindowDocumentTaskTarget,
+        RendererDocumentLifecycleIdentity,
+        RendererWindowDocumentSource,
+    )> {
+        self.window_execution_context_identity_is_current(identity)
+            .then(|| identity.dispatch_scope())
+            .and_then(|scope| self.renderer_window_document_source_for_dispatch_scope(scope))
+    }
+
     /// Captures the source-side facts for a top-level navigation before target
     /// selection enters another Window realm or hands scheduling to another
     /// Page. The source URL follows the inherited creator URL for initial
@@ -232,6 +248,21 @@ impl JsContextHost {
             policy.referrer_policy,
             suppress_referrer,
         ))
+    }
+
+    pub(crate) fn renderer_top_level_navigation_source_for_identity(
+        &self,
+        identity: WindowExecutionContextIdentity,
+        suppress_referrer: bool,
+    ) -> Option<RendererTopLevelNavigationSource> {
+        self.window_execution_context_identity_is_current(identity)
+            .then(|| identity.dispatch_scope())
+            .and_then(|scope| {
+                self.renderer_top_level_navigation_source_for_dispatch_scope(
+                    scope,
+                    suppress_referrer,
+                )
+            })
     }
 
     pub(crate) fn renderer_top_level_navigation_source_for_node(

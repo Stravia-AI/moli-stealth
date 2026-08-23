@@ -404,12 +404,24 @@ impl JsContextHost {
             );
             return None;
         }
-        if let ChildBrowsingContextBootstrap::Url(url) = &pending_bootstrap
-            && url.scheme() == "javascript"
-        {
+        let javascript_url = match &pending_bootstrap {
+            ChildBrowsingContextBootstrap::Url(url) if url.scheme() == "javascript" => {
+                Some(url.clone())
+            }
+            ChildBrowsingContextBootstrap::Request(request)
+                if request.url.scheme() == "javascript" =>
+            {
+                Some(request.url.clone())
+            }
+            ChildBrowsingContextBootstrap::AboutBlank
+            | ChildBrowsingContextBootstrap::Url(_)
+            | ChildBrowsingContextBootstrap::Request(_)
+            | ChildBrowsingContextBootstrap::Srcdoc { .. } => None,
+        };
+        if let Some(url) = javascript_url {
             self.queue_child_browsing_context_javascript_url_execution(
                 handle,
-                url.clone(),
+                url,
                 false,
                 false,
                 navigation_load,

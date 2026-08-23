@@ -26,7 +26,7 @@ static NEXT_REMOTE_WINDOW_PROXY_COMMAND_ID: AtomicU64 = AtomicU64::new(1);
 static NEXT_REMOTE_WINDOW_PROXY_CHANNEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 static NEXT_REMOTE_FRAME_NAVIGATION_ID: AtomicU64 = AtomicU64::new(1);
 
-const REMOTE_WINDOW_PROXY_WIRE_VERSION: u16 = 1;
+const REMOTE_WINDOW_PROXY_WIRE_VERSION: u16 = 2;
 const MAX_REMOTE_WINDOW_PROXY_WIRE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_WINDOW_PROXY_URL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_REMOTE_WINDOW_PROXY_STRING_BYTES: usize = 16 * 1024;
@@ -174,6 +174,81 @@ pub(crate) enum RendererRemoteWindowProxyNavigationKind {
     Replace,
 }
 
+/// Source JavaScript world whose policy admitted one remote `javascript:` URL.
+///
+/// The destination always executes the URL in its current main world. This
+/// value preserves the source dispatch-world distinction across the remote
+/// owner boundary. Moli does not currently expose isolated-world-specific CSP
+/// state, so both variants consult the source Document policy; universal
+/// Window access remains a separate `CanNavigate` fact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RendererRemoteJavaScriptUrlSourceWorld {
+    Main,
+    Isolated { grants_universal_access: bool },
+}
+
+/// Exact source-side admission retained for a remote `javascript:` URL.
+///
+/// The ordinary navigation source carries Document/currentness and referrer
+/// causality. The WindowProxy source adds the related-group endpoint and Page
+/// route. Origin/domain/opaque identity are frozen independently so the target
+/// owner can compare them with its *current* Document before scheduling script.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererRemoteJavaScriptUrlSource {
+    navigation_source: RendererTopLevelNavigationSource,
+    window_source: RendererRemoteWindowProxySource,
+    opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
+    document_domain: Option<String>,
+    world: RendererRemoteJavaScriptUrlSourceWorld,
+}
+
+impl RendererRemoteJavaScriptUrlSource {
+    pub(crate) fn new(
+        navigation_source: RendererTopLevelNavigationSource,
+        window_source: RendererRemoteWindowProxySource,
+        opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
+        document_domain: Option<String>,
+        world: RendererRemoteJavaScriptUrlSourceWorld,
+    ) -> Self {
+        assert_eq!(
+            window_source.serialized_origin() == "null",
+            opaque_origin_nonce.is_some(),
+            "remote javascript URL source opaque identity must match its serialized origin"
+        );
+        assert!(
+            window_source.serialized_origin() != "null" || document_domain.is_none(),
+            "an opaque remote javascript URL source cannot carry document.domain"
+        );
+        Self {
+            navigation_source,
+            window_source,
+            opaque_origin_nonce,
+            document_domain,
+            world,
+        }
+    }
+
+    pub(crate) fn navigation_source(&self) -> &RendererTopLevelNavigationSource {
+        &self.navigation_source
+    }
+
+    pub(crate) fn window_source(&self) -> &RendererRemoteWindowProxySource {
+        &self.window_source
+    }
+
+    pub(crate) const fn opaque_origin_nonce(&self) -> Option<moli_storage_key::OpaqueOriginNonce> {
+        self.opaque_origin_nonce
+    }
+
+    pub(crate) fn document_domain(&self) -> Option<&str> {
+        self.document_domain.as_deref()
+    }
+
+    pub(crate) const fn world(&self) -> RendererRemoteJavaScriptUrlSourceWorld {
+        self.world
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct RendererRemoteWindowProxyMessage {
     pub(crate) source: RendererRemoteWindowProxySource,
@@ -188,9 +263,20 @@ pub(crate) enum RendererRemoteWindowProxyCommandKind {
         url: String,
         source: RendererTopLevelNavigationSource,
     },
+    NavigateJavaScriptUrl {
+        kind: RendererRemoteWindowProxyNavigationKind,
+        url: String,
+        source: Box<RendererRemoteJavaScriptUrlSource>,
+    },
     NavigateFrame {
         kind: RendererRemoteWindowProxyNavigationKind,
         request: Box<ChildBrowsingContextNavigationRequest>,
+        scheduler_id: Option<RendererRemoteFrameNavigationId>,
+    },
+    NavigateFrameJavaScriptUrl {
+        kind: RendererRemoteWindowProxyNavigationKind,
+        request: Box<ChildBrowsingContextNavigationRequest>,
+        source: Box<RendererRemoteJavaScriptUrlSource>,
         scheduler_id: Option<RendererRemoteFrameNavigationId>,
     },
     CancelFrameNavigation {
@@ -314,6 +400,26 @@ impl RendererRemoteWindowProxyCommand {
         )
     }
 
+    pub(crate) fn navigate_javascript_url(
+        target_endpoint: TopLevelWindowProxyEndpointId,
+        target_page: RendererResolvedPopupTarget,
+        target_channel: RendererRemoteWindowProxyChannel,
+        kind: RendererRemoteWindowProxyNavigationKind,
+        url: String,
+        source: RendererRemoteJavaScriptUrlSource,
+    ) -> Self {
+        Self::new(
+            target_endpoint,
+            target_page,
+            target_channel,
+            RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+                kind,
+                url,
+                source: Box::new(source),
+            },
+        )
+    }
+
     pub(crate) fn post_message(
         target_endpoint: TopLevelWindowProxyEndpointId,
         target_page: RendererResolvedPopupTarget,
@@ -351,6 +457,28 @@ impl RendererRemoteWindowProxyCommand {
             RendererRemoteWindowProxyCommandKind::NavigateFrame {
                 kind,
                 request: Box::new(request),
+                scheduler_id,
+            },
+        )
+    }
+
+    pub(crate) fn navigate_frame_javascript_url(
+        target_frame: RendererRemoteFrameToken,
+        target_page: RendererResolvedPopupTarget,
+        target_channel: RendererRemoteWindowProxyChannel,
+        kind: RendererRemoteWindowProxyNavigationKind,
+        request: ChildBrowsingContextNavigationRequest,
+        source: RendererRemoteJavaScriptUrlSource,
+        scheduler_id: Option<RendererRemoteFrameNavigationId>,
+    ) -> Self {
+        Self::new_for_frame(
+            target_frame,
+            target_page,
+            target_channel,
+            RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+                kind,
+                request: Box::new(request),
+                source: Box::new(source),
                 scheduler_id,
             },
         )
@@ -496,6 +624,7 @@ impl RemoteWindowProxyCommandWire {
         route: RendererRemoteWindowProxyRoute,
         kind: RendererRemoteWindowProxyCommandKind,
     ) -> Result<Self> {
+        validate_remote_command_route_and_kind(route, &kind)?;
         Ok(Self {
             version: REMOTE_WINDOW_PROXY_WIRE_VERSION,
             request_id: route.id,
@@ -540,34 +669,126 @@ impl RemoteWindowProxyCommandWire {
             );
         }
         let kind = self.command.into_kind()?;
-        ensure!(
-            matches!(
-                (&kind, target_frame),
-                (
-                    RendererRemoteWindowProxyCommandKind::NavigateFrame { .. }
-                        | RendererRemoteWindowProxyCommandKind::CancelFrameNavigation { .. },
-                    Some(_)
-                ) | (RendererRemoteWindowProxyCommandKind::PostMessage(_), _)
-                    | (
-                        RendererRemoteWindowProxyCommandKind::Navigate { .. }
-                            | RendererRemoteWindowProxyCommandKind::Focus
-                            | RendererRemoteWindowProxyCommandKind::Close,
-                        None
-                    )
-            ),
-            "RemoteWindowProxy command kind is incompatible with its frame route"
-        );
-        Ok((
-            RendererRemoteWindowProxyRoute {
-                id: self.request_id,
-                target_endpoint,
-                target_page,
-                target_channel,
-                target_frame,
-            },
-            kind,
-        ))
+        let route = RendererRemoteWindowProxyRoute {
+            id: self.request_id,
+            target_endpoint,
+            target_page,
+            target_channel,
+            target_frame,
+        };
+        validate_remote_command_route_and_kind(route, &kind)?;
+        Ok((route, kind))
     }
+}
+
+fn validate_remote_command_route_and_kind(
+    route: RendererRemoteWindowProxyRoute,
+    kind: &RendererRemoteWindowProxyCommandKind,
+) -> Result<()> {
+    ensure!(
+        matches!(
+            (kind, route.target_frame),
+            (
+                RendererRemoteWindowProxyCommandKind::NavigateFrame { .. }
+                    | RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl { .. }
+                    | RendererRemoteWindowProxyCommandKind::CancelFrameNavigation { .. },
+                Some(_)
+            ) | (RendererRemoteWindowProxyCommandKind::PostMessage(_), _)
+                | (
+                    RendererRemoteWindowProxyCommandKind::Navigate { .. }
+                        | RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { .. }
+                        | RendererRemoteWindowProxyCommandKind::Focus
+                        | RendererRemoteWindowProxyCommandKind::Close,
+                    None
+                )
+        ),
+        "RemoteWindowProxy command kind is incompatible with its frame route"
+    );
+    match kind {
+        RendererRemoteWindowProxyCommandKind::Navigate { url, .. } => {
+            ensure!(
+                parse_url_string(url, "target navigation URL")?.scheme() != "javascript",
+                "ordinary remote navigation cannot carry a javascript URL"
+            );
+        }
+        RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { url, source, .. } => {
+            ensure!(
+                parse_url_string(url, "target javascript navigation URL")?.scheme() == "javascript",
+                "typed remote javascript navigation requires a javascript URL"
+            );
+            validate_remote_javascript_url_source_route(source, route)?;
+        }
+        RendererRemoteWindowProxyCommandKind::NavigateFrame { request, .. } => {
+            ensure!(
+                request.url.scheme() != "javascript",
+                "ordinary remote frame navigation cannot carry a javascript URL"
+            );
+        }
+        RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+            request,
+            source,
+            ..
+        } => {
+            ensure!(
+                request.url.scheme() == "javascript",
+                "typed remote frame javascript navigation requires a javascript URL"
+            );
+            validate_remote_javascript_url_source_route(source, route)?;
+        }
+        RendererRemoteWindowProxyCommandKind::CancelFrameNavigation { .. }
+        | RendererRemoteWindowProxyCommandKind::PostMessage(_)
+        | RendererRemoteWindowProxyCommandKind::Focus
+        | RendererRemoteWindowProxyCommandKind::Close => {}
+    }
+    Ok(())
+}
+
+fn validate_remote_javascript_url_source_route(
+    source: &RendererRemoteJavaScriptUrlSource,
+    route: RendererRemoteWindowProxyRoute,
+) -> Result<()> {
+    let window_source = source.window_source();
+    ensure!(
+        window_source.endpoint().browsing_context_group_id()
+            == route.target_endpoint.browsing_context_group_id(),
+        "remote javascript URL source and target belong to different browsing-context groups"
+    );
+    let root_document = source
+        .navigation_source()
+        .root_document()
+        .ok_or_else(|| anyhow!("remote javascript URL has no Window Document source"))?;
+    ensure!(
+        root_document.frame.page_id == window_source.page().page_id()
+            && root_document.document.page_id == window_source.page().page_id(),
+        "remote javascript URL source Document belongs to another Page"
+    );
+    match (source.navigation_source().window(), window_source.frame()) {
+        (Some(RendererWindowDocumentSource::RootFrame), None) => {}
+        (Some(RendererWindowDocumentSource::ChildFrame { .. }), Some(frame)) => {
+            ensure!(
+                frame.endpoint == window_source.endpoint(),
+                "remote javascript URL source frame belongs to another endpoint"
+            );
+            ensure!(
+                frame.root_document == root_document,
+                "remote javascript URL source frame belongs to another root Document"
+            );
+        }
+        _ => {
+            return Err(anyhow!(
+                "remote javascript URL source Window kind disagrees with its frame route"
+            ));
+        }
+    }
+    ensure!(
+        (window_source.serialized_origin() == "null") == source.opaque_origin_nonce().is_some(),
+        "remote javascript URL source opaque identity disagrees with its serialized origin"
+    );
+    ensure!(
+        window_source.serialized_origin() != "null" || source.document_domain().is_none(),
+        "opaque remote javascript URL source cannot carry document.domain"
+    );
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize)]
@@ -1013,6 +1234,101 @@ impl TryFrom<RemoteWindowProxySourceWire> for RendererRemoteWindowProxySource {
     }
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase", tag = "kind")]
+enum RemoteJavaScriptUrlSourceWorldWire {
+    Main,
+    Isolated { grants_universal_access: bool },
+}
+
+impl From<RendererRemoteJavaScriptUrlSourceWorld> for RemoteJavaScriptUrlSourceWorldWire {
+    fn from(world: RendererRemoteJavaScriptUrlSourceWorld) -> Self {
+        match world {
+            RendererRemoteJavaScriptUrlSourceWorld::Main => Self::Main,
+            RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access,
+            } => Self::Isolated {
+                grants_universal_access,
+            },
+        }
+    }
+}
+
+impl From<RemoteJavaScriptUrlSourceWorldWire> for RendererRemoteJavaScriptUrlSourceWorld {
+    fn from(world: RemoteJavaScriptUrlSourceWorldWire) -> Self {
+        match world {
+            RemoteJavaScriptUrlSourceWorldWire::Main => Self::Main,
+            RemoteJavaScriptUrlSourceWorldWire::Isolated {
+                grants_universal_access,
+            } => Self::Isolated {
+                grants_universal_access,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RemoteJavaScriptUrlSourceWire {
+    navigation_source: RemoteTopLevelNavigationSourceWire,
+    window_source: RemoteWindowProxySourceWire,
+    opaque_origin_nonce: Option<u64>,
+    document_domain: Option<String>,
+    world: RemoteJavaScriptUrlSourceWorldWire,
+}
+
+impl From<RendererRemoteJavaScriptUrlSource> for RemoteJavaScriptUrlSourceWire {
+    fn from(source: RendererRemoteJavaScriptUrlSource) -> Self {
+        Self {
+            navigation_source: RemoteTopLevelNavigationSourceWire::from_source(
+                source.navigation_source,
+            ),
+            window_source: source.window_source.into(),
+            opaque_origin_nonce: source
+                .opaque_origin_nonce
+                .map(moli_storage_key::OpaqueOriginNonce::get),
+            document_domain: source.document_domain,
+            world: source.world.into(),
+        }
+    }
+}
+
+impl TryFrom<RemoteJavaScriptUrlSourceWire> for RendererRemoteJavaScriptUrlSource {
+    type Error = anyhow::Error;
+
+    fn try_from(source: RemoteJavaScriptUrlSourceWire) -> Result<Self> {
+        let window_source: RendererRemoteWindowProxySource = source.window_source.try_into()?;
+        let opaque_origin_nonce = source
+            .opaque_origin_nonce
+            .map(|nonce| {
+                ensure!(
+                    nonce != 0,
+                    "remote javascript URL opaque-origin nonce is zero"
+                );
+                Ok(moli_storage_key::OpaqueOriginNonce::new(nonce))
+            })
+            .transpose()?;
+        ensure!(
+            (window_source.serialized_origin() == "null") == opaque_origin_nonce.is_some(),
+            "remote javascript URL opaque-origin identity disagrees with its serialized origin"
+        );
+        ensure!(
+            window_source.serialized_origin() != "null" || source.document_domain.is_none(),
+            "opaque remote javascript URL source cannot carry document.domain"
+        );
+        if let Some(domain) = source.document_domain.as_deref() {
+            validate_short_string(domain, "javascript URL source document.domain")?;
+        }
+        Ok(RendererRemoteJavaScriptUrlSource::new(
+            source.navigation_source.into_source()?,
+            window_source,
+            opaque_origin_nonce,
+            source.document_domain,
+            source.world.into(),
+        ))
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase", tag = "kind")]
 enum RemoteCommandKindWire {
@@ -1021,9 +1337,20 @@ enum RemoteCommandKindWire {
         url: String,
         source: RemoteTopLevelNavigationSourceWire,
     },
+    NavigateJavaScriptUrl {
+        navigation_kind: RemoteNavigationKindWire,
+        url: String,
+        source: Box<RemoteJavaScriptUrlSourceWire>,
+    },
     NavigateFrame {
         navigation_kind: RemoteNavigationKindWire,
         request: Box<RemoteChildNavigationRequestWire>,
+        scheduler_id: Option<u64>,
+    },
+    NavigateFrameJavaScriptUrl {
+        navigation_kind: RemoteNavigationKindWire,
+        request: Box<RemoteChildNavigationRequestWire>,
+        source: Box<RemoteJavaScriptUrlSourceWire>,
         scheduler_id: Option<u64>,
     },
     CancelFrameNavigation {
@@ -1048,6 +1375,13 @@ impl RemoteCommandKindWire {
                     source: RemoteTopLevelNavigationSourceWire::from_source(source),
                 }
             }
+            RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { kind, url, source } => {
+                Self::NavigateJavaScriptUrl {
+                    navigation_kind: kind.into(),
+                    url,
+                    source: Box::new((*source).into()),
+                }
+            }
             RendererRemoteWindowProxyCommandKind::NavigateFrame {
                 kind,
                 request,
@@ -1055,6 +1389,17 @@ impl RemoteCommandKindWire {
             } => Self::NavigateFrame {
                 navigation_kind: kind.into(),
                 request: Box::new((*request).into()),
+                scheduler_id: scheduler_id.map(RendererRemoteFrameNavigationId::value),
+            },
+            RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+                kind,
+                request,
+                source,
+                scheduler_id,
+            } => Self::NavigateFrameJavaScriptUrl {
+                navigation_kind: kind.into(),
+                request: Box::new((*request).into()),
+                source: Box::new((*source).into()),
                 scheduler_id: scheduler_id.map(RendererRemoteFrameNavigationId::value),
             },
             RendererRemoteWindowProxyCommandKind::CancelFrameNavigation { scheduler_id } => {
@@ -1086,6 +1431,18 @@ impl RemoteCommandKindWire {
                     source: source.into_source()?,
                 }
             }
+            Self::NavigateJavaScriptUrl {
+                navigation_kind,
+                url,
+                source,
+            } => {
+                validate_url_string(&url, "target javascript navigation URL")?;
+                RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+                    kind: navigation_kind.into(),
+                    url,
+                    source: Box::new((*source).try_into()?),
+                }
+            }
             Self::NavigateFrame {
                 navigation_kind,
                 request,
@@ -1097,6 +1454,23 @@ impl RemoteCommandKindWire {
                     .map(|id| {
                         RendererRemoteFrameNavigationId::from_wire(id)
                             .ok_or_else(|| anyhow!("remote frame navigation scheduler id is zero"))
+                    })
+                    .transpose()?,
+            },
+            Self::NavigateFrameJavaScriptUrl {
+                navigation_kind,
+                request,
+                source,
+                scheduler_id,
+            } => RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+                kind: navigation_kind.into(),
+                request: Box::new((*request).try_into()?),
+                source: Box::new((*source).try_into()?),
+                scheduler_id: scheduler_id
+                    .map(|id| {
+                        RendererRemoteFrameNavigationId::from_wire(id).ok_or_else(|| {
+                            anyhow!("remote frame javascript navigation scheduler id is zero")
+                        })
                     })
                     .transpose()?,
             },
@@ -1191,6 +1565,42 @@ mod tests {
 
     fn test_page() -> RendererResolvedPopupTarget {
         RendererResolvedPopupTarget::from_wire_parts(11, 13).expect("test Page")
+    }
+
+    fn test_source_page() -> RendererResolvedPopupTarget {
+        RendererResolvedPopupTarget::from_wire_parts(17, 19).expect("test source Page")
+    }
+
+    fn test_document(
+        page: RendererResolvedPopupTarget,
+    ) -> crate::runtime::RendererDocumentLifecycleIdentity {
+        let page_id = page.page_id();
+        crate::runtime::RendererDocumentLifecycleIdentity {
+            frame: crate::runtime::RendererFrameToken { page_id },
+            document: crate::runtime::RendererDocumentToken::new_for_testing(page_id, 23),
+            epoch: crate::runtime::RendererLifecycleEpoch(29),
+        }
+    }
+
+    fn test_javascript_source(
+        world: RendererRemoteJavaScriptUrlSourceWorld,
+    ) -> RendererRemoteJavaScriptUrlSource {
+        let page = test_source_page();
+        let endpoint =
+            TopLevelWindowProxyEndpointId::from_wire_parts(7, 31).expect("test source endpoint");
+        RendererRemoteJavaScriptUrlSource::new(
+            RendererTopLevelNavigationSource::new(
+                test_document(page),
+                RendererWindowDocumentSource::RootFrame,
+                "https://source.test/document".to_owned(),
+                Some("strict-origin-when-cross-origin".to_owned()),
+                false,
+            ),
+            RendererRemoteWindowProxySource::new(endpoint, page, "https://source.test".to_owned()),
+            None,
+            Some("source.test".to_owned()),
+            world,
+        )
     }
 
     #[test]
@@ -1290,6 +1700,159 @@ mod tests {
         let duplicate_port = serde_json::to_vec(&value).expect("mutated port wire JSON");
         assert!(
             RendererRemoteWindowProxyCommand::from_wire_bytes_for_testing(duplicate_port).is_err()
+        );
+    }
+
+    #[test]
+    fn remote_javascript_navigation_wire_is_typed_and_route_qualified() {
+        let target_page = test_page();
+        let target_channel = RendererRemoteWindowProxyChannel::allocate(target_page);
+        let top = RendererRemoteWindowProxyCommand::navigate_javascript_url(
+            test_endpoint(),
+            target_page,
+            target_channel,
+            RendererRemoteWindowProxyNavigationKind::Replace,
+            "javascript:void(globalThis.remoteTop = true)".to_owned(),
+            test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: false,
+            }),
+        );
+        let RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { kind, url, source } =
+            top.kind_for_testing()
+        else {
+            panic!("typed top-level javascript URL must round-trip its command kind")
+        };
+        assert_eq!(kind, RendererRemoteWindowProxyNavigationKind::Replace);
+        assert_eq!(url, "javascript:void(globalThis.remoteTop = true)");
+        assert_eq!(
+            source.world(),
+            RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: false
+            }
+        );
+        assert_eq!(source.document_domain(), Some("source.test"));
+
+        let opaque_nonce = moli_storage_key::OpaqueOriginNonce::new(33);
+        let opaque = RendererRemoteWindowProxyCommand::navigate_javascript_url(
+            test_endpoint(),
+            target_page,
+            target_channel,
+            RendererRemoteWindowProxyNavigationKind::Assign,
+            "javascript:void(globalThis.remoteOpaque = true)".to_owned(),
+            RendererRemoteJavaScriptUrlSource::new(
+                RendererTopLevelNavigationSource::new(
+                    test_document(test_source_page()),
+                    RendererWindowDocumentSource::RootFrame,
+                    "about:blank".to_owned(),
+                    None,
+                    false,
+                ),
+                RendererRemoteWindowProxySource::new(
+                    TopLevelWindowProxyEndpointId::from_wire_parts(7, 31)
+                        .expect("test source endpoint"),
+                    test_source_page(),
+                    "null".to_owned(),
+                ),
+                Some(opaque_nonce),
+                None,
+                RendererRemoteJavaScriptUrlSourceWorld::Main,
+            ),
+        );
+        assert!(matches!(
+            opaque.kind_for_testing(),
+            RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { source, .. }
+                if source.opaque_origin_nonce() == Some(opaque_nonce)
+                    && source.document_domain().is_none()
+        ));
+
+        let target_frame = RendererRemoteFrameToken {
+            endpoint: test_endpoint(),
+            root_document: test_document(target_page),
+            browsing_context_id: crate::browsing_context_model::BrowsingContextId::nested(37),
+        };
+        let frame = RendererRemoteWindowProxyCommand::navigate_frame_javascript_url(
+            target_frame,
+            target_page,
+            target_channel,
+            RendererRemoteWindowProxyNavigationKind::Assign,
+            ChildBrowsingContextNavigationRequest::new(
+                Url::parse("javascript:void(globalThis.remoteFrame = true)")
+                    .expect("test javascript URL"),
+                "GET".to_owned(),
+                None,
+                Vec::new(),
+            ),
+            test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Main),
+            Some(RendererRemoteFrameNavigationId::allocate()),
+        );
+        assert_eq!(frame.target_frame(), Some(target_frame));
+        assert!(matches!(
+            frame.kind_for_testing(),
+            RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+                source,
+                scheduler_id: Some(_),
+                ..
+            } if source.world() == RendererRemoteJavaScriptUrlSourceWorld::Main
+        ));
+    }
+
+    #[test]
+    fn remote_javascript_navigation_wire_rejects_generic_and_forged_sources() {
+        let target_page = test_page();
+        let channel = RendererRemoteWindowProxyChannel::allocate(target_page);
+        let ordinary = RendererRemoteWindowProxyCommand::navigate(
+            test_endpoint(),
+            target_page,
+            channel,
+            RendererRemoteWindowProxyNavigationKind::Assign,
+            "https://target.test/ordinary".to_owned(),
+            RendererTopLevelNavigationSource::browser_context(
+                "https://source.test/worker".to_owned(),
+                None,
+                false,
+            ),
+        );
+        let mut ordinary_value: serde_json::Value =
+            serde_json::from_slice(&ordinary.wire_bytes).expect("ordinary wire JSON");
+        ordinary_value["command"]["url"] =
+            serde_json::json!("javascript:void(globalThis.forged = true)");
+        assert!(
+            RendererRemoteWindowProxyCommand::from_wire_bytes_for_testing(
+                serde_json::to_vec(&ordinary_value).expect("mutated ordinary wire JSON")
+            )
+            .is_err(),
+            "the generic navigation variant must not smuggle a javascript URL"
+        );
+
+        let typed = RendererRemoteWindowProxyCommand::navigate_javascript_url(
+            test_endpoint(),
+            target_page,
+            channel,
+            RendererRemoteWindowProxyNavigationKind::Assign,
+            "javascript:void(0)".to_owned(),
+            test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Main),
+        );
+        let mut group_value: serde_json::Value =
+            serde_json::from_slice(&typed.wire_bytes).expect("typed wire JSON");
+        group_value["command"]["source"]["windowSource"]["endpoint"]["browsingContextGroupId"] =
+            serde_json::json!(41);
+        assert!(
+            RendererRemoteWindowProxyCommand::from_wire_bytes_for_testing(
+                serde_json::to_vec(&group_value).expect("mutated source-group wire JSON")
+            )
+            .is_err(),
+            "a javascript URL source from another browsing-context group must be rejected"
+        );
+
+        let mut opaque_value: serde_json::Value =
+            serde_json::from_slice(&typed.wire_bytes).expect("typed wire JSON");
+        opaque_value["command"]["source"]["opaqueOriginNonce"] = serde_json::json!(43);
+        assert!(
+            RendererRemoteWindowProxyCommand::from_wire_bytes_for_testing(
+                serde_json::to_vec(&opaque_value).expect("mutated opaque-source wire JSON")
+            )
+            .is_err(),
+            "a tuple source must not acquire a forged opaque-origin nonce"
         );
     }
 

@@ -302,6 +302,13 @@ impl JsContextHost {
         _scope: &mut v8::PinScope<'_, '_>,
         context: v8::Local<'_, v8::Context>,
     ) -> Option<WindowExecutionContextIdentity> {
+        self.window_execution_context_identity_for_v8_context_without_scope(context)
+    }
+
+    pub(crate) fn window_execution_context_identity_for_v8_context_without_scope(
+        &self,
+        context: v8::Local<'_, v8::Context>,
+    ) -> Option<WindowExecutionContextIdentity> {
         let realm_token = context
             .get_slot::<RuntimeObservableContextToken>()
             .as_deref()

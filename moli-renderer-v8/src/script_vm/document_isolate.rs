@@ -450,6 +450,7 @@ struct RendererRelatedPageTopLevelTargetState {
     current_url: RefCell<String>,
     current_serialized_origin: RefCell<String>,
     current_opaque_origin_nonce: Cell<Option<moli_storage_key::OpaqueOriginNonce>>,
+    current_document_domain: RefCell<Option<String>>,
     current_cross_origin_opener_policy:
         RefCell<Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy>>,
     /// Agent-neutral projection of the current root Document's nested frame
@@ -534,6 +535,7 @@ pub(crate) struct RendererRemoteTopLevelWindowProxyTarget {
     pub(crate) current_url: String,
     pub(crate) current_serialized_origin: String,
     pub(crate) current_opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
+    pub(crate) current_document_domain: Option<String>,
     pub(crate) opener_endpoint: Option<TopLevelWindowProxyEndpointId>,
 }
 
@@ -1189,6 +1191,7 @@ impl RendererPageScriptEnvironment {
             current_url: RefCell::new(String::new()),
             current_serialized_origin: RefCell::new(String::new()),
             current_opaque_origin_nonce: Cell::new(None),
+            current_document_domain: RefCell::new(None),
             current_cross_origin_opener_policy: RefCell::new(None),
             remote_frame_tree: RefCell::new(Vec::new()),
             remote_frame_tree_revision: Cell::new(0),
@@ -1703,6 +1706,7 @@ impl RendererPageScriptEnvironment {
                 current_url: target.current_url.borrow().clone(),
                 current_serialized_origin: target.current_serialized_origin.borrow().clone(),
                 current_opaque_origin_nonce: target.current_opaque_origin_nonce.get(),
+                current_document_domain: target.current_document_domain.borrow().clone(),
                 opener_endpoint: *target.opener_endpoint.borrow(),
             },
         ))
@@ -1718,6 +1722,7 @@ impl RendererPageScriptEnvironment {
         url: &url::Url,
         serialized_origin: &str,
         opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
+        document_domain: Option<String>,
     ) {
         assert_eq!(
             serialized_origin == "null",
@@ -1728,12 +1733,17 @@ impl RendererPageScriptEnvironment {
             opaque_origin_nonce.is_none_or(|nonce| nonce.get() != 0),
             "top-level opaque-origin replication rejects a zero nonce"
         );
+        assert!(
+            serialized_origin != "null" || document_domain.is_none(),
+            "an opaque top-level origin cannot replicate document.domain"
+        );
         *self.top_level_target.current_url.borrow_mut() = url.to_string();
         *self.top_level_target.current_serialized_origin.borrow_mut() =
             serialized_origin.to_owned();
         self.top_level_target
             .current_opaque_origin_nonce
             .set(opaque_origin_nonce);
+        *self.top_level_target.current_document_domain.borrow_mut() = document_domain;
     }
 
     pub(crate) fn replicate_current_remote_frame_tree(
@@ -1948,6 +1958,7 @@ impl RendererPageScriptEnvironment {
                 current_url: target.current_url.borrow().clone(),
                 current_serialized_origin: target.current_serialized_origin.borrow().clone(),
                 current_opaque_origin_nonce: target.current_opaque_origin_nonce.get(),
+                current_document_domain: target.current_document_domain.borrow().clone(),
                 opener_endpoint: *target.opener_endpoint.borrow(),
             })
     }

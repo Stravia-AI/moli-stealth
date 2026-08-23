@@ -5389,6 +5389,38 @@ impl ScriptVm {
                     host.replace_active_top_level_navigation_source(previous);
                     Ok(accepted)
                 }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+                    kind,
+                    url,
+                    source,
+                } => {
+                    if target_frame.is_some()
+                        || !host.remote_javascript_url_source_can_access_dispatch_scope(
+                            crate::native_bridge::OwnerDispatchScope::Top,
+                            &source,
+                        )
+                    {
+                        return Ok(false);
+                    }
+                    let previous = host.replace_active_top_level_navigation_source(Some(
+                        source.navigation_source().clone(),
+                    ));
+                    let window = scope.get_current_context().global(scope);
+                    let kind = match kind {
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign => {
+                            crate::context_bootstrap::LocationNavigationKind::Assign
+                        }
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace => {
+                            crate::context_bootstrap::LocationNavigationKind::Replace
+                        }
+                    };
+                    let accepted =
+                        crate::context_bootstrap::navigate_top_level_window_location_from_cross_origin(
+                            scope, window, kind, url,
+                        );
+                    host.replace_active_top_level_navigation_source(previous);
+                    Ok(accepted)
+                }
                 crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrame {
                     kind,
                     request,
@@ -5406,6 +5438,52 @@ impl ScriptVm {
                     else {
                         return Ok(false);
                     };
+                    let replace_current = matches!(
+                        kind,
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
+                    );
+                    let Some(navigation_load) = host
+                        .queue_deferred_child_browsing_context_navigation_request(
+                            handle,
+                            *request,
+                            replace_current,
+                        )
+                    else {
+                        return Ok(false);
+                    };
+                    if let Some(scheduler_id) = scheduler_id {
+                        host.record_pending_remote_frame_navigation(
+                            scheduler_id,
+                            token,
+                            navigation_load,
+                        );
+                    }
+                    Ok(true)
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+                    kind,
+                    request,
+                    source,
+                    scheduler_id,
+                } => {
+                    let Some(token) = target_frame else {
+                        return Ok(false);
+                    };
+                    if host.root_document_lifecycle_identity() != Some(token.root_document) {
+                        return Ok(false);
+                    }
+                    let Some(handle) = host
+                        .child_browsing_context_handle_for_id(token.browsing_context_id)
+                        .filter(|handle| host.child_browsing_context_is_live(*handle))
+                    else {
+                        return Ok(false);
+                    };
+                    if !host.remote_javascript_url_source_can_access_dispatch_scope(
+                        crate::native_bridge::OwnerDispatchScope::Child(handle),
+                        &source,
+                    ) {
+                        return Ok(false);
+                    }
                     let replace_current = matches!(
                         kind,
                         crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace

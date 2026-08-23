@@ -94,6 +94,7 @@ impl JsContextHost {
             self.document_url(),
             &self.main_document_serialized_origin,
             self.main_window_opaque_origin_nonce(),
+            self.document_domain_override.clone(),
         );
         let identity = (environment.page_id(), environment.isolate_identity_key());
         assert!(
@@ -154,15 +155,30 @@ impl JsContextHost {
         &self,
         scope: &mut v8::PinScope<'_, '_>,
     ) -> Option<crate::runtime::RendererRemoteWindowProxySource> {
+        if let Some(identity) = self.current_runtime_window_execution_context_identity(scope) {
+            return self.remote_window_proxy_source_for_identity(identity);
+        }
         let source = crate::runtime::RendererRemoteWindowProxySource::new(
             self.top_level_window_proxy_endpoint_id()?,
             self.top_level_page_residence()?,
             self.main_document_serialized_origin.clone(),
         );
-        let source_scope = self
-            .current_runtime_window_execution_context_identity(scope)
-            .map(WindowExecutionContextIdentity::dispatch_scope)
-            .unwrap_or(OwnerDispatchScope::Top);
+        Some(source)
+    }
+
+    pub(crate) fn remote_window_proxy_source_for_identity(
+        &self,
+        identity: WindowExecutionContextIdentity,
+    ) -> Option<crate::runtime::RendererRemoteWindowProxySource> {
+        if !self.window_execution_context_identity_is_current(identity) {
+            return None;
+        }
+        let source = crate::runtime::RendererRemoteWindowProxySource::new(
+            self.top_level_window_proxy_endpoint_id()?,
+            self.top_level_page_residence()?,
+            self.main_document_serialized_origin.clone(),
+        );
+        let source_scope = identity.dispatch_scope();
         let OwnerDispatchScope::Child(handle) = source_scope else {
             return Some(source);
         };

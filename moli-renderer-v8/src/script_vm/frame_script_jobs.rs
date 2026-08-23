@@ -212,7 +212,9 @@ impl ScriptVm {
             let url = job.script_url.clone();
             let allowed = self.with_frame_realm_scope(realm_id, |scope, host_ptr| {
                 let host = unsafe { &mut *host_ptr };
-                let owner = host.entered_owner_dispatch_scope(scope);
+                let Some(owner) = host.current_realm_owner_dispatch_scope(scope) else {
+                    return Ok(false);
+                };
                 let csp_source = crate::native_bridge::javascript_url_csp_source(&url);
                 if !host.allows_inline_javascript_navigation_by_csp(scope, owner, &csp_source) {
                     return Ok(false);

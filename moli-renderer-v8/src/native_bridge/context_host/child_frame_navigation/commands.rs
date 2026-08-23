@@ -82,6 +82,17 @@ impl JsContextHost {
         self.queue_child_browsing_context_navigation_to_url(handle, &url)
     }
 
+    pub(crate) fn queue_child_browsing_context_navigation_request_without_seed_update(
+        &mut self,
+        handle: DomHandle,
+        request: ChildBrowsingContextNavigationRequest,
+    ) -> bool {
+        if !self.child_browsing_contexts.contains_key(&handle) {
+            return false;
+        }
+        self.queue_child_browsing_context_navigation_request(handle, request)
+    }
+
     pub(crate) fn queue_deferred_child_browsing_context_navigation_from_entry_seed(
         &mut self,
         handle: DomHandle,

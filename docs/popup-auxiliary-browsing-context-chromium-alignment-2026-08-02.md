@@ -2,7 +2,102 @@
 
 日期：2026-08-02；最后更新：2026-08-23
 
-## 2026-08-23 P6R7 direct Browser cross-document history closure 结论
+## 2026-08-23 P6R10 Window call realm identity 与同步 child script 收口结论
+
+P6R10 完成了 P6R9 留下的两个实际可达边界。`window.open()` 现在分别保存 receiver、entry
+与 accessing realm 的 typed identity，child Document 动态插入的 inline classic script 也在
+DOM mutation 返回前执行。两条修复都落在通用 Window operation 与 Document script owner，popup
+继续复用 stable child-frame WindowProxy/realm 基础，没有增加 popup 专用 facade 或调度器。
+
+Chromium 基线仍固定在 `a03603fe9af6230a12f1b2fb2c18a7d003a0d937`。其中
+`LocalDOMWindow::open()` 在 `local_dom_window.cc:2296-2450` 明确保留两组不同事实。
+
+| Chromium owner fact | P6R10 的对应实现 |
+| --- | --- |
+| `this` 对应的 `LocalDOMWindow` 决定 receiver frame、target tree、sandbox admission、transient activation、opener relation 与 session storage clone | `WindowOperationReceiver` 在 WebIDL argument conversion 前冻结 exact owner、dispatch scope、realm token 与 V8 context，conversion 返回后只接受同一 generation |
+| `EnteredDOMWindow` 完成 URL，并创建 `FrameLoadRequest`、referrer 与 creator fetch client | entry identity 提供 base URL、Document policy、CSP/Trusted Types、resource loader、referrer 和 destination request source |
+| caller realm 负责 receiver access check 与 argument conversion | accessing host 与 receiver host 分开解析；跨 Page borrowed method 使用 related-page script-agent 与 effective-origin 检查 |
+| target lookup 从 receiver frame 开始，request creator 仍是 entered Window | popup activation source 指向 receiver Page/Frame，activation 内的 navigation request source 指向 entry Page/Frame |
+
+这组拆分也覆盖 author getter 引发的同步 replacement。调用 `Window.prototype.open` 后，URL
+conversion 可以删除并重新插入 receiver iframe。旧 LocalWindow generation 此时返回 `null`，不会按稳定
+child handle 重新绑定到 replacement realm。跨 Page 的同源 related Window receiver 则保持可调用；endpoint
+marker 只识别 proxy 形态，最终授权由 observer identity、target identity、script-agent membership 与 effective
+origin 一起决定。
+
+动态 child script 路径已经改成 mutation turn 内的有序候选。主 Document script 与 child inline
+classic script 按 DOM mutation 发现顺序准备，child script 在 exact child owner scope 中完成 CSP、Trusted
+Types、nonce、integrity 与 source 解析，随后同步进入该 child realm。外层 DOM API 返回时才执行原有
+microtask checkpoint；脚本引发的 nested mutation 不提前 drain microtask。脚本同步移除自身 frame 的场景也由
+同一 owner currentness 检查收口。
+
+这次清理采用物理删除。没有 production writer 的 `ENTERED_CHILD_WINDOW_HANDLE_SLOT` 已移除，旧
+`PendingChildDynamicDocumentScript`、`FrameDocumentDynamicClassic*`、ready task、owner action 与 followup
+调度栈也已移除。`ACTIVE_CHILD_WINDOW_HANDLE_SLOT` 仍有 production writer，继续承担当前 child owner scope。
+完整旧 owner 不会转移到 `cfg(test)`。`cfg(test)` 只保留构造 production 输入的 fixture、无副作用只读
+accessor 与断言。
+
+最终 release binary SHA-256 为
+`f193e206c22d7888940a7ea7ab6a15fbf8a2d8f8233f3f6914b34976b7599a1b`。WPT checkout 固定在
+`db95fafd1fcef8428805e41eb5705d444e8c67ce`。四个 `multiple-globals` focused cases 在 CLI 与
+CDP 均为 4/4 pass。81-case popup 矩阵的最终结果如下。
+
+| 入口 | P6R9 基线 | P6R10 最终结果 | 变化 |
+| --- | --- | --- | --- |
+| CLI | 35 pass / 27 fail / 19 timeout | 40 pass / 26 fail / 15 timeout | 新增 5 个 pass，没有丢失既有 pass |
+| CDP | 35 pass / 27 fail / 19 harness-stalled | 40 pass / 26 fail / 15 harness-stalled | 归一化 case 分类与 CLI 完全一致 |
+
+新增通过项是三个 Location multiple-globals case、`context-for-window-open.html` 与
+`choose-_self-001.html`。最终代码相对前一版 P6R10 release 的逐 case status 和 failure-name 没有漂移。
+CLI 与 CDP 的 timeout 表达不同，归一化后的 81 个 case status 全部一致。产物保存在
+`/tmp/moli-wpt-popup-p6r10-final2-{multiple-globals-,}{cli,cdp}-20260823-1`。
+
+按当前产品边界，P6R10 已满足单进程 popup owner 计划的最后两个 exit。production lightweight 扫描、
+entered child ghost marker 和旧 async DynamicClassic stack 都保持零命中。81-case 矩阵仍有 26 个 fail 与
+15 个 timeout，这些结果需要按 history、opener、name、testharness completion 等责任方继续分类。没有证据时，
+不能把它们一律算作 popup owner 缺口，也不能据此恢复已经删除的双栈。
+
+## 2026-08-23 P6R9 child identity 与 navigation source 复核结论
+
+这轮复核确认了两处仍在 production 路径上的 child browsing-context identity 错误，也收回了
+P6R8 文档对 remote form 和 remote descendant 的过度要求。第一处错误把 `<iframe name>` 属性
+和 browsing-context name 存在同一个字段中。owner refresh 会把脚本写入的 `window.name` 覆盖掉，
+随后 `_self` 和普通 named lookup 都可能丢失目标。第二处错误把 Location 与 `window.open()` 的
+相对 URL 都按 incumbent realm 解析，本地 child Location 路径还会退化成只带 URL 的 bootstrap，
+因此 entry realm 的 base 与 incumbent Document 的 referrer/source 无法同时成立。
+
+本轮修复让既有 child entry 在 owner attribute refresh 时保留 browsing-context name，并让
+HTTP(S) child Location 交付统一的 typed GET request。URL 使用 entry settings object 的 base，
+request source、network `Referer` 和最终 `document.referrer` 则来自 incumbent Window/Document。
+`blob:` 等同步 materialization 路径仍使用既有 URL bootstrap，避免把同步 child commit 错改成
+network request task。
+
+Chromium 对照也改变了剩余工作判断。`RemoteFrame::Navigate()` 的 wire 保存 URL、POST body、
+headers、referrer、form 标记和 initiator，不传递 DOM Element 或 V8 `FormData`。Blink 只在 source
+Window 能访问本地 target frame 时把 `source_element` 交给 target `NavigateEvent`，`FormData` 随后由
+该本地元素重建。跨 agent 搬运 DOM facade 既不符合 Chromium，也不符合 Moli 的 isolate owner。
+当前 remote request carrier 已覆盖产品需要的 method、body、headers、referrer 与 scheduler identity，
+所以 remote DOM element/`FormData` wire 不再是 popup exit condition。
+
+同理，当前 Page owner 已在 target Page 内递归处理本地 descendant 的 beforeunload、pagehide、unload
+和 close ACK。只有真实 OOPIF 或多进程 descendant 出现后，才需要跨 endpoint 聚合 descendant ACK。
+Moli 当前没有这种 production producer，这项工作归入可选多进程基础设施，不再计入单进程 popup 终态。
+
+按三个口径看 P6R9 结束时的状态如下。P6R10 已完成表中的 receiver/entry 与 child script 两项，
+当前结论以上一节为准。
+
+| 口径 | 当前判断 | 剩余重点 |
+| --- | --- | --- |
+| 常用 DOM popup 行为 | 约 99% | 扩大 focused WPT，并清理暴露出来的通用 child lifecycle/script scheduler 阻塞 |
+| Moli 单进程 popup 终态 | 约 99% | `window.open()` receiver、entry 与 incumbent 的精确分离，外加 focused WPT/CDP 重新分类 |
+| Chromium 完整基础设施等价 | 不作为当前产品 exit | 真实 process/channel、capability broker、fenced/guest、完整 Reporting/agent reunification |
+
+这里的百分比是风险加权工程估计，不是测试通过率。production lightweight owner、fallback、
+mirrored loader/parser/lifecycle 和 observation seam 已由 P6R4 物理删除，tracked Rust 宽口径扫描仍为
+零命中。完整旧 owner 不应以 `cfg(test)` 形式保留。只有构造 production 输入的 fixture，或无副作用
+读取 production state 的 accessor，才适合放在 `cfg(test)` 下。
+
+## 2026-08-23 P6R8 remote JavaScript URL closure 结论
 
 此前改动的核心方向符合预期：popup 已复用 child-frame 的 stable WindowProxy/realm
 基础，并把真实 auxiliary Page、Document、loader、target/session、name/opener、policy、
@@ -16,12 +111,12 @@ headless browser 的可观察语义，不要求复制 Chromium 的完整 SiteIns
 应作为当前单进程 owner 的 fail-closed transport contract，以及未来若采用多进程时的复用
 边界；不应为了 popup 单独先建设一套假的 process supervisor。
 
-按三个不同口径看当前进度：
+按三个不同口径看 P6R8 结束时的进度。后续 P6R9/P6R10 结果以上文最新结论为准。
 
 | 口径 | 当前判断 | 剩余重点 |
 | --- | --- | --- |
-| 常用 DOM popup 行为 | 约 99% | 更宽 focused WPT、少数 remote/isolated-world 长尾 |
-| Moli 单进程 popup 终态 | 约 99% | remote JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP |
+| 常用 DOM popup 行为 | 约 99% | 更宽 focused WPT 与通用 child scheduler 长尾 |
+| Moli 单进程 popup 终态 | P6R8 当时约 99% | 当时剩余 receiver/entry/incumbent identity 与更宽 focused WPT/CDP，后由 P6R9/P6R10 收口 |
 | Chromium 完整基础设施等价 | 不作为当前产品 exit | 真实 process/channel、capability broker、fenced/guest、完整 Reporting/agent reunification |
 
 这里的百分比是风险加权工程估计，不是测试通过率。旧的 94-95% 估计把“process-neutral
@@ -29,8 +124,10 @@ schema 已建立”误算成“process lifecycle 已完成”，同时低估了 
 现已作废。P6R2 已完成 group-safe opaque-origin identity，P6R3 又完成真实 local Document realm 的
 JS-retained lifetime 与无引用 GC 回收；P6R4 随后按 owner 依赖顺序物理删除 compatibility record、realm alias、
 mirrored parser/loader/lifecycle 与 protocol fallback。2026-08-23 对 tracked Rust 的
-`lightweight_popup|LightweightPopup|lightweight popup` 宽口径扫描已从 112 个文件、1492 处命中降为零。剩余风险
-主要在 remote JavaScript URL、descendant lifecycle 和更宽 focused WPT/CDP 重新分类。
+`lightweight_popup|LightweightPopup|lightweight popup` 宽口径扫描已从 112 个文件、1492 处命中降为零。P6R9
+复核后，remote descendant lifecycle 与 remote DOM form carrier 已按 Chromium 和 production reachability
+重新分类。P6R10 随后完成 receiver/entry/accessing identity 与通用 child dynamic-script scheduler，
+并重跑更宽 focused WPT/CDP。剩余外部失败按各自 owner 继续分类。
 P6R5 又补上 protocol target scheduler 之外的 production direct `Browser` owner；CLI/WebFetch 不再因没有
 output consumer 而留下无人采纳、无人驱动的真实 auxiliary Page。P6R6 随后把 initial-empty creator fallback base、incumbent
 source/base、target-local destination queue 和 renderer-authored history seed 接到同一个 Page/commit owner；固定六例
@@ -38,6 +135,15 @@ source/base、target-local destination queue 和 renderer-authored history seed 
 P6R7 又让 direct `Browser` 的 root Page 与 auxiliary Page 消费同一份 cross-document traversal seed，
 `history.back()` 和 `history.forward()` 不再停在无人处理的 renderer owner action。旧 standalone observation seam
 已在前一笔清理中物理删除，没有作为 history controller 重新引入。
+P6R8 随后让 remote top 与 remote child 的 `javascript:` 导航进入 typed wire 和目标 Page/Frame owner。
+source Document 先完成 CSP 与 Window access 准入，目标 owner 再按当前 Document identity、origin、
+`document.domain`、target CSP 与 Trusted Types 决定是否在目标 main realm 执行。main world、isolated world
+和 universal-access isolated world 都保留精确 source identity。被拒绝的同名 remote target 仍算选中，
+不会退回新建第二个 popup。
+P6R9 又修复 child browsing-context name 被 owner attribute refresh 覆盖的问题，并让 child Location 的
+entry base 与 incumbent request source 分别由正确 realm 提供。P6R10 随后补齐 `window.open()` 的
+receiver/entry/accessing identity，并让 child Document 动态 inline classic script 在 mutation 返回前同步执行。
+外部 `_self` 与四个 multiple-globals WPT 均已转绿。
 
 状态：架构评估与分阶段迁移设计；`popup-refactor` 已完成 Phase 1 primitive 抽取、
 Phase 2A script-agent identity / current-policy baseline，以及 Phase 2B 的 selective
@@ -73,7 +179,10 @@ Page/focused-frame authority 又已在 L2 exit；P6R2/P6R3 已完成当前产品
 P6R4 已物理删除本地 lightweight 双栈；P6R5 已让 direct `Browser`/CLI 复用同一真实 Page owner，P6R6 又完成
 initial-empty/no-commit URL、single destination queue 与 protocol history replacement 的固定 WPT closure。P6R7
 继续补齐 direct `Browser` root/auxiliary Page 的跨文档 back/forward，并保持 protocol browser history authority。
-剩余工作已经转为 group/remote 长尾与更宽外部矩阵。
+P6R10 已完成 P6R9 留下的 receiver/entry/accessing identity 与通用 child script scheduler 两项，
+并以 81-case CLI/CDP 矩阵重新分类。当前单进程 popup owner 计划的 exit 已满足。remote DOM form carrier
+和没有 production producer 的 OOPIF descendant ACK 不属于当前 popup exit，剩余外部失败按 history、
+opener、name 与 testharness completion 等责任方继续处理。
 Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
 并覆盖 initial realm/history 保留和后续 redirect replacement。第四纵切又把 replacement
 Document 的 commit/attachment publication 与其精确 DCL continuation 分开：protocol 可以在
@@ -507,25 +616,30 @@ owners”。这不是原始评估时的推测，而是 Phase 4 第一纵切之�
 
 | 语义 | 当前状态 | 直接后果 |
 |---|---|---|
-| authoritative Page | related 非命名、普通 named `window.open()`/hyperlink/full-creator form、Fresh noopener，以及 E3 的 SW `clients.openWindow()` / notification navigation 都已统一到真实 Page；E2N 已把 DOM producer 的 `javascript:` target 也交给该 Page；compatibility fallback 仍可保留 lightweight owner | legacy/standalone 入口的 DOM、history、lifecycle 仍可分叉 |
-| navigation owner | DOM 与 E3 非 DOM production producer 的一个 URL 只有一个 owner；legacy compatibility 入口仍可能有两个 load owner | Phase 6 前兼容入口仍可能重复请求、cookie、服务端副作用和计时 |
+| authoritative Page | related、Fresh、SW `clients.openWindow()`、notification、direct `Browser` 与曾经的 compatibility fixture 都已统一到真实 Page；P6R4 已删除 lightweight owner，P6R5 又补齐 direct owner wake | 当前没有第二 Page 风险；P6R10 已补 receiver/entry realm 证据并重跑 81-case CLI/CDP 矩阵 |
+| navigation owner | DOM、非 DOM、protocol 与 direct `Browser` producer 的一个 URL 只有一个 Page/Frame scheduler owner；P6R6/P6R7 已补 initial target queue 与 direct history traversal；P6R9 又让 HTTP(S) child Location 保存 typed source request；P6R10 让 child inline classic script 在 mutation turn 内同步执行 | remote method/body/header/referrer/scheduler 已完整；redirect response policy 仍属于独立 navigation 长尾 |
 | top-level initiator / referrer | E2H 已让 current-top `window.open()`、hyperlink/form 与 related target request 保存 exact source Window/Document 和 policy；E2N 的 target-local `javascript:` task 也保留这份 source carrier；preflight、transport redirect/Fetch URL override、最终 `document.referrer` 不再从 target root 反推 | redirect response 自身更新 policy、完整 Fetch response-stage override 仍需独立收口 |
-| realm | related 非命名/普通 named 路径（含 full-creator form 与 E2N `javascript:`）使用真实独立 target realm；Fresh noopener 以及 SW/notification Fresh Page 不暴露伪 opener realm；legacy facade 仍可能共享 opener `Context` | compatibility handle 仍可能与 CDP execution context 无关 |
-| synchronous access | 已迁移 related path 直接访问 target 的真实 Document；E2N 同步返回 stable target WindowProxy、异步执行 target task；legacy facade 仍模拟部分 `w.document` | 未迁移入口的写入不会自然出现在 target DOM |
+| realm | related、Fresh 与非 DOM target 都使用真实独立 target realm；P6R3 已闭合 detached realm lifetime，P6R4 已删除共享 opener `Context` 的 alias；P6R8 又让 remote `javascript:` 固定在目标 main realm 执行 | 当前没有第二套 popup realm；未来真实 renderer process capability lifetime 仍属可选基础设施 |
+| synchronous access | related path 直接访问 target 的真实 Document；E2N 同步返回 stable target WindowProxy、异步执行 target task；G5/G6 对 remote endpoint 使用 observer-local proxy 和 typed command；P6R10 已冻结 `window.open()` receiver/entry/accessing identity，并同步执行 child dynamic inline classic script | 当前单进程 exit 已满足；可选 process death 不计入当前 exit |
 | cross-origin WindowProxy | related local Page 已复用 stable outer proxy 与 per-Realm restricted surface；G4 由 browsing-context group 分配 typed endpoint generation，G5 再分离 logical target 与 per-agent projection并完成 remote top-level typed command/ACK；G6A 已复制 Document-qualified remote child tree，在 observer agent 建立 stable nested proxy，并把 dynamic child projection、Location、postMessage、named target 和 exact frame scheduler 路由到 target Page/Frame；G6B1 又把 command/frame policy/clone carrier编码为 strict versioned bytes，并增加 execution-channel generation和 queued cancellation。G1 COOP old proxy、root replacement 后 child proxy与 close 后 facade 都按 typed currentness 断连 | process-neutral seam 已走通；真正 renderer IPC/channel/process death/restart、browser capability broker、agent reunification、fenced/embedder 完整 policy/lifecycle replication 仍缺失 |
-| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 auxiliary Page 已由 Phase 5B/L1 统一 script-closable、subtree beforeunload、network drain、pagehide/unload、renderer ACK/timeout 和最终 teardown；Fresh noopener 不向 opener 暴露 close handle | compatibility fallback 与 remote frame unload 仍可能让 `closed`、lifecycle、资源回收不一致 |
+| `window.close()` | 真实 auxiliary Page 已由 Phase 5B/L1 统一 script-closable、subtree beforeunload、network drain、pagehide/unload、renderer ACK/timeout 和最终 teardown；Fresh noopener 不向 opener 暴露 close handle；P6R4 已删除 compatibility close owner | 当前 target Page 已拥有本地 descendant 事务；实际 OOPIF descendant ACK 留给可选多进程基础设施 |
 | focus/blur | Phase 5L2 已建立彼此独立的 browser-context active-target/effective-focus Page 位与 renderer focused-frame authority；`Window.focus()` 保留 transient-activation/opener admission，跨 Page owner action 冻结 exact renderer Page，target activation、focus emulation、window minimize/restore、activated creation 与 close promotion 都更新 native `document.hasFocus()`、CSS `:focus` / `:focus-within` 和 Chromium event order；modal prompt 阻塞 owner lane 时，browser activation 不等待旧 Window，exact Page focus/surface command 留在 owner FIFO；top-level `blur()` 保持 metric-only no-op；G1 的 local agent switch 保留同一 Page active/focused state | RemoteFrame/COOP 的 cross-process focus endpoint 与 embedder activation 尚未建模 |
-| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；E2M.1 已让 current/related local candidate 统一经过 renderer `CanNavigate` authority；G1 在 COOP commit 时从旧 related registry 注销 target；G6A 又按 related Page/frame document order 复制 remote nested name，并让 window.open/hyperlink/form 命中 exact frame token，remote same-form A→B 可取消 A 的精确 loader/parser generation；G6B1 让整棵 remote tree按 monotonic revision经 strict wire/topology校验 | ordinary related RemoteFrame lookup与进程中立 revision seam 已建模；fenced/guest/embedder fallback、真实 process currentness 与 legacy compatibility helper 仍待后续/Phase 6 |
+| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；E2M.1 已让 current/related local candidate 统一经过 renderer `CanNavigate` authority；G1 在 COOP commit 时从旧 related registry 注销 target；G6A 又按 related Page/frame document order 复制 remote nested name，并让 window.open/hyperlink/form 命中 exact frame token，remote same-form A→B 可取消 A 的精确 loader/parser generation；G6B1 让整棵 remote tree按 monotonic revision经 strict wire/topology校验；P6R8 保留 denied remote name selection，不再回退新建 Page | ordinary related RemoteFrame lookup与进程中立 revision seam 已建模；fenced/guest/embedder fallback 与真实 process currentness 仍属后续可选基础设施 |
 | opener / COOP | G1 已持久化 typed browsing-context-group/committed COOP state并完成 local sever；G2 又逐 hop消费 redirect + terminal response，累积 enforced swap、推进 report-only virtual group、解析 Reporting endpoint并发出 navigation reports；G3 已在 redirect follow/final effective response前执行 sandbox sanitation并强制 real+virtual sever；G4 统一旧 endpoint currentness；G5 再让 same-group跨 agent replacement复制 opener endpoint并建立 canonical projection；G6A 让 remote child source/target也依附同一 top endpoint与 root Document generation；G6B1 新增 current execution-channel generation，只有 committed agent transition旋转，canceled preparation保持不变 | 完整 Reporting queue/source 隔离、真实 renderer process/channel death/restart、protocol group projection、agent reunification和 fenced/guest隔离仍未完成 |
 | popup blocker / user activation | E2K 已建立 renderer-owned 5s transient + sticky ledger、exact generation consume、existing-target bypass、sandbox-before-blocker order、pre-consumption `Page.windowOpen` observation 和 browser-context allow/require policy；E2M.1 已把 transient/sticky 状态接入 local top-navigation decision；DevTools gesture 与 trusted mouse/key/touch 共用 owner；G6A 的 remote child navigation admission 读取 source committed ledger/policy，但不伪造 target activation | 尚无 content-setting/CDP 配置面与 blocked console/UI diagnostic；跨进程 per-frame activation/visibility、focus transfer 和 history activation 长尾未完成 |
 | sandbox | E2I 已统一 attribute/response-CSP `allow-popups` 新建准入，并区分 escape 只控制继承；E2J 又让 Fresh/no-local-proxy target Page 跨 initial 与后续 Document 持有 renderer-frozen policy；E2L/L.1 已补 source `allow-forms` 和 creation-only side effect；E2M.1 已提交并冻结 navigation/top-navigation flags、frame-owner token provenance 与 Chromium `can_navigate_top_without_user_gesture` 等价 guard，并用于 local target selection/navigation；G3 已补 response sanitation；G6A 又复制 related remote frame 的 committed sandbox/origin/document.domain facts，支持 target/ancestor access 与 sandboxed-ancestor refusal；G6B1 将完整当前 `DocumentPolicyContainer` 投影编码进 revisioned strict wire | security console/Audits diagnostic、完整 RemoteFrame top/opener exceptions、fenced/embedder 与 file-local 特例仍缺失 |
-| initial empty Document | 已迁移 related 路径由 target 采纳同一份；Fresh noopener 只由目标 Page 创建；legacy 双栈仍各有一份 | 未迁移入口的同步 mutation 与 target attach 无法指向同一对象 |
-| script loader / JavaScript URL task | ordinary URL、form POST 与 E3 SW/notification destination 都只使用 selected target Page 的唯一 loader；E2N `javascript:` 由 target Page pending slot / Document task 执行，E2O 补齐 target CSP/Trusted Types/form-action，E3 再锁住 ordinary start→target JS task→commit 顺序；G6A 的 related remote child GET/POST/Location 也只在 exact target Frame scheduler 建立 loader，并可由 source id 精确取消；legacy lightweight 仍有专用 parser/script wrapper | remote form NavigateEvent/FormData/source-element carrier、remote `javascript:`/isolated-world、redirect-time browser policy 与 compatibility executor 仍未统一 |
+| initial empty Document | related、Fresh 与 direct `Browser` target 都只由目标 Page 创建一份；P6R6 已补 creator fallback base、no-commit URL 与 target-local destination queue | focused WPT/CDP 仍需扩大，owner 已唯一 |
+| script loader / JavaScript URL task | ordinary URL、form POST 与 E3 SW/notification destination 都只使用 selected target Page 的唯一 loader；E2N/E2O 已完成 local target task、CSP、Trusted Types 与 form-action；G6A 完成 remote child ordinary scheduler；P6R8 又让 remote top/child `javascript:` 使用 typed source carrier，并在当前目标 main realm 执行；P6R10 删除旧 async DynamicClassic stack并把 child inline script 接入同步 mutation candidate | Chromium 不跨 remote wire 传 DOM source element 或 V8 `FormData`；redirect-time browser policy 与剩余外部用例按独立 owner 处理 |
 
-因此，继续为 lightweight 路径分别补 module、dynamic import、beforeunload、COOP、
-cross-origin descriptor、CDP Runtime context 等功能，会让每个修复都复制到另一条路径。
+P6R4 已按这张表的 owner 依赖顺序删除 lightweight 路径。后续工作只扩展真实 Page、Frame、
+endpoint 和 lifecycle owner，不能再恢复 popup 专用的 loader、realm 或 observation seam。
 
-### 7. 历史 WPT 风险快照（必须重跑后才能用于当前验收）
+### 7. 当前与历史 WPT 风险快照
+
+P6R10 已按同一份 81-case 清单重跑 release CLI/CDP。最终结果分别为
+40 pass / 26 fail / 15 timeout 和 40 pass / 26 fail / 15 harness-stalled，归一化后的逐 case
+status 完全一致。四个 multiple-globals focused cases 在两条入口均为 4/4 pass。以下静态关键字清单
+保留为早期历史记录，不能覆盖 P6R10 的当前结果。
 
 对 `moli-benchmark/wpt-cross-current/{passed,failed,timeout}-cases.txt` 使用下面的
 粗粒度关键字切片：
@@ -5956,10 +6070,11 @@ TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-protocol \
   没有伪装成 root Window 的 source Document；
 - already-published ordinary destination 后同一 source turn 又排队 JS URL 的 renderer/protocol causal ordering
   已由 E3 的真实 protocol apply/commit integration 回归补齐；
-- G1 后 local committed-response COOP group sever 已进入 Page replacement owner；RemoteFrame/fenced target、
-  isolated world、真正 remote endpoint 与 cross-process scheduler 仍不在本地 Page queue 能表达的范围；
-- legacy lightweight JS executor 仍服务 standalone fixture/compatibility fallback。E2N 的结论是 primary owner 已
-  迁移，不是 Phase 6 已可直接删除；2026-08-23 当前宽口径 surface 仍为 112 个 tracked Rust 文件、1492 处命中；
+- G1 后 local committed-response COOP group sever 已进入 Page replacement owner。该阶段尚不能表达的 related
+  remote endpoint 与 isolated-world source 已由 G5/G6 和 P6R8 接入 typed route。fenced target 与真实
+  cross-process scheduler 仍是独立基础设施边界；
+- E2N 提交时 legacy lightweight JS executor 仍服务 standalone fixture/compatibility fallback。P6R4 已沿依赖顺序
+  删除该 owner，tracked Rust 的宽口径旧模型扫描也已归零；
 - E2O 后规划的非 DOM creation producer 与 focused protocol evidence 已由 E3 完成，local close/unload 又由 L1
   完成。后续 focus、group/remote 与 identity/lifetime 中，local owner 已依次由 L2、G1-G6、P6R2/P6R3 收口；
   当前进入 Phase 6 compatibility reachability 与依赖层删除。
@@ -6096,10 +6211,10 @@ cargo nextest run -p moli-renderer-v8 \
 - Moli 对 ordinary form scheme 也在 renderer 做 `form-action`，因为当前没有 Chromium browser-process
   navigation policy continuation。redirect chain、response-stage URL override 与每 hop 的 form-action 语义仍需随
   browser/network navigation policy owner 补齐；
-- isolated world 的 bypass、RemoteFrame/fenced target、cross-process scheduler 与 disconnected WindowProxy 不在
-  当前 local Page/FrameRealm 表达范围；
-- legacy lightweight executor 仍服务 standalone fixture 和 compatibility fallback。E2O 让它的 existing-target
-  source ordering 不再错误，但没有把其 active-realm Trusted Types/lifetime 提升为 Phase 6 可删证明；
+- isolated-world source 与 related remote top/child target 已由 P6R8 接入 source-qualified typed route。
+  Moli 当前只有 Document 级 CSP 与 Trusted Types policy，尚未模拟 Chromium extension world 的独立 policy；
+- E2O 提交时 legacy lightweight executor 仍服务 standalone fixture 和 compatibility fallback。P6R3/P6R4
+  随后补齐真实 realm lifetime 并删除该 executor；
 - already-published ordinary destination 后同一 turn 又排队 JavaScript URL 的 protocol apply/commit integration
   已由 E3 完成；focused upstream WPT slice 和 CSP reporting endpoint 网络上报仍是外部证据债。
 
@@ -6239,27 +6354,30 @@ Rust 回归写成 WPT pass。
   `CanNavigate`/activation/focus/unload 与 Reporting 行为有明确实现或明确降级；
 - P6R2 已把 group-safe opaque-origin nonce 收进 top/child LocalWindow、related Page 与 strict remote frame
   replication；P6R3 又让被 JS 强引用的 detached top/child Document、Node、function 与 realm 继续由原 native
-  owner 服务，并让无引用 realm 在 GC 后精确释放。redirect-time browser-process `form-action`、isolated-world
-  bypass、file-local/diagnostic 和 focused WPT 仍是明确长尾。
+  owner 服务，并让无引用 realm 在 GC 后精确释放。P6R8 又补齐当前产品的 isolated-world source 与 remote
+  `javascript:`。redirect-time browser-process `form-action`、extension world 独立 policy、file-local/diagnostic
+  和 focused WPT 仍是明确长尾。
 
 ##### 距离最终架构的剩余工作量（2026-08-23）
 
-这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。P6R7 后，常用 DOM popup
-路径约完成 99%；以“在 Moli 当前单进程产品边界内删除 production lightweight 双栈，并具备稳定
-group/lifetime owner”为终态，同样约完成 99%。旧 owner 的实际删除和 direct Browser cross-document history
-handoff 已经完成，剩余工作集中在 remote 语义长尾和 focused WPT/CDP 重新验收，不能按当前测试数量线性外推：
+P6R10 已满足这里定义的 Moli 单进程 popup owner exit。production lightweight 双栈、ghost entered-child
+marker 与旧 async DynamicClassic scheduler 均已物理删除，stable group/lifetime owner 和 direct Browser
+cross-document history handoff 已经完成。remote DOM form carrier 与没有 production producer 的 OOPIF descendant
+ACK 不计入当前 exit。当前 81-case 结果为 40 pass / 26 fail / 15 timeout；剩余用例需要按实际责任方分类，
+这组测试数字不等同于 popup 架构完成度。
 
 | 大里程碑 | 必须形成的 exit condition | 规模/风险判断 |
 | --- | --- | --- |
-| 当前产品的 remote semantic closure | remote `javascript:`/isolated world、descendant unload/focus、form `NavigateEvent`/`FormData` source carrier按实际 production reachability收口；Reporting/file-local/diagnostic按产品支持面分级，不要求先造 OS process | 中到大；2-4 个内聚提交 |
+| 当前产品的 remote semantic closure | P6R8 已完成 remote `javascript:` 与 isolated-world source；P6R9 确认 ordinary/form request wire 已保存实际可传输的 source facts，本地 target Page 已拥有 descendant lifecycle；Reporting/file-local/diagnostic 按产品支持面分级 | 当前单进程 exit 已满足；OOPIF/process 聚合留给可选基础设施 |
 | identity/lifetime closure | P6R2 已完成 group-safe opaque-origin nonce；P6R3 已完成真实 local top/child Document realm 的 retain/detach/GC owner 协同、执行资源退休与安全 V8 handle 释放。remote endpoint/process capability lifetime 继续归 remote milestone | 当前产品 local exit 已完成；remote 长尾随上一行收口 |
-| Phase 6 readiness/removal | P6R4 已物理删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle 与 protocol compatibility fallback；tracked Rust 宽口径旧模型扫描为零。剩余 exit 是 focused WPT/CDP 重新分类与 full gate/rebase 后复验 | 代码删除已完成；验收与证据债为小到中 |
+| Phase 6 readiness/removal | P6R4 已物理删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle 与 protocol compatibility fallback；tracked Rust 宽口径旧模型扫描为零。P6R10 又删除 ghost marker 与旧 async DynamicClassic stack，并完成 focused WPT/CDP 重新分类 | 当前产品 exit 已完成；后续保持零回退门禁 |
+| reachable realm semantics | Location 已区分 entry base 与 incumbent source；P6R10 完成 `window.open()` receiver/entry/accessing owner 拆分，并让动态 inline child script 同步执行；multiple-globals 四例 CLI/CDP 均通过 | 当前产品 exit 已完成 |
 | 可选 Chromium infrastructure | 真实 renderer process/channel/crash/restart、browser capability broker、agent reunification、fenced/guest 完整 replication | 仅在产品决定采用多进程/OOPIF 时另立项目，不计入当前 popup exit |
 
-P6R4 证明此前“先按 reachability 和 owner dependency 拆除”的顺序是必要的，但不再需要把同一删除切成更多微型提交。
-下一阶段只保留两个大 exit：一是把实际 production 可达的 remote `javascript:`、isolated world、descendant lifecycle
-与 Reporting/file-local 分级收口；二是重跑 focused WPT/CDP slice 并更新旧 timeout/fail 分类。真实多进程 lifecycle
-只在独立产品决策下推进。
+P6R4 证明先按 reachability 和 owner dependency 拆除的顺序成立。P6R10 已完成此前保留的两个 exit，
+包括 realm owner facts、child script timing 和 focused WPT/CDP 重分类。后续工作从 26 个 fail 与 15 个 timeout
+中按 history、opener、name、testharness completion 等责任方建立新计划。真实多进程 lifecycle 只在独立产品
+决策下推进。
 
 ##### E1-E2O/E3 完成后的 Phase 5E 范围
 
@@ -6329,10 +6447,10 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
 
 | 未完成项 | 当前事实 | 下一责任方 |
 | --- | --- | --- |
-| close/unload remote 与 compatibility 长尾 | Phase 5L1 已统一真实 local Page 的 script-closable、subtree beforeunload、一次 dialog、network drain、pagehide/unload、renderer ACK/timeout 与 target teardown；G6A 的 remote child proxy 在 root/target teardown 后会 disconnected，但 remote descendant beforeunload/unload ACK 尚未进入跨 endpoint 事务；compatibility lightweight 也未迁移 | group/remote owner + Phase 6 compatibility removal |
-| focus / active Page remote 长尾 | Phase 5L2 已完成 local Page/focused-frame authority、native `document.hasFocus()`、events/CSS、target activation/focus emulation/window-state/create/close promotion；G5 的 remote top-level focus 在 source 侧消费 activation/opener admission，并由 target Page ACK；G6A 没有伪造 nested focus，top-level `blur()` 保持 Chromium no-op | group/remote owner仍负责 remote child/process death 与 embedder activation endpoint |
+| close/unload remote 长尾 | Phase 5L1 已统一真实 local Page 的 script-closable、subtree beforeunload、一次 dialog、network drain、pagehide/unload、renderer ACK/timeout 与 target teardown；G6A 的 remote child proxy 在 root/target teardown 后会 disconnected；P6R4 已删除 compatibility owner | 当前 Page 内的 descendant 已覆盖；跨 OOPIF/process descendant ACK 在出现真实 producer 后由 process owner 实现 |
+| focus / active Page remote 长尾 | Phase 5L2 已完成 local Page/focused-frame authority、native `document.hasFocus()`、events/CSS、target activation/focus emulation/window-state/create/close promotion；G5 的 remote top-level focus 在 source 侧消费 activation/opener admission，并由 target Page ACK；G6A 没有伪造 nested focus，top-level `blur()` 保持 Chromium no-op | 当前产品不创建 remote child process；embedder/OOPIF activation endpoint 属于可选基础设施 |
 | retained detached Document values | P6R3 已完成：stable WindowProxy 继续投影 current Window；被作者保存的旧 Document/Node/function 仍读写原 detached DOM，`defaultView`/Window execution authority 已关闭；最后引用删除并 GC 后 old top/child Context、host 与 native DOM 精确回到基线 | 当前产品 local exit 已满足；保留真实站点长跑 RSS 与未来不可信跨进程 capability lifetime 观察 |
-| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification producer；G1-G5 已完成 local COOP、group endpoint 与 cross-agent top-level；G6A/G6B1 已完成 related remote child tree、stable proxy、named/Location/message/scheduler route、strict wire、channel currentness、ACK deadline 与 Page teardown disconnect | group/remote owner继续负责当前产品可达的 remote JavaScript URL、descendant unload/focus、Reporting/file-local/diagnostic；真实 process/fenced/guest 是可选基础设施项目 |
+| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification producer；G1-G6 已完成 local COOP、group endpoint、cross-agent top/child route、strict wire、channel currentness、ACK deadline 与 Page teardown disconnect；P6R8 已补 remote JavaScript URL、isolated-world source 与目标 main-realm execution；P6R9 已确认 remote form wire 无需携带 DOM/V8 value；P6R10 已完成 receiver/entry/accessing realm 区分与外部证据 | 当前单进程 exit 已满足；Reporting/file-local/diagnostic 和真实 process/fenced/guest 另行分级 |
 
 下一批按以下顺序推进，避免把动态状态继续塞进静态 surface：
 
@@ -6388,11 +6506,13 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
    WindowProxy/opener projection、remote named reuse 与 typed protocol target ACK；Phase 5G6A 已完成 agent-neutral
    remote child tree、stable nested proxy、related named target/Location/postMessage、exact scheduler cancellation、
    ACK deadline 与 Page teardown disconnect；Phase 5G6B1 已完成 versioned command/frame-policy/structured-clone
-   wire、execution-channel generation与 queued ACK cancellation。下一步不再把真实 renderer process 当作 popup
-   blocker；P6R1-P6R3 已完成 creation caller graph 与当前产品 local identity/lifetime closure，P6R4 又按
-   facade→loader/parser→protocol fallback 的依赖顺序物理删除 lightweight 双栈。现在只把实际 production
-   可达的 remote JavaScript URL、descendant lifecycle 与 Reporting/file-local 分级收口，并用 focused WPT/CDP
-   重新验收。多进程 renderer/capability broker 仅在独立产品决策后继续。
+   wire、execution-channel generation与 queued ACK cancellation。P6R8 又完成 remote JavaScript URL、
+   isolated-world source、target main-realm execution 与 denied-name no-fallback。下一步不再把真实 renderer process
+   当作 popup blocker；P6R1-P6R3 已完成 creation caller graph 与当前产品 local identity/lifetime closure，P6R4 又按
+   facade→loader/parser→protocol fallback 的依赖顺序物理删除 lightweight 双栈。P6R9 又按 Chromium wire
+   与当前 producer 修正 remote form/descendant exit。P6R10 已完成 receiver/entry/accessing identity、child script
+   timing 与 focused WPT/CDP 重新验收。后续按当前 26 fail / 15 timeout 的实际责任方处理，并继续分级
+   Reporting/file-local。多进程 renderer/capability broker 仅在独立产品决策后继续。
 
 Phase 5A 聚焦验证：
 
@@ -8585,7 +8705,8 @@ versioned process-neutral wire，但仍没有实际 Mojo/process channel。
    task；target origin仍在 dispatch时检查。source carrier可标记 source top或source child token/origin，target agent
    materialize自己的 source proxy，`MessageEvent.source` 不为 `null`且不会退回 incumbent self-message。
 5. nested `focus()`/close 不被伪造：G5 top-level focus/close transaction只接受无 `target_frame` 的 command，child
-   close按 Window 语义保持 no-op；remote focus traversal、activation transfer和 descendant unload仍是后续范围。
+   close按 Window 语义保持 no-op。P6R9 复核确认当前 target Page 已拥有本地 descendant lifecycle；实际 remote
+   focus traversal、activation transfer 和 descendant unload 聚合只在 OOPIF/process producer 出现后实现。
 
 ##### Protocol ACK deadline 与 owner loss
 
@@ -8866,10 +8987,12 @@ same-process fault seam；没有 fork renderer或注入 OS channel failure。
   trust bit、per-frame activation/ad/focus、pending-vs-active policy和 fenced/guest/embedder状态仍缺；
 - exact agent-cluster token/reunification尚未建模。target回到 opener同源时继续保留 remote projection，语义安全但
   资源和 agent clustering不等价；
-- remote descendant beforeunload/unload/focus、fenced/guest/embedder `CanNavigate`/side-channel规则、BFCache/
-  pending-deletion delivery、on-demand opener chain与 source terminal completion notification仍缺；
-- remote form method/body/referrer/scheduler已完整，但 target-realm `NavigateEvent` 的 source element/`FormData` V8
-  值、remote `javascript:`/isolated-world尚无 wire carrier；
+- 实际 OOPIF/process descendant 的 beforeunload/unload/focus 聚合、fenced/guest/embedder `CanNavigate`/
+  side-channel 规则、BFCache/pending-deletion delivery、on-demand opener chain 与 source terminal completion
+  notification 仍缺。当前单进程 target Page 已拥有本地 descendant lifecycle，也没有 remote child process producer；
+- remote form method/body/referrer/scheduler 已完整。Chromium 的 `RemoteFrame::Navigate()` wire 同样不携带
+  source element 或 V8 `FormData`。target-realm event 只在 source Window 可访问本地 target 时接收 source element，
+  所以跨 agent DOM carrier 不再列为缺口。remote `javascript:`/isolated-world 的历史缺口已由 P6R8 收口；
 - P6R2 已完成 group-safe opaque-origin nonce，P6R3 已完成真实 local Document realm 的 JS-retained
   detach/GC owner 协同；ReportingService queue/source/partition/NIK 与未来不可信跨进程 capability lifetime
   仍属于后续 group/identity 长尾。
@@ -8880,9 +9003,11 @@ same-process fault seam；没有 fork renderer或注入 OS channel failure。
 retained proxy不会跨 process generation串线。当前下一大纵切是 **Phase 6 compatibility reachability/removal**。
 P6R1 已画清并关闭三个 compatibility creation 文件的 production caller，P6R2 收敛 group-safe opaque origin，
 P6R3 又完成 JS-retained detached Document/Node/realm lifetime；P6R4 已按 facade → loader/parser → protocol fallback
-的 owner 依赖顺序物理拆除旧栈。与此同时，
-remote `javascript:` / isolated-world、remote descendant lifecycle 和 Reporting/file-local 等当前可达长尾继续在同一
-typed endpoint 上补齐。fenced/guest/embedder 与 browser capability broker 保持独立可选项目，不能阻塞 Moli 的
+的 owner 依赖顺序物理拆除旧栈。P6R8 又在同一 typed endpoint 上补齐 remote `javascript:` 与
+isolated-world source。P6R9 按 Chromium wire 和当前 producer 重新分类 remote descendant 与 form DOM carrier。
+P6R10 又完成 receiver/entry/accessing identity 与通用 child scheduler。当前长尾转为 81-case 矩阵的
+owner-by-owner 分类，以及 Reporting/file-local。
+fenced/guest/embedder、OOPIF lifecycle 和 browser capability broker 保持独立可选项目，不能阻塞 Moli 的
 单进程 popup 收口。
 
 ### Phase 6：删除 lightweight 专用模型
@@ -9108,8 +9233,9 @@ P6R3 没有声称解决 V8/Rust 全仓所有内存问题，也没有用单元回
 network-body source 中已经不含 detached-realm strong edge 的纯 Rust/scalar record，仍可能存活到后续显式取消或 Page
 host teardown；这是资源表 compaction/RSS 观察项，不再是 Context 自保活环。P6R3 完成的是 Phase 6
 所需的 local Document lifetime owner：有 JS 引用时语义可用，无引用时不形成跨堆强环，Page execution resource
-不会在 detached realm 中复活。多进程 remote capability 的认证/崩溃回收继续是可选基础设施；当前产品的 remote
-JavaScript URL、descendant lifecycle、Reporting/file-local 等语义长尾仍按 G6 endpoint owner 收口。
+不会在 detached realm 中复活。多进程 remote capability 的认证/崩溃回收继续是可选基础设施。remote JavaScript URL
+已由 P6R8 收口，descendant lifecycle 又由 P6R9 按当前 Page owner 与 OOPIF reachability 重新分类。
+Reporting/file-local 等语义长尾继续按产品支持面分级。
 
 #### P6R4：物理删除 compatibility owner 与 protocol fallback
 
@@ -9494,7 +9620,8 @@ Fetch 执行没有改变。上面的 CLI/CDP 结果仍是前一笔 P6R6 browser-
 
 P6R6 结束时仍有两项明确工作。direct Browser 当时尚未拥有 cross-document `history.back()` / `forward()` controller，remote
 JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP 也仍需单独验收。固定六例已经从 remaining-risk 列表移除，后续不能
-继续沿用 P6R5 的 2 pass / 2 fail / 2 timeout 作为当前状态。第一项现由 P6R7 收口。
+继续沿用 P6R5 的 2 pass / 2 fail / 2 timeout 作为当前状态。history 已由 P6R7 收口，remote JavaScript URL 已由
+P6R8 收口，descendant lifecycle 又由 P6R9 按 production reachability 重新分类。
 
 #### P6R7 direct Browser cross-document history owner
 
@@ -9603,9 +9730,495 @@ TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 P6R7 收口的是当前单进程 direct owner 的跨文档 traversal handoff。BFCache、POST history resubmission、scroll restoration
-和 crash restore 属于整个 session-history 子系统，不能从这组 popup 回归外推为已经完成。popup 计划剩余的本地重点为
-remote JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP 重新分类。前一笔已经删除的
+和 crash restore 属于整个 session-history 子系统，不能从这组 popup 回归外推为已经完成。remote JavaScript URL
+现已由 P6R8 收口。P6R9 又确认本地 target Page 已拥有 descendant lifecycle，remote wire 不应传 DOM form value。
+P6R7 结束时剩余的 receiver/entry identity、通用 child scheduler 与 focused WPT/CDP 已由 P6R10 收口。
+前一笔已经删除的
 `StandaloneAuxiliaryPageObservation` 不会以 history observer 或 test-only controller 的形式恢复。
+
+#### P6R8 remote JavaScript URL 与目标 realm owner
+
+G5/G6 已经让 related Page 在跨 script-agent replacement 后保留同一个 logical WindowProxy endpoint，也能把
+ordinary Location、named navigation、form request 和 child scheduler 送到 exact target Page/Frame。这里仍有一条
+生产可达的断路。目标跨源后再回到与 source 同源时仍保持 remote projection，`javascript:` 不能借 local V8 object
+直达目标。旧分支会拒绝或静默丢弃这次导航。remote child 则只能把 URL 塞进 ordinary request，接收方会把它误认成
+跨文档 load。
+
+本轮复核固定了四个责任边界。
+
+1. named lookup 先固定 exact target 并执行 `CanNavigate`。准入的 existing hit 随后在发布 command 前检查 source
+   Document 的 inline-navigation CSP。main world 与 isolated world 都保留 exact `WindowExecutionContextIdentity`。
+   isolated world 的 `grants_universal_access` 单独参与 Window access，不能被折叠成 source origin 相同。
+2. 通过准入的 request 使用 `NavigateJavaScriptUrl` 或 `NavigateFrameJavaScriptUrl`。普通 `Navigate` 与
+   `NavigateFrame` 在构造和 wire decode 两端都拒绝 `javascript:`，防止协议 carrier 绕过 source policy。
+3. target owner 在 ACK 前复核 endpoint、Page residence、execution-channel generation、root Document、exact child token
+   与当前 access origin。通过后只把任务放进 target Page 或 child Frame 的现有 networking-task queue。脚本始终在目标
+   main realm 执行，source world 只保留 policy 和 access 语义。
+4. target task 继续使用 E2O 已有的 current Document、target CSP、Trusted Types、异常和 completion owner。non-string
+   completion 保留 Document/realm，string completion 才进入既有 replacement transaction。
+
+source carrier 由以下 typed facts 组成。
+
+```text
+exact source root or child Window identity
+  + source Page residence and related-group endpoint
+  + root Document lifecycle identity
+  + serialized tuple origin or group-safe opaque nonce
+  + current document.domain override
+  + main or isolated source world
+  + isolated-world universal-access bit
+  + referrer and suppression navigation source
+```
+
+`RemoteWindowProxy` wire 升到 version 2。decode 会验证 source 与 target 属于同一个 browsing-context group，source
+root Document 与 source Page 相符，child source token 指向同一 endpoint 和 root Document，tuple/opaque identity 与
+`document.domain` 形状一致，command kind 与 top/frame route 相符。target dispatch 再消费本地当前状态，wire 中冻结的
+origin 不能替代 target 当前 origin。
+
+当前 wire 由同一进程内已经验证的 source owner 生成，isolated world 的 universal-access bit 还不是 browser 签发的
+安全 capability。未来若接入不可信 renderer process，这个权限必须由 browser broker 绑定 source endpoint 和 channel，
+不能接受 renderer 自报。P6R8 只把当前产品已有的 trusted isolated-world identity 无损送过 owner 边界。
+
+named target lookup 也补了一个独立但必要的语义。匹配到同名 remote top 或 child 后，`CanNavigate` 拒绝只会让这次
+导航成为 no-op。resolver 仍返回已选中的 stable WindowProxy，`window.open()` 仍返回该对象，hyperlink/form 也不会把
+拒绝解释成 name miss 后新建第二个 popup。这个结果同时避免错误消耗 popup activation。
+
+`document.domain` 以前只在 remote frame-tree snapshot 中更新。same-origin remote top 因而可能在 source/target 已经
+共同放宽 domain 后继续按旧 top origin 判断。本轮让 top Document 的 domain mutation 立即重发 top-level target state，
+source carrier 也冻结发出时的 domain。target 在 command 到达前发生 domain mutation 时会返回 negative ACK，channel
+generation 保持不变，后续 source 采用相同 domain 后的新 command 才能通过。
+
+实现过程中聚焦回归暴露了一个 owner 分类错误。remote child form 需要保留 method、body、headers 与 scheduler id，
+所以 wire 解码后使用 `ChildBrowsingContextBootstrap::Request`。原来的 JavaScript URL fast path 只识别
+`ChildBrowsingContextBootstrap::Url`，导致 non-string completion 仍退休旧 child realm。第一次 G6 运行因此无法再用缓存的
+execution context id。诊断把 child default realm inventory 从执行前后的 `[2, 3]` 与 `[3]` 对照出来。最终修复放在
+bootstrap classification、pending-task query 与 history seed 三个 owner 边界，`Request(javascript:)` 现在与
+`Url(javascript:)` 进入同一个 target task，不经过 loader/parser commit。
+
+Chromium 对照固定在 `a03603fe9af6230a12f1b2fb2c18a7d003a0d937`。
+
+| Chromium owner | 固定基线位置 | P6R8 采用的事实 |
+| --- | --- | --- |
+| source admission | `third_party/blink/renderer/core/loader/frame_loader.cc:545-565` | `FrameLoadRequest` 用 origin Window 与 `JavascriptWorld()` 检查 source browsing context CSP |
+| target scheduling | `third_party/blink/renderer/core/loader/frame_loader.cc:825-854`、`third_party/blink/renderer/core/dom/document.cc:9613-9640` | 选中的 target Document 接收 URL，并在 networking task 中批量执行 |
+| source/target policy split | `third_party/blink/renderer/core/frame/local_dom_window.cc:514-558` | source inline check 不执行 Trusted Types，最终 task 的 `CheckAndGetJavascriptUrl()` 再处理 target policy |
+| target realm execution | `third_party/blink/renderer/bindings/core/v8/script_controller.cc:248-320` | classic script 对 target `LocalDOMWindow` 执行，并按 target provisional navigation 与 completion type 决定是否替换 Document |
+
+Moli 当前的 isolated world 没有独立 CSP/Trusted Types policy container，因此 main/isolated source 都读取同一 source
+Document policy，target task 也读取目标 Document policy。world kind 仍进入 wire，避免 universal access 与普通 isolated
+source 混同，也为未来增加 world-specific policy 留下 typed 位置。这一阶段没有声称复制 Chromium extension world 的全部
+bypass 行为。
+
+回归矩阵覆盖以下可观察结果。
+
+- cross-origin named target 被 main-world source 拒绝后仍返回同一 proxy，不发布 command、activation 或第二 Page。
+- universal isolated source 可以命中 cross-origin remote target，target main realm 执行，target isolated realm 不变。
+- target 回到 source origin 后仍保持 remote agent，Location、named hyperlink 与 isolated-world `window.open()` 都进入
+  typed top command。
+- command 发出后 target `document.domain` 改变会 negative ACK，source/target 采用相同 domain 后可以重新准入。
+- source CSP 在发布 command 前拒绝，target CSP 在 positive ACK 后的 delayed target task 中拒绝。
+- remote child Location、hyperlink 与 POST form 都使用 exact frame token。form 保留 scheduler id，三条路径都在 target
+  child main realm 执行。
+- non-string remote child JavaScript URL 执行前后 execution-context inventory 完全相同。
+- wire round trip 保留 world/domain/source route，并拒绝 generic JavaScript URL、forged group 与 forged opaque nonce。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E '<wire 两条 + remote top/child 两条 + G5 + local child JS/TT + local popup JS + source CSP 三条>' \
+  --no-fail-fast
+# run 4ac54d27-f725-4742-8e46-2eec9fa08615
+# 11/11 passed, 7289 skipped by the focused filter
+```
+
+提交前 workspace 门禁也在同一代码工作树上通过。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast
+# run 768204b1-a651-472b-88cc-9d2f62750026
+# 15984 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed in 1m 32s
+```
+
+G6 的首次失败与修正后证据保留如下。
+
+```text
+72a04a2d-f290-48c7-8ca0-3a0ea7f83bd2  cached child context id became unknown
+080da5de-fdd9-4e2e-acbc-8985364a2a91  realm inventory changed from [2, 3] to [3]
+78e8d845-40a8-4eb9-add6-fb2f180230d4  owner fix passed the complete G6 case
+```
+
+这一纵切没有恢复 P6R4 删除的 observation seam 或 lightweight executor。完整 owner、loader、parser、realm alias 和
+lifecycle state 应继续物理删除。仅供测试构造输入或查询 production state 的无副作用 fixture/accessor 才适合
+`cfg(test)`。P6R9 已把 remote descendant 与 form DOM carrier 按 Chromium wire 和 production reachability
+重新分类。P6R10 随后完成 receiver/entry/accessing identity、通用 child script scheduler 与更宽
+focused WPT/CDP 分类。extension world 独立 policy 仍按产品支持面单独处理。
+
+#### P6R9 child browsing-context name 与 entry/incumbent navigation identity
+
+P6R9 不是继续扩展 popup facade。它复查现有真实 Page/Frame owner 在普通 child 场景中的两个 identity 漏洞，
+并用 Chromium 与外部 WPT 校准 P6R8 留下的 exit condition。两处修复都落在 child browsing-context owner
+和 navigation request owner，popup 只复用修正后的通用 primitive。
+
+##### Browsing-context name owner
+
+旧 `ChildBrowsingContextEntry::name` 同时表示 browsing-context name 和 `<iframe name>` 属性。
+`refresh_child_browsing_context()` 每次同步 owner element 时都会重新读取 DOM attribute，再重建 entry。
+脚本执行 `childWindow.name = "runtime-name"` 后，只要 parent 改动或删除 `<iframe name>`，下一次 refresh
+就会覆盖 runtime name。后续 `_self`、ordinary named lookup 和跨文档 replacement 都可能丢失同一个 frame。
+
+Chromium 基线 `a03603fe9af6230a12f1b2fb2c18a7d003a0d937` 给出的 owner 很清楚。
+
+| Chromium 位置 | 采用的事实 |
+| --- | --- |
+| `third_party/blink/renderer/core/frame/local_dom_window.cc:1772-1784` | `window.name` 读写 `FrameTree` name，并按 frame-tree owner replication |
+| `third_party/blink/renderer/core/html/html_frame_element_base.cc:173-175` | owner attribute 只在 frame 建立时初始化 frame name |
+| `third_party/blink/renderer/core/html/html_frame_owner_element.cc:694-697` | subframe creation/navigation 显式接收已经确定的 `frame_name` |
+
+本地 Chromium 最小探针依次执行 initial owner name `a`、owner rename `b`、`window.name = "c"`、
+owner rename `d` 和 owner attribute removal，结果为 `a|a|c|c|c`。这证明 owner attribute mutation
+不会回写已经存在的 browsing-context name。
+
+Moli 现在把字段改为 `browsing_context_name`。新 entry 仍由初始 owner attribute 初始化，既有 entry
+refresh 则保留 runtime name。frame identity snapshot、named lookup 和 `window.name` getter/setter 都读取
+同一个字段。回归覆盖 owner rename、attribute removal、`window.open(blob, "_self")` replacement 与新 realm
+继续观察 `runtime-name`。
+
+上游 `html/browsers/windows/browsing-context-names/choose-_self-001.html` 在修复后的 release binary 上，
+CLI 与 CDP 都由旧失败转为 pass。该用例从 child 将自己命名后调用 `window.open(..., "_self")`，能直接证明
+修复进入 production target selection 和 replacement，不只是 test accessor 的状态变化。
+
+##### Entry base 与 incumbent source
+
+Location API 需要同时保存两类来源。相对 URL 按 entry settings object 的 base 解析，fetch client、referrer
+与 navigation initiator 则来自 incumbent settings object。旧 `entered_window_api_base_url()` 使用
+`get_incumbent_context()`，把两者折叠成一份 realm。local child cross-document Location 随后只排入
+`ChildBrowsingContextBootstrap::Url`，即使调用点捕获了 source，也会在 target loader 前丢失。
+
+P6R9 采用 V8 `get_entered_or_microtask_context()` 解析 entry execution-context identity，并从该 identity
+读取 Document base。incumbent source 继续由现有 navigation-source capture 负责。HTTP(S) child Location
+现在构造 `ChildBrowsingContextNavigationRequest`，统一冻结以下值。
+
+```text
+entry Window/Document base
+  -> absolute target URL
+
+incumbent Window/Document source URL
+  + referrer policy
+  + suppress-referrer decision
+  -> network Referer
+  + committed document.referrer
+  + typed initiator source
+```
+
+request builder 已从 element activation 与 remote-frame caller 的重复实现上移到
+`ChildBrowsingContextNavigationRequest`。local child、related child 与 remote frame 因而使用同一个 GET
+carrier。Location 的 history increment 仍由原 owner 处理，request queue 不重写 renderer-authored seed。
+
+这次升级只用于 HTTP(S)。`blob:` 等路径当前可在 child owner 中同步 materialize Document；把它们包装成
+network-shaped Request 会改变 commit timing，并让 `_self` replacement 失去同步完成。P6R9 保留原 URL bootstrap，
+后续若统一 non-network navigation carrier，需要先给 carrier 建立明确的 materialization kind，不能靠 scheme
+外推异步 loader。
+
+内部三 realm 回归建立 entry、incumbent 与 relevant sibling。entry realm 调用 top bridge，top 再调用 incumbent
+函数，incumbent 最终写 relevant Location。断言同时锁住 entry base 解析出的
+`https://multiple-globals.test/entry/target.html`，以及 incumbent `about:srcdoc` source identity。
+修复前该用例拿到 URL-only bootstrap，修复后得到 typed Request。
+
+##### Remote form carrier 的 reachability 修正
+
+P6R8 文档把 remote target 的 `NavigateEvent.sourceElement` 与 V8 `FormData` carrier 列为当前缺口，
+这项要求超出了 Chromium 行为，也违反 isolate ownership。
+
+| Chromium 位置 | 采用的事实 |
+| --- | --- |
+| `third_party/blink/renderer/core/loader/frame_loader.cc:882-899` | 只有 origin Window 可以访问本地 target frame 时，target `NavigateEvent` 才接收 `source_element` |
+| `third_party/blink/renderer/core/frame/remote_frame.cc:263-319` | remote wire 发送 URL、initiator、POST body、headers、referrer、form flag、gesture 与 frame tokens，不发送 DOM/V8 value |
+| `third_party/blink/renderer/core/navigation_api/navigation_api.cc:815-833` | `FormData` 由 target 进程可见的本地 `source_element` 重建 |
+
+Moli 不应为跨 agent form 构造伪 DOM facade。remote route 继续传 method、raw body、Content-Type、headers、
+referrer、form flag、source scheduler id 和 exact target binding。source element 与 `FormData` 只在 same-agent
+local route 中存在。这样既保留网络与取消语义，也不让一个 isolate 持有另一个 isolate 的 V8 object。
+
+remote descendant lifecycle 也按相同原则重新分类。当前 remote projection 的 target 仍是一份真实 Page，
+它自己的 `JsContextHost` 拥有本地 child subtree。Phase 5L1 已让该 Page 在 close transaction 中递归派发
+beforeunload、pagehide、unload 并提交 renderer ACK。source agent 不需要再遍历 target 的 DOM。
+只有产品引入真实 OOPIF 或 renderer process descendant 后，browser/process owner 才需要聚合多 endpoint ACK。
+
+##### 外部 WPT 与失速归因
+
+WPT checkout 固定为 `db95fafd1fcef8428805e41eb5705d444e8c67ce`。本轮先用改动前 release
+跑 81 case 的 popup 关键切片，CLI 为 35 pass、27 fail、19 timeout，CDP 为 35 pass、27 fail、
+19 harness-stalled。两种入口的 case 分类一致，说明当前主要差距来自 renderer 行为，没有出现 CLI/CDP
+两套 popup owner 再次分叉。该结果只是宽口径基线，不能作为 P6R9 修复后通过率。
+
+修复后的 release binary SHA-256 为
+`92b464d6e6710c9a9dfb5b4609d03ddf85e4d42ecf4f6bb8dad945afe83435b4`。
+四例 focused slice 的结果如下。
+
+| 用例 | CLI | CDP | 结论 |
+| --- | --- | --- | --- |
+| `choose-_self-001.html` | pass | pass | browsing-context name 修复已由 production 外部路径证明 |
+| `context-for-location.html` | timeout | harness-stalled | testharness 没有收到 result/completion callback |
+| `context-for-location-assign.html` | timeout | harness-stalled | 同上 |
+| `context-for-location-href.html` | timeout | harness-stalled | 同上 |
+
+CDP 逐 frame 探针证明 entry、incumbent 与 relevant 都达到 `readyState = "complete"`，entry body 的
+`onload` 也已派发。失败发生在 `context-helper.js:33`。entry onload 向 incumbent Document 插入 inline
+classic script 后立刻调用 `incumbent.contentWindow.go()`，Moli 抛出
+`TypeError: incumbent.contentWindow.go is not a function`。稍后检查时该函数已经出现。这说明动态插入到
+child Document 的 inline classic script 没有在 `appendChild()` 返回前同步执行。
+
+手工再次调用 entry onload 后导航会继续，但这次调用由 top-level CDP evaluation 进入，URL base 也随之变成
+top-level entry realm，不能当作 multiple-globals 语义通过证据。P6R9 因此采用内部三 realm 回归证明
+entry/incumbent carrier，把三个外部 timeout 记到通用 child dynamic-script scheduling，不把它们写成 popup
+target 或 Location owner 已通过。
+
+聚焦验证如下。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E 'test(child_window_name_survives_owner_refresh_and_self_navigation) or test(cross_realm_location_uses_entry_base_and_incumbent_navigation_source)' \
+  --no-fail-fast
+# run f64cd39c-af81-4a25-ac20-bf894b474ba8
+# 2 passed, 7300 skipped
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E '<P6R9 two regressions plus six adjacent child/window/location/source cases>' \
+  --no-fail-fast
+# run 68bd48a0-9037-48d6-808c-930bc0ccd489
+# 8 passed
+
+# P6R9 两例、form replacement、related Page projection 和跨源 named child projection
+# 连续运行十轮
+# run ba3b26fb-6b92-4395-8086-6d3008af104b
+# 50 passed
+```
+
+第一轮 full nextest 暴露出三个仍把 owner attribute 当作 live browsing-context name 的旧 fixture/assertion，
+以及一个随后单跑通过的 parser backlog 用例。fixture 已改为让 child 自己写 `window.name`，没有放宽
+production 语义。修正后第二轮 full nextest 只出现一次
+`related_popup_same_turn_retarget_admits_only_winning_initial_navigation` 失败。该用例随即单跑通过，之后连续
+五十轮全部通过。最终门禁重新从头运行并全绿，保留这段中间结果是为了避免用一次成功掩盖时序风险。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast
+# run bddb83d3-d505-4c6e-bda2-ddec4c31d2c2
+# 15986 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed
+
+TMPDIR=<repo>/target/tmp cargo build --release -p moli
+sha256sum target/release/moli
+# 92b464d6e6710c9a9dfb5b4609d03ddf85e4d42ecf4f6bb8dad945afe83435b4
+```
+
+外部产物保存在 `/tmp/moli-wpt-popup-p6r9-entry-source-cli-20260823-1` 和
+`/tmp/moli-wpt-popup-p6r9-entry-source-cdp-20260823-1`。最终 release 哈希与运行这组 focused WPT 时
+一致，后续仅修改了测试 fixture 和本文档，所以结果仍对应当前 production binary。
+
+#### P6R10 Window call realm identity 与同步 child script owner
+
+P6R10 直接完成 P6R9 留下的两个 exit。实现范围覆盖 `window.open()` 的 typed call identity、related Page
+borrowed receiver、creator resource authority、top-level causal request carrier，以及 child Document 动态 inline
+classic script 的同步 mutation semantics。没有增加 popup-specific state。
+
+##### Chromium 的 receiver 与 entry 分工
+
+固定 Chromium 基线的 `LocalDOMWindow::open()` 在
+`third_party/blink/renderer/core/frame/local_dom_window.cc:2296-2450` 保留以下调用顺序。
+
+1. generated binding 先完成 Window receiver brand/access check，并在当前 calling realm 中做 WebIDL argument
+   conversion。conversion 可以同步执行 author getter。
+2. native `LocalDOMWindow::open()` 把 `this` 保留为 receiver，同时读取 `EnteredDOMWindow(isolate)`。
+3. entered Window 完成 URL，构造 `FrameLoadRequest`，提供 referrer policy、outgoing referrer 与 creator fetch client。
+4. receiver frame 的 `FrameTree` 执行 `FindOrCreateFrameForNavigation()`。sandbox、popup admission、transient
+   activation、opener relation、session storage clone 与 special/named target 都依附 receiver。
+5. 选定的 frame 消费由 entered Window 创建的 request。已有 target 与新 auxiliary context 使用同一套 request
+   facts，不会把 target root 重新解释成 initiator。
+
+这里存在三个不可互换的身份。
+
+| 身份 | 提供的事实 |
+| --- | --- |
+| receiver | `this` 对应的 exact LocalWindow、target tree、sandbox、activation、opener 与 creation transaction |
+| entry | URL base、Document policy、CSP/Trusted Types、resource loader、referrer 与 destination request source |
+| accessing/calling realm | receiver access check、WebIDL conversion 与异常所属 realm |
+
+P6R10 没有继续使用 incumbent 或 current realm 猜测这三组事实。`current_realm_owner_dispatch_scope()`
+现在返回 `Option<OwnerDispatchScope>`，无法找到 exact binding 时 fail closed，也不再隐式退回 Top。
+
+##### Typed receiver capture 与 generation currentness
+
+`WindowOperationReceiver` 在 argument conversion 前冻结 receiver 的 owner、dispatch scope、realm token 与
+V8 context。conversion 返回后，`resolve_live_binding()` 只接受原 binding 仍是 current 的情况。稳定 child
+handle 只用于找到 capture 时的 scope，不能在 iframe replacement 后重新绑定到新 LocalWindow。
+
+回归 `window_open_receiver_generation_is_frozen_before_url_conversion` 让 URL `toString()` 删除并重新插入
+receiver iframe。调用返回 `null`，replacement child 保持 initial `about:blank`。这锁住了一个容易被 stable
+WindowProxy 掩盖的 generation race。
+
+receiver host 与 accessing host 也不再共用一个 registry。same-host receiver 使用本地 dispatch-scope access
+check，related Page receiver 使用 related script-agent membership 与两端 effective origin 检查。跨源 top/child
+与 remote frame proxy 保持 fail closed。group-qualified related endpoint marker 同时存在于同源和跨源 proxy，
+所以 marker 只参与形态识别，不能单独决定授权。
+
+第一次加入粗粒度 marker 拒绝后，focused nextest run
+`98c76f0a-36d4-4406-9df6-84888713f187` 出现 3 pass / 1 fail。同源 related popup 的 borrowed
+`Window.open()` 被错误返回 `null`。删除这条粗粒度拒绝并保留 typed origin check 后，run
+`58c2c017-b855-4f34-85d0-4616a741ead4` 的四条回归全部通过。这个中间失败证明测试检查了真实
+跨 Page receiver route，没有只验证本地 child。
+
+##### Creation 与 navigation 的两组 source
+
+P6R10 进一步拆开 creation activation source 与 destination request source。
+
+```text
+receiver Page/Frame
+  -> target lookup
+  -> sandbox and transient activation
+  -> opener/session storage relation
+  -> RendererPendingPopupActivation source
+
+entry Page/Frame
+  -> URL/base and creator policy
+  -> DocumentResourceLoader
+  -> referrer/CSP/Trusted Types
+  -> RendererTopLevelNavigationRequest source
+```
+
+所有 existing related hit、Fresh/noopener、staged Related fallback 与最终 browser-owned fallback 都显式携带
+同一份 `RendererTopLevelNavigationRequest`。早期回归曾发现 referrer tuple 已正确，但 activation 丢失 causal
+request source。补齐所有 activation branch 后，receiver sandbox admission 与 entry navigation source 可以同时
+成立。
+
+`open_renderer_owned_related_auxiliary_page()` 现在接收明确的 creator `DocumentResourceLoader`。调用方不再从
+ambient current/receiver realm 二次发现 network authority。新 related initial policy 组合 entry Document
+policy 与 receiver 已准入的 sandbox/escape 结果，避免把 raw sandbox flags 重算一次并破坏
+`allow-popups-to-escape-sandbox`。
+
+special/named target helper 也接收 exact receiver Window 与 identity。child `_self` 只有在 target scope 确实是
+Top 时才进入 top-level Page queue；child target 继续由 Location/Frame owner 处理。显式 top-level navigation
+carrier 优先于 incumbent-derived fallback，因此跨 child Location handoff 不会覆盖 entry source。
+
+##### Child dynamic inline classic script 的同步边界
+
+P6R9 的三条 Location WPT 在 target request 已正确后仍 timeout。最小探针显示 entry onload 向 incumbent child
+Document 插入 inline classic script，`appendChild()` 返回时函数尚未定义，稍后才出现。错误属于通用
+Document mutation/script scheduler。
+
+P6R10 用 `RuntimeScriptStartCandidate` 保存 mutation turn 中的 script discovery 顺序。候选可以是 main Document
+script，也可以是带 exact child handle 的 inline classic script。child candidate 在对应 owner scope 中完成
+source、nonce、integrity、CSP 与 Trusted Types 准备，并在 mutation followup 返回前进入 child realm 执行。
+
+microtask checkpoint 仍由最外层 DOM API turn 负责。nested dynamic insertion 不单独 drain microtask，
+`document.close()` 路径继续按原 parser boundary drain。回归
+`child_initial_about_blank_executes_dynamic_inline_script_synchronously` 同时检查三件事。
+
+- inline body 在 append 返回前已经执行；
+- script 内创建的 Promise 在外层 checkpoint 才执行；
+- script 同步移除自身 iframe 时，不会让旧 owner 的后续任务进入 replacement 或 detached realm。
+
+旧异步路径已经物理删除，包括 `PendingChildDynamicDocumentScript`、
+`FrameDocumentDynamicClassic*`、`FrameDocumentUnboundScriptWork::DynamicClassic`、ready task、owner action 与
+followup。编译器在第一次删除入口后暴露出剩余 dead enum branch，本轮继续删除这些 branch，没有用
+`cfg(test)` 或 `allow(dead_code)` 隐藏。
+
+##### 删除与 `cfg(test)` 的边界
+
+P6R10 复核了两个 child-window private marker。`ENTERED_CHILD_WINDOW_HANDLE_SLOT` 没有 production writer，
+读路径只能制造 ambient fallback，现已连同 getter/export 一起删除。`ACTIVE_CHILD_WINDOW_HANDLE_SLOT` 有真实
+production enter/restore writer，继续服务 CSP、Trusted Types、script preparation 与 execution 的 exact child
+scope。
+
+这次判断沿用 P6R4 的规则。
+
+- production 不再可达的完整 owner、scheduler、parser、loader、realm alias 与 lifecycle state 直接删除；
+- 只构造 production 输入的 fixture 可以保留；
+- 无副作用读取 production state 的 test accessor 与断言可以保留；
+- 测试不能调用一套只在 `cfg(test)` 编译的旧 owner 来证明 release 行为。
+
+当前 tracked Rust 对 `lightweight_popup|LightweightPopup|lightweight popup` 的宽口径扫描为零，
+`ENTERED_CHILD_WINDOW_HANDLE_SLOT|entered_child_window_handle` 为零，旧 DynamicClassic stack 的专用符号也为零。
+
+##### 聚焦回归、全量门禁与外部矩阵
+
+receiver 与 entry 拆分完成后的第一组聚焦回归如下。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E 'test(child_initial_about_blank_executes_dynamic_inline_script_synchronously) | test(window_open_receiver_generation_is_frozen_before_url_conversion) | test(cross_realm_window_open_uses_receiver_target_and_entry_request_policy) | test(related_window_proxy_location_wakes_the_exact_standalone_target_page)'
+# run 58c2c017-b855-4f34-85d0-4616a741ead4
+# 4 passed, 7299 skipped
+```
+
+`cross_realm_window_open_uses_receiver_target_and_entry_request_policy` 同时锁住 receiver target、receiver sandbox、
+receiver activation source、entry URL/base 与 entry destination request source。related Page runtime 回归用无效 URL
+要求 borrowed receiver 抛出 `SyntaxError`，证明调用已经到达 URL parsing，而没有把 live target 当作 stale/null。
+
+第一次 workspace 门禁随后暴露了两类历史假设。旧测试仍要求 dynamic inline child script 经过
+`DocumentScriptReady` 异步队列。这个 release 路径已经被同步 mutation candidate 取代，其中三个测试组成的
+`runtime/page_vm/tests/child_document_script_ready.rs` 整文件删除，其余覆盖改写为同步 owner、typed realm
+publication 与 detach lifetime 断言。旧 owner 没有搬进 `cfg(test)`。
+
+同一轮还发现 sandboxed contextual fragment 会进入 child script preparation。共同入口
+`start_connected_child_document_script()` 现在先检查 exact owner Document 是否允许 scripting，再准备 inline、
+external 或 module script。修正后的五项 owner 回归在 run
+`725ee5a6-b067-4d6d-8bf4-8b67c508e124` 中全部通过。
+
+协议全包并发又揭示两条 same-turn popup 测试等待了 URL commit，却在目标 Document 到达 load 前读取
+`document.title`。URL 与 history 已经是 winning navigation，标题仍可能来自空 Document。测试保留标题强断言，
+attach 后改用 `Page.enable`，再等待 exact popup session 与 frame id 的 `Page.frameStoppedLoading`。无 URL
+用例压力运行 50 次全过，run 为 `b1e85cc2-ef82-46fa-b93b-7e76f02fb106`。retarget 用例压力运行
+100 次全过，run 为 `c24d9293-3ea8-4ac0-bb48-ef26a5161a11`。最终协议全包 run
+`48dbd8f6-c74b-4ce2-9fc6-8908f3d00360` 为 3358 passed。
+
+最终代码上的八项 owner 聚焦回归覆盖 receiver generation、跨 Page borrowed receiver、receiver 与 entry
+policy、related target wake、同步 child inline script、sandbox gate、typed realm publication 与 detach
+lifetime。run `05d8533a-b4c8-41ca-ba16-4aefe817ac30` 为 8 passed，7292 skipped。
+
+提交前 workspace 门禁使用同一份最终 Rust 代码。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast
+# run a247565f-762c-4223-9b7a-6820321132ba
+# 15984 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed in 1m 33s
+```
+
+最终 release binary SHA-256 为
+`f193e206c22d7888940a7ea7ab6a15fbf8a2d8f8233f3f6914b34976b7599a1b`。四例 focused WPT 如下。
+
+| WPT | CLI | CDP |
+| --- | --- | --- |
+| `multiple-globals/context-for-location.html` | pass | pass |
+| `multiple-globals/context-for-location-assign.html` | pass | pass |
+| `multiple-globals/context-for-location-href.html` | pass | pass |
+| `multiple-globals/context-for-window-open.html` | pass | pass |
+
+同一 binary 随后重跑固定 81-case popup 清单。CLI 为 40 pass / 26 fail / 15 timeout，CDP 为
+40 pass / 26 fail / 15 harness-stalled。归一化后的逐 case status 完全一致。相对 P6R9 基线新增五个 pass，
+没有丢失既有 pass。相对早一版 P6R10 binary 的逐 case status 与 failure-name 也没有变化。
+focused 与完整矩阵产物分别保存在
+`/tmp/moli-wpt-popup-p6r10-final2-multiple-globals-{cli,cdp}-20260823-1` 和
+`/tmp/moli-wpt-popup-p6r10-final2-{cli,cdp}-20260823-1`。
+
+P6R10 至此完成当前单进程 popup owner 计划。剩余 26 fail 与 15 timeout 是下一轮兼容性分类输入，
+不能在未确认 owner 前继续扩展 popup transaction。真实 renderer process、OOPIF、fenced/guest 与完整 Reporting
+仍按产品决策独立立项。
 
 ## 验收不变量
 

@@ -78,6 +78,7 @@ mod broadcast_channels;
 mod canvas_resources;
 mod child_documents;
 mod child_dynamic_scripts;
+pub(crate) use child_dynamic_scripts::ChildDynamicInlineClassicScriptStart;
 mod child_events;
 mod child_frame_navigation;
 mod child_frame_runtime;
@@ -1161,6 +1162,42 @@ impl ChildBrowsingContextNavigationRequest {
             request_headers,
             navigation_source: None,
         }
+    }
+
+    pub(crate) fn get_from_top_level_source(
+        target_url: Url,
+        source: Option<&crate::RendererTopLevelNavigationSource>,
+    ) -> Self {
+        let request = Self::new(target_url.clone(), "GET".to_owned(), None, Vec::new());
+        let Some(source) = source else {
+            return request;
+        };
+        let Some(source_url) = Url::parse(source.source_url()).ok() else {
+            return request;
+        };
+        let navigation_referrer = if source.suppresses_referrer() {
+            String::new()
+        } else {
+            moli_fetch::referrer_header_value(
+                &source_url,
+                &target_url,
+                None,
+                source.referrer_policy(),
+            )
+            .unwrap_or_default()
+        };
+        let document_referrer = if source.suppresses_referrer() {
+            String::new()
+        } else {
+            moli_fetch::navigation_referrer_value(
+                &source_url,
+                &target_url,
+                None,
+                source.referrer_policy(),
+            )
+            .unwrap_or_default()
+        };
+        request.with_navigation_source(source_url, navigation_referrer, document_referrer)
     }
 
     /// Freezes the source-side navigation metadata before a named target can

@@ -6750,6 +6750,574 @@ addEventListener("messageerror", event => {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn remote_javascript_urls_preserve_selection_source_world_and_target_main_realm() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let source_url = url::Url::parse("https://remote-javascript.test/source")
+        .expect("remote javascript source URL");
+    let mut opener = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        "<!doctype html><body>remote javascript source</body>",
+    )
+    .await;
+    let mut popup = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &opener,
+        &loader,
+        url::Url::parse("https://remote-javascript.test/initial").expect("initial popup URL"),
+        "<!doctype html><body>remote javascript initial target</body>",
+    )
+    .await;
+    let opener_testing = RendererPageTestingHandle::new_for_testing(&opener);
+    let popup_testing = RendererPageTestingHandle::new_for_testing(&popup);
+    opener_testing
+        .install_related_page_window_proxy_for_experiment(&popup_testing, "__remoteJavascriptPopup")
+        .await
+        .expect("source should retain the target WindowProxy");
+    let (named, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.name = 'remote-javascript-target'; window.name".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target should publish its reusable name");
+    assert_eq!(
+        renderer_json_value(named),
+        Some(serde_json::json!("remote-javascript-target"))
+    );
+    let (opener_severed, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener = null; window.opener === null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target should sever its opener before the denied-target probe");
+    assert_eq!(
+        renderer_json_value(opener_severed),
+        Some(serde_json::json!(true))
+    );
+
+    let split_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("cross-origin target replacement should reserve");
+    let split = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        split_reservation,
+        &loader,
+        url::Url::parse("https://remote-javascript-split.test/target")
+            .expect("cross-origin target URL"),
+        Vec::new(),
+        completed_external_raw_document_body(
+            r#"<!doctype html><body><script>
+window.name = "remote-javascript-target";
+globalThis.__remoteJavascriptCrossOriginMarker = "initial";
+</script></body>"#,
+        ),
+    )
+    .await
+    .expect("cross-origin target replacement should prepare");
+    let split_permit = split.issue_commit_permit();
+    let split = split
+        .commit_page_replacement(split_permit)
+        .await
+        .expect("cross-origin target replacement should commit");
+    popup
+        .adopt_page_replacement(&split)
+        .expect("stable target handle should adopt the cross-origin agent");
+    let (_, _, _, _, pending_download) = split.into_parts();
+    assert!(pending_download.is_none());
+
+    output_rx.drain();
+    let (cross_origin_selection, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const selected = window.open(
+    "javascript:void(globalThis.__remoteJavascriptCrossOriginMarker = 'main-must-not-run')",
+    "remote-javascript-target"
+  );
+  return selected === __remoteJavascriptPopup;
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin named target selection should remain a no-op");
+    assert_eq!(
+        renderer_json_value(cross_origin_selection),
+        Some(serde_json::json!(true)),
+        "a denied existing target must still be selected instead of creating another popup"
+    );
+    let denied_publications = output_rx.drain();
+    assert!(
+        remote_window_proxy_commands_for_page(&denied_publications, &opener).is_empty(),
+        "a main-world cross-origin javascript URL must not cross the remote wire"
+    );
+    assert!(
+        popup_activations_for_page(&denied_publications, &opener).is_empty(),
+        "a denied named hit must not fall through to auxiliary Page creation"
+    );
+    let (opener_after_denial, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener === null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("denied target should retain its prior opener state");
+    assert_eq!(
+        renderer_json_value(opener_after_denial),
+        Some(serde_json::json!(true)),
+        "selection without navigation must not install a new opener"
+    );
+
+    let (universal_world_reply, _) = opener
+        .run_async_command(RendererPageCommand::CreateIsolatedWorld {
+            name: "remote-javascript-universal-source".to_owned(),
+            grant_universal_access: true,
+            frame_id: None,
+        })
+        .await
+        .expect("universal source world should be created");
+    let RendererPageReply::ExecutionContextId(universal_world_context_id) = universal_world_reply
+    else {
+        panic!("CreateIsolatedWorld should return the universal source context id")
+    };
+    output_rx.drain();
+    let (universal_dispatched, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: universal_world_context_id,
+            expression: r#"(() => {
+  window.open(
+    "javascript:void(globalThis.__remoteJavascriptCrossOriginMarker = 'universal-main')",
+    "remote-javascript-target"
+  );
+  return "universal-dispatched";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("universal source world should publish the cross-origin command");
+    assert_eq!(
+        renderer_json_value(universal_dispatched),
+        Some(serde_json::json!("universal-dispatched"))
+    );
+    let universal_publications = output_rx.drain();
+    let mut universal_commands =
+        remote_window_proxy_commands_for_page(&universal_publications, &opener);
+    assert_eq!(universal_commands.len(), 1);
+    match universal_commands[0].kind_for_testing() {
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+            source,
+            ..
+        } => assert_eq!(
+            source.world(),
+            crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: true
+            }
+        ),
+        other => panic!("universal source should publish typed javascript URL, got {other:?}"),
+    }
+    let universal_activations = popup_activations_for_page(&universal_publications, &opener);
+    assert_eq!(universal_activations.len(), 1);
+    assert_eq!(
+        universal_activations[0].resolved_target_page(),
+        RendererResolvedPopupTarget::from_residence(RendererOutputResidenceIdentity::Page {
+            owner_local_host_id: popup.owner_local_host_id(),
+            page_id: popup.renderer_page_id(),
+        })
+    );
+    assert!(universal_activations[0].pending_auxiliary_page().is_none());
+    assert!(!universal_activations[0].has_destination_navigation());
+    let (universal_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            universal_commands.pop().expect("one universal command"),
+        ))
+        .await
+        .expect("cross-origin target should ACK universal source access");
+    assert!(matches!(universal_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("cross-origin target should run its selected javascript URL task");
+    let (universal_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__remoteJavascriptCrossOriginMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin target marker should evaluate");
+    assert_eq!(
+        renderer_json_value(universal_marker),
+        Some(serde_json::json!("universal-main"))
+    );
+
+    let return_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("same-origin return replacement should reserve");
+    let returned = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        return_reservation,
+        &loader,
+        url::Url::parse("https://remote-javascript.test/returned").expect("same-origin return URL"),
+        Vec::new(),
+        completed_external_raw_document_body(
+            r#"<!doctype html><body><script>
+window.name = "remote-javascript-target";
+globalThis.__remoteJavascriptMainMarker = "returned";
+</script></body>"#,
+        ),
+    )
+    .await
+    .expect("same-origin return replacement should prepare");
+    let return_permit = returned.issue_commit_permit();
+    let returned = returned
+        .commit_page_replacement(return_permit)
+        .await
+        .expect("same-origin return replacement should commit");
+    popup
+        .adopt_page_replacement(&returned)
+        .expect("stable target handle should adopt the returned remote agent");
+    let (_, _, _, _, pending_download) = returned.into_parts();
+    assert!(pending_download.is_none());
+    let opener_diagnostics = runtime_heap_usage_for_test(&opener).await;
+    let popup_diagnostics = runtime_heap_usage_for_test(&popup).await;
+    assert_ne!(
+        opener_diagnostics["moli"]["runtime"]["scriptAgentId"],
+        popup_diagnostics["moli"]["runtime"]["scriptAgentId"],
+        "returning to the opener origin must not silently move the target LocalWindow back into the opener agent"
+    );
+
+    let target_isolated_context_id =
+        create_isolated_world_for_test(&popup, "remote-javascript-target-isolated")
+            .await
+            .expect("target isolated world should be created");
+    popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: target_isolated_context_id,
+            expression: "globalThis.__remoteJavascriptRealmMarker = 'target-isolated'; 'installed'"
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target isolated marker should be installed");
+
+    output_rx.drain();
+    let (location_dispatched, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"__remoteJavascriptPopup.location.href = "javascript:void(globalThis.__remoteJavascriptMainMarker = 'location-main')"; "location-dispatched""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same-origin remote Location should publish a typed command");
+    assert_eq!(
+        renderer_json_value(location_dispatched),
+        Some(serde_json::json!("location-dispatched"))
+    );
+    let location_publications = output_rx.drain();
+    let mut location_commands =
+        remote_window_proxy_commands_for_page(&location_publications, &opener);
+    assert_eq!(location_commands.len(), 1);
+    assert!(matches!(
+        location_commands[0].kind_for_testing(),
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+            source,
+            ..
+        } if source.world() == crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Main
+            && source.document_domain().is_none()
+    ));
+    let (location_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            location_commands.pop().expect("one Location command"),
+        ))
+        .await
+        .expect("same-origin target should ACK remote Location");
+    assert!(matches!(location_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("same-origin target should run the remote Location task");
+    let (location_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__remoteJavascriptMainMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote Location marker should evaluate");
+    assert_eq!(
+        renderer_json_value(location_marker),
+        Some(serde_json::json!("location-main"))
+    );
+
+    output_rx.drain();
+    let (linked, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const link = document.createElement("a");
+  link.href = "javascript:void(globalThis.__remoteJavascriptMainMarker = 'hyperlink-main')";
+  link.target = "remote-javascript-target";
+  link.rel = "opener";
+  document.body.appendChild(link);
+  link.click();
+  return "linked";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same-origin remote hyperlink should publish a typed command");
+    assert_eq!(
+        renderer_json_value(linked),
+        Some(serde_json::json!("linked"))
+    );
+    let hyperlink_publications = output_rx.drain();
+    let mut hyperlink_commands =
+        remote_window_proxy_commands_for_page(&hyperlink_publications, &opener);
+    assert_eq!(hyperlink_commands.len(), 1);
+    assert_eq!(
+        popup_activations_for_page(&hyperlink_publications, &opener).len(),
+        1,
+        "remote hyperlink target reuse should remain observable without a browser destination"
+    );
+    let (hyperlink_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            hyperlink_commands.pop().expect("one hyperlink command"),
+        ))
+        .await
+        .expect("same-origin target should ACK the remote hyperlink");
+    assert!(matches!(hyperlink_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("same-origin target should run the remote hyperlink task");
+
+    let source_isolated_context_id =
+        create_isolated_world_for_test(&opener, "remote-javascript-source-isolated")
+            .await
+            .expect("source isolated world should be created");
+    output_rx.drain();
+    let (isolated_dispatched, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: source_isolated_context_id,
+            expression: r#"(() => {
+  window.open(
+    "javascript:void(globalThis.__remoteJavascriptRealmMarker = 'target-main')",
+    "remote-javascript-target"
+  );
+  return "isolated-dispatched";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("isolated source world should publish a same-origin typed command");
+    assert_eq!(
+        renderer_json_value(isolated_dispatched),
+        Some(serde_json::json!("isolated-dispatched"))
+    );
+    let isolated_publications = output_rx.drain();
+    let mut isolated_commands =
+        remote_window_proxy_commands_for_page(&isolated_publications, &opener);
+    assert_eq!(isolated_commands.len(), 1);
+    assert!(matches!(
+        isolated_commands[0].kind_for_testing(),
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+            source,
+            ..
+        } if source.world()
+            == crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: false
+            }
+    ));
+    let (isolated_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            isolated_commands.pop().expect("one isolated-world command"),
+        ))
+        .await
+        .expect("same-origin target should ACK the isolated-world source");
+    assert!(matches!(isolated_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("target should execute the isolated-source URL in its main realm");
+    let (main_realm_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__remoteJavascriptRealmMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target main-world marker should evaluate");
+    assert_eq!(
+        renderer_json_value(main_realm_marker),
+        Some(serde_json::json!("target-main"))
+    );
+    let (isolated_realm_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: target_isolated_context_id,
+            expression: "globalThis.__remoteJavascriptRealmMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target isolated-world marker should evaluate");
+    assert_eq!(
+        renderer_json_value(isolated_realm_marker),
+        Some(serde_json::json!("target-isolated")),
+        "the source world is policy input and must never become the target execution realm"
+    );
+
+    output_rx.drain();
+    opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"__remoteJavascriptPopup.location.href = "javascript:void(globalThis.__remoteJavascriptStaleMarker = 'must-not-run')"; "staged""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same-origin command should stage before target origin mutation");
+    let staged_publications = output_rx.drain();
+    let mut staged_commands = remote_window_proxy_commands_for_page(&staged_publications, &opener);
+    assert_eq!(staged_commands.len(), 1);
+    popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.domain = document.domain; document.domain".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target should mutate its current access origin without rotating the channel");
+    let (stale_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            staged_commands.pop().expect("one staged command"),
+        ))
+        .await
+        .expect("target should return a negative ACK for stale source-origin access");
+    assert!(matches!(stale_ack, RendererPageReply::Bool(false)));
+    opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.domain = document.domain; document.domain".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source should opt into the same document.domain after the stale-command probe");
+
+    popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "script-src 'none'";
+  (document.head || document.documentElement).appendChild(meta);
+  return "target-csp-installed";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target CSP should install dynamically");
+    output_rx.drain();
+    opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"__remoteJavascriptPopup.location.href = "javascript:void(globalThis.__remoteJavascriptTargetCspMarker = 'must-not-run')"; "target-csp-dispatched""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source policy should admit a command for the target CSP probe");
+    let target_csp_publications = output_rx.drain();
+    let mut target_csp_commands =
+        remote_window_proxy_commands_for_page(&target_csp_publications, &opener);
+    assert_eq!(target_csp_commands.len(), 1);
+    assert!(matches!(
+        target_csp_commands[0].kind_for_testing(),
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl {
+            source,
+            ..
+        } if source.document_domain() == Some("remote-javascript.test")
+    ));
+    let (target_csp_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            target_csp_commands.pop().expect("one target-CSP command"),
+        ))
+        .await
+        .expect("target should accept the command before its delayed CSP check");
+    assert!(matches!(target_csp_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(RendererPageCommand::RunPendingJavascriptUrlTasksBeforeBrowserNavigation)
+        .await
+        .expect("target should run the delayed CSP decision task");
+    let (target_csp_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "String(globalThis.__remoteJavascriptTargetCspMarker)".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target CSP marker should evaluate");
+    assert_eq!(
+        renderer_json_value(target_csp_marker),
+        Some(serde_json::json!("undefined"))
+    );
+
+    output_rx.drain();
+    let (source_csp_selection, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const meta = document.createElement("meta");
+  meta.httpEquiv = "Content-Security-Policy";
+  meta.content = "script-src 'none'";
+  (document.head || document.documentElement).appendChild(meta);
+  const selected = window.open(
+    "javascript:void(globalThis.__remoteJavascriptSourceCspMarker = 'must-not-run')",
+    "remote-javascript-target"
+  );
+  return selected === __remoteJavascriptPopup;
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source CSP should preserve selected-target identity");
+    assert_eq!(
+        renderer_json_value(source_csp_selection),
+        Some(serde_json::json!(true))
+    );
+    let source_csp_publications = output_rx.drain();
+    assert!(remote_window_proxy_commands_for_page(&source_csp_publications, &opener).is_empty());
+    assert!(popup_activations_for_page(&source_csp_publications, &opener).is_empty());
+
+    output_rx.drain();
+    opener
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: source_isolated_context_id,
+            expression: r#"window.open(
+  "javascript:void(globalThis.__remoteJavascriptIsolatedSourceCspMarker = 'must-not-run')",
+  "remote-javascript-target"
+); "isolated-source-csp-checked""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("isolated source world should use the source Document CSP fallback");
+    let isolated_csp_publications = output_rx.drain();
+    assert!(remote_window_proxy_commands_for_page(&isolated_csp_publications, &opener).is_empty());
+    assert!(popup_activations_for_page(&isolated_csp_publications, &opener).is_empty());
+
+    popup
+        .close_async()
+        .await
+        .expect("remote javascript target should close");
+    opener
+        .close_async()
+        .await
+        .expect("remote javascript source should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands() {
     // Keep every routed child navigation pending until a newer navigation or
     // Page teardown cancels it. Using unresolvable example.test URLs here made
@@ -6931,6 +7499,233 @@ addEventListener('message', event => __g6Messages.push({
     );
 
     output_rx.drain();
+    let (javascript_location, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"__g6FirstRemoteFrame.location.href = "javascript:void(globalThis.__g6RemoteJavascriptMarker = 'location-main')"; "javascript-location""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child Location should publish a typed javascript URL request");
+    assert_eq!(
+        renderer_json_value(javascript_location),
+        Some(serde_json::json!("javascript-location"))
+    );
+    let javascript_location_publications = output_rx.drain();
+    let mut javascript_location_commands =
+        remote_window_proxy_commands_for_page(&javascript_location_publications, &opener);
+    assert_eq!(javascript_location_commands.len(), 1);
+    let first_frame = javascript_location_commands[0]
+        .target_frame()
+        .expect("remote child javascript URL needs its exact frame token");
+    match javascript_location_commands[0].kind_for_testing() {
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+            request,
+            source,
+            scheduler_id,
+            ..
+        } => {
+            assert_eq!(request.method, "GET");
+            assert!(scheduler_id.is_none());
+            assert_eq!(source.document_domain(), Some("example.test"));
+            assert_eq!(
+                source.world(),
+                crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Main
+            );
+        }
+        other => panic!("remote child Location should use typed javascript URL, got {other:?}"),
+    }
+    let (javascript_location_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            javascript_location_commands
+                .pop()
+                .expect("one remote child Location command"),
+        ))
+        .await
+        .expect("remote child should ACK its javascript Location command");
+    assert!(matches!(
+        javascript_location_ack,
+        RendererPageReply::Bool(true)
+    ));
+    let (javascript_location_completed, _) = popup
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("remote child javascript Location task should complete");
+    assert!(matches!(
+        javascript_location_completed,
+        RendererPageReply::Bool(true)
+    ));
+    let child_context_ids_after_javascript_location = child_default_context_ids_for_test(&popup)
+        .await
+        .expect("child contexts should remain enumerable after a non-string javascript URL");
+    assert_eq!(
+        child_context_ids_after_javascript_location, popup_child_context_ids,
+        "a non-string child javascript URL must preserve the current Document realm"
+    );
+    let (javascript_location_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_popup_child_context_id,
+            expression: "globalThis.__g6RemoteJavascriptMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child Location marker should evaluate");
+    assert_eq!(
+        renderer_json_value(javascript_location_marker),
+        Some(serde_json::json!("location-main"))
+    );
+
+    output_rx.drain();
+    let (javascript_link, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const link = document.createElement("a");
+  link.href = "javascript:void(globalThis.__g6RemoteJavascriptMarker = 'hyperlink-main')";
+  link.target = "g6-first";
+  document.body.appendChild(link);
+  link.click();
+  return "javascript-link";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("named hyperlink should route a remote child javascript URL");
+    assert_eq!(
+        renderer_json_value(javascript_link),
+        Some(serde_json::json!("javascript-link"))
+    );
+    let javascript_link_publications = output_rx.drain();
+    assert!(
+        popup_activations_for_page(&javascript_link_publications, &opener).is_empty(),
+        "a remote child javascript target must not create a second popup"
+    );
+    let mut javascript_link_commands =
+        remote_window_proxy_commands_for_page(&javascript_link_publications, &opener);
+    assert_eq!(javascript_link_commands.len(), 1);
+    assert_eq!(
+        javascript_link_commands[0].target_frame(),
+        Some(first_frame)
+    );
+    assert!(matches!(
+        javascript_link_commands[0].kind_for_testing(),
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+            scheduler_id: None,
+            ..
+        }
+    ));
+    let (javascript_link_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            javascript_link_commands
+                .pop()
+                .expect("one remote child hyperlink command"),
+        ))
+        .await
+        .expect("remote child should ACK its javascript hyperlink command");
+    assert!(matches!(javascript_link_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("remote child javascript hyperlink task should complete");
+    let (javascript_link_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_popup_child_context_id,
+            expression: "globalThis.__g6RemoteJavascriptMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child hyperlink marker should evaluate");
+    assert_eq!(
+        renderer_json_value(javascript_link_marker),
+        Some(serde_json::json!("hyperlink-main"))
+    );
+
+    output_rx.drain();
+    let (javascript_form, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = "javascript:void(globalThis.__g6RemoteJavascriptMarker = 'form-main')";
+  form.target = "g6-first";
+  document.body.appendChild(form);
+  form.submit();
+  return "javascript-form";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("named form should route a remote child javascript URL");
+    assert_eq!(
+        renderer_json_value(javascript_form),
+        Some(serde_json::json!("javascript-form"))
+    );
+    let javascript_form_publications = output_rx.drain();
+    assert!(
+        popup_activations_for_page(&javascript_form_publications, &opener).is_empty(),
+        "a remote child javascript form target must not create a second popup"
+    );
+    let mut javascript_form_commands =
+        remote_window_proxy_commands_for_page(&javascript_form_publications, &opener);
+    assert_eq!(javascript_form_commands.len(), 1);
+    assert_eq!(
+        javascript_form_commands[0].target_frame(),
+        Some(first_frame)
+    );
+    match javascript_form_commands[0].kind_for_testing() {
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrameJavaScriptUrl {
+            request,
+            scheduler_id,
+            ..
+        } => {
+            assert_eq!(request.method, "POST");
+            assert!(scheduler_id.is_some());
+        }
+        other => panic!("remote child form should use typed javascript URL, got {other:?}"),
+    }
+    let (javascript_form_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            javascript_form_commands
+                .pop()
+                .expect("one remote child form command"),
+        ))
+        .await
+        .expect("remote child should ACK its javascript form command");
+    assert!(matches!(javascript_form_ack, RendererPageReply::Bool(true)));
+    popup
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("remote child javascript form task should complete");
+    let (javascript_form_marker, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_popup_child_context_id,
+            expression: "globalThis.__g6RemoteJavascriptMarker".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child form marker should evaluate");
+    assert_eq!(
+        renderer_json_value(javascript_form_marker),
+        Some(serde_json::json!("form-main"))
+    );
+
+    output_rx.drain();
     let (posted, _) = opener
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression:
@@ -6947,9 +7742,7 @@ addEventListener('message', event => __g6Messages.push({
     let publications = output_rx.drain();
     let mut message_commands = remote_window_proxy_commands_for_page(&publications, &opener);
     assert_eq!(message_commands.len(), 1);
-    let first_frame = message_commands[0]
-        .target_frame()
-        .expect("remote child message must retain its exact frame token");
+    assert_eq!(message_commands[0].target_frame(), Some(first_frame));
     let (message_ack, _) = popup
         .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
             message_commands.pop().expect("one remote child message"),
@@ -7620,7 +8413,13 @@ async fn related_page_script_agent_exposes_chromium_cross_origin_window_proxy_su
         ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let (opener_base_url, observer_child_server) = spawn_owner_wake_server_with_content_type(
         "/observer-child",
-        "<!doctype html><body>observer child</body>",
+        r#"<!doctype html><head><script>
+addEventListener("message", event => {
+  if (!event.data || event.data.type !== "rename-observer-child") return;
+  window.name = event.data.name;
+  parent.postMessage({ type: event.data.replyType, name: window.name }, "*");
+});
+</script></head><body>observer child</body>"#,
         "text/html",
         Duration::ZERO,
     )
@@ -8039,20 +8838,33 @@ async fn related_page_script_agent_exposes_chromium_cross_origin_window_proxy_su
 
     let (child_mutation, _) = second_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r#"(() => {
+            expression: r#"(() => new Promise(resolve => {
   const { alpha, thenFrame } = globalThis.__lm_dynamic_child_frames;
-  alpha.name = "renamed";
-  thenFrame.remove();
-  return JSON.stringify([window.length, window.renamed === window[0]]);
-})()"#
+  const replyType = `observer-child-renamed-${Math.random()}`;
+  addEventListener("message", function onMessage(event) {
+    if (!event.data || event.data.type !== replyType) return;
+    removeEventListener("message", onMessage);
+    thenFrame.remove();
+    resolve(JSON.stringify([
+      window.length,
+      window.renamed === window[0],
+      event.data.name
+    ]));
+  });
+  alpha.contentWindow.postMessage({
+    type: "rename-observer-child",
+    name: "renamed",
+    replyType
+  }, "*");
+}))()"#
                 .to_owned(),
-            await_promise: false,
+            await_promise: true,
         })
         .await
         .expect("related popup should rename and remove child contexts");
     assert_eq!(
         renderer_json_value(child_mutation),
-        Some(serde_json::json!("[2,true]"))
+        Some(serde_json::json!(r#"[2,true,"renamed"]"#))
     );
 
     let (refreshed_children, _) = first_page
@@ -12299,6 +13111,29 @@ async fn related_window_proxy_location_wakes_the_exact_standalone_target_page() 
     )
     .await;
     output_rx.drain();
+
+    let (borrowed_open_result, _) = opener_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  try {
+    __relatedLocationPopup.open("http://[", "_self");
+    return "missing-error";
+  } catch (error) {
+    return error.name;
+  }
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same-origin related Window.open receiver should remain callable");
+    assert_eq!(
+        renderer_json_value(borrowed_open_result),
+        Some(serde_json::json!("SyntaxError")),
+        "cross-Page receiver authorization must reach URL parsing instead of treating the live target as stale"
+    );
 
     let destination = "data:text/html,<title>cross-page-location</title><script>globalThis.__crossPageLocationLoaded=true</script>";
     let (assignment_result, _) = opener_page

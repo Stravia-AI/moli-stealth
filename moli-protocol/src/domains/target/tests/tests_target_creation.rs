@@ -3135,6 +3135,22 @@ async fn related_popup_same_turn_retarget_admits_only_winning_initial_navigation
                 .expect("popup session id")
                 .to_owned();
             ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 15315,
+                "sessionId": popup_session_id,
+                "method": "Page.enable"
+            }))
+            .await;
+            ctx.expect_result(15315, json!({}), Some(&popup_session_id));
+            ctx.wait_for_scheduler_message(
+                "winning initial popup load completion",
+                |message| {
+                    message["method"] == json!("Page.frameStoppedLoading")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["frameId"] == json!(popup_target_id)
+                },
+            )
+            .await;
 
             ctx.process_async(json!({
                 "id": 15313,
@@ -3243,9 +3259,20 @@ async fn related_popup_without_url_same_turn_location_admits_initial_navigation(
                 .expect("popup session id")
                 .to_owned();
             ctx.sent.clear();
-            ctx.wait_for_document_continuation_for_test(
-                Some(&popup_session_id),
-                "no-URL initial popup Document continuation",
+            ctx.process_async(json!({
+                "id": 15325,
+                "sessionId": popup_session_id,
+                "method": "Page.enable"
+            }))
+            .await;
+            ctx.expect_result(15325, json!({}), Some(&popup_session_id));
+            ctx.wait_for_scheduler_message(
+                "no-URL initial popup load completion",
+                |message| {
+                    message["method"] == json!("Page.frameStoppedLoading")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["frameId"] == json!(popup_target_id)
+                },
             )
             .await;
 

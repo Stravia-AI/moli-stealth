@@ -756,15 +756,6 @@ impl JsContextHost {
                 .child_browsing_context_parent_handle(handle)
                 .is_some_and(|parent| self.child_browsing_context_document_credentialless(parent))
     }
-
-    pub(crate) fn child_browsing_context_popup_opener_sandbox_policy(
-        &self,
-        handle: DomHandle,
-    ) -> Option<crate::document_runtime::DocumentSandboxPolicy> {
-        let entry = self.child_browsing_contexts.get(&handle)?;
-        let policy = entry.document_sandbox_policy();
-        (policy.sandboxes_document_domain && !policy.allows_popups_to_escape).then_some(policy)
-    }
 }
 
 fn web_storage_key_for_origin_and_top_level_site_with_nonce(

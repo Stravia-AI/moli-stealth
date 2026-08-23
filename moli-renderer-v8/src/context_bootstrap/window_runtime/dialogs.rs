@@ -1,12 +1,9 @@
-use super::super::{
-    location_navigation::{LocationNavigationKind, navigate_location_object},
-    navigation_cancellation::inform_about_canceled_navigation_for_window,
-};
+use super::super::navigation_cancellation::inform_about_canceled_navigation_for_window;
 use crate::{
-    context_bootstrap::CHILD_BROWSING_CONTEXT_HANDLE_SLOT,
-    document_runtime::{DocumentPolicyContainer, DomHandle},
     native_bridge::{
-        InputNavigationPolicy, child_window_handle_from_marker_data,
+        InputNavigationPolicy,
+        WindowExecutionContextBinding, WindowOperationReceiver,
+        WindowOperationReceiverCaptureError,
         element::{
             SpecialBrowsingContextTarget,
             cancel_pending_renderer_owned_javascript_url_navigation_for_window,
@@ -17,7 +14,6 @@ use crate::{
             source_javascript_url_allowed_by_csp_for_owner,
             source_javascript_url_allows_new_context_by_policy,
         },
-        entered_child_window_handle,
     },
     runtime::{
         RendererPendingJavaScriptDialog, RendererPendingPopupActivation,
@@ -25,7 +21,8 @@ use crate::{
         RendererTopLevelNavigationRequest,
     },
     util::{
-        context_host_ptr_from_context_slot, context_host_ptr_from_global_bridge, get_private_value,
+        context_host_ptr_from_context_slot, context_host_ptr_from_global_bridge,
+        context_host_ptr_from_window_object,
     },
     webidl,
 };
@@ -131,24 +128,59 @@ pub(crate) fn window_open_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(parsed) = webidl::parse_args::<WindowOpenArgs>(scope, &args) else {
-        return;
-    };
-    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+    let Some(accessing_host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         rv.set(v8::null(scope).into());
         return;
     };
-    let entered_window = {
-        let host = unsafe { &*host_ptr };
-        window_open_entered_window(scope, host).unwrap_or_else(|| args.this())
+    let receiver_host_ptr =
+        context_host_ptr_from_window_object(scope, args.this()).unwrap_or(accessing_host_ptr);
+    let receiver = match WindowOperationReceiver::capture_and_authorize(
+        scope,
+        args.this(),
+        unsafe { &*receiver_host_ptr },
+        unsafe { &*accessing_host_ptr },
+    ) {
+        Ok(receiver) => receiver,
+        Err(WindowOperationReceiverCaptureError::IllegalInvocation) => {
+            crate::util::throw_type_error(
+                scope,
+                "Failed to execute 'open' on 'Window': Illegal invocation",
+            );
+            return;
+        }
+        Err(WindowOperationReceiverCaptureError::CrossOrigin) => {
+            crate::native_bridge::throw_cross_origin_location_security_error(scope);
+            return;
+        }
     };
-    let source_scope = window_open_receiver_child_handle(scope, entered_window)
-        .map(crate::native_bridge::OwnerDispatchScope::Child)
-        .unwrap_or_else(|| unsafe { &*host_ptr }.entered_owner_dispatch_scope(scope));
+    let Some(parsed) = webidl::parse_args::<WindowOpenArgs>(scope, &args) else {
+        return;
+    };
+    let Some(receiver_binding) = receiver.resolve_live_binding(unsafe { &*receiver_host_ptr })
+    else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let Some(receiver_identity) = receiver_binding.resolve_identity(unsafe { &*receiver_host_ptr })
+    else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let receiver_context = receiver_binding.context(scope);
+    let receiver_window = receiver_context.global(scope);
+    let Some((entry_host_ptr, entry_identity, entry_binding)) =
+        entered_window_execution_context_binding(scope)
+    else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+
     let special_target = SpecialBrowsingContextTarget::parse(&parsed.target_name);
-    let entered_base_url = {
-        let host = unsafe { &*host_ptr };
-        entered_window_api_base_url(scope, host)
+    let Some(entered_base_url) = (unsafe { &*entry_host_ptr })
+        .navigation_api_base_url_for_identity_without_scope(entry_identity)
+    else {
+        rv.set(v8::null(scope).into());
+        return;
     };
     let url = if parsed.raw_url.is_empty() {
         Url::parse("about:blank").expect("about:blank should parse")
@@ -168,30 +200,20 @@ pub(crate) fn window_open_callback<'s>(
             }
         }
     };
-    if special_target == Some(SpecialBrowsingContextTarget::Current) {
-        if !source_javascript_url_allowed_by_csp_for_owner(
-            scope,
-            unsafe { &mut *host_ptr },
-            source_scope,
-            url.as_str(),
-        ) {
-            rv.set(entered_window.into());
-            return;
-        }
-        navigate_window_open_self(scope, entered_window, url.as_str(), &mut rv);
-        return;
-    }
     let parsed_features = WindowOpenFeatures::parse(&parsed.features);
     let suppress_opener = parsed_features.suppresses_opener();
     let suppress_referrer = parsed_features.suppresses_referrer();
-    let mut creator_policy_container = {
-        let host = unsafe { &*host_ptr };
-        host.document_policy_container_snapshot_for_owner(source_scope)
-            .unwrap_or_else(|| window_open_entered_policy_container(scope, host))
+    let Some(mut creator_policy_container) = (unsafe { &*entry_host_ptr })
+        .document_policy_container_snapshot_for_identity(entry_identity)
+    else {
+        rv.set(v8::null(scope).into());
+        return;
     };
-    let entered_document_url = {
-        let host = unsafe { &*host_ptr };
-        window_open_entered_document_url(scope, host)
+    let Some(entered_document_url) = (unsafe { &*entry_host_ptr })
+        .document_url_for_window_execution_context_identity(entry_identity)
+    else {
+        rv.set(v8::null(scope).into());
+        return;
     };
     let initial_document_referrer = if suppress_referrer {
         String::new()
@@ -227,26 +249,29 @@ pub(crate) fn window_open_callback<'s>(
         moli_url::is_about_blank(&url) && url.query().is_none() && url.fragment().is_none();
     let is_javascript_url = url.scheme() == "javascript";
     let url = url.to_string();
-    let navigation_source = unsafe { &*host_ptr }
-        .renderer_top_level_navigation_source_for_dispatch_scope(source_scope, suppress_referrer);
+    let navigation_source = unsafe { &*entry_host_ptr }
+        .renderer_top_level_navigation_source_for_identity(entry_identity, suppress_referrer);
     let mut navigation_request = RendererTopLevelNavigationRequest::get(url.clone());
     if let Some(source) = navigation_source.clone() {
         navigation_request = navigation_request.with_source(source);
     }
     let javascript_navigation_request = is_javascript_url.then(|| navigation_request.clone());
     if let Some(
-        target @ (SpecialBrowsingContextTarget::Parent | SpecialBrowsingContextTarget::Top),
+        target @ (SpecialBrowsingContextTarget::Current
+        | SpecialBrowsingContextTarget::Parent
+        | SpecialBrowsingContextTarget::Top),
     ) = special_target
     {
-        let Some(target_window) = existing_browsing_context_target_window(scope, host_ptr, target)
+        let Some(target_window) =
+            existing_browsing_context_target_window(scope, receiver_window, target)
         else {
             rv.set(v8::null(scope).into());
             return;
         };
-        if !source_javascript_url_allowed_by_csp_for_owner(
+        if !window_open_entry_javascript_url_allowed_by_csp(
             scope,
-            unsafe { &mut *host_ptr },
-            source_scope,
+            entry_host_ptr,
+            &entry_binding,
             &url,
         ) {
             rv.set(target_window.into());
@@ -254,7 +279,9 @@ pub(crate) fn window_open_callback<'s>(
         }
         match navigate_existing_browsing_context_target(
             scope,
-            host_ptr,
+            receiver_host_ptr,
+            receiver_window,
+            receiver_identity,
             target,
             &url,
             navigation_source.clone(),
@@ -268,28 +295,29 @@ pub(crate) fn window_open_callback<'s>(
         trackable_named_popup_target_name(&parsed.target_name).and_then(|name| {
             resolve_named_browsing_context_target_for_navigation(
                 scope,
-                host_ptr,
-                source_scope,
+                receiver_host_ptr,
+                receiver_identity,
                 name,
                 &url,
             )
         });
-    let existing_named_target_allows_source_navigation =
-        resolved_named_target.as_ref().is_none_or(|_| {
-            source_javascript_url_allowed_by_csp_for_owner(
-                scope,
-                unsafe { &mut *host_ptr },
-                source_scope,
-                &url,
-            )
-        });
+    let existing_named_target_allows_source_navigation = match resolved_named_target.as_ref() {
+        None => true,
+        Some(target) if !target.navigation_allowed() => false,
+        Some(_) => window_open_entry_javascript_url_allowed_by_csp(
+            scope,
+            entry_host_ptr,
+            &entry_binding,
+            &url,
+        ),
+    };
     if let Some(target) = resolved_named_target.as_ref()
         && target.related_top_level_page().is_none()
     {
         if existing_named_target_allows_source_navigation {
             let _ = target.navigate_existing_context(
                 scope,
-                host_ptr,
+                receiver_host_ptr,
                 &url,
                 navigation_source.clone(),
                 None,
@@ -302,14 +330,16 @@ pub(crate) fn window_open_callback<'s>(
         }
         return;
     }
-    let host = unsafe { &mut *host_ptr };
-    let Some((_, root_document, source)) =
-        host.renderer_window_document_source_for_dispatch_scope(source_scope)
+    // Popup creation and opener projection belong to the receiver browsing
+    // context. The destination request already carries the separate entry
+    // Window source used for URL/referrer/fetch policy.
+    let Some((_, root_document, source)) = (unsafe { &*receiver_host_ptr })
+        .renderer_window_document_source_for_identity(receiver_identity)
     else {
         rv.set(v8::null(scope).into());
         return;
     };
-    let popup_disposition = match host
+    let popup_disposition = match (unsafe { &*receiver_host_ptr })
         .current_input_event()
         .map(crate::native_bridge::CurrentInputEvent::navigation_policy)
     {
@@ -327,22 +357,22 @@ pub(crate) fn window_open_callback<'s>(
     if let Some(target) = resolved_named_target.as_ref()
         && let Some(resolved_target_page) = target.related_top_level_page()
     {
-        if !suppress_opener
-            && !host.replace_related_page_top_level_opener(
-                scope,
-                resolved_target_page,
-                entered_window,
-            )
-        {
-            rv.set(v8::null(scope).into());
-            return;
-        }
         if !existing_named_target_allows_source_navigation {
             if suppress_opener {
                 rv.set(v8::null(scope).into());
             } else {
                 rv.set(target.window().into());
             }
+            return;
+        }
+        if !suppress_opener
+            && !unsafe { &mut *receiver_host_ptr }.replace_related_page_top_level_opener(
+                scope,
+                resolved_target_page,
+                receiver_window,
+            )
+        {
+            rv.set(v8::null(scope).into());
             return;
         }
         if target.related_local_top_level_context().is_some() {
@@ -364,16 +394,29 @@ pub(crate) fn window_open_callback<'s>(
                 );
             }
         } else if is_javascript_url {
-            // Current remote targets are cross-origin script-agent splits;
-            // their source-side CanNavigate check rejects javascript: before
-            // this branch. Do not accidentally queue the URL on the facade's
-            // observing Page if a stale caller reaches here.
-            if suppress_opener {
-                rv.set(v8::null(scope).into());
-            } else {
-                rv.set(target.window().into());
+            let command = (unsafe { &*entry_host_ptr })
+                .renderer_remote_javascript_url_source(entry_identity, suppress_referrer)
+                .zip(target.related_remote_top_level_target())
+                .map(|(source, target)| {
+                    crate::runtime::RendererRemoteWindowProxyCommand::navigate_javascript_url(
+                        target.endpoint,
+                        target.residence,
+                        target.channel,
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign,
+                        url.clone(),
+                        source,
+                    )
+                });
+            if !command.is_some_and(|command| {
+                unsafe { &mut *receiver_host_ptr }.append_live_turn_owner_action(
+                    crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
+                )
+            }) {
+                tracing::warn!(
+                    ?resolved_target_page,
+                    "selected remote javascript URL target lost its exact source or owner route"
+                );
             }
-            return;
         }
         let activation = popup_activation_for_javascript_url(
             RendererPendingPopupActivation::window(
@@ -384,7 +427,8 @@ pub(crate) fn window_open_callback<'s>(
                 url,
                 parsed.target_name,
                 popup_disposition,
-            ),
+            )
+            .with_navigation_request(navigation_request.clone()),
             is_javascript_url,
         )
         .with_navigation_referrers(
@@ -393,7 +437,7 @@ pub(crate) fn window_open_callback<'s>(
             document_referrer,
         )
         .with_resolved_target_page(resolved_target_page);
-        host.record_pending_popup_activation(activation, None);
+        unsafe { &mut *receiver_host_ptr }.record_pending_popup_activation(activation, None);
         if suppress_opener {
             rv.set(v8::null(scope).into());
         } else {
@@ -401,14 +445,29 @@ pub(crate) fn window_open_callback<'s>(
         }
         return;
     }
-    let opener = (!suppress_opener).then_some(entered_window);
-    let opener_child_handle =
-        opener.and_then(|opener| window_open_receiver_child_handle(scope, opener));
-    if !source_javascript_url_allows_new_context_by_policy(scope, host, source_scope, &url) {
+    let opener = (!suppress_opener).then_some(receiver_window);
+    let opener_child_handle = opener
+        .is_some()
+        .then(|| receiver_identity.dispatch_scope().child_window())
+        .flatten();
+    if !window_open_entry_javascript_url_allows_new_context_by_policy(
+        scope,
+        entry_host_ptr,
+        &entry_binding,
+        &url,
+    ) {
         rv.set(v8::null(scope).into());
         return;
     }
-    let admission = match host.admit_new_auxiliary_browsing_context(creator_policy_container) {
+    let Some(receiver_creation_policy_container) = (unsafe { &*receiver_host_ptr })
+        .document_policy_container_snapshot_for_identity(receiver_identity)
+    else {
+        rv.set(v8::null(scope).into());
+        return;
+    };
+    let admission = match unsafe { &mut *receiver_host_ptr }
+        .admit_new_auxiliary_browsing_context(receiver_creation_policy_container)
+    {
         Ok(admission) => admission,
         Err(_) => {
             rv.set(v8::null(scope).into());
@@ -430,7 +489,8 @@ pub(crate) fn window_open_callback<'s>(
     };
     if suppress_opener
         && popup_target_can_use_fresh_page_without_local_proxy(&parsed.target_name, &url)
-        && let Some(pending_auxiliary_page) = host.reserve_pending_auxiliary_page(false)
+        && let Some(pending_auxiliary_page) =
+            unsafe { &mut *receiver_host_ptr }.reserve_pending_auxiliary_page(false)
     {
         let new_target_disposition =
             if trackable_named_popup_target_name(&parsed.target_name).is_some() {
@@ -447,7 +507,8 @@ pub(crate) fn window_open_callback<'s>(
                 url,
                 parsed.target_name,
                 popup_disposition,
-            ),
+            )
+            .with_navigation_request(navigation_request.clone()),
             is_javascript_url,
             uses_synchronous_initial_empty_document,
         )
@@ -460,27 +521,38 @@ pub(crate) fn window_open_callback<'s>(
         .with_auxiliary_browsing_context_policy(auxiliary_browsing_context_policy)
         .with_new_target_disposition(new_target_disposition)
         .with_creation_user_activation(creation_user_activation);
-        host.record_pending_popup_activation(activation, Some(window_open_event));
+        unsafe { &mut *receiver_host_ptr }
+            .record_pending_popup_activation(activation, Some(window_open_event));
         rv.set(v8::null(scope).into());
         return;
     }
-    let creator_policy_container = creator_policy.into_policy_container();
-    let opened_popup = opener.and_then(|opener| {
-        popup_target_can_create_auxiliary_page(&parsed.target_name, &url)
-            .then(|| {
-                host.open_renderer_owned_related_auxiliary_page(
-                    scope,
-                    host_ptr,
-                    opener,
-                    opener_child_handle,
-                    &parsed.target_name,
-                    &url,
-                    entered_base_url.clone(),
-                    creator_policy_container.clone(),
-                )
-            })
-            .flatten()
-    });
+    // Blink creates the FrameLoadRequest from the entry Window, while
+    // CreateNewWindow admits and propagates sandbox flags from the receiver
+    // frame. Preserve both owners in the initial Document policy.
+    creator_policy_container.sandbox = creator_policy.into_policy_container().sandbox;
+    let creator_resource_authority = unsafe { &*entry_host_ptr }
+        .document_resource_loader_for_window_execution_context_identity(entry_identity);
+    let opened_popup =
+        opener
+            .zip(creator_resource_authority)
+            .and_then(|(opener, creator_resource_authority)| {
+                popup_target_can_create_auxiliary_page(&parsed.target_name, &url)
+                    .then(|| {
+                        unsafe { &mut *receiver_host_ptr }
+                            .open_renderer_owned_related_auxiliary_page(
+                                scope,
+                                receiver_host_ptr,
+                                opener,
+                                opener_child_handle,
+                                &parsed.target_name,
+                                &url,
+                                entered_base_url.clone(),
+                                creator_policy_container.clone(),
+                                creator_resource_authority,
+                            )
+                    })
+                    .flatten()
+            });
     if let Some(opened_popup) = opened_popup {
         let popup_id = opened_popup.popup_id;
         let session_storage_store = Some(opened_popup.captured_session_storage_store.clone());
@@ -496,7 +568,7 @@ pub(crate) fn window_open_callback<'s>(
             && queue_renderer_owned_top_level_navigation_for_window(
                 scope,
                 opened_popup.window,
-                navigation_request,
+                navigation_request.clone(),
             );
         if !uses_synchronous_initial_empty_document && !destination_queued {
             tracing::warn!(
@@ -513,7 +585,8 @@ pub(crate) fn window_open_callback<'s>(
                 url,
                 parsed.target_name,
                 popup_disposition,
-            ),
+            )
+            .with_navigation_request(navigation_request.clone()),
             is_javascript_url,
             uses_synchronous_initial_empty_document,
         );
@@ -535,7 +608,8 @@ pub(crate) fn window_open_callback<'s>(
             activation
         };
         let activation = activation.with_creation_user_activation(creation_user_activation);
-        host.record_pending_popup_activation(activation, Some(window_open_event));
+        unsafe { &mut *receiver_host_ptr }
+            .record_pending_popup_activation(activation, Some(window_open_event));
         if suppress_opener {
             rv.set(v8::null(scope).into());
         } else {
@@ -552,7 +626,8 @@ pub(crate) fn window_open_callback<'s>(
             url,
             parsed.target_name,
             popup_disposition,
-        ),
+        )
+        .with_navigation_request(navigation_request),
         is_javascript_url,
         uses_synchronous_initial_empty_document,
     )
@@ -563,35 +638,87 @@ pub(crate) fn window_open_callback<'s>(
     )
     .with_initial_auxiliary_state(None, None)
     .with_creation_user_activation(creation_user_activation);
-    host.record_pending_popup_activation(activation, Some(window_open_event));
+    unsafe { &mut *receiver_host_ptr }
+        .record_pending_popup_activation(activation, Some(window_open_event));
     rv.set(v8::null(scope).into());
 }
 
-fn window_open_receiver_child_handle<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    receiver: v8::Local<'s, v8::Object>,
-) -> Option<DomHandle> {
-    get_private_value(scope, receiver, CHILD_BROWSING_CONTEXT_HANDLE_SLOT)
-        .and_then(|value| child_window_handle_from_marker_data(scope, value))
+fn entered_window_execution_context_binding(
+    scope: &mut v8::PinScope<'_, '_>,
+) -> Option<(
+    *mut crate::native_bridge::JsContextHost,
+    crate::native_bridge::WindowExecutionContextIdentity,
+    WindowExecutionContextBinding,
+)> {
+    let context = scope.get_entered_or_microtask_context();
+    let host_ptr = context_host_ptr_from_context_slot(context)?;
+    let host = unsafe { &*host_ptr };
+    let identity = host.window_execution_context_identity_for_v8_context_without_scope(context)?;
+    host.window_execution_context_identity_is_current(identity)
+        .then(|| {
+            let binding = WindowExecutionContextBinding::new(
+                identity.owner(),
+                identity.dispatch_scope(),
+                identity.realm_token(),
+                v8::Global::new(scope, context),
+            );
+            (host_ptr, identity, binding)
+        })
+}
+
+fn window_open_entry_javascript_url_allowed_by_csp(
+    scope: &mut v8::PinScope<'_, '_>,
+    entry_host_ptr: *mut crate::native_bridge::JsContextHost,
+    entry_binding: &WindowExecutionContextBinding,
+    resolved_url: &str,
+) -> bool {
+    entry_binding
+        .with_current_scope(scope, entry_host_ptr, |scope, owner| {
+            source_javascript_url_allowed_by_csp_for_owner(
+                scope,
+                unsafe { &mut *entry_host_ptr },
+                owner,
+                resolved_url,
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn window_open_entry_javascript_url_allows_new_context_by_policy(
+    scope: &mut v8::PinScope<'_, '_>,
+    entry_host_ptr: *mut crate::native_bridge::JsContextHost,
+    entry_binding: &WindowExecutionContextBinding,
+    resolved_url: &str,
+) -> bool {
+    entry_binding
+        .with_current_scope(scope, entry_host_ptr, |scope, owner| {
+            source_javascript_url_allows_new_context_by_policy(
+                scope,
+                unsafe { &mut *entry_host_ptr },
+                owner,
+                resolved_url,
+            )
+        })
+        .unwrap_or(false)
 }
 
 pub(in crate::context_bootstrap) fn entered_window_api_base_url(
     scope: &mut v8::PinScope<'_, '_>,
     host: &crate::native_bridge::JsContextHost,
 ) -> Url {
-    let current_context = scope.get_current_context();
-    let incumbent_context = scope.get_incumbent_context().unwrap_or(current_context);
-    if let Some(incumbent_host_ptr) = context_host_ptr_from_context_slot(incumbent_context) {
-        let incumbent_host = unsafe { &*incumbent_host_ptr };
-        if let Some(identity) = incumbent_host
-            .window_execution_context_identity_for_v8_context(scope, incumbent_context)
-            && let Some(url) = incumbent_host.navigation_api_base_url_for_identity(scope, identity)
+    let entry_context = scope.get_entered_or_microtask_context();
+    if let Some(entry_host_ptr) = context_host_ptr_from_context_slot(entry_context) {
+        let entry_host = unsafe { &*entry_host_ptr };
+        if let Some(identity) =
+            entry_host.window_execution_context_identity_for_v8_context_without_scope(entry_context)
+            && let Some(url) =
+                entry_host.navigation_api_base_url_for_identity_without_scope(identity)
         {
             return url;
         }
     }
-    if let Some(handle) = entered_child_window_handle(scope)
-        && let Some(url) = host.child_browsing_context_base_url(handle)
+    if let Some(identity) = host.current_runtime_window_execution_context_identity(scope)
+        && let Some(url) = host.navigation_api_base_url_for_identity_without_scope(identity)
     {
         return url;
     }
@@ -604,40 +731,26 @@ fn window_open_entered_document_url(
     scope: &mut v8::PinScope<'_, '_>,
     host: &crate::native_bridge::JsContextHost,
 ) -> Url {
-    if let Some(handle) = entered_child_window_handle(scope) {
-        return host.document_url_for_child_context(handle);
+    let entry_context = scope.get_entered_or_microtask_context();
+    if let Some(entry_host_ptr) = context_host_ptr_from_context_slot(entry_context) {
+        let entry_host = unsafe { &*entry_host_ptr };
+        if let Some(identity) =
+            entry_host.window_execution_context_identity_for_v8_context_without_scope(entry_context)
+            && let Some(url) =
+                entry_host.document_url_for_window_execution_context_identity(identity)
+        {
+            return url;
+        }
+    }
+    if let Some(identity) = host.current_runtime_window_execution_context_identity(scope)
+        && let Some(url) = host.document_url_for_window_execution_context_identity(identity)
+    {
+        return url;
     }
     host.dom_host()
         .document_url()
         .cloned()
         .unwrap_or_else(|| host.document_url().clone())
-}
-
-fn window_open_entered_policy_container(
-    scope: &mut v8::PinScope<'_, '_>,
-    host: &crate::native_bridge::JsContextHost,
-) -> DocumentPolicyContainer {
-    if let Some(handle) = entered_child_window_handle(scope)
-        && let Some(policy_container) =
-            host.child_browsing_context_policy_container_snapshot(handle)
-    {
-        return policy_container;
-    }
-    host.document_policy_container().clone()
-}
-
-fn window_open_entered_window<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    host: &crate::native_bridge::JsContextHost,
-) -> Option<v8::Local<'s, v8::Object>> {
-    match host.entered_owner_dispatch_scope(scope) {
-        crate::native_bridge::OwnerDispatchScope::Top => {
-            Some(scope.get_current_context().global(scope))
-        }
-        crate::native_bridge::OwnerDispatchScope::Child(handle) => {
-            host.existing_child_browsing_context_window_wrapper(scope, handle)
-        }
-    }
 }
 
 fn popup_target_can_create_auxiliary_page(target_name: &str, href: &str) -> bool {
@@ -691,27 +804,6 @@ fn trackable_named_popup_target_name(target_name: &str) -> Option<&str> {
         return None;
     }
     Some(target_name)
-}
-
-fn navigate_window_open_self<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    receiver: v8::Local<'s, v8::Object>,
-    url: &str,
-    rv: &mut v8::ReturnValue<'_, v8::Value>,
-) {
-    let Some(location) =
-        super::super::navigation_window::window_location_for_holder(scope, receiver)
-    else {
-        rv.set(v8::null(scope).into());
-        return;
-    };
-    navigate_location_object(
-        scope,
-        location,
-        LocationNavigationKind::Assign,
-        Some(url.to_owned()),
-    );
-    rv.set(receiver.into());
 }
 
 fn open_dialog(

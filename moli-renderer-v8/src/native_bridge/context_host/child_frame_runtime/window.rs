@@ -2818,42 +2818,36 @@ impl CrossOriginWindowObserver {
         )
     }
 
+    fn admitted_remote_javascript_url_source(
+        self,
+        scope: &mut v8::PinScope<'_, '_>,
+        target_url: &url::Url,
+    ) -> Option<crate::runtime::RendererRemoteJavaScriptUrlSource> {
+        if target_url.scheme() != "javascript" {
+            return None;
+        }
+        let source = crate::native_bridge::javascript_url_csp_source(target_url);
+        let host = unsafe { &mut *self.host_ptr };
+        if !host.allows_inline_javascript_navigation_by_csp(
+            scope,
+            self.identity.dispatch_scope(),
+            &source,
+        ) {
+            return None;
+        }
+        host.renderer_remote_javascript_url_source(self.identity, false)
+    }
+
     fn remote_frame_navigation_request(
         self,
         target_url: &url::Url,
     ) -> Option<super::super::ChildBrowsingContextNavigationRequest> {
         let source = self.top_level_navigation_source()?;
-        let source_url = url::Url::parse(source.source_url()).ok()?;
-        let navigation_referrer = if source.suppresses_referrer() {
-            String::new()
-        } else {
-            moli_fetch::referrer_header_value(
-                &source_url,
-                target_url,
-                None,
-                source.referrer_policy(),
-            )
-            .unwrap_or_default()
-        };
-        let document_referrer = if source.suppresses_referrer() {
-            String::new()
-        } else {
-            moli_fetch::navigation_referrer_value(
-                &source_url,
-                target_url,
-                None,
-                source.referrer_policy(),
-            )
-            .unwrap_or_default()
-        };
         Some(
-            super::super::ChildBrowsingContextNavigationRequest::new(
+            super::super::ChildBrowsingContextNavigationRequest::get_from_top_level_source(
                 target_url.clone(),
-                "GET".to_owned(),
-                None,
-                Vec::new(),
-            )
-            .with_navigation_source(source_url, navigation_referrer, document_referrer),
+                Some(&source),
+            ),
         )
     }
 
@@ -4416,6 +4410,15 @@ fn cross_origin_location_navigate_raw<'s>(
             }
             return true;
         }
+        let javascript_source = if target_url.scheme() == "javascript" {
+            let Some(source) = observer.admitted_remote_javascript_url_source(scope, &target_url)
+            else {
+                return true;
+            };
+            Some(source)
+        } else {
+            None
+        };
         let Some(request) = observer.remote_frame_navigation_request(&target_url) else {
             return true;
         };
@@ -4427,7 +4430,17 @@ fn cross_origin_location_navigate_raw<'s>(
                 crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
             }
         };
-        let _ = observer.append_remote_command(
+        let command = if let Some(source) = javascript_source {
+            crate::runtime::RendererRemoteWindowProxyCommand::navigate_frame_javascript_url(
+                token,
+                top.residence,
+                top.channel,
+                kind,
+                request,
+                source,
+                None,
+            )
+        } else {
             crate::runtime::RendererRemoteWindowProxyCommand::navigate_frame(
                 token,
                 top.residence,
@@ -4435,8 +4448,9 @@ fn cross_origin_location_navigate_raw<'s>(
                 kind,
                 request,
                 None,
-            ),
-        );
+            )
+        };
+        let _ = observer.append_remote_command(command);
         return true;
     }
     let resolved_top_target = if related_endpoint.is_some() || local_top_window {
@@ -4463,6 +4477,16 @@ fn cross_origin_location_navigate_raw<'s>(
                     }
                     return true;
                 }
+                let javascript_source = if target_url.scheme() == "javascript" {
+                    let Some(source) =
+                        observer.admitted_remote_javascript_url_source(scope, &target_url)
+                    else {
+                        return true;
+                    };
+                    Some(source)
+                } else {
+                    None
+                };
                 let Some(source) = observer.top_level_navigation_source() else {
                     return true;
                 };
@@ -4474,7 +4498,16 @@ fn cross_origin_location_navigate_raw<'s>(
                         crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
                     }
                 };
-                let _ = observer.append_remote_command(
+                let command = if let Some(javascript_source) = javascript_source {
+                    crate::runtime::RendererRemoteWindowProxyCommand::navigate_javascript_url(
+                        target.endpoint,
+                        target.residence,
+                        target.channel,
+                        kind,
+                        target_url.to_string(),
+                        javascript_source,
+                    )
+                } else {
                     crate::runtime::RendererRemoteWindowProxyCommand::navigate(
                         target.endpoint,
                         target.residence,
@@ -4482,8 +4515,9 @@ fn cross_origin_location_navigate_raw<'s>(
                         kind,
                         target_url.to_string(),
                         source,
-                    ),
-                );
+                    )
+                };
+                let _ = observer.append_remote_command(command);
                 return true;
             }
             local @ ResolvedCrossOriginRelatedTopWindow::Local { .. } => Some(local),

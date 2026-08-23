@@ -32,16 +32,22 @@ impl WindowOperationReceiver {
     pub(crate) fn capture_and_authorize<'s>(
         scope: &mut v8::PinScope<'s, '_>,
         receiver: v8::Local<'s, v8::Object>,
-        host: &JsContextHost,
+        receiver_host: &JsContextHost,
+        accessing_host: &JsContextHost,
     ) -> Result<Self, WindowOperationReceiverCaptureError> {
         let marked_scope = marked_window_dispatch_scope(scope, receiver);
         if marked_scope.is_none() && !is_window_receiver(scope, receiver) {
             return Err(WindowOperationReceiverCaptureError::IllegalInvocation);
         }
+        if crate::native_bridge::is_cross_origin_top_window_proxy(scope, receiver)
+            || crate::native_bridge::is_cross_origin_remote_frame_window_proxy(scope, receiver)
+        {
+            return Err(WindowOperationReceiverCaptureError::CrossOrigin);
+        }
 
         let relevant_context = receiver.get_creation_context(scope);
         let relevant_identity = relevant_context.and_then(|context| {
-            host.window_execution_context_identity_for_v8_context(scope, context)
+            receiver_host.window_execution_context_identity_for_v8_context(scope, context)
         });
         let target_scope = marked_scope
             .or_else(|| relevant_identity.map(|identity| identity.dispatch_scope()))
@@ -49,7 +55,8 @@ impl WindowOperationReceiver {
                 receiver
                     .strict_equals(scope.get_current_context().global(scope).into())
                     .then(|| {
-                        host.current_runtime_window_execution_context_identity(scope)
+                        receiver_host
+                            .current_runtime_window_execution_context_identity(scope)
                             .map(|identity| identity.dispatch_scope())
                     })
                     .flatten()
@@ -63,21 +70,32 @@ impl WindowOperationReceiver {
                 binding_at_capture: None,
             });
         };
-        let Some(target_owner) = host.current_window_execution_context_owner(target_scope) else {
-            return Ok(Self {
-                binding_at_capture: None,
-            });
-        };
-        let Some(accessing_identity) =
-            host.current_runtime_window_execution_context_identity(scope)
+        let Some(target_owner) = receiver_host.current_window_execution_context_owner(target_scope)
         else {
             return Ok(Self {
                 binding_at_capture: None,
             });
         };
-        if !host
-            .window_execution_context_can_access_dispatch_scope(accessing_identity, target_scope)
-        {
+        let Some(accessing_identity) =
+            accessing_host.current_runtime_window_execution_context_identity(scope)
+        else {
+            return Ok(Self {
+                binding_at_capture: None,
+            });
+        };
+        let access_allowed = if std::ptr::eq(receiver_host, accessing_host) {
+            accessing_host.window_execution_context_can_access_dispatch_scope(
+                accessing_identity,
+                target_scope,
+            )
+        } else {
+            accessing_host.window_execution_context_can_access_related_page_dispatch_scope(
+                accessing_identity,
+                receiver_host,
+                target_scope,
+            )
+        };
+        if !access_allowed {
             return Err(WindowOperationReceiverCaptureError::CrossOrigin);
         }
 

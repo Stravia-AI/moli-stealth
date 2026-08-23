@@ -250,15 +250,18 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
     let incumbent_context = scope
         .get_incumbent_context()
         .unwrap_or_else(|| scope.get_current_context());
-    let navigation_source =
-        context_host_ptr_from_context_slot(incumbent_context).and_then(|host_ptr| {
-            let host = unsafe { &*host_ptr };
-            let identity =
-                host.window_execution_context_identity_for_v8_context(scope, incumbent_context)?;
-            host.renderer_top_level_navigation_source_for_dispatch_scope(
-                identity.dispatch_scope(),
-                false,
-            )
+    let navigation_source = context_host_ptr_from_global_bridge(scope)
+        .and_then(|host_ptr| unsafe { &*host_ptr }.active_top_level_navigation_source_snapshot())
+        .or_else(|| {
+            context_host_ptr_from_context_slot(incumbent_context).and_then(|host_ptr| {
+                let host = unsafe { &*host_ptr };
+                let identity = host
+                    .window_execution_context_identity_for_v8_context(scope, incumbent_context)?;
+                host.renderer_top_level_navigation_source_for_dispatch_scope(
+                    identity.dispatch_scope(),
+                    false,
+                )
+            })
         });
     if !matches!(kind, LocationNavigationKind::Reload)
         && exact_same_href
@@ -629,6 +632,16 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
                 host.queue_child_browsing_context_reload_from_existing_seed(
                     handle,
                     resolved.as_str(),
+                );
+            } else if matches!(resolved.scheme(), "http" | "https")
+                && let Some(source) = navigation_source.as_ref()
+            {
+                let request = crate::native_bridge::ChildBrowsingContextNavigationRequest::get_from_top_level_source(
+                    resolved.clone(),
+                    Some(source),
+                );
+                host.queue_child_browsing_context_navigation_request_without_seed_update(
+                    handle, request,
                 );
             } else {
                 host.queue_child_browsing_context_navigation_without_seed_update(

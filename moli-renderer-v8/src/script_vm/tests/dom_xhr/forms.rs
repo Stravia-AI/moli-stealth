@@ -2609,8 +2609,9 @@ fn submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_tar
         .child_browsing_context_pending_live_navigation_for_test(second_handle)
         .expect("the submitter navigation should be pending in its new target");
 
-    let crate::native_bridge::ChildBrowsingContextBootstrap::Url(first_url) = first_pending else {
-        panic!("replacement navigation should remain URL-owned, got {first_pending:?}");
+    let crate::native_bridge::ChildBrowsingContextBootstrap::Request(first_request) = first_pending
+    else {
+        panic!("replacement navigation should remain request-owned, got {first_pending:?}");
     };
     let crate::native_bridge::ChildBrowsingContextBootstrap::Request(second_request) =
         second_pending
@@ -2618,7 +2619,7 @@ fn submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_tar
         panic!("submitter navigation should remain request-owned, got {second_pending:?}");
     };
     assert_eq!(
-        first_url.as_str(),
+        first_request.url.as_str(),
         "https://form-navigation-token.test/path/replacement.html"
     );
     assert_eq!(

@@ -170,7 +170,7 @@ impl PendingFormSubmissionChildNavigation {
 pub(super) struct ChildBrowsingContextEntry {
     frame_id: String,
     current_document_loader_id: Option<String>,
-    name: Option<String>,
+    browsing_context_name: Option<String>,
     id: Option<String>,
     attribute_bootstrap: ChildBrowsingContextBootstrap,
     pending_attribute_bootstrap_commit: bool,
@@ -237,7 +237,7 @@ pub(in crate::native_bridge::context_host) struct ChildBrowsingContextFrameIdent
 
 impl ChildBrowsingContextEntry {
     fn matches_browsing_context_name(&self, key: &str) -> bool {
-        self.name.as_deref() == Some(key)
+        self.browsing_context_name.as_deref() == Some(key)
     }
 
     pub(super) fn clear_document_runtime_state(&mut self) {
@@ -258,11 +258,11 @@ impl ChildBrowsingContextEntry {
     }
 
     pub(super) fn window_name(&self) -> &str {
-        self.name.as_deref().unwrap_or("")
+        self.browsing_context_name.as_deref().unwrap_or("")
     }
 
     pub(super) fn set_window_name(&mut self, name: String) {
-        self.name = Some(name);
+        self.browsing_context_name = Some(name);
     }
 
     pub(super) fn live_bootstrap(&self) -> ChildBrowsingContextBootstrap {
@@ -629,7 +629,7 @@ impl ChildBrowsingContextEntry {
     pub(super) fn frame_identity_snapshot(&self) -> ChildBrowsingContextFrameIdentitySnapshot {
         ChildBrowsingContextFrameIdentitySnapshot {
             frame_id: self.frame_id.clone(),
-            name: self.name.clone(),
+            name: self.browsing_context_name.clone(),
             owner_element_id: self.id.clone(),
             security_origin_inherited: self.security_origin_inherited(),
         }
@@ -1141,6 +1141,11 @@ impl ChildBrowsingContextEntry {
             || matches!(
                 self.pending_live_navigation,
                 Some(ChildBrowsingContextBootstrap::Url(ref url)) if url.scheme() == "javascript"
+            )
+            || matches!(
+                self.pending_live_navigation,
+                Some(ChildBrowsingContextBootstrap::Request(ref request))
+                    if request.url.scheme() == "javascript"
             )
     }
 

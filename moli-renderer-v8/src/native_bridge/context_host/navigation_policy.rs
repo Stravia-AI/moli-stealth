@@ -40,6 +40,87 @@ impl BrowsingContextNavigationDenial {
 }
 
 impl JsContextHost {
+    pub(crate) fn renderer_remote_javascript_url_source(
+        &self,
+        source_identity: WindowExecutionContextIdentity,
+        suppress_referrer: bool,
+    ) -> Option<crate::runtime::RendererRemoteJavaScriptUrlSource> {
+        if !self.window_execution_context_identity_is_current(source_identity) {
+            return None;
+        }
+        let navigation_source = self.renderer_top_level_navigation_source_for_dispatch_scope(
+            source_identity.dispatch_scope(),
+            suppress_referrer,
+        )?;
+        let window_source = self.remote_window_proxy_source_for_identity(source_identity)?;
+        let source_origin =
+            self.window_access_origin_for_dispatch_scope(source_identity.dispatch_scope())?;
+        let (opaque_origin_nonce, document_domain) = match source_origin {
+            BrowsingContextAccessOrigin::Opaque { identity } => {
+                if window_source.serialized_origin() != "null" || identity.is_none() {
+                    return None;
+                }
+                (identity, None)
+            }
+            BrowsingContextAccessOrigin::Tuple {
+                serialized_origin,
+                document_domain,
+                ..
+            } => {
+                if serialized_origin != window_source.serialized_origin() {
+                    return None;
+                }
+                (None, document_domain)
+            }
+        };
+        let world = if self.window_execution_context_identity_is_default_world(source_identity) {
+            crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Main
+        } else {
+            crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: source_identity.grants_universal_access(),
+            }
+        };
+        Some(crate::runtime::RendererRemoteJavaScriptUrlSource::new(
+            navigation_source,
+            window_source,
+            opaque_origin_nonce,
+            document_domain,
+            world,
+        ))
+    }
+
+    pub(crate) fn remote_javascript_url_source_can_access_dispatch_scope(
+        &self,
+        target_scope: OwnerDispatchScope,
+        source: &crate::runtime::RendererRemoteJavaScriptUrlSource,
+    ) -> bool {
+        if matches!(
+            source.world(),
+            crate::runtime::RendererRemoteJavaScriptUrlSourceWorld::Isolated {
+                grants_universal_access: true
+            }
+        ) {
+            return true;
+        }
+        let source_origin = if source.window_source().serialized_origin() == "null" {
+            BrowsingContextAccessOrigin::Opaque {
+                identity: source.opaque_origin_nonce(),
+            }
+        } else {
+            let Some(origin) = BrowsingContextAccessOrigin::from_serialized_origin(
+                source.window_source().serialized_origin().to_owned(),
+                source.document_domain().map(ToOwned::to_owned),
+            ) else {
+                return false;
+            };
+            origin
+        };
+        let Some(target_origin) = self.window_access_origin_for_dispatch_scope(target_scope) else {
+            return false;
+        };
+        source_origin.can_access(&target_origin)
+    }
+
     /// Local renderer equivalent of Blink `LocalFrame::CanNavigate` for the
     /// browsing-context kinds Moli currently owns.
     ///
@@ -183,10 +264,25 @@ impl JsContextHost {
         if !self.window_execution_context_identity_is_current(source_identity) {
             return Err(BrowsingContextNavigationDenial::StaleContext);
         }
-        if destination_url.scheme() == "javascript" {
+        let source_scope = source_identity.dispatch_scope();
+        let target_origin = if target.current_serialized_origin == "null" {
+            BrowsingContextAccessOrigin::Opaque {
+                identity: target.current_opaque_origin_nonce,
+            }
+        } else {
+            BrowsingContextAccessOrigin::from_serialized_origin(
+                target.current_serialized_origin.clone(),
+                target.current_document_domain.clone(),
+            )
+            .ok_or(BrowsingContextNavigationDenial::StaleContext)?
+        };
+        let source_can_access_target = source_identity.grants_universal_access()
+            || self
+                .window_access_origin_for_dispatch_scope(source_scope)
+                .is_some_and(|source_origin| source_origin.can_access(&target_origin));
+        if destination_url.scheme() == "javascript" && !source_can_access_target {
             return Err(BrowsingContextNavigationDenial::JavascriptCrossOrigin);
         }
-        let source_scope = source_identity.dispatch_scope();
         let source_policy = self
             .document_policy_container_snapshot_for_owner(source_scope)
             .ok_or(BrowsingContextNavigationDenial::StaleContext)?;
@@ -208,7 +304,7 @@ impl JsContextHost {
                 return Err(BrowsingContextNavigationDenial::SandboxedPopup);
             }
         }
-        if target_was_opened_by_source || source_was_opened_by_target {
+        if source_can_access_target || target_was_opened_by_source || source_was_opened_by_target {
             return Ok(());
         }
         Err(BrowsingContextNavigationDenial::UnrelatedContext)
@@ -260,6 +356,9 @@ impl JsContextHost {
         source_identity: WindowExecutionContextIdentity,
         target: &crate::script_vm::RendererRemoteFrameSnapshot,
     ) -> Option<bool> {
+        if source_identity.grants_universal_access() {
+            return Some(true);
+        }
         let source_origin =
             self.window_access_origin_for_dispatch_scope(source_identity.dispatch_scope())?;
         let environment = self.page_script_environment.as_ref()?;
@@ -293,7 +392,7 @@ impl JsContextHost {
         } else {
             BrowsingContextAccessOrigin::from_serialized_origin(
                 top.current_serialized_origin,
-                None,
+                top.current_document_domain,
             )?
         };
         Some(source_origin.can_access(&top_origin))
@@ -302,6 +401,13 @@ impl JsContextHost {
     pub(crate) fn navigation_api_base_url_for_identity(
         &self,
         _scope: &mut v8::PinScope<'_, '_>,
+        identity: WindowExecutionContextIdentity,
+    ) -> Option<Url> {
+        self.navigation_api_base_url_for_identity_without_scope(identity)
+    }
+
+    pub(crate) fn navigation_api_base_url_for_identity_without_scope(
+        &self,
         identity: WindowExecutionContextIdentity,
     ) -> Option<Url> {
         if !self.window_execution_context_identity_is_current(identity) {
@@ -314,6 +420,23 @@ impl JsContextHost {
                 .or_else(|| Some(self.document_url().clone())),
             OwnerDispatchScope::Child(handle) => self.child_browsing_context_base_url(handle),
         }
+    }
+
+    pub(crate) fn document_url_for_window_execution_context_identity(
+        &self,
+        identity: WindowExecutionContextIdentity,
+    ) -> Option<Url> {
+        if !self.window_execution_context_identity_is_current(identity) {
+            return None;
+        }
+        Some(match identity.dispatch_scope() {
+            OwnerDispatchScope::Top => self
+                .dom_host()
+                .document_url()
+                .cloned()
+                .unwrap_or_else(|| self.document_url().clone()),
+            OwnerDispatchScope::Child(handle) => self.document_url_for_child_context(handle),
+        })
     }
 
     /// Freezes Chromium's policy-container
