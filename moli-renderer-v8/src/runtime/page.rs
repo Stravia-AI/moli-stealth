@@ -645,6 +645,25 @@ impl JsRuntime {
         self.inner.renderer_owner.allocate_page_reservation_token()
     }
 
+    #[cfg(test)]
+    pub(crate) fn reserve_related_page_for_creation_experiment(
+        &self,
+        source_page: &RendererPageHandle,
+    ) -> Result<RendererPageReservationToken> {
+        let local_host_id = self.inner.renderer_owner.state.owner_local_host_id;
+        anyhow::ensure!(
+            source_page.owner_local_host_id() == local_host_id,
+            "related-page script-agent admission requires the same renderer owner"
+        );
+        Ok(
+            RendererPageReservationToken::new_related_page_for_experiment(
+                local_host_id,
+                self.inner.renderer_owner.allocate_page_id(),
+                source_page.renderer_page_id(),
+            ),
+        )
+    }
+
     pub async fn create_streaming_raw_page_from_external_body(
         &self,
         requested_url: Url,

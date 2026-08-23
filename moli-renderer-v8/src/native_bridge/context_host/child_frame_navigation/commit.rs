@@ -546,6 +546,22 @@ impl JsContextHost {
             })
     }
 
+    pub(crate) fn frame_document_projection_is_current(
+        &self,
+        handle: DomHandle,
+        browsing_context_id: crate::frame_owner_model::BrowsingContextId,
+        owner: FrameDocumentTaskOwner,
+    ) -> bool {
+        self.frame_owner_store
+            .current_child_owner_snapshot(handle)
+            .is_some_and(|snapshot| {
+                snapshot.browsing_context_id == browsing_context_id
+                    && snapshot.scheduler_lane_id == owner.scheduler_lane_id
+                    && snapshot.local_window_id == owner.local_window_id
+                    && snapshot.document_id == owner.document_id
+            })
+    }
+
     pub(crate) fn child_javascript_url_script_execution_action_for_owner(
         &self,
         work: &PendingChildJavascriptUrlDocumentScript,

@@ -1,5 +1,6 @@
 use super::super::{JsContextHost, PendingWindowMessageEndpoint};
 use crate::{
+    browsing_context_model::{BrowsingContextId, BrowsingContextKind},
     context_bootstrap::{
         CHILD_BROWSING_CONTEXT_HANDLE_SLOT,
         dispatch_cross_document_navigation_navigate_event_for_window,
@@ -30,7 +31,8 @@ struct ChildWindowProxyFacadeContextHandle(DomHandle);
 
 #[derive(Default)]
 pub(in crate::native_bridge::context_host) struct ChildWindowProxyRecords {
-    records: HashMap<DomHandle, ChildWindowProxyRecord>,
+    records: HashMap<BrowsingContextId, ChildWindowProxyRecord>,
+    context_ids_by_owner_handle: HashMap<DomHandle, BrowsingContextId>,
     detached_content_window_wrappers: HashMap<DomHandle, v8::Global<v8::Object>>,
     detached_content_document_wrappers: HashMap<DomHandle, v8::Global<v8::Object>>,
 }
@@ -51,8 +53,53 @@ struct ChildWindowProxyRecord {
 }
 
 impl ChildWindowProxyRecords {
+    pub(in crate::native_bridge::context_host) fn bind_nested_browsing_context(
+        &mut self,
+        handle: DomHandle,
+        browsing_context_id: BrowsingContextId,
+    ) {
+        assert_eq!(
+            browsing_context_id.kind(),
+            BrowsingContextKind::Nested,
+            "child WindowProxy adapter requires a nested browsing context"
+        );
+        self.context_ids_by_owner_handle
+            .retain(|bound_handle, bound_id| {
+                *bound_handle == handle || *bound_id != browsing_context_id
+            });
+        let previous_id = self
+            .context_ids_by_owner_handle
+            .insert(handle, browsing_context_id);
+        if let Some(previous_id) = previous_id
+            && previous_id != browsing_context_id
+            && !self.records.contains_key(&browsing_context_id)
+            && let Some(record) = self.records.remove(&previous_id)
+        {
+            // Preserve the current child observable behavior when an owner
+            // element is rebound while giving the record its authoritative
+            // context-identity key.
+            self.records.insert(browsing_context_id, record);
+        }
+    }
+
+    fn context_id(&self, handle: DomHandle) -> Option<BrowsingContextId> {
+        self.context_ids_by_owner_handle.get(&handle).copied()
+    }
+
+    fn record(&self, handle: DomHandle) -> Option<&ChildWindowProxyRecord> {
+        self.records.get(&self.context_id(handle)?)
+    }
+
+    fn existing_record_mut(&mut self, handle: DomHandle) -> Option<&mut ChildWindowProxyRecord> {
+        let context_id = self.context_id(handle)?;
+        self.records.get_mut(&context_id)
+    }
+
     fn record_mut(&mut self, handle: DomHandle) -> &mut ChildWindowProxyRecord {
-        self.records.entry(handle).or_default()
+        let context_id = self
+            .context_id(handle)
+            .expect("child WindowProxy materialization requires a bound browsing-context identity");
+        self.records.entry(context_id).or_default()
     }
 
     pub(in crate::native_bridge::context_host) fn shell<'s>(
@@ -60,7 +107,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_, ()>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        let record = self.records.get(&handle)?;
+        let record = self.record(handle)?;
         record
             .live_window_wrapper
             .as_ref()
@@ -73,8 +120,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_, ()>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .live_window_wrapper
             .as_ref()
             .map(|window| v8::Local::new(scope, window))
@@ -84,8 +130,7 @@ impl ChildWindowProxyRecords {
         &self,
         handle: DomHandle,
     ) -> bool {
-        self.records
-            .get(&handle)
+        self.record(handle)
             .is_some_and(|record| record.live_window_wrapper.is_some())
     }
 
@@ -106,7 +151,7 @@ impl ChildWindowProxyRecords {
         &mut self,
         handle: DomHandle,
     ) -> Option<v8::Global<v8::Context>> {
-        self.records.get_mut(&handle)?.facade_context.take()
+        self.existing_record_mut(handle)?.facade_context.take()
     }
 
     pub(in crate::native_bridge::context_host) fn promote_shell_to_live(
@@ -142,8 +187,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_, ()>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .browsing_context_parent_window
             .as_ref()
             .map(|parent| v8::Local::new(scope, parent))
@@ -154,8 +198,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_, ()>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .browsing_context_top_window
             .as_ref()
             .map(|top| v8::Local::new(scope, top))
@@ -167,8 +210,7 @@ impl ChildWindowProxyRecords {
         handle: DomHandle,
         endpoint: PendingWindowMessageEndpoint,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .cross_origin_endpoint_projections
             .get(&endpoint)
             .map(|projection| v8::Local::new(scope, projection))
@@ -209,8 +251,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .realm_top_window_wrapper
             .as_ref()
             .map(|top| v8::Local::new(scope, top))
@@ -227,8 +268,7 @@ impl ChildWindowProxyRecords {
         &self,
         handle: DomHandle,
     ) -> bool {
-        self.records
-            .get(&handle)
+        self.record(handle)
             .is_some_and(|record| record.live_window_exposed_to_top)
     }
 
@@ -237,8 +277,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_>,
         handle: DomHandle,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        self.records
-            .get(&handle)?
+        self.record(handle)?
             .cross_origin_window_proxy
             .as_ref()
             .map(|proxy| v8::Local::new(scope, proxy))
@@ -248,8 +287,7 @@ impl ChildWindowProxyRecords {
         &self,
         handle: DomHandle,
     ) -> bool {
-        self.records
-            .get(&handle)
+        self.record(handle)
             .is_some_and(|record| record.cross_origin_window_proxy.is_some())
     }
 
@@ -277,7 +315,7 @@ impl ChildWindowProxyRecords {
         scope: &mut v8::PinScope<'s, '_>,
         handle: DomHandle,
     ) -> Option<(v8::Local<'s, v8::Object>, v8::Local<'s, v8::Object>)> {
-        let record = self.records.get(&handle)?;
+        let record = self.record(handle)?;
         let access_surface = record.cross_origin_access_surface.as_ref()?;
         let window_proxy = record.live_window_wrapper.as_ref()?;
         Some((
@@ -298,7 +336,7 @@ impl ChildWindowProxyRecords {
         &mut self,
         handle: DomHandle,
     ) {
-        let Some(record) = self.records.get_mut(&handle) else {
+        let Some(record) = self.existing_record_mut(handle) else {
             return;
         };
         record.default_execution_context_id = None;
@@ -327,19 +365,28 @@ impl ChildWindowProxyRecords {
         &self,
         handle: DomHandle,
     ) -> Option<i64> {
-        self.records.get(&handle)?.default_execution_context_id
+        self.record(handle)?.default_execution_context_id
     }
 
     pub(in crate::native_bridge::context_host) fn clear_live_records(&mut self, handle: DomHandle) {
-        self.records.remove(&handle);
+        if let Some(context_id) = self.context_ids_by_owner_handle.remove(&handle) {
+            self.records.remove(&context_id);
+        }
     }
 
     pub(in crate::native_bridge::context_host) fn retain_live_records(
         &mut self,
         live_handles: &HashSet<DomHandle>,
     ) {
-        self.records
+        self.context_ids_by_owner_handle
             .retain(|handle, _| live_handles.contains(handle));
+        let live_context_ids = self
+            .context_ids_by_owner_handle
+            .values()
+            .copied()
+            .collect::<HashSet<_>>();
+        self.records
+            .retain(|context_id, _| live_context_ids.contains(context_id));
     }
 
     pub(in crate::native_bridge::context_host) fn detached_content_document<'s>(
@@ -2734,4 +2781,27 @@ fn cross_origin_index_property_attributes() -> v8::PropertyAttribute {
 
 fn cross_origin_named_property_attributes() -> v8::PropertyAttribute {
     v8::PropertyAttribute::DONT_ENUM | v8::PropertyAttribute::READ_ONLY
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_window_proxy_record_is_keyed_by_browsing_context_identity() {
+        let handle = DomHandle::new(41);
+        let first_id = BrowsingContextId::nested(7);
+        let replacement_id = BrowsingContextId::nested(8);
+        let mut records = ChildWindowProxyRecords::default();
+
+        records.bind_nested_browsing_context(handle, first_id);
+        records.record_mut(handle).live_window_exposed_to_top = true;
+        assert!(records.records.contains_key(&first_id));
+
+        records.bind_nested_browsing_context(handle, replacement_id);
+        assert_eq!(records.context_id(handle), Some(replacement_id));
+        assert!(records.records.contains_key(&replacement_id));
+        assert!(!records.records.contains_key(&first_id));
+        assert!(records.live_window_exposed_to_top(handle));
+    }
 }

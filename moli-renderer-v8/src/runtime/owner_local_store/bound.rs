@@ -129,13 +129,19 @@ pub(in crate::runtime) fn resolve_pending_page_creation_on_bound_owner_local_sto
 pub(super) fn reserve_renderer_document_isolate_on_bound_owner_local_store(
     owner_local: &RendererOwnerLocalContext,
     page_id: PageId,
+    script_agent_admission: RendererScriptAgentAdmission,
     page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
 ) -> Result<(
     RendererDocumentIsolateBootstrap,
     RendererDocumentIsolateReservation,
 )> {
     with_bound_render_runtime_owner_local_store_session(|mut session| {
-        session.reserve_renderer_document_isolate(owner_local, page_id, page_runtime_task_source)
+        session.reserve_renderer_document_isolate(
+            owner_local,
+            page_id,
+            script_agent_admission,
+            page_runtime_task_source,
+        )
     })
 }
 

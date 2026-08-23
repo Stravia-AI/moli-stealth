@@ -535,9 +535,19 @@ impl PageId {
 /// observers bind work to the future Page without guessing from the currently
 /// installed Page.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum RendererScriptAgentAdmission {
+    Fresh,
+    #[cfg(test)]
+    RelatedPageForExperiment {
+        source_page_id: PageId,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RendererPageReservationToken {
     local_host_id: RendererOwnerLocalHostId,
     page_id: PageId,
+    script_agent_admission: RendererScriptAgentAdmission,
 }
 
 impl RendererPageReservationToken {
@@ -545,6 +555,22 @@ impl RendererPageReservationToken {
         Self {
             local_host_id,
             page_id,
+            script_agent_admission: RendererScriptAgentAdmission::Fresh,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_related_page_for_experiment(
+        local_host_id: RendererOwnerLocalHostId,
+        page_id: PageId,
+        source_page_id: PageId,
+    ) -> Self {
+        Self {
+            local_host_id,
+            page_id,
+            script_agent_admission: RendererScriptAgentAdmission::RelatedPageForExperiment {
+                source_page_id,
+            },
         }
     }
 
@@ -554,6 +580,10 @@ impl RendererPageReservationToken {
 
     pub fn page_id(self) -> PageId {
         self.page_id
+    }
+
+    pub(crate) fn script_agent_admission(self) -> RendererScriptAgentAdmission {
+        self.script_agent_admission
     }
 }
 

@@ -39,10 +39,17 @@ impl JsContextHost {
 
     pub(in crate::native_bridge::context_host) fn retire_child_document_external_state(
         &mut self,
-        handle: DomHandle,
-        retired_owner: crate::frame_owner_model::FrameDocumentTaskOwner,
-        document_handle: DomHandle,
+        retirement: crate::frame_owner_model::FrameDocumentExternalStateRetirement,
     ) {
+        let handle = retirement.child_handle();
+        let retired_owner = retirement.retired_owner();
+        let document_handle = retirement.document_handle();
+        debug_assert_eq!(
+            self.frame_owner_store
+                .browsing_context_id_for_child_handle(handle),
+            Some(retirement.browsing_context_id()),
+            "child external-state retirement must name the current context adapter"
+        );
         let _ = self.retire_document_resource_loader(
             crate::native_bridge::WindowDocumentOwner::Frame(retired_owner),
         );
@@ -71,7 +78,18 @@ impl JsContextHost {
             .frame_owner_store
             .current_child_document_task_owner(handle)
         {
-            self.retire_child_document_external_state(handle, owner, document_handle);
+            let browsing_context_id = self
+                .frame_owner_store
+                .browsing_context_id_for_child_handle(handle)
+                .expect("current child document owner must retain its browsing context");
+            self.retire_child_document_external_state(
+                crate::frame_owner_model::FrameDocumentExternalStateRetirement::new(
+                    handle,
+                    browsing_context_id,
+                    owner,
+                    document_handle,
+                ),
+            );
             return Some(document_handle);
         }
         self.retire_image_state_for_document(document_handle);
@@ -231,6 +249,12 @@ impl JsContextHost {
                     frame_id.clone(),
                     parent_frame_id.clone(),
                 );
+                let browsing_context_id = self
+                    .frame_owner_store
+                    .browsing_context_id_for_child_handle(handle)
+                    .expect("ensured child frame must expose its browsing-context identity");
+                self.child_window_proxy_records
+                    .bind_nested_browsing_context(handle, browsing_context_id);
                 self.apply_pending_parent_descendant_completions();
                 self.rebind_active_child_frame_load_to_parent(handle);
                 if is_new {

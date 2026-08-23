@@ -9,6 +9,7 @@ use super::{
     },
 };
 use crate::{
+    browsing_context_model::ScriptAgentId,
     context_bootstrap::ContextBootstrapAssets,
     document_runtime::DocumentRuntime,
     exception_reporting::v8_message_listener,
@@ -27,7 +28,10 @@ use crate::{
     },
     resource_owner::ResourceOwnerId,
     runtime::RendererPageContextCancelSender,
-    v8_platform::{V8ForegroundTaskWake, V8PlatformIsolateRegistration},
+    v8_platform::{
+        RendererScriptAgentPageMembership, RendererScriptAgentV8ForegroundTaskRouter,
+        V8ForegroundTaskWake, V8PlatformIsolateRegistration,
+    },
 };
 use anyhow::{Result, anyhow};
 use std::{
@@ -40,6 +44,16 @@ static DOCUMENT_ISOLATE_CREATED_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOCUMENT_ISOLATE_DESTROYED_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOCUMENT_ISOLATE_LIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOCUMENT_ISOLATE_RESERVED_COUNT: AtomicU64 = AtomicU64::new(0);
+static NEXT_SCRIPT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_script_agent_id() -> ScriptAgentId {
+    let value = NEXT_SCRIPT_AGENT_ID
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+            value.checked_add(1)
+        })
+        .expect("script-agent id allocator overflow");
+    ScriptAgentId::new(value)
+}
 
 pub(crate) fn renderer_document_isolate_accounting_diagnostics()
 -> crate::runtime::RendererDocumentIsolateAccountingDiagnostics {
@@ -101,6 +115,7 @@ pub(super) struct ScriptVmPageRealmBootstrap {
     pub(super) page_runtime_wake_tx: PageRuntimeWakeSender,
     pub(super) storage_bucket_store: crate::context_bootstrap::SharedStorageBucketStore,
     pub(super) renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
+    pub(super) script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     pub(super) reuse_main_window_proxy: bool,
 }
 
@@ -115,6 +130,7 @@ pub(crate) struct RendererDocumentIsolateBootstrap {
     pub(super) bridge_bindings: NativeBridgeBindings,
     pub(super) renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
     pub(super) page_inspector: DocumentInspectorBinding,
+    pub(super) script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     pub(super) renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
     pub(super) reuse_main_window_proxy: bool,
 }
@@ -134,6 +150,10 @@ impl RendererDocumentIsolateBootstrap {
 
     pub(crate) fn renderer_page_script_environment(&self) -> Option<RendererPageScriptEnvironment> {
         self.renderer_page_script_environment.clone()
+    }
+
+    pub(crate) fn script_agent_page_membership(&self) -> Option<RendererScriptAgentPageMembership> {
+        self.script_agent_page_membership.clone()
     }
 
     pub(crate) fn inspector_isolate_backend_handle(&self) -> RendererInspectorIsolateBackendHandle {
@@ -159,6 +179,7 @@ impl RendererDocumentIsolateBootstrap {
 pub(crate) struct RendererPageScriptEnvironment {
     page_id: u64,
     renderer_document_isolate: RendererDocumentIsolateHandle,
+    script_agent_page_membership: RendererScriptAgentPageMembership,
     page_runtime_task_source: PageRuntimeTaskSource,
     output_journal: crate::runtime::RendererTurnOutputJournal,
     global_proxy: Rc<OnceCell<v8::Global<v8::Object>>>,
@@ -172,6 +193,7 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
                 "isolate_identity_key",
                 &self.renderer_document_isolate.identity_key(),
             )
+            .field("script_agent_id", &self.script_agent_id())
             .field(
                 "runtime_task_source_identity_key",
                 &self.page_runtime_task_source.identity_key(),
@@ -186,16 +208,22 @@ impl RendererPageScriptEnvironment {
     pub(crate) fn new(
         page_id: u64,
         renderer_document_isolate: RendererDocumentIsolateHandle,
+        script_agent_page_membership: RendererScriptAgentPageMembership,
         page_runtime_task_source: PageRuntimeTaskSource,
         output_journal: crate::runtime::RendererTurnOutputJournal,
-    ) -> Self {
-        Self {
+    ) -> Result<Self> {
+        anyhow::ensure!(
+            script_agent_page_membership.page_id().as_u64() == page_id,
+            "Page script environment membership belongs to a different Page"
+        );
+        Ok(Self {
             page_id,
             renderer_document_isolate,
+            script_agent_page_membership,
             page_runtime_task_source,
             output_journal,
             global_proxy: Rc::new(OnceCell::new()),
-        }
+        })
     }
 
     pub(crate) fn page_id(&self) -> u64 {
@@ -219,8 +247,16 @@ impl RendererPageScriptEnvironment {
             .retire(crate::runtime::RendererOutputStreamCloseReason::ResidenceRetired);
     }
 
+    pub(crate) fn retire_script_agent_page_membership(&self) {
+        self.script_agent_page_membership.retire();
+    }
+
     pub(crate) fn isolate_identity_key(&self) -> usize {
         self.renderer_document_isolate.identity_key()
+    }
+
+    pub(crate) fn script_agent_id(&self) -> ScriptAgentId {
+        self.renderer_document_isolate.script_agent_id()
     }
 
     pub(crate) fn bootstrap_replacement_document_isolate(
@@ -237,9 +273,19 @@ impl RendererPageScriptEnvironment {
                 RendererDocumentIsolateTeardown::owner_reserved_page(),
             page_inspector: DocumentInspectorBinding::new(isolate_backend)
                 .with_output_journal(self.output_journal()),
+            script_agent_page_membership: None,
             renderer_page_script_environment: Some(self.clone()),
             reuse_main_window_proxy: true,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bootstrap_related_page_document_isolate_for_experiment(
+        &self,
+        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
+    ) -> Result<RendererDocumentIsolateBootstrap> {
+        self.renderer_document_isolate
+            .bootstrap_related_page_document_isolate(v8_foreground_task_sender)
     }
 
     pub(super) fn install_initial_main_window_proxy(
@@ -269,6 +315,7 @@ pub(crate) struct ScriptVmDefaultWorldBootstrap {
     pub(super) renderer_document_isolate: RendererDocumentIsolateHandle,
     pub(super) renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
     pub(super) renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
+    pub(super) script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     pub(super) page_default_context: v8::Global<v8::Context>,
     pub(super) bridge_ref: JsContextHostBridgeRef,
     pub(super) runtime_observable_context_token: RuntimeObservableContextToken,
@@ -353,8 +400,8 @@ impl RendererDocumentIsolateHandle {
     pub(crate) fn new_standalone_without_owner_reservation_for_test(
         v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
     ) -> Result<RendererDocumentIsolateBootstrap> {
-        Self::new_with_foreground_wake(
-            V8ForegroundTaskWake::page(v8_foreground_task_sender),
+        Self::new_with_page_route(
+            v8_foreground_task_sender,
             RendererDocumentIsolateTeardown::standalone_test(),
         )
     }
@@ -362,18 +409,18 @@ impl RendererDocumentIsolateHandle {
     pub(crate) fn new_owner_reserved_page(
         v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
     ) -> Result<RendererDocumentIsolateBootstrap> {
-        Self::new_with_foreground_wake(
-            V8ForegroundTaskWake::page(v8_foreground_task_sender),
+        Self::new_with_page_route(
+            v8_foreground_task_sender,
             RendererDocumentIsolateTeardown::owner_reserved_page(),
         )
     }
 
-    fn new_with_foreground_wake(
-        foreground_wake: V8ForegroundTaskWake,
+    fn new_with_page_route(
+        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
         renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
     ) -> Result<RendererDocumentIsolateBootstrap> {
-        let (renderer_document_isolate, bridge_bindings) =
-            RendererDocumentIsolateHolder::new_holder(foreground_wake)?;
+        let (renderer_document_isolate, bridge_bindings, script_agent_page_membership) =
+            RendererDocumentIsolateHolder::new_holder(v8_foreground_task_sender)?;
         let renderer_document_isolate = Self {
             inner: Rc::new(RefCell::new(renderer_document_isolate)),
         };
@@ -383,6 +430,31 @@ impl RendererDocumentIsolateHandle {
             bridge_bindings,
             renderer_document_isolate_teardown,
             page_inspector: DocumentInspectorBinding::new(isolate_backend),
+            script_agent_page_membership: Some(script_agent_page_membership),
+            renderer_page_script_environment: None,
+            reuse_main_window_proxy: false,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn bootstrap_related_page_document_isolate(
+        &self,
+        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
+    ) -> Result<RendererDocumentIsolateBootstrap> {
+        let script_agent_page_membership = self
+            .inner
+            .borrow()
+            .script_agent_foreground_router
+            .admit_related_page(v8_foreground_task_sender)?;
+        let bridge_bindings = self.build_bridge_bindings()?;
+        let isolate_backend = self.inspector_isolate_backend_handle();
+        Ok(RendererDocumentIsolateBootstrap {
+            renderer_document_isolate: self.clone(),
+            bridge_bindings,
+            renderer_document_isolate_teardown:
+                RendererDocumentIsolateTeardown::owner_reserved_page(),
+            page_inspector: DocumentInspectorBinding::new(isolate_backend),
+            script_agent_page_membership: Some(script_agent_page_membership),
             renderer_page_script_environment: None,
             reuse_main_window_proxy: false,
         })
@@ -390,6 +462,21 @@ impl RendererDocumentIsolateHandle {
 
     pub(crate) fn identity_key(&self) -> usize {
         Rc::as_ptr(&self.inner) as usize
+    }
+
+    pub(crate) fn script_agent_id(&self) -> ScriptAgentId {
+        self.inner.borrow().script_agent_id
+    }
+
+    pub(crate) fn script_agent_scope(&self) -> crate::browsing_context_model::ScriptAgentScope {
+        self.inner.borrow().script_agent_foreground_router.scope()
+    }
+
+    pub(crate) fn script_agent_page_count(&self) -> usize {
+        self.inner
+            .borrow()
+            .script_agent_foreground_router
+            .page_count()
     }
 
     pub(crate) fn inspector_isolate_backend_handle(&self) -> RendererInspectorIsolateBackendHandle {
@@ -500,6 +587,8 @@ pub(super) struct RendererDocumentIsolateHolder {
     // isolate. `ScriptVm::drop` normally performs explicit context destruction;
     // this field order is the final safety net for partial construction paths.
     inspector_backend: Option<RendererInspectorIsolateBackend>,
+    script_agent_id: ScriptAgentId,
+    script_agent_foreground_router: RendererScriptAgentV8ForegroundTaskRouter,
     bootstrap: IsolateBootstrapCache,
     _platform_registration: V8PlatformIsolateRegistration,
     isolate: v8::OwnedIsolate,
@@ -509,9 +598,23 @@ pub(super) struct RendererDocumentIsolateHolder {
 }
 
 impl RendererDocumentIsolateHolder {
-    fn new_holder(foreground_wake: V8ForegroundTaskWake) -> Result<(Self, NativeBridgeBindings)> {
+    fn new_holder(
+        v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
+    ) -> Result<(
+        Self,
+        NativeBridgeBindings,
+        RendererScriptAgentPageMembership,
+    )> {
         let timing_enabled = moli_trace::cdp_nav_timing_enabled();
         let total_start = timing_enabled.then(std::time::Instant::now);
+        let script_agent_id = allocate_script_agent_id();
+        let (script_agent_foreground_router, script_agent_page_membership) =
+            RendererScriptAgentV8ForegroundTaskRouter::new(
+                script_agent_id,
+                v8_foreground_task_sender,
+            );
+        let foreground_wake =
+            V8ForegroundTaskWake::script_agent(script_agent_foreground_router.clone());
 
         let isolate_new_start = timing_enabled.then(std::time::Instant::now);
         // Window agents must not block their event loop with Atomics.wait().
@@ -632,16 +735,21 @@ impl RendererDocumentIsolateHolder {
 
         Ok((
             Self::new(
+                script_agent_id,
+                script_agent_foreground_router,
                 inspector_backend,
                 isolate_bootstrap,
                 platform_registration,
                 isolate,
             ),
             bridge_bindings,
+            script_agent_page_membership,
         ))
     }
 
     pub(super) fn new(
+        script_agent_id: ScriptAgentId,
+        script_agent_foreground_router: RendererScriptAgentV8ForegroundTaskRouter,
         inspector_backend: RendererInspectorIsolateBackend,
         bootstrap: IsolateBootstrapCache,
         platform_registration: V8PlatformIsolateRegistration,
@@ -649,6 +757,8 @@ impl RendererDocumentIsolateHolder {
     ) -> Self {
         Self {
             inspector_backend: Some(inspector_backend),
+            script_agent_id,
+            script_agent_foreground_router,
             bootstrap,
             _platform_registration: platform_registration,
             isolate,

@@ -518,6 +518,10 @@ impl RendererPageScriptEnvironmentPin {
     fn clear_page_runtime_tasks(&self) {
         self.environment.clear_page_runtime_tasks();
     }
+
+    fn retire_script_agent_page_membership(&self) {
+        self.environment.retire_script_agent_page_membership();
+    }
 }
 
 #[derive(Debug)]
@@ -611,6 +615,10 @@ impl Drop for RendererOwnerLocalPageSlot {
         // This is the stable Page lifetime boundary. A replacement PageVm
         // drops only Document-owned queues; retiring the slot also discards
         // V8 foreground work and typed Page source payloads.
+        self.script_environment_pin
+            .retire_script_agent_page_membership();
+        self.task_sources
+            .redispatch_script_agent_tasks_after_page_retirement();
         self.task_sources.clear();
         self.script_environment_pin
             .environment
@@ -639,6 +647,7 @@ struct RendererDocumentIsolateReservationEntry {
 pub(crate) struct RendererDocumentIsolateAllocator {
     owner: RendererOwnerLocalContext,
     page_id: PageId,
+    script_agent_admission: RendererScriptAgentAdmission,
 }
 
 #[derive(Clone)]
@@ -653,8 +662,16 @@ struct RendererDocumentIsolateReservationState {
 }
 
 impl RendererDocumentIsolateAllocator {
-    pub(super) fn new(owner: RendererOwnerLocalContext, page_id: PageId) -> Self {
-        Self { owner, page_id }
+    pub(super) fn new(
+        owner: RendererOwnerLocalContext,
+        page_id: PageId,
+        script_agent_admission: RendererScriptAgentAdmission,
+    ) -> Self {
+        Self {
+            owner,
+            page_id,
+            script_agent_admission,
+        }
     }
 
     pub(crate) fn reserve_renderer_document_isolate(
@@ -667,6 +684,7 @@ impl RendererDocumentIsolateAllocator {
         bound::reserve_renderer_document_isolate_on_bound_owner_local_store(
             &self.owner,
             self.page_id,
+            self.script_agent_admission,
             page_runtime_task_source,
         )
     }
@@ -717,6 +735,7 @@ impl RendererOwnerLocalStoreSession<'_> {
         &mut self,
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
+        script_agent_admission: RendererScriptAgentAdmission,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
@@ -725,6 +744,7 @@ impl RendererOwnerLocalStoreSession<'_> {
         self.store.reserve_renderer_document_isolate_for_owner(
             owner,
             page_id,
+            script_agent_admission,
             page_runtime_task_source,
         )
     }
@@ -856,6 +876,17 @@ impl RendererOwnerLocalStoreSession<'_> {
     ) -> Result<usize> {
         self.store
             .host_unique_document_isolate_count_for_testing(token)
+    }
+
+    #[cfg(test)]
+    pub(super) fn install_related_page_window_proxy_for_experiment(
+        &mut self,
+        target: RendererPageToken,
+        peer: RendererPageToken,
+        property_name: &str,
+    ) -> Result<()> {
+        self.store
+            .install_related_page_window_proxy_for_experiment(target, peer, property_name)
     }
 }
 
@@ -1082,6 +1113,7 @@ impl RendererOwnerLocalStore {
         &mut self,
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
+        script_agent_admission: RendererScriptAgentAdmission,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
@@ -1114,8 +1146,33 @@ impl RendererOwnerLocalStore {
         let v8_foreground_task_sender = page_runtime_task_source
             .v8_foreground_task_sender()
             .ok_or_else(|| anyhow!("owner-reserved Page is missing its V8 foreground source"))?;
-        let bootstrap =
-            RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?;
+        let bootstrap = match script_agent_admission {
+            RendererScriptAgentAdmission::Fresh => {
+                RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?
+            }
+            #[cfg(test)]
+            RendererScriptAgentAdmission::RelatedPageForExperiment { source_page_id } => {
+                ensure!(
+                    source_page_id != page_id,
+                    "a Page cannot use itself as its related script-agent source"
+                );
+                let source_environment = self
+                    .page_hosts
+                    .get(&owner.local_host_id)
+                    .and_then(|host| host.pages.get(&source_page_id))
+                    .map(|slot| slot.script_environment_pin.environment.clone())
+                    .ok_or_else(|| {
+                        anyhow!(
+                            "related script-agent source Page {} is not live on renderer owner {}",
+                            source_page_id.as_u64(),
+                            owner.local_host_id.as_u64()
+                        )
+                    })?;
+                source_environment.bootstrap_related_page_document_isolate_for_experiment(
+                    v8_foreground_task_sender,
+                )?
+            }
+        };
         let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
         let reservation_id = self.next_renderer_document_isolate_reservation_id;
         self.next_renderer_document_isolate_reservation_id = self
@@ -1139,12 +1196,17 @@ impl RendererOwnerLocalStore {
             None => RendererTurnOutputJournal::new(output_stream),
         };
         let page_inspector = page_inspector.with_output_journal(output_journal.clone());
+        let script_agent_page_membership =
+            bootstrap.script_agent_page_membership().ok_or_else(|| {
+                anyhow!("initial Page isolate bootstrap is missing its script-agent membership")
+            })?;
         let page_script_environment = RendererPageScriptEnvironment::new(
             page_id.as_u64(),
             host_handle.clone(),
+            script_agent_page_membership,
             page_runtime_task_source,
             output_journal.clone(),
-        );
+        )?;
         let host = self.host_for_id(owner.local_host_id);
         host.reserved_renderer_document_isolates
             .entry(page_id)
@@ -2105,6 +2167,63 @@ impl RendererOwnerLocalStore {
             isolate_keys.insert(page_slot.script_environment_pin.identity_key());
         }
         Ok(isolate_keys.len())
+    }
+
+    #[cfg(test)]
+    fn install_related_page_window_proxy_for_experiment(
+        &mut self,
+        target: RendererPageToken,
+        peer: RendererPageToken,
+        property_name: &str,
+    ) -> Result<()> {
+        #[cfg(debug_assertions)]
+        {
+            Self::ensure_token_thread(&target)?;
+            Self::ensure_token_thread(&peer)?;
+        }
+        ensure!(
+            target.local_host_id == peer.local_host_id,
+            "related WindowProxy probe requires Pages on the same renderer owner"
+        );
+        ensure!(
+            target.page_id != peer.page_id,
+            "related WindowProxy probe cannot use the target Page as its peer"
+        );
+        let host = self
+            .page_hosts
+            .get_mut(&target.local_host_id)
+            .ok_or_else(|| {
+                anyhow!(
+                    "renderer owner local runtime no longer tracks host {}",
+                    target.local_host_id.as_u64()
+                )
+            })?;
+        let peer_environment = host
+            .pages
+            .get(&peer.page_id)
+            .map(|slot| slot.script_environment_pin.environment.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "related WindowProxy peer Page {} is not live",
+                    peer.page_id.as_u64()
+                )
+            })?;
+        let target_slot = host.pages.get_mut(&target.page_id).ok_or_else(|| {
+            anyhow!(
+                "related WindowProxy target Page {} is not live",
+                target.page_id.as_u64()
+            )
+        })?;
+        let target_entry = target_slot.resident_entry_mut().ok_or_else(|| {
+            anyhow!(
+                "related WindowProxy target Page {} is checked out of its owner slot",
+                target.page_id.as_u64()
+            )
+        })?;
+        target_entry
+            .page_vm_mut()
+            .vm_mut()
+            .install_related_page_main_window_proxy_for_experiment(&peer_environment, property_name)
     }
 
     #[cfg(debug_assertions)]

@@ -474,7 +474,8 @@ pub(crate) use self::user_interaction::{
 pub(crate) use self::v8_foreground_task::RendererPageV8ForegroundTaskOwner;
 pub(crate) use self::v8_foreground_task::{
     PageV8ForegroundTaskEffect, PageV8ForegroundTaskTurnAction, PageV8ForegroundTaskTurnOutcome,
-    RendererPageV8ForegroundTask, RendererPageV8ForegroundTaskSender,
+    RendererPageV8ForegroundTask, RendererPageV8ForegroundTaskKind,
+    RendererPageV8ForegroundTaskSender,
 };
 pub(crate) use self::view_transition_update::{
     PageViewTransitionUpdateTargetEffect, PageViewTransitionUpdateTurnAction,

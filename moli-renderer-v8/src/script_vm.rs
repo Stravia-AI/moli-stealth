@@ -37,6 +37,7 @@ use crate::{
     runtime_binding_data::{build_runtime_binding_data, runtime_binding_callback},
     script_provenance::CompiledStringProvenance,
     types::ScriptObservableOutput,
+    v8_platform::RendererScriptAgentPageMembership,
 };
 use anyhow::{Context, Result, anyhow};
 use moli_page_types::{
@@ -924,6 +925,7 @@ pub(super) struct ScriptVm {
     renderer_document_isolate: RendererDocumentIsolateHandle,
     renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
     renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
+    _script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     page_default_context: v8::Global<v8::Context>,
     page_default_bridge_ref: Option<JsContextHostBridgeRef>,
     page_isolated_world_contexts: PageIsolatedWorldRegistry,
@@ -1930,6 +1932,7 @@ impl ScriptVmPageRealmBootstrap {
             bridge_bindings,
             renderer_document_isolate_teardown,
             page_inspector,
+            script_agent_page_membership,
             renderer_page_script_environment,
             reuse_main_window_proxy,
         } = renderer_document_isolate_bootstrap;
@@ -2028,6 +2031,7 @@ impl ScriptVmPageRealmBootstrap {
             page_runtime_wake_tx,
             storage_bucket_store: crate::context_bootstrap::new_shared_storage_bucket_store(),
             renderer_page_script_environment,
+            script_agent_page_membership,
             reuse_main_window_proxy,
         })
     }
@@ -2050,6 +2054,7 @@ impl ScriptVmPageRealmBootstrap {
             page_runtime_wake_tx,
             storage_bucket_store,
             renderer_page_script_environment,
+            script_agent_page_membership,
             reuse_main_window_proxy,
         } = self;
         let context_bootstrap = match renderer_document_isolate
@@ -2167,6 +2172,7 @@ impl ScriptVmPageRealmBootstrap {
             page_runtime_wake_tx,
             storage_bucket_store,
             renderer_page_script_environment,
+            script_agent_page_membership,
         })
     }
 }
@@ -2305,6 +2311,7 @@ impl ScriptVmDefaultWorldBootstrap {
             renderer_document_isolate,
             renderer_document_isolate_teardown,
             renderer_page_script_environment,
+            script_agent_page_membership,
             page_default_context: context,
             bridge_ref,
             runtime_observable_context_token,
@@ -2327,6 +2334,7 @@ impl ScriptVmDefaultWorldBootstrap {
             renderer_document_isolate,
             renderer_document_isolate_teardown,
             renderer_page_script_environment,
+            _script_agent_page_membership: script_agent_page_membership,
             page_default_context: context,
             page_default_bridge_ref: Some(bridge_ref),
             page_isolated_world_contexts: PageIsolatedWorldRegistry::new(),
@@ -3007,14 +3015,14 @@ impl ScriptVm {
     }
 
     pub(super) fn close_page_context_resources_for_context_teardown(&mut self) {
-        self.clear_context_wrapper_caches_for_context_teardown();
+        self.clear_context_embedder_state_for_context_teardown();
         clear_promise_rejection_dispatch_state(&self.promise_reject_dispatch);
         self._context_host
             .borrow_mut()
             .close_page_context_resources_for_teardown();
     }
 
-    fn clear_context_wrapper_caches_for_context_teardown(&mut self) {
+    fn clear_context_embedder_state_for_context_teardown(&mut self) {
         let mut context_ptrs: Vec<*const v8::Global<v8::Context>> = Vec::with_capacity(
             1 + self.page_isolated_world_contexts.len() + self.child_frame_realm_store.len(),
         );
@@ -3047,7 +3055,7 @@ impl ScriptVm {
                 let scope = &mut scope.init();
                 let context = unsafe { v8::Local::new(scope, &*context_ptr) };
                 let scope = &mut v8::ContextScope::new(scope, context);
-                crate::native_bridge::clear_context_wrapper_cache_for_teardown(
+                crate::native_bridge::clear_context_embedder_state_for_teardown(
                     scope,
                     include_shared_default_world,
                 );
@@ -3108,6 +3116,52 @@ impl ScriptVm {
             "detached committed main WindowProxy for replacement context"
         );
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_related_page_main_window_proxy_for_experiment(
+        &mut self,
+        peer_environment: &RendererPageScriptEnvironment,
+        property_name: &str,
+    ) -> Result<()> {
+        let target_environment = self
+            .renderer_page_script_environment
+            .as_ref()
+            .ok_or_else(|| anyhow!("related WindowProxy probe requires a Page environment"))?;
+        anyhow::ensure!(
+            target_environment.page_id() != peer_environment.page_id(),
+            "related WindowProxy probe cannot link a Page to itself"
+        );
+        anyhow::ensure!(
+            target_environment.isolate_identity_key() == peer_environment.isolate_identity_key(),
+            "related WindowProxy probe requires Pages in the same script agent"
+        );
+        let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
+        peer_environment.with_main_window_proxy(|peer_window_proxy| {
+            self.renderer_document_isolate
+                .with_entered_renderer_document_isolate(|isolate| {
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let scope = &mut scope.init();
+                    // SAFETY: `context_ptr` points to this ScriptVm's default
+                    // context, which remains owned for the whole synchronous
+                    // probe installation call.
+                    let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                    let scope = &mut v8::ContextScope::new(scope, context);
+                    let property_name = v8_string(scope, property_name).ok_or_else(|| {
+                        anyhow!("failed to allocate related WindowProxy probe property")
+                    })?;
+                    let peer_window_proxy = v8::Local::new(scope, peer_window_proxy);
+                    anyhow::ensure!(
+                        context.global(scope).set(
+                            scope,
+                            property_name.into(),
+                            peer_window_proxy.into(),
+                        ) == Some(true),
+                        "failed to install related Page WindowProxy probe property"
+                    );
+                    Ok(())
+                })
+        })?
     }
 
     pub(super) fn sync_live_document_style_sources_if_pending(&mut self) {
@@ -3926,6 +3980,7 @@ impl ScriptVm {
 
     pub(super) fn rebind_isolated_worlds_for_document_owner_transition(
         &mut self,
+        browsing_context_id: crate::frame_owner_model::BrowsingContextId,
         retired_owner: FrameDocumentTaskOwner,
         current_owner: FrameDocumentTaskOwner,
     ) -> usize {
@@ -3965,6 +4020,7 @@ impl ScriptVm {
                                 child_scope,
                                 global,
                                 child_handle,
+                                browsing_context_id,
                                 retired_owner,
                                 current_owner,
                                 realm_token,
@@ -6736,6 +6792,9 @@ impl ScriptVm {
             },
             dom,
             runtime: RendererMoliRuntimeMemoryDiagnostics {
+                script_agent_id: self.renderer_document_isolate.script_agent_id().value(),
+                script_agent_scope: self.renderer_document_isolate.script_agent_scope().as_str(),
+                script_agent_page_count: self.renderer_document_isolate.script_agent_page_count(),
                 runtime_observable_context_count: self.page_runtime_observable_contexts().len(),
                 isolated_context_count: self.page_isolated_world_contexts.len(),
                 child_default_context_count: self.child_frame_realm_store.len(),

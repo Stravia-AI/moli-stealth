@@ -39,7 +39,7 @@ use identity::{BridgeHandle, BridgeIdentityStore, DomTokenListKind};
 use identity::{CollectionKind, LiveCollectionDescriptor, LiveCollectionQueryKind};
 pub(crate) use identity::{
     ComputedStyleDescriptor, ComputedStylePseudoKey, ComputedStyleTargetKey,
-    clear_context_wrapper_cache_for_teardown,
+    clear_context_embedder_state_for_teardown,
 };
 
 pub(crate) use active_child_window::{

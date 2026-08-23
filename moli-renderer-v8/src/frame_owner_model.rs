@@ -174,8 +174,9 @@ pub(crate) use navigation_tasks::{
 #[cfg(test)]
 pub(crate) use records::FrameFunctionConstructorSource;
 pub(crate) use records::{
-    ChildFrameOwnerSnapshot, DocumentCreationKind, DocumentId, DocumentLoadDelayTokenId,
-    FrameDocumentDescendantLoadCompletion, FrameDocumentDescendantLoadParent,
+    BrowsingContextId, ChildFrameOwnerSnapshot, DocumentCreationKind, DocumentId,
+    DocumentLoadDelayTokenId, FrameDocumentDescendantLoadCompletion,
+    FrameDocumentDescendantLoadParent, FrameDocumentExternalStateRetirement,
     FrameDocumentLoadDispatchFinish, FrameDocumentLocalWindowTransition,
     FrameDocumentNavigationLoadBinding, FrameDocumentOwner, FrameDocumentOwnerTransition,
     FrameDocumentTaskOwner, FrameDocumentTaskRealmCurrentness, FrameId,

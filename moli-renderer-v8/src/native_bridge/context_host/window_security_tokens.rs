@@ -1,7 +1,7 @@
 use super::{
     JsContextHost, OwnerDispatchScope, WindowExecutionContextIdentity, WindowExecutionContextOwner,
 };
-use crate::document_runtime::DomHandle;
+use crate::{browsing_context_model::BrowsingContextAccessOrigin, document_runtime::DomHandle};
 
 const WINDOW_SECURITY_TOKEN_PREFIX: &str = "moli-window-origin-v1:";
 const WINDOW_ISOLATED_WORLD_SECURITY_TOKEN_PREFIX: &str = "moli-window-isolated-origin-v1:";
@@ -310,90 +310,8 @@ impl JsContextHost {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(in crate::native_bridge::context_host) enum WindowAccessOrigin {
-    Opaque {
-        identity: Option<WindowExecutionContextOwner>,
-    },
-    Tuple {
-        serialized_origin: String,
-        scheme: String,
-        document_domain: Option<String>,
-    },
-}
-
-impl WindowAccessOrigin {
-    pub(in crate::native_bridge::context_host) fn opaque(
-        identity: WindowExecutionContextOwner,
-    ) -> Self {
-        Self::Opaque {
-            identity: Some(identity),
-        }
-    }
-
-    pub(in crate::native_bridge::context_host) fn from_serialized_origin(
-        serialized_origin: String,
-        document_domain: Option<String>,
-    ) -> Option<Self> {
-        if serialized_origin == "null" {
-            return Some(Self::Opaque { identity: None });
-        }
-        let scheme = url::Url::parse(&serialized_origin)
-            .ok()?
-            .scheme()
-            .to_owned();
-        Some(Self::Tuple {
-            serialized_origin,
-            scheme,
-            document_domain,
-        })
-    }
-
-    pub(in crate::native_bridge::context_host) fn can_access(&self, target: &Self) -> bool {
-        if let (
-            Self::Opaque {
-                identity: Some(accessing_identity),
-            },
-            Self::Opaque {
-                identity: Some(target_identity),
-            },
-        ) = (self, target)
-        {
-            return accessing_identity == target_identity;
-        }
-        let (
-            Self::Tuple {
-                serialized_origin: accessing_origin,
-                scheme: accessing_scheme,
-                document_domain: accessing_domain,
-            },
-            Self::Tuple {
-                serialized_origin: target_origin,
-                scheme: target_scheme,
-                document_domain: target_domain,
-            },
-        ) = (self, target)
-        else {
-            return false;
-        };
-        match (accessing_domain, target_domain) {
-            (None, None) => accessing_origin == target_origin,
-            (Some(accessing_domain), Some(target_domain)) => {
-                accessing_scheme == target_scheme && accessing_domain == target_domain
-            }
-            _ => false,
-        }
-    }
-
-    pub(in crate::native_bridge::context_host) fn serialized_origin(&self) -> String {
-        match self {
-            Self::Opaque { .. } => "null".to_owned(),
-            Self::Tuple {
-                serialized_origin, ..
-            } => serialized_origin.clone(),
-        }
-    }
-}
+pub(in crate::native_bridge::context_host) type WindowAccessOrigin =
+    BrowsingContextAccessOrigin<WindowExecutionContextOwner>;
 
 pub(crate) fn set_window_security_token(
     scope: &mut v8::PinScope<'_, '_, ()>,

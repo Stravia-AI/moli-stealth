@@ -280,6 +280,12 @@ pub enum RendererOwnerCommand {
         token: RendererPageToken,
     },
     #[cfg(test)]
+    TestingInstallRelatedPageWindowProxyForExperiment {
+        target: RendererPageToken,
+        peer: RendererPageToken,
+        property_name: String,
+    },
+    #[cfg(test)]
     TestingDeferredPageVmDropPendingCount,
 }
 
@@ -303,6 +309,8 @@ pub enum RendererOwnerReply {
     TestingOwnerSlot(RendererPageSlotHandle),
     TestingHostInstanceKey(usize),
     TestingHostUniqueDocumentIsolateCount(usize),
+    #[cfg(test)]
+    TestingRelatedPageWindowProxyInstalled,
     #[cfg(test)]
     TestingDeferredPageVmDropPendingCount(usize),
 }
@@ -2598,6 +2606,15 @@ impl RendererOwnerHandle {
                     .map(RendererOwnerReply::TestingHostUniqueDocumentIsolateCount)
                     .into()
             }
+            #[cfg(test)]
+            RendererOwnerCommand::TestingInstallRelatedPageWindowProxyForExperiment {
+                target,
+                peer,
+                property_name,
+            } => owner_local_store_session(owner_local_store)
+                .install_related_page_window_proxy_for_experiment(target, peer, &property_name)
+                .map(|()| RendererOwnerReply::TestingRelatedPageWindowProxyInstalled)
+                .into(),
             #[cfg(test)]
             RendererOwnerCommand::TestingDeferredPageVmDropPendingCount => {
                 Ok(RendererOwnerReply::TestingDeferredPageVmDropPendingCount(
@@ -6862,8 +6879,11 @@ impl RendererOwnerHandle {
                 let page_id = page_reservation.page_id();
                 let owner_local_context = owner.owner_local_context()?;
                 let owner_wake = owner.owner_wake_sender_for_page(&owner_local_context, page_id);
-                let renderer_document_isolate_allocator =
-                    RendererDocumentIsolateAllocator::new(owner_local_context.clone(), page_id);
+                let renderer_document_isolate_allocator = RendererDocumentIsolateAllocator::new(
+                    owner_local_context.clone(),
+                    page_id,
+                    page_reservation.script_agent_admission(),
+                );
                 let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
                     owner_wake,
                     owner.state.browser_context_runtime.clone(),
@@ -7023,8 +7043,11 @@ impl RendererOwnerHandle {
                     owner.owner_wake_sender_for_page(&owner_local_context, token.page_id());
                 let page_runtime_task_source =
                     crate::page_task_queue::PageRuntimeTaskSource::new(Some(owner_wake));
-                let isolate_allocator =
-                    RendererDocumentIsolateAllocator::new(owner_local_context, token.page_id());
+                let isolate_allocator = RendererDocumentIsolateAllocator::new(
+                    owner_local_context,
+                    token.page_id(),
+                    token.script_agent_admission(),
+                );
                 let (isolate_bootstrap, isolate_reservation) = isolate_allocator
                     .reserve_renderer_document_isolate(page_runtime_task_source)?;
                 Ok(RendererPreparedDocumentResidence {

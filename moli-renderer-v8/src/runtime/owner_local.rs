@@ -734,6 +734,36 @@ impl RendererPageTestingHandle {
     }
 
     #[cfg(test)]
+    pub async fn install_related_page_window_proxy_for_experiment(
+        &self,
+        peer: &Self,
+        property_name: &str,
+    ) -> Result<()> {
+        if !self.shares_local_host(peer) {
+            return Err(anyhow!(
+                "related WindowProxy probe requires Pages on the same renderer owner"
+            ));
+        }
+        match self
+            .render_runtime
+            .dispatch(
+                RendererOwnerCommand::TestingInstallRelatedPageWindowProxyForExperiment {
+                    target: self.token,
+                    peer: peer.token,
+                    property_name: property_name.to_owned(),
+                },
+            )
+            .await?
+        {
+            RendererOwnerReply::TestingRelatedPageWindowProxyInstalled => Ok(()),
+            other => Err(anyhow!(
+                "renderer owner returned non-WindowProxy-install testing reply: {:?}",
+                std::mem::discriminant(&other)
+            )),
+        }
+    }
+
+    #[cfg(test)]
     pub async fn deferred_page_vm_drop_pending_count_async(&self) -> Result<usize> {
         match self
             .render_runtime

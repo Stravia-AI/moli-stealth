@@ -179,6 +179,12 @@ impl IntrinsicInterfaceRegistry {
     }
 }
 
+pub(crate) fn clear_intrinsic_interface_registry_for_context_teardown(
+    context: v8::Local<'_, v8::Context>,
+) {
+    context.remove_slot::<IntrinsicInterfaceRegistry>();
+}
+
 #[cfg(test)]
 mod tests {
     use std::pin::pin;

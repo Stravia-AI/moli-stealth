@@ -325,13 +325,17 @@ impl JsContextHost {
             }
         }
 
-        if let Some(retired_owner) = owner_transition.retired_owner() {
-            self.retire_child_document_external_state(
-                handle,
-                retired_owner,
-                expected_current_document_handle
-                    .expect("retired owner must have a matching document handle"),
-            );
+        let external_state_retirement =
+            expected_current_document_handle.and_then(|document_handle| {
+                owner_transition.external_state_retirement(document_handle)
+            });
+        debug_assert_eq!(
+            external_state_retirement.is_some(),
+            owner_transition.retired_owner().is_some(),
+            "retired owner must have a matching document handle"
+        );
+        if let Some(retirement) = external_state_retirement {
+            self.retire_child_document_external_state(retirement);
         }
 
         let replaced_document_handle = self

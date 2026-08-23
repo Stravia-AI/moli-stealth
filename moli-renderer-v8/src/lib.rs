@@ -27,6 +27,7 @@ mod abort_signal_route;
 mod app_manifest;
 mod blob;
 mod broadcast_channel_runtime;
+mod browsing_context_model;
 mod callback_invocation;
 #[cfg(test)]
 mod chromium_property_surface;

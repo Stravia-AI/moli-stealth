@@ -470,23 +470,31 @@ pub(crate) fn retain_context_wrapper_cache_for_test(
     }
 }
 
-pub(crate) fn clear_context_wrapper_cache_for_teardown(
+pub(crate) fn clear_context_embedder_state_for_teardown(
     scope: &mut v8::PinScope<'_, '_>,
     include_shared_default_world: bool,
 ) {
     let context = scope.get_current_context();
-    if !include_shared_default_world
-        && context
-            .get_slot::<SharedDefaultWorldWrapperCache>()
-            .is_some()
+    let uses_shared_default_world_cache = context
+        .get_slot::<SharedDefaultWorldWrapperCache>()
+        .is_some();
+    if (include_shared_default_world || !uses_shared_default_world_cache)
+        && let Some(cache) = context.get_slot::<RefCell<BridgeContextWrapperCache>>()
     {
-        return;
-    }
-    if let Some(cache) = context.get_slot::<RefCell<BridgeContextWrapperCache>>() {
         let mut cache = cache.borrow_mut();
         cache.wrappers.clear();
         cache.live_collection_wrappers.clear();
     }
+
+    // The Context owns this slot while the slot owns a strong handle back to
+    // the Context's Window wrapper. Break that cross-language cycle without
+    // clearing unrelated slots: retained functions from a retired child realm
+    // still need its host-pointer and execution-owner metadata to fail closed
+    // with the correct realm semantics.
+    context.remove_slot::<BridgeContextWindowWrapper>();
+    crate::context_bootstrap::exposed_interfaces::clear_intrinsic_interface_registry_for_context_teardown(
+        context,
+    );
 }
 
 #[derive(Debug, Default)]

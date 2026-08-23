@@ -1794,6 +1794,9 @@ pub struct RendererMoliDomMemoryDiagnostics {
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RendererMoliRuntimeMemoryDiagnostics {
+    pub script_agent_id: u64,
+    pub script_agent_scope: &'static str,
+    pub script_agent_page_count: usize,
     pub runtime_observable_context_count: usize,
     pub isolated_context_count: usize,
     pub child_default_context_count: usize,

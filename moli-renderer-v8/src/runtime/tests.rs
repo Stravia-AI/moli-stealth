@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::io::Cursor;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::sync::{mpsc, oneshot};
@@ -3781,6 +3781,36 @@ async fn per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts() 
     let second_heap = runtime_heap_usage_for_test(&second_page).await;
     let first_runtime = &first_heap["moli"]["runtime"];
     let second_runtime = &second_heap["moli"]["runtime"];
+    let first_script_agent_id = first_runtime["scriptAgentId"]
+        .as_u64()
+        .expect("first page should expose a script-agent id");
+    let second_script_agent_id = second_runtime["scriptAgentId"]
+        .as_u64()
+        .expect("second page should expose a script-agent id");
+    assert_ne!(
+        first_script_agent_id, second_script_agent_id,
+        "concurrently live per-Page script environments must retain distinct agents"
+    );
+    assert_eq!(
+        first_runtime["scriptAgentScope"],
+        serde_json::json!("page-script-environment"),
+        "the current agent admission scope must remain explicit: {first_heap:?}"
+    );
+    assert_eq!(
+        second_runtime["scriptAgentScope"],
+        serde_json::json!("page-script-environment"),
+        "the peer agent admission scope must remain explicit: {second_heap:?}"
+    );
+    assert_eq!(
+        first_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "the first per-Page agent must retain exactly one live Page"
+    );
+    assert_eq!(
+        second_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "the second per-Page agent must retain exactly one live Page"
+    );
     assert_eq!(
         first_runtime["inspectorContextGroupScope"],
         serde_json::json!("local-root-agent"),
@@ -3965,6 +3995,1410 @@ async fn per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts() 
         .close_async()
         .await
         .expect("second shared page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_experiment_shares_isolate_and_survives_source_close() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-agent-a").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-agent-b").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related agent first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related agent second</body>",
+    )
+    .await;
+
+    let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
+    let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
+    assert!(first_testing.shares_local_host(&second_testing));
+    assert_eq!(
+        second_testing
+            .host_unique_document_isolate_count_async()
+            .await
+            .expect("related Pages should expose their unique isolate count"),
+        1,
+        "selectively related Pages must share exactly one document isolate"
+    );
+
+    let first_heap = runtime_heap_usage_for_test(&first_page).await;
+    let second_heap = runtime_heap_usage_for_test(&second_page).await;
+    let first_runtime = &first_heap["lightmount"]["runtime"];
+    let second_runtime = &second_heap["lightmount"]["runtime"];
+    let script_agent_id = first_runtime["scriptAgentId"]
+        .as_u64()
+        .expect("related source Page should expose a script-agent id");
+    assert_eq!(
+        second_runtime["scriptAgentId"],
+        serde_json::json!(script_agent_id),
+        "related Page realms must retain the same script-agent identity"
+    );
+    assert_eq!(
+        first_runtime["scriptAgentScope"],
+        serde_json::json!("related-page-group")
+    );
+    assert_eq!(
+        second_runtime["scriptAgentScope"],
+        serde_json::json!("related-page-group")
+    );
+    assert_eq!(first_runtime["scriptAgentPageCount"], serde_json::json!(2));
+    assert_eq!(second_runtime["scriptAgentPageCount"], serde_json::json!(2));
+    assert_ne!(
+        first_runtime["inspectorContextGroupId"], second_runtime["inspectorContextGroupId"],
+        "related Page targets must retain distinct Inspector context groups"
+    );
+    assert_ne!(
+        first_runtime["mainWindowProxyIdentityHash"], second_runtime["mainWindowProxyIdentityHash"],
+        "related Pages must retain distinct stable main WindowProxy objects"
+    );
+    assert_eq!(
+        first_runtime["inspectorDefaultContextRegistryCount"],
+        serde_json::json!(2),
+        "the shared isolate backend must retain both Page default contexts"
+    );
+    assert_eq!(
+        second_runtime["inspectorDefaultContextRegistryCount"],
+        serde_json::json!(2),
+        "both related Pages must observe the shared backend context inventory"
+    );
+
+    let (first_marker, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"globalThis.__lm_related_agent_marker = "first";
+Array.prototype.__lm_related_agent_intrinsic_marker = "first-array";
+globalThis.__lm_related_agent_marker"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related source Page marker should evaluate");
+    assert_eq!(
+        renderer_json_value(first_marker),
+        Some(serde_json::json!("first"))
+    );
+    let (second_missing_marker, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"[
+  globalThis.__lm_related_agent_marker ?? "missing",
+  Array.prototype.__lm_related_agent_intrinsic_marker ?? "missing"
+].join(":")"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related peer Page marker should evaluate");
+    assert_eq!(
+        renderer_json_value(second_missing_marker),
+        Some(serde_json::json!("missing:missing")),
+        "sharing an agent must not merge Page globals or intrinsics"
+    );
+
+    let first_object_id = runtime_protocol_object_id(
+        &first_page,
+        serde_json::json!({
+            "id": 8101,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "({ marker: 'related-source-object' })" }
+        }),
+        8101,
+    )
+    .await
+    .expect("related source Runtime.evaluate should return an objectId");
+    let cross_target_call = dispatch_runtime_protocol_for_test(
+        &second_page,
+        serde_json::json!({
+            "id": 8102,
+            "method": "Runtime.callFunctionOn",
+            "params": {
+                "objectId": first_object_id,
+                "functionDeclaration": "function() { return this.marker; }",
+                "returnByValue": true
+            }
+        }),
+    )
+    .await
+    .expect("related peer cross-target Runtime.callFunctionOn should dispatch");
+    let cross_target_response = runtime_protocol_response_by_id(&cross_target_call, 8102)
+        .expect("cross-target Runtime.callFunctionOn should return a response");
+    assert!(
+        cross_target_response.get("error").is_some()
+            || cross_target_response["result"]["exceptionDetails"].is_object(),
+        "sharing an isolate must not authorize a peer target's remote object: {cross_target_response:?}"
+    );
+
+    let (compiled_before_source_close, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  await WebAssembly.compile(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+  return "compiled-before-source-close";
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("related peer should complete isolate-level foreground work");
+    assert_eq!(
+        renderer_json_value(compiled_before_source_close),
+        Some(serde_json::json!("compiled-before-source-close"))
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("related source Page should close independently");
+    let remaining_heap = runtime_heap_usage_for_test(&second_page).await;
+    let remaining_runtime = &remaining_heap["lightmount"]["runtime"];
+    assert_eq!(
+        remaining_runtime["scriptAgentId"],
+        serde_json::json!(script_agent_id),
+        "closing the admission source must not replace the surviving agent"
+    );
+    assert_eq!(
+        remaining_runtime["scriptAgentScope"],
+        serde_json::json!("related-page-group")
+    );
+    assert_eq!(
+        remaining_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "source retirement must remove exactly its Page route"
+    );
+    assert_eq!(
+        remaining_runtime["inspectorDefaultContextRegistryCount"],
+        serde_json::json!(1),
+        "source retirement must release only its Inspector default context"
+    );
+
+    let remaining_window_proxy_identity_hash =
+        remaining_runtime["mainWindowProxyIdentityHash"].clone();
+    let remaining_context_group_id = remaining_runtime["inspectorContextGroupId"].clone();
+    let replacement_url = "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cbody%3Erelated%20agent%20replacement%3C/body%3E";
+    let (navigation_reply, _) = second_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: format!("location.href = {replacement_url:?}; 'navigating'"),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("surviving related Page should navigate within its agent");
+    assert_eq!(
+        renderer_json_value(navigation_reply),
+        Some(serde_json::json!("navigating"))
+    );
+    let after_navigation_heap = runtime_heap_usage_for_test(&second_page).await;
+    let after_navigation_runtime = &after_navigation_heap["lightmount"]["runtime"];
+    assert_eq!(
+        after_navigation_runtime["scriptAgentId"],
+        serde_json::json!(script_agent_id),
+        "related Page navigation must retain the surviving script agent"
+    );
+    assert_eq!(
+        after_navigation_runtime["scriptAgentScope"],
+        serde_json::json!("related-page-group")
+    );
+    assert_eq!(
+        after_navigation_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "replacement must reuse the stable Page membership"
+    );
+    assert_eq!(
+        after_navigation_runtime["mainWindowProxyIdentityHash"],
+        remaining_window_proxy_identity_hash,
+        "related Page navigation must reuse its stable main WindowProxy"
+    );
+    assert_ne!(
+        after_navigation_runtime["inspectorContextGroupId"], remaining_context_group_id,
+        "replacement Document must receive a new local-root Inspector context group"
+    );
+
+    let (compiled_after_source_close, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  await WebAssembly.compile(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
+  return "compiled-after-source-close";
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("surviving related Page should retain the agent V8 route");
+    assert_eq!(
+        renderer_json_value(compiled_after_source_close),
+        Some(serde_json::json!("compiled-after-source-close"))
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("surviving related Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_keeps_async_work_and_rejections_page_local() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-async-a").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-async-b").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related async first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related async second</body>",
+    )
+    .await;
+
+    for (page, label) in [(&first_page, "first"), (&second_page, "second")] {
+        let (scheduled, _) = page
+            .run_async_command(RendererPageCommand::EvaluateExpression {
+                expression: format!(
+                    r#"(() => {{
+  globalThis.__lm_related_async_events = [];
+  addEventListener("unhandledrejection", event => {{
+    event.preventDefault();
+    globalThis.__lm_related_async_events.push("rejection:" + String(event.reason));
+  }});
+  globalThis.__lm_related_async_work = Promise.all([
+    new Promise(resolve => setTimeout(() => resolve("timer:{label}"), 0)),
+    fetch("data:text/plain,fetch-{label}").then(response => response.text())
+  ]).then(values => values.join("|"));
+  Promise.reject("{label}-only");
+  return "scheduled:{label}";
+}})()"#
+                ),
+                await_promise: false,
+            })
+            .await
+            .expect("related Page async work should schedule");
+        assert_eq!(
+            renderer_json_value(scheduled),
+            Some(serde_json::json!(format!("scheduled:{label}")))
+        );
+    }
+
+    for (page, label) in [(&second_page, "second"), (&first_page, "first")] {
+        let (completed, _) = page
+            .run_async_command(RendererPageCommand::EvaluateExpression {
+                expression: "globalThis.__lm_related_async_work".to_owned(),
+                await_promise: true,
+            })
+            .await
+            .expect("related Page async work should complete on its Page route");
+        assert_eq!(
+            renderer_json_value(completed),
+            Some(serde_json::json!(format!("timer:{label}|fetch-{label}"))),
+            "timer/fetch completion must stay in the originating Page realm"
+        );
+
+        let (rejections, _) = page
+            .run_async_command(RendererPageCommand::EvaluateExpression {
+                expression: "JSON.stringify(globalThis.__lm_related_async_events)".to_owned(),
+                await_promise: false,
+            })
+            .await
+            .expect("related Page rejection list should evaluate");
+        assert_eq!(
+            renderer_json_value(rejections),
+            Some(serde_json::json!(format!("[\"rejection:{label}-only\"]"))),
+            "unhandled rejection dispatch must use the originating Page context"
+        );
+    }
+
+    first_page
+        .close_async()
+        .await
+        .expect("first related async Page should close");
+    second_page
+        .close_async()
+        .await
+        .expect("second related async Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_keeps_inspector_objects_and_bindings_page_local() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-inspector-a").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-inspector-b").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related inspector first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related inspector second</body>",
+    )
+    .await;
+
+    let first_object_id = runtime_protocol_object_id(
+        &first_page,
+        serde_json::json!({
+            "id": 8201,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "({ marker: 'related-first-group-object' })",
+                "objectGroup": "related-same-group"
+            }
+        }),
+        8201,
+    )
+    .await
+    .expect("first related Page should create a grouped remote object");
+    let second_object_id = runtime_protocol_object_id(
+        &second_page,
+        serde_json::json!({
+            "id": 8202,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": "({ marker: 'related-second-group-object' })",
+                "objectGroup": "related-same-group"
+            }
+        }),
+        8202,
+    )
+    .await
+    .expect("second related Page should create a grouped remote object");
+
+    let release = dispatch_runtime_protocol_for_test(
+        &first_page,
+        serde_json::json!({
+            "id": 8203,
+            "method": "Runtime.releaseObjectGroup",
+            "params": { "objectGroup": "related-same-group" }
+        }),
+    )
+    .await
+    .expect("first related Page should release its object group");
+    let release_response = runtime_protocol_response_by_id(&release, 8203)
+        .expect("first related Page should return a release response");
+    assert_eq!(release_response["result"], serde_json::json!({}));
+
+    let first_call_after_release = dispatch_runtime_protocol_for_test(
+        &first_page,
+        serde_json::json!({
+            "id": 8204,
+            "method": "Runtime.callFunctionOn",
+            "params": {
+                "objectId": first_object_id,
+                "functionDeclaration": "function() { return this.marker; }",
+                "returnByValue": true
+            }
+        }),
+    )
+    .await
+    .expect("first related Page call after release should dispatch");
+    let first_call_after_release_response =
+        runtime_protocol_response_by_id(&first_call_after_release, 8204)
+            .expect("first related Page call after release should return a response");
+    assert!(
+        first_call_after_release_response.get("error").is_some()
+            || first_call_after_release_response["result"]["exceptionDetails"].is_object(),
+        "releasing Page A's group must invalidate its own object: {first_call_after_release_response:?}"
+    );
+
+    let second_call_after_peer_release = dispatch_runtime_protocol_for_test(
+        &second_page,
+        serde_json::json!({
+            "id": 8205,
+            "method": "Runtime.callFunctionOn",
+            "params": {
+                "objectId": second_object_id,
+                "functionDeclaration": "function() { return this.marker; }",
+                "returnByValue": true
+            }
+        }),
+    )
+    .await
+    .expect("second related Page call after peer release should dispatch");
+    let second_call_after_peer_release_response =
+        runtime_protocol_response_by_id(&second_call_after_peer_release, 8205)
+            .expect("second related Page call after peer release should return a response");
+    assert_eq!(
+        second_call_after_peer_release_response["result"]["result"]["value"],
+        serde_json::json!("related-second-group-object"),
+        "same-name object groups must remain scoped to each Page inspector binding"
+    );
+
+    let first_world_context_id =
+        create_isolated_world_for_test(&first_page, "related-binding-world")
+            .await
+            .expect("first related Page should create an isolated world");
+    let second_world_context_id =
+        create_isolated_world_for_test(&second_page, "related-binding-world")
+            .await
+            .expect("second related Page should create an isolated world");
+    add_runtime_binding_for_test(
+        &first_page,
+        "relatedBinding",
+        Some("related-binding-world"),
+        None,
+    )
+    .await
+    .expect("first related Page should install its scoped runtime binding");
+
+    let (first_binding_type, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_world_context_id,
+            expression: "typeof relatedBinding".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("first related Page binding should be observable");
+    assert_eq!(
+        renderer_json_value(first_binding_type),
+        Some(serde_json::json!("function"))
+    );
+    let (second_binding_type, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: second_world_context_id,
+            expression: "typeof relatedBinding".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("second related Page binding type should be observable");
+    assert_eq!(
+        renderer_json_value(second_binding_type),
+        Some(serde_json::json!("undefined")),
+        "same-name isolated worlds in a shared isolate must not inherit a peer target's binding"
+    );
+
+    output_rx.drain();
+    let (binding_call_result, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_world_context_id,
+            expression: r#"relatedBinding("from-related-first"); "called""#.to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("first related Page binding call should evaluate");
+    assert_eq!(
+        renderer_json_value(binding_call_result),
+        Some(serde_json::json!("called"))
+    );
+
+    let mut first_binding_calls = Vec::new();
+    let mut second_binding_calls = Vec::new();
+    for publication in output_rx.drain() {
+        let is_first_page = publication_is_for_page(&publication, &first_page);
+        let is_second_page = publication_is_for_page(&publication, &second_page);
+        for record in publication.into_records() {
+            if let RendererOutputItem::Observation(RendererProtocolObservation::RuntimeBinding(
+                call,
+            )) = record.into_parts().1
+            {
+                if is_first_page {
+                    first_binding_calls.push(call);
+                } else if is_second_page {
+                    second_binding_calls.push(call);
+                }
+            }
+        }
+    }
+    assert_eq!(first_binding_calls.len(), 1);
+    assert_eq!(first_binding_calls[0].name, "relatedBinding");
+    assert_eq!(first_binding_calls[0].payload, "from-related-first");
+    assert_eq!(
+        first_binding_calls[0].execution_context_id, first_world_context_id,
+        "binding output must retain the originating Page's compatibility context id"
+    );
+    assert!(
+        second_binding_calls.is_empty(),
+        "binding output from Page A must not be published on Page B's output stream"
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("first related inspector Page should close");
+    second_page
+        .close_async()
+        .await
+        .expect("second related inspector Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let (base_url, replacement_server) = spawn_owner_wake_server_with_content_type(
+        "/replacement",
+        r#"<!doctype html>
+<body data-page="replacement"><main id="peer-node">after-navigation</main>
+<script>globalThis.__lm_related_replacement_marker = "replacement-ready";</script>
+</body>"#,
+        "text/html",
+        Duration::ZERO,
+    )
+    .await;
+    let first_url = url::Url::parse(&format!("{base_url}/first")).unwrap();
+    let second_url = url::Url::parse(&format!("{base_url}/second")).unwrap();
+    let replacement_url = format!("{base_url}/replacement");
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body data-page='first'>related proxy first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        r#"<!doctype html><body data-page="second"><main id="peer-node">before</main></body>"#,
+    )
+    .await;
+
+    let (prepared, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  globalThis.__lm_related_shared_object = { count: 1 };
+  globalThis.__lm_related_shared_function = value => {
+    document.body.dataset.functionCall = value;
+    return `${value}:${document.body.dataset.page}`;
+  };
+  return "prepared";
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related peer realm should prepare cross-realm values");
+    assert_eq!(
+        renderer_json_value(prepared),
+        Some(serde_json::json!("prepared"))
+    );
+
+    let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
+    let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
+    first_testing
+        .install_related_page_window_proxy_for_experiment(
+            &second_testing,
+            "__lm_related_peer_window",
+        )
+        .await
+        .expect("related Pages should install the peer's stable main WindowProxy");
+
+    let (cross_realm_result, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const peer = globalThis.__lm_related_peer_window;
+  globalThis.__lm_related_saved_peer_window = peer;
+  peer.__lm_related_shared_object.count += 1;
+  const peerNode = peer.document.querySelector("#peer-node");
+  peerNode.textContent = "mutated-from-first";
+  return JSON.stringify([
+    peer === globalThis.__lm_related_peer_window,
+    peer.__lm_related_shared_object.count,
+    peer.__lm_related_shared_function("called-from-first"),
+    peerNode.ownerDocument === peer.document,
+    peerNode.textContent,
+    document.querySelector("#peer-node") === null
+  ]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("same-origin related WindowProxy should synchronously expose peer values");
+    assert_eq!(
+        renderer_json_value(cross_realm_result),
+        Some(serde_json::json!(
+            "[true,2,\"called-from-first:second\",true,\"mutated-from-first\",true]"
+        )),
+        "object, function and DOM wrapper access must execute against the peer realm/document"
+    );
+
+    let (peer_observed, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"JSON.stringify([
+  globalThis.__lm_related_shared_object.count,
+  document.body.dataset.functionCall,
+  document.querySelector("#peer-node").textContent
+])"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("peer Page should observe synchronous cross-realm mutations");
+    assert_eq!(
+        renderer_json_value(peer_observed),
+        Some(serde_json::json!(
+            "[2,\"called-from-first\",\"mutated-from-first\"]"
+        ))
+    );
+
+    let (navigation_reply, _) = second_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression: format!("location.href = {replacement_url:?}; 'navigating'"),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("related peer should navigate to a same-origin replacement");
+    assert_eq!(
+        renderer_json_value(navigation_reply),
+        Some(serde_json::json!("navigating"))
+    );
+    replacement_server
+        .await
+        .expect("related peer replacement server should finish");
+
+    let (after_navigation, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const peer = globalThis.__lm_related_peer_window;
+  return JSON.stringify([
+    peer === globalThis.__lm_related_saved_peer_window,
+    peer.__lm_related_replacement_marker,
+    peer.document.body.dataset.page,
+    peer.document.querySelector("#peer-node").textContent,
+    typeof peer.__lm_related_shared_object
+  ]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("saved related WindowProxy should project the replacement peer realm");
+    assert_eq!(
+        renderer_json_value(after_navigation),
+        Some(serde_json::json!(
+            "[true,\"replacement-ready\",\"replacement\",\"after-navigation\",\"undefined\"]"
+        )),
+        "stable peer WindowProxy identity must survive same-origin Document replacement"
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("related WindowProxy peer should close");
+    first_page
+        .close_async()
+        .await
+        .expect("related WindowProxy holder should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_keeps_dedicated_worker_events_page_local_after_source_close() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-worker-a").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-worker-b").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related worker first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related worker second</body>",
+    )
+    .await;
+
+    let (installed, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  globalThis.__lm_related_worker_events = [];
+  const source = `
+    postMessage("ready");
+    onmessage = event => postMessage("echo:" + String(event.data));
+  `;
+  globalThis.__lm_related_worker = new Worker(
+    "data:text/javascript," + encodeURIComponent(source)
+  );
+  globalThis.__lm_related_worker.onmessage = event => {
+    globalThis.__lm_related_worker_events.push(String(event.data));
+  };
+  return "installed";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related peer dedicated worker should install");
+    assert_eq!(
+        renderer_json_value(installed),
+        Some(serde_json::json!("installed"))
+    );
+    second_page
+        .run_async_command(RendererPageCommand::WaitForScriptTruthy {
+            expression: r#"globalThis.__lm_related_worker_events?.includes("ready")"#.to_owned(),
+            timeout_ms: 2_000,
+            loader: loader.clone(),
+        })
+        .await
+        .expect("related peer should receive its worker ready event");
+
+    let (first_marker, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"globalThis.__lm_related_worker_events ?? "missing""#.to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related source worker marker should evaluate");
+    assert_eq!(
+        renderer_json_value(first_marker),
+        Some(serde_json::json!("missing")),
+        "worker events created by Page B must not enter Page A's realm"
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("related worker admission source should close");
+    let (posted, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression:
+                r#"globalThis.__lm_related_worker.postMessage("after-source-close"); "posted""#
+                    .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("surviving Page should post to its worker");
+    assert_eq!(
+        renderer_json_value(posted),
+        Some(serde_json::json!("posted"))
+    );
+    second_page
+        .run_async_command(RendererPageCommand::WaitForScriptTruthy {
+            expression:
+                r#"globalThis.__lm_related_worker_events?.includes("echo:after-source-close")"#
+                    .to_owned(),
+            timeout_ms: 2_000,
+            loader: loader.clone(),
+        })
+        .await
+        .expect("worker event route should survive admission-source retirement");
+    let (events, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify(globalThis.__lm_related_worker_events)".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("surviving related worker events should evaluate");
+    assert_eq!(
+        renderer_json_value(events),
+        Some(serde_json::json!("[\"ready\",\"echo:after-source-close\"]"))
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("surviving related worker Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_keeps_indexed_db_manager_routes_page_local() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://related-idb.example/app-a").unwrap();
+    let second_url = url::Url::parse("https://related-idb.example/app-b").unwrap();
+    let storage_key =
+        lightmount_storage_key::LightmountStorageKey::first_party_from_url(&first_url, None)
+            .serialized_storage_key();
+    let first_root = runtime_indexed_db_test_root("related-agent-a");
+    let second_root = runtime_indexed_db_test_root("related-agent-b");
+    let first_manager = crate::new_indexed_db_manager(Some(first_root.clone()))
+        .expect("first related indexedDB manager should initialize");
+    let second_manager = crate::new_indexed_db_manager(Some(second_root.clone()))
+        .expect("second related indexedDB manager should initialize");
+    let mut first_page = create_test_html_page_with_indexed_db_manager(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related indexedDB first</body>",
+        &first_manager,
+    )
+    .await;
+    let mut second_page =
+        create_related_test_html_page_with_indexed_db_manager_for_script_agent_experiment(
+            &runtime,
+            &first_page,
+            &loader,
+            second_url,
+            "<!doctype html><body>related indexedDB second</body>",
+            &second_manager,
+        )
+        .await;
+
+    let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
+    assert_eq!(
+        second_testing
+            .host_unique_document_isolate_count_async()
+            .await
+            .expect("related indexedDB Pages should share one isolate"),
+        1
+    );
+    store_indexed_db_value_for_test(&first_page, &loader, "first-related").await;
+    store_indexed_db_value_for_test(&second_page, &loader, "second-related").await;
+    assert!(
+        runtime_indexed_db_origin_file(&first_root, &storage_key).exists(),
+        "Page A must write through its own injected indexedDB manager"
+    );
+    assert!(
+        runtime_indexed_db_origin_file(&second_root, &storage_key).exists(),
+        "Page B must write through its own injected indexedDB manager"
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("related indexedDB source Page should close");
+    store_indexed_db_value_for_test(&second_page, &loader, "second-after-source-close").await;
+    second_page
+        .close_async()
+        .await
+        .expect("surviving related indexedDB Page should close");
+    let _ = std::fs::remove_dir_all(first_root);
+    let _ = std::fs::remove_dir_all(second_root);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_survives_non_lifo_member_churn() {
+    let runtime = JsRuntime::initialize();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-churn-a").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-churn-b").unwrap();
+    let third_url = url::Url::parse("https://example.test/related-churn-c").unwrap();
+    let fourth_url = url::Url::parse("https://example.test/related-churn-d").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related churn first</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related churn second</body>",
+    )
+    .await;
+    let mut third_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &second_page,
+        &loader,
+        third_url,
+        "<!doctype html><body>related churn third</body>",
+    )
+    .await;
+
+    let third_testing = RendererPageTestingHandle::new_for_testing(&third_page);
+    assert_eq!(
+        third_testing
+            .host_unique_document_isolate_count_async()
+            .await
+            .expect("three related Pages should expose one unique isolate"),
+        1
+    );
+    let three_member_heap = runtime_heap_usage_for_test(&third_page).await;
+    assert_eq!(
+        three_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(3)
+    );
+    let three_member_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(
+        three_member_accounting.created,
+        baseline_isolates.created + 1
+    );
+    assert_eq!(three_member_accounting.live, baseline_isolates.live + 1);
+    assert_eq!(
+        three_member_accounting.reserved, baseline_isolates.reserved,
+        "committed related Pages must not retain prepared-isolate reservations"
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("middle related Page should close first");
+    let after_middle_close = runtime_heap_usage_for_test(&third_page).await;
+    assert_eq!(
+        after_middle_close["lightmount"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(2),
+        "non-LIFO retirement must remove only the middle Page route"
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("original admission source should close second");
+    let after_source_close = runtime_heap_usage_for_test(&third_page).await;
+    assert_eq!(
+        after_source_close["lightmount"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(1)
+    );
+
+    let mut fourth_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &third_page,
+        &loader,
+        fourth_url,
+        "<!doctype html><body>related churn fourth</body>",
+    )
+    .await;
+    let fourth_testing = RendererPageTestingHandle::new_for_testing(&fourth_page);
+    assert_eq!(
+        fourth_testing
+            .host_unique_document_isolate_count_async()
+            .await
+            .expect("replacement related member should reuse the surviving isolate"),
+        1
+    );
+    let replacement_member_heap = runtime_heap_usage_for_test(&fourth_page).await;
+    assert_eq!(
+        replacement_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(2)
+    );
+    let replacement_member_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(
+        replacement_member_accounting.created,
+        baseline_isolates.created + 1,
+        "admitting through the surviving Page must not allocate another isolate"
+    );
+
+    third_page
+        .close_async()
+        .await
+        .expect("last original related Page should close");
+    let (surviving_result, _) = fourth_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"Promise.resolve("survived-non-lifo-churn")"#.to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("replacement member should survive all earlier members");
+    assert_eq!(
+        renderer_json_value(surviving_result),
+        Some(serde_json::json!("survived-non-lifo-churn"))
+    );
+    let final_member_heap = runtime_heap_usage_for_test(&fourth_page).await;
+    assert_eq!(
+        final_member_heap["lightmount"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(1)
+    );
+
+    fourth_page
+        .close_async()
+        .await
+        .expect("final related Page should close");
+    let final_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(final_accounting.live, baseline_isolates.live);
+    assert_eq!(final_accounting.reserved, baseline_isolates.reserved);
+    assert_eq!(final_accounting.destroyed, baseline_isolates.destroyed + 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
+    let runtime = JsRuntime::initialize();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let anchor_url = url::Url::parse("https://example.test/related-realm-anchor").unwrap();
+    let mut anchor_page = create_test_html_page(
+        &runtime,
+        &loader,
+        anchor_url,
+        "<!doctype html><body>related realm anchor</body>",
+    )
+    .await;
+    let anchor_heap = runtime_heap_usage_for_test(&anchor_page).await;
+    let anchor_native_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfNativeContexts"]);
+    let anchor_detached_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfDetachedContexts"]);
+    let script_agent_id =
+        related_script_agent_memory_u64(&anchor_heap, &["lightmount", "runtime", "scriptAgentId"]);
+
+    for iteration in 1..=3 {
+        let peer_url = url::Url::parse(&format!(
+            "https://example.test/related-realm-peer/{iteration}"
+        ))
+        .unwrap();
+        let mut peer_page = create_related_test_html_page_for_script_agent_experiment(
+            &runtime,
+            &anchor_page,
+            &loader,
+            peer_url,
+            "<!doctype html><body><main>related realm peer</main></body>",
+        )
+        .await;
+        let active_heap = runtime_heap_usage_for_test(&peer_page).await;
+        assert_eq!(
+            related_script_agent_memory_u64(&active_heap, &["numberOfNativeContexts"]),
+            anchor_native_contexts + 1,
+            "iteration {iteration} should add exactly one live peer realm"
+        );
+        assert_eq!(
+            related_script_agent_memory_u64(
+                &active_heap,
+                &["lightmount", "runtime", "scriptAgentId"]
+            ),
+            script_agent_id
+        );
+
+        let replacement_url = format!(
+            "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cbody%3Erelated-realm-peer-{iteration}-replacement%3C/body%3E"
+        );
+        peer_page
+            .run_async_command(
+                RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                    expression: format!("location.href = {replacement_url:?}; 'navigating'"),
+                    await_promise: false,
+                },
+            )
+            .await
+            .expect("related peer replacement navigation should complete");
+        peer_page
+            .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+            .await
+            .expect("related peer replacement should collect its retired realm");
+        let post_navigation_heap = runtime_heap_usage_for_test(&peer_page).await;
+        assert_eq!(
+            related_script_agent_memory_u64(&post_navigation_heap, &["numberOfNativeContexts"]),
+            anchor_native_contexts + 1,
+            "iteration {iteration} must replace rather than accumulate peer realms"
+        );
+        assert_eq!(
+            related_script_agent_memory_u64(&post_navigation_heap, &["numberOfDetachedContexts"]),
+            anchor_detached_contexts,
+            "iteration {iteration} must release the retired peer realm after GC"
+        );
+
+        peer_page
+            .close_async()
+            .await
+            .expect("related realm peer should close");
+        drop(peer_page);
+        anchor_page
+            .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+            .await
+            .expect("surviving related Page should collect the closed peer realm");
+        let post_close_heap = runtime_heap_usage_for_test(&anchor_page).await;
+        assert_eq!(
+            related_script_agent_memory_u64(&post_close_heap, &["numberOfNativeContexts"]),
+            anchor_native_contexts,
+            "iteration {iteration} must return to the anchor native-context baseline"
+        );
+        assert_eq!(
+            related_script_agent_memory_u64(&post_close_heap, &["numberOfDetachedContexts"]),
+            anchor_detached_contexts,
+            "iteration {iteration} must return to the anchor detached-context baseline"
+        );
+        assert_eq!(
+            related_script_agent_memory_u64(
+                &post_close_heap,
+                &["lightmount", "runtime", "scriptAgentPageCount"]
+            ),
+            1
+        );
+        assert_eq!(
+            related_script_agent_memory_u64(
+                &post_close_heap,
+                &[
+                    "lightmount",
+                    "runtime",
+                    "inspectorDefaultContextRegistryCount",
+                ]
+            ),
+            1
+        );
+    }
+
+    anchor_page
+        .close_async()
+        .await
+        .expect("related realm anchor should close");
+    let final_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(final_accounting.created, baseline_isolates.created + 1);
+    assert_eq!(final_accounting.destroyed, baseline_isolates.destroyed + 1);
+    assert_eq!(final_accounting.live, baseline_isolates.live);
+    assert_eq!(final_accounting.reserved, baseline_isolates.reserved);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "release-only selective related-agent memory acceptance"]
+async fn related_page_script_agent_release_memory_acceptance() {
+    let configuration = RelatedScriptAgentMemoryConfiguration::from_environment();
+    let started_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock should follow the Unix epoch")
+        .as_millis() as u64;
+    let started = Instant::now();
+    let runtime = JsRuntime::initialize();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let loader = ResourceRequestClient::new(&lightmount_fetch::FetchConfig::default())
+        .expect("default loader");
+    let anchor_url = url::Url::parse("https://example.test/related-memory-anchor").unwrap();
+    let mut anchor_page = create_test_html_page(
+        &runtime,
+        &loader,
+        anchor_url,
+        "<!doctype html><body>related memory anchor</body>",
+    )
+    .await;
+    let anchor_heap = runtime_heap_usage_for_test(&anchor_page).await;
+    let script_agent_id =
+        related_script_agent_memory_u64(&anchor_heap, &["lightmount", "runtime", "scriptAgentId"]);
+    let anchor_native_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfNativeContexts"]);
+    let anchor_detached_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfDetachedContexts"]);
+    let anchor_used_global_handles_bytes =
+        related_script_agent_memory_u64(&anchor_heap, &["usedGlobalHandlesSize"]);
+    assert_eq!(
+        related_script_agent_memory_u64(
+            &anchor_heap,
+            &[
+                "lightmount",
+                "runtime",
+                "inspectorDefaultContextRegistryCount",
+            ],
+        ),
+        1
+    );
+    let mut active_samples = Vec::with_capacity(configuration.iterations);
+    let mut post_close_samples = Vec::with_capacity(configuration.iterations);
+    let mut post_navigation_samples =
+        Vec::with_capacity(configuration.iterations / configuration.peer_navigation_every);
+
+    for iteration in 1..=configuration.iterations {
+        let peer_url = url::Url::parse(&format!(
+            "https://example.test/related-memory-peer/{iteration}"
+        ))
+        .expect("related memory peer url");
+        let html = related_script_agent_memory_payload_html(iteration, &configuration);
+        let mut peer_page = create_related_test_html_page_for_script_agent_experiment(
+            &runtime,
+            &anchor_page,
+            &loader,
+            peer_url,
+            &html,
+        )
+        .await;
+        let peer_testing = RendererPageTestingHandle::new_for_testing(&peer_page);
+        assert_eq!(
+            peer_testing
+                .host_unique_document_isolate_count_async()
+                .await
+                .expect("related memory Pages should expose one unique isolate"),
+            1,
+            "iteration {iteration} must reuse the anchor script agent isolate"
+        );
+        drop(peer_testing);
+        let expected_payload = format!(
+            "{}:{}:{}",
+            configuration.payload_objects, configuration.dom_nodes, configuration.promises
+        );
+        let (payload, _) = peer_page
+            .run_async_command(RendererPageCommand::EvaluateExpression {
+                expression: "globalThis.__lm_related_memory_payload".to_owned(),
+                await_promise: false,
+            })
+            .await
+            .expect("related memory payload should be observable");
+        assert_eq!(
+            renderer_json_value(payload),
+            Some(serde_json::json!(expected_payload)),
+            "iteration {iteration} must execute the complete allocation payload"
+        );
+
+        let active = related_script_agent_memory_sample(
+            &peer_page,
+            iteration,
+            "active-related-page",
+            started,
+        )
+        .await;
+        assert_eq!(active.script_agent_id, script_agent_id);
+        assert_eq!(active.script_agent_page_count, 2);
+        assert_eq!(active.inspector_default_context_registry_count, 2);
+        assert_eq!(active.number_of_native_contexts, anchor_native_contexts + 1);
+        assert_eq!(active.number_of_detached_contexts, anchor_detached_contexts);
+        active_samples.push(active);
+
+        if iteration % configuration.peer_navigation_every == 0 {
+            let replacement_url = format!(
+                "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Cbody%3Erelated-memory-peer-{iteration}-replacement%3C/body%3E"
+            );
+            peer_page
+                .run_async_command(
+                    RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                        expression: format!("location.href = {replacement_url:?}; 'navigating'"),
+                        await_promise: false,
+                    },
+                )
+                .await
+                .expect("memory peer replacement navigation should complete");
+            peer_page
+                .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+                .await
+                .expect("replacement peer should collect its retired context");
+            let post_navigation = related_script_agent_memory_sample(
+                &peer_page,
+                iteration,
+                "active-related-page-after-navigation-gc",
+                started,
+            )
+            .await;
+            assert_eq!(post_navigation.script_agent_id, script_agent_id);
+            assert_eq!(post_navigation.script_agent_page_count, 2);
+            assert_eq!(post_navigation.inspector_default_context_registry_count, 2);
+            assert_eq!(
+                post_navigation.number_of_native_contexts,
+                anchor_native_contexts + 1,
+                "replacement navigation GC must leave exactly one live peer context"
+            );
+            assert_eq!(
+                post_navigation.number_of_detached_contexts, anchor_detached_contexts,
+                "replacement navigation GC must release the retired peer context"
+            );
+            post_navigation_samples.push(post_navigation);
+        }
+
+        peer_page
+            .close_async()
+            .await
+            .expect("related memory peer should close");
+        drop(peer_page);
+        anchor_page
+            .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+            .await
+            .expect("surviving agent should collect unreachable peer state");
+        let post_close =
+            related_script_agent_memory_sample(&anchor_page, iteration, "post-close-gc", started)
+                .await;
+        assert_eq!(post_close.script_agent_id, script_agent_id);
+        assert_eq!(post_close.script_agent_page_count, 1);
+        assert_eq!(post_close.inspector_default_context_registry_count, 1);
+        assert_eq!(
+            post_close.number_of_native_contexts, anchor_native_contexts,
+            "peer retirement GC must return to the anchor native-context baseline"
+        );
+        assert_eq!(
+            post_close.number_of_detached_contexts, anchor_detached_contexts,
+            "peer retirement GC must return to the anchor detached-context baseline"
+        );
+        let iteration_accounting = runtime.document_isolate_accounting_for_diagnostics();
+        assert_eq!(iteration_accounting.created, baseline_isolates.created + 1);
+        assert_eq!(iteration_accounting.live, baseline_isolates.live + 1);
+        assert_eq!(iteration_accounting.reserved, baseline_isolates.reserved);
+        post_close_samples.push(post_close);
+    }
+
+    let pre_final_close_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    anchor_page
+        .close_async()
+        .await
+        .expect("related memory anchor should close");
+    let final_accounting = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(final_accounting.created, baseline_isolates.created + 1);
+    assert_eq!(final_accounting.destroyed, baseline_isolates.destroyed + 1);
+    assert_eq!(final_accounting.live, baseline_isolates.live);
+    assert_eq!(final_accounting.reserved, baseline_isolates.reserved);
+    let summary = RelatedScriptAgentMemorySummary::from_samples(
+        &active_samples,
+        &post_close_samples,
+        &post_navigation_samples,
+        configuration.enforce_memory_thresholds(),
+    );
+    let artifact = serde_json::json!({
+        "schemaVersion": 1,
+        "workload": "selective-related-page-script-agent",
+        "startedAtUnixMs": started_at_unix_ms,
+        "elapsedMs": started.elapsed().as_millis() as u64,
+        "profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+        "executable": std::env::current_exe()
+            .expect("test executable path")
+            .display()
+            .to_string(),
+        "sourceCommit": std::env::var("LIGHTMOUNT_RELATED_AGENT_MEMORY_COMMIT")
+            .unwrap_or_else(|_| "unknown".to_owned()),
+        "configuration": configuration,
+        "anchorRealmBaseline": {
+            "numberOfNativeContexts": anchor_native_contexts,
+            "numberOfDetachedContexts": anchor_detached_contexts,
+            "usedGlobalHandlesBytes": anchor_used_global_handles_bytes,
+        },
+        "baselineIsolateAccounting": related_script_agent_memory_accounting_json(baseline_isolates),
+        "preFinalCloseIsolateAccounting": related_script_agent_memory_accounting_json(
+            pre_final_close_accounting,
+        ),
+        "finalIsolateAccounting": related_script_agent_memory_accounting_json(final_accounting),
+        "summary": summary,
+        "activeSamples": active_samples,
+        "postCloseSamples": post_close_samples,
+        "postNavigationSamples": post_navigation_samples,
+        "finalProcessMemory": related_script_agent_process_memory_sample(),
+    });
+    if let Some(parent) = configuration.output_path.parent() {
+        std::fs::create_dir_all(parent).expect("related memory artifact directory should create");
+    }
+    std::fs::write(
+        &configuration.output_path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&artifact)
+                .expect("related memory artifact should serialize")
+        ),
+    )
+    .expect("related memory artifact should write");
+
+    assert!(
+        summary.used_heap_slope_passed,
+        "warm-half post-close used-heap slope {:.6} MiB/iteration exceeded {:.6}; artifact: {}",
+        summary.warm_half_post_close_used_heap_slope_mib_per_iteration,
+        RELATED_SCRIPT_AGENT_MAX_USED_HEAP_SLOPE_MIB_PER_ITERATION,
+        configuration.output_path.display()
+    );
+    assert!(
+        summary.rss_slope_passed,
+        "warm-half post-close RSS slope {:.6} MiB/iteration exceeded {:.6}; artifact: {}",
+        summary.warm_half_post_close_rss_slope_mib_per_iteration,
+        RELATED_SCRIPT_AGENT_MAX_RSS_SLOPE_MIB_PER_ITERATION,
+        configuration.output_path.display()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -6092,6 +7526,19 @@ async fn per_page_isolate_policy_reuses_navigation_isolate_and_replaces_contexts
     assert_window_performance_surface_for_test(&navigated_page, "old document").await;
     let old_heap = runtime_heap_usage_for_test(&navigated_page).await;
     let old_runtime = &old_heap["moli"]["runtime"];
+    let old_script_agent_id = old_runtime["scriptAgentId"]
+        .as_u64()
+        .expect("old document should expose a script-agent id");
+    assert_eq!(
+        old_runtime["scriptAgentScope"],
+        serde_json::json!("page-script-environment"),
+        "navigation should start in the current Page-scoped agent policy: {old_heap:?}"
+    );
+    assert_eq!(
+        old_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "navigation should start with exactly one Page in its agent"
+    );
     let old_context_group_id = old_runtime["inspectorContextGroupId"]
         .as_i64()
         .expect("old document should expose inspector context group id");
@@ -6196,6 +7643,16 @@ async fn per_page_isolate_policy_reuses_navigation_isolate_and_replaces_contexts
     assert_window_performance_surface_for_test(&navigated_page, "replacement document").await;
     let new_heap = runtime_heap_usage_for_test(&navigated_page).await;
     let new_runtime = &new_heap["moli"]["runtime"];
+    assert_eq!(
+        new_runtime["scriptAgentId"],
+        serde_json::json!(old_script_agent_id),
+        "same-Page cross-document navigation must retain its script agent"
+    );
+    assert_eq!(
+        new_runtime["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "same-Page navigation must not create a second agent membership"
+    );
     assert_eq!(
         new_runtime["inspectorSessionRegistryOwner"],
         serde_json::json!("renderer-devtools-agent"),
@@ -17269,6 +18726,387 @@ async fn assert_window_performance_surface_for_test(page: &RendererPageHandle, p
     );
 }
 
+const RELATED_SCRIPT_AGENT_MAX_USED_HEAP_SLOPE_MIB_PER_ITERATION: f64 = 0.02;
+const RELATED_SCRIPT_AGENT_MAX_RSS_SLOPE_MIB_PER_ITERATION: f64 = 0.20;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedScriptAgentMemoryConfiguration {
+    iterations: usize,
+    peer_navigation_every: usize,
+    payload_objects: usize,
+    dom_nodes: usize,
+    promises: usize,
+    output_path: std::path::PathBuf,
+}
+
+impl RelatedScriptAgentMemoryConfiguration {
+    fn from_environment() -> Self {
+        let iterations = related_script_agent_memory_environment_usize(
+            "LIGHTMOUNT_RELATED_AGENT_MEMORY_ITERATIONS",
+            120,
+        );
+        assert!(
+            iterations >= 4,
+            "LIGHTMOUNT_RELATED_AGENT_MEMORY_ITERATIONS must be at least 4"
+        );
+        let peer_navigation_every = related_script_agent_memory_environment_usize(
+            "LIGHTMOUNT_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY",
+            12,
+        );
+        assert!(
+            peer_navigation_every > 0,
+            "LIGHTMOUNT_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY must be positive"
+        );
+        let output_path = std::env::var_os("LIGHTMOUNT_RELATED_AGENT_MEMORY_OUTPUT")
+            .map(std::path::PathBuf::from)
+            .expect("LIGHTMOUNT_RELATED_AGENT_MEMORY_OUTPUT is required for the ignored test");
+        Self {
+            iterations,
+            peer_navigation_every,
+            payload_objects: related_script_agent_memory_environment_usize(
+                "LIGHTMOUNT_RELATED_AGENT_MEMORY_PAYLOAD_OBJECTS",
+                24_000,
+            ),
+            dom_nodes: related_script_agent_memory_environment_usize(
+                "LIGHTMOUNT_RELATED_AGENT_MEMORY_DOM_NODES",
+                4_000,
+            ),
+            promises: related_script_agent_memory_environment_usize(
+                "LIGHTMOUNT_RELATED_AGENT_MEMORY_PROMISES",
+                1_000,
+            ),
+            output_path,
+        }
+    }
+
+    fn enforce_memory_thresholds(&self) -> bool {
+        !cfg!(debug_assertions) && self.iterations >= 60
+    }
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedScriptAgentProcessMemorySample {
+    vm_rss_kib: u64,
+    rss_anon_kib: u64,
+    rss_file_kib: u64,
+    vm_data_kib: u64,
+    vm_swap_kib: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedScriptAgentMemorySample {
+    iteration: usize,
+    phase: &'static str,
+    elapsed_ms: u64,
+    process: RelatedScriptAgentProcessMemorySample,
+    used_heap_bytes: u64,
+    total_heap_bytes: u64,
+    total_physical_bytes: u64,
+    external_memory_bytes: u64,
+    total_global_handles_bytes: u64,
+    used_global_handles_bytes: u64,
+    number_of_native_contexts: u64,
+    number_of_detached_contexts: u64,
+    script_agent_id: u64,
+    script_agent_page_count: u64,
+    inspector_default_context_registry_count: u64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RelatedScriptAgentMemorySummary {
+    thresholds_enforced: bool,
+    maximum_used_heap_slope_mib_per_iteration: f64,
+    maximum_rss_slope_mib_per_iteration: f64,
+    used_heap_slope_passed: bool,
+    rss_slope_passed: bool,
+    warm_half_post_close_used_heap_slope_mib_per_iteration: f64,
+    warm_half_post_close_rss_slope_mib_per_iteration: f64,
+    first_to_last_window_post_close_used_heap_delta_mib: f64,
+    first_to_last_window_post_close_rss_delta_mib: f64,
+    peak_active_used_heap_mib: f64,
+    peak_active_rss_mib: f64,
+    final_post_close_used_heap_mib: f64,
+    final_post_close_rss_mib: f64,
+    maximum_active_detached_contexts: u64,
+    maximum_post_close_detached_contexts: u64,
+    post_navigation_sample_count: usize,
+    maximum_post_navigation_detached_contexts: u64,
+    peak_post_navigation_used_heap_mib: Option<f64>,
+    peak_post_navigation_rss_mib: Option<f64>,
+}
+
+impl RelatedScriptAgentMemorySummary {
+    fn from_samples(
+        active_samples: &[RelatedScriptAgentMemorySample],
+        post_close_samples: &[RelatedScriptAgentMemorySample],
+        post_navigation_samples: &[RelatedScriptAgentMemorySample],
+        thresholds_enforced: bool,
+    ) -> Self {
+        assert_eq!(active_samples.len(), post_close_samples.len());
+        assert!(post_close_samples.len() >= 4);
+        let active_used_heap_mib = active_samples
+            .iter()
+            .map(|sample| sample.used_heap_bytes as f64 / 1_048_576.0)
+            .collect::<Vec<_>>();
+        let active_rss_mib = active_samples
+            .iter()
+            .map(|sample| sample.process.vm_rss_kib as f64 / 1_024.0)
+            .collect::<Vec<_>>();
+        let post_close_used_heap_mib = post_close_samples
+            .iter()
+            .map(|sample| sample.used_heap_bytes as f64 / 1_048_576.0)
+            .collect::<Vec<_>>();
+        let post_close_rss_mib = post_close_samples
+            .iter()
+            .map(|sample| sample.process.vm_rss_kib as f64 / 1_024.0)
+            .collect::<Vec<_>>();
+        let warm_start = post_close_samples.len() / 2;
+        let used_heap_slope =
+            related_script_agent_memory_linear_slope(&post_close_used_heap_mib[warm_start..]);
+        let rss_slope = related_script_agent_memory_linear_slope(&post_close_rss_mib[warm_start..]);
+        let window = post_close_samples.len().min(10);
+        let used_heap_window_delta =
+            related_script_agent_memory_average(
+                &post_close_used_heap_mib[post_close_used_heap_mib.len() - window..],
+            ) - related_script_agent_memory_average(&post_close_used_heap_mib[..window]);
+        let rss_window_delta =
+            related_script_agent_memory_average(
+                &post_close_rss_mib[post_close_rss_mib.len() - window..],
+            ) - related_script_agent_memory_average(&post_close_rss_mib[..window]);
+        Self {
+            thresholds_enforced,
+            maximum_used_heap_slope_mib_per_iteration:
+                RELATED_SCRIPT_AGENT_MAX_USED_HEAP_SLOPE_MIB_PER_ITERATION,
+            maximum_rss_slope_mib_per_iteration:
+                RELATED_SCRIPT_AGENT_MAX_RSS_SLOPE_MIB_PER_ITERATION,
+            used_heap_slope_passed: !thresholds_enforced
+                || used_heap_slope <= RELATED_SCRIPT_AGENT_MAX_USED_HEAP_SLOPE_MIB_PER_ITERATION,
+            rss_slope_passed: !thresholds_enforced
+                || rss_slope <= RELATED_SCRIPT_AGENT_MAX_RSS_SLOPE_MIB_PER_ITERATION,
+            warm_half_post_close_used_heap_slope_mib_per_iteration: used_heap_slope,
+            warm_half_post_close_rss_slope_mib_per_iteration: rss_slope,
+            first_to_last_window_post_close_used_heap_delta_mib: used_heap_window_delta,
+            first_to_last_window_post_close_rss_delta_mib: rss_window_delta,
+            peak_active_used_heap_mib: active_used_heap_mib
+                .into_iter()
+                .reduce(f64::max)
+                .expect("active memory samples"),
+            peak_active_rss_mib: active_rss_mib
+                .into_iter()
+                .reduce(f64::max)
+                .expect("active RSS samples"),
+            final_post_close_used_heap_mib: *post_close_used_heap_mib
+                .last()
+                .expect("post-close memory samples"),
+            final_post_close_rss_mib: *post_close_rss_mib.last().expect("post-close RSS samples"),
+            maximum_active_detached_contexts: active_samples
+                .iter()
+                .map(|sample| sample.number_of_detached_contexts)
+                .max()
+                .expect("active memory samples"),
+            maximum_post_close_detached_contexts: post_close_samples
+                .iter()
+                .map(|sample| sample.number_of_detached_contexts)
+                .max()
+                .expect("post-close memory samples"),
+            post_navigation_sample_count: post_navigation_samples.len(),
+            maximum_post_navigation_detached_contexts: post_navigation_samples
+                .iter()
+                .map(|sample| sample.number_of_detached_contexts)
+                .max()
+                .unwrap_or(0),
+            peak_post_navigation_used_heap_mib: post_navigation_samples
+                .iter()
+                .map(|sample| sample.used_heap_bytes as f64 / 1_048_576.0)
+                .reduce(f64::max),
+            peak_post_navigation_rss_mib: post_navigation_samples
+                .iter()
+                .map(|sample| sample.process.vm_rss_kib as f64 / 1_024.0)
+                .reduce(f64::max),
+        }
+    }
+}
+
+async fn related_script_agent_memory_sample(
+    page: &RendererPageHandle,
+    iteration: usize,
+    phase: &'static str,
+    started: Instant,
+) -> RelatedScriptAgentMemorySample {
+    let heap = runtime_heap_usage_for_test(page).await;
+    RelatedScriptAgentMemorySample {
+        iteration,
+        phase,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        process: related_script_agent_process_memory_sample(),
+        used_heap_bytes: related_script_agent_memory_u64(&heap, &["usedSize"]),
+        total_heap_bytes: related_script_agent_memory_u64(&heap, &["totalSize"]),
+        total_physical_bytes: related_script_agent_memory_u64(&heap, &["totalPhysicalSize"]),
+        external_memory_bytes: related_script_agent_memory_u64(&heap, &["externalMemory"]),
+        total_global_handles_bytes: related_script_agent_memory_u64(
+            &heap,
+            &["totalGlobalHandlesSize"],
+        ),
+        used_global_handles_bytes: related_script_agent_memory_u64(
+            &heap,
+            &["usedGlobalHandlesSize"],
+        ),
+        number_of_native_contexts: related_script_agent_memory_u64(
+            &heap,
+            &["numberOfNativeContexts"],
+        ),
+        number_of_detached_contexts: related_script_agent_memory_u64(
+            &heap,
+            &["numberOfDetachedContexts"],
+        ),
+        script_agent_id: related_script_agent_memory_u64(
+            &heap,
+            &["lightmount", "runtime", "scriptAgentId"],
+        ),
+        script_agent_page_count: related_script_agent_memory_u64(
+            &heap,
+            &["lightmount", "runtime", "scriptAgentPageCount"],
+        ),
+        inspector_default_context_registry_count: related_script_agent_memory_u64(
+            &heap,
+            &[
+                "lightmount",
+                "runtime",
+                "inspectorDefaultContextRegistryCount",
+            ],
+        ),
+    }
+}
+
+fn related_script_agent_memory_payload_html(
+    iteration: usize,
+    configuration: &RelatedScriptAgentMemoryConfiguration,
+) -> String {
+    let payload_objects = configuration.payload_objects;
+    let dom_nodes = configuration.dom_nodes;
+    let promises = configuration.promises;
+    format!(
+        r#"<!doctype html>
+<meta charset="utf-8">
+<main id="root"></main>
+<script>
+const marker = "related-memory-{iteration}-";
+globalThis.__retainedPayload = Array.from({{ length: {payload_objects} }}, (_, itemIndex) => ({{
+  itemIndex,
+  text: (marker + itemIndex).padEnd(112, "x"),
+  values: [itemIndex, itemIndex + 1, itemIndex + 2, itemIndex + 3]
+}}));
+const fragment = document.createDocumentFragment();
+for (let nodeIndex = 0; nodeIndex < {dom_nodes}; nodeIndex += 1) {{
+  const row = document.createElement("a");
+  row.className = "row";
+  row.dataset.bucket = String(nodeIndex % 10);
+  row.href = "/item/{iteration}/" + nodeIndex;
+  row.textContent = marker + "node-" + nodeIndex;
+  fragment.appendChild(row);
+}}
+document.getElementById("root").appendChild(fragment);
+globalThis.__resolvedPromises = Array.from({{ length: {promises} }}, (_, promiseIndex) =>
+  Promise.resolve(marker + promiseIndex)
+);
+globalThis.__lm_related_memory_payload = [
+  globalThis.__retainedPayload.length,
+  document.getElementById("root").childNodes.length,
+  globalThis.__resolvedPromises.length
+].join(":");
+</script>"#
+    )
+}
+
+fn related_script_agent_memory_environment_usize(name: &str, default: usize) -> usize {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse::<usize>()
+            .unwrap_or_else(|error| panic!("{name} must be an unsigned integer: {error}")),
+        Err(std::env::VarError::NotPresent) => default,
+        Err(error) => panic!("failed to read {name}: {error}"),
+    }
+}
+
+fn related_script_agent_process_memory_sample() -> RelatedScriptAgentProcessMemorySample {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .expect("Linux procfs status is required for the release memory acceptance test");
+    let status_kib = |name: &str| {
+        status
+            .lines()
+            .find_map(|line| {
+                let (key, value) = line.split_once(':')?;
+                (key == name)
+                    .then(|| value.split_whitespace().next()?.parse::<u64>().ok())
+                    .flatten()
+            })
+            .unwrap_or_else(|| panic!("/proc/self/status should expose {name}"))
+    };
+    RelatedScriptAgentProcessMemorySample {
+        vm_rss_kib: status_kib("VmRSS"),
+        rss_anon_kib: status_kib("RssAnon"),
+        rss_file_kib: status_kib("RssFile"),
+        vm_data_kib: status_kib("VmData"),
+        vm_swap_kib: status_kib("VmSwap"),
+    }
+}
+
+fn related_script_agent_memory_u64(value: &serde_json::Value, path: &[&str]) -> u64 {
+    let mut current = value;
+    for component in path {
+        current = current.get(component).unwrap_or_else(|| {
+            panic!(
+                "related memory diagnostics should expose {}: {value:?}",
+                path.join(".")
+            )
+        });
+    }
+    current.as_u64().unwrap_or_else(|| {
+        panic!(
+            "related memory diagnostics {} should be an unsigned integer: {current:?}",
+            path.join(".")
+        )
+    })
+}
+
+fn related_script_agent_memory_linear_slope(values: &[f64]) -> f64 {
+    assert!(values.len() >= 2);
+    let mean_x = (values.len() - 1) as f64 / 2.0;
+    let mean_y = related_script_agent_memory_average(values);
+    let (numerator, denominator) =
+        values
+            .iter()
+            .enumerate()
+            .fold((0.0, 0.0), |(numerator, denominator), (index, value)| {
+                let centered_x = index as f64 - mean_x;
+                (
+                    numerator + centered_x * (value - mean_y),
+                    denominator + centered_x * centered_x,
+                )
+            });
+    numerator / denominator
+}
+
+fn related_script_agent_memory_average(values: &[f64]) -> f64 {
+    assert!(!values.is_empty());
+    values.iter().sum::<f64>() / values.len() as f64
+}
+
+fn related_script_agent_memory_accounting_json(
+    accounting: super::RendererDocumentIsolateAccountingDiagnostics,
+) -> serde_json::Value {
+    serde_json::json!({
+        "created": accounting.created,
+        "destroyed": accounting.destroyed,
+        "live": accounting.live,
+        "reserved": accounting.reserved,
+    })
+}
+
 async fn runtime_heap_usage_for_test(page: &RendererPageHandle) -> serde_json::Value {
     let (reply, _) = page
         .run_async_command(RendererPageCommand::RuntimeHeapUsage)
@@ -17501,6 +19339,98 @@ async fn create_test_html_page(
     html: &str,
 ) -> RendererPageHandle {
     create_test_html_page_with_optional_indexed_db_manager(runtime, loader, url, html, None).await
+}
+
+async fn create_related_test_html_page_for_script_agent_experiment(
+    runtime: &JsRuntime,
+    source_page: &RendererPageHandle,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    html: &str,
+) -> RendererPageHandle {
+    create_related_test_html_page_with_optional_indexed_db_manager_for_script_agent_experiment(
+        runtime,
+        source_page,
+        loader,
+        url,
+        html,
+        None,
+    )
+    .await
+}
+
+async fn create_related_test_html_page_with_indexed_db_manager_for_script_agent_experiment(
+    runtime: &JsRuntime,
+    source_page: &RendererPageHandle,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    html: &str,
+    indexed_db_manager: &crate::SharedIndexedDbManager,
+) -> RendererPageHandle {
+    create_related_test_html_page_with_optional_indexed_db_manager_for_script_agent_experiment(
+        runtime,
+        source_page,
+        loader,
+        url,
+        html,
+        Some(crate::downgrade_indexed_db_manager(indexed_db_manager)),
+    )
+    .await
+}
+
+async fn create_related_test_html_page_with_optional_indexed_db_manager_for_script_agent_experiment(
+    runtime: &JsRuntime,
+    source_page: &RendererPageHandle,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    html: &str,
+    indexed_db_manager: Option<crate::WeakIndexedDbManager>,
+) -> RendererPageHandle {
+    let reservation = runtime
+        .reserve_related_page_for_creation_experiment(source_page)
+        .expect("related Page reservation should use the source renderer owner");
+    let pending = runtime
+        .start_create_html_page_from_response_with_inspector_session_restores(
+            reservation,
+            url.clone(),
+            url,
+            None,
+            false,
+            0,
+            200,
+            vec![("content-type".to_owned(), "text/html".to_owned())],
+            loader,
+            crate::RendererWebStorageHandles::ephemeral(),
+            html.to_owned(),
+            indexed_db_manager,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            1.0,
+            Default::default(),
+            None,
+            false,
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+            None,
+        )
+        .expect("related test HTML page should start");
+    let (page, _, _, _creation_artifacts, pending_download) = pending
+        .await_ready()
+        .await
+        .expect("related test HTML page should load");
+    assert!(pending_download.is_none());
+    page
 }
 
 async fn create_test_html_page_with_indexed_db_manager(

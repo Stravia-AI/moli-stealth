@@ -1,6 +1,7 @@
 use super::super::{
     LightweightPopupLocalWindowId, OwnerDispatchScope, RuntimeObservableContextToken,
 };
+pub(crate) use crate::browsing_context_model::RealmAccessPolicy as WindowExecutionContextAccessPolicy;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -10,13 +11,6 @@ pub(crate) enum WindowExecutionContextOwner {
         popup_id: u64,
         local_window_id: LightweightPopupLocalWindowId,
     },
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub(crate) enum WindowExecutionContextAccessPolicy {
-    #[default]
-    EnforceWebOrigin,
-    Universal,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
