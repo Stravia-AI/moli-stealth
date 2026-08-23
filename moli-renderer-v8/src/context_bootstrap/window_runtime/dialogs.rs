@@ -162,16 +162,21 @@ pub(crate) fn window_open_callback<'s>(
     }
     let parsed_features = WindowOpenFeatures::parse(&parsed.features);
     let suppress_opener = parsed_features.suppresses_opener();
+    let suppress_referrer = parsed_features.suppresses_referrer();
     let mut creator_policy_container = {
         let host = unsafe { &*host_ptr };
         window_open_entered_policy_container(scope, host)
     };
-    creator_policy_container.document_referrer = if suppress_opener {
+    let entered_document_url = {
+        let host = unsafe { &*host_ptr };
+        window_open_entered_document_url(scope, host)
+    };
+    let initial_document_referrer = if suppress_referrer {
         String::new()
     } else {
-        let host = unsafe { &*host_ptr };
-        window_open_entered_document_url(scope, host).to_string()
+        entered_document_url.to_string()
     };
+    creator_policy_container.document_referrer = initial_document_referrer.clone();
     if url.scheme() == "javascript" {
         let source = crate::native_bridge::javascript_url_csp_source(&url);
         let host = unsafe { &mut *host_ptr };
@@ -181,6 +186,30 @@ pub(crate) fn window_open_callback<'s>(
             return;
         }
     }
+    let navigation_referrer = if suppress_referrer {
+        String::new()
+    } else {
+        moli_fetch::referrer_header_value(
+            &entered_document_url,
+            &url,
+            None,
+            creator_policy_container.referrer_policy.as_deref(),
+        )
+        .unwrap_or_default()
+    };
+    let document_referrer = if suppress_referrer {
+        String::new()
+    } else if moli_url::is_about_blank(&url) {
+        initial_document_referrer.clone()
+    } else {
+        moli_fetch::navigation_referrer_value(
+            &entered_document_url,
+            &url,
+            None,
+            creator_policy_container.referrer_policy.as_deref(),
+        )
+        .unwrap_or_default()
+    };
     let url = url.to_string();
     if let Some(
         target @ (SpecialBrowsingContextTarget::Parent | SpecialBrowsingContextTarget::Top),
@@ -218,6 +247,30 @@ pub(crate) fn window_open_callback<'s>(
         rv.set(v8::null(scope).into());
         return;
     };
+    if suppress_opener
+        && popup_target_can_use_fresh_page_without_local_proxy(&parsed.target_name, &url)
+        && let Some(pending_auxiliary_page) = host.reserve_pending_auxiliary_page(false)
+    {
+        host.record_pending_popup_activation(
+            RendererPendingPopupActivation::window(
+                root_document,
+                source,
+                false,
+                None,
+                url,
+                parsed.target_name,
+            )
+            .with_navigation_referrers(
+                navigation_referrer,
+                initial_document_referrer,
+                document_referrer,
+            )
+            .with_pending_auxiliary_page(Some(pending_auxiliary_page)),
+            Some(window_open_event),
+        );
+        rv.set(v8::null(scope).into());
+        return;
+    }
     let opener = (!suppress_opener).then_some(entered_window);
     let opener_child_handle =
         opener.and_then(|opener| window_open_receiver_child_handle(scope, opener));
@@ -272,6 +325,11 @@ pub(crate) fn window_open_callback<'s>(
                 parsed.target_name,
                 popup_disposition,
             )
+            .with_navigation_referrers(
+                navigation_referrer,
+                initial_document_referrer,
+                document_referrer,
+            )
             .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key)
             .with_pending_auxiliary_page(pending_auxiliary_page),
             window_open_event,
@@ -292,6 +350,11 @@ pub(crate) fn window_open_callback<'s>(
             url,
             parsed.target_name,
             popup_disposition,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
         )
         .with_initial_auxiliary_state(None, None),
         Some(window_open_event),
@@ -381,6 +444,13 @@ fn popup_target_can_use_lightweight_window(target_name: &str, href: &str) -> boo
             || SpecialBrowsingContextTarget::parse(target_name)
                 == Some(SpecialBrowsingContextTarget::Blank)
             || trackable_named_popup_target_name(target_name).is_some())
+}
+
+fn popup_target_can_use_fresh_page_without_local_proxy(target_name: &str, href: &str) -> bool {
+    Url::parse(href).is_ok_and(|url| url.scheme() != "javascript")
+        && (target_name.is_empty()
+            || SpecialBrowsingContextTarget::parse(target_name)
+                == Some(SpecialBrowsingContextTarget::Blank))
 }
 
 fn trackable_named_popup_target_name(target_name: &str) -> Option<&str> {

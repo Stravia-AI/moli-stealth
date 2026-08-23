@@ -1426,6 +1426,269 @@ async fn window_open_hands_off_session_storage_snapshot_and_initial_storage_key(
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy() {
+    #[derive(Clone, Default)]
+    struct RequestObservations {
+        requests: Arc<Mutex<Vec<(String, Option<String>)>>>,
+    }
+
+    async fn document(
+        axum::extract::State(observations): axum::extract::State<RequestObservations>,
+        uri: axum::http::Uri,
+        headers: HeaderMap,
+    ) -> impl IntoResponse {
+        observations.requests.lock().push((
+            uri.path().to_owned(),
+            headers
+                .get("referer")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned),
+        ));
+        (
+            [(CONTENT_TYPE.as_str(), "text/html")],
+            "<!doctype html><main>popup referrer policy</main>",
+        )
+    }
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let observations = RequestObservations::default();
+    let server_observations = observations.clone();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            Router::new()
+                .route("/opener", get(document))
+                .route("/noopener", get(document))
+                .route("/noreferrer", get(document))
+                .route("/implicit-anchor-noopener", get(document))
+                .with_state(server_observations),
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut ctx = TestContext::new();
+    enable_root_target_discovery_for_test(&mut ctx);
+    let mut browser_context = ctx
+        .conn
+        .new_browser_context("BID-popup-referrer-policy".to_owned());
+    browser_context.set_active_target_id("TID-popup-referrer-opener");
+    ctx.conn.browser_context = Some(browser_context);
+    let opener_url = format!("http://{addr}/opener");
+    let page = ctx
+        .conn
+        .load_page_via_runtime_async(&opener_url)
+        .await
+        .expect("popup referrer opener should load");
+    {
+        let browser_context = ctx.conn.browser_context.as_mut().unwrap();
+        browser_context.set_target_url(page.final_url().as_str().to_owned());
+        let _ = browser_context
+            .active_target
+            .runtime_slot
+            .replace_loaded_page(Some(page));
+    }
+    observations.requests.lock().clear();
+    ctx.enable_background_navigation_scheduler_for_test();
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (
+                command_id,
+                destination,
+                source,
+                expected_network_referrer,
+                expected_document_referrer,
+                request_path,
+            ) in [
+                (
+                    12101,
+                    "/noopener",
+                    "window-open-noopener",
+                    Some(opener_url.as_str()),
+                    Some(opener_url.as_str()),
+                    Some("/noopener"),
+                ),
+                (
+                    12102,
+                    "/noreferrer",
+                    "window-open-noreferrer",
+                    None,
+                    None,
+                    Some("/noreferrer"),
+                ),
+                (
+                    12103,
+                    "/implicit-anchor-noopener",
+                    "implicit-anchor-noopener",
+                    Some(opener_url.as_str()),
+                    Some(opener_url.as_str()),
+                    Some("/implicit-anchor-noopener"),
+                ),
+                (
+                    12104,
+                    "about:blank",
+                    "about-blank-noopener",
+                    None,
+                    Some(opener_url.as_str()),
+                    None,
+                ),
+                (
+                    12105,
+                    "about:blank",
+                    "about-blank-noreferrer",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    12106,
+                    "about:blank#fresh-noopener",
+                    "about-blank-fragment-noopener",
+                    None,
+                    Some(opener_url.as_str()),
+                    None,
+                ),
+            ] {
+                ctx.sent.clear();
+                let popup_url = if destination.starts_with('/') {
+                    format!("http://{addr}{destination}")
+                } else {
+                    destination.to_owned()
+                };
+                let expected_origin = if destination.starts_with('/') {
+                    format!("http://{addr}")
+                } else {
+                    "null".to_owned()
+                };
+                let expression = match source {
+                    "window-open-noopener" => {
+                        format!("window.open({popup_url:?}, '_blank', 'noopener') === null")
+                    }
+                    "window-open-noreferrer" => {
+                        format!("window.open({popup_url:?}, '_blank', 'noreferrer') === null")
+                    }
+                    "implicit-anchor-noopener" => format!(
+                        "(() => {{ const link = document.createElement('a'); link.href = {popup_url:?}; link.target = '_blank'; document.body.appendChild(link); link.click(); return true; }})()"
+                    ),
+                    "about-blank-noopener" => {
+                        "window.open('about:blank', '_blank', 'noopener') === null".to_owned()
+                    }
+                    "about-blank-noreferrer" => {
+                        "window.open('about:blank', '_blank', 'noreferrer') === null".to_owned()
+                    }
+                    "about-blank-fragment-noopener" => {
+                        "window.open('about:blank#fresh-noopener', '_blank', 'noopener') === null"
+                            .to_owned()
+                    }
+                    _ => unreachable!("unknown popup source"),
+                };
+                ctx.process_async(json!({
+                    "id": command_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": expression,
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    command_id,
+                    json!({
+                        "result": {
+                            "type": "boolean",
+                            "value": true
+                        }
+                    }),
+                    None,
+                );
+                let popup_target_id = ctx
+                    .sent
+                    .iter()
+                    .find(|message| {
+                        message["method"] == json!("Target.targetCreated")
+                            && message["params"]["targetInfo"]["url"] == json!(popup_url)
+                    })
+                    .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                    .unwrap_or_else(|| panic!("missing {source} popup target: {:?}", ctx.sent))
+                    .to_owned();
+                ctx.wait_until_scheduler_state(
+                    "noopener/noreferrer popup navigation commit",
+                    |conn| {
+                        conn.browser_context_by_id("BID-popup-referrer-policy")
+                            .and_then(|browser_context| {
+                                browser_context.background_target(&popup_target_id)
+                            })
+                            .and_then(|target| target.loaded_page())
+                            .is_some_and(|page| page.final_url().as_str() == popup_url)
+                    },
+                )
+                .await;
+
+                let attach_id = command_id + 1_000;
+                ctx.process_async(json!({
+                    "id": attach_id,
+                    "method": "Target.attachToTarget",
+                    "params": { "targetId": popup_target_id }
+                }))
+                .await;
+                let popup_session_id = take_response_by_id(&mut ctx, attach_id)["result"]
+                    ["sessionId"]
+                    .as_str()
+                    .expect("popup attachment session id")
+                    .to_owned();
+                let inspect_id = command_id + 2_000;
+                ctx.process_async(json!({
+                    "id": inspect_id,
+                    "sessionId": popup_session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "`${document.referrer}|${window.opener === null}|${location.origin}`",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    inspect_id,
+                    json!({
+                        "result": {
+                            "type": "string",
+                            "value": format!(
+                                "{}|true|{}",
+                                expected_document_referrer.unwrap_or_default(),
+                                expected_origin,
+                            )
+                        }
+                    }),
+                    Some(&popup_session_id),
+                );
+
+                if let Some(request_path) = request_path {
+                    let requests = observations.requests.lock();
+                    let matching = requests
+                        .iter()
+                        .filter(|(observed_path, _)| observed_path == request_path)
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        matching.len(),
+                        1,
+                        "{source} must have one real Page navigation and no parallel lightweight loader: {requests:?}"
+                    );
+                    assert_eq!(
+                        matching[0].1.as_deref(),
+                        expected_network_referrer,
+                        "{source} network referrer policy"
+                    );
+                }
+            }
+        })
+        .await;
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn puppeteer_window_open_uses_parent_context_and_reports_opener() {
     let mut ctx = TestContext::new();
     load_bc_with_titled_page_async(

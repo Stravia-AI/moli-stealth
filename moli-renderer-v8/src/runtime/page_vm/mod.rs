@@ -1064,6 +1064,7 @@ async fn execute_page_owned_work_on_script_execution_lane(
 pub(crate) struct PageVmEnvConfig {
     pub(crate) root_frame_id: Option<String>,
     pub(crate) main_document_commit: Option<super::RendererMainDocumentCommit>,
+    pub(crate) initial_document_referrer: Option<String>,
     pub(crate) top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
     pub(crate) web_storage: crate::RendererWebStorageHandles,
     pub(crate) document_start_scripts: Vec<DocumentStartScript>,
@@ -1133,6 +1134,7 @@ impl PageVmEnvConfig {
         Self {
             root_frame_id: None,
             main_document_commit: None,
+            initial_document_referrer: None,
             top_level_storage_key: Some(top_level_storage_key),
             web_storage,
             document_start_scripts: Vec::new(),
@@ -1785,6 +1787,9 @@ impl Drop for PageVm {
         // Stop accepting foreground work before dropping tasks that V8 had
         // already transferred to this PageVm. The isolate remains alive until
         // its ScriptVm and owner pin finish teardown below.
+        if let Err(error) = vm.disconnect_top_level_browsing_context_for_page_close() {
+            tracing::error!(%error, "failed to disconnect final top-level browsing context");
+        }
         vm.unregister_document_isolate_platform_for_context_teardown();
         self.page_task_queue.clear_document_owned_tasks();
 
@@ -1919,8 +1924,15 @@ impl PageVm {
         let Some(vm) = self.vm.as_mut() else {
             return;
         };
+        if let Err(error) = vm.disconnect_top_level_browsing_context_for_page_close() {
+            tracing::error!(%error, "failed to disconnect final top-level browsing context");
+        }
         vm.detach_default_inspector_context_for_context_teardown();
         vm.close_page_context_resources_for_context_teardown();
+    }
+
+    pub(super) fn top_level_browsing_context_is_closed(&self) -> bool {
+        self.vm().top_level_browsing_context_is_closed()
     }
 
     pub(super) fn take_page_creation_artifacts(&self) -> RendererPageCreationArtifacts {
@@ -4389,6 +4401,7 @@ impl PageVm {
             backend_node_registry.clone(),
             env.root_frame_id.clone(),
             env.main_document_commit.clone(),
+            env.initial_document_referrer.clone(),
             env.top_level_storage_key.clone(),
             env.reserved_service_worker_client_id,
         )?;

@@ -30,6 +30,7 @@ pub(in crate::domains) enum ProtocolOutputResponseOrder {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::domains) enum ProtocolOutputSlot {
     PendingSubresourceContinueEvents,
+    TopLevelClose,
     TopLevelLocationNavigation,
     TopLevelHistoryTraversal,
     FileChooser,
@@ -63,6 +64,7 @@ impl ProtocolOutputSlot {
     pub(in crate::domains::activity) const fn delivery(self) -> ProtocolOutputDelivery {
         match self {
             Self::PendingSubresourceContinueEvents
+            | Self::TopLevelClose
             | Self::FileChooser
             | Self::Download
             | Self::JavascriptDialog
@@ -97,7 +99,8 @@ impl ProtocolOutputSlot {
         self,
     ) -> ProtocolOutputResponseOrder {
         match self {
-            Self::TopLevelLocationNavigation
+            Self::TopLevelClose
+            | Self::TopLevelLocationNavigation
             | Self::TopLevelHistoryTraversal
             | Self::Download
             | Self::SharedWorkerTargetLifecycle
@@ -221,6 +224,7 @@ impl ProtocolOutputSlot {
                     .await;
                 }
                 Self::Download
+                | Self::TopLevelClose
                 | Self::FileChooser
                 | Self::JavascriptDialog
                 | Self::WindowOpen
@@ -271,6 +275,7 @@ mod tests {
                 OwnerAction,
                 BeforeResponse,
             ),
+            (TopLevelClose, OwnerAction, AfterResponse),
             (TopLevelLocationNavigation, OwnerAction, AfterResponse),
             (TopLevelHistoryTraversal, OwnerAction, AfterResponse),
             (FileChooser, OwnerAction, BeforeResponse),

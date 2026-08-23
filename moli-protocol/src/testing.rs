@@ -1791,11 +1791,17 @@ impl TestContext {
                 .pending_protocol_scheduler_work
                 .remove(selected_index)
                 .expect("ready protocol work must remain resident");
-            let (events, scheduler_events) = self
+            let (events, scheduler_events, renderer_output_predecessor) = self
                 .conn
                 .complete_ready_protocol_scheduler_work_turn(protocol_work)
                 .await
                 .into_protocol_event_parts();
+            if let Some(predecessor) = renderer_output_predecessor {
+                Box::pin(
+                    self.route_renderer_output_predecessor_before_command_response(predecessor),
+                )
+                .await;
+            }
             if !events.is_empty() {
                 work.push_back(TestSchedulerWork::ProtocolEvents(events));
             }
@@ -2160,10 +2166,14 @@ async fn drain_scheduler_events_like_scheduler_with_materializer(
             protocol_work.is_ready(),
             "the stateless compatibility materializer cannot own pending protocol work; use TestContext or the production CdpScheduler"
         );
-        let (events, nested_scheduler_events) = conn
+        let (events, nested_scheduler_events, renderer_output_predecessor) = conn
             .complete_ready_protocol_scheduler_work_turn(protocol_work)
             .await
             .into_protocol_event_parts();
+        assert!(
+            renderer_output_predecessor.is_none(),
+            "the stateless compatibility materializer cannot project a renderer-owner predecessor; use TestContext or the production CdpScheduler"
+        );
         out.extend(events.into_iter().map(materialize_event));
         enqueue_scheduler_events_like_scheduler(&mut queue, nested_scheduler_events);
         enqueue_scheduler_events_like_scheduler(&mut queue, conn.take_scheduler_events());

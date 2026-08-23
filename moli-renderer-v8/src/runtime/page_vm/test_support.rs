@@ -646,6 +646,7 @@ fn minimal_test_page_vm_env_config() -> PageVmEnvConfig {
         web_storage: crate::RendererWebStorageHandles::ephemeral(),
         root_frame_id: None,
         main_document_commit: None,
+        initial_document_referrer: None,
         top_level_storage_key: None,
         document_start_scripts: Vec::new(),
         runtime_bindings: Vec::new(),

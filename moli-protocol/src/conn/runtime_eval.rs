@@ -7999,7 +7999,11 @@ mod tests {
             work.bidi_channel_owner_action_kind(),
             Some(BidiChannelOwnerActionKind::ReleaseObjectGroup)
         );
-        conn.complete_ready_protocol_scheduler_work_turn(work).await;
+        let (_, _, renderer_output_predecessor) = conn
+            .complete_ready_protocol_scheduler_work_turn(work)
+            .await
+            .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(
             conn.runtime_remote_object_group_for_session_owner(
                 Some("SID-active"),
@@ -8043,7 +8047,11 @@ mod tests {
             "webdriver-bidi-channel-stale-release",
         );
 
-        conn.complete_ready_protocol_scheduler_work_turn(work).await;
+        let (_, _, renderer_output_predecessor) = conn
+            .complete_ready_protocol_scheduler_work_turn(work)
+            .await
+            .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
 
         assert_eq!(
             conn.runtime_remote_object_group_for_session_owner(

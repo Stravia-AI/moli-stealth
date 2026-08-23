@@ -1169,6 +1169,7 @@ impl PageVm {
     fn followed_location_navigation_env(&self) -> PageVmEnvConfig {
         PageVmEnvConfig {
             main_document_commit: None,
+            initial_document_referrer: None,
             web_storage: self.vm().web_storage_handles(),
             document_start_scripts: self.document_start_scripts.clone(),
             runtime_bindings: self.runtime_bindings.clone(),

@@ -1,4 +1,4 @@
-use super::{CdpConnection, CdpTurnOutcome};
+use super::{CdpConnection, CdpRendererOwnerTurnOutcome, CdpTurnOutcome};
 use crate::domains::activity::{
     ReadyProtocolSchedulerWork, RuntimeCommandOutputBarrierCompletion,
     RuntimeCommandOutputBarrierPermit, RuntimeCommandOutputBarriers,
@@ -159,8 +159,8 @@ impl CdpConnection {
     pub async fn complete_ready_protocol_scheduler_work_turn(
         &mut self,
         work: crate::domains::activity::ProtocolSchedulerWork,
-    ) -> CdpTurnOutcome {
-        match work.into_ready() {
+    ) -> CdpRendererOwnerTurnOutcome {
+        let outcome = match work.into_ready() {
             ReadyProtocolSchedulerWork::ProtocolObservation(work) => {
                 CdpTurnOutcome::new_with_protocol_events(
                     work.into_background_events(self),
@@ -213,13 +213,20 @@ impl CdpConnection {
                 crate::domains::target::complete_popup_target_activation_action_async(self, action)
                     .await
             }
+            ReadyProtocolSchedulerWork::PageTargetCloseRequestOwnerAction(action) => {
+                return crate::domains::page::complete_page_target_close_request_owner_action_async(
+                    self, action,
+                )
+                .await;
+            }
             ReadyProtocolSchedulerWork::PageTargetTerminationOwnerAction(action) => {
                 crate::domains::page::complete_page_target_termination_owner_action_async(
                     self, action,
                 )
                 .await
             }
-        }
+        };
+        outcome.with_renderer_output_predecessor(None)
     }
 
     /// Ingests one concrete renderer publication and returns the protocol

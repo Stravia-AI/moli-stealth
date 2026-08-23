@@ -3094,12 +3094,18 @@ async fn canceling_prepared_live_page_replacement_preserves_page_environment_and
     }
     let (reply, _) = page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: "console.log('live-after-replacement-cancel'); 'alive'".to_owned(),
+            expression:
+                "console.log('live-after-replacement-cancel'); JSON.stringify(['alive', window.closed])"
+                    .to_owned(),
             await_promise: false,
         })
         .await
         .expect("the original Page should remain executable after replacement cancellation");
-    assert_eq!(renderer_json_value(reply), Some(serde_json::json!("alive")));
+    assert_eq!(
+        renderer_json_value(reply),
+        Some(serde_json::json!("[\"alive\",false]")),
+        "discarding a replacement Document must not close its stable Page"
+    );
     loop {
         match output_rx.recv_message().await {
             RendererOutputTransportMessage::Publication(publication)
@@ -5126,6 +5132,13 @@ async fn related_page_script_agent_experiment_shares_isolate_and_survives_source
     let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
     let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
     assert!(first_testing.shares_local_host(&second_testing));
+    first_testing
+        .install_related_page_window_proxy_for_experiment(
+            &second_testing,
+            "__lm_related_agent_peer",
+        )
+        .await
+        .expect("related source should bind the peer's opener edge");
     assert_eq!(
         second_testing
             .host_unique_document_isolate_count_async()
@@ -5265,11 +5278,33 @@ globalThis.__lm_related_agent_marker"#
         renderer_json_value(compiled_before_source_close),
         Some(serde_json::json!("compiled-before-source-close"))
     );
+    let (opener_before_source_close, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener !== null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related peer should observe its live opener edge");
+    assert_eq!(
+        renderer_json_value(opener_before_source_close),
+        Some(serde_json::json!(true))
+    );
 
     first_page
         .close_async()
         .await
         .expect("related source Page should close independently");
+    let (opener_after_source_close, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener === null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("surviving related peer should collapse its discarded opener edge");
+    assert_eq!(
+        renderer_json_value(opener_after_source_close),
+        Some(serde_json::json!(true))
+    );
     let remaining_heap = runtime_heap_usage_for_test(&second_page).await;
     let remaining_runtime = &remaining_heap["moli"]["runtime"];
     assert_eq!(
@@ -5333,6 +5368,17 @@ globalThis.__lm_related_agent_marker"#
     assert_ne!(
         after_navigation_runtime["inspectorContextGroupId"], remaining_context_group_id,
         "replacement Document must receive a new local-root Inspector context group"
+    );
+    let (opener_after_source_close_navigation, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener === null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("discarded opener edge should stay severed after peer navigation");
+    assert_eq!(
+        renderer_json_value(opener_after_source_close_navigation),
+        Some(serde_json::json!(true))
     );
 
     let (compiled_after_source_close, _) = second_page
@@ -5658,6 +5704,725 @@ async fn related_page_script_agent_keeps_inspector_objects_and_bindings_page_loc
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let (opener_base_url, observer_child_server) = spawn_owner_wake_server_with_content_type(
+        "/observer-child",
+        "<!doctype html><body>observer child</body>",
+        "text/html",
+        Duration::ZERO,
+    )
+    .await;
+    let first_url =
+        url::Url::parse(&format!("{opener_base_url}/related-cross-origin-opener")).unwrap();
+    let observer_child_url = format!("{opener_base_url}/observer-child");
+    let second_url = url::Url::parse("https://popup.test/related-cross-origin-popup").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related cross-origin opener</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        "<!doctype html><body>related cross-origin popup</body>",
+    )
+    .await;
+
+    let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
+    let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
+    first_testing
+        .install_related_page_window_proxy_for_experiment(
+            &second_testing,
+            "__lm_related_cross_origin_popup",
+        )
+        .await
+        .expect("related opener should receive the popup stable WindowProxy");
+
+    second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                "globalThis.__lm_observer_child_url = {};",
+                serde_json::to_string(&observer_child_url)
+                    .expect("serialize observer-relative child URL")
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup should receive the observer-relative child URL");
+
+    let (non_null_opener_shadow, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const descriptor = Object.getOwnPropertyDescriptor(window, "opener");
+  const openerGet = descriptor.get;
+  window.opener = "shadow";
+  const shadow = Object.getOwnPropertyDescriptor(window, "opener");
+  return JSON.stringify([
+    window.opener,
+    openerGet() === null,
+    shadow.value,
+    shadow.writable,
+    shadow.enumerable,
+    shadow.configurable
+  ]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("non-null Window.opener assignment should create an ordinary shadow");
+    assert_eq!(
+        renderer_json_value(non_null_opener_shadow),
+        Some(serde_json::json!(
+            "[\"shadow\",true,\"shadow\",true,true,true]"
+        ))
+    );
+
+    let (surface, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const popup = globalThis.__lm_related_cross_origin_popup;
+  const probe = callback => {
+    try {
+      const value = callback();
+      return value === undefined ? "undefined" : String(value);
+    } catch (error) {
+      return `${error && error.name}:${error instanceof DOMException}`;
+    }
+  };
+  const dataDescriptor = descriptor => [
+    typeof descriptor.value,
+    descriptor.value && descriptor.value.name,
+    descriptor.value && descriptor.value.length,
+    descriptor.writable,
+    descriptor.enumerable,
+    descriptor.configurable
+  ];
+  const locationDescriptor = Object.getOwnPropertyDescriptor(popup, "location");
+  const symbolDescriptor = Object.getOwnPropertyDescriptor(popup, Symbol.toStringTag);
+  const location = popup.location;
+  return JSON.stringify({
+    identity: [
+      popup === globalThis.__lm_related_cross_origin_popup,
+      popup.window === popup,
+      popup.self === popup,
+      popup.frames === popup,
+      popup.parent === popup,
+      popup.top === popup,
+      popup.location === popup.location
+    ],
+    scalar: [popup.closed, popup.length, popup.then],
+    methods: [
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "postMessage")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "blur")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "close")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "focus"))
+    ],
+    locationDescriptor: [
+      typeof locationDescriptor.get,
+      typeof locationDescriptor.set,
+      locationDescriptor.enumerable,
+      locationDescriptor.configurable
+    ],
+    symbolDescriptor: [
+      symbolDescriptor.value === undefined,
+      symbolDescriptor.writable,
+      symbolDescriptor.enumerable,
+      symbolDescriptor.configurable
+    ],
+    names: Object.getOwnPropertyNames(popup).sort(),
+    keys: Object.keys(popup),
+    symbols: Object.getOwnPropertySymbols(popup).map(String),
+    symbolValues: [
+      popup[Symbol.toStringTag],
+      popup[Symbol.hasInstance],
+      popup[Symbol.isConcatSpreadable]
+    ].map(value => value === undefined),
+    prototype: Object.getPrototypeOf(popup) === null,
+    tag: Object.prototype.toString.call(popup),
+    locationSurface: [
+      Object.getPrototypeOf(location) === null,
+      Object.prototype.toString.call(location),
+      typeof location.replace,
+      location === popup.location
+    ],
+    denied: [
+      probe(() => popup.document),
+      probe(() => popup.name),
+      probe(() => popup.globalThis),
+      probe(() => popup.__not_exposed),
+      probe(() => Object.getOwnPropertyDescriptor(popup, "document")),
+      probe(() => Object.prototype.hasOwnProperty.call(popup, "document")),
+      probe(() => location.href),
+      probe(() => location.origin)
+    ],
+    allowedCalls: [probe(() => popup.blur()), probe(() => popup.focus())]
+  });
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related cross-origin WindowProxy surface should evaluate");
+    assert_eq!(
+        renderer_json_value(surface),
+        Some(serde_json::json!(
+            r#"{"identity":[true,true,true,true,true,true,true],"scalar":[false,0,null],"methods":[["function","postMessage",1,false,false,true],["function","blur",0,false,false,true],["function","close",0,false,false,true],["function","focus",0,false,false,true]],"locationDescriptor":["function","function",false,true],"symbolDescriptor":[true,false,false,true],"names":["blur","close","closed","focus","frames","length","location","opener","parent","postMessage","self","then","top","window"],"keys":[],"symbols":["Symbol(Symbol.toStringTag)","Symbol(Symbol.hasInstance)","Symbol(Symbol.isConcatSpreadable)"],"symbolValues":[true,true,true],"prototype":true,"tag":"[object Object]","locationSurface":[true,"[object Object]","function",true],"denied":["SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true"],"allowedCalls":["undefined","undefined"]}"#
+        ))
+    );
+
+    let (location_internal_methods, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const location = globalThis.__lm_related_cross_origin_popup.location;
+  const probe = callback => {
+    try {
+      const value = callback();
+      return value === undefined ? "undefined" : String(value);
+    } catch (error) {
+      return `${error && error.name}:${error instanceof DOMException}`;
+    }
+  };
+  const href = Object.getOwnPropertyDescriptor(location, "href");
+  const replace = Object.getOwnPropertyDescriptor(location, "replace");
+  const then = Object.getOwnPropertyDescriptor(location, "then");
+  const tag = Object.getOwnPropertyDescriptor(location, Symbol.toStringTag);
+  const legacyProtoSetter = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__").set;
+  return JSON.stringify({
+    names: Object.getOwnPropertyNames(location),
+    keys: Object.keys(location),
+    symbols: Object.getOwnPropertySymbols(location).map(String),
+    descriptors: {
+      href: [href.get === undefined, typeof href.set, href.set.name, href.set.length,
+             href.enumerable, href.configurable],
+      replace: [typeof replace.value, replace.value.name, replace.value.length,
+                replace.writable, replace.enumerable, replace.configurable],
+      then: [then.value === undefined, then.writable, then.enumerable, then.configurable],
+      tag: [tag.value === undefined, tag.writable, tag.enumerable, tag.configurable]
+    },
+    allowed: [
+      Object.prototype.hasOwnProperty.call(location, "href"),
+      "replace" in location,
+      location.then === undefined,
+      Object.isExtensible(location),
+      Object.getPrototypeOf(location) === null,
+      Object.setPrototypeOf(location, null) === location,
+      (() => { legacyProtoSetter.call(location, null); return true; })(),
+      Reflect.setPrototypeOf(location, null),
+      Reflect.setPrototypeOf(location, {}),
+      Reflect.preventExtensions(location),
+      Object.isExtensible(location)
+    ],
+    denied: [
+      probe(() => location.origin),
+      probe(() => Object.getOwnPropertyDescriptor(location, "origin")),
+      probe(() => Object.prototype.hasOwnProperty.call(location, "origin")),
+      probe(() => "origin" in location),
+      probe(() => { location.origin = "https://denied.test/"; }),
+      probe(() => delete location.origin),
+      probe(() => Object.defineProperty(location, "origin", { value: "denied" })),
+      probe(() => { location.__proto__ = {}; }),
+      probe(() => legacyProtoSetter.call(location, {})),
+      probe(() => Object.setPrototypeOf(location, {})),
+      probe(() => Object.preventExtensions(location))
+    ]
+  });
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin Location internal-method matrix should evaluate");
+    assert_eq!(
+        renderer_json_value(location_internal_methods),
+        Some(serde_json::json!(
+            r#"{"names":["href","replace","then"],"keys":[],"symbols":["Symbol(Symbol.toStringTag)","Symbol(Symbol.hasInstance)","Symbol(Symbol.isConcatSpreadable)"],"descriptors":{"href":[true,"function","set href",1,false,true],"replace":["function","replace",1,false,false,true],"then":[true,false,false,true],"tag":[true,false,false,true]},"allowed":[true,true,true,true,true,true,true,true,false,false,true],"denied":["SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","TypeError:false","TypeError:false","TypeError:false"]}"#
+        ))
+    );
+
+    let (child_setup, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  const appendFrame = name => {
+    const frame = document.createElement("iframe");
+    frame.name = name;
+    document.body.append(frame);
+    return frame;
+  };
+  const alpha = document.createElement("iframe");
+  alpha.name = "alpha";
+  alpha.src = globalThis.__lm_observer_child_url;
+  const alphaLoaded = new Promise((resolve, reject) => {
+    alpha.addEventListener("load", resolve, { once: true });
+    alpha.addEventListener("error", reject, { once: true });
+  });
+  document.body.append(alpha);
+  await alphaLoaded;
+  const thenFrame = appendFrame("then");
+  const openFrame = appendFrame("open");
+  globalThis.__lm_dynamic_child_frames = { alpha, thenFrame, openFrame };
+  const parentChildAccess = (() => {
+    try {
+      alpha.contentWindow.document;
+      return "allowed";
+    } catch (error) {
+      return `${error && error.name}:${error instanceof DOMException}`;
+    }
+  })();
+  return JSON.stringify([
+    window.length,
+    window[0] === alpha.contentWindow,
+    window[1] === thenFrame.contentWindow,
+    window[2] === openFrame.contentWindow,
+    parentChildAccess
+  ]);
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("related popup should create live named child contexts");
+    assert_eq!(
+        renderer_json_value(child_setup),
+        Some(serde_json::json!(
+            "[3,true,true,true,\"SecurityError:true\"]"
+        ))
+    );
+
+    let (live_children, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__lm_related_cross_origin_popup;
+  const names = Object.getOwnPropertyNames(popup);
+  const thenDescriptor = Object.getOwnPropertyDescriptor(popup, "then");
+  return JSON.stringify({
+    length: popup.length,
+    stableIndices: [popup[0] === popup[0], popup[1] === popup[1], popup[2] === popup[2]],
+    namedIdentity: [popup.alpha === popup[0], popup.then === popup[1], popup.open === popup[2]],
+    observerRelativeEndpoint: [
+      popup[0].document.defaultView === popup[0],
+      popup[0].document.body.textContent === "observer child",
+      popup[0].Array !== Array,
+      popup[0].parent === popup,
+      popup[0].top === popup
+    ],
+    thenDescriptor: [thenDescriptor.value === popup[1], thenDescriptor.writable,
+                     thenDescriptor.enumerable, thenDescriptor.configurable],
+    keys: Object.keys(popup),
+    namedOwnKeys: [names.includes("alpha"), names.includes("open"),
+                   names.filter(name => name === "then").length],
+    opener: popup.opener === window
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin WindowProxy should project the live child registry");
+    assert_eq!(
+        renderer_json_value(live_children),
+        Some(serde_json::json!(
+            r#"{"length":3,"stableIndices":[true,true,true],"namedIdentity":[true,true,true],"observerRelativeEndpoint":[true,true,true,true,true],"thenDescriptor":[true,false,false,true],"keys":["0","1","2"],"namedOwnKeys":[false,false,1],"opener":true}"#
+        ))
+    );
+
+    let (window_internal_methods, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__lm_related_cross_origin_popup;
+  const probe = callback => {
+    try {
+      const value = callback();
+      return value === undefined ? "undefined" : String(value);
+    } catch (error) {
+      return `${error && error.name}:${error instanceof DOMException}`;
+    }
+  };
+  const typeProbe = callback => {
+    try {
+      callback();
+      return "allowed";
+    } catch (error) {
+      return `${error && error.name}:${error instanceof TypeError}`;
+    }
+  };
+  const legacyProto = Object.getOwnPropertyDescriptor(Object.prototype, "__proto__");
+  const ownKeys = Reflect.ownKeys(popup);
+  const stringKeys = ownKeys.filter(key => typeof key === "string");
+  const symbolKeys = ownKeys.filter(key => typeof key === "symbol");
+  return JSON.stringify({
+    unknownIndex: [
+      probe(() => popup[99]),
+      probe(() => Object.getOwnPropertyDescriptor(popup, "99")),
+      probe(() => Object.prototype.hasOwnProperty.call(popup, "99")),
+      probe(() => 99 in popup)
+    ],
+    unknownNamed: [
+      probe(() => popup.__unknown),
+      probe(() => Object.getOwnPropertyDescriptor(popup, "__unknown")),
+      probe(() => Object.prototype.hasOwnProperty.call(popup, "__unknown")),
+      probe(() => "__unknown" in popup),
+      probe(() => { popup.__unknown = null; })
+    ],
+    mutation: [
+      probe(() => { popup[0] = null; }),
+      probe(() => { popup[99] = null; }),
+      probe(() => delete popup[0]),
+      probe(() => delete popup[99]),
+      probe(() => delete popup.location),
+      probe(() => delete popup.__unknown),
+      probe(() => Object.defineProperty(popup, "0", { value: null })),
+      probe(() => Object.defineProperty(popup, "99", { value: null })),
+      probe(() => Object.defineProperty(popup, "location", { value: null })),
+      probe(() => Object.defineProperty(popup, "__unknown", { value: null }))
+    ],
+    prototype: [
+      probe(() => Object.getPrototypeOf(popup) === null),
+      probe(() => legacyProto.get.call(popup) === null),
+      probe(() => popup.__proto__),
+      probe(() => { popup.__proto__ = {}; }),
+      probe(() => legacyProto.set.call(popup, {})),
+      probe(() => Object.setPrototypeOf(popup, {})),
+      probe(() => Object.setPrototypeOf(popup, null) === popup),
+      probe(() => legacyProto.set.call(popup, null)),
+      probe(() => Reflect.setPrototypeOf(popup, null)),
+      probe(() => Reflect.setPrototypeOf(popup, {}))
+    ],
+    extensions: [
+      probe(() => Object.isExtensible(popup)),
+      probe(() => Reflect.preventExtensions(popup)),
+      probe(() => Object.preventExtensions(popup)),
+      probe(() => Object.isExtensible(popup))
+    ],
+    accessingRealmTypeErrors: [
+      typeProbe(() => legacyProto.set.call(popup, {})),
+      typeProbe(() => Object.setPrototypeOf(popup, {})),
+      typeProbe(() => Object.preventExtensions(popup))
+    ],
+    ownKeys: {
+      indexPrefix: stringKeys.slice(0, 3),
+      names: Object.getOwnPropertyNames(popup).sort(),
+      thenIsLastString: stringKeys[stringKeys.length - 1] === "then",
+      symbolsAreSuffix: ownKeys.slice(-3).every(key => typeof key === "symbol"),
+      symbols: symbolKeys.map(String)
+    }
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin Window internal-method matrix should evaluate");
+    assert_eq!(
+        renderer_json_value(window_internal_methods),
+        Some(serde_json::json!(
+            r#"{"unknownIndex":["SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true"],"unknownNamed":["SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true"],"mutation":["SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true","SecurityError:true"],"prototype":["true","true","SecurityError:true","SecurityError:true","TypeError:false","TypeError:false","true","undefined","true","false"],"extensions":["true","false","TypeError:false","true"],"accessingRealmTypeErrors":["TypeError:true","TypeError:true","TypeError:true"],"ownKeys":{"indexPrefix":["0","1","2"],"names":["0","1","2","blur","close","closed","focus","frames","length","location","opener","parent","postMessage","self","then","top","window"],"thenIsLastString":true,"symbolsAreSuffix":true,"symbols":["Symbol(Symbol.toStringTag)","Symbol(Symbol.hasInstance)","Symbol(Symbol.isConcatSpreadable)"]}}"#
+        ))
+    );
+
+    let (child_mutation, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const { alpha, thenFrame } = globalThis.__lm_dynamic_child_frames;
+  alpha.name = "renamed";
+  thenFrame.remove();
+  return JSON.stringify([window.length, window.renamed === window[0]]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup should rename and remove child contexts");
+    assert_eq!(
+        renderer_json_value(child_mutation),
+        Some(serde_json::json!("[2,true]"))
+    );
+
+    let (refreshed_children, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__lm_related_cross_origin_popup;
+  const probe = callback => {
+    try { callback(); return "allowed"; }
+    catch (error) { return error && error.name; }
+  };
+  const names = Object.getOwnPropertyNames(popup);
+  return JSON.stringify({
+    length: popup.length,
+    identity: [popup.renamed === popup[0], popup.open === popup[1], popup.then === undefined],
+    removed: probe(() => popup.alpha),
+    keys: Object.keys(popup),
+    namedOwnKeys: [names.includes("renamed"), names.includes("open"),
+                   names.filter(name => name === "then").length]
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin WindowProxy should discard stale child projections");
+    assert_eq!(
+        renderer_json_value(refreshed_children),
+        Some(serde_json::json!(
+            r#"{"length":2,"identity":[true,true,true],"removed":"SecurityError","keys":["0","1"],"namedOwnKeys":[false,false,1]}"#
+        ))
+    );
+
+    let (opener_sever, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const descriptor = Object.getOwnPropertyDescriptor(window, "opener");
+  const openerGet = descriptor.get;
+  const hadOpener = openerGet() !== null;
+  window.opener = null;
+  const shadow = Object.getOwnPropertyDescriptor(window, "opener");
+  return JSON.stringify([
+    hadOpener,
+    openerGet() === null,
+    window.opener === null,
+    shadow.value === null,
+    shadow.writable,
+    shadow.enumerable,
+    shadow.configurable
+  ]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup should sever its Page-scoped opener edge");
+    assert_eq!(
+        renderer_json_value(opener_sever),
+        Some(serde_json::json!("[true,true,true,true,true,true,true]"))
+    );
+
+    let (sever_observed, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "globalThis.__lm_related_cross_origin_popup.opener === null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("opener should observe the target Page's severed relation");
+    assert_eq!(
+        renderer_json_value(sever_observed),
+        Some(serde_json::json!(true))
+    );
+
+    let (close_state, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__lm_related_cross_origin_popup;
+  popup.close();
+  return JSON.stringify([popup.closed, window.closed]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin close should address the related target Page");
+    assert_eq!(
+        renderer_json_value(close_state),
+        Some(serde_json::json!("[true,false]")),
+        "cross-origin close() must transition the target Page without closing its opener"
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("related cross-origin popup should close");
+    first_page
+        .close_async()
+        .await
+        .expect("related cross-origin opener should close");
+    observer_child_server
+        .await
+        .expect("observer-relative child fixture should finish");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let first_url = url::Url::parse("https://example.test/related-close-opener").unwrap();
+    let second_url = url::Url::parse("https://example.test/related-close-popup").unwrap();
+    let mut first_page = create_test_html_page(
+        &runtime,
+        &loader,
+        first_url,
+        "<!doctype html><body>related close opener</body>",
+    )
+    .await;
+    let mut second_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &first_page,
+        &loader,
+        second_url,
+        r#"<!doctype html><body><main id="peer-node">before-close</main></body>"#,
+    )
+    .await;
+
+    let (prepared, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"globalThis.__lm_peer_function = () => document.querySelector("#peer-node").textContent; "prepared""##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup should prepare retained realm values");
+    assert_eq!(
+        renderer_json_value(prepared),
+        Some(serde_json::json!("prepared"))
+    );
+
+    let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
+    let second_testing = RendererPageTestingHandle::new_for_testing(&second_page);
+    first_testing
+        .install_related_page_window_proxy_for_experiment(
+            &second_testing,
+            "__lm_related_close_popup",
+        )
+        .await
+        .expect("related opener should receive the popup stable WindowProxy");
+    output_rx.drain();
+
+    let (synchronous_close, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const popup = globalThis.__lm_related_close_popup;
+  globalThis.__lm_saved_close_popup = popup;
+  globalThis.__lm_saved_peer_function = popup.__lm_peer_function;
+  globalThis.__lm_saved_peer_node = popup.document.querySelector("#peer-node");
+  popup.close();
+  popup.close();
+  return JSON.stringify([
+    popup === globalThis.__lm_saved_close_popup,
+    popup.closed,
+    popup.window === popup,
+    popup.document.querySelector("#peer-node").textContent
+  ]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related WindowProxy close should complete in the opener turn");
+    assert_eq!(
+        renderer_json_value(synchronous_close),
+        Some(serde_json::json!("[true,true,true,\"before-close\"]")),
+        "Closing must be synchronously visible without prematurely discarding the target realm"
+    );
+
+    let (target_closed_state, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.closed".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("target Page should observe its own Closing state");
+    assert_eq!(
+        renderer_json_value(target_closed_state),
+        Some(serde_json::json!(true))
+    );
+
+    let mut close_action_count = 0;
+    loop {
+        let publication = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+            .await
+            .expect("target close output should settle before the test deadline")
+            .expect("renderer output transport should remain open");
+        if !publication_is_for_page(&publication, &second_page) {
+            continue;
+        }
+        close_action_count += publication
+            .records()
+            .iter()
+            .filter(|record| {
+                matches!(
+                    record.item(),
+                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose)
+                )
+            })
+            .count();
+        if close_action_count != 0 {
+            break;
+        }
+    }
+    close_action_count += output_rx
+        .drain()
+        .iter()
+        .filter(|publication| publication_is_for_page(publication, &second_page))
+        .flat_map(RendererOutputPublication::records)
+        .filter(|record| {
+            matches!(
+                record.item(),
+                RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose)
+            )
+        })
+        .count();
+    assert_eq!(
+        close_action_count, 1,
+        "duplicate close() calls must publish one Page-owned close transaction"
+    );
+
+    second_page
+        .close_async()
+        .await
+        .expect("related popup Page should complete final close teardown");
+
+    let (after_discard, _) = first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__lm_related_close_popup;
+  const probe = callback => {
+    try {
+      const value = callback();
+      return ["return", value === undefined ? "undefined" : String(value)];
+    } catch (error) {
+      return ["throw", error && error.name];
+    }
+  };
+  return JSON.stringify({
+    identity: popup === globalThis.__lm_saved_close_popup,
+    surface: [popup.closed, popup.opener === window, popup.length, popup.window === popup],
+    deniedDocument: probe(() => popup.document),
+    retainedFunction: probe(() => globalThis.__lm_saved_peer_function()),
+    retainedNodeRead: probe(() => globalThis.__lm_saved_peer_node.textContent),
+    retainedNodeWrite: probe(() => {
+      globalThis.__lm_saved_peer_node.textContent = "after-close";
+      return globalThis.__lm_saved_peer_node.textContent;
+    })
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("retained proxy and wrappers should fail closed after target discard");
+    assert_eq!(
+        renderer_json_value(after_discard),
+        Some(serde_json::json!(
+            r#"{"identity":true,"surface":[true,true,0,true],"deniedDocument":["throw","SecurityError"],"retainedFunction":["throw","TypeError"],"retainedNodeRead":["throw","TypeError"],"retainedNodeWrite":["throw","TypeError"]}"#
+        )),
+        "final close must preserve the stable proxy identity while disconnecting every old host pointer entry point"
+    );
+
+    first_page
+        .close_async()
+        .await
+        .expect("related close opener should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers() {
     let runtime = JsRuntime::initialize();
     let loader =
@@ -5728,6 +6493,8 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
   globalThis.__lm_related_saved_peer_window = peer;
   peer.__lm_related_shared_object.count += 1;
   const peerNode = peer.document.querySelector("#peer-node");
+  globalThis.__lm_related_saved_peer_function = peer.__lm_related_shared_function;
+  globalThis.__lm_related_saved_peer_node = peerNode;
   peerNode.textContent = "mutated-from-first";
   return JSON.stringify([
     peer === globalThis.__lm_related_peer_window,
@@ -5770,6 +6537,34 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
         ))
     );
 
+    let (opener_severed, _) = second_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const descriptor = Object.getOwnPropertyDescriptor(window, "opener");
+  const openerGet = descriptor.get;
+  const hadOpener = openerGet() !== null;
+  window.opener = null;
+  const shadow = Object.getOwnPropertyDescriptor(window, "opener");
+  return JSON.stringify([
+    hadOpener,
+    openerGet() === null,
+    window.opener === null,
+    shadow.value === null,
+    shadow.writable,
+    shadow.enumerable,
+    shadow.configurable
+  ]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related peer should explicitly sever its opener edge");
+    assert_eq!(
+        renderer_json_value(opener_severed),
+        Some(serde_json::json!("[true,true,true,true,true,true,true]"))
+    );
+
     let (navigation_reply, _) = second_page
         .run_async_command(
             RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
@@ -5791,12 +6586,24 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: r##"(() => {
   const peer = globalThis.__lm_related_peer_window;
+  const probe = callback => {
+    try {
+      callback();
+      return "allowed";
+    } catch (error) {
+      return error && error.name;
+    }
+  };
   return JSON.stringify([
     peer === globalThis.__lm_related_saved_peer_window,
+    peer.closed,
     peer.__lm_related_replacement_marker,
     peer.document.body.dataset.page,
     peer.document.querySelector("#peer-node").textContent,
-    typeof peer.__lm_related_shared_object
+    typeof peer.__lm_related_shared_object,
+    peer.opener === null,
+    probe(() => globalThis.__lm_related_saved_peer_function("after-navigation")),
+    probe(() => globalThis.__lm_related_saved_peer_node.textContent)
   ]);
 })()"##
                 .to_owned(),
@@ -5807,9 +6614,9 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
     assert_eq!(
         renderer_json_value(after_navigation),
         Some(serde_json::json!(
-            "[true,\"replacement-ready\",\"replacement\",\"after-navigation\",\"undefined\"]"
+            "[true,false,\"replacement-ready\",\"replacement\",\"after-navigation\",\"undefined\",true,\"TypeError\",\"TypeError\"]"
         )),
-        "stable peer WindowProxy identity must survive same-origin Document replacement"
+        "stable peer WindowProxy identity must survive Document replacement while retired realm wrappers fail closed"
     );
 
     second_page
@@ -7164,6 +7971,11 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
     let noopener_publications = output_rx.drain();
     let noopener_popups = popup_activations_for_page(&noopener_publications, &second_page);
     assert_eq!(noopener_popups.len(), 1);
+    assert_eq!(
+        noopener_popups[0].popup_id(),
+        None,
+        "a production noopener popup must not create a parallel lightweight browsing-context identity"
+    );
     let noopener_page_reservation = noopener_popups[0]
         .pending_auxiliary_page()
         .expect("new noopener popup should still reserve a renderer Page")
@@ -20663,6 +21475,7 @@ async fn create_related_test_html_page_with_optional_indexed_db_manager_for_scri
             None,
             RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             None,
+            None,
         )
         .expect("related test HTML page should start");
     let (page, _, _, _creation_artifacts, pending_download) = pending
@@ -20791,6 +21604,7 @@ fn start_test_html_page_with_optional_indexed_db_manager_and_navigation_dispatch
             None,
             None,
             top_level_navigation_dispatch,
+            None,
             None,
         )
         .expect("test HTML page should start")

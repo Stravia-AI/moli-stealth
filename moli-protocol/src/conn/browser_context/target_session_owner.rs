@@ -4681,6 +4681,7 @@ mod tests {
             frame_id: "TID-parked".to_owned(),
             loader_id: "LOADER-nav".to_owned(),
             url: navigation_url.to_string(),
+            document_referrer: String::new(),
             unreachable_url: None,
             security_origin: "https://nav.example".to_owned(),
             secure_context_type: "Secure".to_owned(),

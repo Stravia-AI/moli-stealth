@@ -1550,6 +1550,7 @@ impl NavigationEngine {
         root_frame_id: Option<String>,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         main_document_commit: Option<RendererMainDocumentCommit>,
+        initial_document_referrer: Option<String>,
     ) -> Result<PendingBuiltDocumentPage> {
         let loader = self.ensure_resource_request_client(cookie_store)?;
         loader.set_extra_http_headers(&extra_http_headers);
@@ -1590,6 +1591,7 @@ impl NavigationEngine {
                 top_level_storage_key,
                 moli_renderer_v8::RendererTopLevelNavigationDispatch::DelegateToBrowser,
                 main_document_commit,
+                initial_document_referrer,
             )?;
         Ok(PendingBuiltDocumentPage { pending })
     }
@@ -1650,6 +1652,7 @@ impl NavigationEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1684,6 +1687,7 @@ impl NavigationEngine {
         root_frame_id: Option<String>,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         main_document_commit: Option<RendererMainDocumentCommit>,
+        initial_document_referrer: Option<String>,
     ) -> Result<PendingBuiltDocumentPage> {
         let (cookie_store, web_storage, indexed_db_manager, storage_bucket_store) =
             storage.into_parts();
@@ -1719,6 +1723,7 @@ impl NavigationEngine {
             root_frame_id,
             top_level_storage_key,
             main_document_commit,
+            initial_document_referrer,
         )
     }
 

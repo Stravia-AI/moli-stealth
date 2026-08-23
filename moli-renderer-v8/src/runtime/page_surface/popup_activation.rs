@@ -49,9 +49,34 @@ pub struct RendererPendingPopupActivation {
     popup_id: Option<u64>,
     url: String,
     target_name: String,
+    /// Heap-owned so adding popup policy facts does not inflate every
+    /// `RendererOwnerAction` variant and its async orchestration frames.
+    referrers: Option<Box<RendererPopupNavigationReferrers>>,
     pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
     session_storage_store: Option<SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RendererPopupNavigationReferrers {
+    /// Frozen Referer value for the destination navigation.
+    ///
+    /// `Some("")` explicitly suppresses the header. `None` is reserved for
+    /// legacy/browser-context producers that still rely on target-local
+    /// inference; protocol code must otherwise use this creator-side result
+    /// instead of deriving a referrer from the popup's initial about:blank.
+    navigation: String,
+    /// Frozen referrer for the auxiliary context's initial empty Document.
+    ///
+    /// This is the creator's full URL unless `noreferrer` applies, independent
+    /// of HTTP header eligibility and the destination navigation policy.
+    initial_document: String,
+    /// Frozen script-visible referrer for the committed destination Document.
+    ///
+    /// This differs from `navigation_referrer` for non-HTTP destinations. In
+    /// particular, a noopener initial `about:blank` keeps the creator's full
+    /// URL even though no HTTP Referer header can be emitted.
+    document: String,
 }
 
 impl RendererPendingPopupActivation {
@@ -78,6 +103,7 @@ impl RendererPendingPopupActivation {
             popup_id,
             url,
             target_name,
+            referrers: None,
             pending_auxiliary_page: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
@@ -100,6 +126,7 @@ impl RendererPendingPopupActivation {
             popup_id,
             url,
             target_name,
+            referrers: None,
             pending_auxiliary_page: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
@@ -135,6 +162,22 @@ impl RendererPendingPopupActivation {
         self
     }
 
+    /// Attaches the creator-resolved network, initial-empty-Document, and
+    /// destination-Document referrers for this exact activation.
+    pub fn with_navigation_referrers(
+        mut self,
+        navigation_referrer: String,
+        initial_document_referrer: String,
+        document_referrer: String,
+    ) -> Self {
+        self.referrers = Some(Box::new(RendererPopupNavigationReferrers {
+            navigation: navigation_referrer,
+            initial_document: initial_document_referrer,
+            document: document_referrer,
+        }));
+        self
+    }
+
     pub fn source(&self) -> &RendererPopupActivationSource {
         &self.source
     }
@@ -155,6 +198,24 @@ impl RendererPendingPopupActivation {
         &self.target_name
     }
 
+    pub fn navigation_referrer(&self) -> Option<&str> {
+        self.referrers
+            .as_deref()
+            .map(|referrers| referrers.navigation.as_str())
+    }
+
+    pub fn initial_document_referrer(&self) -> Option<&str> {
+        self.referrers
+            .as_deref()
+            .map(|referrers| referrers.initial_document.as_str())
+    }
+
+    pub fn document_referrer(&self) -> Option<&str> {
+        self.referrers
+            .as_deref()
+            .map(|referrers| referrers.document.as_str())
+    }
+
     pub fn pending_auxiliary_page(&self) -> Option<RendererPendingAuxiliaryPage> {
         self.pending_auxiliary_page
     }
@@ -168,16 +229,32 @@ impl RendererPendingPopupActivation {
         Option<u64>,
         String,
         String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
         Option<RendererPendingAuxiliaryPage>,
         Option<SharedWebStorageStore>,
         Option<moli_storage_key::MoliStorageKey>,
     ) {
+        let (navigation_referrer, initial_document_referrer, document_referrer) = self
+            .referrers
+            .map(|referrers| {
+                (
+                    Some(referrers.navigation),
+                    Some(referrers.initial_document),
+                    Some(referrers.document),
+                )
+            })
+            .unwrap_or((None, None, None));
         (
             self.source,
             self.disposition,
             self.popup_id,
             self.url,
             self.target_name,
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
             self.pending_auxiliary_page,
             self.session_storage_store,
             self.initial_empty_document_storage_key,
@@ -192,6 +269,7 @@ impl PartialEq for RendererPendingPopupActivation {
             && self.popup_id == other.popup_id
             && self.url == other.url
             && self.target_name == other.target_name
+            && self.referrers == other.referrers
             && self.pending_auxiliary_page == other.pending_auxiliary_page
             && match (&self.session_storage_store, &other.session_storage_store) {
                 (None, None) => true,

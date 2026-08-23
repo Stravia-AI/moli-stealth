@@ -39,7 +39,7 @@ use crate::{
     runtime_binding_data::{build_runtime_binding_data, runtime_binding_callback},
     script_provenance::CompiledStringProvenance,
     types::ScriptObservableOutput,
-    util::set_private_value,
+    util::{get_private_value, set_private_value},
     v8_platform::RendererScriptAgentPageMembership,
 };
 use anyhow::{Context, Result, anyhow};
@@ -920,6 +920,7 @@ pub(super) struct ScriptVm {
     renderer_document_isolate: RendererDocumentIsolateHandle,
     renderer_document_isolate_teardown: RendererDocumentIsolateTeardown,
     renderer_page_script_environment: Option<RendererPageScriptEnvironment>,
+    top_level_browsing_context_disconnected: bool,
     _script_agent_page_membership: Option<RendererScriptAgentPageMembership>,
     page_default_context: v8::Global<v8::Context>,
     page_default_bridge_ref: Option<JsContextHostBridgeRef>,
@@ -1912,6 +1913,7 @@ impl ScriptVmPageRealmBootstrap {
         backend_node_registry: SharedRendererBackendNodeRegistry,
         root_frame_id: Option<String>,
         main_document_commit: Option<crate::runtime::RendererMainDocumentCommit>,
+        initial_document_referrer: Option<String>,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         reserved_service_worker_client_id: Option<
             crate::service_worker_runtime::ServiceWorkerClientId,
@@ -1961,6 +1963,12 @@ impl ScriptVmPageRealmBootstrap {
             .map(|environment| environment.origin.clone());
         if let Some(environment) = initial_document_environment {
             document_runtime.set_initial_document_policy_container(environment.policy_container);
+        }
+        if let Some(initial_document_referrer) = initial_document_referrer {
+            document_runtime.set_document_referrer(initial_document_referrer);
+        }
+        if let Some(commit) = main_document_commit.as_ref() {
+            document_runtime.set_document_referrer(commit.document_referrer.clone());
         }
         let (page_context_cancel_tx, page_context_cancel_rx) =
             renderer_page_context_cancel_channel();
@@ -2268,6 +2276,7 @@ impl ScriptVmDefaultWorldBootstrap {
             backend_node_registry,
             None,
             None,
+            None,
             top_level_storage_key,
             reserved_service_worker_client_id,
             Some(ScriptVmInitialDocumentEnvironment {
@@ -2310,6 +2319,7 @@ impl ScriptVmDefaultWorldBootstrap {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -2346,6 +2356,7 @@ impl ScriptVmDefaultWorldBootstrap {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -2364,6 +2375,7 @@ impl ScriptVmDefaultWorldBootstrap {
         backend_node_registry: SharedRendererBackendNodeRegistry,
         root_frame_id: Option<String>,
         main_document_commit: Option<crate::runtime::RendererMainDocumentCommit>,
+        initial_document_referrer: Option<String>,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         reserved_service_worker_client_id: Option<
             crate::service_worker_runtime::ServiceWorkerClientId,
@@ -2383,6 +2395,7 @@ impl ScriptVmDefaultWorldBootstrap {
             backend_node_registry,
             root_frame_id,
             main_document_commit,
+            initial_document_referrer,
             top_level_storage_key,
             reserved_service_worker_client_id,
             None,
@@ -2449,6 +2462,7 @@ impl ScriptVmDefaultWorldBootstrap {
             renderer_document_isolate,
             renderer_document_isolate_teardown,
             renderer_page_script_environment,
+            top_level_browsing_context_disconnected: false,
             _script_agent_page_membership: script_agent_page_membership,
             page_default_context: context,
             page_default_bridge_ref: Some(bridge_ref),
@@ -2567,6 +2581,9 @@ impl ScriptVmPreinspectorDefaultWorldBootstrap {
             None => v8::null(scope).into(),
         };
         set_private_value(scope, global, WINDOW_OPENER_SLOT, opener);
+        if let Some(environment) = self.inner.renderer_page_script_environment.as_ref() {
+            environment.set_top_level_opener_edge(scope, opener);
+        }
         if let Some(name) = crate::util::v8_string(scope, name) {
             set_object_slot(scope, global, WINDOW_NAME_SLOT, name.into());
         }
@@ -3276,11 +3293,120 @@ impl ScriptVm {
     }
 
     pub(super) fn close_page_context_resources_for_context_teardown(&mut self) {
+        self.disconnect_document_contexts_for_host_teardown();
         self.clear_context_embedder_state_for_context_teardown();
         clear_promise_rejection_dispatch_state(&self.promise_reject_dispatch);
         self._context_host
             .borrow_mut()
             .close_page_context_resources_for_teardown();
+    }
+
+    /// Performs the final Page-close disconnect, distinct from navigation
+    /// teardown of one replaceable LocalWindow realm.
+    pub(super) fn disconnect_top_level_browsing_context_for_page_close(&mut self) -> Result<()> {
+        if self.top_level_browsing_context_disconnected {
+            return Ok(());
+        }
+        self.top_level_browsing_context_disconnected = true;
+        let environment = self.renderer_page_script_environment.clone();
+        if let Some(environment) = &environment {
+            environment.mark_top_level_browsing_context_closed();
+        }
+
+        let default_context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
+        let opener = if let Some(environment) = environment.as_ref() {
+            self.renderer_document_isolate
+                .with_entered_renderer_document_isolate(|isolate| {
+                    let scope = pin!(v8::HandleScope::new(isolate));
+                    let scope = &mut scope.init();
+                    let context = unsafe { v8::Local::new(scope, &*default_context_ptr) };
+                    let context_scope = &mut v8::ContextScope::new(scope, context);
+                    let window_proxy = context.global(context_scope);
+                    let opener = environment
+                        .top_level_opener_value(context_scope)
+                        .or_else(|| {
+                            get_private_value(context_scope, window_proxy, WINDOW_OPENER_SLOT)
+                        });
+                    Ok(opener.map(|opener| v8::Global::new(context_scope, opener)))
+                })?
+        } else {
+            None
+        };
+        self.disconnect_document_contexts_for_host_teardown();
+        let host = self._context_host.clone();
+        self.renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                let Some(environment) = environment else {
+                    return Ok(());
+                };
+                let context = unsafe { v8::Local::new(scope, &*default_context_ptr) };
+                let window_proxy = context.global(scope);
+                let stable_proxy_matches = environment.with_main_window_proxy(|stable_proxy| {
+                    v8::Local::new(scope, stable_proxy).strict_equals(window_proxy.into())
+                })?;
+                anyhow::ensure!(
+                    stable_proxy_matches,
+                    "final Page close crossed its stable main WindowProxy ownership"
+                );
+                context.detach_global();
+                let opener = opener
+                    .as_ref()
+                    .map(|opener| v8::Local::new(scope, opener))
+                    .unwrap_or_else(|| v8::null(scope).into());
+                anyhow::ensure!(
+                    host.borrow_mut().park_closed_top_level_window_proxy(
+                        scope,
+                        window_proxy,
+                        opener
+                    ),
+                    "failed to park the closed top-level WindowProxy"
+                );
+                Ok(())
+            })
+    }
+
+    /// Severs every raw native-host entry point before this Document host can
+    /// drop. Navigation retirement uses this without changing the stable
+    /// browsing-context lifecycle; final Page close additionally parks the
+    /// main WindowProxy above.
+    fn disconnect_document_contexts_for_host_teardown(&mut self) {
+        let mut context_ptrs: Vec<*const v8::Global<v8::Context>> = Vec::with_capacity(
+            1 + self.page_isolated_world_contexts.len() + self.child_frame_realm_store.len(),
+        );
+        context_ptrs.push(&self.page_default_context as *const _);
+        context_ptrs.extend(
+            self.page_isolated_world_contexts
+                .contexts()
+                .map(|world| &world.context as *const _),
+        );
+        context_ptrs.extend(
+            self.child_frame_realm_store
+                .values()
+                .map(|world| &world.context as *const _),
+        );
+        if let Err(error) = self
+            .renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                for context_ptr in context_ptrs {
+                    let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                    let context_scope = &mut v8::ContextScope::new(scope, context);
+                    crate::util::disconnect_page_context(context_scope);
+                }
+                Ok(())
+            })
+        {
+            tracing::error!(%error, "failed to disconnect retiring Document contexts");
+        }
+    }
+
+    pub(super) fn top_level_browsing_context_is_closed(&self) -> bool {
+        self.renderer_page_script_environment
+            .as_ref()
+            .is_some_and(RendererPageScriptEnvironment::top_level_browsing_context_is_closed)
     }
 
     fn clear_context_embedder_state_for_context_teardown(&mut self) {
@@ -3414,6 +3540,9 @@ impl ScriptVm {
                         anyhow!("failed to allocate related WindowProxy probe property")
                     })?;
                     let peer_window_proxy = v8::Local::new(scope, peer_window_proxy);
+                    let target_window_proxy: v8::Local<'_, v8::Value> =
+                        context.global(scope).into();
+                    peer_environment.set_top_level_opener_edge(scope, target_window_proxy);
                     anyhow::ensure!(
                         context.global(scope).set(
                             scope,

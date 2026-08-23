@@ -811,6 +811,8 @@ pub struct RendererMainDocumentCommit {
     pub frame_id: String,
     pub loader_id: String,
     pub url: String,
+    /// Referrer frozen for the committed Document before its realm exists.
+    pub document_referrer: String,
     pub unreachable_url: Option<String>,
     pub security_origin: String,
     pub secure_context_type: String,
@@ -822,6 +824,9 @@ pub struct RendererPageCreationDiagnostics {
     pub initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
     pub renderer_output_predecessor: Option<RendererOutputFence>,
     pub document_continuation_observer: Option<RendererDocumentContinuationObserver>,
+    /// The initial realm synchronously accepted `window.close()` before this
+    /// Page was admitted to its protocol target.
+    pub top_level_browsing_context_closing: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

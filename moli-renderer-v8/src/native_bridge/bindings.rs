@@ -360,7 +360,6 @@ impl NativeBridgeBindings {
         // properties, especially non-configurable Window.location, before
         // its cross-origin accessors are installed.
         let global_template = v8::Local::new(scope, &self.cross_origin_window_global_template);
-        let parent_security_token = scope.get_current_context().get_security_token(scope);
         let context = v8::Context::new(
             scope,
             v8::ContextOptions {
@@ -368,7 +367,9 @@ impl NativeBridgeBindings {
                 ..Default::default()
             },
         );
-        context.set_security_token(parent_security_token);
+        // Keep V8's unique default token. The shell is a restricted facade,
+        // not a same-origin realm alias; its owner installs the host/handle
+        // slots and access surface before exposing the global proxy.
         let global = context.global(scope);
         (global, v8::Global::new(scope, context))
     }
@@ -392,7 +393,8 @@ impl NativeBridgeBindings {
             },
         );
         context.set_security_token(parent_security_token);
-        crate::util::install_context_host_pointer_slot(context, host_ptr);
+        let host_liveness = unsafe { &*host_ptr }.context_host_liveness_handle();
+        crate::util::install_context_host_pointer_slot(context, host_ptr, host_liveness);
         {
             let facade_scope = &mut v8::ContextScope::new(scope, context);
             let global = context.global(facade_scope);

@@ -1664,6 +1664,7 @@ pub(crate) fn finish_context_bootstrap(
         );
     }
     let _ = global.delete(scope, console_key.into());
+    crate::native_bridge::install_cross_origin_window_internal_method_intrinsics(scope, global)?;
     install_window_runtime_state(scope, global, document_runtime, secure_context_url)?;
     // WPT harness helper only. Normal builds keep the feature disabled so pages
     // do not observe non-standard `webdriver` / `WebDriver` globals.

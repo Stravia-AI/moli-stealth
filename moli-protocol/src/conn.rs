@@ -529,8 +529,8 @@ pub(crate) use runtime_load::{
     BackgroundNavigationBodyCompletionSink, BackgroundNavigationEarlyResult,
     BackgroundNavigationLoadJob, CommittedStablePageNavigation, CompletedInitialDocumentPageBuild,
     FailedInitialDocumentPageBuild, InitialDocumentPageInstallResult, InitialDocumentPageOwner,
-    PausedResponsePreparedDocument, PendingInitialDocumentPageBuild, ResponseCommitReady,
-    StablePageNavigationCommitTarget,
+    LoadedPageCreationDiagnosticsParts, PausedResponsePreparedDocument,
+    PendingInitialDocumentPageBuild, ResponseCommitReady, StablePageNavigationCommitTarget,
 };
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
@@ -2772,6 +2772,22 @@ impl CdpConnection {
             .allocate_protocol_work_publish_sequence();
         let work =
             crate::domains::activity::ProtocolSchedulerWork::page_target_termination_owner_action(
+                publish_sequence,
+                action,
+            );
+        self.scheduler_state
+            .push_scheduler_event(CdpSchedulerEvent::ProtocolWorkPublished { work });
+    }
+
+    pub(crate) fn publish_page_target_close_request_owner_action(
+        &mut self,
+        action: crate::domains::page::PageTargetCloseRequestOwnerAction,
+    ) {
+        let publish_sequence = self
+            .scheduler_state
+            .allocate_protocol_work_publish_sequence();
+        let work =
+            crate::domains::activity::ProtocolSchedulerWork::page_target_close_request_owner_action(
                 publish_sequence,
                 action,
             );

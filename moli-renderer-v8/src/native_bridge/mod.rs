@@ -7,8 +7,8 @@ mod collections;
 mod context_host;
 mod current_input;
 pub(crate) use context_host::{
-    JsContextHost, JsContextHostPageTaskCapabilities, PendingScrollObservableEffects,
-    PostParseAutofocusAdmission, ServiceWorkerWindowOwner,
+    ChildDocumentStartScriptSnapshot, JsContextHost, JsContextHostPageTaskCapabilities,
+    PendingScrollObservableEffects, PostParseAutofocusAdmission, ServiceWorkerWindowOwner,
 };
 pub(crate) use current_input::{
     CurrentInputEvent, CurrentInputEventScope, InputNavigationPolicy, navigation_policy_from_event,
@@ -56,14 +56,16 @@ pub(crate) use collections::{
 pub(crate) use context_host::{
     DetachedChildBrowsingContextDocumentSnapshot, ImageDecodeRequestId,
     RuntimeObservableContextToken, cross_origin_lightweight_popup_id,
-    current_runtime_observable_context_token, defer_active_lightweight_popup_restore,
-    enter_active_lightweight_popup_scope, enter_top_level_lightweight_popup_scope,
-    install_child_window_proxy_access_check_handlers,
-    install_runtime_observable_context_token_for_context, is_cross_origin_top_window_proxy,
-    lightweight_popup_id_from_window, restore_active_lightweight_popup_scope,
+    cross_origin_window_target_host_ptr, current_runtime_observable_context_token,
+    defer_active_lightweight_popup_restore, enter_active_lightweight_popup_scope,
+    enter_top_level_lightweight_popup_scope, install_child_window_proxy_access_check_handlers,
+    install_cross_origin_window_internal_method_intrinsics,
+    install_runtime_observable_context_token_for_context, is_cross_origin_related_top_window_proxy,
+    is_cross_origin_top_window_proxy, lightweight_popup_id_from_window,
+    restore_active_lightweight_popup_scope,
     restore_deferred_active_lightweight_popup_scope_if_present,
     set_renderer_owned_auxiliary_popup_id, throw_cross_origin_location_security_error,
-    throw_cross_origin_type_error,
+    throw_cross_origin_type_error, top_level_window_proxy_is_finally_closed,
 };
 
 pub(crate) const ACTIVE_CHILD_WINDOW_HANDLE_SLOT: &str = "__moliActiveChildWindowHandle";

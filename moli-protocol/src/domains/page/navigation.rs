@@ -2285,6 +2285,8 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
     url: &str,
+    referrer: Option<&str>,
+    document_referrer: Option<&str>,
     request_method: &str,
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
@@ -2313,7 +2315,8 @@ pub(super) fn start_session_owner_navigation_from_renderer(
             None,
             session_id,
             url,
-            None,
+            referrer,
+            document_referrer,
             result_projection,
             request_method,
             request_body.map(<[u8]>::to_vec),
@@ -2908,6 +2911,7 @@ fn start_navigate_to_url_command_with_background_policy(
         command_session_id,
         url,
         referrer,
+        referrer,
         result_projection,
         "GET",
         None,
@@ -2935,6 +2939,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     command_session_id: Option<&str>,
     url: &str,
     referrer: Option<&str>,
+    document_referrer: Option<&str>,
     result_projection: NavigationResultProjection,
     request_method: &str,
     request_body: Option<Vec<u8>>,
@@ -3009,10 +3014,14 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         request_headers,
         request_load_policy,
         timestamp,
-        source_document_security: NavigationSourceDocumentSecurityContext::new(
+        source_document_security: Box::new(NavigationSourceDocumentSecurityContext::new(
             inherited_security_origin,
             inherited_secure_context_type,
-        ),
+            document_referrer
+                .or(referrer)
+                .unwrap_or_default()
+                .to_owned(),
+        )),
     };
     let mut pending_fetch_navigation = None;
 

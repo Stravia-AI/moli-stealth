@@ -31,6 +31,10 @@ pub struct RendererDocumentTitleChanged {
 /// without changing their position in the enclosing FIFO.
 #[derive(Clone, Debug, PartialEq)]
 pub enum RendererOwnerAction {
+    /// Requests browser-owner retirement of this output stream's top-level
+    /// browsing context. The Page-scoped lifecycle has already transitioned
+    /// to script-visible `Closing` when this record is appended.
+    TopLevelClose,
     FileChooser(RendererPendingFileChooserActivation),
     Download(RendererPendingDownloadActivation),
     JavaScriptDialog(RendererPendingJavaScriptDialog),

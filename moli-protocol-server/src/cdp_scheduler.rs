@@ -117,6 +117,7 @@ pub(crate) struct CdpScheduler {
     pending_navigation_background_events: VecDeque<PendingNavigationBackgroundEvent>,
     runtime_command_output_barriers: RuntimeCommandOutputBarriers,
     queues: SchedulerQueues,
+    pending_protocol_renderer_owner_turns: VecDeque<moli_protocol::CdpRendererOwnerTurnOutcome>,
     page_screencasts: HashMap<Option<String>, PageScreencastSchedule>,
 }
 
@@ -760,6 +761,7 @@ impl CdpScheduler {
             pending_navigation_background_events: VecDeque::new(),
             runtime_command_output_barriers: RuntimeCommandOutputBarriers::default(),
             queues: SchedulerQueues::default(),
+            pending_protocol_renderer_owner_turns: VecDeque::new(),
             page_screencasts: HashMap::new(),
         }
     }
@@ -1822,7 +1824,9 @@ impl CdpScheduler {
             return ProtocolOutputSequence::empty();
         }
         let snapshot = self.queues.take_command_followup_snapshot();
-        self.complete_protocol_residence_snapshot(snapshot).await
+        let mut output = self.complete_protocol_residence_snapshot(snapshot).await;
+        output.append(self.release_projected_protocol_renderer_owner_turns().await);
+        output
     }
 
     /// Completes frozen outputs admitted from one exact renderer stream before
@@ -2223,6 +2227,88 @@ impl CdpScheduler {
         output
     }
 
+    fn apply_protocol_scheduler_turn_outcome(
+        &mut self,
+        outcome: moli_protocol::CdpRendererOwnerTurnOutcome,
+    ) -> ProtocolOutputSequence {
+        if outcome.renderer_output_predecessor().is_some() {
+            self.pending_protocol_renderer_owner_turns
+                .push_back(outcome);
+            return ProtocolOutputSequence::empty();
+        }
+        let (mut output, post_renderer_output, renderer_output_boundary, predecessor) =
+            self.materialize_renderer_owner_turn_outcome(outcome);
+        assert!(
+            renderer_output_boundary.is_none(),
+            "protocol scheduler work must consume its renderer insertion boundary at its owner boundary"
+        );
+        assert!(
+            predecessor.is_none(),
+            "a renderer predecessor must remain parked until its exact cursor is projected"
+        );
+        output.append(post_renderer_output);
+        output
+    }
+
+    /// Releases browser-owner work only after the concrete renderer cursor
+    /// produced by its preflight has crossed ordered ingress.
+    ///
+    /// A `window.close()` preflight can synchronously fail pending Fetch work
+    /// and receive the resulting cursor while the publication itself is still
+    /// travelling on the renderer transport. Keeping the typed outcome here
+    /// prevents its terminal events and final target teardown from overtaking
+    /// that publication without blocking the adapter actor on a second input.
+    async fn release_projected_protocol_renderer_owner_turns(&mut self) -> ProtocolOutputSequence {
+        let mut pending = std::mem::take(&mut self.pending_protocol_renderer_owner_turns);
+        let mut retained = VecDeque::new();
+        let mut causal_output = ProtocolOutputSequence::empty();
+        loop {
+            while let Some(outcome) = pending.pop_front() {
+                let predecessor = outcome
+                    .renderer_output_predecessor()
+                    .expect("only predecessor-bearing protocol owner turns are parked")
+                    .clone();
+                if !self
+                    .conn
+                    .renderer_output_cursor_is_projected(predecessor.cursor())
+                {
+                    retained.push_back(outcome);
+                    continue;
+                }
+                causal_output.append(
+                    self.complete_renderer_output_predecessor_before_runtime_response(&predecessor)
+                        .await,
+                );
+                let (
+                    mut output,
+                    post_renderer_output,
+                    renderer_output_boundary,
+                    materialized_predecessor,
+                ) = self.materialize_renderer_owner_turn_outcome(outcome);
+                assert!(
+                    renderer_output_boundary.is_none(),
+                    "protocol renderer-owner work must not carry an independent insertion boundary"
+                );
+                assert_eq!(
+                    materialized_predecessor
+                        .as_ref()
+                        .map(moli_core::RendererOutputFence::cursor),
+                    Some(predecessor.cursor()),
+                    "parked protocol renderer-owner work changed its exact predecessor"
+                );
+                output.append(post_renderer_output);
+                causal_output.append(output);
+            }
+            if self.pending_protocol_renderer_owner_turns.is_empty() {
+                break;
+            }
+            pending.append(&mut self.pending_protocol_renderer_owner_turns);
+        }
+        retained.append(&mut self.pending_protocol_renderer_owner_turns);
+        self.pending_protocol_renderer_owner_turns = retained;
+        causal_output
+    }
+
     async fn apply_renderer_owner_turn_outcome(
         &mut self,
         receivers: &mut CdpSchedulerEventReceivers,
@@ -2399,9 +2485,11 @@ impl CdpScheduler {
                     elapsed_us = %started.elapsed().as_micros(),
                 );
             }
-            return self.route_background_events_around_inflight_navigation(
+            let mut output = self.route_background_events_around_inflight_navigation(
                 immediate_output.into_background_events(),
             );
+            output.append(self.release_projected_protocol_renderer_owner_turns().await);
+            return output;
         }
 
         self.apply_scheduler_events_with_load_predecessors(
@@ -2411,8 +2499,9 @@ impl CdpScheduler {
         );
         let mut output = immediate_output;
         output.append(resident_output);
-        let output = self
+        let mut output = self
             .route_background_events_around_inflight_navigation(output.into_background_events());
+        output.append(self.release_projected_protocol_renderer_owner_turns().await);
         if let Some(started) = trace_started {
             tracing::info!(
                 target: "moli_cdp_runtime",
@@ -2560,7 +2649,9 @@ impl CdpScheduler {
         let Some(residence) = self.queues.take_protocol_residence_at(index) else {
             return ProtocolOutputSequence::empty();
         };
-        self.complete_protocol_residence(residence).await
+        let mut output = self.complete_protocol_residence(residence).await;
+        output.append(self.release_projected_protocol_renderer_owner_turns().await);
+        output
     }
 
     pub(crate) async fn project_protocol_local_command_outputs_now(
@@ -2626,7 +2717,7 @@ impl CdpScheduler {
                     .conn
                     .complete_ready_protocol_scheduler_work_turn(work)
                     .await;
-                out.append(self.apply_protocol_only_turn_outcome(outcome));
+                out.append(self.apply_protocol_scheduler_turn_outcome(outcome));
                 if let Some(observation_id) = load_observation_id {
                     self.queues.satisfy_load_predecessor(observation_id);
                 }

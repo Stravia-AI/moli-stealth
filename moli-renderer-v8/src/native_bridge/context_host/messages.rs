@@ -8,6 +8,7 @@ use crate::{document_runtime::DomHandle, structured_clone::V8StructuredClonePayl
 pub(crate) struct PendingWindowMessage {
     pub(crate) target: WindowTaskTarget,
     pub(crate) source: PendingWindowMessageSource,
+    pub(crate) source_window_proxy: Option<v8::Global<v8::Object>>,
     pub(crate) data: V8StructuredClonePayload,
     pub(crate) origin: String,
     pub(crate) intended_target_origin: Option<String>,

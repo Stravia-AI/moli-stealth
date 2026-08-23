@@ -12,6 +12,8 @@ pub(crate) struct PopupTargetNavigationClaimIdentity {
     browser_context_id: String,
     target_id: String,
     url: String,
+    referrer: Option<String>,
+    document_referrer: Option<String>,
     kind: PopupTargetNavigationKind,
 }
 
@@ -30,6 +32,14 @@ impl PopupTargetNavigationClaimIdentity {
 
     pub(crate) fn url(&self) -> &str {
         &self.url
+    }
+
+    pub(crate) fn referrer(&self) -> Option<&str> {
+        self.referrer.as_deref()
+    }
+
+    pub(crate) fn document_referrer(&self) -> Option<&str> {
+        self.document_referrer.as_deref()
     }
 
     pub(crate) fn kind(&self) -> PopupTargetNavigationKind {
@@ -88,6 +98,8 @@ impl PopupTargetNavigationOwnerAction {
         browser_context_id: &str,
         target_id: &str,
         url: String,
+        referrer: Option<String>,
+        document_referrer: Option<String>,
         kind: PopupTargetNavigationKind,
     ) -> Option<Self> {
         let route = conn.target_session_route_for_target_id(target_id)?;
@@ -114,6 +126,8 @@ impl PopupTargetNavigationOwnerAction {
                 browser_context_id: browser_context_id.to_owned(),
                 target_id: target_id.to_owned(),
                 url,
+                referrer,
+                document_referrer,
                 kind,
             },
         })

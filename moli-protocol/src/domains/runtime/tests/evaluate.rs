@@ -2451,9 +2451,12 @@ async fn page_navigate_network_failure_commits_error_document_in_stable_page() {
             request_headers: Vec::new(),
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 0.0,
-            source_document_security: crate::conn::NavigationSourceDocumentSecurityContext::new(
-                "http://127.0.0.1".to_owned(),
-                "InsecureScheme".to_owned(),
+            source_document_security: Box::new(
+                crate::conn::NavigationSourceDocumentSecurityContext::new(
+                    "http://127.0.0.1".to_owned(),
+                    "InsecureScheme".to_owned(),
+                    String::new(),
+                ),
             ),
         },
         None,

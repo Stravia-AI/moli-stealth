@@ -512,6 +512,10 @@ impl DocumentRuntime {
         self.policy_container = policy_container;
     }
 
+    pub(crate) fn set_document_referrer(&mut self, document_referrer: String) {
+        self.policy_container.document_referrer = document_referrer;
+    }
+
     pub(crate) fn set_bypass_content_security_policy(&mut self, bypass: bool) {
         self.bypass_content_security_policy = bypass;
     }

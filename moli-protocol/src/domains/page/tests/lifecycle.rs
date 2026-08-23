@@ -4,6 +4,50 @@ use crate::domains::page::{
     PageScreencastCaptureCompletion, PageScreencastCaptureStart, PageScreencastSubscriptionStatus,
 };
 
+#[tokio::test(flavor = "multi_thread")]
+async fn stale_window_close_termination_cannot_retire_current_page_residence() {
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-stale-window-close",
+        "TID-stale-window-close",
+        "SID-stale-window-close",
+        "about:blank",
+    );
+    ensure_initial_document_for_session(&mut ctx, Some("SID-stale-window-close")).await;
+    let current = ctx
+        .conn
+        .target_page_residence_identity_for_session(Some("SID-stale-window-close"))
+        .expect("current Page residence");
+    let stale_attachment_id = current.page_attachment_id().get() + 1;
+    let stale = crate::conn::TargetPageResidenceIdentity::new_for_test(
+        current.browser_context_id().to_owned(),
+        current.target_id().map(str::to_owned),
+        stale_attachment_id,
+    );
+    let action = crate::domains::page::PageTargetTerminationOwnerAction::new_for_window_close(
+        crate::conn::CommandOwnerScope::capture(&ctx.conn, Some("SID-stale-window-close")),
+        "TID-stale-window-close".to_owned(),
+        stale,
+    );
+
+    let (events, scheduler_events) =
+        crate::domains::page::complete_page_target_termination_owner_action_async(
+            &mut ctx.conn,
+            action,
+        )
+        .await
+        .into_protocol_event_parts();
+    assert!(events.is_empty());
+    assert!(scheduler_events.is_empty());
+    assert_eq!(
+        ctx.conn
+            .target_page_residence_identity_for_session(Some("SID-stale-window-close")),
+        Some(current),
+        "the final close continuation must recheck its exact Page generation"
+    );
+}
+
 #[test]
 fn child_frame_security_identity_matches_chromium_cdp_url_projection() {
     assert_eq!(
@@ -3503,12 +3547,13 @@ async fn close_command_background_events_keep_target_detached_sidecar() {
     // only then may this owner action retire the session route and materialize
     // the detach sidecar. Exercise that real scheduler boundary instead of
     // expecting the old command-local destructive drain.
-    let (mut termination_events, nested_scheduler_events) = ctx
+    let (mut termination_events, nested_scheduler_events, renderer_output_predecessor) = ctx
         .conn
         .complete_ready_protocol_scheduler_work_turn(work)
         .await
         .into_protocol_event_parts();
     assert!(nested_scheduler_events.is_empty());
+    assert!(renderer_output_predecessor.is_none());
     events.append(&mut termination_events);
 
     let response = events

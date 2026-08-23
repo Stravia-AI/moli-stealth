@@ -16,14 +16,19 @@ fn main_ingress(
     )
 }
 
-fn configure_page(bridge: &RendererInspectorPauseBridge, page_id: PageId) {
+fn configure_page(
+    bridge: &RendererInspectorPauseBridge,
+    page_id: PageId,
+) -> RendererDevToolsAgentToken {
+    let agent_token = RendererDevToolsAgentToken::allocate();
     bridge.configure_page_route(RendererTurnOutputJournal::new(
         crate::runtime::RendererOutputStreamIdentity::new_page(
             crate::runtime::RendererOwnerLocalHostId::new_for_testing(page_id.as_u64()),
             page_id,
-            RendererDevToolsAgentToken::allocate(),
+            agent_token,
         ),
     ));
+    agent_token
 }
 
 fn outbound_route(bridge: &RendererInspectorPauseBridge) -> RendererInspectorSessionOutboundRoute {
@@ -34,15 +39,21 @@ fn outbound_route_with_io(
     bridge: &RendererInspectorPauseBridge,
     io_ingress: crate::devtools::ingress::io::RendererInspectorIoIngress,
 ) -> RendererInspectorSessionOutboundRoute {
+    let agent_token = bridge
+        .shared
+        .state
+        .lock()
+        .routes
+        .keys()
+        .next()
+        .copied()
+        .unwrap_or_else(RendererDevToolsAgentToken::allocate);
     crate::devtools::target::RendererDevToolsTargetHandle::new(
         bridge.clone(),
         main_ingress(bridge),
         io_ingress,
     )
-    .outbound_route(
-        RendererDevToolsAgentToken::allocate(),
-        DevToolsSessionKey::Primary,
-    )
+    .outbound_route(agent_token, DevToolsSessionKey::Primary)
 }
 
 fn enqueue_command(
@@ -456,29 +467,26 @@ fn page_detach_does_not_close_target_persistent_bridge_or_new_page_route() {
     let bridge = RendererInspectorPauseBridge::default();
     let first_page_id = PageId::new_for_testing(1);
     let second_page_id = PageId::new_for_testing(2);
-    configure_page(&bridge, first_page_id);
+    let first_agent_token = configure_page(&bridge, first_page_id);
 
     assert!(expect_immediate_preface(route_paused(&bridge)).is_empty());
-    assert!(bridge.detach_page(first_page_id));
+    assert!(bridge.detach_page(first_page_id, first_agent_token));
     {
         let state = bridge.shared.state.lock();
         assert_eq!(state.phase, RendererInspectorPausePhase::Running);
         assert!(!state.target_closed);
-        assert!(state.route.is_none());
+        assert!(state.routes.is_empty());
     }
 
-    configure_page(&bridge, second_page_id);
-    assert!(!bridge.detach_page(first_page_id));
+    let second_agent_token = configure_page(&bridge, second_page_id);
+    assert!(!bridge.detach_page(first_page_id, first_agent_token));
     {
         let state = bridge.shared.state.lock();
         assert_eq!(
-            state.route.as_ref().and_then(|route| {
-                match route.output_journal.stream().residence() {
-                    RendererOutputResidenceIdentity::Page { page_id, .. } => Some(page_id),
-                    RendererOutputResidenceIdentity::SharedWorker { .. }
-                    | RendererOutputResidenceIdentity::ServiceWorker { .. } => None,
-                }
-            }),
+            state
+                .routes
+                .get(&second_agent_token)
+                .map(|route| route.page_id),
             Some(second_page_id),
             "a stale page drop must not detach the replacement page"
         );
@@ -532,8 +540,8 @@ fn session_detach_arm_prevents_a_new_pause_before_owner_dispatch() {
 fn detached_page_cannot_enter_a_new_pause() {
     let bridge = RendererInspectorPauseBridge::default();
     let page_id = PageId::new_for_testing(1);
-    configure_page(&bridge, page_id);
-    bridge.detach_page(page_id);
+    let agent_token = configure_page(&bridge, page_id);
+    bridge.detach_page(page_id, agent_token);
 
     assert_eq!(
         route_paused(&bridge),

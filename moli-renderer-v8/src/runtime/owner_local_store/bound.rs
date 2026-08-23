@@ -626,6 +626,9 @@ pub(in crate::runtime) async fn finalize_prepared_page_replacement_on_entry_via_
                         initial_runtime_realms,
                         renderer_output_predecessor,
                         document_continuation_observer: None,
+                        top_level_browsing_context_closing: entry
+                            .page_vm()
+                            .top_level_browsing_context_is_closed(),
                     },
                     creation_artifacts,
                     pending_download: None,
@@ -761,6 +764,15 @@ pub(in crate::runtime) fn remove_page_on_bound_owner_local_store(token: Renderer
     with_bound_render_runtime_owner_local_store_session(|mut session| session.remove_page(token))
 }
 
+pub(in crate::runtime) fn remove_page_after_target_close_on_bound_owner_local_store(
+    token: RendererPageToken,
+    terminated_active_execution: bool,
+) {
+    with_bound_render_runtime_owner_local_store_session(|mut session| {
+        session.remove_page_after_target_close(token, terminated_active_execution)
+    })
+}
+
 pub(in crate::runtime) fn publish_page_navigation_failure_on_bound_owner_local_store(
     token: RendererPageToken,
     failure: PageNavigationOwnerFailure,
@@ -778,6 +790,21 @@ pub(in crate::runtime) async fn remove_page_on_bound_owner_local_store_via_local
 ) -> Result<()> {
     run_on_bound_owner_local_store_local_task(local_executor, async move {
         remove_page_on_bound_owner_local_store(token);
+        Ok(())
+    })
+    .await
+}
+
+pub(in crate::runtime) async fn remove_page_after_target_close_on_bound_owner_local_store_via_local_task(
+    local_executor: JsLocalExecutor,
+    token: RendererPageToken,
+    terminated_active_execution: bool,
+) -> Result<()> {
+    run_on_bound_owner_local_store_local_task(local_executor, async move {
+        remove_page_after_target_close_on_bound_owner_local_store(
+            token,
+            terminated_active_execution,
+        );
         Ok(())
     })
     .await

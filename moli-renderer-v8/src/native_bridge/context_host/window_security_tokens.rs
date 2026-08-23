@@ -167,6 +167,54 @@ impl JsContextHost {
         )
     }
 
+    pub(crate) fn window_execution_context_can_access_related_page(
+        &self,
+        accessing: WindowExecutionContextIdentity,
+        accessed_host: &Self,
+        accessed: WindowExecutionContextIdentity,
+    ) -> bool {
+        if !accessed_host.window_execution_context_identity_is_current(accessed) {
+            return false;
+        }
+        self.window_execution_context_can_access_related_page_dispatch_scope(
+            accessing,
+            accessed_host,
+            accessed.dispatch_scope(),
+        )
+    }
+
+    /// Checks an observer Realm against a target scope in another related
+    /// Page before that target Realm necessarily exists.
+    pub(crate) fn window_execution_context_can_access_related_page_dispatch_scope(
+        &self,
+        accessing: WindowExecutionContextIdentity,
+        accessed_host: &Self,
+        accessed_scope: OwnerDispatchScope,
+    ) -> bool {
+        if !self.window_execution_context_identity_is_current(accessing)
+            || !self.shares_related_page_script_agent_with(accessed_host)
+        {
+            return false;
+        }
+        if accessing.grants_universal_access() {
+            return true;
+        }
+        let Some(accessing_origin) = self.window_access_origin(accessing) else {
+            return false;
+        };
+        let Some(accessed_origin) =
+            accessed_host.window_access_origin_for_dispatch_scope(accessed_scope)
+        else {
+            return false;
+        };
+        // Opaque WindowExecutionContextOwner identities are host-local. Two
+        // related Page/frame hosts can both allocate LocalWindowId(1), but
+        // that does not make their independently created opaque origins equal.
+        // Initial about:blank inheritance does not reach this branch: its
+        // creator security token is transferred exactly to the new context.
+        related_page_window_origins_can_access(&accessing_origin, &accessed_origin)
+    }
+
     /// Checks Window access before the target realm is entered or materialized.
     ///
     /// WebIDL operations such as a borrowed `fetch()` must authorize the
@@ -313,6 +361,15 @@ impl JsContextHost {
 pub(in crate::native_bridge::context_host) type WindowAccessOrigin =
     BrowsingContextAccessOrigin<WindowExecutionContextOwner>;
 
+fn related_page_window_origins_can_access(
+    accessing: &WindowAccessOrigin,
+    accessed: &WindowAccessOrigin,
+) -> bool {
+    !matches!(accessing, BrowsingContextAccessOrigin::Opaque { .. })
+        && !matches!(accessed, BrowsingContextAccessOrigin::Opaque { .. })
+        && accessing.can_access(accessed)
+}
+
 pub(crate) fn set_window_security_token(
     scope: &mut v8::PinScope<'_, '_, ()>,
     context: v8::Local<'_, v8::Context>,
@@ -354,7 +411,8 @@ fn window_isolated_world_security_token_key(
 #[cfg(test)]
 mod tests {
     use super::{
-        WindowAccessOrigin, window_isolated_world_security_token_key, window_security_token_key,
+        WindowAccessOrigin, related_page_window_origins_can_access,
+        window_isolated_world_security_token_key, window_security_token_key,
     };
     use crate::{frame_owner_model::LocalWindowId, native_bridge::WindowExecutionContextOwner};
 
@@ -372,6 +430,16 @@ mod tests {
         assert!(inherited.can_access(&WindowAccessOrigin::opaque(inherited_identity)));
         assert!(!inherited.can_access(&WindowAccessOrigin::opaque(distinct_identity)));
         assert!(!inherited.can_access(&WindowAccessOrigin::Opaque { identity: None }));
+    }
+
+    #[test]
+    fn related_pages_do_not_treat_colliding_host_local_opaque_ids_as_same_origin() {
+        let colliding_identity = WindowExecutionContextOwner::Frame(LocalWindowId(1));
+        let first = WindowAccessOrigin::opaque(colliding_identity);
+        let second = WindowAccessOrigin::opaque(colliding_identity);
+
+        assert!(first.can_access(&second));
+        assert!(!related_page_window_origins_can_access(&first, &second));
     }
 
     #[test]

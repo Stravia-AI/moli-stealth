@@ -671,6 +671,279 @@ async fn rust_cdp_chromium_target_window_open_blank_creates_popup_target() {
     );
 }
 
+// Chromium sources:
+// third_party/blink/renderer/core/frame/local_dom_window.cc::close
+// third_party/blink/renderer/core/frame/dom_window.cc::closed
+// content/browser/web_contents/web_contents_impl.cc::ClosePage
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_window_close_retires_target_and_parks_stable_window_proxy() {
+    let listener =
+        std::net::TcpListener::bind("127.0.0.1:0").expect("early-close destination listener");
+    listener
+        .set_nonblocking(true)
+        .expect("early-close destination listener nonblocking mode");
+    let destination_url = format!(
+        "http://{}/must-not-start",
+        listener.local_addr().expect("early-close listener address")
+    );
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-window-close",
+                "TID-popup-window-close-opener",
+                "<main>opener</main>",
+            )
+            .await;
+            set_auto_attach(&mut ctx, 2_602_430, true).await;
+            ctx.take_all();
+
+            ctx.process_async(json!({
+                "id": 2_602_431,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(r#"(() => {{
+  const popup = window.open({destination_url:?}, "_blank");
+  globalThis.__lmClosedPopup = popup;
+  globalThis.__lmClosedPopupAlias = popup;
+  const initialDocument = popup.document;
+  popup.close();
+  const afterFirstClose = [
+    popup.closed,
+    popup === globalThis.__lmClosedPopupAlias,
+    popup.window === popup,
+    popup.opener === window,
+    popup.document === initialDocument
+  ];
+  popup.close();
+  return afterFirstClose;
+}})()"#),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "window.close popup targetDestroyed",
+                |message| message["method"] == json!("Target.targetDestroyed"),
+            )
+            .await;
+
+            let messages = ctx.take_all();
+            assert_eq!(
+                response(&messages, 2_602_431)["result"]["result"]["value"],
+                json!([true, true, true, true, true]),
+                "close() must synchronously expose Closing while the initial Document is still alive"
+            );
+            let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                ["targetInfo"]["targetId"]
+                .as_str()
+                .expect("closed popup target id")
+                .to_owned();
+            let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                ["sessionId"]
+                .as_str()
+                .expect("closed popup session id")
+                .to_owned();
+            let destroyed = messages
+                .iter()
+                .filter(|message| {
+                    message["method"] == json!("Target.targetDestroyed")
+                        && message["params"]["targetId"] == json!(popup_target_id)
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                destroyed.len(),
+                1,
+                "duplicate close() calls must retire the target exactly once: {messages:?}"
+            );
+            let response_index = messages
+                .iter()
+                .position(|message| message["id"] == json!(2_602_431))
+                .expect("window.close opener evaluation response");
+            let created_index = messages
+                .iter()
+                .position(|message| message["method"] == json!("Target.targetCreated"))
+                .expect("window.close popup targetCreated");
+            let destroyed_index = messages
+                .iter()
+                .position(|message| {
+                    message["method"] == json!("Target.targetDestroyed")
+                        && message["params"]["targetId"] == json!(popup_target_id)
+                })
+                .expect("window.close popup targetDestroyed");
+            assert!(
+                response_index < destroyed_index && created_index < destroyed_index,
+                "the opener command response and target creation must precede target retirement: {messages:?}"
+            );
+            assert!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-window-close")
+                    .and_then(|browser_context| {
+                        browser_context.background_target(&popup_target_id)
+                    })
+                    .is_none(),
+                "window.close target must leave no background target residence"
+            );
+            assert!(
+                ctx.conn
+                    .target_page_residence_identity_for_session(Some(&popup_session_id))
+                    .is_none(),
+                "window.close target must leave no session-owned Page residence"
+            );
+            assert!(
+                matches!(
+                    listener.accept(),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+                ),
+                "open(url); popup.close() must not start the destination fetch"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_432,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": r#"(() => {
+  const popup = globalThis.__lmClosedPopup;
+  let deniedDocument;
+  try {
+    void popup.document;
+    deniedDocument = "allowed";
+  } catch (error) {
+    deniedDocument = error && error.name;
+  }
+  return {
+    identity: popup === globalThis.__lmClosedPopupAlias,
+    closed: popup.closed,
+    openerIsWindow: popup.opener === window,
+    length: popup.length,
+    windowIdentity: popup.window === popup,
+    deniedDocument
+  };
+})()"#,
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            let retained_proxy_response = take_response_by_id(&mut ctx, 2_602_432);
+            assert_eq!(
+                retained_proxy_response["result"]["result"]["value"],
+                json!({
+                    "identity": true,
+                    "closed": true,
+                    "openerIsWindow": true,
+                    "length": 0,
+                    "windowIdentity": true,
+                    "deniedDocument": "SecurityError"
+                }),
+                "the opener must retain the exact stable WindowProxy on its host-free closed facade: {retained_proxy_response:?}"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn target_close_parks_the_same_stable_popup_window_proxy() {
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-target-close",
+                "TID-popup-target-close-opener",
+                "<main>opener</main>",
+            )
+            .await;
+            set_auto_attach(&mut ctx, 2_602_433, true).await;
+            ctx.take_all();
+
+            let opened = open_popup_from_runtime(
+                &mut ctx,
+                2_602_434,
+                "(() => { const popup = window.open('about:blank', '_blank'); globalThis.__lmTargetClosedPopup = popup; globalThis.__lmTargetClosedPopupAlias = popup; return popup.closed; })()",
+            )
+            .await;
+            assert_eq!(
+                response(&opened, 2_602_434)["result"]["result"]["value"],
+                false
+            );
+            let popup_target_id = event(&opened, "Target.targetCreated")["params"]
+                ["targetInfo"]["targetId"]
+                .as_str()
+                .expect("Target.closeTarget popup id")
+                .to_owned();
+
+            ctx.process_async(json!({
+                "id": 2_602_435,
+                "method": "Target.closeTarget",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "Target.closeTarget popup targetDestroyed",
+                |message| {
+                    message["method"] == json!("Target.targetDestroyed")
+                        && message["params"]["targetId"] == json!(popup_target_id)
+                },
+            )
+            .await;
+            let closed = ctx.take_all();
+            assert_eq!(
+                response(&closed, 2_602_435)["result"],
+                json!({ "success": true })
+            );
+            assert_eq!(
+                closed
+                    .iter()
+                    .filter(|message| {
+                        message["method"] == json!("Target.targetDestroyed")
+                            && message["params"]["targetId"] == json!(popup_target_id)
+                    })
+                    .count(),
+                1,
+                "Target.closeTarget must retire the popup exactly once: {closed:?}"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_436,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": r#"(() => {
+  const popup = globalThis.__lmTargetClosedPopup;
+  let deniedDocument;
+  try {
+    void popup.document;
+    deniedDocument = "allowed";
+  } catch (error) {
+    deniedDocument = error && error.name;
+  }
+  return [
+    popup === globalThis.__lmTargetClosedPopupAlias,
+    popup.closed,
+    popup.opener === window,
+    popup.length,
+    popup.window === popup,
+    deniedDocument
+  ];
+})()"#,
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            let retained_proxy_response = take_response_by_id(&mut ctx, 2_602_436);
+            assert_eq!(
+                retained_proxy_response["result"]["result"]["value"],
+                json!([true, true, true, 0, true, "SecurityError"]),
+                "Target.closeTarget and window.close must share final stable-WindowProxy teardown: {retained_proxy_response:?}"
+            );
+        })
+        .await;
+}
+
 // Chromium source:
 // third_party/blink/web_tests/http/tests/inspector-protocol/target/target-setAutoAttach-windowOpen.js
 #[tokio::test(flavor = "multi_thread")]
@@ -1225,7 +1498,7 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             assert_eq!(
                 ctx.conn
                     .target_page_residence_identity_for_session(Some(&popup_session_id)),
-                Some(before_target_page),
+                Some(before_target_page.clone()),
                 "popup error navigation should keep its target Page residence"
             );
             assert_eq!(
@@ -1247,7 +1520,89 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
                 "id": 260_234,
                 "method": "Runtime.evaluate",
                 "params": {
-                    "expression": "({ retainedWindowProxy: __networkErrorPopup !== null && __networkErrorPopup === __networkErrorPopupAlias })",
+                    "expression": r#"(() => {
+  const popup = __networkErrorPopup;
+  const probe = callback => {
+    try {
+      const value = callback();
+      return value === undefined ? "undefined" : String(value);
+    } catch (error) {
+      return `${error && error.name}:${error instanceof DOMException}`;
+    }
+  };
+  const dataDescriptor = descriptor => [
+    typeof descriptor.value,
+    descriptor.value.name,
+    descriptor.value.length,
+    descriptor.writable,
+    descriptor.enumerable,
+    descriptor.configurable
+  ];
+  const locationDescriptor = Object.getOwnPropertyDescriptor(popup, "location");
+  const symbolDescriptor = Object.getOwnPropertyDescriptor(popup, Symbol.toStringTag);
+  return {
+    retainedWindowProxy: popup !== null && popup === __networkErrorPopupAlias,
+    identity: [
+      popup.window === popup,
+      popup.self === popup,
+      popup.frames === popup,
+      popup.parent === popup,
+      popup.top === popup,
+      popup.opener === window,
+      popup.location === popup.location
+    ],
+    scalar: [popup.closed, popup.length, popup.then],
+    methods: [
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "postMessage")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "blur")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "close")),
+      dataDescriptor(Object.getOwnPropertyDescriptor(popup, "focus"))
+    ],
+    stableMethods: [
+      popup.postMessage === popup.postMessage,
+      popup.blur === popup.blur,
+      popup.close === popup.close,
+      popup.focus === popup.focus
+    ],
+    locationDescriptor: [
+      typeof locationDescriptor.get,
+      typeof locationDescriptor.set,
+      locationDescriptor.enumerable,
+      locationDescriptor.configurable
+    ],
+    symbolDescriptor: [
+      symbolDescriptor.value === undefined,
+      symbolDescriptor.writable,
+      symbolDescriptor.enumerable,
+      symbolDescriptor.configurable
+    ],
+    names: Object.getOwnPropertyNames(popup).sort(),
+    keys: Object.keys(popup),
+    symbols: Object.getOwnPropertySymbols(popup).map(String),
+    symbolValues: [
+      popup[Symbol.toStringTag],
+      popup[Symbol.hasInstance],
+      popup[Symbol.isConcatSpreadable]
+    ].map(value => value === undefined),
+    prototype: Object.getPrototypeOf(popup) === null,
+    tag: Object.prototype.toString.call(popup),
+    locationSurface: [
+      Object.getPrototypeOf(popup.location) === null,
+      Object.prototype.toString.call(popup.location),
+      typeof popup.location.replace
+    ],
+    denied: [
+      probe(() => popup.document),
+      probe(() => popup.name),
+      probe(() => popup.globalThis),
+      probe(() => popup.__not_exposed),
+      probe(() => Object.getOwnPropertyDescriptor(popup, "document")),
+      probe(() => Object.prototype.hasOwnProperty.call(popup, "document")),
+      probe(() => popup.location.href),
+      probe(() => popup.location.origin)
+    ]
+  };
+})()"#,
                     "returnByValue": true
                 }
             }))
@@ -1255,8 +1610,257 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
             let opener_probe = take_response_by_id(&mut ctx, 260_234);
             assert_eq!(
                 opener_probe["result"]["result"]["value"],
-                json!({ "retainedWindowProxy": true }),
+                json!({
+                    "retainedWindowProxy": true,
+                    "identity": [true, true, true, true, true, true, true],
+                    "scalar": [false, 0, null],
+                    "methods": [
+                        ["function", "postMessage", 1, false, false, true],
+                        ["function", "blur", 0, false, false, true],
+                        ["function", "close", 0, false, false, true],
+                        ["function", "focus", 0, false, false, true]
+                    ],
+                    "stableMethods": [true, true, true, true],
+                    "locationDescriptor": ["function", "function", false, true],
+                    "symbolDescriptor": [true, false, false, true],
+                    "names": [
+                        "blur", "close", "closed", "focus", "frames", "length",
+                        "location", "opener", "parent", "postMessage", "self", "then",
+                        "top", "window"
+                    ],
+                    "keys": [],
+                    "symbols": [
+                        "Symbol(Symbol.toStringTag)",
+                        "Symbol(Symbol.hasInstance)",
+                        "Symbol(Symbol.isConcatSpreadable)"
+                    ],
+                    "symbolValues": [true, true, true],
+                    "prototype": true,
+                    "tag": "[object Object]",
+                    "locationSurface": [true, "[object Object]", "function"],
+                    "denied": [
+                        "SecurityError:true", "SecurityError:true", "SecurityError:true",
+                        "SecurityError:true", "SecurityError:true", "SecurityError:true",
+                        "SecurityError:true", "SecurityError:true"
+                    ]
+                }),
                 "opener-side stable popup WindowProxy probe failed: {opener_probe:?}"
+            );
+
+            ctx.process_async(json!({
+                "id": 260_235,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": r#"(() => {
+  globalThis.__relatedPopupMessage = null;
+  addEventListener("message", event => {
+    globalThis.__relatedPopupMessage = {
+      data: event.data,
+      origin: event.origin,
+      sourceIsOpener: event.source === opener
+    };
+    console.log("__related-popup-message", JSON.stringify(__relatedPopupMessage));
+  }, { once: true });
+  return "ready";
+})()"#,
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_235)["result"]["result"]["value"],
+                "ready"
+            );
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 260_236,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "__networkErrorPopup.postMessage({ kind: 'related-page', value: 41 }, '*'); 'queued'",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_236)["result"]["result"]["value"],
+                "queued"
+            );
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "related popup Window.postMessage delivery",
+                |message| {
+                    message["method"] == json!("Runtime.consoleAPICalled")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["args"][0]["value"]
+                            == json!("__related-popup-message")
+                },
+            )
+            .await;
+
+            ctx.process_async(json!({
+                "id": 260_237,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "__relatedPopupMessage",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_237)["result"]["result"]["value"],
+                json!({
+                    "data": { "kind": "related-page", "value": 41 },
+                    "origin": "null",
+                    "sourceIsOpener": true
+                })
+            );
+
+            let related_location_url =
+                "data:text/html,<title>related-popup-location</title><main>location-routed</main>";
+            ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 260_238,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "__networkErrorPopup.location = {related_location_url:?}; 'navigating'"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_238)["result"]["result"]["value"],
+                "navigating"
+            );
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "cross-origin popup.location load",
+                |message| {
+                    message["method"] == json!("Page.loadEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("cross-origin popup.location commit", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                    && conn
+                        .browser_context_by_id("BID-popup-network-error")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == related_location_url)
+            })
+            .await;
+
+            assert_eq!(
+                ctx.conn
+                    .target_page_residence_identity_for_session(Some(&popup_session_id)),
+                Some(before_target_page),
+                "cross-origin popup.location should preserve the target Page residence"
+            );
+            assert_eq!(
+                ctx.conn
+                    .renderer_page_residence_identity_for_session_owner(Some(&popup_session_id)),
+                Some(before_renderer_page),
+                "cross-origin popup.location should preserve the stable renderer Page/WindowProxy"
+            );
+
+            ctx.process_async(json!({
+                "id": 260_239,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ title: document.title, text: document.querySelector('main').textContent, hasOpener: opener !== null })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_239)["result"]["result"]["value"],
+                json!({
+                    "title": "related-popup-location",
+                    "text": "location-routed",
+                    "hasOpener": true
+                })
+            );
+
+            let related_replace_url =
+                "data:text/html,<title>related-popup-replace</title><main>replace-routed</main>";
+            ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 260_240,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "__networkErrorPopup.location.replace({related_replace_url:?}); 'replacing'"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_240)["result"]["result"]["value"],
+                "replacing"
+            );
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "cross-origin popup.location.replace load",
+                |message| {
+                    message["method"] == json!("Page.loadEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("cross-origin popup.location.replace commit", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                    && conn
+                        .browser_context_by_id("BID-popup-network-error")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == related_replace_url)
+            })
+            .await;
+
+            ctx.process_async(json!({
+                "id": 260_241,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ title: document.title, text: document.querySelector('main').textContent, hasOpener: opener !== null })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 260_241)["result"]["result"]["value"],
+                json!({
+                    "title": "related-popup-replace",
+                    "text": "replace-routed",
+                    "hasOpener": true
+                })
+            );
+
+            ctx.process_async(json!({
+                "id": 260_242,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "__networkErrorPopup === __networkErrorPopupAlias && typeof __networkErrorPopup.postMessage === 'function'",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            let post_navigation_opener_probe = take_response_by_id(&mut ctx, 260_242);
+            assert_eq!(
+                post_navigation_opener_probe["result"]["result"]["value"],
+                true,
+                "opener should retain the same cross-origin WindowProxy after location navigation: {post_navigation_opener_probe:?}"
             );
         })
         .await;

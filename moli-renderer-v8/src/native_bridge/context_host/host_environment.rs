@@ -72,6 +72,31 @@ fn hover_chain_for_input_hit(runtime: &JsContextHost, hit: Option<DomHandle>) ->
     hovered
 }
 
+/// Document-start registry observed when one exact child Document is created.
+///
+/// Realm materialization can happen after a later DevTools command has changed
+/// the Page-wide registry. Keeping the exact-owner snapshot here prevents that
+/// later command from being replayed retroactively into an older child
+/// Document.
+#[derive(Clone)]
+pub(crate) struct ChildDocumentStartScriptSnapshot {
+    scripts: Vec<crate::DocumentStartScript>,
+}
+
+impl ChildDocumentStartScriptSnapshot {
+    pub(crate) fn scripts(&self) -> &[crate::DocumentStartScript] {
+        &self.scripts
+    }
+
+    pub(crate) fn default_world_scripts(
+        &self,
+    ) -> impl Iterator<Item = &crate::DocumentStartScript> {
+        self.scripts
+            .iter()
+            .filter(|script| script.world_name.is_none())
+    }
+}
+
 impl JsContextHost {
     pub(crate) fn documents_with_adopted_style_sheets(&self) -> Vec<DomHandle> {
         self.style_engine.documents_with_adopted_style_sheets()
@@ -449,16 +474,38 @@ impl JsContextHost {
         self.stored_document_start_scripts = scripts.to_vec();
     }
 
-    pub(crate) fn stored_default_document_start_scripts(&self) -> Vec<crate::DocumentStartScript> {
-        self.stored_document_start_scripts
-            .iter()
-            .filter(|script| script.world_name.is_none())
-            .cloned()
-            .collect()
+    pub(crate) fn capture_child_document_start_script_snapshot(
+        &mut self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) {
+        let replaced = self.child_document_start_script_snapshots.insert(
+            owner,
+            ChildDocumentStartScriptSnapshot {
+                scripts: self.stored_document_start_scripts.clone(),
+            },
+        );
+        debug_assert!(
+            replaced.is_none(),
+            "a child Document owner must capture its preload registry exactly once"
+        );
     }
 
-    pub(crate) fn stored_document_start_scripts(&self) -> Vec<crate::DocumentStartScript> {
-        self.stored_document_start_scripts.clone()
+    pub(crate) fn child_document_start_script_snapshot(
+        &self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) -> Option<ChildDocumentStartScriptSnapshot> {
+        self.child_document_start_script_snapshots
+            .get(&owner)
+            .cloned()
+    }
+
+    pub(crate) fn retire_child_document_start_script_snapshot(
+        &mut self,
+        owner: crate::frame_owner_model::FrameDocumentTaskOwner,
+    ) -> bool {
+        self.child_document_start_script_snapshots
+            .remove(&owner)
+            .is_some()
     }
 
     pub(crate) fn stored_default_runtime_binding_names(&self) -> Vec<String> {

@@ -90,6 +90,55 @@ impl JsContextHost {
         self.page_script_environment = Some(environment);
     }
 
+    pub(crate) fn shares_related_page_script_agent_with(&self, other: &Self) -> bool {
+        self.page_script_environment
+            .as_ref()
+            .zip(other.page_script_environment.as_ref())
+            .is_some_and(|(environment, other_environment)| {
+                environment.is_related_page_peer(other_environment)
+            })
+    }
+
+    pub(crate) fn top_level_browsing_context_is_closed(&self) -> bool {
+        self.page_script_environment
+            .as_ref()
+            .is_some_and(|environment| environment.top_level_browsing_context_is_closed())
+    }
+
+    pub(crate) fn top_level_opener_value<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        self.page_script_environment
+            .as_ref()
+            .and_then(|environment| environment.top_level_opener_value(scope))
+    }
+
+    pub(crate) fn sever_top_level_opener(&self, scope: &mut v8::PinScope<'_, '_>) -> bool {
+        let Some(environment) = self.page_script_environment.as_ref() else {
+            return false;
+        };
+        environment.sever_top_level_opener_edge(scope);
+        true
+    }
+
+    /// Starts one Page-scoped close transaction and appends its browser-owner
+    /// action to this Page's exact output stream.
+    pub(crate) fn request_top_level_browsing_context_close(&self) -> bool {
+        let Some(environment) = self.page_script_environment.clone() else {
+            return false;
+        };
+        if !environment.begin_top_level_browsing_context_close() {
+            return true;
+        }
+        assert!(
+            self.append_live_turn_owner_action(crate::runtime::RendererOwnerAction::TopLevelClose),
+            "a live Page window.close() must retain its renderer output journal"
+        );
+        environment.signal_top_level_close_output_handoff();
+        true
+    }
+
     pub(crate) fn bind_auxiliary_page_reservation_allocator(
         &mut self,
         allocator: RendererAuxiliaryPageReservationAllocator,
@@ -286,6 +335,7 @@ impl JsContextHost {
             auxiliary_page_reservation_allocator: None,
             page_script_environment: None,
             page_context_resources_closed: false,
+            context_host_liveness: Rc::new(Cell::new(true)),
             page_default_context: None,
             v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry::default(),
             bridge: NativeDomBridge::new(bindings),
@@ -319,6 +369,7 @@ impl JsContextHost {
             child_document_script_schedulers: FrameDocumentScriptSchedulerStore::default(),
             child_document_parsers: ChildDocumentParserStore::default(),
             child_window_proxy_records: ChildWindowProxyRecords::default(),
+            top_level_cross_origin_window_access_surface: None,
             child_default_context_bootstrap: None,
             #[cfg(test)]
             force_child_default_context_preflight_failure: false,
@@ -334,6 +385,7 @@ impl JsContextHost {
             indexed_db_manager: None,
             storage_bucket_store: new_shared_storage_bucket_store(),
             stored_document_start_scripts: Vec::new(),
+            child_document_start_script_snapshots: HashMap::new(),
             stored_runtime_bindings: Vec::new(),
             app_manifest_link_change_epoch: 0,
             extra_http_headers: Vec::new(),

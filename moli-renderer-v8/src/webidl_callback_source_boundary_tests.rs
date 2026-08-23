@@ -211,6 +211,11 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(
+        "native_bridge/context_host/child_frame_runtime/cross_origin_window_intrinsics.rs",
+        1,
+        DirectCallOwner::NativeForwardingOrScript,
+    ),
+    allowed(
         "native_bridge/context_host/host_loads.rs",
         1,
         DirectCallOwner::NativeForwardingOrScript,

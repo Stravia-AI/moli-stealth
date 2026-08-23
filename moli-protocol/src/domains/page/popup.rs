@@ -93,6 +93,9 @@ pub(super) async fn emit_prepared(
             popup_id,
             url,
             target_name,
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
             pending_auxiliary_page,
             session_storage_store,
             initial_empty_document_storage_key,
@@ -113,16 +116,23 @@ pub(super) async fn emit_prepared(
             opener,
             can_access_opener,
             disposition,
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
             pending_auxiliary_page,
             session_storage_store,
             initial_empty_document_storage_key,
         );
         let browser_context_id = page_owner.browser_context_id().to_owned();
-        let target_id =
+        // Keep the large target-admission state off the generic renderer
+        // output projection stack. This path is present in every projection
+        // future even when the current command contains no popup action.
+        let target_id = Box::pin(
             crate::domains::target::create_popup_target_from_renderer_output_background_events_async(
                 conn, out, creation,
-            )
-            .await;
+            ),
+        )
+        .await;
         super::javascript_dialog::settle_pending_popup_dialogs(
             conn,
             out,

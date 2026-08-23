@@ -82,7 +82,10 @@ mod child_dynamic_scripts;
 mod child_events;
 mod child_frame_navigation;
 mod child_frame_runtime;
-pub(crate) use child_frame_runtime::install_child_window_proxy_access_check_handlers;
+pub(crate) use child_frame_runtime::{
+    install_child_window_proxy_access_check_handlers,
+    install_cross_origin_window_internal_method_intrinsics,
+};
 mod child_frame_snapshots;
 mod child_frames;
 mod core;
@@ -99,6 +102,7 @@ mod focus;
 mod frame_document_ready_routes;
 mod hash_changes;
 mod host_environment;
+pub(crate) use host_environment::ChildDocumentStartScriptSnapshot;
 mod host_loads;
 mod image_decodes;
 mod image_loads;
@@ -178,9 +182,10 @@ use child_documents::{ChildDocumentParserStore, PendingChildDocumentNavigation};
 use child_events::ChildWindowEventListenerEntry;
 use child_frame_runtime::ChildWindowProxyRecords;
 pub(crate) use child_frame_runtime::{
-    cross_origin_lightweight_popup_id, is_cross_origin_location_proxy,
+    cross_origin_lightweight_popup_id, cross_origin_window_target_host_ptr,
+    is_cross_origin_location_proxy, is_cross_origin_related_top_window_proxy,
     is_cross_origin_top_window_proxy, throw_cross_origin_location_security_error,
-    throw_cross_origin_type_error,
+    throw_cross_origin_type_error, top_level_window_proxy_is_finally_closed,
 };
 pub(crate) use child_frame_snapshots::{
     ChildBrowsingContextDocumentSnapshot, ChildBrowsingContextFrameSnapshot,
@@ -818,6 +823,7 @@ pub(crate) struct JsContextHost {
     auxiliary_page_reservation_allocator: Option<RendererAuxiliaryPageReservationAllocator>,
     page_script_environment: Option<crate::script_vm::RendererPageScriptEnvironment>,
     page_context_resources_closed: bool,
+    context_host_liveness: Rc<Cell<bool>>,
     page_default_context: Option<v8::Weak<v8::Context>>,
     pub(crate) v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry,
     pub(super) bridge: NativeDomBridge,
@@ -852,6 +858,7 @@ pub(crate) struct JsContextHost {
     child_document_script_schedulers: FrameDocumentScriptSchedulerStore,
     child_document_parsers: ChildDocumentParserStore,
     child_window_proxy_records: ChildWindowProxyRecords,
+    top_level_cross_origin_window_access_surface: Option<v8::Global<v8::Object>>,
     child_default_context_bootstrap: Option<ChildDefaultContextBootstrapConfig>,
     #[cfg(test)]
     force_child_default_context_preflight_failure: bool,
@@ -867,6 +874,10 @@ pub(crate) struct JsContextHost {
     indexed_db_manager: Option<WeakIndexedDbManager>,
     storage_bucket_store: SharedStorageBucketStore,
     stored_document_start_scripts: Vec<crate::DocumentStartScript>,
+    child_document_start_script_snapshots: HashMap<
+        crate::frame_owner_model::FrameDocumentTaskOwner,
+        host_environment::ChildDocumentStartScriptSnapshot,
+    >,
     stored_runtime_bindings: Vec<crate::protocol_types::RuntimeBindingRegistration>,
     app_manifest_link_change_epoch: u64,
     extra_http_headers: Vec<(String, String)>,
@@ -1243,6 +1254,7 @@ impl JsContextHost {
     }
 
     pub(crate) fn close_page_context_resources_for_teardown(&mut self) {
+        self.context_host_liveness.set(false);
         if self.page_context_resources_closed {
             return;
         }
@@ -1259,6 +1271,10 @@ impl JsContextHost {
         self.close_owned_broadcast_channels();
         self.close_owned_message_ports();
         self.shutdown_workers();
+    }
+
+    pub(crate) fn context_host_liveness_handle(&self) -> Rc<Cell<bool>> {
+        self.context_host_liveness.clone()
     }
 }
 

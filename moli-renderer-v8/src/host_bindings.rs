@@ -124,8 +124,12 @@ pub(super) fn install_host_bindings(
 }
 
 fn context_host_ptr_from_callback_data(
+    scope: &mut v8::PinScope<'_, '_>,
     data: v8::Local<'_, v8::Value>,
 ) -> std::result::Result<*mut JsContextHost, String> {
+    if crate::util::page_context_is_disconnected(scope.get_current_context()) {
+        return Err("host callback belongs to a closed Page".to_owned());
+    }
     let external = v8::Local::<v8::External>::try_from(data)
         .map_err(|_| "host callback missing external context data".to_owned())?;
     let host_ptr = external.value() as *mut JsContextHost;
@@ -249,7 +253,7 @@ fn host_resolve_child_window_by_handle_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -280,7 +284,7 @@ fn host_child_frame_owner_backend_node_id_for_window_callback<'s>(
         rv.set_null();
         return;
     };
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -310,7 +314,7 @@ fn host_lightweight_popup_id_for_object_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -361,7 +365,7 @@ fn host_bidi_window_remote_value_callback<'s>(
         rv.set_null();
         return;
     };
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -396,7 +400,7 @@ fn host_resolve_internal_node_reference_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -411,7 +415,7 @@ fn host_resolve_internal_inspector_value_reference_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -426,7 +430,7 @@ fn host_resolve_backend_node_id_for_object_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -447,7 +451,7 @@ fn host_prepare_script_start_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_undefined();
         return;
     };
@@ -484,7 +488,7 @@ fn host_dispatch_document_event_callback(
     args: v8::FunctionCallbackArguments<'_>,
     _rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         return;
     };
     let host = unsafe { &mut *host_ptr };
@@ -514,7 +518,7 @@ fn host_query_selector_callback(
         rv.set_null();
         return;
     };
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -539,7 +543,7 @@ fn host_query_selector_all_callback(
         rv.set(v8::Array::new(scope, 0).into());
         return;
     };
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set(v8::Array::new(scope, 0).into());
         return;
     };
@@ -560,7 +564,7 @@ fn host_matches_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_bool(false);
         return;
     };
@@ -585,7 +589,7 @@ fn host_closest_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };
@@ -610,7 +614,7 @@ fn host_selector_debug_stats_callback(
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(args.data()) else {
+    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
         rv.set_null();
         return;
     };

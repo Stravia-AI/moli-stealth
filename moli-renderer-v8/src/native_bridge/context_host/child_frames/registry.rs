@@ -62,6 +62,7 @@ impl JsContextHost {
             .remove_document(retired_owner.document_owner());
         self.cancel_child_document_script_work_for_owner(handle, retired_owner);
         self.retire_child_frame_realm_materialization_request(handle, retired_owner);
+        self.retire_child_document_start_script_snapshot(retired_owner);
         self.note_style_subtree_context_change(document_handle);
         self.dom_host_mut()
             .mark_subtree_disconnected_preserving_owner_document(document_handle);

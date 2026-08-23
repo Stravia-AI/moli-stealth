@@ -932,6 +932,15 @@ impl RendererOwnerLocalStoreSession<'_> {
         self.store.remove_page(token)
     }
 
+    fn remove_page_after_target_close(
+        &mut self,
+        token: RendererPageToken,
+        terminated_active_execution: bool,
+    ) {
+        self.store
+            .remove_page_after_target_close(token, terminated_active_execution)
+    }
+
     fn restore_entry_after_command(&mut self, token: RendererPageToken, entry: LivePageEntry) {
         self.store.restore_entry_after_command(token, entry);
     }
@@ -2428,6 +2437,9 @@ impl RendererOwnerLocalStore {
                 initial_runtime_realms,
                 renderer_output_predecessor: None,
                 document_continuation_observer: None,
+                top_level_browsing_context_closing: entry
+                    .page_vm()
+                    .top_level_browsing_context_is_closed(),
             };
             let creation_artifacts = entry.page_vm_mut().take_page_creation_artifacts();
             Ok((
@@ -2493,6 +2505,22 @@ impl RendererOwnerLocalStore {
     }
 
     fn remove_page(&mut self, token: RendererPageToken) {
+        self.remove_page_with_target_close_termination(token, false);
+    }
+
+    fn remove_page_after_target_close(
+        &mut self,
+        token: RendererPageToken,
+        terminated_active_execution: bool,
+    ) {
+        self.remove_page_with_target_close_termination(token, terminated_active_execution);
+    }
+
+    fn remove_page_with_target_close_termination(
+        &mut self,
+        token: RendererPageToken,
+        terminated_active_execution: bool,
+    ) {
         #[cfg(debug_assertions)]
         {
             debug_assert!(
@@ -2524,6 +2552,17 @@ impl RendererOwnerLocalStore {
                     .pages
                     .remove(&token.page_id)
                     .expect("resident retiring page should retain its owner-local slot");
+                if terminated_active_execution {
+                    let canceled = entry
+                        .page_vm()
+                        .devtools_target()
+                        .cancel_terminate_execution_for_target_close();
+                    tracing::debug!(
+                        page_id = token.page_id.as_u64(),
+                        canceled,
+                        "canceled target-close execution termination before Page teardown"
+                    );
+                }
                 entry.close_for_context_teardown();
                 // PageVm owns document contexts and isolate-local inspector
                 // bindings. It must finish teardown before the stable slot can

@@ -2,7 +2,8 @@ use crate::conn::{
     BackgroundProtocolEvent, CdpConnection, Cmd, CommandOwnerScope, DEFAULT_LOADER_ID,
     DocumentNavigationToken, NavigationDispatchState, PendingFetchNavigation,
     PendingSubresourceFetchAuthRequest, PendingSubresourceFetchRequest,
-    PendingSubresourceFetchResponseRequest, monotonic_timestamp_seconds,
+    PendingSubresourceFetchResponseRequest, TargetPageResidenceIdentity,
+    monotonic_timestamp_seconds,
 };
 use crate::domains::{activity, network};
 use moli_core::RendererOutputFence;
@@ -14,12 +15,57 @@ use crate::domains::command_output::{CommandOutputBuffer, CommandOutputPlan};
 pub(crate) enum PageTargetTerminationKind {
     PageClose,
     TargetClose,
+    WindowClose,
+}
+
+/// Browser-owner preflight for one renderer `window.close()` record.
+///
+/// The exact Page residence prevents a delayed close from retiring a target
+/// that has already installed a replacement Page. The final target teardown is
+/// still delegated to `PageTargetTerminationOwnerAction` after pending
+/// renderer terminals have acquired their output fence.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PageTargetCloseRequestOwnerAction {
+    owner_scope: CommandOwnerScope,
+    page_owner: TargetPageResidenceIdentity,
+    target_id: String,
+}
+
+impl PageTargetCloseRequestOwnerAction {
+    pub(crate) fn new(
+        owner_scope: CommandOwnerScope,
+        page_owner: TargetPageResidenceIdentity,
+        target_id: String,
+    ) -> Self {
+        Self {
+            owner_scope,
+            page_owner,
+            target_id,
+        }
+    }
+
+    pub(crate) fn owner_scope(&self) -> &CommandOwnerScope {
+        &self.owner_scope
+    }
+
+    pub(crate) fn page_owner(&self) -> &TargetPageResidenceIdentity {
+        &self.page_owner
+    }
+
+    pub(crate) fn target_id(&self) -> &str {
+        &self.target_id
+    }
+
+    fn into_parts(self) -> (CommandOwnerScope, TargetPageResidenceIdentity, String) {
+        (self.owner_scope, self.page_owner, self.target_id)
+    }
 }
 
 #[derive(Debug)]
 pub(crate) struct PageTargetTerminationOwnerAction {
     owner_scope: CommandOwnerScope,
     target_id: String,
+    expected_page_owner: Option<TargetPageResidenceIdentity>,
     kind: PageTargetTerminationKind,
 }
 
@@ -32,7 +78,21 @@ impl PageTargetTerminationOwnerAction {
         Self {
             owner_scope,
             target_id,
+            expected_page_owner: None,
             kind,
+        }
+    }
+
+    pub(crate) fn new_for_window_close(
+        owner_scope: CommandOwnerScope,
+        target_id: String,
+        expected_page_owner: TargetPageResidenceIdentity,
+    ) -> Self {
+        Self {
+            owner_scope,
+            target_id,
+            expected_page_owner: Some(expected_page_owner),
+            kind: PageTargetTerminationKind::WindowClose,
         }
     }
 
@@ -48,8 +108,20 @@ impl PageTargetTerminationOwnerAction {
         self.kind
     }
 
-    fn into_parts(self) -> (CommandOwnerScope, String, PageTargetTerminationKind) {
-        (self.owner_scope, self.target_id, self.kind)
+    fn into_parts(
+        self,
+    ) -> (
+        CommandOwnerScope,
+        String,
+        Option<TargetPageResidenceIdentity>,
+        PageTargetTerminationKind,
+    ) {
+        (
+            self.owner_scope,
+            self.target_id,
+            self.expected_page_owner,
+            self.kind,
+        )
     }
 }
 
@@ -647,14 +719,21 @@ pub(crate) async fn complete_page_target_termination_owner_action_async(
     conn: &mut CdpConnection,
     action: PageTargetTerminationOwnerAction,
 ) -> crate::conn::CdpTurnOutcome {
-    let (owner_scope, expected_target_id, kind) = action.into_parts();
+    let (owner_scope, expected_target_id, expected_page_owner, kind) = action.into_parts();
     let mut route_scope = owner_scope.enter(conn);
     let conn = route_scope.conn_mut();
     let mut out = Vec::new();
     let current_target_id = conn
         .target_owner_identity_for_session(owner_scope.session_id())
         .and_then(|(_, target_id)| target_id);
-    if current_target_id.as_deref() != Some(expected_target_id.as_str()) {
+    if current_target_id.as_deref() != Some(expected_target_id.as_str())
+        || expected_page_owner.as_ref().is_some_and(|page_owner| {
+            !conn.target_page_residence_identity_is_current_for_session(
+                owner_scope.session_id(),
+                page_owner,
+            )
+        })
+    {
         return crate::conn::CdpTurnOutcome::new_with_protocol_events(
             out,
             conn.take_scheduler_events(),
@@ -663,6 +742,10 @@ pub(crate) async fn complete_page_target_termination_owner_action_async(
     let target_host_closure = conn.prepare_target_host_closure(&expected_target_id);
     let closed = match kind {
         PageTargetTerminationKind::PageClose => {
+            conn.close_page_target_for_session_owner_async(owner_scope.session_id())
+                .await
+        }
+        PageTargetTerminationKind::WindowClose => {
             conn.close_page_target_for_session_owner_async(owner_scope.session_id())
                 .await
         }
@@ -712,4 +795,71 @@ pub(crate) async fn complete_page_target_termination_owner_action_async(
     out.extend(conn.prepared_target_host_deltas_event_plan(target_destroyed_deltas));
     conn.release_idle_navigation_engine_memory_after_target_close();
     crate::conn::CdpTurnOutcome::new_with_protocol_events(out, conn.take_scheduler_events())
+}
+
+pub(crate) async fn complete_page_target_close_request_owner_action_async(
+    conn: &mut CdpConnection,
+    action: PageTargetCloseRequestOwnerAction,
+) -> crate::conn::CdpRendererOwnerTurnOutcome {
+    let (owner_scope, page_owner, expected_target_id) = action.into_parts();
+    let mut route_scope = owner_scope.enter(conn);
+    let conn = route_scope.conn_mut();
+    let session_id = owner_scope.session_id();
+    let target_is_current = conn
+        .target_owner_identity_for_session(session_id)
+        .and_then(|(_, target_id)| target_id)
+        .as_deref()
+        == Some(expected_target_id.as_str());
+    if !target_is_current
+        || !conn.target_page_residence_identity_is_current_for_session(session_id, &page_owner)
+    {
+        return crate::conn::CdpTurnOutcome::new_with_protocol_events(
+            Vec::new(),
+            conn.take_scheduler_events(),
+        )
+        .with_renderer_output_predecessor(None);
+    }
+
+    let primary_session_id = conn.runtime_session_owner_primary_session_id(session_id);
+    let fail_session_id = session_id.or(primary_session_id.as_deref());
+    let (
+        pending_navigations,
+        pending_auth_navigations,
+        pending_response_navigations,
+        pending_subresource_fetches,
+        pending_subresource_auths,
+        pending_subresource_responses,
+    ) = take_pending_fetch_state(conn, session_id);
+    let mut out = Vec::new();
+    let mut claimed_await_events = Vec::new();
+    conn.fail_pending_inspector_awaits_for_session_owner_background_events_into(
+        &mut out,
+        &mut claimed_await_events,
+        session_id,
+        "Window closed",
+    );
+    out.extend(claimed_await_events);
+    let renderer_output_predecessor = fail_pending_fetch_state_background_events_async(
+        conn,
+        &mut out,
+        fail_session_id,
+        "Window closed",
+        pending_navigations,
+        pending_auth_navigations,
+        pending_response_navigations,
+        pending_subresource_fetches,
+        pending_subresource_auths,
+        pending_subresource_responses,
+    )
+    .await;
+
+    conn.publish_page_target_termination_owner_action(
+        PageTargetTerminationOwnerAction::new_for_window_close(
+            owner_scope,
+            expected_target_id,
+            page_owner,
+        ),
+    );
+    crate::conn::CdpTurnOutcome::new_with_protocol_events(out, conn.take_scheduler_events())
+        .with_renderer_output_predecessor(renderer_output_predecessor)
 }

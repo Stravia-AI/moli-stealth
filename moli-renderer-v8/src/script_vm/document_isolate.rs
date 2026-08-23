@@ -39,7 +39,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use std::{
-    cell::{OnceCell, RefCell},
+    cell::{Cell, OnceCell, RefCell},
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -196,7 +196,17 @@ pub(crate) struct RendererPageScriptEnvironment {
     global_proxy: Rc<OnceCell<v8::Global<v8::Object>>>,
     initial_global_proxy_facade_context: Rc<RefCell<Option<v8::Global<v8::Context>>>>,
     initial_global_proxy_security_token: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
-    navigation_persistent_opener: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
+    // Page-scoped opener edge. The value belongs to the stable top-level
+    // browsing context rather than to one replaceable LocalWindow realm.
+    top_level_opener_edge: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
+    top_level_browsing_context_lifecycle: Rc<Cell<RendererTopLevelBrowsingContextLifecycle>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RendererTopLevelBrowsingContextLifecycle {
+    Active,
+    Closing,
+    Closed,
 }
 
 impl std::fmt::Debug for RendererPageScriptEnvironment {
@@ -215,8 +225,12 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
             .field("output_stream", &self.output_journal.stream())
             .field("has_global_proxy", &self.global_proxy.get().is_some())
             .field(
-                "has_navigation_persistent_opener",
-                &self.navigation_persistent_opener.borrow().is_some(),
+                "has_top_level_opener_edge",
+                &self.top_level_opener_edge.borrow().is_some(),
+            )
+            .field(
+                "top_level_browsing_context_lifecycle",
+                &self.top_level_browsing_context_lifecycle.get(),
             )
             .finish()
     }
@@ -247,7 +261,10 @@ impl RendererPageScriptEnvironment {
             global_proxy: Rc::new(OnceCell::new()),
             initial_global_proxy_facade_context: Rc::new(RefCell::new(None)),
             initial_global_proxy_security_token: Rc::new(RefCell::new(None)),
-            navigation_persistent_opener: Rc::new(RefCell::new(None)),
+            top_level_opener_edge: Rc::new(RefCell::new(None)),
+            top_level_browsing_context_lifecycle: Rc::new(Cell::new(
+                RendererTopLevelBrowsingContextLifecycle::Active,
+            )),
         })
     }
 
@@ -267,6 +284,37 @@ impl RendererPageScriptEnvironment {
 
     pub(crate) fn output_journal(&self) -> crate::runtime::RendererTurnOutputJournal {
         self.output_journal.clone()
+    }
+
+    /// Begins the script-visible close transaction exactly once.
+    ///
+    /// Like Blink's `window_is_closing_`, `Closing` is observable immediately,
+    /// before the browser owner has retired the target. The Page-owned output
+    /// record produced by the caller is what later performs that retirement.
+    pub(crate) fn begin_top_level_browsing_context_close(&self) -> bool {
+        if self.top_level_browsing_context_lifecycle.get()
+            != RendererTopLevelBrowsingContextLifecycle::Active
+        {
+            return false;
+        }
+        self.top_level_browsing_context_lifecycle
+            .set(RendererTopLevelBrowsingContextLifecycle::Closing);
+        true
+    }
+
+    pub(crate) fn mark_top_level_browsing_context_closed(&self) {
+        self.top_level_browsing_context_lifecycle
+            .set(RendererTopLevelBrowsingContextLifecycle::Closed);
+    }
+
+    pub(crate) fn top_level_browsing_context_is_closed(&self) -> bool {
+        self.top_level_browsing_context_lifecycle.get()
+            != RendererTopLevelBrowsingContextLifecycle::Active
+    }
+
+    pub(crate) fn signal_top_level_close_output_handoff(&self) {
+        self.page_runtime_task_source
+            .signal_top_level_close_output_handoff();
     }
 
     pub(crate) fn stage_related_initial_empty_page_in_scope(
@@ -305,6 +353,16 @@ impl RendererPageScriptEnvironment {
 
     pub(crate) fn script_agent_id(&self) -> ScriptAgentId {
         self.renderer_document_isolate.script_agent_id()
+    }
+
+    pub(crate) fn is_related_page_peer(&self, other: &Self) -> bool {
+        // One RendererDocumentIsolate owns exactly one script agent. Access
+        // checks run while that isolate is already mutably borrowed, so this
+        // hot path must use the stable Rc identity instead of borrowing the
+        // holder again to read its script-agent id.
+        self.page_id != other.page_id
+            && self.renderer_document_isolate.identity_key()
+                == other.renderer_document_isolate.identity_key()
     }
 
     pub(crate) fn bootstrap_replacement_document_isolate(
@@ -444,9 +502,48 @@ impl RendererPageScriptEnvironment {
         scope: &mut v8::PinScope<'s, '_>,
         window_proxy: v8::Local<'s, v8::Object>,
     ) {
-        *self.navigation_persistent_opener.borrow_mut() =
+        // Once bound, the Page edge is authoritative. In particular, an
+        // explicit `window.opener = null` must not be reconnected from a stale
+        // realm-private slot during the next Document replacement.
+        if self.top_level_opener_edge.borrow().is_some() {
+            return;
+        }
+        *self.top_level_opener_edge.borrow_mut() =
             get_private_value(scope, window_proxy, WINDOW_OPENER_SLOT)
                 .map(|opener| v8::Global::new(scope, opener));
+    }
+
+    pub(crate) fn set_top_level_opener_edge<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        opener: v8::Local<'s, v8::Value>,
+    ) {
+        *self.top_level_opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+    }
+
+    pub(crate) fn sever_top_level_opener_edge(&self, scope: &mut v8::PinScope<'_, '_>) {
+        let opener: v8::Local<'_, v8::Value> = v8::null(scope).into();
+        self.set_top_level_opener_edge(scope, opener);
+    }
+
+    pub(crate) fn top_level_opener_value<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        let opener = {
+            let edge = self.top_level_opener_edge.borrow();
+            edge.as_ref().map(|opener| v8::Local::new(scope, opener))?
+        };
+        if let Ok(opener_window) = v8::Local::<v8::Object>::try_from(opener)
+            && crate::native_bridge::top_level_window_proxy_is_finally_closed(scope, opener_window)
+        {
+            // Blink clears the opener edge when the opener browsing context is
+            // discarded. Lazily collapsing the edge here also handles a Page
+            // that outlives its opener without retaining the opener host.
+            self.sever_top_level_opener_edge(scope);
+            return Some(v8::null(scope).into());
+        }
+        Some(opener)
     }
 
     pub(super) fn restore_main_window_opener_after_navigation<'s>(
@@ -454,11 +551,9 @@ impl RendererPageScriptEnvironment {
         scope: &mut v8::PinScope<'s, '_>,
         window_proxy: v8::Local<'s, v8::Object>,
     ) {
-        let opener = self.navigation_persistent_opener.borrow();
-        let Some(opener) = opener.as_ref() else {
+        let Some(opener) = self.top_level_opener_value(scope) else {
             return;
         };
-        let opener = v8::Local::new(scope, opener);
         set_private_value(scope, window_proxy, WINDOW_OPENER_SLOT, opener);
     }
 }

@@ -3013,6 +3013,32 @@ async fn child_navigation_aborts_fetch_and_detaches_keepalive() {
         records, 1,
         "detached keepalive must preserve network observation without settling the old Promise"
     );
+
+    vm.close_page_context_resources_for_context_teardown();
+    vm.eval(
+        r#"
+        globalThis.__retiredChildFetchAfterHostTeardown = "pending";
+        __retiredChildFetch("https://fetch-execution-context.test/after-host-teardown").then(
+          () => { __retiredChildFetchAfterHostTeardown = "resolved"; },
+          error => {
+            __retiredChildFetchAfterHostTeardown = JSON.stringify([
+              error instanceof __retiredChildTypeErrorConstructor,
+              error.message
+            ]);
+          }
+        );
+        "queued"
+        "#,
+    )
+    .expect("retained old-child Fetch closure should remain safely callable after host teardown");
+    vm.eval("0")
+        .expect("post-host-teardown Fetch rejection microtask");
+    assert_eq!(
+        vm.eval("__retiredChildFetchAfterHostTeardown")
+            .expect("post-host-teardown retained child Fetch result"),
+        r#"[true,"failed to get native bridge"]"#,
+        "Document host retirement must invalidate raw pointers even for a child realm already removed from the live realm store"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

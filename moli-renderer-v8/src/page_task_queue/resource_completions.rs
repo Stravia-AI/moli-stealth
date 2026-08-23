@@ -67,6 +67,10 @@ pub(crate) enum RendererOwnerWake {
         token: RendererPageToken,
         handoff: RendererTopLevelNavigationHandoff,
     },
+    /// A related Page synchronously appended `window.close()` to this Page's
+    /// output journal. The target Page owner settles that exact FIFO; the wake
+    /// carries no close authority of its own.
+    TopLevelCloseOutputHandoff { token: RendererPageToken },
     /// The stable Page view either committed or rejected one exact
     /// replacement PageVm identity. This wake only re-admits commands parked
     /// on that identity; ordinary Page activity cannot satisfy the condition.
@@ -116,6 +120,10 @@ impl RendererOwnerWake {
         }
     }
 
+    pub(crate) fn top_level_close_output_handoff(token: RendererPageToken) -> Self {
+        Self::TopLevelCloseOutputHandoff { token }
+    }
+
     #[cfg(test)]
     pub(crate) fn page_id(&self) -> crate::PageId {
         match self {
@@ -124,6 +132,7 @@ impl RendererOwnerWake {
             | Self::CommittedDocumentParserUnblocked { token }
             | Self::RuntimeInspectorResponsePublication { token, .. }
             | Self::TopLevelNavigationHandoff { token, .. }
+            | Self::TopLevelCloseOutputHandoff { token }
             | Self::ReplacementDocumentViewSettled { token, .. } => token.page_id(),
         }
     }
@@ -143,6 +152,9 @@ impl RendererOwnerWake {
             }
             Self::TopLevelNavigationHandoff { .. } => panic!(
                 "a top-level navigation handoff is an execution handoff, not a Page source wake"
+            ),
+            Self::TopLevelCloseOutputHandoff { .. } => panic!(
+                "a top-level close output handoff settles a target FIFO, not a Page source wake"
             ),
             Self::ReplacementDocumentViewSettled { .. } => panic!(
                 "a replacement Document settlement is a command admission fact, not a Page source wake"
@@ -388,6 +400,14 @@ impl RendererOwnerWakeSender {
                 self.token, handoff,
             ))
             .is_ok()
+    }
+
+    pub(crate) fn signal_top_level_close_output_handoff(&self) {
+        let _ = self
+            .tx
+            .send(RendererOwnerWake::top_level_close_output_handoff(
+                self.token,
+            ));
     }
     pub(crate) fn defer_runtime_inspector_response_publication(
         &self,

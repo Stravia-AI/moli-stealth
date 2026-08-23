@@ -244,6 +244,10 @@ impl CdpTurnOutcome {
 }
 
 impl CdpRendererOwnerTurnOutcome {
+    pub fn renderer_output_predecessor(&self) -> Option<&moli_core::RendererOutputFence> {
+        self.renderer_output_predecessor.as_ref()
+    }
+
     #[cfg(test)]
     pub fn into_parts(self) -> (Vec<serde_json::Value>, Vec<CdpSchedulerEvent>) {
         assert!(

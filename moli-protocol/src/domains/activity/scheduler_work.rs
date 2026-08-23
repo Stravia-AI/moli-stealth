@@ -50,6 +50,7 @@ pub enum ProtocolSchedulerWorkKind {
     TopLevelLocationNavigationOwnerAction,
     PopupTargetNavigationOwnerAction,
     PopupTargetActivationAction,
+    PageTargetCloseRequestOwnerAction,
     PageTargetTerminationOwnerAction,
 }
 
@@ -73,6 +74,7 @@ enum ProtocolSchedulerWorkPayload {
     TopLevelLocationNavigationOwnerAction(TopLevelLocationNavigationOwnerAction),
     PopupTargetNavigationOwnerAction(PopupTargetNavigationOwnerAction),
     PopupTargetActivationAction(PopupTargetActivationAction),
+    PageTargetCloseRequestOwnerAction(crate::domains::page::PageTargetCloseRequestOwnerAction),
     PageTargetTerminationOwnerAction(crate::domains::page::PageTargetTerminationOwnerAction),
 }
 
@@ -123,6 +125,12 @@ impl fmt::Debug for ProtocolSchedulerWork {
                 debug
                     .field("browser_context_id", &action.browser_context_id())
                     .field("target_id", &action.target_id());
+            }
+            ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(action) => {
+                debug
+                    .field("session_id", &action.owner_scope().session_id())
+                    .field("target_id", &action.target_id())
+                    .field("page_owner", &action.page_owner());
             }
             ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(action) => {
                 debug
@@ -208,6 +216,16 @@ impl ProtocolSchedulerWork {
         }
     }
 
+    pub(crate) fn page_target_close_request_owner_action(
+        publish_sequence: ProtocolWorkPublishSequence,
+        action: crate::domains::page::PageTargetCloseRequestOwnerAction,
+    ) -> Self {
+        Self {
+            publish_sequence,
+            payload: ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(action),
+        }
+    }
+
     pub fn publish_sequence(&self) -> ProtocolWorkPublishSequence {
         self.publish_sequence
     }
@@ -232,6 +250,9 @@ impl ProtocolSchedulerWork {
             ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_) => {
                 ProtocolSchedulerWorkKind::PopupTargetActivationAction
             }
+            ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(_) => {
+                ProtocolSchedulerWorkKind::PageTargetCloseRequestOwnerAction
+            }
             ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(_) => {
                 ProtocolSchedulerWorkKind::PageTargetTerminationOwnerAction
             }
@@ -254,6 +275,7 @@ impl ProtocolSchedulerWork {
             ProtocolSchedulerWorkPayload::TopLevelLocationNavigationOwnerAction(_) => true,
             ProtocolSchedulerWorkPayload::PopupTargetNavigationOwnerAction(_) => true,
             ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_) => true,
+            ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(_) => true,
             ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(_) => true,
         }
     }
@@ -273,6 +295,7 @@ impl ProtocolSchedulerWork {
             ProtocolSchedulerWorkPayload::BidiChannelOwnerAction(_)
                 | ProtocolSchedulerWorkPayload::TopLevelLocationNavigationOwnerAction(_)
                 | ProtocolSchedulerWorkPayload::PopupTargetNavigationOwnerAction(_)
+                | ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(_)
                 | ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(_)
         )
     }
@@ -295,6 +318,9 @@ impl ProtocolSchedulerWork {
                 Some(action.target_id())
             }
             ProtocolSchedulerWorkPayload::PopupTargetActivationAction(action) => {
+                Some(action.target_id())
+            }
+            ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(action) => {
                 Some(action.target_id())
             }
             ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(action) => {
@@ -421,6 +447,7 @@ impl ProtocolSchedulerWork {
             | ProtocolSchedulerWorkPayload::TopLevelLocationNavigationOwnerAction(_)
             | ProtocolSchedulerWorkPayload::PopupTargetNavigationOwnerAction(_)
             | ProtocolSchedulerWorkPayload::PopupTargetActivationAction(_)
+            | ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(_)
             | ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(_) => {
                 panic!("only main-document load owner work can start a lifecycle wait")
             }
@@ -475,6 +502,7 @@ pub(crate) enum ReadyProtocolSchedulerWork {
     TopLevelLocationNavigationOwnerAction(TopLevelLocationNavigationOwnerAction),
     PopupTargetNavigationOwnerAction(PopupTargetNavigationOwnerAction),
     PopupTargetActivationAction(PopupTargetActivationAction),
+    PageTargetCloseRequestOwnerAction(crate::domains::page::PageTargetCloseRequestOwnerAction),
     PageTargetTerminationOwnerAction(crate::domains::page::PageTargetTerminationOwnerAction),
 }
 
@@ -503,6 +531,9 @@ impl ProtocolSchedulerWork {
             }
             ProtocolSchedulerWorkPayload::PopupTargetActivationAction(action) => {
                 ReadyProtocolSchedulerWork::PopupTargetActivationAction(action)
+            }
+            ProtocolSchedulerWorkPayload::PageTargetCloseRequestOwnerAction(action) => {
+                ReadyProtocolSchedulerWork::PageTargetCloseRequestOwnerAction(action)
             }
             ProtocolSchedulerWorkPayload::PageTargetTerminationOwnerAction(action) => {
                 ReadyProtocolSchedulerWork::PageTargetTerminationOwnerAction(action)

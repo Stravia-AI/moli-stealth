@@ -354,6 +354,7 @@ impl JsContextHost {
         let current_owner = owner_transition
             .current_owner()
             .expect("child document commit must install a current owner");
+        self.capture_child_document_start_script_snapshot(current_owner);
         let resource_authority = match navigation_loader {
             Some(loader) => {
                 let seed = loader

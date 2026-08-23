@@ -3327,7 +3327,7 @@ fn iframe_content_window_getter_function<'s>(
         runtime.child_browsing_context_is_same_origin_with_top(handle);
     let window = runtime.child_browsing_context_window_proxy_for_top(scope, handle);
     if window.is_some() {
-        runtime.mark_child_browsing_context_window_wrapper_exposed_to_top(handle);
+        runtime.mark_child_browsing_context_window_proxy_exposed(handle);
     }
     if exposes_same_origin_wrapper && window.is_some() {
         runtime.request_child_frame_realm_materialization(handle);

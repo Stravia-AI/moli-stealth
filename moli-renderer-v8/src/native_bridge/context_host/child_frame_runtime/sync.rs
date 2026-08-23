@@ -47,9 +47,7 @@ impl JsContextHost {
         let Some(wrapper) = self.child_window_proxy_records.live_window(scope, handle) else {
             return;
         };
-        if self
-            .child_window_proxy_records
-            .live_window_exposed_to_top(handle)
+        if self.child_window_proxy_records.window_proxy_exposed(handle)
             && !self.child_browsing_context_is_same_origin_with_top(handle)
         {
             let _ = self.ensure_top_exposed_cross_origin_window_proxy(scope, handle);

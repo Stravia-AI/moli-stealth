@@ -106,6 +106,7 @@ fn observation_transport_charge_bytes(observation: &RendererProtocolObservation)
 
 fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
     match action {
+        RendererOwnerAction::TopLevelClose => 0,
         RendererOwnerAction::FileChooser(event) => {
             event.source_frame_id().map(string_charge).unwrap_or(0)
         }
@@ -134,9 +135,16 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
         .into_iter()
         .map(string_charge)
         .sum(),
-        RendererOwnerAction::Popup(event) => {
-            string_charge(event.url()).saturating_add(string_charge(event.target_name()))
-        }
+        RendererOwnerAction::Popup(event) => string_charge(event.url())
+            .saturating_add(string_charge(event.target_name()))
+            .saturating_add(event.navigation_referrer().map(string_charge).unwrap_or(0))
+            .saturating_add(
+                event
+                    .initial_document_referrer()
+                    .map(string_charge)
+                    .unwrap_or(0),
+            )
+            .saturating_add(event.document_referrer().map(string_charge).unwrap_or(0)),
         RendererOwnerAction::ChildFrameTree { event, .. } => match event {
             crate::protocol_types::ChildFrameTreeEventSnapshot::Attached(event) => {
                 string_charge(&event.frame_id).saturating_add(

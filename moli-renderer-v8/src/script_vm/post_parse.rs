@@ -360,8 +360,18 @@ impl ScriptVmContextBootstrap {
                     runtime_observable_context_token,
                 )?;
             }
-            WindowContextBootstrapMode::MainDefault
-            | WindowContextBootstrapMode::Isolated {
+            WindowContextBootstrapMode::MainDefault => {
+                let top_window_endpoint = v8::Boolean::new(scope, true);
+                set_private_value(
+                    scope,
+                    global,
+                    window_host::TOP_WINDOW_MESSAGE_ENDPOINT_SLOT,
+                    top_window_endpoint.into(),
+                );
+                unsafe { &mut *host_ptr }
+                    .install_top_level_window_proxy_cross_origin_access_surface(scope, global);
+            }
+            WindowContextBootstrapMode::Isolated {
                 child_handle: None, ..
             } => {
                 let top_window_endpoint = v8::Boolean::new(scope, true);

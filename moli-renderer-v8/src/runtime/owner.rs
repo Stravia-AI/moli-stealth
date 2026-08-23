@@ -48,6 +48,7 @@ use super::owner_local_store::{
     publish_page_navigation_failure_on_bound_owner_local_store,
     release_lifecycle_gate_on_bound_owner_local_store,
     release_post_response_document_lifecycle_on_bound_owner_local_store,
+    remove_page_after_target_close_on_bound_owner_local_store_via_local_task,
     remove_page_on_bound_owner_local_store, remove_page_on_bound_owner_local_store_via_local_task,
     renderer_output_fence_for_tail_on_bound_owner_local_store,
     renderer_page_token_for_owner_context,
@@ -135,6 +136,12 @@ pub struct RendererCreateHtmlPageRequest {
     pub page_reservation: RendererPageReservationToken,
     pub root_frame_id: Option<String>,
     pub main_document_commit: Option<RendererMainDocumentCommit>,
+    /// Script-visible referrer installed before a fresh initial realm exists.
+    ///
+    /// Unlike `main_document_commit`, this does not emit a navigation commit
+    /// observation. It is used for an auxiliary initial empty Document whose
+    /// requested URL may remain `about:blank` without a replacement commit.
+    pub initial_document_referrer: Option<String>,
     pub top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
     pub requested_url: Url,
     pub navigation_initiator_url: Option<Url>,
@@ -274,6 +281,7 @@ pub enum RendererOwnerCommand {
     },
     RemovePage {
         token: RendererPageToken,
+        terminated_active_execution: bool,
     },
     TestingCurrentPageState {
         token: RendererPageToken,
@@ -2275,6 +2283,7 @@ impl RendererOwnerHandle {
             page_reservation,
             root_frame_id: None,
             main_document_commit: None,
+            initial_document_referrer: None,
             top_level_storage_key: None,
             requested_url,
             navigation_initiator_url,
@@ -2776,15 +2785,17 @@ impl RendererOwnerHandle {
                     },
                 ))
             }
-            RendererOwnerCommand::RemovePage { token } => {
-                remove_page_on_bound_owner_local_store_via_local_task(
-                    self.state.local_executor.clone(),
-                    token,
-                )
-                .await
-                .map(|()| RendererOwnerReply::PageRemoved)
-                .into()
-            }
+            RendererOwnerCommand::RemovePage {
+                token,
+                terminated_active_execution,
+            } => remove_page_after_target_close_on_bound_owner_local_store_via_local_task(
+                self.state.local_executor.clone(),
+                token,
+                terminated_active_execution,
+            )
+            .await
+            .map(|()| RendererOwnerReply::PageRemoved)
+            .into(),
             RendererOwnerCommand::TestingCurrentPageState { token } => {
                 owner_local_store_session(owner_local_store)
                     .current_page_state_for_testing(token)
@@ -3402,7 +3413,7 @@ impl RendererOwnerHandle {
             return;
         }
         let removed_page_token = match &command {
-            RendererOwnerCommand::RemovePage { token } => Some(*token),
+            RendererOwnerCommand::RemovePage { token, .. } => Some(*token),
             _ => None,
         };
         let mut command_admission_output_predecessor =
@@ -4093,6 +4104,17 @@ impl RendererOwnerHandle {
                     allow_command_overtake: false,
                     command_admission_output_predecessor: None,
                 });
+            }
+            RendererOwnerWake::TopLevelCloseOutputHandoff { token } => {
+                // A cross-Page WindowProxy call appends into the target Page's
+                // journal even though the opener owns the executing turn. If
+                // the target is resident, checking it out and restoring it
+                // freezes that exact FIFO now. A busy Page will settle on its
+                // own return; a synchronously staged auxiliary Page settles
+                // during creation admission after protocol binds its owner.
+                if let Ok(entry) = take_entry_for_command_on_bound_owner_local_store(token) {
+                    self.restore_live_page_entry(token, entry);
+                }
             }
             RendererOwnerWake::ReplacementDocumentViewSettled {
                 token,
@@ -7580,6 +7602,7 @@ impl RendererOwnerHandle {
             page_reservation,
             root_frame_id,
             main_document_commit,
+            initial_document_referrer,
             top_level_storage_key,
             requested_url,
             navigation_initiator_url,
@@ -7715,6 +7738,7 @@ impl RendererOwnerHandle {
                     wpt_extensions_enabled,
                     root_frame_id,
                     main_document_commit,
+                    initial_document_referrer,
                     top_level_storage_key,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id,
@@ -8155,6 +8179,7 @@ impl RendererOwnerHandle {
                     wpt_extensions_enabled,
                     root_frame_id,
                     main_document_commit,
+                    initial_document_referrer: None,
                     top_level_storage_key: None,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id: reserved_service_worker_client
@@ -8332,7 +8357,6 @@ impl RendererOwnerHandle {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn record(&self, page_id: PageId) -> Option<RendererPageRecord> {
         self.state.page_table.record(page_id)
     }

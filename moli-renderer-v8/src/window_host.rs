@@ -792,10 +792,12 @@ pub(crate) fn window_post_message_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+    let Some(ambient_host_ptr) = context_host_ptr_from_global_bridge(scope) else {
         rv.set_undefined();
         return;
     };
+    let host_ptr = crate::native_bridge::cross_origin_window_target_host_ptr(scope, args.this())
+        .unwrap_or(ambient_host_ptr);
     let host = unsafe { &mut *host_ptr };
     let Some(target_endpoint) = window_message_endpoint_from_receiver(scope, args.this()) else {
         crate::native_bridge::throw_cross_origin_type_error(
@@ -816,6 +818,7 @@ pub(crate) fn window_post_message_callback<'s>(
     // scope is the one necessary override; the ambient source marker is only
     // a fallback for legacy execution paths that do not expose an incumbent
     // context.
+    let related_page_source = incumbent_related_page_window_message_source(scope, host);
     let source_identity = active_lightweight_popup_id(scope)
         .map(PendingWindowMessageEndpoint::LightweightPopup)
         .and_then(|endpoint| current_window_message_source_identity(scope, host, endpoint))
@@ -831,11 +834,28 @@ pub(crate) fn window_post_message_callback<'s>(
                 .unwrap_or(PendingWindowMessageEndpoint::TopWindow);
             current_window_message_source_identity(scope, host, endpoint)
         });
-    let Some((source_endpoint, source_owner, source_realm_token)) = source_identity else {
+    let accepted_source = related_page_source.or_else(|| {
+        let (source_endpoint, source_owner, source_realm_token) = source_identity?;
+        let origin = window_message_endpoint_origin(host, source_endpoint)?;
+        Some(AcceptedWindowMessageSource {
+            source: PendingWindowMessageSource::new(
+                source_endpoint,
+                source_owner,
+                source_realm_token,
+            ),
+            origin,
+            window_proxy: None,
+        })
+    });
+    let Some(AcceptedWindowMessageSource {
+        source,
+        origin: source_origin,
+        window_proxy: source_window_proxy,
+    }) = accepted_source
+    else {
         rv.set_undefined();
         return;
     };
-    let source = PendingWindowMessageSource::new(source_endpoint, source_owner, source_realm_token);
 
     let target_dispatch_scope = target_endpoint.dispatch_scope();
     let Some(target_owner) = host.current_window_execution_context_owner(target_dispatch_scope)
@@ -850,10 +870,6 @@ pub(crate) fn window_post_message_callback<'s>(
         rv.set_undefined();
         return;
     }
-    let Some(source_origin) = window_message_endpoint_origin(host, source_endpoint) else {
-        rv.set_undefined();
-        return;
-    };
     let source_security =
         crate::context_bootstrap::RuntimeMessageSourceSecurity::window(source_origin.clone());
 
@@ -941,6 +957,7 @@ pub(crate) fn window_post_message_callback<'s>(
     let task_id = host.queue_window_message(PendingWindowMessage {
         target,
         source,
+        source_window_proxy,
         data,
         origin: source_origin,
         intended_target_origin: target_origin_match,
@@ -1521,6 +1538,7 @@ fn dispatch_window_message_in_current_target_context(
             message_ctor,
             target_endpoint,
             source_endpoint,
+            message.source_window_proxy.as_ref(),
             "messageerror",
             v8::null(scope).into(),
             &message.origin,
@@ -1569,6 +1587,7 @@ fn dispatch_window_message_in_current_target_context(
             message_ctor,
             target_endpoint,
             source_endpoint,
+            message.source_window_proxy.as_ref(),
             "messageerror",
             v8::null(scope).into(),
             &message.origin,
@@ -1595,6 +1614,7 @@ fn dispatch_window_message_in_current_target_context(
         message_ctor,
         target_endpoint,
         source_endpoint,
+        message.source_window_proxy.as_ref(),
         "message",
         data,
         &message.origin,
@@ -1656,6 +1676,7 @@ fn dispatch_window_message_event<'s>(
     message_ctor: v8::Local<'s, v8::Function>,
     target: PendingWindowMessageEndpoint,
     source_endpoint: PendingWindowMessageEndpoint,
+    source_window_proxy: Option<&v8::Global<v8::Object>>,
     event_type: &str,
     data: v8::Local<'s, v8::Value>,
     origin: &str,
@@ -1665,20 +1686,24 @@ fn dispatch_window_message_event<'s>(
     let Some(origin) = v8_string(scope, origin) else {
         return;
     };
-    let source: v8::Local<'_, v8::Value> = match source_endpoint {
-        PendingWindowMessageEndpoint::TopWindow => {
-            top_window_message_source_for_target(scope, host, target)
-                .unwrap_or_else(|| global.into())
-        }
-        PendingWindowMessageEndpoint::ChildWindow(handle) => {
-            child_window_message_source(scope, host, handle)
+    let source: v8::Local<'_, v8::Value> = if let Some(source_window_proxy) = source_window_proxy {
+        v8::Local::new(scope, source_window_proxy).into()
+    } else {
+        match source_endpoint {
+            PendingWindowMessageEndpoint::TopWindow => {
+                top_window_message_source_for_target(scope, host, target)
+                    .unwrap_or_else(|| global.into())
+            }
+            PendingWindowMessageEndpoint::ChildWindow(handle) => {
+                child_window_message_source(scope, host, handle)
+                    .map(Into::into)
+                    .unwrap_or_else(|| v8::null(scope).into())
+            }
+            PendingWindowMessageEndpoint::LightweightPopup(popup_id) => host
+                .lightweight_popup_window(scope, popup_id)
                 .map(Into::into)
-                .unwrap_or_else(|| v8::null(scope).into())
+                .unwrap_or_else(|| v8::null(scope).into()),
         }
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id) => host
-            .lightweight_popup_window(scope, popup_id)
-            .map(Into::into)
-            .unwrap_or_else(|| v8::null(scope).into()),
     };
     let init = WindowMessageEventInitDeclaration::new(data, origin, ports, source)
         .bind(scope)
@@ -2055,6 +2080,7 @@ fn window_message_endpoint_from_receiver<'s>(
     if get_private_value(scope, object, TOP_WINDOW_MESSAGE_ENDPOINT_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
         || crate::native_bridge::is_cross_origin_top_window_proxy(scope, object)
+        || crate::native_bridge::is_cross_origin_related_top_window_proxy(scope, object)
     {
         return Some(PendingWindowMessageEndpoint::TopWindow);
     }
@@ -2079,6 +2105,43 @@ fn current_window_message_source_identity(
     let owner = host.current_window_execution_context_owner(dispatch_scope)?;
     let (realm_token, _) = host.window_execution_context(scope, owner, dispatch_scope)?;
     Some((endpoint, owner, realm_token))
+}
+
+struct AcceptedWindowMessageSource {
+    source: PendingWindowMessageSource,
+    origin: String,
+    window_proxy: Option<v8::Global<v8::Object>>,
+}
+
+fn incumbent_related_page_window_message_source(
+    scope: &mut v8::PinScope<'_, '_>,
+    target_host: &JsContextHost,
+) -> Option<AcceptedWindowMessageSource> {
+    let incumbent_context = scope.get_incumbent_context()?;
+    let source_host_ptr = crate::util::context_host_ptr_from_context_slot(incumbent_context)?;
+    let target_host_ptr = target_host as *const JsContextHost;
+    if std::ptr::eq(source_host_ptr.cast_const(), target_host_ptr) {
+        return None;
+    }
+    let source_host = unsafe { &*source_host_ptr };
+    if !source_host.shares_related_page_script_agent_with(target_host) {
+        return None;
+    }
+    let identity =
+        source_host.window_execution_context_identity_for_access_check(incumbent_context)?;
+    if identity.dispatch_scope() != crate::native_bridge::OwnerDispatchScope::Top
+        || !source_host.window_execution_context_identity_is_current(identity)
+        || !source_host.window_execution_context_identity_is_default_world(identity)
+    {
+        return None;
+    }
+    let endpoint = PendingWindowMessageEndpoint::TopWindow;
+    let origin = window_message_endpoint_origin(source_host, endpoint)?;
+    Some(AcceptedWindowMessageSource {
+        source: PendingWindowMessageSource::new(endpoint, identity.owner(), identity.realm_token()),
+        origin,
+        window_proxy: Some(v8::Global::new(scope, incumbent_context.global(scope))),
+    })
 }
 
 fn incumbent_window_message_source_identity(
@@ -2151,6 +2214,7 @@ mod tests {
                 owner,
                 crate::native_bridge::RuntimeObservableContextToken::from_raw(1),
             ),
+            source_window_proxy: None,
             data,
             origin: "https://sender.test".to_owned(),
             intended_target_origin: None,

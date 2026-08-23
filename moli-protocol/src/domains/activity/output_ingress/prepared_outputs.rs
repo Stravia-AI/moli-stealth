@@ -220,6 +220,12 @@ impl PreparedProtocolOutputs {
     ) -> Self {
         let mut prepared = Self::empty();
         match action {
+            RendererOwnerAction::TopLevelClose => {
+                crate::domains::page::PagePreparedOutputs::from_renderer_top_level_close(
+                    conn, session_id,
+                )
+                .append_to_top_level_close_output_sink(&mut prepared);
+            }
             RendererOwnerAction::FileChooser(activation) => {
                 crate::domains::input::InputPreparedOutputs::from_renderer_file_chooser_activation(
                     conn, session_id, activation,

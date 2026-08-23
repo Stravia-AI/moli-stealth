@@ -255,6 +255,7 @@ impl JsRuntime {
             None,
             crate::RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             None,
+            None,
         )
     }
 
@@ -553,6 +554,7 @@ impl JsRuntime {
             None,
             crate::RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             None,
+            None,
         )
     }
 
@@ -591,6 +593,7 @@ impl JsRuntime {
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         top_level_navigation_dispatch: crate::RendererTopLevelNavigationDispatch,
         main_document_commit: Option<crate::RendererMainDocumentCommit>,
+        initial_document_referrer: Option<String>,
     ) -> Result<PendingHtmlPage> {
         let mut request = self
             .inner
@@ -630,6 +633,7 @@ impl JsRuntime {
         request.top_level_storage_key = top_level_storage_key;
         request.top_level_navigation_dispatch = top_level_navigation_dispatch;
         request.main_document_commit = main_document_commit;
+        request.initial_document_referrer = initial_document_referrer;
         let reply_rx = self
             .inner
             .renderer_owner

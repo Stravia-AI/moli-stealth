@@ -304,6 +304,7 @@ pub(crate) struct LoadedPageCreationDiagnosticsParts {
     pub(crate) renderer_output_predecessor: Option<RendererOutputFence>,
     pub(crate) document_continuation_observer:
         Option<moli_core::page::RendererDocumentContinuationObserver>,
+    pub(crate) top_level_browsing_context_closing: bool,
 }
 
 fn loaded_page_creation_diagnostics_parts(
@@ -313,6 +314,7 @@ fn loaded_page_creation_diagnostics_parts(
         initial_runtime_realms: diagnostics.initial_runtime_realms,
         renderer_output_predecessor: diagnostics.renderer_output_predecessor,
         document_continuation_observer: diagnostics.document_continuation_observer,
+        top_level_browsing_context_closing: diagnostics.top_level_browsing_context_closing,
     }
 }
 
@@ -2090,6 +2092,16 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
+        self.start_initial_document_page_ensure_with_referrer_for_session_owner(session_id, None)
+    }
+
+    /// Starts a fresh initial empty-Document build with a creator-frozen
+    /// script-visible referrer installed before the default realm exists.
+    pub(crate) fn start_initial_document_page_ensure_with_referrer_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        initial_document_referrer: Option<&str>,
+    ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
         let runtime_slot = match self.runtime_session_owner_slot(session_id) {
             Ok(slot) => slot,
             Err(_) => return Ok(None),
@@ -2112,7 +2124,10 @@ impl CdpConnection {
             return Ok(None);
         }
 
-        self.start_initial_empty_document_page_build_for_session_owner(session_id)
+        self.start_initial_empty_document_page_build_for_session_owner(
+            session_id,
+            initial_document_referrer,
+        )
     }
 
     pub(crate) fn runtime_session_owner_target_is_initial_about_blank(
@@ -2188,6 +2203,7 @@ impl CdpConnection {
     fn start_initial_empty_document_page_build_for_session_owner(
         &mut self,
         session_id: Option<&str>,
+        initial_document_referrer: Option<&str>,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
         let runtime_slot = match self.runtime_session_owner_slot(session_id) {
             Ok(slot) => slot,
@@ -2290,6 +2306,7 @@ impl CdpConnection {
                 load_inputs.root_frame_id.clone(),
                 top_level_storage_key,
                 None,
+                initial_document_referrer.map(str::to_owned),
             )
             .map_err(|error| {
                 let message = format!("failed to start initial document page build: {error}");

@@ -212,13 +212,76 @@ fn navigate_hyperlink_popup_target(
         );
         return true;
     };
-    creator.policy_container.document_referrer = if relations.suppress_referrer {
+    let initial_document_referrer = if relations.suppress_referrer {
         String::new()
     } else {
         creator.document_url.to_string()
     };
+    creator.policy_container.document_referrer = initial_document_referrer.clone();
+    let target_url = url::Url::parse(resolved_url).ok();
+    let navigation_referrer = if relations.suppress_referrer {
+        String::new()
+    } else {
+        target_url
+            .as_ref()
+            .and_then(|target_url| {
+                moli_fetch::referrer_header_value(
+                    &creator.document_url,
+                    target_url,
+                    None,
+                    creator.policy_container.referrer_policy.as_deref(),
+                )
+            })
+            .unwrap_or_default()
+    };
+    let document_referrer = if relations.suppress_referrer {
+        String::new()
+    } else if target_url.as_ref().is_some_and(moli_url::is_about_blank) {
+        initial_document_referrer.clone()
+    } else {
+        target_url
+            .as_ref()
+            .and_then(|target_url| {
+                moli_fetch::navigation_referrer_value(
+                    &creator.document_url,
+                    target_url,
+                    None,
+                    creator.policy_container.referrer_policy.as_deref(),
+                )
+            })
+            .unwrap_or_default()
+    };
     let opener = (!relations.suppress_opener).then_some(creator.opener);
     let runtime = unsafe { &mut *runtime_ptr };
+    if relations.suppress_opener
+        && target_name.eq_ignore_ascii_case("_blank")
+        && target_url.is_some_and(|url| url.scheme() != "javascript")
+        && let Some(pending_auxiliary_page) = runtime.reserve_pending_auxiliary_page(false)
+    {
+        let user_gesture = runtime.protocol_user_gesture_activation();
+        runtime.record_pending_popup_activation(
+            RendererPendingPopupActivation::window(
+                root_document,
+                source,
+                false,
+                None,
+                resolved_url.to_owned(),
+                target_name.to_owned(),
+            )
+            .with_navigation_referrers(
+                navigation_referrer,
+                initial_document_referrer,
+                document_referrer,
+            )
+            .with_pending_auxiliary_page(Some(pending_auxiliary_page)),
+            Some(RendererPendingWindowOpenEvent::browser_window(
+                resolved_url,
+                target_name,
+                user_gesture,
+            )),
+        );
+        return true;
+    }
     let Some(opened_popup) = runtime.open_lightweight_popup_window(
         scope,
         runtime_ptr,
@@ -245,6 +308,11 @@ fn navigate_hyperlink_popup_target(
                 target_name.to_owned(),
                 disposition,
             )
+            .with_navigation_referrers(
+                navigation_referrer,
+                initial_document_referrer,
+                document_referrer,
+            )
             .with_initial_auxiliary_state(None, None),
             Some(window_open_event),
         );
@@ -268,6 +336,11 @@ fn navigate_hyperlink_popup_target(
             resolved_url.to_owned(),
             target_name.to_owned(),
             disposition,
+        )
+        .with_navigation_referrers(
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
         )
         .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key)
         .with_pending_auxiliary_page(pending_auxiliary_page),

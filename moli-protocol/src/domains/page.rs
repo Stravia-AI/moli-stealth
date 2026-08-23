@@ -110,7 +110,8 @@ use prepared_navigation::{
     PagePreparedSameDocumentNavigation, PagePreparedTopLevelLocationNavigation,
 };
 pub(crate) use termination::{
-    PageTargetTerminationKind, PageTargetTerminationOwnerAction,
+    PageTargetCloseRequestOwnerAction, PageTargetTerminationKind, PageTargetTerminationOwnerAction,
+    complete_page_target_close_request_owner_action_async,
     complete_page_target_termination_owner_action_async,
     fail_pending_fetch_state_background_events_async, take_pending_fetch_state,
 };
@@ -470,6 +471,7 @@ pub(crate) fn command_output_plan(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> Co
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PageOutputProjectionStep {
+    TopLevelClose,
     Download,
     FileChooser,
     JavascriptDialog,
@@ -485,6 +487,7 @@ enum PageOutputProjectionStep {
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct PagePreparedOutputs {
+    top_level_close: Option<PageTargetCloseRequestOwnerAction>,
     javascript_dialogs: Vec<javascript_dialog::PreparedJavaScriptDialog>,
     window_open_events: Vec<popup::PagePreparedWindowOpenEvent>,
     popup_activations: Vec<popup::PagePreparedPopupActivation>,
@@ -502,6 +505,26 @@ pub(crate) struct PagePreparedOutputSlot {
 }
 
 impl PagePreparedOutputs {
+    pub(crate) fn from_renderer_top_level_close(
+        conn: &CdpConnection,
+        session_id: Option<&str>,
+    ) -> Self {
+        let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
+            return Self::default();
+        };
+        let Some(target_id) = page_owner.target_id().map(str::to_owned) else {
+            return Self::default();
+        };
+        Self {
+            top_level_close: Some(PageTargetCloseRequestOwnerAction::new(
+                CommandOwnerScope::capture(conn, session_id),
+                page_owner,
+                target_id,
+            )),
+            ..Self::default()
+        }
+    }
+
     pub(crate) fn from_renderer_javascript_dialog(
         conn: &CdpConnection,
         session_id: Option<&str>,
@@ -787,6 +810,9 @@ impl PagePreparedOutputs {
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
+        if self.top_level_close.is_none() {
+            self.top_level_close = other.top_level_close;
+        }
         self.javascript_dialogs.extend(other.javascript_dialogs);
         self.window_open_events.extend(other.window_open_events);
         self.popup_activations.extend(other.popup_activations);
@@ -804,6 +830,16 @@ impl PagePreparedOutputs {
         }
         if self.top_level_history_traversal.is_none() {
             self.top_level_history_traversal = other.top_level_history_traversal;
+        }
+    }
+
+    pub(in crate::domains) fn append_to_top_level_close_output_sink(
+        self,
+        sink: &mut (impl ProtocolOutputSink + ?Sized),
+    ) {
+        if self.top_level_close.is_some() {
+            sink.push_produced_slot(SLOT_TOP_LEVEL_CLOSE);
+            sink.push_prepared_payload(PagePreparedOutputSlot::from_outputs(self).into());
         }
     }
 
@@ -918,6 +954,7 @@ impl PagePreparedOutputs {
                     )
                 })
                 .collect(),
+            top_level_close: None,
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
             document_title_changes: Vec::new(),
@@ -935,6 +972,7 @@ impl PagePreparedOutputs {
         activations: Vec<moli_core::page::RendererPendingPopupActivation>,
     ) -> Self {
         Self {
+            top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: activations
@@ -990,6 +1028,7 @@ impl PagePreparedOutputs {
             Self::child_frame_document_activity_for_test(),
         );
         Self {
+            top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
@@ -1008,6 +1047,7 @@ impl PagePreparedOutputs {
         navigations: Vec<RendererDocumentSourcedSameDocumentNavigation>,
     ) -> Self {
         Self {
+            top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
@@ -1031,6 +1071,7 @@ impl PagePreparedOutputs {
         navigation: Option<RendererDocumentSourcedTopLevelLocationNavigation>,
     ) -> Self {
         Self {
+            top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
@@ -1107,6 +1148,10 @@ impl PagePreparedOutputSlot {
         self.outputs.top_level_location_navigation.take()
     }
 
+    fn take_top_level_close(&mut self) -> Option<PageTargetCloseRequestOwnerAction> {
+        self.outputs.top_level_close.take()
+    }
+
     pub(in crate::domains) fn top_level_location_navigation_runtime_command_cause(
         &self,
     ) -> Option<&RendererRuntimeCommandCausalIdentity> {
@@ -1140,6 +1185,8 @@ impl PagePreparedOutputSlot {
 }
 
 pub(in crate::domains) const SLOT_DOWNLOAD: ProtocolOutputSlot = ProtocolOutputSlot::Download;
+pub(in crate::domains) const SLOT_TOP_LEVEL_CLOSE: ProtocolOutputSlot =
+    ProtocolOutputSlot::TopLevelClose;
 pub(in crate::domains) const SLOT_FILE_CHOOSER: ProtocolOutputSlot =
     ProtocolOutputSlot::FileChooser;
 
@@ -1179,6 +1226,14 @@ impl PageOutputProjectionStep {
         prepared_outputs: Option<&mut ProtocolOutputPayloads>,
     ) {
         match self {
+            PageOutputProjectionStep::TopLevelClose => {
+                if let Some(action) = prepared_outputs
+                    .and_then(ProtocolOutputPayloads::page_mut)
+                    .and_then(PagePreparedOutputSlot::take_top_level_close)
+                {
+                    conn.publish_page_target_close_request_owner_action(action);
+                }
+            }
             PageOutputProjectionStep::Download => {
                 let mut events = Vec::new();
                 input::emit_download_activity_background_events_async(
@@ -1336,6 +1391,7 @@ pub(in crate::domains) async fn project_page_output_async(
     prepared_outputs: Option<&mut ProtocolOutputPayloads>,
 ) {
     let step = match output {
+        ProtocolOutputSlot::TopLevelClose => PageOutputProjectionStep::TopLevelClose,
         ProtocolOutputSlot::Download => PageOutputProjectionStep::Download,
         ProtocolOutputSlot::FileChooser => PageOutputProjectionStep::FileChooser,
         ProtocolOutputSlot::JavascriptDialog => PageOutputProjectionStep::JavascriptDialog,
@@ -2323,6 +2379,8 @@ pub(crate) async fn navigate_page_owned_top_level_location_background_events_asy
         out,
         session_id,
         navigation.url(),
+        None,
+        None,
         navigation.request_method(),
         navigation.request_body(),
         navigation.request_headers(),
@@ -2342,6 +2400,31 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
         out,
         session_id,
         url,
+        None,
+        None,
+        "GET",
+        None,
+        &[],
+        moli_fetch::BrowserNavigationRequestKind::Navigate,
+    )
+    .await;
+}
+
+pub(crate) async fn navigate_session_owner_from_renderer_with_referrers_background_events_async(
+    conn: &mut CdpConnection,
+    out: &mut Vec<BackgroundProtocolEvent>,
+    session_id: Option<&str>,
+    url: &str,
+    referrer: Option<&str>,
+    document_referrer: Option<&str>,
+) {
+    navigate_session_owner_from_renderer_request_background_events_async(
+        conn,
+        out,
+        session_id,
+        url,
+        referrer,
+        document_referrer,
         "GET",
         None,
         &[],
@@ -2355,6 +2438,8 @@ async fn navigate_session_owner_from_renderer_request_background_events_async(
     out: &mut Vec<BackgroundProtocolEvent>,
     session_id: Option<&str>,
     url: &str,
+    referrer: Option<&str>,
+    document_referrer: Option<&str>,
     request_method: &str,
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
@@ -2364,6 +2449,8 @@ async fn navigate_session_owner_from_renderer_request_background_events_async(
         conn,
         session_id,
         url,
+        referrer,
+        document_referrer,
         request_method,
         request_body,
         request_headers,
@@ -3694,10 +3781,11 @@ mod producer_tests {
         }
 
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (navigation_events, nested_scheduler_events) = conn
+        let (navigation_events, nested_scheduler_events, renderer_output_predecessor) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(
             !nested_scheduler_events.iter().any(|event| {
                 matches!(
@@ -4415,6 +4503,7 @@ mod producer_tests {
             "Secure".to_owned(),
         );
         let outputs = super::PagePreparedOutputs {
+            top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
@@ -5213,10 +5302,11 @@ mod producer_tests {
         );
 
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (events, scheduler_events) = conn
+        let (events, scheduler_events, renderer_output_predecessor) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(!scheduler_events.iter().any(|event| {
             matches!(
                 event,
@@ -5288,10 +5378,11 @@ mod producer_tests {
             Some(&mut prepared),
         );
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (out, scheduler_events) = conn
+        let (out, scheduler_events, renderer_output_predecessor) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(!scheduler_events.iter().any(|event| {
             matches!(
                 event,
@@ -5348,10 +5439,11 @@ mod producer_tests {
             Some(&mut prepared),
         );
         let work = take_top_level_location_navigation_work_for_test(&mut conn);
-        let (out, scheduler_events) = conn
+        let (out, scheduler_events, renderer_output_predecessor) = conn
             .complete_ready_protocol_scheduler_work_turn(work)
             .await
             .into_protocol_event_parts();
+        assert!(renderer_output_predecessor.is_none());
         assert!(scheduler_events.is_empty());
 
         assert!(out.is_empty(), "a retired Page must start no navigation");

@@ -19,7 +19,7 @@ pub use moli_v8_util::{
 };
 use moli_webapi_declare::WebApiValue;
 pub(crate) use moli_webapi_declare::define_array_data_property as define_v8_array_data_property;
-use std::{ptr::NonNull, rc::Rc};
+use std::{cell::Cell, ptr::NonNull, rc::Rc};
 use url::Url;
 use widestring::U16String;
 
@@ -28,9 +28,24 @@ const SCRIPT_BASE_URL_HOST_DEFINED_OPTIONS_MARKER: &str = "moli-script-base-url-
 // Access-check callbacks cannot inspect the global object to rediscover the host:
 // that property lookup would recursively invoke the same V8 access check. This
 // non-owning slot is valid while the context can execute because the matching
-// ScriptVm context state retains its `JsContextHostBridgeRef`.
+// Document host owns the shared liveness token. Retired child realms may
+// outlive their `JsContextHostBridgeRef`, so the token -- rather than the realm
+// store -- is the final raw-pointer validity boundary.
 #[derive(Debug)]
-struct ContextHostPointerSlot(NonNull<JsContextHost>);
+struct ContextHostPointerSlot {
+    host_ptr: NonNull<JsContextHost>,
+    host_liveness: Rc<Cell<bool>>,
+}
+
+/// Marks a V8 Context whose native Document host has been retired.
+///
+/// Navigation can keep the stable WindowProxy while replacing its Context and
+/// `JsContextHost`; final Page close also parks that proxy on a host-free
+/// facade. In both cases retained functions and wrappers can outlive the Rust
+/// host, so every raw-pointer entry point must fail closed before inspecting
+/// embedder data.
+#[derive(Debug)]
+struct DisconnectedPageContext;
 
 /// Materializes the unexposed prototype described by a WebIDL iterator
 /// FunctionTemplate. The temporary constructor is an implementation detail, so
@@ -346,6 +361,9 @@ pub(super) fn context_host_ptr_from_global_bridge(
     scope: &mut v8::PinScope<'_, '_>,
 ) -> Option<*mut JsContextHost> {
     let context = scope.get_current_context();
+    if page_context_is_disconnected(context) {
+        return None;
+    }
     if let Some(host_ptr) = context_host_ptr_from_context_slot(context) {
         return Some(host_ptr);
     }
@@ -357,14 +375,22 @@ pub(super) fn context_host_ptr_from_global_bridge(
 pub(super) fn install_context_host_pointer_slot(
     context: v8::Local<'_, v8::Context>,
     host_ptr: *mut JsContextHost,
+    host_liveness: Rc<Cell<bool>>,
 ) {
     let host_ptr =
         NonNull::new(host_ptr).expect("V8 context JsContextHost pointer should not be null");
-    let previous = context.set_slot(Rc::new(ContextHostPointerSlot(host_ptr)));
     assert!(
-        previous
-            .as_deref()
-            .is_none_or(|previous| previous.0 == host_ptr),
+        host_liveness.get(),
+        "a retired JsContextHost must not be installed into a V8 context"
+    );
+    let previous = context.set_slot(Rc::new(ContextHostPointerSlot {
+        host_ptr,
+        host_liveness: host_liveness.clone(),
+    }));
+    assert!(
+        previous.as_deref().is_none_or(|previous| {
+            previous.host_ptr == host_ptr && Rc::ptr_eq(&previous.host_liveness, &host_liveness)
+        }),
         "V8 context JsContextHost pointer must not be rebound"
     );
 }
@@ -372,9 +398,39 @@ pub(super) fn install_context_host_pointer_slot(
 pub(super) fn context_host_ptr_from_context_slot(
     context: v8::Local<'_, v8::Context>,
 ) -> Option<*mut JsContextHost> {
+    if page_context_is_disconnected(context) {
+        return None;
+    }
     context
         .get_slot::<ContextHostPointerSlot>()
-        .map(|slot| slot.0.as_ptr())
+        .map(|slot| slot.host_ptr.as_ptr())
+}
+
+pub(crate) fn page_context_is_disconnected(context: v8::Local<'_, v8::Context>) -> bool {
+    context.get_slot::<DisconnectedPageContext>().is_some()
+        || context
+            .get_slot::<ContextHostPointerSlot>()
+            .is_some_and(|slot| !slot.host_liveness.get())
+}
+
+pub(crate) fn disconnect_page_context(scope: &mut v8::PinScope<'_, '_>) {
+    let context = scope.get_current_context();
+    if page_context_is_disconnected(context) {
+        return;
+    }
+    let previous = context.set_slot(Rc::new(DisconnectedPageContext));
+    debug_assert!(previous.is_none());
+    context.remove_slot::<ContextHostPointerSlot>();
+
+    // Clear both non-owning native-bridge fields as defense in depth. Callback
+    // data and retained wrappers have their own guards, but no future bridge
+    // helper should be able to rediscover a retired host through the global.
+    if let Some(bridge) = global_bridge_object(scope) {
+        let undefined: v8::Local<'_, v8::Data> = v8::undefined(scope).into();
+        let _ = bridge.set_internal_field(0, undefined);
+        let undefined: v8::Local<'_, v8::Data> = v8::undefined(scope).into();
+        let _ = bridge.set_internal_field(1, undefined);
+    }
 }
 
 /// Convenience wrapper for callbacks that immediately need the host value.
@@ -418,6 +474,13 @@ pub(super) fn context_host_ptr_from_window_object(
     scope: &mut v8::PinScope<'_, '_>,
     object: v8::Local<'_, v8::Object>,
 ) -> Option<*mut JsContextHost> {
+    if page_context_is_disconnected(scope.get_current_context())
+        || object
+            .get_creation_context(scope)
+            .is_some_and(page_context_is_disconnected)
+    {
+        return None;
+    }
     if let Some(value) = object.get_internal_field(scope, 0)
         && let Ok(external) = v8::Local::<v8::External>::try_from(value)
     {

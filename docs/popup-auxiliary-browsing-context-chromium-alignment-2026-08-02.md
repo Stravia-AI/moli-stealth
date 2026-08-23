@@ -1,6 +1,6 @@
 # Popup / Auxiliary Browsing Context：现状、Chromium 对照与统一方案
 
-日期：2026-08-02
+日期：2026-08-02；最后更新：2026-08-04
 
 状态：架构评估与分阶段迁移设计；`popup-refactor` 已完成 Phase 1 primitive 抽取、
 Phase 2A script-agent identity / current-policy baseline，以及 Phase 2B 的 selective
@@ -12,7 +12,7 @@ prepared-document environment reuse，第二个提交已经把 prepared replacem
 stable Page slot 内的 `PageVm`/view publication 和同一个 core `Page` 的 adoption 边界接通；
 第三个提交已经让 protocol `Page.navigate` / target navigation 在已有 Page 上使用这份
 replacement path，并覆盖 active、background、inactive target 及 Fetch response-stage；
-`noopener` 仍显式使用 fresh agent。第四个提交又把 opener 同步拿到的同一 V8
+`noopener` 显式使用 fresh agent。第四个提交又把 opener 同步拿到的同一 V8
 WindowProxy 交给 related auxiliary Page 的首个 realm，并保留 inherited `about:blank`
 的 creator security token。第五个基础提交把 main default realm bootstrap 拆成 callback
 内可用的 in-scope prebootstrap 与 callback 后 Inspector materialization，并验证两段之间
@@ -44,8 +44,46 @@ error Document：请求失败 URL 继续作为 Target/history URL，新 Document
 WindowProxy 和 opener graph 保持，Document/realm 按正常 replacement 边界替换。同步 initial
 realm 会把 opener 的数值 viewport surface 安装到最终 target Context，而不是即将 detach 的临时
 facade；Page script environment 也会跨 realm 保存实际 opener 值。named target、`noopener`、
-`javascript:` URL、完整 cross-origin WindowProxy whitelist、target admission 前的早期任务以及
-close transaction 仍需后续纵切收敛。
+`javascript:` URL 和 target admission 前的早期任务在当时仍需后续纵切收敛。Phase 5 第一纵切 A
+已经把 child-frame stable WindowProxy 的 V8 access-check/handler primitive 扩展到同一
+related-page script agent 中的真实 top-level Page：opener 现在可在跨源 commit 后观察 Chromium
+restricted Window whitelist、own property/descriptor/symbol 形状和稳定 identity；跨 Page
+`postMessage` 会保存真实 source WindowProxy 与 source origin，`window.location =` /
+`location.replace()` 则进入目标 Page 已有的 navigation owner。该纵切同时修正了 shared isolate
+中 host-local opaque LocalWindow id 碰撞造成的伪同源，以及 child primitive 的 configurable
+descriptor、well-known symbol value 和 `[object Object]` 形状。动态 `closed`、`close()` /
+target teardown 的 Phase 5 第二纵切 B 也已接通：related Page 的 same-origin / cross-origin
+`close()` 会同步进入唯一 `Closing` 状态，经 target Page 自己的 output FIFO 交给 protocol，最终与
+`Target.closeTarget` 共享 Page discard 和 stable WindowProxy closed facade；`open(url); popup.close()`
+不会再启动 destination navigation。Phase 5 第三纵切 C 也已经完成 live relation/child projection：
+related top-level cross-origin WindowProxy 的 index/name 不再复制到静态 surface，而是从目标 Page 的
+child registry 动态解析到既有 stable child WindowProxy；插入、移除、重命名、`then` / `open` named
+shadow 和 ownKeys 排除 named child 均有回归。opener 则由 Page-scoped edge 跨 realm 保存；显式
+`window.opener = null`、opener 最终 discard 和后续 navigation 使用同一 sever 结果，关闭 popup 自身仍
+按 Chromium 保留尚存活的 opener。script-closable policy、beforeunload/unload、focus transaction、
+Phase 5D 第一纵切 D1 也已收敛 restricted Location internal methods：ownKeys 只保留
+`href` / `replace` / `then` 和 3 个 fallback symbol，unknown get/has/descriptor/set/delete/define、
+prototype mutation 与 preventExtensions 均按 WPT 形状处理。第二纵切 D2 进一步完成 restricted
+Window internal methods：denied/unknown name 和 out-of-range index 不再以伪 own accessor 或
+`undefined` 泄漏，delete/define/set、null prototype、extensibility 和 exact ownKeys 顺序均对齐本地
+Chromium WPT；named child 可遮住 `document` / `open` / `then`，但不能遮住 `focus` / `close` 等
+cross-origin exposed property。D2.5 又把同一 projection owner 扩展到 generic nested child：live
+Document 的 get/query/descriptor/enumerator/length 全部直接读取 scoped child registry，同一 Document
+内 insert/remove/rename 不再复活 surface snapshot；预物化 stable child WindowProxy facade 也改用唯一
+security token 和正式 access surface，不会泄漏调用方 raw global。D3a 进一步完成
+`CrossOriginPropertyDescriptorMap` 的 accessing-Realm 侧：Window/Location 的 method、getter、setter
+按 incumbent Realm 缓存，具有该 Realm 的 `Function.prototype`、标准 name/length 与 accessor descriptor；
+共享 wrapper 的 native callback 则从 receiver 解析真实 target Context/Page owner，避免在 opener host 上执行
+popup 的 close、postMessage 或 Location navigation。D3b 又让非 top observer 的 `parent` / `top`
+直接复用 stable top-level WindowProxy，并在 index/name lookup 时按 observer Realm 与 target child
+origin 决定是否 materialize 同一个 stable child proxy；same-host sibling 与 related Page 跨 host
+路径都已有回归。Phase 5E 第一纵切 E1 现已把 production 的非命名、非 `javascript:`
+`window.open(..., "noopener|noreferrer")` 以及 hyperlink `_blank` implicit/explicit noopener
+切到唯一 Fresh auxiliary Page：调用方返回 `null`，不创建 lightweight browsing context、镜像
+Document 或第二 loader；initial empty Document referrer、目标导航的网络 `Referer` 与提交后
+`document.referrer` 由 creator policy 一次冻结为三个独立投影。named target/group lookup、form
+target、sandbox、popup activation、COOP group sever 与
+remote/disconnected endpoint 仍未完成。
 
 代码基线：
 
@@ -75,7 +113,9 @@ top-level browsing context。它不是 Blink 用于 `<select>`、权限气泡等
 production 迁移路径：opener 与 target 看到同一 stable WindowProxy、initial realm、Document
 和 Page residence；non-empty destination 在 target admission 后从该 Page 发起一次 replacement
 navigation，opener host 不再保存对应 lightweight Document record 或启动 mirrored loader。
-上述双实现判断仍适用于 named target、`noopener`、`javascript:` URL 和其余尚未迁移入口；
+非命名、非 `javascript:` 的 `noopener` / `noreferrer` 与 hyperlink `_blank` 也已经进入独立
+Fresh Page 的 single-owner 路径，只是不向 creator 暴露 local WindowProxy。上述双实现判断仍适用于
+named target（包括其 noopener/noreferrer 组合）、`javascript:` URL、form target 和其余尚未迁移入口；
 因此 lightweight 模型仍是 Phase 4-6 的主要删除对象，而不是可以继续扩展的长期架构。
 
 建议采纳下面的方向：
@@ -290,19 +330,19 @@ owners”。这不是原始评估时的推测，而是 Phase 4 第一纵切之�
 
 | 语义 | 当前状态 | 直接后果 |
 |---|---|---|
-| authoritative Page | lightweight Page 与 target Page 并存 | DOM、history、lifecycle 可分叉 |
-| navigation owner | 同一个 URL 两个 load owner | 请求、cookie、服务端副作用和计时重复 |
-| realm | facade 共享 opener `Context`；target 有另一个 isolate | opener handle 与 CDP execution context 无关 |
+| authoritative Page | related 非命名与 Fresh noopener 非命名路径已统一；named/`javascript:`/form 等 legacy 路径仍可让 lightweight Page 与 target Page 并存 | 未迁移入口的 DOM、history、lifecycle 仍可分叉 |
+| navigation owner | 已迁移入口一个 URL 只有一个 owner；legacy 入口仍可能有两个 load owner | 未迁移入口仍可能重复请求、cookie、服务端副作用和计时 |
+| realm | related 路径使用真实独立 realm；Fresh noopener 不向 creator 暴露 local proxy；legacy facade 仍可能共享 opener `Context` | named/`javascript:` 等 opener handle 仍可能与 CDP execution context 无关 |
 | synchronous access | facade 可模拟部分 `w.document` | 写入不会自然出现在 target DOM |
 | cross-origin WindowProxy | 有局部 restriction/facade | 不是完整 outer/inner 或 local/remote proxy 模型 |
-| `window.close()` | lightweight record 可关闭；target 另有生命周期 | `closed`、targetDestroyed、资源回收可能不一致 |
+| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 related auxiliary Page 已在 Phase 5B 统一；Fresh noopener 不向 opener 暴露 close handle | named/`javascript:` 等 legacy 路径仍可能让 `closed`、targetDestroyed、资源回收不一致 |
 | focus/blur | top-level Window 上仍有 no-op surface | named-target focus 和事件不完整 |
 | named target | renderer facade registry 与 protocol target registry 分开 | 复用/导航/关闭后查找可能不一致 |
 | opener / COOP | 有 opener suppression 字段和局部 policy | 没有完整 browsing-context-group split / opener sever |
 | popup blocker | userGesture 被观测，部分 policy 已冻结 | 没有统一的 transient activation 消耗和创建 gate |
 | sandbox | 有部分 frame policy 输入 | `allow-popups` / escape-sandbox 创建边界不完整 |
-| initial empty Document | 两条路径各有一份 | 同步 mutation 与 target attach 无法指向同一对象 |
-| script loader | lightweight 有专用 parser/script wrapper | 与主/child loader、module、CSP、currentness 持续漂移 |
+| initial empty Document | 已迁移 related 路径由 target 采纳同一份；Fresh noopener 只由目标 Page 创建；legacy 双栈仍各有一份 | 未迁移入口的同步 mutation 与 target attach 无法指向同一对象 |
+| script loader | 已迁移入口只使用 Page loader；legacy lightweight 仍有专用 parser/script wrapper | named/`javascript:`/form 的 loader、module、CSP、currentness 仍会漂移 |
 
 因此，继续为 lightweight 路径分别补 module、dynamic import、beforeunload、COOP、
 cross-origin descriptor、CDP Runtime context 等功能，会让每个修复都复制到另一条路径。
@@ -1951,8 +1991,9 @@ Phase 4 尚未完成，后续纵切仍必须补齐：
 
 - 普通 network error/error-page 的 Document policy、CDP response shape、history、DCL/load/done
   和 opener-visible state 仍需专门 integration 矩阵；
-- named target、`noopener` / `noreferrer` 和 `javascript:` URL 仍由 legacy policy/path 处理，
-  分别属于 Phase 5 group/opener 纵切和后续 URL semantics 纵切；
+- 该阶段的 named target、`noopener` / `noreferrer` 和 `javascript:` URL 仍由 legacy policy/path
+  处理；其中新建非命名 noopener/noreferrer 后续已由 Phase 5E1 迁移，named/group 与
+  `javascript:` semantics 仍未完成；
 - target admission 前启动 timer/fetch/modal 或先关闭 popup 的行为仍需和 close transaction 一起
   定义，不能靠当前 output journal 的 fail-closed 门槛代替正常时序。
 
@@ -2174,7 +2215,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 本纵切补齐的是 204/205 effective-response interception terminal，不改变普通
 DNS/connect/TLS/HTTP failure 的 Document/error-page policy，也不扩大到 named target、`noopener`、
-`javascript:` 或 close transaction；这些仍是 Phase 4/5 后续切片。
+`javascript:` 或 close transaction；close transaction 后来已由 Phase 5B accepted-close 纵切完成，
+其余仍是 Phase 4/5 后续切片。
 
 #### Phase 4 第六纵切 F：pre-response transport failure 的 browser-owned error Document
 
@@ -2316,12 +2358,12 @@ JS object。`RendererPageScriptEnvironment` 现在在旧 main realm commit 前�
 - opener 同步保存的两个 popup WindowProxy 引用在失败前后仍严格相等；
 - 保存的是实际槽值而不是一条 target id，未来 opener 被显式 sever 为 `null` 时也不会被导航重新连上。
 
-同一回归也精确暴露了下一层边界：从 opener 读取已跨源 popup WindowProxy 的 `.closed` 目前仍得到
-`SecurityError`。这不是 identity 或 opener graph 丢失，而是 top-level related Page 尚未接入 child
-frame 已有的 restricted cross-origin access surface。测试因此用导航前保存的两个引用做 strict
-identity 检查，并单独验证 popup realm 的 `opener !== null`；它没有把 `.closed` 硬编码成 `false`。
-`closed`、`postMessage`、`location`、identity aliases、descriptor/enumerator 与 close 后动态状态应在
-Phase 5 作为一个完整 WindowProxy whitelist 纵切复用 child-frame primitive，不能逐属性开洞。
+同一回归也精确暴露了下一层边界：当时 opener 保存的 stable popup WindowProxy 在跨源 commit 后仍
+保持 identity，但 `.closed` 会得到 `SecurityError`，说明 top-level related Page 尚未接入 child-frame
+已有的 restricted cross-origin access surface。Phase 5 第一纵切 A 已在下节按完整 allowlist 处理该
+边界，而不是只为 `.closed` 开洞；原 identity 回归也已扩展为 Window/Location descriptor、ownKeys、
+`postMessage` source 和 target-owned location navigation 的端到端矩阵。动态 close state 仍属于下一
+纵切；该记录描述 Phase 5A 当时边界，Phase 5B 现已用 shared Page lifecycle authority 替换常量值。
 
 ##### 回归矩阵与当前边界
 
@@ -2370,18 +2412,1215 @@ cargo clippy --workspace --all-targets -- -D warnings
 证书/interstitial、proxy、offline/blocked policy、Fetch request-stage fail/continue、reload/traverse
 到 error entry，以及 error page 上的再次导航。尤其 redirect failure 的 Network redirect metadata、
 error HistoryItem method/state 和 `Network.getResponseBody` 错误形状目前证据较弱。named target、
-`noopener` / COOP、full cross-origin WindowProxy surface 和 close transaction 仍按 Phase 5 处理。
+`noopener` / COOP、cross-origin WindowProxy 的每调用方细节仍按 Phase 5 后续纵切处理；动态 close
+transaction 已由 Phase 5B accepted-close 闭环继续收敛。
 
 ### Phase 5：name、opener、cross-origin、sandbox 与 COOP
 
-- group-level named target registry 和 related Page 查找；
-- opener graph、setter/closed behavior；
-- full restricted WindowProxy whitelist/descriptor 行为；
-- popup blocker 和 transient activation consume；
-- `allow-popups` / `allow-popups-to-escape-sandbox`；
-- `noopener` / `noreferrer` group/agent/storage policy；
-- COOP group switch 和 old proxy endpoint sever；
-- focus/blur/close observable state。
+#### 第一纵切 A：复用 stable WindowProxy 的 related top-level 跨源 surface
+
+本纵切已完成。范围刻意限定为：两个真实 top-level Page 已通过 production auxiliary admission
+进入同一个 related-page script agent，opener 持有 popup 的实际 stable main WindowProxy，随后 popup
+提交不同源 Document。它不建立 named-target registry，不改变 `noopener` / COOP 的 fresh-agent
+policy，也不宣称 close transaction 已完成。
+
+##### Chromium / WPT 合同
+
+直接对照的主要证据是：
+
+- Chromium `third_party/blink/renderer/bindings/core/v8/window_proxy.h`：同一个 browsing context
+  保留稳定 WindowProxy，访问安全检查位于 proxy/realm 边界；
+- WPT `html/browsers/origin/cross-origin-objects/cross-origin-objects.html`：锁住 Window / Location
+  allowlist、own descriptor、ownKeys、well-known symbols、prototype、内部方法和每 incumbent wrapper；
+- 同目录 `cross-origin-objects-function-{caching,length,name}.html`：锁住函数 identity、`name`、
+  `length` 和 descriptor 返回的函数缓存；
+- 同目录 `window-location-and-location-href-cross-realm-set.html`：锁住 Location setter 的 receiver、
+  URL coercion 和异常 realm；
+- popup error-Document 行为继续参考 Chromium `NavigationRequest::CommitErrorPage` 路径；该路径证明
+  transport failure 替换 Document，而不是销毁 auxiliary browsing context 或 opener edge。
+
+对不含子 frame 的跨源 Window，WPT 的 string allowlist 是：
+
+| 类别 | 名称 | 本纵切状态 |
+| --- | --- | --- |
+| identity / relation | `window`、`self`、`frames`、`parent`、`top`、`opener` | 已接真实 stable WindowProxy；top-level 的 parent/top/self 均是自身，opener 来自实际 V8 opener slot |
+| live scalar | `closed`、`length` | 可跨源读取；`length` 从目标 Page child count 读取，`closed` 由稳定 Page environment 的 `Active → Closing → Closed` authority 动态投影 |
+| callable | `postMessage`、`blur`、`close`、`focus` | descriptor/name/length/缓存形状已对齐；`postMessage` 已跨 Page 交付，`close()` 已进入 target-owned close transaction，`blur` / `focus` 仍无动态事务 |
+| navigation | `location` setter、`location.href` setter、`location.replace()` | 已进入目标 Page 原有 Location/navigation owner；读 `href` 与其他敏感属性抛 `SecurityError` |
+| promise assimilation | `then` | own、值为 `undefined`；没有名为 `then` 的 child 时不会把 WindowProxy 当 thenable |
+| well-known symbols | `Symbol.toStringTag`、`Symbol.hasInstance`、`Symbol.isConcatSpreadable` | own、non-enumerable、non-writable、configurable，值均为 `undefined` |
+
+`globalThis` 不在 HTML cross-origin Window allowlist 中。本纵切从共用 child primitive 中移除了此前
+错误暴露的 cross-origin `globalThis` identity alias；读取它与 `document`、`name`、任意未知属性
+一样抛调用方 realm 的 `SecurityError`。well-known symbol 不再伪造 `"Window"` / `"Location"`
+tag，因此 `Object.prototype.toString.call(crossOriginWindow)` 和 Location 都是 WPT 要求的
+`[object Object]`，不是 `[object Window]` / `[object Location]`。
+
+当前已锁住的 descriptor 规则是：
+
+- allowlist string/symbol property 都作为 own property 投影；
+- 普通值和方法 `writable:false`、`enumerable:false`、`configurable:true`；
+- `location` 是带 getter/setter 的 non-enumerable、configurable own accessor；
+- 数字 child index 应为 `writable:false`、`enumerable:true`、`configurable:true`；
+- 未知 Window property 的 read、descriptor 和 `hasOwnProperty` 都抛 `SecurityError`；
+- 无 child 的 `Object.getOwnPropertyNames(window)` 精确只含 14 个 string allowlist 名称，
+  `Object.keys(window)` 为空，三个 symbols 按 WPT 顺序位于 symbol own keys 中；
+- cross-origin Window / Location prototype 为 `null`。
+
+##### Owner 设计：实际 proxy + target-owned surface
+
+实现没有给 popup 再建一个“restricted facade”。现有 Window global template 本来就安装了 child-frame
+使用的 V8 security-token access check 和 named/indexed property handlers；本纵切把其授权域从“同一
+`JsContextHost` 的 top/child realm”窄化扩展为“显式 related、共享同一 script-agent isolate 的两个
+current top-level default realms”：
+
+```text
+opener current Context
+  -> saved popup stable WindowProxy (target Page owns the object)
+     -> V8 security-token/access-check
+        -> same effective tuple origin: access actual target global
+        -> cross origin: target JsContextHost cross-origin access surface
+           -> identity / descriptor / ownKeys
+           -> target postMessage queue
+           -> target Location navigation owner
+        -> unrelated Page / stale realm / non-top endpoint: deny
+```
+
+关键责任边界如下：
+
+1. `RendererPageScriptEnvironment::is_related_page_peer` 只接受不同 Page id、相同 isolate identity。
+   一个 document isolate 对应一个 script agent；V8 access-check 发生时 holder 已被可变借用，因此热路径
+   不能再次借 holder 查询 script-agent id。第一次回归确实捕获了该 reentrant `RefCell` borrow，当前
+   实现使用稳定 `Rc` identity，不引入裸指针 cache 或临时释放借用。
+2. `window_access_check_callback` 只有在两个 context 的 host 不同且满足 related-page gate 时才进入
+   cross-Page origin 判断；fresh Page、`noopener` Page、stale owner 和非 top-level endpoint 不因此
+   获得能力。
+3. 每个 main default realm bootstrap 在目标 `JsContextHost` 中建立 cross-origin access surface，但
+   surface 的 identity slots 指回 Page environment 持有的实际 stable main WindowProxy。navigation
+   替换 Context 后重新建立 target-owned surface，调用方保存的 proxy object 本身不变。
+4. surface 在恢复 navigation-persistent opener slot 之后读取实际 opener value。它没有根据 CDP
+   `openerId` 反造 JS 对象，也没有把 opener target metadata 当作 JS graph authority。
+5. unknown descriptor 路径由 handler 显式在 lexical/incumbent realm 创建 DOM `SecurityError`，避免
+   V8 对 `undefined` descriptor 生成错误 realm 的普通 `TypeError`。
+
+这正是“复用 child-frame stable WindowProxy/realm 基础”的含义：共享 access-check、origin、
+handler、descriptor 和 Location primitive；popup 仍是独立 top-level Page/target，没有
+`frameElement`、parent load blocker 或 iframe owner 特例。
+
+##### child Document preload registry 必须按 owner 冻结
+
+workspace 并发门禁同时暴露了 child-frame 基础中的一个既有时序缺口。一个 child Document 已经创建，
+但它的 realm-materialization Page task 可能因调度负载晚于
+`Page.addScriptToEvaluateOnNewDocument(runImmediately:true)` 执行；旧实现到 materialization body 才读
+Page-wide 最新 script registry，于是本应只在当前 top-level world 立即执行的新脚本，又被追溯重放到
+更早创建、同名的 child isolated world。聚焦运行通常先完成 child task，因此看不见；workspace 高负载
+能稳定把它放大为 `typeof childMarker === "string"`。
+
+这里没有给 CDP 命令加 drain、retry 或 sleep。责任边界提升到 exact child Document owner：
+
+- initial-empty Document、普通导航 commit 和 `document.open()` replacement 创建新 owner 时，冻结当时
+  可见的完整 document-start script registry；
+- 后续 default/named child realm materialization 只消费该 owner 的快照，不再读取 Page-wide 最新脚本；
+- 快照与 Document owner 同寿命，同一 Document 的测试性/内部 realm replacement 继续使用同一份配置，
+  只在 owner retirement 时清理；
+- later registry update 仍由 top-level `runImmediately` 处理，并被之后创建的 child Document 捕获，不会
+  因修复而丢失 future-document preload。
+
+低层回归用同一 Page 锁住“更新前 child 不追溯注入、更新后 child 正常继承”；原 protocol
+world-name 回归在并发 core+renderer 负载下从修复前第 6/22/36 次内可复现，变为修复后连续
+100 次通过。这项修复是复用 child-frame realm primitive 的必要收敛，不是 popup 调用点补丁。
+
+##### opaque origin：不能比较 host-local LocalWindow id
+
+真实 error popup 回归暴露了一个 shared-isolate 特有问题。`WindowAccessOrigin::Opaque` 过去用
+`WindowExecutionContextOwner::Frame(LocalWindowId)` 作为 non-serialized identity；该 id 只在单个
+`JsContextHost` 内唯一。两个 Page 都可能分配 `LocalWindowId(1)`，跨 host 直接比较会把两个独立
+opaque origin 错判为同源，并绕过 restricted surface。
+
+related-page 跨 host origin gate 现在不把 opaque owner 数值当作全局 nonce；两个 independently
+created opaque realm 一律不能靠碰撞互访。initial `about:blank` 合法继承 creator 的 opaque 或
+`document.domain`-mutated effective origin 时，Page admission 已把 creator 的精确 V8 security token
+交给 initial Context，因此同源访问在到达该 fallback gate 前已经成立。当前生产回归覆盖
+`data:` opener → initial inherited Document → opaque error Document 的转变。后续仍需用 WPT 覆盖
+非 initial 的 inherited opaque navigation、sandbox-forced opaque origin 和 COOP split，不能把
+host-local owner id 扩成伪全局 nonce。
+
+##### cross-Page `postMessage`
+
+跨源 `postMessage` 继续调用目标 Window surface 上的同一 native binding，但 acceptance 时需要同时
+知道 target 和 incumbent source：
+
+- binding 的 current context/host 是目标 popup Page，因此 payload 进入 popup 的 Page-owned
+  WindowMessage task queue，target origin 在 dispatch 时再次检查；
+- incumbent context 是 opener Page；只有它与 target 属于同一 related script agent、且是 current
+  top-level default realm 时才接受；
+- acceptance 保存 source origin、source owner/realm token，以及 source Page 的实际 stable main
+  WindowProxy `v8::Global`；
+- `MessageEvent` materialization 直接使用该 source proxy，所以 target 中
+  `event.source === opener`，而不是 target global、`null` 或一份 synthetic facade；
+- structured clone、transfer list、`messageerror`、target-generation/currentness 和 task ordering 继续
+  复用原 WindowMessage owner path。
+
+端到端测试在 error popup realm 注册 listener，由 opener 对保存的跨源 WindowProxy 发送 object，
+锁住 `{data, origin:"null", sourceIsOpener:true}`。Phase 5B 又补上 source/target Page 最终关闭后的
+断开边界：保留的 stable proxy 继续可读 `closed === true`，但旧 realm function / DOM wrapper 会在
+解引用 native host 前 fail closed，不能因为 source `v8::Global` 仍存在就延长 Rust host 生命周期。
+
+##### target-owned Location navigation
+
+cross-origin Location object 不保存 protocol target id，也不从 opener host 发起 mirrored navigation。
+它只保存目标 stable WindowProxy marker；`window.location = value`、`location.href = value` 和
+`location.replace(value)` 完成 WebIDL USVString coercion 后，取目标 Window 的真实 public Location
+slot，进入已有 `navigate_location_object` owner：
+
+```text
+opener expression
+  -> popup restricted Location setter / replace binding
+  -> popup current Window Location slot
+  -> popup RendererPageScriptEnvironment task/output route
+  -> exact popup TargetPageResidenceIdentity navigation
+  -> replace popup Document/realm; keep Page + stable WindowProxy
+```
+
+CDP 回归从 opener 先执行 assignment、再执行 `replace()`，两次都等待 background popup target 的
+typed scheduler state，而不是 sleep/drain；新 Document 的 title/body 只能在 popup session 观察，
+target/core Page residence 和 renderer Page/WindowProxy residence 均保持，opener 保存的两个 proxy
+引用在两次 navigation 后仍严格相等。
+
+#### 第二纵切 B：统一 close transaction 与最终 WindowProxy 断开
+
+本纵切已完成 close transaction 的第一条 production 闭环，范围是已经迁移为真实 related
+auxiliary Page 的 top-level popup，以及既有 `Page.close` / `Target.closeTarget` target teardown。
+它没有把 lightweight named/`noopener` popup 伪装成已经迁移，也没有在这一层实现 popup blocker、
+sandbox、COOP 或完整 unload policy。
+
+##### Chromium 合同与 Lightmount 对应边界
+
+本地 Chromium `a03603fe9af6` 的关键事实如下：
+
+- `DOMWindow::Close` 只接受 outermost main frame，并以 incumbent Document 的 `CanNavigate`、
+  `OpenedByDOM` / history length、`ShouldClose` 等条件决定脚本是否可关；调用 `Page::CloseSoon()` 后又
+  立即设置 `window_is_closing_`，保证延迟关闭真正发生前 `window.closed` 已经返回 `true`；
+- `DOMWindow::closed()` 同时观察 `window_is_closing_`、Frame 是否存在和 Frame 是否仍有 Page；它不是
+  bootstrap 时写死的普通 data property；
+- `Page::CloseSoon()` 先把 Page 标记为 closing、停止 loader，再把 browser close request 排到当前
+  JavaScript 完成之后；这样深层 JS 调用不会在嵌套 loop 中把正在执行的 realm 提前销毁；
+- browser 侧 `RenderFrameHostImpl::ClosePage` 把 renderer-origin 和 browser-origin close 汇到同一
+  unload / final close path，并在 renderer-origin request 已不再指向 active main frame 时拒绝误关新页；
+  `WebContentsImpl::ClosePage` 也进入该入口。
+
+Lightmount 对应采用两阶段状态，而不是从 `close()` callback 直接 drop `PageVm`：
+
+```text
+target Window.close()
+  -> RendererPageScriptEnvironment: Active -> Closing（同步、幂等）
+  -> target Page output FIFO: RendererOwnerAction::TopLevelClose
+  -> protocol exact TargetPageResidenceIdentity preflight
+  -> fail pending Inspector awaits / fetches + acquire renderer output fence
+  -> PageTargetTerminationOwnerAction::WindowClose
+  -> common target/session close path + targetDestroyed
+  -> renderer final Page teardown: Closing -> Closed
+  -> same stable WindowProxy reattached to a host-free restricted facade
+```
+
+这里有五个必须保持的 owner 不变量：
+
+1. `RendererPageScriptEnvironment` 与 stable Page/WindowProxy 同寿命，并跨 replacement `PageVm` 复用；
+   `Active → Closing` 只能成功一次，所以同一 turn 的重复 `close()` 只产生一个 owner action。普通
+   cross-document navigation 不改变该状态。
+2. same-origin direct Window 和 related cross-origin Window surface 都调用目标 Page 的 close authority。
+   跨 Page 调用发生在 opener turn 时，typed `TopLevelCloseOutputHandoff` 只唤醒目标 Page owner 来冻结
+   它自己的 FIFO，不携带第二份 close authority；busy Page 在本 turn 返回时结算，尚未 admission 的
+   initial Page 在创建提交时结算。
+3. protocol 在 renderer output 进入 ingress 时冻结 target id、session owner scope 和
+   `TargetPageResidenceIdentity`。延迟 action 不能跟随一个 session 去关闭后来安装的 Page；pending
+   Inspector await、navigation/subresource fetch 先产生 terminal output，renderer fence 通过后才发布
+   最终 target termination。
+4. initial Page creation diagnostics 会携带 `top_level_browsing_context_closing`。因此
+   `const p = open(url); p.close()` 即使完全发生在 target admission 前，也仍先创建可观察的 target，
+   随后按自己的 close FIFO 销毁；目标 URL 的 navigation claim 根本不会 stage/publish，不靠取消一个
+   已经开始的请求来掩盖副作用。
+5. 每个 `JsContextHost` 拥有一个 Document 级 liveness token，并把同一个 token 装进 default、isolated、
+   child 和临时 facade Context 的非 owning host slot。child realm navigation 只退休自己的 owner/token，
+   不提前熄灭 Document host token，因此保留的旧 child `fetch` / XHR / Runtime binding 仍按原 owner 语义
+   fail closed；当整个 Document host retirement 时 token 一次性失效，即使某个旧 child Context 已从 live
+   realm store 移除，任何 raw-pointer callback 也会先拒绝访问。当前仍可枚举的 Context 还会被显式标成
+   disconnected、移除 host slot 并清空 bridge pointer。这个 Document 边界不改变 stable Page 的 close
+   state；只有 stable Page 最终 discard 才进一步把原 main WindowProxy 从旧 global detach，挂到无
+   `JsContextHost` 的 restricted facade。opener 保存的引用仍严格相等并观察
+   `{closed:true, opener:<original opener>, length:0}`；敏感属性抛 `SecurityError`，旧 realm function 和 DOM wrapper
+   抛 `TypeError`。Document replacement/cancel 回归明确锁住 `closed === false`，防止把 realm teardown
+   提升成 browsing-context teardown。
+
+`window.close()`、`Page.close` 和 `Target.closeTarget` 的触发前置条件不同，但最终 target/session
+closure 和 renderer Page discard 已经共用同一责任边界。`WindowClose` 保留独立 termination kind，
+用于诊断触发来源，而不是复制销毁逻辑。`targetDestroyed` 仍由既有 target-host closure event plan
+统一生成，重复 close 或晚到 action 通过 exact target/Page currentness 变成 no-op。
+
+##### 本纵切仍未实现的 Chromium close policy
+
+本轮刻意没有把以下行为塞进 V8 callback 或 protocol 调用点：
+
+- `OpenedByDOM`、history length 1 和浏览器设置共同决定的 script-closable gate；
+- incumbent `CanNavigate`、sandbox navigation flag、COOP browsing-context group sever；
+- `beforeunload` / `unload`、dialog、`ShouldClose` 和 renderer ACK/timeout；
+- close 与已经提交的 navigation、named-target reuse、opener sever 的完整竞态矩阵。
+
+这些是 creation/group policy 与通用 Page unload lifecycle 的后续纵切。当前实现对已迁移的 top-level
+Page 允许脚本发起 close；证据只支持“请求一旦被接受，transaction、取消、target 事件与断开语义
+一致”，不能解读成 Chromium 的所有“是否允许关闭”条件已经完成。
+
+##### 聚焦证据
+
+renderer 回归覆盖：跨 Page 两次 `close()` 只发布一个 target-owned action，target 自身与 opener
+同步观察 `closed === true`；最终 close 后 stable proxy identity 不变，旧 function/DOM wrapper fail
+closed；普通 navigation 和取消的 prepared replacement 保持 `closed === false`。另有组合回归先让
+child realm 因 navigation 离开 live store，再退休整个 Document host：host 退休前旧 child
+`fetch` 仍返回既有 shutting-down TypeError，退休后同一 closure 在原 Promise/TypeError realm 安全拒绝，
+证明安全性不依赖保存所有旧 `Global<Context>`。
+
+protocol 回归覆盖：`open(url); popup.close()` 的 evaluation response 和 `targetCreated` 都早于唯一
+`targetDestroyed`，目标监听 socket 没有收到连接，target/session residence 被移除；随后 opener
+仍观察同一个 closed proxy。另一个用例从 `Target.closeTarget` 关闭真实 popup，得到完全相同的最终
+proxy facade，证明 browser-origin close 没有旁路 renderer teardown。
+
+本地 Chromium 行为探针还校正了两个边界。关闭 DOM-opened popup 后，保存的 proxy 仍满足
+`popup.opener === opener`，所以 closed facade 保留原 opener edge，而不是擅自 sever 为 `null`。另一方面，
+Chromium 的 Oilpan/V8 lifetime 能让已关闭 popup 或已移除 iframe 的旧 Node 和函数继续读取 detached
+Document；Lightmount 当前 DocumentRuntime/`JsContextHost` 还不是由 V8 wrapper 共同拥有，因而本纵切
+只能在 host retirement 时让这些 raw-host-backed 值抛 `TypeError` 来保证内存安全。这是明确的兼容性
+缺口，不应把“安全 fail closed”解读成 Chromium 的 detached-Document 完整语义。
+
+`chromium 145.0.7632.116 --headless --dump-dom` 的本地最小探针结果为：移除 same-origin iframe 后，
+`[savedNode.textContent, savedFunction(), savedWindow.closed]` 是 `['old','old',true]`；关闭 DOM-opened
+popup 后，下一 task 中的
+`[savedNode.textContent, savedFunction(), popup.closed, popup.opener === opener]` 是
+`['old','old',true,true]`。这与上述 source lifecycle 分支一致，也把当前 Lightmount 的安全降级边界
+固定成可复查的行为差异。
+
+#### Phase 5C：live child relation 与 Page-scoped opener edge
+
+Phase 5A 最初为 related top-level WindowProxy 建立的 restricted surface 仍保存了 bootstrap 时的
+child count/name 和 opener value。`length` 虽然会读取目标 host，但 numeric index、named child、
+ownKeys 和 opener getter 仍可能互相矛盾。Phase 5C 没有在 `appendChild`、attribute setter、remove 或
+navigation 调用点逐个刷新 surface；它把投影重新接回已经拥有 browsing-context identity 的 owner。
+
+top-level cross-origin Window 的 access surface 现在只保存稳定 allowlist/function/Location 基础，不再
+保存 child index/name。V8 named/indexed handler 每次从目标 WindowProxy 的 creation context 找到精确
+`JsContextHost`，先通过既有 child registry 同步当前 subtree，再按 frame-tree sibling order 解析 child，
+最终调用 `child_browsing_context_window_proxy_for_top()`。因此 index、name 和 iframe `contentWindow`
+返回的是同一个 child-frame stable WindowProxy，而不是另造 detached placeholder：
+
+```text
+related top-level WindowProxy handler
+  -> target Page current JsContextHost
+  -> top-level child browsing-context registry
+  -> stable child WindowProxy / current LocalWindow realm
+  -> caller-observed numeric or named value
+```
+
+named lookup 的次序按本地 Chromium source/WPT 校正为：cross-origin exposed IDL property 优先，其次是
+document-tree child browsing-context name，最后才是 `then` / symbol fallback 或 SecurityError。于是名为
+`close` 的 child 不能遮住 allowlist method；名为 `open` 的 child 在跨源观察方可见；名为 `then` 的 child
+会遮住默认 `undefined`，移除后又恢复非 thenable fallback。普通 named child 不参加
+`[[OwnPropertyKeys]]`，numeric child 则继续作为 enumerable index 出现在 keys；这与 Chromium
+`WindowProperties::AnonymousNamedGetter()`、bindings generator 的
+`CrossOriginGetOwnPropertyHelper` 以及 `v8_cross_origin_property_support.cc` 的 fallback/enumerator 顺序
+一致。
+
+opener 不再只是 LocalWindow private slot。`RendererPageScriptEnvironment` 保存 Page-scoped
+`top_level_opener_edge`，initial auxiliary realm 直接绑定实际 stable opener WindowProxy；Document
+replacement 只把同一 edge 投影到新 realm。`Window.opener` setter 对齐 Chromium
+`DOMWindow::setOpenerForBindings()`：传入 `null` 先 sever browsing-context edge；无论值是否为 null，
+随后都在当前 Window 上建立 writable/enumerable/configurable own data property。非 null 值因此只
+shadow accessor，不改变底层 edge。跨源 popup opener accessor 读取目标 Page edge；opener Page 最终
+discard 后，stable opener proxy 的 closed marker 会把存活 popup 的 edge 折叠为 `null`。反方向关闭
+popup 不会错误 sever 其仍存活的 opener，closed facade 继续投影原 edge。
+
+回归覆盖以下状态变化：
+
+- 跨源 target 动态插入名为 `alpha`、`then`、`open` 的三个 iframe；observer 的 index/name/descriptor
+  都指向同一 stable child WindowProxy，keys 只含 `0..2`，普通 named child 不进入 own names；
+- rename `alpha → renamed` 并移除 `then` 后，length/indices/name 同步变化，旧 `alpha` 重新抛
+  `SecurityError`，`then` 恢复 `undefined`，没有 stale index/name；
+- target 执行 `window.opener = null` 后，保存的原 accessor getter、target 自身和跨源 observer 都看到
+  `null`，own data descriptor 形状正确，Document replacement 后仍不重连；另有 non-null 赋值回归
+  锁住“只建立 ordinary shadow、原 getter/edge 不变”；
+- 不显式 sever 时，关闭 popup 自身仍保留 opener；关闭 opener Page 时，存活 popup 在最终 discard 后
+  看到 `null`，导航后保持 sever。
+
+本纵切仍没有实现 COOP/`noopener` 的 browsing-context-group switch 或 remote endpoint；Page-scoped
+edge 是当前 related same-agent group 的唯一投影 owner，也是后续 group policy transaction 的接入点，
+不能把“JS setter/本地 opener discard 已 live”解读为完整 COOP policy 已完成。
+
+#### Phase 5D1：restricted Location internal methods
+
+Phase 5A 的 cross-origin Location 用 null-prototype target 加 JavaScript `Proxy` 实现，但 target 同时
+安装了 `origin`、`assign`、`reload` 等 denied accessor。这虽然让直接读取抛错，却产生两个错误事实：
+denied name 会泄漏进 `[[OwnPropertyKeys]]`，其 descriptor/hasOwnProperty 还会被报告为 own property；
+完全未知的 key 则沿普通 target 路径返回 `undefined`。handler 也没有拥有 `[[SetPrototypeOf]]` 与
+`[[PreventExtensions]]`，因此这些 internal methods 会落回普通 extensible object 语义。
+
+D1 把 restricted Location 的 target 缩成唯一可枚举事实：`href` setter、`replace` method、`then`
+fallback 和 `Symbol.toStringTag` / `Symbol.hasInstance` / `Symbol.isConcatSpreadable`。Proxy handler 负责
+其余策略，不再用 denied accessor 假装接口表：
+
+```text
+cross-origin Location Proxy
+  -> minimal null-prototype target
+       href / replace / then / three fallback symbols
+  -> get / has / getOwnPropertyDescriptor
+       allow target key; otherwise SecurityError in the accessing realm
+  -> set
+       href navigation only; otherwise SecurityError
+  -> deleteProperty / defineProperty
+       always SecurityError
+  -> setPrototypeOf
+       null => true; non-null => false
+  -> preventExtensions
+       false; target remains extensible
+```
+
+这与本地 Chromium 的
+`third_party/blink/renderer/bindings/scripts/bind_gen/interface.py`（generated cross-origin
+getter/descriptor/query/enumerator）和
+`third_party/blink/renderer/platform/bindings/v8_cross_origin_property_support.cc`
+（fallback/ownKeys）一致，也直接覆盖
+`third_party/blink/web_tests/external/wpt/html/browsers/origin/cross-origin-objects/cross-origin-objects.html`
+中的 Location 矩阵。回归锁住以下结果：
+
+- `Object.getOwnPropertyNames(location)` 精确为 `['href','replace','then']`，string keys 不可枚举，
+  3 个 symbol 位于其后且 descriptor 都是 non-writable/non-enumerable/configurable；
+- `href` descriptor 只有本地 realm 可调用的 setter，`replace` 是 readonly method，fallback value 为
+  `undefined`；existing identity、WebIDL conversion 和 navigation 路径不变；
+- denied/unknown key 的 get、`in`、descriptor、hasOwnProperty、set、delete、define 均抛访问方 realm 的
+  `SecurityError`，不再返回 `undefined` 或暴露伪 descriptor；
+- prototype 保持 `null`：设为 `null` 成功，设为其他对象时 Reflect 返回 false、Object/legacy setter
+  抛 `TypeError`；直接 `location.__proto__ = value` 仍属于 denied property set，抛 `SecurityError`；
+- `Object.isExtensible()` 始终为 true，Reflect.preventExtensions 返回 false，Object.preventExtensions
+  抛 `TypeError`，失败后不会偷偷冻结 target。
+
+D1 没有声称完成整个 Phase 5D。Window 的 denied/unknown property、out-of-range index、delete/define、
+prototype/preventExtensions 与 ownKeys 精确矩阵仍由 D2 负责；D1 当时的 cross-origin
+Window/Location method 和 accessor 仍从 target surface 创建，后续已由 D3a 改成按 accessing
+realm/incumbent 分配。
+
+#### Phase 5D2：restricted Window internal methods
+
+D2 延续 D1 的原则：restricted surface 只保存真实可观察事实，拒绝策略属于 WindowProxy internal
+methods。旧 child surface 为 `document`、`setTimeout`、`open` 等大量 denied name 安装 throwing
+accessor，导致这些 name 错误进入 own keys、descriptor 和 hasOwnProperty；不存在的 numeric index 又因
+直接调用 V8 `get()` 而把“property missing”误判成值为 `undefined` 的 own property。这既不符合
+`cross-origin-objects.html`，也阻止名为 `document` / `open` / `then` 的 child browsing context 按
+Chromium 的 named getter precedence 出现。
+
+D2 删除整张 denied accessor 表。stable WindowProxy 的 V8 named/indexed handler 与 detached fallback
+Proxy 现在共同拥有以下矩阵：
+
+```text
+cross-origin WindowProxy
+  -> minimal access surface
+       live exposed properties / actual child indices / actual named children
+       then fallback / three fallback symbols
+  -> [[Get]] / [[HasProperty]] / [[GetOwnProperty]]
+       exposed property or existing child => value/descriptor
+       denied/unknown name or missing index => accessing-realm SecurityError
+  -> [[Set]]
+       location navigation only; every other name/index => SecurityError
+  -> [[Delete]] / [[DefineOwnProperty]]
+       every name/index, present or absent => SecurityError
+  -> [[GetPrototypeOf]]
+       null
+  -> [[SetPrototypeOf]]
+       null => success; non-null => false / TypeError according to caller API
+  -> [[IsExtensible]] / [[PreventExtensions]]
+       true; Reflect => false, Object => TypeError, target remains extensible
+  -> [[OwnPropertyKeys]]
+       numeric child indices, exposed strings, one final then, three symbols
+       ordinary named children excluded
+```
+
+named lookup 继续复用 Phase 5C 的 child registry precedence，而不是恢复接口名称黑名单：只有
+cross-origin exposed Window property 保留优先级。于是 `name="focus"` 仍得到 readonly `focus()`，
+`name="document"` 则得到与 numeric index 相同的 stable child WindowProxy；named descriptor 是
+non-writable/non-enumerable/configurable，且普通 named child 不进入 ownKeys。`then` 是唯一例外：named
+child 可以遮住 fallback，但 ownKeys 中仍只有一个 `then`，并保持为最后一个 string key。enumerator
+同时显式保证 indices 在前、3 个 well-known symbols 在末尾，不再依赖 target property 的安装顺序。
+
+这里存在一个 V8 版本边界。仓库当前的 V8 137 会在 foreign global 的
+`Object.setPrototypeOf` / legacy proto setter / `preventExtensions` 到达 interceptor 前先执行 security
+access check，因而统一抛 `SecurityError`；本地 Chromium 对应 WPT 要求 non-null prototype 和
+Object.preventExtensions 抛访问方 `TypeError`，Reflect 返回 false，而 null prototype 成功。D2 没有
+为此包装或替换 stable WindowProxy identity。它在每个访问方 Window realm 安装 native intrinsic
+adapter，并且只在参数同时满足以下条件时接管：
+
+1. 参数严格等于其 creation Context 的 global proxy；
+2. 当前 Context 与该 Context 不同；
+3. 既有 Window access-check owner 判定当前调用方不能访问目标。
+
+其余普通 object、same-origin Window 和非法参数全部调用保存在 callback data 中的原始 V8 intrinsic；
+回归同时锁住 ordinary delegation、function name/length 和 native-code 形状。cross-origin Window 的
+template 也标为 immutable-prototype exotic object，保证 same-origin 转发路径仍遵守 Window 自身的
+immutable prototype 约束。detached fallback 本来就是 JavaScript Proxy，则直接由 ownKeys、
+setPrototypeOf 和 preventExtensions traps 提供同一结果。
+
+D2 回归覆盖：
+
+- related popup、普通 cross-origin child 与 detached child fallback 的 missing index get/descriptor/
+  hasOwnProperty/`in` 全部抛访问方 `SecurityError`；
+- unknown named get/descriptor/hasOwnProperty/`in`/set，以及 present/absent index/name 的 set/delete/
+  define 全部拒绝；`location` navigation、allowed method 和 receiver check 保持；
+- Object、Reflect、legacy proto setter 和 direct `__proto__` 的完整 null/non-null 矩阵，错误分别属于
+  访问方 `DOMException` / `TypeError` realm；preventExtensions 失败后仍 extensible；
+- exact string/symbol own names、index/then/symbol 顺序、named child 排除，以及
+  `document` collision 可见、`focus` collision 被 exposed method 压住；
+- ordinary Object/Reflect/legacy proto 操作仍委托 V8，设置 prototype 和冻结普通对象的结果不变。
+
+D2 完成的是 `cross-origin-objects.html` 的 Window internal-method 静态矩阵。当时 related top-level
+已由 Phase 5C 动态读取 target Page registry，但 generic nested cross-origin child 仍可能回落到
+refresh-time index/name snapshot。D2 将该风险明确留给 D3 前的独立 owner 抽取；下面的 D2.5 完成了
+该抽取，没有通过 access 时 drain/retry 修补。
+
+#### Phase 5D2.5：generic nested live child projection
+
+D2.5 把 Phase 5C 的 related-top 特例收敛为一次 WindowProxy callback 内有效的
+`CrossOriginWindowChildRegistryOwner { host, parent }`。`parent=None` 表示 target Page 的 top-level
+children，`parent=Some(DomHandle)` 表示 generic nested Window 的 direct children。owner 只从 target
+Context 已有 host/handle slot 临时解析，不进入全局 cache，也不延长 `JsContextHost` 生命周期；nested
+owner 只有在对应 browsing context 仍 live 且拥有 current Document handle 时成立，parked/retired facade
+不会伪装成 live registry。
+
+named/indexed WindowProxy handlers 和 `length` accessor 现在共享同一查询流程：
+
+```text
+foreign WindowProxy callback
+  -> resolve target Context host + scoped parent
+  -> synchronously project that Document subtree into the child registry
+  -> index/count/name lookup in scoped registry
+  -> return the existing stable child WindowProxy for that browsing-context id
+  -> missing live entry => SecurityError（then 单独回落到 undefined fallback）
+```
+
+因此 get/query/descriptor、indexed enumerator/ownKeys 和 length 不再从 live surface 读取 child slot。
+real LocalWindow 的 cross-origin access surface 现在只安装 exposed Window properties、Location、methods、
+`then` fallback 和 symbols，child index/name 的物理 seed 为零；只有尚无 current LocalWindow 的预物化
+facade或 navigation realm gap facade 保留 snapshot seed，作为没有 live registry owner 时的安全 fallback。
+live owner 一旦存在，旧 seed 即使还附着在 proxy storage 上也不参与 named/indexed internal methods，
+所以 rename/remove 后不会从 backing surface 复活 stale name/index。
+
+该改动也暴露并修复了一个更底层的 stable WindowProxy 缺陷。未物化 nested child 原先通过
+`instantiate_window_proxy_shell()` 预留 identity，但 cross-origin facade 错误复用了创建方 security
+token，而且没有把 host/child handle 与 access surface 接回 facade Context。旧静态 index proxy 掩盖了
+这一点；live registry 首次返回该 shell 时会直接看到创建方 raw global/intrinsics。现在预物化 shell：
+
+- 保留 V8 unique default security token，不与创建方形成 same-origin alias；
+- 在暴露前安装 exact context-host liveness slot 和 `ChildWindowProxyFacadeContextHandle`；
+- 在 facade realm 同时初始化 stable global proxy 与独立 minimal access surface；
+- handler data 在没有 live LocalWindow 时使用该 cross-origin proxy，后续 realm materialization 仍 detach
+  同一 facade 并把 exact proxy 交给新 Context，identity 不复制也不替换。
+
+回归在一个已经跨源 commit 的 child Document 内保留原始 3 个 nested WindowProxy，随后由 child 自己
+rename 第 0 个 frame、移除第 1 个、append 一个 `name="then"` 的新 frame。parent 侧在不重新获取 outer
+`contentWindow` 的前提下证明：第 0 个 identity 保持，原第 2 个移动到 index 1，新 child 同时等于
+index 2 与 named `then`，旧 `nestedNamed` / `document` 的 get/has/descriptor 全部立即抛访问方
+`SecurityError`，普通 named child 仍不进入 ownKeys，且三个 returned child 都继续拒绝 `.document`。
+原有 detached fixture 进一步证明 context 尚未物化时不会泄漏 raw global。
+
+D2.5 统一的是 child registry authority，不提前冒充 D3 membrane。它完成时，child WindowProxy 的
+observer-relative 选择仍复用现有 top projection helper；不同 same-origin incumbent 的
+Function/accessor prototype、wrapper cache 和异常 realm 随后已由 D3a 收敛，非-top observer 的 endpoint
+projection 仍留给 D3b。
+
+#### Phase 5D3a：per-accessing-Realm `CrossOriginPropertyDescriptorMap`
+
+D3a 已完成 Function/accessor membrane，范围是 HTML
+`CrossOriginGetOwnPropertyHelper` 返回的 Window/Location method 与 accessor wrapper。它没有为每个
+target 复制一套 wrapper；缓存 key 是“访问方 Realm + interface member”，target identity 仍由 stable
+WindowProxy/Location object 承担。这一点与 Chromium 的边界相同，也是复用 child-frame stable
+WindowProxy/realm 基础后必须补上的访问方投影层。
+
+##### Chromium / WPT 合同
+
+本地 Chromium `a03603fe9af6` 的
+`third_party/blink/renderer/platform/bindings/v8_cross_origin_property_support.cc` 在 isolate 的 current
+Context 中取得 `ScriptState`，按 world 与 callback 缓存 `FunctionTemplate`，再对 current Context 调用
+`GetFunction()`。template 还绑定对应 Window/Location interface signature，让 receiver brand 在 native
+callback 和 WebIDL 参数转换之前成立。generated binding 入口位于
+`third_party/blink/renderer/bindings/scripts/bind_gen/interface.py`。
+
+对应 WPT 不只要求“属性可调用”，还要求：
+
+- Window 的 `close`、`focus`、`blur`、`postMessage` 是 readonly data descriptor，name 分别等于属性名，
+  length 分别为 `0/0/0/1`；
+- Window 的 `location/window/frames/self/top/parent/opener/closed/length` 是 accessor descriptor，getter
+  name 为 `get <name>`、length 为 0；只有 `location` 有 `set location`，length 为 1；
+- Location 的 `replace` 是 length 1 的 readonly method，`href` 只有 `set href`、length 1；
+- 同一 Realm 重复 `[[Get]]` / `[[GetOwnProperty]]` 得到同一个 function；两个 same-origin observer Realm
+  得到不同 function，且各自继承本 Realm 的 `Function.prototype`；
+- observer 不同不会复制 target：双方仍观察同一个 WindowProxy 和同一个 Location identity。
+
+直接证据来自 Chromium checkout 中的
+`cross-origin-objects-function-{common,caching,name,length}.html/js` 与 `cross-origin-objects.html`。
+
+新增 core 回归构造 A（parent）与 B（same-origin `srcdoc` observer）两个 Realm，共同观察跨源 child C。
+在接入 D3a 前，红灯输出精确暴露了旧 target-surface 模型：四个 method 和可见 accessor 的
+`Function.prototype` 均不是访问方 Realm；`window/frames/self/top/parent/opener` descriptor 没有 getter；
+readonly attribute 仍带 throwing setter；A/B 之间 method、getter、Window location setter、
+Location.replace 与 href setter 的 identity 全部相同。该失败不是测试等待或 fixture 时序问题，而是 wrapper
+确实由 target realm 唯一创建。
+
+##### Realm-local cache owner
+
+新模块 `cross_origin_property_descriptor_map.rs` 以 accessing Context 的 V8 hidden
+extras-binding object 作为 cache owner，并用 isolate-wide private symbol 区分每个 member：
+
+```text
+cross-origin [[Get]] / [[GetOwnProperty]]
+  -> incumbent Context（无 incumbent 时才回落 current Context）
+  -> Context::get_extras_binding_object()
+  -> member private slot
+       hit  => 返回该 Realm 已有 native Function
+       miss => 在该 Context 创建、设置 name/length、写回 slot
+  -> descriptor/value 返回给访问方
+```
+
+这个 owner 选择同时满足三条 lifetime 不变量：
+
+1. wrapper 只被 V8 tracing 持有，不在 Rust host/global cache 中形成强引用环；
+2. stable WindowProxy navigation rebind 到新 Context 时，新 Realm 自然得到新的 extras object，不会复用旧
+   LocalWindow generation 的 function；
+3. 同一 Realm 观察多个 cross-origin target 时共享 HTML 规定的 member wrapper，function 本身不捕获某个
+   target Page。
+
+Window 四个 method、九个 getter、唯一 location setter，以及 Location 的 replace/href setter 都经过该
+cache。`[[GetOwnProperty]]` 不再复用 target surface 的旧 data descriptor：九个 Window attribute 统一返回
+non-enumerable/configurable accessor descriptor，readonly attribute 的 `set` 精确为 `undefined`；method 与
+Location.replace 继续是 non-writable/non-enumerable/configurable data descriptor。
+
+##### target-neutral wrapper 与 receiver-owned execution
+
+per-Realm wrapper 不能把创建时的 ambient `JsContextHost` 当作 target。否则 opener 首次取得 popup.close
+后调用该缓存 function，会关闭 opener；同理，postMessage 和 Location navigation 会进入错误 Page 的
+queue/URL owner。D3a 因而把 native callback 划成两个阶段：
+
+```text
+accessing Realm
+  -> receiver / WebIDL 参数 / exception Realm
+  -> receiver 上的 stable child handle 或 related-top target marker
+  -> target WindowProxy creation Context
+  -> liveness-checked Context host slot
+  -> target Page owner 执行 close / postMessage / Assign / Replace
+```
+
+- URL 的 USVString conversion 留在 accessing Realm；解析到 target 后才进入 target Context 和 navigation
+  owner，避免 target realm 泄漏转换异常；
+- `postMessage` 仍由既有 endpoint resolver 决定 top/child/popup endpoint，但排队 host 从 receiver 的 target
+  Context 取得，`event.source` 继续是 stable source WindowProxy；
+- related popup `close()` 只请求 target Page 的唯一 close transaction；`focus()` / `blur()` 当前仍是通过
+  receiver brand 检查的 no-op，与尚未完成的 focus transaction 边界一致；
+- attribute getter 先校验 receiver，再在 target access-surface Context 读取 live relation/scalar；
+  `window/self/frames` 直接返回 exact receiver，避免创建等价但不相等的 identity；
+- Chromium 依赖 V8 interface signature 拒绝错误 Location receiver；当前 Lightmount 的 minimal
+  cross-origin object 没有对应 template signature，因此 cached `href` setter 与 `replace` 在参数转换前
+  显式验证 Location proxy brand。扩大矩阵曾捕获 `hrefSetter.call(null, ...)` 被错误当成访问方 global 的
+  回归，修复后又加入 `replace.call(null, ...)` 防回归。
+
+双 Realm 回归最终证明：每个 Realm 内所有 wrapper 重复读取稳定，A/B wrapper 全部不同且原型分别属于
+A/B，name/length/descriptor shape 一致，非法 receiver 的 `TypeError` 与 unknown property 的
+`SecurityError` 都属于发起 Realm；同时 A/B 观察到的 target Window 和 Location identity 仍完全相同。
+related popup 端到端回归还同时覆盖跨 Page message source、target Location assignment/replace、
+target-only close 和 transport-failure error Document 后的 stable WindowProxy。
+
+D3a 不改变 child registry authority，也不宣称完成 observer-relative endpoint。当时 generic nested child
+lookup 已经 live，但从非-top same-origin observer 返回 child WindowProxy 时仍复用 top-oriented projection
+helper。下面的 D3b 已把这条历史缺口闭合：observer/target pair 只用于本次 callback 的授权判断，最终仍
+返回 browsing-context-owned stable target identity，而不是把 child wrapper 放进 Realm-local function cache。
+
+#### Phase 5D3b：observer-relative child endpoint projection
+
+D3b 修复的是一个三方关系，不能简化成“parent 是否和 child 同源”：A 是 top，B/C 是 A 的两个 direct
+child；A 与 B/C 跨源，而 B 与 C 同源。B 通过跨源的 `parent.frames[1]` 或 named property 取得 C 时，应得到
+C 的 stable WindowProxy 并拥有完整同源访问；A 对同一对象仍必须只看到 restricted surface。旧实现虽然
+已经由 D2.5 live-resolve 到 C 的 browsing-context handle，最后却无条件调用
+`child_browsing_context_window_proxy_for_top()`，把 A/C 的关系误当成所有 observer/C 的关系。
+
+##### Chromium 边界
+
+本地 Chromium `a03603fe9af6` 的
+`third_party/blink/renderer/core/frame/{dom_window.cc,window_properties.cc}` 与
+`third_party/blink/renderer/bindings/core/v8/window_proxy.cc` 没有为每个 observer 克隆 child Window：
+
+- `DOMWindow::AnonymousIndexedGetter()` 从 `FrameTree::ScopedChild(index)` 取得 child 的 `DomWindow()`；
+- `WindowProperties::AnonymousNamedGetter()` 同样解析 scoped child，再通过 current Realm 的
+  `ToV8Traits<DOMWindow>::ToV8(...)` 投影；
+- `DOMWindow::Wrap()` 最终返回 `WindowProxyManager` 持有的 `GetGlobalProxy()`，因此不同 observer 共享
+  browsing-context identity；
+- 访问是否展开由 current Realm / `BindingSecurity` 和 child security origin 决定，而不是由 target parent
+  预先选一份永久 restricted/full wrapper。
+
+WPT
+`third_party/blink/web_tests/external/wpt/html/browsers/windows/nested-browsing-contexts/frameElement-siblings.sub.html`
+也直接通过 `parent.frames[0]` 验证 sibling Window 的访问结果随 same-origin-domain 关系变化。D3b 沿用
+这条边界：registry 决定“是哪一个 child”，observer-relative access 决定“本次能否 materialize/展开”，
+stable WindowProxy 决定“对象 identity 是哪一个”。
+
+##### Lightmount cutover
+
+实现没有给 synthetic facade 增加第二套动态 index/name trap，而是把责任收回已成熟的 stable
+WindowProxy/realm 基础：
+
+```text
+non-top observer B reads parent.frames[index/name]
+  -> parent/top is A's real stable top-level WindowProxy
+  -> cross-origin handler resolves A's live scoped child registry
+  -> callback-local observer = incumbent B execution-context identity
+  -> compare B origin with target child C dispatch-scope origin
+       same origin => promote/reuse C's exact stable WindowProxy + LocalWindow realm
+       cross origin => keep C's restricted facade
+  -> V8 access check continues to evaluate every later observer against C
+```
+
+- child Realm 的 `parent` / `top` 在 main top Realm 存在时直接引用其 stable global proxy；只在尚无 current
+  top Realm 的 bootstrap gap 保留旧 detached safe projection fallback。这样 B 的 `parent`、C 的
+  `parent/top` 和 A 自身不再是三份 synthetic identity；
+- `CrossOriginWindowChildRegistryOwner` 仍只持 callback-scoped target host/parent authority，但新增独立的
+  `CrossOriginWindowObserver { host, identity }`。observer 从 incumbent Context 的 liveness slot 解析，不被
+  target holder creation Context 覆盖，也不会跨 callback 缓存 raw host pointer；
+- same-host 路径复用 `window_execution_context_can_access_dispatch_scope()`；related Page 路径把原先只允许
+  top-to-top 的检查推广到 target dispatch scope。后者仍要求访问方 identity current、两 Page 属于同一个
+  related script agent，并对 target 的 live origin 做比较；opaque origin 不因两个 host-local owner id 碰巧
+  相同而放行；
+- observer 有权限时，预物化 restricted facade 会 detach 并把 exact proxy 交给 C 的正式 Context。A 早先保存
+  的引用严格相等，但在 C materialize 后读取 `document` 或页面 marker 仍由 V8 access check 拒绝；
+- index、named get 与两种 descriptor 都经过同一个 owner/observer 决策。Realm-local cache 继续只保存
+  D3a 的 method/accessor function，不保存 WindowProxy。
+
+##### 回归证据
+
+core 回归构造 `localhost` top A 与两个 `127.0.0.1` child B/C。A 先保存 C 的 restricted facade，随后 B
+通过 `parent.frames[1]` 和 `parent.observerTarget` 访问 C。接入 D3b 前稳定红灯为：lookup 已返回对象，但
+首次 marker write 抛访问方 `SecurityError`；A 侧 identity 与两个 denial 均正常，证明失败不是加载等待或
+错误 target。修复后同时证明：
+
+- index/name/getOwnPropertyDescriptor 都返回同一个 C proxy；
+- B 可读写 C Document、Location、intrinsics，且 `document.defaultView === target`；
+- C 的 `parent/top` 与 B 观察的真实 A proxy identity 一致；
+- A 保存的引用不变，且 A 对 C 的 Document/marker 继续得到 `SecurityError`。
+
+related Page 回归又把 opener A 与跨源 popup P 放在两个 `JsContextHost` 中，并让 P 的第一个 child C 导航到
+A 的精确 origin。P 对 C 的 Document 被拒绝；A 经跨源 `popup[0]` 取得同一 C proxy 后可以完整读取 C 的
+Document/realm，且 C 的 `parent/top` 都严格等于 popup stable WindowProxy。这覆盖了 related-agent
+cross-host dispatch-scope access，不把同宿主 sibling 通过误当成跨 Page 证据。
+
+#### Phase 5E1：非命名 `noopener` / `noreferrer` 的 Fresh Page single-owner
+
+E1 先处理不需要把 WindowProxy 同步交回 creator 的最小 creation-policy 纵切：production
+`window.open()` 的空 target / `_blank`，以及 hyperlink `_blank` 的 implicit 或显式 noopener。它们仍然
+创建可被 CDP/BiDi 观察的 auxiliary top-level target，但 author 调用方只得到 `null`，所以没有理由先在
+opener Page 内创建一份 lightweight Window、Document 和 loader，再等 protocol 创建第二份真实 Page。
+
+##### Chromium / WPT 合同
+
+本地 Chromium `a03603fe9af6` 的责任顺序很重要：
+
+- `LocalDOMWindow::open()` 先从 entered Window 完成 URL 和 feature parsing；生成 referrer 时，只有
+  `noreferrer` 选择 `kNever`，单独的 `noopener` 仍使用 entered Document 的 Referrer Policy；
+- 同一个函数随后调用 `FrameTree::FindOrCreateFrameForNavigation()`，对返回的 frame 发起导航，最后才在
+  普通 target 的 `noopener` 分支返回 `nullptr`。`_self` / `_parent` / `_top` 在该 null-return 判断之前
+  返回 existing Window；
+- `FrameTree` 先查 current tree / related Pages / existing named context，找不到才调用
+  `CreateNewWindow()`。因此 `noopener` 不是“永远跳过 named lookup 并新建窗口”的同义词；
+- `CreateNewWindow()` 在真正新建 auxiliary context 前检查 sandbox popup flag，并且只在
+  `!features.noopener` 时 clone opener session-storage namespace。
+
+对应 WPT 把容易混淆的边界拆得很清楚：
+
+- `the-window-object/window-open-noopener.html` 要求第二次带 noopener 的 named `window.open()` 仍导航
+  已有 target，但返回 `null`，原 target 的 opener 不被改写；special target 则忽略 null-return policy；
+- `the-window-object/window-open-noreferrer.html` 要求新窗口 name 为空、`document.referrer` 为空、
+  `window.opener` 为 `null`；
+- `referrer-policy/generic/inheritance/popup-inheritance-about-blank.html` 要求普通 initial
+  `about:blank` popup 的 `document.referrer` 保留 creator 完整 URL，不受 creator Document 的
+  Referrer Policy 截短；
+- `webstorage/storage_session_window_noopener.window.js` 要求新 noopener window 不复制 creator 的
+  session storage；`storage_session_window_reopen.window.js` 则要求普通 named reopen 保留同一 Window；
+- `windows/noreferrer-window-name.html` 同时证明两件事：新建的 named noreferrer windows 不应互相进入
+  同一可复用 name group，但一个预先存在的 named iframe/window 仍可以被 noreferrer navigation 命中。
+
+本纵切阅读了上述 Chromium source/WPT，没有编译 Chromium，也没有运行 upstream WPT；这里的 WPT
+结果是合同对照，不是 Lightmount 新的通过声明。另用本地 `out/Default/chromedriver` 驱动
+`out/Default/chrome`（`Chromium 147.0.7709.0`，headless），从 HTTP creator 分别打开
+`about:blank`：
+
+| 调用 | target realm 观察值 `[document.referrer, opener===null, href, name, origin]` |
+| --- | --- |
+| `window.open('about:blank', '_blank', 'noopener')` | `[creator 完整 URL, true, 'about:blank', '', 'null']` |
+| `window.open('about:blank', '_blank', 'noreferrer')` | `['', true, 'about:blank', '', 'null']` |
+
+这个 probe 直接证明 HTTP header eligibility、initial empty Document referrer 和 destination
+Document referrer 不能共用一个字符串或一个计算入口。
+
+##### 稳定红灯与旧 owner 违反路径
+
+renderer owner 回归先在 production Page 上执行
+`window.open("about:blank#fresh-agent", "_blank", "noopener")`。旧实现虽然预留了
+`RendererScriptAgentAdmission::Fresh` Page，activation 中仍带 `popup_id = Some(2)`，证明 opener host
+同时创建了 lightweight browsing-context identity。期望改为 `popup_id = None` 后稳定失败。
+
+protocol 集成回归又用真实 HTTP server 观察 `/noopener`。旧实现得到两次请求：一次来自 opener 内的
+lightweight loader，且没有 `Referer`；一次来自 target Page，带 creator URL。失败形状为：
+
+```text
+[("/noopener", None),
+ ("/noopener", Some("http://127.0.0.1:<port>/opener"))]
+```
+
+这不是 redirect、retry 或测试 server 误计数，而是两个独立 loader。切掉 lightweight loader 后，请求数与
+header 已转绿，但增强后的 target-session probe 继续稳定失败：网络 `Referer` 已正确，committed realm 的
+`document.referrer` 仍为空。该第二阶段红灯把缺口定位到 main-Document commit fact，而不是再给请求层加
+header patch。拆出 destination Document referrer 后，`about:blank` 又稳定暴露第三阶段红灯：它与 target
+的 initial URL 相同，不发生 replacement commit，target realm 仍观察到空 referrer。加入
+`about:blank#fragment` 后 same-document 路径同样失败，证明 initial empty Document 必须在默认 realm
+创建前独立接收 creator referrer，不能等待 navigation commit 补写。
+
+##### Lightmount cutover
+
+E1 把 creation policy、Page reservation、导航与 Document commit 串成一份 typed transaction：
+
+```text
+entered creator Document
+  -> resolve opener/referrer policy + destination URL
+  -> reserve RendererPendingAuxiliaryPage(Fresh)
+  -> freeze { initial-document, network, destination-document } referrers
+  -> emit PendingPopupActivation { popup_id: None, exact referrers, reservation }
+  -> protocol creates one target and consumes that reservation
+  -> fresh Page bootstrap installs initial-document referrer before its first realm
+  -> target Page owns at most one destination navigation
+  -> replacement commit installs destination-document referrer before the new realm
+```
+
+- `WindowOpenFeatures` 现在分别回答 `suppresses_opener()` 与 `suppresses_referrer()`；parser 仍保持
+  `noreferrer ⇒ noopener`，但 `noopener` 不再错误清空 referrer；
+- creator 在同一个 decision point 冻结三个不同结果：initial empty Document 使用 creator 完整 URL
+  （`noreferrer` 时为空）；HTTP network referrer 额外受 header eligibility 约束；destination
+  `document.referrer` 使用 navigation referrer policy，但 `about:blank` 保留 initial 值。
+  `RendererPendingPopupActivation` 显式携带三者；`Some("")` 表示显式抑制，`None` 只留给尚未迁移、
+  仍依赖 browser-context inference 的 producer；
+- production 的非命名、可解析、非 `javascript:` suppress-opener 路径只预留 Fresh Page，不调用
+  `open_lightweight_popup_window()`，不创建 opener-local WindowProxy/Document/loader，也不携带 creator
+  session-storage snapshot；`window.open()` 同步返回 `null`；
+- hyperlink `_blank` 使用同一边界。没有 `rel=opener` 时的 implicit noopener、`rel=noopener` 和
+  `rel=noreferrer` 都进入 Fresh Page；只有 `noreferrer` 抑制 referrer。当前端到端回归直接覆盖 anchor，
+  `<area>` 虽共享 hyperlink activation 路径但尚未单独运行 WPT；
+- protocol 的 `PopupTargetCreation` 原样携带三个 referrer；initial 值在 fresh Page 默认 realm 创建前
+  安装，network/destination 值继续进入 exact target-owner navigation claim。任何一项都不从新 target
+  的 initial `about:blank` 或消费时的 current session 反推。target admission 后仍只有该 target Page
+  发起 destination navigation；
+- `NavigationDispatchState` 把 `document_referrer` 放在 heap-owned commit environment 中，与
+  `request_headers` 分开冻结。Fetch interception 可以修改 transport header，但不能顺带改写已经接受的
+  Document environment；随后
+  `RendererMainDocumentCommitSeed → RendererMainDocumentCommit` 把值送进 renderer，在默认 realm 和
+  document-start script 创建前安装到 `DocumentPolicyContainer`；
+- fresh initial Page 使用独立的 `initial_document_referrer` bootstrap 输入；它只初始化 Document
+  environment，不伪造 `MainDocumentCommit` observation。因此精确 `about:blank` 和
+  `about:blank#fragment` 都能在没有 cross-document commit 时保持 Chromium referrer；
+- 三个 popup referrer 收拢为 heap-owned typed bundle，target admission future 也在 generic renderer
+  output projection 边界 `Box::pin`。destination Document referrer 与 source origin / secure-context
+  则组成一个 heap-owned commit environment；这些结构既表达同一组冻结事实，也避免普通
+  `Target.createTarget` 为未走到的 popup/navigation 分支预留大栈帧；
+- 没有 production Page allocator 的 renderer standalone fixture 暂时保留 lightweight fallback，避免把
+  单元测试适配器误当成真实 browser owner。production 回归要求 reservation 必须存在，因此该 fallback
+  不会掩盖 CDP 双 loader。
+
+这一纵切建立的窄不变量是：
+
+1. 一个新建的非命名 suppress-opener auxiliary context 只有一个 browsing-context/Page identity 和一个
+   destination loader；
+2. `window.open()` 返回值、`window.opener`、script-agent admission、session-storage clone policy 和
+   referrer policy 都来自同一 creator-side decision；
+3. initial empty Document referrer、网络 `Referer` 与 destination `document.referrer` 在同一
+   creator-side decision 中分别冻结；它们可以不同，而 `noreferrer` 明确把三者都置空；
+4. target/session attach 观察的是上述 Fresh Page 的 committed realm，不是 opener-local mirror。
+
+##### 有意保留的 Phase 5E 范围
+
+E1 不是 creation/group policy 完成标志，以下边界不能套用“非命名直接 Fresh Page”的捷径：
+
+- named target 必须先执行 group-level lookup。existing named target 即使本次带 noopener/noreferrer 也可能
+  被导航；新 named noreferrer context 的后续可查找性又不同，必须由统一 group registry 决定；
+- `_self` / `_parent` / `_top` 继续命中 existing context，并按 Chromium compatibility 行为返回 Window；
+- `javascript:` URL 仍涉及同步 target realm/CSP 语义，本纵切保留 legacy path；
+- form `_blank` 目前走独立 form submission carrier，尚未获得 typed Fresh Page/referrer handoff；POST body、
+  content type 和 navigation policy 应在 form owner 一次迁移，不能退化成 GET popup helper；
+- popup blocker/transient activation、sandbox `allow-popups` / escape-sandbox、COOP group switch、remote 或
+  disconnected WindowProxy endpoint 仍没有统一 creation transaction；
+- 当前 HTTP 集成回归是同源 direct response。cross-origin、downgrade、redirect 链中 referrer policy 的再次
+  计算，以及 Fetch header override 与 Chromium `document.referrer` 的精确关系，仍需单独 WPT/最小探针，
+  不能由这一个 green case 外推。
+
+##### 已知差距与后续顺序
+
+Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，但还不是整份
+`cross-origin-objects.html` 全通过。明确未完成项如下：
+
+| 未完成项 | 当前事实 | 下一责任方 |
+| --- | --- | --- |
+| close policy / unload | accepted close transaction、动态 `closed`、task/fetch cancellation、target teardown 和 closed facade 已统一；script-closable、beforeunload/unload/ACK 尚未实现 | popup creation/group policy + 通用 Page unload lifecycle owner |
+| focus / blur | descriptor 和调用许可已存在，没有 Page focus authority/事件事务 | browser-context active/focus owner |
+| retained detached Document values | Document host retirement 后旧 function/DOM wrapper 当前安全抛 `TypeError`；Chromium 中被 JS 强引用的 detached Node/realm 仍可继续存活和读取 | 为 DocumentRuntime、realm 和 wrappers 建立 GC/owner 协同 lifetime，避免用 raw host pointer 决定对象寿命 |
+| policy/group sever | E1 已统一新建非命名 noopener/noreferrer 的 Fresh Page/referrer owner；named lookup、form、sandbox、activation、COOP 和 remote/disconnected endpoint 仍未统一 | browsing-context group / popup policy owner |
+
+下一批按以下顺序推进，避免把动态状态继续塞进静态 surface：
+
+1. **Phase 5B：close transaction（本纵切已完成 accepted-close 闭环）。** 已建立唯一
+   browsing-context liveness authority；`window.close()`、`Target.closeTarget`、opener-side `.closed`、
+   task cancellation、targetDestroyed 和 Page teardown 使用同一 typed transaction，并覆盖重复 close、
+   target currentness 与早期 admission。script-closable/unload policy 按上节边界继续补齐。
+2. **Phase 5C：live relation/child projection（本纵切已完成）。** Page-scoped opener edge 与 top-level
+   child/name registry 已取代静态 surface snapshot，覆盖动态 frames、named child、`then` / `open`
+   shadow、opener setter/discard sever 与 navigation persistence；COOP/remote group sever 留在 Phase 5E。
+3. **Phase 5D：WPT internal methods/per-incumbent membrane（D1-D3b 已完成）。** D1 已完成 Location、D2
+   已完成 Window 的 exact ownKeys、unknown/index、mutation、prototype/preventExtensions 静态矩阵，
+   D2.5 已把 related/generic nested child 接回通用 live registry owner并修复预物化 restricted facade；
+   D3a 已完成 Function/accessor 的 accessing-Realm prototype、identity、cache、异常 realm 与
+   receiver-owned target dispatch；D3b 已完成 stable top identity cutover、callback-scoped observer/target
+   child projection，以及 same-host / related-Page 两条访问矩阵。
+4. **Phase 5E：creation/group policy（E1 已完成非命名 Fresh Page 纵切）。** E1 已覆盖
+   `window.open()` 非命名 noopener/noreferrer 与 hyperlink `_blank` implicit/explicit noopener 的
+   single-owner/referrer commit；下一步仍是 named target/group registry，再处理 form、popup
+   blocker/transient activation、sandbox、COOP group switch 与 remote/disconnected WindowProxy endpoint。
+
+Phase 5A 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(data_url_child_document_is_cross_origin_to_parent) | test(child_window_proxy_identity_survives_cross_origin_round_trip)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 4 passed
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 1 passed；包含 error commit、Window allowlist、postMessage、location assign/replace
+
+cargo nextest run \
+  -E 'test(child_document_creation_freezes_document_start_script_registry) | test(add_script_run_immediately_creates_top_level_world_even_when_child_world_name_matches)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 2 passed；另在 concurrent core+renderer 负载下重复 protocol case 100 次通过
+```
+
+Phase 5B 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream) or test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers) or test(related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm) or test(child_navigation_retires_runtime_binding_context_and_stale_function) or test(child_navigation_retires_local_window_owned_xhr) or test(child_navigation_aborts_fetch_and_detaches_keepalive)' \
+  --no-fail-fast
+# 7 passed
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(popup_window_close_retires_target_and_parks_stable_window_proxy) or test(target_close_parks_the_same_stable_popup_window_proxy) or test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page)' \
+  --no-fail-fast
+# 3 passed
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(stale_window_close_termination_cannot_retire_current_page_residence)' \
+  --no-fail-fast
+# 1 passed；最终 termination continuation 会再次拒绝 stale Page generation
+```
+
+Phase 5C 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(related_page_script_agent_experiment_shares_isolate_and_survives_source_close) or test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm) or test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers)' \
+  --no-fail-fast
+# 4 passed；覆盖 live index/name/ownKeys、then/open shadow、显式 sever、opener discard、
+# closed-popup opener retention 和两种 sever 的 navigation persistence
+```
+
+Phase 5D1 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(data_url_child_document_is_cross_origin_to_parent) or test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) or test(child_window_proxy_identity_survives_cross_origin_round_trip)' \
+  --no-fail-fast
+# 4 passed；覆盖 related/detached top-level Location、generic child Location、
+# origin migration 和 stable WindowProxy navigation round-trip
+
+cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+# passed
+
+cargo nextest run -p lightmount-core \
+  -E 'test(cross_origin_window_proxy_exposes_standard_noop_shape)' \
+  --no-fail-fast
+# 1 passed；同步淘汰 core 集成层中 denied Location descriptor/has 的旧预期
+```
+
+Phase 5D2 聚焦验证：
+
+```bash
+cargo nextest run \
+  -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(data_url_child_document_is_cross_origin_to_parent) | test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_window_proxy_exposes_named_child_frames)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 4 passed；覆盖 related/generic/detached Window internal methods、ordinary intrinsic
+# delegation、exact ownKeys、document/focus named collision 和 navigation 后 stale name 拒绝
+
+cargo nextest run \
+  -E 'test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_top_window_proxy_length_tracks_top_child_lifecycle) | test(cross_origin_window_proxy_exposes_named_child_frames) | test(child_cross_origin_window_denials_use_the_child_dom_exception_realm) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(child_window_proxy_identity_survives_cross_origin_round_trip) | test(child_browsing_context_cross_origin_post_message_reply_preserves_source_identity) | test(captured_cross_origin_content_window_matches_message_source_after_child_navigation) | test(captured_cross_origin_content_window_keeps_safe_surface_during_realm_gap) | test(data_url_child_document_is_cross_origin_to_parent) | test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 首次 10/11 passed；唯一失败是 document named-child collision 仍期待旧 denied accessor。
+# 按 Chromium precedence 更新该回归后单独复跑通过；上述最终 4-case owner matrix 随后全通过。
+
+cargo check -p lightmount-renderer-v8
+# passed
+```
+
+Phase 5D2.5 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-core --test history_child \
+  -E 'test(cross_origin_window_proxy_exposes_named_child_frames)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 新 mutation matrix 在旧实现上稳定失败：child 已回复完成 rename/remove/append，parent 读取
+# renamedNested descriptor 得到 SecurityError；接入通用 owner 后 1 passed。
+
+cargo nextest run \
+  -E 'test(data_url_child_document_is_cross_origin_to_parent) | test(cross_origin_window_proxy_exposes_named_child_frames)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 2 passed；同时证明预物化 child shell 仍是 restricted facade、不会泄漏 raw global。
+
+cargo nextest run \
+  -E 'test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_top_window_proxy_length_tracks_top_child_lifecycle) | test(cross_origin_window_proxy_exposes_named_child_frames) | test(child_cross_origin_window_denials_use_the_child_dom_exception_realm) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(child_window_proxy_identity_survives_cross_origin_round_trip) | test(child_browsing_context_cross_origin_post_message_reply_preserves_source_identity) | test(captured_cross_origin_content_window_matches_message_source_after_child_navigation) | test(captured_cross_origin_content_window_keeps_safe_surface_during_realm_gap) | test(data_url_child_document_is_cross_origin_to_parent) | test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 11 passed；覆盖 related/generic live owner、pre-materialized shell、realm-gap snapshot、
+# navigation round-trip、source identity、Location/Window internal-method matrix。
+
+cargo check -p lightmount-renderer-v8
+# passed
+```
+
+Phase 5D3a 聚焦验证：
+
+```bash
+cargo nextest run \
+  -E 'test(data_url_child_document_is_cross_origin_to_parent) | test(cross_origin_property_wrappers_are_cached_per_accessing_realm)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 2 passed；覆盖两个 accessing Realm 的完整 wrapper 矩阵，以及 Location cached
+# href/replace wrapper 的 receiver brand / WebIDL 边界。
+
+cargo nextest run \
+  -E 'test(cross_origin_property_wrappers_are_cached_per_accessing_realm) | test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_top_window_proxy_length_tracks_top_child_lifecycle) | test(cross_origin_window_proxy_exposes_named_child_frames) | test(child_cross_origin_window_denials_use_the_child_dom_exception_realm) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(child_window_proxy_identity_survives_cross_origin_round_trip) | test(child_browsing_context_cross_origin_post_message_reply_preserves_source_identity) | test(captured_cross_origin_content_window_matches_message_source_after_child_navigation) | test(captured_cross_origin_content_window_keeps_safe_surface_during_realm_gap) | test(data_url_child_document_is_cross_origin_to_parent) | test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page) | test(cross_origin_location_proxy_only_allows_href_and_replace_navigation)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 首次 13/14 passed：唯一失败把 href setter 的 null receiver 当成访问方 global；
+# 在 WebIDL conversion 前补 Location brand，并新增 replace null-receiver probe 后，最终 14 passed。
+
+cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D3b 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-core --test history_child \
+  -E 'test(cross_origin_child_endpoint_projection_is_relative_to_the_observer)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 旧实现稳定失败：B 经 parent.frames[1] 得到的 C 仍按 A/C origin 保持 restricted，
+# 首次 marker write 抛 SecurityError；stable A-side identity 与 A-side denial 同时成立。
+# stable top WindowProxy + observer/target projection 接入后 1 passed；随后加入 named lookup
+# 与 named/indexed descriptor identity 后仍为 1 passed。
+
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 1 passed；跨 host related opener 与 popup parent 分别对同一个 child 得到 allowed/denied，
+# 并验证 child parent/top 指向 popup stable WindowProxy。
+
+cargo nextest run \
+  -E 'test(cross_origin_child_endpoint_projection_is_relative_to_the_observer) | test(cross_origin_property_wrappers_are_cached_per_accessing_realm) | test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_top_window_proxy_length_tracks_top_child_lifecycle) | test(cross_origin_window_proxy_exposes_named_child_frames) | test(child_cross_origin_window_denials_use_the_child_dom_exception_realm) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(child_window_proxy_identity_survives_cross_origin_round_trip) | test(child_browsing_context_cross_origin_post_message_reply_preserves_source_identity) | test(captured_cross_origin_content_window_matches_message_source_after_child_navigation) | test(captured_cross_origin_content_window_keeps_safe_surface_during_realm_gap) | test(data_url_child_document_is_cross_origin_to_parent) | test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page) | test(cross_origin_location_proxy_only_allows_href_and_replace_navigation)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 15 passed；覆盖 D3a membrane、D3b same-host/cross-host endpoint、live registry、
+# navigation/realm gap、source identity、popup error Document 与 Location/Window internal methods。
+
+cargo check -p lightmount-renderer-v8
+# passed
+```
+
+Phase 5E1 聚焦验证：
+
+```bash
+cargo nextest run -p lightmount-renderer-v8 \
+  -E 'test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(noreferrer_implies_noopener_and_last_value_wins) | test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(window_open_noopener_lightweight_popup_uses_fresh_session_storage)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 4 passed；覆盖 production activation 不再携带 popup_id、Fresh agent、feature precedence、
+# hyperlink 动态 rel policy 和 standalone fresh session-storage fallback。
+
+cargo nextest run -p lightmount-protocol \
+  -E 'test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) | test(anchor_blank_target_uses_implicit_noopener) | test(popup_initial_about_blank_adopts_renderer_page_and_related_script_agent)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 3 passed；覆盖 noopener/noreferrer/implicit-noopener 的 single request、network Referer、
+# initial/destination document.referrer、精确 about:blank 与 fragment same-document、null opener、
+# target attach，以及保留 opener 路径不回归；主矩阵内包含 6 条 activation case。
+
+cargo nextest run -p lightmount-fetch \
+  navigation_referrer_is_distinct_from_http_header_eligibility \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 1 passed；证明非 HTTP destination 的 Document referrer 与 HTTP Referer eligibility 分离。
+
+cargo nextest run -p lightmount-protocol \
+  local_storage_mutations_fan_out_across_targets_without_leaking_session_storage \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 默认 nextest 栈首次全量稳定 SIGABRT 后，detached HEAD 基线通过；heap-owned commit
+# environment 修复后首次 + 连续 10 次聚焦复跑均通过。
+
+cargo check -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol --tests
+# passed
+```
+
+Phase 5A 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# 15891 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5B 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# 15895 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5C 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast
+# 15895 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D1 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast
+# 首次：15892 passed, 3 failed, 18 skipped。
+# 其中 core cross_origin_window_proxy_exposes_standard_noop_shape 是本纵切应淘汰的旧
+# denied Location descriptor/has 预期，更新后聚焦通过；另两个 websocket/parser backlog
+# case 与本纵切路径不相交，在首次高并发 workspace 运行中失败。
+
+for run in {1..5}; do
+  cargo nextest run -p lightmount \
+    -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded) or test(websocket_cdp_runtime_evaluate_uses_committed_page_while_parser_blocking_source_is_pending)' \
+    --no-fail-fast || exit 1
+done
+# 5 rounds passed；每轮 2/2
+
+cargo nextest run --no-fail-fast
+# 最终：15895 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D2 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast
+# 首次：15894 passed, 1 failed, 18 skipped。唯一失败是
+# webidl_callback_source_boundary_tests::direct_v8_call_inventory_is_frozen：D2 新增的原始
+# Object/Reflect intrinsic delegate 尚未登记 source-level inventory。
+
+cargo nextest run \
+  -E 'test(direct_v8_call_inventory_is_frozen) | test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(data_url_child_document_is_cross_origin_to_parent) | test(cross_origin_window_proxy_exposes_standard_noop_shape) | test(cross_origin_window_proxy_exposes_named_child_frames)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# 将该调用按 captured native intrinsic 分类为 NativeForwardingOrScript 后，5 passed。
+
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# 最终：15895 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D2.5 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# 15895 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D3a 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# 15896 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5D3b 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast
+# rebase 到当时 origin/master 后最终为 15904 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+Phase 5E1 提交门禁结果：
+
+```bash
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# rebase 前：15906 passed, 18 skipped。
+# rebase 到 origin/master 后，前两次 workspace 高并发运行各出现一个互不相同的既有
+# timing case：parser-script network backlog 一次、sandboxed blob/OPFS message 一次；
+# 其余均为 15961 passed。两个失败分别连续 10 次聚焦复跑通过。
+
+cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
+# rebase 后最终：15962 passed, 18 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
 
 ### Phase 6：删除 lightweight 专用模型
 

@@ -52,20 +52,28 @@ impl NetworkErrorPageNavigation {
 pub(crate) struct NavigationSourceDocumentSecurityContext {
     security_origin: String,
     secure_context_type: String,
+    /// Script-visible referrer frozen independently of mutable request
+    /// headers and carried with the other source-Document commit facts.
+    document_referrer: String,
 }
 
 impl NavigationSourceDocumentSecurityContext {
-    pub(crate) fn new(security_origin: String, secure_context_type: String) -> Self {
+    pub(crate) fn new(
+        security_origin: String,
+        secure_context_type: String,
+        document_referrer: String,
+    ) -> Self {
         Self {
             security_origin,
             secure_context_type,
+            document_referrer,
         }
     }
 }
 
 impl Default for NavigationSourceDocumentSecurityContext {
     fn default() -> Self {
-        Self::new("null".to_owned(), "Secure".to_owned())
+        Self::new("null".to_owned(), "Secure".to_owned(), String::new())
     }
 }
 
@@ -79,6 +87,7 @@ pub(crate) struct RendererMainDocumentCommitSeed {
     frame_id: String,
     loader_id: String,
     timestamp: f64,
+    document_referrer: String,
     inherited_security_origin: String,
     inherited_secure_context_type: String,
 }
@@ -89,6 +98,10 @@ impl RendererMainDocumentCommitSeed {
             frame_id: navigation.frame_id.clone(),
             loader_id: navigation.loader_id.clone(),
             timestamp: navigation.timestamp,
+            document_referrer: navigation
+                .source_document_security
+                .document_referrer
+                .clone(),
             inherited_security_origin: navigation.source_document_security.security_origin.clone(),
             inherited_secure_context_type: navigation
                 .source_document_security
@@ -111,6 +124,7 @@ impl RendererMainDocumentCommitSeed {
             frame_id,
             loader_id,
             timestamp,
+            document_referrer: source_document_security.document_referrer,
             inherited_security_origin: source_document_security.security_origin,
             inherited_secure_context_type: source_document_security.secure_context_type,
         }
@@ -142,6 +156,7 @@ impl RendererMainDocumentCommitSeed {
             frame_id: self.frame_id.clone(),
             loader_id: self.loader_id.clone(),
             url: final_url.as_str().to_owned(),
+            document_referrer: self.document_referrer.clone(),
             unreachable_url: network_error_page
                 .map(|error_page| error_page.unreachable_url().as_str().to_owned()),
             security_origin,
@@ -355,7 +370,10 @@ pub struct NavigationDispatchState {
     pub request_headers: Vec<(String, String)>,
     pub request_load_policy: NavigationRequestLoadPolicy,
     pub timestamp: f64,
-    pub(crate) source_document_security: NavigationSourceDocumentSecurityContext,
+    /// Heap-owned because this source-Document commit environment travels
+    /// through large navigation futures; keeping it inline regresses the
+    /// default Tokio worker stack even for unrelated target creation.
+    pub(crate) source_document_security: Box<NavigationSourceDocumentSecurityContext>,
 }
 
 impl NavigationDispatchState {

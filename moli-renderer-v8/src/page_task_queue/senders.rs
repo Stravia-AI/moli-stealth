@@ -316,6 +316,12 @@ impl PageRuntimeTaskSource {
         Rc::as_ptr(&self.page_task_producer_routes) as usize
     }
 
+    pub(crate) fn signal_top_level_close_output_handoff(&self) {
+        if let Some(owner_wake) = &self.owner_wake {
+            owner_wake.signal_top_level_close_output_handoff();
+        }
+    }
+
     /// Allocates one exact cross-Document commit identity from this stable
     /// Page source. Prepared browser-owned navigation does not originate in a
     /// ScriptVm, but it must share the same identity namespace as script

@@ -2,6 +2,7 @@ use std::{marker::PhantomData, rc::Rc, sync::Arc};
 
 use super::owner_local_store::{
     RendererPageToken, has_current_render_runtime_owner_local_store,
+    remove_page_after_target_close_on_bound_owner_local_store,
     remove_page_on_bound_owner_local_store,
 };
 use super::*;
@@ -12,6 +13,10 @@ use tokio::sync::oneshot;
 
 fn remove_page(token: RendererPageToken) {
     remove_page_on_bound_owner_local_store(token)
+}
+
+fn remove_page_after_target_close(token: RendererPageToken, terminated_active_execution: bool) {
+    remove_page_after_target_close_on_bound_owner_local_store(token, terminated_active_execution)
 }
 
 #[doc(hidden)]
@@ -189,7 +194,8 @@ impl RendererPageHandle {
     /// ordinary DevTools command lane.
     #[doc(hidden)]
     pub fn crash_devtools_target_from_io(&self) {
-        self.devtools_target.crash_from_io();
+        self.devtools_target
+            .crash_page_target_from_io(self.renderer_page_id(), self.devtools_agent_token);
     }
 
     #[doc(hidden)]
@@ -212,6 +218,7 @@ impl RendererPageHandle {
         );
         self.devtools_target.detach_page(
             self.renderer_page_id(),
+            self.devtools_agent_token,
             "Inspector Page document was replaced",
         );
         self.javascript_dialog_broker.dismiss_pending();
@@ -584,9 +591,11 @@ impl RendererPageHandle {
         let Some(token) = self.token else {
             return Ok(());
         };
-        let terminated_active_execution = self
-            .devtools_target
-            .close("Inspector target closed with its Page handle");
+        let terminated_active_execution = self.devtools_target.close_page_target(
+            token.page_id,
+            self.devtools_agent_token,
+            "Inspector target closed with its Page handle",
+        );
         self.javascript_dialog_broker.dismiss_pending();
         self.page_context_cancel_tx
             .cancel(RendererPageContextCancelReason::PageClosed);
@@ -599,7 +608,7 @@ impl RendererPageHandle {
         if is_on_named_owner_execution_lane_for(&self.local_executor)
             && has_current_render_runtime_owner_local_store()
         {
-            remove_page(token);
+            remove_page_after_target_close(token, terminated_active_execution);
             self.token = None;
             tracing::debug!("renderer page handle closed on owner lane");
             return Ok(());
@@ -609,7 +618,10 @@ impl RendererPageHandle {
         // this future is cancelled, Drop can still enqueue detached cleanup.
         match self
             .render_runtime
-            .dispatch(RendererOwnerCommand::RemovePage { token })
+            .dispatch(RendererOwnerCommand::RemovePage {
+                token,
+                terminated_active_execution,
+            })
             .await?
         {
             RendererOwnerReply::PageRemoved => {
@@ -691,8 +703,11 @@ impl Drop for RendererPageHandle {
         let Some(token) = self.token.take() else {
             return;
         };
-        self.devtools_target
-            .detach_page(token.page_id, "Inspector Page handle was dropped");
+        self.devtools_target.detach_page(
+            token.page_id,
+            self.devtools_agent_token,
+            "Inspector Page handle was dropped",
+        );
         self.javascript_dialog_broker.dismiss_pending();
         self.page_context_cancel_tx
             .cancel(RendererPageContextCancelReason::PageClosed);
@@ -717,7 +732,10 @@ impl Drop for RendererPageHandle {
         );
         let _ = self
             .render_runtime
-            .dispatch_detached(RendererOwnerCommand::RemovePage { token });
+            .dispatch_detached(RendererOwnerCommand::RemovePage {
+                token,
+                terminated_active_execution: false,
+            });
     }
 }
 

@@ -488,6 +488,9 @@ pub(crate) struct PopupTargetCreation {
     target_name: String,
     opener: Option<PopupTargetOpenerIdentity>,
     can_access_opener: bool,
+    navigation_referrer: Option<String>,
+    initial_document_referrer: Option<String>,
+    document_referrer: Option<String>,
     pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
     session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
@@ -501,6 +504,9 @@ impl PopupTargetCreation {
         target_name: String,
         opener: Option<PopupTargetOpenerIdentity>,
         can_access_opener: bool,
+        navigation_referrer: Option<String>,
+        initial_document_referrer: Option<String>,
+        document_referrer: Option<String>,
         pending_auxiliary_page: Option<moli_core::page::RendererPendingAuxiliaryPage>,
         session_storage_store: Option<moli_core::network::SharedWebStorageStore>,
         initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
@@ -512,6 +518,9 @@ impl PopupTargetCreation {
             target_name,
             opener,
             can_access_opener,
+            navigation_referrer,
+            initial_document_referrer,
+            document_referrer,
             pending_auxiliary_page,
             session_storage_store,
             initial_empty_document_storage_key,
@@ -531,6 +540,9 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         target_name,
         opener,
         can_access_opener,
+        navigation_referrer,
+        initial_document_referrer,
+        document_referrer,
         pending_auxiliary_page,
         session_storage_store,
         initial_empty_document_storage_key,
@@ -557,6 +569,8 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
                         &browser_context_id,
                         &existing_target_id,
                         url.clone(),
+                        navigation_referrer.clone(),
+                        document_referrer.clone(),
                         PopupTargetNavigationKind::NamedTargetReuse,
                     )
                 })
@@ -674,26 +688,48 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         }
     }
 
-    if !ensure_popup_initial_document_page_async(conn, &target_id).await {
-        rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
-        return None;
-    }
-
-    let Some(navigation) = PopupTargetNavigationOwnerAction::capture(
+    let Some(creation_diagnostics) = ensure_popup_initial_document_page_async(
         conn,
-        &browser_context_id,
         &target_id,
-        requested_url,
-        PopupTargetNavigationKind::InitialDocument,
-    ) else {
+        initial_document_referrer.as_deref(),
+    )
+    .await
+    else {
         rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
         return None;
     };
-    if !conn.stage_initial_popup_target_navigation_owner_action(navigation) {
+
+    let navigation = if creation_diagnostics.top_level_browsing_context_closing {
+        // `open(url); popup.close()` may run completely inside the opener's
+        // synchronous V8 turn, before protocol admits the auxiliary Page. Its
+        // close record remains in the staged Page FIFO; do not start a network
+        // navigation for a browsing context already marked Closing.
+        None
+    } else {
+        let Some(navigation) = PopupTargetNavigationOwnerAction::capture(
+            conn,
+            &browser_context_id,
+            &target_id,
+            requested_url,
+            navigation_referrer,
+            document_referrer,
+            PopupTargetNavigationKind::InitialDocument,
+        ) else {
+            rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id)
+                .await;
+            return None;
+        };
+        Some(navigation)
+    };
+    if let Some(navigation) = navigation
+        && !conn.stage_initial_popup_target_navigation_owner_action(navigation)
+    {
         rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
         return None;
     }
-    let navigation = if conn.auto_attach_wait_for_debugger_on_start {
+    let navigation = if creation_diagnostics.top_level_browsing_context_closing
+        || conn.auto_attach_wait_for_debugger_on_start
+    {
         None
     } else {
         let navigation = conn.take_held_popup_target_navigation_owner_action_for_target(&target_id);
@@ -768,16 +804,17 @@ fn remember_resolved_popup_target(
 async fn ensure_popup_initial_document_page_async(
     conn: &mut CdpConnection,
     target_id: &str,
-) -> bool {
-    let Some(route) = conn.target_session_route_for_target_id(target_id) else {
-        return false;
-    };
+    initial_document_referrer: Option<&str>,
+) -> Option<crate::conn::LoadedPageCreationDiagnosticsParts> {
+    let route = conn.target_session_route_for_target_id(target_id)?;
     {
         let mut route_scope = conn.scoped_none_session_owner_route_override(route.clone());
         let pending = match route_scope
             .conn_mut()
-            .start_initial_document_page_ensure_for_session_owner(None)
-        {
+            .start_initial_document_page_ensure_with_referrer_for_session_owner(
+                None,
+                initial_document_referrer,
+            ) {
             Ok(pending) => pending,
             Err(message) => {
                 tracing::debug!(
@@ -785,7 +822,7 @@ async fn ensure_popup_initial_document_page_async(
                     ?message,
                     "failed to start popup initial document page ensure"
                 );
-                return false;
+                return None;
             }
         };
         if let Some(pending) = pending {
@@ -800,24 +837,28 @@ async fn ensure_popup_initial_document_page_async(
                         ?message,
                         "failed to await popup initial document page ensure"
                     );
-                    return false;
+                    return None;
                 }
             };
-            if let Err(message) = route_scope
+            let diagnostics = match route_scope
                 .conn_mut()
-                .complete_initial_document_page_build_for_owner(completed)
+                .complete_initial_document_page_build_for_owner_with_creation_diagnostics(completed)
                 .await
             {
-                tracing::debug!(
-                    target_id,
-                    ?message,
-                    "failed to complete popup initial document page ensure"
-                );
-                return false;
-            }
+                Ok(diagnostics) => diagnostics,
+                Err(message) => {
+                    tracing::debug!(
+                        target_id,
+                        ?message,
+                        "failed to complete popup initial document page ensure"
+                    );
+                    return None;
+                }
+            };
+            return Some(diagnostics);
         }
     }
-    true
+    Some(crate::conn::LoadedPageCreationDiagnosticsParts::default())
 }
 
 fn push_committed_auto_attached_session_events(
@@ -979,6 +1020,8 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
     let browser_context_id = claim.browser_context_id().to_owned();
     let target_id = claim.target_id().to_owned();
     let url = claim.url().to_owned();
+    let referrer = claim.referrer().map(str::to_owned);
+    let document_referrer = claim.document_referrer().map(str::to_owned);
     let kind = claim.kind();
     let mut route_scope = owner_scope.enter(conn);
     let conn = route_scope.conn_mut();
@@ -1033,11 +1076,13 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
         PopupTargetNavigationKind::NamedTargetReuse => {}
     }
     Box::pin(
-        crate::domains::page::navigate_session_owner_from_renderer_background_events_async(
+        crate::domains::page::navigate_session_owner_from_renderer_with_referrers_background_events_async(
             conn,
             protocol_events,
             execution_session_id,
             &url,
+            referrer.as_deref(),
+            document_referrer.as_deref(),
         ),
     )
     .await;

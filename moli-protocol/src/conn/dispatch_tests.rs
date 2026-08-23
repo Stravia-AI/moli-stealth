@@ -2427,6 +2427,7 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         frame_id: "TID-1".to_owned(),
         loader_id: "LOADER-real-page".to_owned(),
         url: parsed_real_page_url.to_string(),
+        document_referrer: String::new(),
         unreachable_url: None,
         security_origin: "null".to_owned(),
         secure_context_type: "InsecureScheme".to_owned(),

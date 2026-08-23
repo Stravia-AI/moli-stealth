@@ -646,6 +646,8 @@ impl JsContextHost {
             let current_owner = transition
                 .current_owner()
                 .expect("committed child document-open replacement must install an owner");
+            host.retire_child_document_start_script_snapshot(retired_owner);
+            host.capture_child_document_start_script_snapshot(current_owner);
             host.replace_document_resource_loader_for_document_open(
                 crate::native_bridge::WindowDocumentOwner::Frame(retired_owner),
                 crate::network::context::DocumentFetchContext::new(

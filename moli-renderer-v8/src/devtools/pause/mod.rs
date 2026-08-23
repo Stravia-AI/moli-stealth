@@ -1,7 +1,7 @@
 //! Nested pause-loop coordination and causal Inspector output routing.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{Arc, Weak},
 };
 
@@ -47,6 +47,7 @@ pub(crate) struct RendererInspectorPauseBridgeShared {
 
 #[derive(Clone)]
 struct RendererInspectorPauseRoute {
+    page_id: PageId,
     output_journal: RendererTurnOutputJournal,
 }
 
@@ -66,7 +67,7 @@ struct RendererInspectorPauseBridgeState {
     // so active and pending transition ownership are each singular.
     active_command_dispatch: Option<RendererInspectorPauseCommandDispatch>,
     pending_command_transition: Option<RendererInspectorPauseCommandTransition>,
-    route: Option<RendererInspectorPauseRoute>,
+    routes: HashMap<RendererDevToolsAgentToken, RendererInspectorPauseRoute>,
 }
 
 #[must_use]
@@ -130,7 +131,7 @@ impl RendererInspectorPauseBridge {
                 paused_sessions_awaiting_resumed: HashSet::new(),
                 active_command_dispatch: None,
                 pending_command_transition: None,
-                route: None,
+                routes: HashMap::new(),
             }),
             pause_loop_wake: Condvar::new(),
         });
@@ -148,6 +149,7 @@ impl std::fmt::Debug for RendererInspectorPauseBridge {
             .field("quit_requested", &state.quit_requested)
             .field("session_detach_arms", &state.session_detach_arms)
             .field("target_closed", &state.target_closed)
+            .field("target_route_count", &state.routes.len())
             .field("pending_prefaces", &state.pending_prefaces.len())
             .field(
                 "paused_sessions_awaiting_resumed",
@@ -186,11 +188,17 @@ impl RendererInspectorPauseBridge {
     }
 
     pub(crate) fn configure_page_route(&self, output_journal: RendererTurnOutputJournal) {
-        let RendererOutputResidenceIdentity::Page { .. } = output_journal.stream().residence()
-        else {
+        let stream = output_journal.stream();
+        let RendererOutputResidenceIdentity::Page { page_id, .. } = stream.residence() else {
             panic!("an Inspector pause route requires a Page output stream");
         };
-        self.shared.state.lock().route = Some(RendererInspectorPauseRoute { output_journal });
+        self.shared.state.lock().routes.insert(
+            stream.renderer_agent(),
+            RendererInspectorPauseRoute {
+                page_id,
+                output_journal,
+            },
+        );
     }
 
     pub(crate) fn is_pause_active(&self) -> bool {
@@ -298,7 +306,7 @@ impl RendererInspectorPauseBridge {
             return None;
         }
         let mut state = self.shared.state.lock();
-        if state.target_closed || state.route.is_none() {
+        if state.target_closed || !state.routes.contains_key(&agent_token) {
             return None;
         }
         let id = state.next_preface_id;
@@ -390,37 +398,86 @@ impl RendererInspectorPauseBridge {
         // execution chances.
     }
 
-    pub(crate) fn detach_page(&self, page_id: PageId) -> bool {
+    pub(crate) fn detach_page(
+        &self,
+        page_id: PageId,
+        agent_token: RendererDevToolsAgentToken,
+    ) -> bool {
+        self.remove_agent_route(page_id, agent_token)
+    }
+
+    pub(crate) fn close_page_target(
+        &self,
+        page_id: PageId,
+        agent_token: RendererDevToolsAgentToken,
+    ) -> bool {
+        self.remove_agent_route(page_id, agent_token)
+    }
+
+    fn remove_agent_route(&self, page_id: PageId, agent_token: RendererDevToolsAgentToken) -> bool {
         let mut state = self.shared.state.lock();
-        let route_page_id = state.route.as_ref().and_then(|route| {
-            match route.output_journal.stream().residence() {
-                RendererOutputResidenceIdentity::Page { page_id, .. } => Some(page_id),
-                RendererOutputResidenceIdentity::SharedWorker { .. }
-                | RendererOutputResidenceIdentity::ServiceWorker { .. } => None,
-            }
-        });
-        if route_page_id != Some(page_id) {
+        if !state
+            .routes
+            .get(&agent_token)
+            .is_some_and(|route| route.page_id == page_id)
+        {
             return false;
         }
-        state.route = None;
-        state.pending_prefaces.clear();
-        state.paused_sessions_awaiting_resumed.clear();
-        state.pending_command_transition = None;
-        match state.phase {
-            RendererInspectorPausePhase::Running => {}
-            RendererInspectorPausePhase::Entering => {
-                state.phase = RendererInspectorPausePhase::Running;
-                state.pause_loop_policy = RendererInspectorPauseLoopPolicy::MainAndIo;
-                state.quit_requested = false;
-            }
-            RendererInspectorPausePhase::Paused => {
-                state.quit_requested = true;
-                self.shared.pause_loop_wake.notify_all();
+        state.routes.remove(&agent_token);
+        state
+            .pending_prefaces
+            .retain(|preface| preface.agent_token != agent_token);
+        let mut removed_reported_pause = false;
+        state
+            .paused_sessions_awaiting_resumed
+            .retain(|(paused_agent_token, _)| {
+                let remove = *paused_agent_token == agent_token;
+                removed_reported_pause |= remove;
+                !remove
+            });
+        if let Some(dispatch) = state.active_command_dispatch.as_mut() {
+            dispatch
+                .transition
+                .awaiting_resumed
+                .retain(|(transition_agent_token, _)| *transition_agent_token != agent_token);
+            dispatch
+                .transition
+                .awaiting_repause
+                .retain(|(transition_agent_token, _)| *transition_agent_token != agent_token);
+        }
+        if let Some(transition) = state.pending_command_transition.as_mut() {
+            transition
+                .awaiting_resumed
+                .retain(|(transition_agent_token, _)| *transition_agent_token != agent_token);
+            transition
+                .awaiting_repause
+                .retain(|(transition_agent_token, _)| *transition_agent_token != agent_token);
+        }
+        if state
+            .pending_command_transition
+            .as_ref()
+            .is_some_and(RendererInspectorPauseCommandTransition::is_complete)
+        {
+            state.pending_command_transition = None;
+        }
+        if removed_reported_pause {
+            match state.phase {
+                RendererInspectorPausePhase::Running => {}
+                RendererInspectorPausePhase::Entering => {
+                    state.phase = RendererInspectorPausePhase::Running;
+                    state.pause_loop_policy = RendererInspectorPauseLoopPolicy::MainAndIo;
+                    state.quit_requested = false;
+                }
+                RendererInspectorPausePhase::Paused => {
+                    state.quit_requested = true;
+                    self.shared.pause_loop_wake.notify_all();
+                }
             }
         }
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn close_target(&self) {
         let mut state = self.shared.state.lock();
         state.target_closed = true;
@@ -442,7 +499,7 @@ impl RendererInspectorPauseBridge {
             if state.target_closed {
                 return;
             }
-            state.route.clone()
+            state.routes.get(&agent_token).cloned()
         };
         let Some(route) = route else {
             return;
@@ -475,7 +532,9 @@ impl RendererInspectorPauseBridge {
         if state.target_closed {
             return RendererInspectorPauseNotificationRoute::Drop;
         }
-        if is_paused_notification && (state.route.is_none() || state.session_detach_arms != 0) {
+        if is_paused_notification
+            && (!state.routes.contains_key(&agent_token) || state.session_detach_arms != 0)
+        {
             return RendererInspectorPauseNotificationRoute::Drop;
         }
         let preface = if is_paused_notification {
