@@ -44,7 +44,7 @@ impl CdpConnection {
             .browser_host_state
             .navigation_owner()
             .target_initial_empty_document(&browser_owner)
-            .map(|document| document.loader_id().to_owned())
+            .map(|document| document.loader_id())
         else {
             let _ = page.close_async().await;
             return Ok(InitialDocumentPageInstallResult::Stale);

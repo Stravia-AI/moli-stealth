@@ -88,34 +88,115 @@ impl BrowserInitialEmptyDocumentSeed {
     }
 }
 
-/// Read-only Browser Core snapshot of one Target's initial empty Document.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BrowserInitialEmptyDocumentLifecycle {
+    Unmaterialized,
+    Materialized,
+    ExitedUnmaterialized,
+    ExitedMaterialized,
+}
+
+impl BrowserInitialEmptyDocumentLifecycle {
+    fn materialized(self) -> bool {
+        matches!(self, Self::Materialized | Self::ExitedMaterialized)
+    }
+
+    fn exited(self) -> bool {
+        matches!(self, Self::ExitedUnmaterialized | Self::ExitedMaterialized)
+    }
+}
+
+/// Minimal state retained for one Target's initial empty Document.
 ///
-/// The record deliberately survives `exited`: history and diagnostics still
-/// need the Target-creation metadata after a successor Document commits.
+/// Target identity remains in the registry key, loader identity is
+/// deterministic, and navigation pending state lives in the authoritative
+/// document-navigation registry.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct BrowserInitialEmptyDocumentRecord {
+    seed: BrowserInitialEmptyDocumentSeed,
+    lifecycle: BrowserInitialEmptyDocumentLifecycle,
+}
+
+impl BrowserInitialEmptyDocumentRecord {
+    pub(super) fn new(seed: BrowserInitialEmptyDocumentSeed) -> Self {
+        Self {
+            seed,
+            lifecycle: BrowserInitialEmptyDocumentLifecycle::Unmaterialized,
+        }
+    }
+
+    pub(super) fn snapshot(
+        &self,
+        target_id: impl Into<String>,
+        has_pending_navigation: bool,
+    ) -> BrowserInitialEmptyDocumentSnapshot {
+        BrowserInitialEmptyDocumentSnapshot {
+            target_id: BrowserTargetId::new(target_id),
+            seed: self.seed.clone(),
+            lifecycle: self.lifecycle,
+            pending_cross_document_navigation: self.is_on_initial_empty_document()
+                && has_pending_navigation,
+        }
+    }
+
+    pub(super) fn initial_url(&self) -> &str {
+        self.seed.initial_url()
+    }
+
+    pub(super) fn is_on_initial_empty_document(&self) -> bool {
+        !self.lifecycle.exited()
+    }
+
+    pub(super) fn materialized(&self) -> bool {
+        self.lifecycle.materialized()
+    }
+
+    pub(super) fn history_seed(&self) -> BrowserNavigationHistorySeed {
+        BrowserNavigationHistorySeed::initial_empty_document(self.initial_url())
+    }
+
+    pub(super) fn mark_materialized(&mut self) {
+        if self.lifecycle == BrowserInitialEmptyDocumentLifecycle::Unmaterialized {
+            self.lifecycle = BrowserInitialEmptyDocumentLifecycle::Materialized;
+        }
+    }
+
+    pub(super) fn rollback_materialized(&mut self) -> bool {
+        if self.lifecycle != BrowserInitialEmptyDocumentLifecycle::Materialized {
+            return false;
+        }
+        self.lifecycle = BrowserInitialEmptyDocumentLifecycle::Unmaterialized;
+        true
+    }
+
+    pub(super) fn mark_exited(&mut self) {
+        self.lifecycle = match self.lifecycle {
+            BrowserInitialEmptyDocumentLifecycle::Unmaterialized
+            | BrowserInitialEmptyDocumentLifecycle::ExitedUnmaterialized => {
+                BrowserInitialEmptyDocumentLifecycle::ExitedUnmaterialized
+            }
+            BrowserInitialEmptyDocumentLifecycle::Materialized
+            | BrowserInitialEmptyDocumentLifecycle::ExitedMaterialized => {
+                BrowserInitialEmptyDocumentLifecycle::ExitedMaterialized
+            }
+        };
+    }
+}
+
+/// Read-only projection of one Target's initial empty Document.
+///
+/// This value is assembled on demand from the registry key, the minimal
+/// lifecycle record, and authoritative navigation state. It is never retained
+/// in the per-Target registry.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct BrowserInitialEmptyDocumentSnapshot {
     target_id: BrowserTargetId,
-    loader_id: String,
     seed: BrowserInitialEmptyDocumentSeed,
-    materialized: bool,
-    exited: bool,
+    lifecycle: BrowserInitialEmptyDocumentLifecycle,
     pending_cross_document_navigation: bool,
 }
 
 impl BrowserInitialEmptyDocumentSnapshot {
-    pub(super) fn new(target_id: impl Into<String>, seed: BrowserInitialEmptyDocumentSeed) -> Self {
-        let target_id = BrowserTargetId::new(target_id);
-        let loader_id = format!("LID-INITIAL-{}", target_id.as_str());
-        Self {
-            target_id,
-            loader_id,
-            seed,
-            materialized: false,
-            exited: false,
-            pending_cross_document_navigation: false,
-        }
-    }
-
     pub fn target_id(&self) -> &str {
         self.target_id.as_str()
     }
@@ -124,8 +205,8 @@ impl BrowserInitialEmptyDocumentSnapshot {
         self.seed.initial_url()
     }
 
-    pub fn loader_id(&self) -> &str {
-        &self.loader_id
+    pub fn loader_id(&self) -> String {
+        format!("LID-INITIAL-{}", self.target_id.as_str())
     }
 
     pub fn creator(&self) -> Option<&BrowserInitialEmptyDocumentCreator> {
@@ -137,11 +218,11 @@ impl BrowserInitialEmptyDocumentSnapshot {
     }
 
     pub fn materialized(&self) -> bool {
-        self.materialized
+        self.lifecycle.materialized()
     }
 
     pub fn exited(&self) -> bool {
-        self.exited
+        self.lifecycle.exited()
     }
 
     pub fn pending_cross_document_navigation(&self) -> bool {
@@ -149,39 +230,6 @@ impl BrowserInitialEmptyDocumentSnapshot {
     }
 
     pub fn is_on_initial_empty_document(&self) -> bool {
-        !self.exited
-    }
-
-    pub(super) fn history_seed(&self) -> BrowserNavigationHistorySeed {
-        BrowserNavigationHistorySeed::initial_empty_document(self.initial_url())
-    }
-
-    pub(super) fn mark_materialized(&mut self) {
-        if !self.exited {
-            self.materialized = true;
-        }
-    }
-
-    pub(super) fn rollback_materialized(&mut self) -> bool {
-        if self.exited || !self.materialized {
-            return false;
-        }
-        self.materialized = false;
-        true
-    }
-
-    pub(super) fn mark_pending_cross_document_navigation(&mut self) {
-        if !self.exited {
-            self.pending_cross_document_navigation = true;
-        }
-    }
-
-    pub(super) fn clear_pending_cross_document_navigation(&mut self) {
-        self.pending_cross_document_navigation = false;
-    }
-
-    pub(super) fn mark_exited(&mut self) {
-        self.exited = true;
-        self.pending_cross_document_navigation = false;
+        !self.exited()
     }
 }

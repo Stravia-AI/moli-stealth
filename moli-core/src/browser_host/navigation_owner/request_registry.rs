@@ -131,7 +131,7 @@ impl BrowserDocumentNavigationRegistry {
             .and_then(|committed| committed.trace())
     }
 
-    fn has_pending(&self, key: &BrowserPageOwnerKey) -> bool {
+    pub(super) fn has_pending(&self, key: &BrowserPageOwnerKey) -> bool {
         self.entries
             .get(key)
             .is_some_and(|state| state.pending.is_some())
@@ -299,8 +299,6 @@ impl BrowserNavigationOwner {
         let fact_page = self.capture_page_residence(key.browser_context_id(), key.target_id());
         let (navigation, superseded) = self.document_navigations.start(key, loader_id, trace);
         self.target_terminations.begin_navigation(key, &navigation);
-        self.initial_empty_documents
-            .mark_pending_cross_document_navigation(key);
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) = self.record_navigation_admission_facts(
                 key,
@@ -438,8 +436,6 @@ impl BrowserNavigationOwner {
         };
         self.target_terminations
             .cancel_navigation_if_matches(key, navigation);
-        self.initial_empty_documents
-            .clear_pending_cross_document_navigation(key);
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) =
                 self.record_navigation_failed_fact(key, navigation, failure.clone(), None, page)
@@ -497,8 +493,6 @@ impl BrowserNavigationOwner {
         };
         self.target_terminations
             .cancel_navigation_if_matches(key, navigation);
-        self.initial_empty_documents
-            .clear_pending_cross_document_navigation(key);
         if let Some(page) = fact_page.as_ref() {
             if let Err(error) = self.record_navigation_download_fact(key, navigation, page) {
                 tracing::error!(

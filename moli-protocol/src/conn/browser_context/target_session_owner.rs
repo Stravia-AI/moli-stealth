@@ -2591,7 +2591,7 @@ impl CdpConnection {
             .or_else(|| {
                 self.target_initial_empty_document_for_session_owner(session_id)
                     .filter(|state| state.is_on_initial_empty_document())
-                    .map(|state| state.loader_id().to_owned())
+                    .map(|state| state.loader_id())
             })
     }
 

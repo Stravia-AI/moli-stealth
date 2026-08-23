@@ -31,7 +31,6 @@ impl CdpConnection {
         self.browser_host_state
             .navigation_owner()
             .target_initial_empty_document(&owner)
-            .cloned()
     }
 
     #[cfg(test)]
@@ -42,7 +41,6 @@ impl CdpConnection {
         self.browser_host_state
             .navigation_owner()
             .target_initial_empty_document(owner)
-            .cloned()
     }
 
     pub(crate) fn mark_target_initial_empty_document_exited_for_session_owner(

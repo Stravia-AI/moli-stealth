@@ -5,7 +5,7 @@ use crate::browser_host::PageResidenceIdentity;
 use super::{
     BrowserInitialEmptyDocumentSeed, BrowserInitialEmptyDocumentSnapshot,
     BrowserNavigationHistorySeed, BrowserNavigationOwner, BrowserPageOwnerKey,
-    BrowserTargetRegistryError,
+    BrowserTargetRegistryError, initial_document::BrowserInitialEmptyDocumentRecord,
 };
 
 /// Authoritative initial-empty-Document lifecycle, keyed by browser Target.
@@ -15,7 +15,7 @@ use super::{
 /// frontend disconnect cannot erase or advance browser state.
 #[derive(Default)]
 pub(super) struct BrowserInitialEmptyDocumentRegistry {
-    entries: HashMap<BrowserPageOwnerKey, BrowserInitialEmptyDocumentSnapshot>,
+    entries: HashMap<BrowserPageOwnerKey, BrowserInitialEmptyDocumentRecord>,
 }
 
 impl BrowserInitialEmptyDocumentRegistry {
@@ -28,29 +28,36 @@ impl BrowserInitialEmptyDocumentRegistry {
             self.entries.remove(owner);
             return;
         }
-        self.entries.insert(
-            owner.clone(),
-            BrowserInitialEmptyDocumentSnapshot::new(owner.target_id(), seed),
-        );
+        self.entries
+            .insert(owner.clone(), BrowserInitialEmptyDocumentRecord::new(seed));
     }
 
     pub(super) fn snapshot(
         &self,
         owner: &BrowserPageOwnerKey,
-    ) -> Option<&BrowserInitialEmptyDocumentSnapshot> {
-        self.entries.get(owner)
+        has_pending_navigation: bool,
+    ) -> Option<BrowserInitialEmptyDocumentSnapshot> {
+        self.entries
+            .get(owner)
+            .map(|record| record.snapshot(owner.target_id(), has_pending_navigation))
     }
 
-    pub(super) fn snapshots(&self) -> impl Iterator<Item = &BrowserInitialEmptyDocumentSnapshot> {
-        self.entries.values()
+    pub(super) fn snapshots<'a>(
+        &'a self,
+        has_pending_navigation: impl Fn(&BrowserPageOwnerKey) -> bool + 'a,
+    ) -> impl Iterator<Item = BrowserInitialEmptyDocumentSnapshot> + 'a {
+        self.entries.iter().map(move |(owner, record)| {
+            record.snapshot(owner.target_id(), has_pending_navigation(owner))
+        })
     }
 
     pub(super) fn history_seed(
         &self,
         owner: &BrowserPageOwnerKey,
     ) -> Option<BrowserNavigationHistorySeed> {
-        self.snapshot(owner)
-            .map(BrowserInitialEmptyDocumentSnapshot::history_seed)
+        self.entries
+            .get(owner)
+            .map(BrowserInitialEmptyDocumentRecord::history_seed)
     }
 
     pub(super) fn accepts_materialization(&self, owner: &BrowserPageOwnerKey) -> bool {
@@ -73,19 +80,7 @@ impl BrowserInitialEmptyDocumentRegistry {
     pub(super) fn rollback_materialized(&mut self, owner: &BrowserPageOwnerKey) -> bool {
         self.entries
             .get_mut(owner)
-            .is_some_and(BrowserInitialEmptyDocumentSnapshot::rollback_materialized)
-    }
-
-    pub(super) fn mark_pending_cross_document_navigation(&mut self, owner: &BrowserPageOwnerKey) {
-        if let Some(state) = self.entries.get_mut(owner) {
-            state.mark_pending_cross_document_navigation();
-        }
-    }
-
-    pub(super) fn clear_pending_cross_document_navigation(&mut self, owner: &BrowserPageOwnerKey) {
-        if let Some(state) = self.entries.get_mut(owner) {
-            state.clear_pending_cross_document_navigation();
-        }
+            .is_some_and(BrowserInitialEmptyDocumentRecord::rollback_materialized)
     }
 
     pub(super) fn mark_exited(&mut self, owner: &BrowserPageOwnerKey) {
@@ -107,6 +102,16 @@ impl BrowserInitialEmptyDocumentRegistry {
 
     pub(super) fn can_install_current_page(&self, owner: &BrowserPageOwnerKey) -> bool {
         self.accepts_materialization(owner)
+    }
+
+    pub(super) fn accepts_initial_target_navigation(
+        &self,
+        owner: &BrowserPageOwnerKey,
+        replacement_url: &str,
+    ) -> bool {
+        self.entries.get(owner).is_some_and(|state| {
+            state.is_on_initial_empty_document() && state.initial_url() != replacement_url
+        })
     }
 
     pub(super) fn forget_target(&mut self, target_id: &str) {
@@ -132,13 +137,10 @@ impl BrowserNavigationOwner {
         let Some(owner) = self.page_owner_key_if_current(expected) else {
             return false;
         };
-        self.initial_empty_documents
-            .snapshot(&owner)
-            .is_some_and(|state| {
-                state.is_on_initial_empty_document()
-                    && !state.pending_cross_document_navigation()
-                    && state.initial_url() != replacement_url
-            })
+        !self.document_navigations.has_pending(&owner)
+            && self
+                .initial_empty_documents
+                .accepts_initial_target_navigation(&owner, replacement_url)
     }
 
     /// Transitional typed metadata install for an already registered Target.
@@ -161,14 +163,16 @@ impl BrowserNavigationOwner {
     pub fn target_initial_empty_document(
         &self,
         owner: &BrowserPageOwnerKey,
-    ) -> Option<&BrowserInitialEmptyDocumentSnapshot> {
-        self.initial_empty_documents.snapshot(owner)
+    ) -> Option<BrowserInitialEmptyDocumentSnapshot> {
+        self.initial_empty_documents
+            .snapshot(owner, self.document_navigations.has_pending(owner))
     }
 
     pub fn initial_empty_documents(
         &self,
-    ) -> impl Iterator<Item = &BrowserInitialEmptyDocumentSnapshot> {
-        self.initial_empty_documents.snapshots()
+    ) -> impl Iterator<Item = BrowserInitialEmptyDocumentSnapshot> + '_ {
+        self.initial_empty_documents
+            .snapshots(|owner| self.document_navigations.has_pending(owner))
     }
 
     pub fn can_install_target_initial_empty_document_page(
@@ -271,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn document_navigation_request_drives_pending_clear_and_exit_in_core() {
+    fn snapshot_derives_pending_state_from_document_navigation_registry() {
         let (mut owner, key) = owner_with_target();
         owner
             .register_target_initial_empty_document(
