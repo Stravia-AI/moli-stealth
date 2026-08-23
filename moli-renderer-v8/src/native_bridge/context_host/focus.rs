@@ -45,9 +45,6 @@ impl JsContextHost {
         if document_handle == self.document_handle() {
             return Some(PendingWindowMessageEndpoint::TopWindow);
         }
-        if let Some(popup_id) = self.lightweight_popup_id_for_document_handle(document_handle) {
-            return Some(PendingWindowMessageEndpoint::LightweightPopup(popup_id));
-        }
         self.child_browsing_context_host_for_document_handle(document_handle)
             .map(PendingWindowMessageEndpoint::ChildWindow)
     }
@@ -59,9 +56,6 @@ impl JsContextHost {
         x: f64,
         y: f64,
     ) {
-        if matches!(endpoint, PendingWindowMessageEndpoint::LightweightPopup(_)) {
-            return;
-        }
         let dispatch_scope = endpoint.dispatch_scope();
         let Some(owner) = self.current_window_execution_context_owner(dispatch_scope) else {
             return;

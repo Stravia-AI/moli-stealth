@@ -131,7 +131,6 @@ mod page_owned_document_script_completion;
 mod page_owned_document_script_hooks;
 mod page_parser_async_module_admission;
 mod page_parser_owned_module_continuation;
-mod page_popup_load_event;
 mod page_rendering_update;
 #[cfg(test)]
 mod page_rendering_update_body_test_support;
@@ -221,7 +220,6 @@ pub(crate) use page_module_reaction::AuthorizedCurrentPageModuleReaction;
 pub(crate) use page_modulepreload_start::AuthorizedCurrentChildModulepreloadStartTask;
 pub(crate) use page_navigation_api_task::AuthorizedCurrentPageNavigationApiTask;
 pub(crate) use page_opfs_task::AuthorizedCurrentPageOpfsTask;
-pub(crate) use page_popup_load_event::AuthorizedCurrentPagePopupLoadEvent;
 pub(crate) use page_rendering_update::AuthorizedCurrentPageRenderingUpdate;
 pub(crate) use page_resource_completion::{
     AuthorizedCurrentChildDocumentLoadCompletion, AuthorizedCurrentChildModuleFetchCompletion,
@@ -229,9 +227,7 @@ pub(crate) use page_resource_completion::{
     AuthorizedCurrentMainDynamicImportGraphFetchCompletion,
     AuthorizedCurrentMainParserModuleGraphFetchCompletion,
     AuthorizedCurrentMainRuntimeModuleGraphFetchCompletion,
-    AuthorizedCurrentPopupClassicScriptLoadCompletion,
-    AuthorizedCurrentPopupDocumentLoadCompletion, AuthorizedLiveMainModulepreloadFetchCompletion,
-    CurrentChildDocumentLoadApplication,
+    AuthorizedLiveMainModulepreloadFetchCompletion, CurrentChildDocumentLoadApplication,
 };
 pub(crate) use page_service_worker_client_message::AuthorizedCurrentPageServiceWorkerClientMessage;
 pub(crate) use page_service_worker_internal::AuthorizedCurrentPageServiceWorkerInternalTask;
@@ -1738,6 +1734,11 @@ pub(crate) struct PageVm {
     /// once before phase one may resume.
     replacement_document_commit_handoff:
         Option<crate::page_task_queue::RendererTopLevelNavigationHandoff>,
+    /// This Page was created synchronously as a related auxiliary initial
+    /// empty Document and later adopted by a protocol target. Its first
+    /// non-JavaScript destination must cross Page admission as target-local
+    /// held authority rather than as a later independent renderer output.
+    staged_related_initial_empty_page: bool,
     pub(super) local_executor: JsLocalExecutor,
 }
 
@@ -3286,7 +3287,6 @@ impl PageVm {
         !self.vm().has_pending_location_navigation()
             && !self.vm().has_pending_child_frame_realm_materialization()
             && !self.vm().has_pending_child_document_lifecycle()
-            && !self.vm().has_pending_lightweight_popup_resource_loads()
     }
 
     #[cfg(test)]
@@ -3376,14 +3376,12 @@ impl PageVm {
                 .wait_for_document_style_progress_without_timeout()
                 .await;
         }
-        if self
+        let has_pending_document_work = self
             .vm()
             .document_runtime
             .has_pending_document_write_external_script_load()
-            || self.vm().has_pending_child_document_lifecycle()
-            || self.vm().has_pending_lightweight_popup_resource_loads()
-            || self.has_pending_module_script_for_target_stage()
-        {
+            || self.vm().has_pending_child_document_lifecycle();
+        if has_pending_document_work || self.has_pending_module_script_for_target_stage() {
             let timer_deadline = include_timer_work
                 .then(|| self.vm().next_timeout_deadline())
                 .flatten();
@@ -3526,15 +3524,14 @@ impl PageVm {
                     .await;
                 continue;
             }
-            if self
+            let has_pending_lifecycle_work = self
                 .vm()
                 .document_runtime
                 .has_pending_document_write_external_script_load()
                 || wait_for_load_event_delaying_subresources
                 || (wait_for_child_browsing_context_work
-                    && (self.vm().has_pending_child_document_lifecycle()
-                        || self.vm().has_pending_lightweight_popup_resource_loads()))
-            {
+                    && self.vm().has_pending_child_document_lifecycle());
+            if has_pending_lifecycle_work {
                 let _ = self
                     .wait_for_lifecycle_blocking_page_work_arrival_without_timeout(
                         wait_for_runtime_owned_module_work,
@@ -4746,6 +4743,10 @@ impl PageVm {
             runtime_hooks,
             navigation_response: None,
             replacement_document_commit_handoff: None,
+            staged_related_initial_empty_page: matches!(
+                environment_apply_mode,
+                PageVmEnvironmentConfigApplyMode::StagedInitialConstruction
+            ),
             local_executor,
         };
         debug!(
@@ -4755,6 +4756,10 @@ impl PageVm {
         );
         page_vm.apply_environment_config(env, environment_apply_mode);
         page_vm
+    }
+
+    pub(in crate::runtime) fn is_staged_related_initial_empty_page(&self) -> bool {
+        self.staged_related_initial_empty_page
     }
 
     fn apply_environment_config(

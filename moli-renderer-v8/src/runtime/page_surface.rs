@@ -259,9 +259,78 @@ pub struct RendererPendingSameDocumentNavigation {
     pub history_update: SameDocumentHistoryUpdate,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One browser-owned top-level session-history traversal selected by the
+/// renderer.
+///
+/// A protocol owner can resolve `delta` against its own session-history
+/// controller. A direct Browser owner has no second history database, so an
+/// exact cross-Document selection also carries the renderer-serialized seed
+/// that must be installed in the replacement realm. Same-Document traversal
+/// remains renderer-local and never uses this carrier.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererPendingTopLevelHistoryTraversal {
-    pub delta: i64,
+    delta: i64,
+    navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
+}
+
+impl RendererPendingTopLevelHistoryTraversal {
+    /// Records a traversal whose destination must be resolved by a browser
+    /// session-history controller. Direct Browser owners treat an unresolved
+    /// destination as a no-op.
+    pub(crate) fn by_delta(delta: i64) -> Self {
+        Self {
+            delta,
+            navigation_history_entry_seed: None,
+        }
+    }
+
+    /// Records an exact cross-Document traversal selected from the active
+    /// renderer history list.
+    pub(crate) fn cross_document(
+        delta: i64,
+        navigation_history_entry_seed: moli_page_types::NavigationHistoryEntrySeed,
+    ) -> Self {
+        assert!(
+            navigation_history_entry_seed.entries.iter().any(|entry| {
+                entry.history_index == navigation_history_entry_seed.current_index
+            }),
+            "cross-Document history traversal seed must contain its current entry"
+        );
+        Self {
+            delta,
+            navigation_history_entry_seed: Some(Box::new(navigation_history_entry_seed)),
+        }
+    }
+
+    pub fn delta(&self) -> i64 {
+        self.delta
+    }
+
+    /// Returns the exact destination URL and history seed when the renderer
+    /// could select a live cross-Document entry.
+    pub fn cross_document_destination(
+        &self,
+    ) -> Option<(&str, &moli_page_types::NavigationHistoryEntrySeed)> {
+        let seed = self.navigation_history_entry_seed.as_deref()?;
+        let entry = seed
+            .entries
+            .iter()
+            .find(|entry| entry.history_index == seed.current_index)?;
+        Some((entry.url.as_str(), seed))
+    }
+
+    pub fn into_cross_document_destination(
+        self,
+    ) -> Option<(String, moli_page_types::NavigationHistoryEntrySeed)> {
+        let seed = *self.navigation_history_entry_seed?;
+        let url = seed
+            .entries
+            .iter()
+            .find(|entry| entry.history_index == seed.current_index)?
+            .url
+            .clone();
+        Some((url, seed))
+    }
 }
 
 /// A same-Document navigation captured together with the exact Document that
@@ -317,6 +386,11 @@ impl RendererDocumentSourcedSameDocumentNavigation {
 pub struct RendererDocumentSourcedTopLevelLocationNavigation {
     source_document: RendererDocumentLifecycleIdentity,
     request: Box<RendererTopLevelNavigationRequest>,
+    /// Renderer-serialized session history after applying this exact
+    /// cross-Document navigation. The browser owner must carry this through
+    /// redirects, Fetch interception, and a stable Page replacement instead
+    /// of reconstructing history from target-level URL metadata.
+    navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
     runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
 }
 
@@ -467,6 +541,27 @@ impl RendererTopLevelNavigationRequest {
         self
     }
 
+    /// Installs the frozen navigation referrer used by an unmigrated producer
+    /// that has no typed source-policy carrier. A request with [`Self::source`]
+    /// must instead let its owner derive the header for each redirect target.
+    /// `None` leaves an existing explicit override untouched; `Some("")`
+    /// records the no-referrer result by removing it.
+    pub fn with_explicit_navigation_referrer_header(
+        mut self,
+        navigation_referrer: Option<&str>,
+    ) -> Self {
+        let Some(navigation_referrer) = navigation_referrer else {
+            return self;
+        };
+        self.request_headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("referer"));
+        if !navigation_referrer.is_empty() {
+            self.request_headers
+                .push(("Referer".to_owned(), navigation_referrer.to_owned()));
+        }
+        self
+    }
+
     pub fn url(&self) -> &str {
         &self.url
     }
@@ -505,6 +600,7 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         Self {
             source_document,
             request: Box::new(RendererTopLevelNavigationRequest::get(url)),
+            navigation_history_entry_seed: None,
             runtime_command_cause,
         }
     }
@@ -546,8 +642,17 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         Self {
             source_document,
             request: Box::new(request),
+            navigation_history_entry_seed: None,
             runtime_command_cause,
         }
+    }
+
+    pub fn with_navigation_history_entry_seed(
+        mut self,
+        seed: Option<moli_page_types::NavigationHistoryEntrySeed>,
+    ) -> Self {
+        self.navigation_history_entry_seed = seed.map(Box::new);
+        self
     }
 
     pub fn source_document(&self) -> RendererDocumentLifecycleIdentity {
@@ -580,6 +685,12 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
 
     pub fn source(&self) -> Option<&RendererTopLevelNavigationSource> {
         self.request.source()
+    }
+
+    pub fn navigation_history_entry_seed(
+        &self,
+    ) -> Option<&moli_page_types::NavigationHistoryEntrySeed> {
+        self.navigation_history_entry_seed.as_deref()
     }
 
     pub fn runtime_command_cause(&self) -> Option<&RendererRuntimeCommandCausalIdentity> {
@@ -1013,6 +1124,10 @@ pub struct RendererMainDocumentCommit {
     pub security_origin: String,
     pub secure_context_type: String,
     pub timestamp: f64,
+    /// Renderer-authored session history for the Document being committed.
+    /// This is present for renderer-initiated cross-Document navigation and
+    /// is installed before the replacement realm runs document-start work.
+    pub navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
     /// Complete response redirect chain frozen by the navigation owner.
     ///
     /// COOP admission is response-by-response: a mismatch on an intermediate
@@ -1036,6 +1151,15 @@ pub struct RendererPageCreationDiagnostics {
     pub initial_runtime_realms: Vec<RendererRuntimeRealmInfo>,
     pub renderer_output_predecessor: Option<RendererOutputFence>,
     pub document_continuation_observer: Option<RendererDocumentContinuationObserver>,
+    /// Winning non-JavaScript destination queued on a synchronously staged
+    /// related auxiliary Page before its protocol target was admitted.
+    ///
+    /// Protocol consumes this once into the exact target Page's held popup
+    /// navigation authority. Publishing it as a later renderer output would
+    /// let it race debugger hold, Fetch interception, and newer target
+    /// commands.
+    pub initial_top_level_navigation:
+        Option<Box<RendererDocumentSourcedTopLevelLocationNavigation>>,
     /// The initial realm synchronously accepted `window.close()` before this
     /// Page was admitted to its protocol target.
     pub top_level_browsing_context_closing: bool,
@@ -5019,6 +5143,17 @@ pub enum RendererPageCommand {
     NavigateTopLevelSameDocument {
         url: String,
     },
+    /// Installs one browser-owner navigation request on a Page whose creation
+    /// selected [`RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter`].
+    ///
+    /// Unlike an expression-based `location` assignment, this keeps the
+    /// renderer-frozen method, body, headers, request kind, and source
+    /// carrier intact. The renderer owner follows the resulting pending
+    /// navigation before replying to the standalone browser owner.
+    FollowTopLevelNavigationInStandaloneAdapter {
+        request: RendererTopLevelNavigationRequest,
+        navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
+    },
     RefreshFullPageState,
     /// Runs the renderer-owned Page.close preflight. A successful result has
     /// already committed Closing and published the typed browser-owner close
@@ -6481,6 +6616,20 @@ impl RendererPageTable {
 
     pub(crate) fn record(&self, page_id: PageId) -> Option<RendererPageRecord> {
         self.entry(page_id).and_then(|entry| entry.active_record())
+    }
+
+    pub(crate) fn active_records(&self) -> Vec<(PageId, RendererPageRecord)> {
+        let state = self.inner.lock();
+        let mut records = state
+            .pages
+            .values()
+            .filter_map(|slot| {
+                let entry = slot.entry();
+                entry.active_record().map(|record| (slot.page_id(), record))
+            })
+            .collect::<Vec<_>>();
+        records.sort_unstable_by_key(|(page_id, _)| page_id.as_u64());
+        records
     }
 
     pub(crate) fn len(&self) -> usize {

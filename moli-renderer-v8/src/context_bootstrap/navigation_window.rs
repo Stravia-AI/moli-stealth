@@ -36,10 +36,7 @@ pub(super) fn runtime_window_is_global<'s>(
 ) -> bool {
     match runtime_window_dispatch_scope(scope, window) {
         Some(crate::native_bridge::OwnerDispatchScope::Top) => true,
-        Some(
-            crate::native_bridge::OwnerDispatchScope::Child(_)
-            | crate::native_bridge::OwnerDispatchScope::LightweightPopup(_),
-        ) => false,
+        Some(crate::native_bridge::OwnerDispatchScope::Child(_)) => false,
         None => window.strict_equals(scope.get_current_context().global(scope).into()),
     }
 }
@@ -58,7 +55,6 @@ pub(super) fn runtime_window_uses_top_level_history_model<'s>(
     window: v8::Local<'s, v8::Object>,
 ) -> bool {
     runtime_window_is_global(scope, window)
-        || crate::native_bridge::lightweight_popup_id_from_window(scope, window).is_some()
 }
 
 pub(super) fn runtime_top_window_owner<'s>(
@@ -119,11 +115,6 @@ pub(crate) fn runtime_window_dispatch_scope<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     window: v8::Local<'s, v8::Object>,
 ) -> Option<crate::native_bridge::OwnerDispatchScope> {
-    if let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, window) {
-        return Some(crate::native_bridge::OwnerDispatchScope::LightweightPopup(
-            popup_id,
-        ));
-    }
     if let Some(handle) = get_private_value(scope, window, WINDOW_CHILD_CONTEXT_HANDLE_SLOT)
         .and_then(|value| dom_handle_from_marker_value(scope, value))
     {

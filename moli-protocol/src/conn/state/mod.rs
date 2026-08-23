@@ -83,7 +83,7 @@ pub(crate) use inspector::InspectorCommandDispatch;
 pub(crate) use javascript_dialog::TargetJavaScriptDialog;
 pub(crate) use javascript_dialog::{
     TargetJavaScriptDialogScope, TargetJavaScriptDialogScopeObserver,
-    TargetPreparedJavaScriptDialog, TargetPreparedJavaScriptDialogRoute,
+    TargetPreparedJavaScriptDialog,
 };
 pub(crate) use pending_renderer_command::{
     DuplicatePendingRendererCommand, PendingRendererCommandKey, PreparedRendererCallDispatch,

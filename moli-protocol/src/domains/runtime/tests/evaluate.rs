@@ -2449,6 +2449,7 @@ async fn page_navigate_network_failure_commits_error_document_in_stable_page() {
             request_body: None,
             request_body_bytes: None,
             request_headers: Vec::new(),
+            navigation_history_entry_seed: None,
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 0.0,
             source_document_security: Box::new(

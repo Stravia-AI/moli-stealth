@@ -1,6 +1,43 @@
 # Popup / Auxiliary Browsing Context：现状、Chromium 对照与统一方案
 
-日期：2026-08-02；最后更新：2026-08-22
+日期：2026-08-02；最后更新：2026-08-23
+
+## 2026-08-23 P6R7 direct Browser cross-document history closure 结论
+
+此前改动的核心方向符合预期：popup 已复用 child-frame 的 stable WindowProxy/realm
+基础，并把真实 auxiliary Page、Document、loader、target/session、name/opener、policy、
+lifecycle 与 remote route 收进 typed owner。G5/G6 又证明 stable logical endpoint 可以和
+agent-local V8 projection 分离，same-group cross-origin commit 不需要退回 lightweight
+record 或共享 opener realm。
+
+本轮复核也修正两个过度外推。第一，strict wire seam 不等于真实多进程 renderer 已完成；
+第二，真实 OS process/OOPIF 不是 Moli popup 终态的必选前置条件。Moli 的产品目标是低资源
+headless browser 的可观察语义，不要求复制 Chromium 的完整 SiteInstance/Mojo 拓扑。G6B1
+应作为当前单进程 owner 的 fail-closed transport contract，以及未来若采用多进程时的复用
+边界；不应为了 popup 单独先建设一套假的 process supervisor。
+
+按三个不同口径看当前进度：
+
+| 口径 | 当前判断 | 剩余重点 |
+| --- | --- | --- |
+| 常用 DOM popup 行为 | 约 99% | 更宽 focused WPT、少数 remote/isolated-world 长尾 |
+| Moli 单进程 popup 终态 | 约 99% | remote JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP |
+| Chromium 完整基础设施等价 | 不作为当前产品 exit | 真实 process/channel、capability broker、fenced/guest、完整 Reporting/agent reunification |
+
+这里的百分比是风险加权工程估计，不是测试通过率。旧的 94-95% 估计把“process-neutral
+schema 已建立”误算成“process lifecycle 已完成”，同时低估了 lightweight 兼容面和 detached lifetime 的删除风险，
+现已作废。P6R2 已完成 group-safe opaque-origin identity，P6R3 又完成真实 local Document realm 的
+JS-retained lifetime 与无引用 GC 回收；P6R4 随后按 owner 依赖顺序物理删除 compatibility record、realm alias、
+mirrored parser/loader/lifecycle 与 protocol fallback。2026-08-23 对 tracked Rust 的
+`lightweight_popup|LightweightPopup|lightweight popup` 宽口径扫描已从 112 个文件、1492 处命中降为零。剩余风险
+主要在 remote JavaScript URL、descendant lifecycle 和更宽 focused WPT/CDP 重新分类。
+P6R5 又补上 protocol target scheduler 之外的 production direct `Browser` owner；CLI/WebFetch 不再因没有
+output consumer 而留下无人采纳、无人驱动的真实 auxiliary Page。P6R6 随后把 initial-empty creator fallback base、incumbent
+source/base、target-local destination queue 和 renderer-authored history seed 接到同一个 Page/commit owner；固定六例
+`initial-empty-document/window-open-*` 现在 CLI/CDP 均为 6/6 case、13/13 subtest 通过。
+P6R7 又让 direct `Browser` 的 root Page 与 auxiliary Page 消费同一份 cross-document traversal seed，
+`history.back()` 和 `history.forward()` 不再停在无人处理的 renderer owner action。旧 standalone observation seam
+已在前一笔清理中物理删除，没有作为 history controller 重新引入。
 
 状态：架构评估与分阶段迁移设计；`popup-refactor` 已完成 Phase 1 primitive 抽取、
 Phase 2A script-agent identity / current-policy baseline，以及 Phase 2B 的 selective
@@ -32,7 +69,12 @@ slot 中建立 `Held → Published → Consumed` authority；旧 admission 因 P
 后，不能导航 replacement Page，也不能被 `Page.enable` 等入口从 target URL 重建。Phase 3-4 的
 single-owner/navigation 主干现已完成；Phase 5 的 local/Fresh creation policy 已在 E3 exit，
 script-closable、beforeunload/unload 与 renderer close ACK/timeout 已在 L1 exit；local focus/active
-Page/focused-frame authority 又已在 L2 exit；group/remote、identity/lifetime 与最终双栈删除仍未整体完成。Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
+Page/focused-frame authority 又已在 L2 exit；P6R2/P6R3 已完成当前产品的 local identity/lifetime closure，
+P6R4 已物理删除本地 lightweight 双栈；P6R5 已让 direct `Browser`/CLI 复用同一真实 Page owner，P6R6 又完成
+initial-empty/no-commit URL、single destination queue 与 protocol history replacement 的固定 WPT closure。P6R7
+继续补齐 direct `Browser` root/auxiliary Page 的跨文档 back/forward，并保持 protocol browser history authority。
+剩余工作已经转为 group/remote 长尾与更宽外部矩阵。
+Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
 并覆盖 initial realm/history 保留和后续 redirect replacement。第四纵切又把 replacement
 Document 的 commit/attachment publication 与其精确 DCL continuation 分开：protocol 可以在
 parser 仍阻塞时控制已经提交的 realm，renderer owner 则用独立 typed terminal 交付同一 turn 的
@@ -120,7 +162,7 @@ typed value，不解释 sandbox flags。继承 sandbox 的 Fresh Page 现在会�
 `noopener` 仍独立切断 opener/group。E2K 又把 DevTools `userGesture` 与 trusted mouse/key/touch input 收敛为
 Page/frame-tree lifetime 的 transient/sticky activation ledger：existing target lookup 不进入 creation gate，sandbox
 拒绝不消费，真正 admitted 的 new-context transaction 才执行 browser-context popup-blocker policy 并至多消费一次
-精确 generation；`Page.windowOpen.userGesture` 只观察消费前冻结值。Lightmount 保留自动化默认放行，并提供严格
+精确 generation；`Page.windowOpen.userGesture` 只观察消费前冻结值。Moli 保留自动化默认放行，并提供严格
 require-activation policy；完整 top-level `CanNavigate`、`javascript:` target-realm execution、focus
 transaction、COOP group sever 与 remote/disconnected endpoint 在该阶段仍未完成。E2L 现已把 `allow-forms` 收回
 source-Document form owner：iframe attribute、所有 response-CSP `sandbox` policy 与 inherited popup policy
@@ -184,7 +226,8 @@ Document preparation 前拒绝非 `unsafe-none` enforced COOP；普通 streaming
 response 都转入同一个 `ERR_BLOCKED_BY_RESPONSE` browser-owned error Document。阻断会在原 target/session 内强制
 real+virtual group switch、sever 旧 opener/proxy，且 redirect 目标不会产生第二次网络请求；前一个 Document
 自己的 response CSP sandbox 不会错误污染后续 navigation。真正 remote endpoint、RemoteFrame/fenced/embedder、
-identity/lifetime 和 Phase 6 compatibility 双栈删除仍是独立的大阶段。Phase 5G4 随后把旧 proxy 从“private slot
+identity/lifetime 和 Phase 6 compatibility 双栈删除在当时仍是独立大阶段；前者现已由 P6R2/P6R3 完成当前产品
+local exit。Phase 5G4 随后把旧 proxy 从“private slot
 直接保存目标 V8 object，再由 creation context 反查 host”迁到 group-qualified typed endpoint：每个 related
 top-level target 由 browsing-context group 分配非零 generation，普通 Document replacement 保留 `(group,
 generation)`，COOP group switch 分配新 pair。`postMessage`、cross-origin Location、`close()`、`focus()` 与 child/name
@@ -209,15 +252,15 @@ encoded bytes，remote-frame tree按 monotonic revision逐 snapshot编码并做�
 拥有 ArrayBuffer/port/stream/Blob/File attachment。logical endpoint之外又增加 execution-channel generation，只有
 committed same-group agent replacement才旋转；ACK waiter被丢弃时可在 target actor admission前取消 queued command。
 跨 agent Wasm按 Chromium派发 `messageerror`而不传递 compiled module；FileSystemHandle/OPFS File则因尚无 browser
-broker在 transfer side effect前拒绝。真实 process spawn/channel/crash/restart/rebind仍属于 G6B2，不能把这一 wire seam
-冒充多进程完成。
+broker在 transfer side effect前拒绝。真实 process spawn/channel/crash/restart/rebind 仍未实现；只有项目另行采用
+多进程 renderer 时才进入独立 G6B2，不把这一 wire seam 冒充多进程完成，也不把多进程建设当作当前 popup 删除前置。
 
 代码基线：
 
-- Lightmount 原始评估：`2e351a545b04`，分支 `cdp-better-4784u`；实施状态以
+- Moli 原始评估：`2e351a545b04`，分支 `cdp-better-4784u`；实施状态以
   `popup-refactor` 当前分支为准。
-- Phase 5G6A 最终集成基线：`origin/master@0ce69cbdcf`；topic 相对该基线落后 0、领先 66。
-- Phase 5G6B1 实施状态：本文同提交；最终 rebase/门禁结果记录在本节聚焦证据中。
+- 2026-08-22 rebase/revisit merge-base：`origin/master@228330684f`；最终门禁结果记录在 G6B1
+  复核证据中。
 - Chromium：`a03603fe9af6`，本地 checkout `/home/donoughliu/chromium/src`。
 
 本文讨论 HTML `window.open()`、`target=_blank` 和命名 target 创建的 auxiliary
@@ -300,36 +343,36 @@ page-local task/event routing、关闭语义和内存 containment。
 
 ## 评估方法与证据边界
 
-本次评估直接阅读了 Lightmount 和本地 Chromium 源码，并运行了聚焦 nextest。
+本次评估直接阅读了 Moli 和本地 Chromium 源码，并运行了聚焦 nextest。
 关键入口如下。
 
-Lightmount popup：
+Moli popup：
 
-- `lightmount-renderer-v8/src/context_bootstrap/window_runtime/dialogs.rs`
+- `moli-renderer-v8/src/context_bootstrap/window_runtime/dialogs.rs`
   - `window_open_callback`
-- `lightmount-renderer-v8/src/native_bridge/context_host/popups.rs`
+- `moli-renderer-v8/src/native_bridge/context_host/popups.rs`
   - `LightweightPopupBrowsingContextRecord`
   - `create_lightweight_popup_window`
   - `commit_lightweight_popup_document`
   - `execute_lightweight_popup_document_scripts`
-- `lightmount-protocol/src/domains/page/popup.rs`
-- `lightmount-protocol/src/domains/target/lifecycle.rs`
+- `moli-protocol/src/domains/page/popup.rs`
+- `moli-protocol/src/domains/target/lifecycle.rs`
   - `PopupTargetCreation`
   - `ensure_popup_initial_document_page_async`
-- `lightmount-protocol/src/domains/target/tests/tests_target_creation.rs`
+- `moli-protocol/src/domains/target/tests/tests_target_creation.rs`
   - `window_open_hands_off_session_storage_snapshot_and_initial_storage_key`
 
-Lightmount child-frame / realm：
+Moli child-frame / realm：
 
-- `lightmount-renderer-v8/src/frame_owner_model.rs`
-- `lightmount-renderer-v8/src/frame_owner_model/records.rs`
-- `lightmount-renderer-v8/src/frame_owner_model/store.rs`
-- `lightmount-renderer-v8/src/native_bridge/context_host/child_frame_runtime/window.rs`
-- `lightmount-renderer-v8/src/native_bridge/context_host/child_frame_runtime/isolated_world.rs`
-- `lightmount-renderer-v8/src/script_vm/child_frame_realm_materialization.rs`
-- `lightmount-renderer-v8/src/script_vm/post_parse.rs`
-- `lightmount-renderer-v8/src/native_bridge/context_host/window_execution_context/`
-- `lightmount-renderer-v8/src/native_bridge/context_host/window_security_tokens.rs`
+- `moli-renderer-v8/src/frame_owner_model.rs`
+- `moli-renderer-v8/src/frame_owner_model/records.rs`
+- `moli-renderer-v8/src/frame_owner_model/store.rs`
+- `moli-renderer-v8/src/native_bridge/context_host/child_frame_runtime/window.rs`
+- `moli-renderer-v8/src/native_bridge/context_host/child_frame_runtime/isolated_world.rs`
+- `moli-renderer-v8/src/script_vm/child_frame_realm_materialization.rs`
+- `moli-renderer-v8/src/script_vm/post_parse.rs`
+- `moli-renderer-v8/src/native_bridge/context_host/window_execution_context/`
+- `moli-renderer-v8/src/native_bridge/context_host/window_security_tokens.rs`
 
 Chromium：
 
@@ -354,7 +397,7 @@ Chromium：
 对照；WPT 数字来自仓库当前已提交的 case list，只能作为风险信号，不能当作新鲜的
 回归结果。
 
-## Lightmount 当前实现
+## Moli 当前实现
 
 下面 1-4 节保留原始架构评估，便于说明迁移为什么必要；其后 Phase 3 实施记录是当前分支
 状态的增量事实。尤其是第三纵切 D 已经替换了窄 initial `about:blank` 路径，不能再把该路径
@@ -390,7 +433,7 @@ Chromium：
 - timer、message、fetch/XHR、worker、CSP 与部分 lifecycle 状态；
 - 非 `about:blank` URL 的 renderer-local load、parser 和 script execution。
 
-但这里的 LocalWindow id 是 Lightmount owner identity，不代表出现了新的 V8 realm。
+但这里的 LocalWindow id 是 Moli owner identity，不代表出现了新的 V8 realm。
 源码已经明确记录：lightweight popup 仍共享 opener 的 concrete V8 context；它在
 `WindowExecutionContextRealmRecords` 中只能作为 scoped alias，不能注册成另一个
 concrete realm。`document.domain` 更新 security token 时也必须跳过 popup，否则会
@@ -403,7 +446,7 @@ inspector context、跨 realm wrapper 和完整 WindowProxy security semantics�
 
 ### 3. protocol 创建的真实 target
 
-renderer output 到达 `lightmount-protocol` 后，`PopupTargetCreation` 会：
+renderer output 到达 `moli-protocol` 后，`PopupTargetCreation` 会：
 
 - 分配 target/session 相关身份；
 - 创建 auxiliary/background target；
@@ -484,7 +527,7 @@ cross-origin descriptor、CDP Runtime context 等功能，会让每个修复都�
 
 ### 7. 历史 WPT 风险快照（必须重跑后才能用于当前验收）
 
-对 `lightmount-benchmark/wpt-cross-current/{passed,failed,timeout}-cases.txt` 使用下面的
+对 `moli-benchmark/wpt-cross-current/{passed,failed,timeout}-cases.txt` 使用下面的
 粗粒度关键字切片：
 
 ```text
@@ -518,7 +561,7 @@ slice。
 
 ## Chromium 的责任链
 
-Chromium 的具体类很多，但对 Lightmount 最重要的不是复制多进程结构，而是保持同一
+Chromium 的具体类很多，但对 Moli 最重要的不是复制多进程结构，而是保持同一
 条语义责任链。
 
 ### 1. Blink 完成调用方语义和 target 选择
@@ -566,7 +609,7 @@ sandbox popup flags，分配 session storage namespace，并调用 `ChromeClient
 保留脚本关系的 popup 与 source `SiteInstance`/`BrowsingInstance` 协作；opener suppressed
 或禁止 JS access 的路径进入新的 BrowsingInstance，source renderer 不拿到可访问 handle。
 
-Lightmount 不需要照搬 UI thread、widget、SiteInstance 或多进程 IPC，但需要保留：
+Moli 不需要照搬 UI thread、widget、SiteInstance 或多进程 IPC，但需要保留：
 
 - 创建 policy 只有一个最终裁决；
 - initial empty context 先真实存在；
@@ -586,11 +629,11 @@ Lightmount 不需要照搬 UI thread、widget、SiteInstance 或多进程 IPC，
 - cross-origin access 进入 outer proxy interceptors；
 - local frame 使用 `LocalWindowProxy`，跨进程 frame 使用 `RemoteWindowProxy`。
 
-这正是 Lightmount child-frame 已经开始实现、而 lightweight popup 绕开的基础。
+这正是 Moli child-frame 已经开始实现、而 lightweight popup 绕开的基础。
 
-### 4. Chromium 与当前 Lightmount 的对比
+### 4. Chromium 与当前 Moli 的对比
 
-| 维度 | Chromium | 当前 Lightmount | 目标 |
+| 维度 | Chromium | 当前 Moli | 目标 |
 |---|---|---|---|
 | 新窗口实体 | 一个真实 Page/FrameTree | lightweight record + target Page 两份 | 一个 auxiliary Page runtime |
 | JS 返回值 | 指向真实 context 的 WindowProxy，或 `null` | 指向 opener 内 facade | 指向真实 auxiliary context 的 stable proxy |
@@ -1001,7 +1044,7 @@ popup 不应因为 opener Page 关闭而自动销毁，除非产品 policy 明�
 #### Phase 2A：显式 identity 与当前策略基线
 
 Phase 2A 当时的源码基线已经引入 typed `ScriptAgentId`，由 document isolate holder 分配并通过
-Lightmount runtime memory diagnostics 暴露。`RendererPageScriptEnvironment` 是当前
+Moli runtime memory diagnostics 暴露。`RendererPageScriptEnvironment` 是当前
 agent identity 的稳定宿主：
 
 - 同时存活的两个顶层 Page script environment 必须报告不同 `ScriptAgentId`；
@@ -1119,11 +1162,11 @@ bootstrap 并保留到 `ScriptVm` 生命周期；owner-managed Page 仍由 stabl
 额外持有，并在 Page slot retirement 时主动撤销。第一切片合入前验证结果：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   script_vm::tests::browser_api::misc::webassembly_compile_accepts_spec_valid_bounds_above_v8_instantiation_limits
 # 1 passed
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/runtime::tests::(related_page_script_agent_experiment_shares_isolate_and_survives_source_close|per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts|per_page_isolate_policy_reuses_navigation_isolate_and_replaces_contexts)$/)'
 # 3 passed
 
@@ -1138,7 +1181,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 第二切片最终验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/runtime::tests::related_page_script_agent_/)'
 # 7 passed
 
@@ -1219,21 +1262,21 @@ exact release 源码快照：
 ```bash
 env \
   CARGO_TARGET_DIR=/home/donoughliu/code/lightmount3/target/related-agent-memory-release-847448b844 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_ITERATIONS=120 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY=12 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_PAYLOAD_OBJECTS=24000 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_DOM_NODES=4000 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_PROMISES=1000 \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_OUTPUT=/home/donoughliu/code/lightmount3/target/related-agent-memory/847448b844-run1.json \
-  LIGHTMOUNT_RELATED_AGENT_MEMORY_COMMIT=847448b8447f0d226567394d2e878265d3d0cafe \
-  cargo nextest run -p lightmount-renderer-v8 --release --run-ignored only \
+  MOLI_RELATED_AGENT_MEMORY_ITERATIONS=120 \
+  MOLI_RELATED_AGENT_MEMORY_PEER_NAVIGATION_EVERY=12 \
+  MOLI_RELATED_AGENT_MEMORY_PAYLOAD_OBJECTS=24000 \
+  MOLI_RELATED_AGENT_MEMORY_DOM_NODES=4000 \
+  MOLI_RELATED_AGENT_MEMORY_PROMISES=1000 \
+  MOLI_RELATED_AGENT_MEMORY_OUTPUT=/home/donoughliu/code/lightmount3/target/related-agent-memory/847448b844-run1.json \
+  MOLI_RELATED_AGENT_MEMORY_COMMIT=847448b8447f0d226567394d2e878265d3d0cafe \
+  cargo nextest run -p moli-renderer-v8 --release --run-ignored only \
     -E 'test(/runtime::tests::related_page_script_agent_release_memory_acceptance$/)'
 ```
 
 最终 repository gate：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/runtime::tests::related_page_script_agent_/)'
 # 8 passed
 
@@ -1289,7 +1332,7 @@ target adoption，又不先引入网络导航。
 - production related Page 使用已验收的 script-agent router/membership。初始
   `about:blank` 集成回归证明 opener 与 popup 有不同 Page/Context/realm，但报告同一个
   `scriptAgentId` 和一个 live document isolate；`noopener` popup 采用不同 agent；
-- `HeapProfiler.lightmountDiagnostics` 改为从 Page snapshot 汇总唯一 `scriptAgentId`，
+- `HeapProfiler.moliDiagnostics` 改为从 Page snapshot 汇总唯一 `scriptAgentId`，
   不再把 loaded Page 数机械等同于 V8 isolate 数。V8 heap、GC、Inspector default-context
   registry 和 foreground wake 的诊断 scope 相应标为 script-agent，而 target-document
   计数仍保持 Page/Document-local；
@@ -1308,15 +1351,15 @@ target adoption，又不先引入网络导航。
 本纵切完成时的实跑证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/script_vm::inspector_pause::tests/) | test(/script_vm::inspector::tests::replacement_document_binding_does_not_adopt_previous_agent_outbound/) | test(/script_vm::inspector::tests::dropping_overlapping_peer_binding_does_not_deactivate_current_agent/) | test(/script_vm::tests::window_execution_context::strict_window_binding_resolves_registry_policy_and_rejects_retired_realm/) | test(/runtime::tests::related_page_script_agent/) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned)' \
   --no-fail-fast
 # 20 passed
 
-cargo nextest run -p lightmount-protocol --no-fail-fast
+cargo nextest run -p moli-protocol --no-fail-fast
 # 3233 passed
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   -E 'test(websocket_bidi_set_viewport_user_context_inherits_through_window_open) | test(webdriver_classic_named_popup_reuse_navigates_existing_window)'
 # 2 passed
 
@@ -1356,7 +1399,7 @@ cross-document `Page.navigate` 仍会分配 fresh Page/agent。
 时把 initial creation 的 stream lifetime 放宽：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/runtime::tests::(canceled_prepared_document_closes_its_ordered_output_stream|prepared_external_raw_document_waits_for_matching_commit_permit|per_page_isolate_policy_reuses_navigation_isolate_and_replaces_contexts|related_page_script_agent_experiment_shares_isolate_and_survives_source_close|canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream|stale_live_page_replacement_reservation_fails_before_isolate_bootstrap|newer_live_page_replacement_reservation_supersedes_unconsumed_nonce)$/)' \
   --no-fail-fast
 # 7 passed
@@ -1405,12 +1448,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 DocumentCommit、NativeDom 和 core adoption：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(/runtime::tests::(prepared_live_page_replacement_commits_in_stable_page_slot_without_new_handle|prepared_live_page_replacement_document_commit_replies_before_stream_completion|prepared_live_page_replacement_document_commit_preserves_browser_owned_tail_navigation|prepared_native_dom_live_page_replacement_uses_the_stable_page_slot|prepared_live_page_replacement_revalidates_generation_at_commit|canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream|stale_live_page_replacement_reservation_fails_before_isolate_bootstrap|newer_live_page_replacement_reservation_supersedes_unconsumed_nonce)$/)' \
   --no-fail-fast
 # 8 passed
 
-cargo nextest run -p lightmount-core \
+cargo nextest run -p moli-core \
   -E 'test(runtime::navigation_engine::tests::core_page_adopts_prepared_renderer_replacement_without_replacing_ownership)' \
   --no-fail-fast
 # 1 passed
@@ -1478,22 +1521,22 @@ background target：
 本纵切的聚焦与 crate 级证据包括：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(newer_live_page_replacement_supersedes_prepared_candidate_without_retiring_page)' \
   --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(cross_document_page_navigate_replaces_realm_in_stable_page_residence) | test(interleaved_response_heads_only_commit_the_current_prepared_document) | test(runtime_evaluate_await_promise_pending_is_terminated_once_by_navigation_replacement) | test(same_context_background_session_can_stage_its_own_locale_and_timezone_before_promotion)' \
   --no-fail-fast
 # 4 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(local_storage_mutations_fan_out_across_targets_without_leaking_session_storage)' \
   --no-fail-fast
 # default test stack 下连续 3 次通过
 
-cargo nextest run -p lightmount-protocol --no-fail-fast
+cargo nextest run -p moli-protocol --no-fail-fast
 # 3234 passed
 
 cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
@@ -1550,32 +1593,32 @@ popup creation，但刻意不把 initial Document mirror 误报为完成：
 本纵切当前的聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers)' \
   --no-fail-fast
 # 2 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   opener_window_handle_projects_the_renderer_owned_auxiliary_realm \
   --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   window_open_hands_off_session_storage_snapshot_and_initial_storage_key \
   --no-fail-fast
 # 1 passed；现阶段仍明确验证 mirrored loader 的双 owner characterization
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   window_open_named_target_reused_in_same_command_emits_one_page_event \
   --no-fail-fast
 # 1 passed；覆盖 facade intrinsic registry 与 named reuse
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   webdriver_classic_execute_script_round_trips_window_and_frame_references \
   --no-fail-fast --stress-count 5
 # 5/5 passed；覆盖 handoff 后 popup Window reference identity 回查
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   owner_scheduler_applies_popup_terminal_from_stable_page_route \
   --no-fail-fast --stress-count 5
 # 5/5 passed；覆盖 facade token、opener projection 与 mirrored terminal application
@@ -1622,17 +1665,17 @@ authoritative navigation。
 聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   main_default_realm_prebootstrap_preserves_window_and_document_until_inspector_materialization \
   --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(main_default_realm_prebootstrap_preserves_window_and_document_until_inspector_materialization) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers) | test(/script_vm::inspector_pause::tests/) | test(/script_vm::inspector::tests::replacement_document_binding_does_not_adopt_previous_agent_outbound/) | test(/script_vm::inspector::tests::dropping_overlapping_peer_binding_does_not_deactivate_current_agent/)' \
   --no-fail-fast
 # 16 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | test(window_open_hands_off_session_storage_snapshot_and_initial_storage_key) | test(window_open_named_target_reused_in_same_command_emits_one_page_event)' \
   --no-fail-fast
 # 3 passed
@@ -1674,17 +1717,17 @@ popup 的 Document owner：
 聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   related_page_isolate_admission_builds_peer_bindings_inside_entered_opener_scope \
   --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_isolate_admission_builds_peer_bindings_inside_entered_opener_scope) | test(main_default_realm_prebootstrap_preserves_window_and_document_until_inspector_materialization) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(related_page_script_agent_experiment_shares_isolate_and_survives_source_close) | test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers)' \
   --no-fail-fast
 # 5 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | test(window_open_hands_off_session_storage_snapshot_and_initial_storage_key) | test(window_open_named_target_reused_in_same_command_emits_one_page_event)' \
   --no-fail-fast
 # 3 passed
@@ -1815,18 +1858,18 @@ protocol initial target build 现在是 adoption，而不是第二次 bootstrap�
 本纵切的聚焦与 repository gate 实跑证据：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | test(window_open_hands_off_session_storage_snapshot_and_initial_storage_key) | test(popup_initial_empty_document_frame_tree_inherits_opener_origin) | test(popup_initial_empty_document_record_captures_creator_identity) | test(rust_cdp_chromium_target_window_open_empty_url_creates_about_blank_popup) | test(window_open_named_target_reused_in_same_command_emits_one_page_event)' \
   --no-fail-fast
 # 6 passed
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   webdriver_classic_execute_script_round_trips_window_and_frame_references \
   --no-fail-fast
 # 1 passed
 
-cargo check -p lightmount-renderer-v8 --all-targets
-cargo check -p lightmount-protocol --all-targets
+cargo check -p moli-renderer-v8 --all-targets
+cargo check -p moli-protocol --all-targets
 # passed
 
 cargo nextest run --no-fail-fast
@@ -1907,22 +1950,22 @@ renderer 同步路径现在遵守以下边界：
 本纵切的实跑聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(window_open_hands_off_session_storage_snapshot_and_initial_storage_key) | test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | test(rust_cdp_chromium_target_window_open_blank_creates_popup_target) | test(rust_cdp_chromium_target_window_open_auto_attached_popup_materializes_initial_document) | test(rust_cdp_chromium_target_window_open_waiting_popup_routes_initial_document_after_resume) | test(window_open_emits_popup_target_created_from_runtime_work) | test(rust_cdp_chromium_target_window_open_javascript_url_still_reports_popup_target) | test(window_open_named_target_reuses_existing_popup_target) | test(rust_cdp_chromium_target_window_open_empty_url_creates_about_blank_popup) | test(popup_initial_about_blank_adopts_renderer_page_and_related_script_agent)' \
   --no-fail-fast
 # 10 passed
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(window_open_non_about_returns_lightweight_popup_and_dispatches_load) | test(window_open_named_lightweight_popup_reuses_without_recloning_session_storage)' \
   --no-fail-fast
 # 2 passed；standalone / named legacy 边界未被 production admission 改写
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   websocket_bidi_set_viewport_user_context_inherits_through_window_open \
   --no-fail-fast
 # 1 passed；同步 stable WindowProxy 与 navigation 后 target 都继承 user-context viewport
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   window_open_lightweight_popup_inherits_opener_viewport_surface \
   --no-fail-fast
 # 1 passed；保留 legacy fallback 的 viewport 行为
@@ -1988,7 +2031,7 @@ RendererPendingPopupActivation
 聚焦回归分别证明正常 action、stale generation 和 debugger admission：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(local_storage_mutations_fan_out_across_targets_without_leaking_session_storage) or test(popup_navigation_owner_action_rejects_replaced_page_and_cannot_be_rescanned) or test(rust_cdp_chromium_target_window_open_waiting_popup_routes_initial_document_after_resume) or test(popup_activation_creates_target_and_schedules_navigation_without_page_readback)' \
   --no-fail-fast
 # 4 passed
@@ -2038,7 +2081,7 @@ Chromium 对照给出的是一个明确的两层合同：
   `net::ERR_ABORTED`，Network 顺序为 `responseReceived → loadingFailed(canceled=true)`，而不是
   `loadingFinished`。
 
-Lightmount 现在把这条语义放在公共 navigation terminal 边界：
+Moli 现在把这条语义放在公共 navigation terminal 边界：
 
 ```text
 HTTP response head (204/205)
@@ -2094,15 +2137,15 @@ seed 和 `document.open()` 的作用；progress queue 与 browser history owner 
 聚焦与全量验证：
 
 ```bash
-cargo nextest run -p lightmount-protocol --no-fail-fast \
+cargo nextest run -p moli-protocol --no-fail-fast \
   -E 'test(completed_no_commit_response_progress_orders_response_before_canceled_failure) | test(active_target_initial_empty_document_record_tracks_navigation_lifecycle) | test(rust_smoke_fixture_serves_navigation_no_commit_routes) | test(page_navigate_network_failure_invalidates_previous_document) | test(popup_no_commit_responses_preserve_initial_document_before_redirect_replacement)'
 # 5 passed
 
-cargo nextest run -p lightmount-protocol --no-fail-fast \
+cargo nextest run -p moli-protocol --no-fail-fast \
   -E 'test(navigation_history_marks_reload_as_reload_transition) | test(navigation_history_supports_playwright_back_forward_commands) | test(navigated_within_document_matches_chromium_mixed_history_sequence) | test(navigation_history_is_preserved_per_parked_target) | test(renderer_history_back_uses_browser_owned_navigation_history) | test(rust_cdp_capability_page_navigation_history_round_trip)'
 # 6 passed
 
-cargo nextest run -p lightmount-renderer-v8 --no-fail-fast \
+cargo nextest run -p moli-renderer-v8 --no-fail-fast \
   -E 'test(root_initial_empty_document_replaces_same_and_cross_document_history_updates) | test(document_open_exits_root_initial_empty_history_replacement_mode) | test(window_open_204_popup_ignores_navigation_and_preserves_initial_empty_history) | test(window_open_without_url_replaces_initial_empty_history_on_first_navigation)'
 # 4 passed
 
@@ -2225,14 +2268,14 @@ owner continuation，以及 Classic/BiDi completion routing。
 聚焦验证证据：
 
 ```bash
-cargo nextest run -p lightmount-protocol --no-fail-fast \
+cargo nextest run -p moli-protocol --no-fail-fast \
   --success-output never --status-level fail --final-status-level fail --show-progress none
 # 3295 passed
 
-cargo nextest run -p lightmount-protocol-cdp --no-fail-fast
+cargo nextest run -p moli-protocol-cdp --no-fail-fast
 # 8 passed
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   websocket_cdp_raw_client_runtime_evaluate_immediately_after_page_navigate_succeeds \
   websocket_cdp_runtime_control_command_waits_for_navigation_attachment_cutover \
   websocket_cdp_runtime_evaluate_uses_committed_page_while_parser_blocking_source_is_pending \
@@ -2333,15 +2376,15 @@ response-stage 又按原始 head 提前终止。第三纵切的真实 popup 204/
 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   response_stage_effective_no_content_statuses_abort_without_committing
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   response_stage_fulfill_can_replace_original_no_content_with_committable_response
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(/(continue_response_can_override_status_and_headers|fulfill_request_completes_navigation_with_synthetic_response|popup_no_commit_responses_preserve_initial_document_before_redirect_replacement)/)'
 # 4 passed（同时命中一条同名 subresource override 回归）
 
@@ -2362,7 +2405,7 @@ DNS/connect/TLS/HTTP failure 的 Document/error-page policy，也不扩大到 na
 
 第三纵切 C 和第五纵切 E 已经把“收到一个不可提交的 HTTP response”定义为保留旧 Document 的
 no-commit terminal，但普通 DNS/connect/reset 等 transport failure 是另一类行为：请求尚未得到
-可渲染 response，Chromium 会提交一个新的 browser-owned error Document。旧 Lightmount 路径把
+可渲染 response，Chromium 会提交一个新的 browser-owned error Document。旧 Moli 路径把
 `NetworkFetchFailure` 直接 materialize 为 failed navigation，并使 target 的旧 Document 不再可用；
 popup initial `about:blank` 因而既没有 Chromium 的错误页，也不能继续通过原 stable Page/WindowProxy
 观察新 realm。这个差异同时影响 `Page.navigate`、Target/history、Network terminal、Runtime realm
@@ -2385,7 +2428,7 @@ Document primitive。
 /home/donoughliu/chromium/src/out/Default/chrome \
   --headless=new --disable-gpu --no-sandbox \
   --remote-debugging-port=9229 \
-  --user-data-dir=/tmp/lightmount-chromium-network-error-probe \
+  --user-data-dir=/tmp/moli-chromium-network-error-probe \
   --noerrdialogs --no-first-run --ozone-platform=headless \
   --ozone-override-screen-size=800,600 --use-angle=swiftshader-webgl \
   about:blank
@@ -2430,7 +2473,7 @@ Chromium 二进制的实际协议序列；实现和测试保留该事实，不�
   `frameNavigated.frame.unreachableUrl`，browser tests 还检查 error Document 的内部 URL和 opaque
   origin。
 
-##### Lightmount owner transaction
+##### Moli owner transaction
 
 实现复用已经成熟的 stable Page replacement/realm 基础，不创建第二个 Page，也不恢复 lightweight
 popup loader。普通 pre-response failure 现在走：
@@ -2522,21 +2565,21 @@ JS object。`RendererPageScriptEnvironment` 现在在旧 main realm commit 前�
 本轮聚焦验证与全量门禁：
 
 ```bash
-cargo nextest run -p lightmount-protocol navigate_failure --no-fail-fast
+cargo nextest run -p moli-protocol navigate_failure --no-fail-fast
 # 2 passed
 
-cargo nextest run -p lightmount-protocol main_document_navigation_failure --no-fail-fast
+cargo nextest run -p moli-protocol main_document_navigation_failure --no-fail-fast
 # 2 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   page_navigate_network_failure_commits_error_document_in_stable_page --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   error_page_progress_releases_failed_before_finished_at_separate_boundaries --no-fail-fast
 # 1 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   popup_transport_failure_commits_error_document_in_stable_auxiliary_page --no-fail-fast
 # 1 passed
 
@@ -2677,13 +2720,24 @@ world-name 回归在并发 core+renderer 负载下从修复前第 6/22/36 次内
 `JsContextHost` 内唯一。两个 Page 都可能分配 `LocalWindowId(1)`，跨 host 直接比较会把两个独立
 opaque origin 错判为同源，并绕过 restricted surface。
 
-related-page 跨 host origin gate 现在不把 opaque owner 数值当作全局 nonce；两个 independently
-created opaque realm 一律不能靠碰撞互访。initial `about:blank` 合法继承 creator 的 opaque 或
-`document.domain`-mutated effective origin 时，Page admission 已把 creator 的精确 V8 security token
-交给 initial Context，因此同源访问在到达该 fallback gate 前已经成立。当前生产回归覆盖
-`data:` opener → initial inherited Document → opaque error Document 的转变。后续仍需用 WPT 覆盖
-非 initial 的 inherited opaque navigation、sandbox-forced opaque origin 和 COOP split，不能把
-host-local owner id 扩成伪全局 nonce。
+第一阶段防御曾让 related-page 跨 host gate 对 opaque origin 一律 fail closed，并依赖 initial Context 的 V8
+security token 保住常用继承路径。P6R2 已替换这项临时状态。对照固定 Chromium
+`security_origin.cc:173-210,249-317,566-611,708-712`：Blink 的 opaque `SecurityOrigin` 保存
+`url::Origin::Nonce`，copy/IPC reconstruction 复制 nonce，`CreateUniqueOpaque()` / `DeriveNewOpaqueOrigin()`
+创建新 nonce，`IsSameOriginWith()` 和 `IsSameOriginDomainWith()` 在任一侧 opaque 时只比较 nonce。Moli 因此复用
+browser-context 单调分配的 `OpaqueOriginNonce`，不再用 V8 token 或 host-local owner id 充当 Rust authority。
+
+nonce 的生命周期绑定 LocalWindow，而不是机械绑定 Document。普通 child navigation 安装 replacement
+LocalWindow 时换 nonce；`document.open()` 只换 Document owner、保留 LocalWindow，因此必须保留 nonce。top-level
+Page 构造时从 inherited StorageKey 复用 nonce，独立 opaque Page 则由 browser-context runtime 分配新值。这样
+`data:` opener → related initial `about:blank` 在完整 Page adoption 前后都能通过同源 DOM access，而另一个同样
+序列化为 `null` 的 related Page 仍抛 `SecurityError`。
+
+remote top-level state 与 remote frame snapshot 同步复制 nonce；frame wire 升到 v2，并严格拒绝 opaque-without-nonce、
+tuple-with-nonce、zero nonce 和 opaque `document.domain`。remote `CanNavigate` 的 target/ancestor origin comparison
+消费该 identity，不再从公开字符串 `null` 反造无 identity origin。nonce 仍不会暴露给 JavaScript，
+`origin`/`MessageEvent.origin` 继续返回 `null`。剩余 WPT 长尾是 sandbox/COOP/remote navigation 的外部矩阵，
+不再是 owner 模型缺口。
 
 ##### cross-Page `postMessage`
 
@@ -2734,7 +2788,7 @@ auxiliary Page 的 top-level popup，以及既有 `Page.close` / `Target.closeTa
 它没有把 lightweight named/`noopener` popup 伪装成已经迁移，也没有在这一层实现 popup blocker、
 sandbox、COOP 或完整 unload policy。
 
-##### Chromium 合同与 Lightmount 对应边界
+##### Chromium 合同与 Moli 对应边界
 
 本地 Chromium `a03603fe9af6` 的关键事实如下：
 
@@ -2749,7 +2803,7 @@ sandbox、COOP 或完整 unload policy。
   unload / final close path，并在 renderer-origin request 已不再指向 active main frame 时拒绝误关新页；
   `WebContentsImpl::ClosePage` 也进入该入口。
 
-Lightmount 对应采用两阶段状态，而不是从 `close()` callback 直接 drop `PageVm`：
+Moli 对应采用两阶段状态，而不是从 `close()` callback 直接 drop `PageVm`：
 
 ```text
 target Window.close()
@@ -2832,7 +2886,7 @@ proxy facade，证明 browser-origin close 没有旁路 renderer teardown。
 本地 Chromium 行为探针还校正了两个边界。关闭 DOM-opened popup 后，保存的 proxy 仍满足
 `popup.opener === opener`，所以 closed facade 保留原 opener edge，而不是擅自 sever 为 `null`。另一方面，
 Chromium 的 Oilpan/V8 lifetime 能让已关闭 popup 或已移除 iframe 的旧 Node 和函数继续读取 detached
-Document；Lightmount 当前 DocumentRuntime/`JsContextHost` 还不是由 V8 wrapper 共同拥有，因而本纵切
+Document；Moli 当前 DocumentRuntime/`JsContextHost` 还不是由 V8 wrapper 共同拥有，因而本纵切
 只能在 host retirement 时让这些 raw-host-backed 值抛 `TypeError` 来保证内存安全。这是明确的兼容性
 缺口，不应把“安全 fail closed”解读成 Chromium 的 detached-Document 完整语义。
 
@@ -2840,7 +2894,7 @@ Document；Lightmount 当前 DocumentRuntime/`JsContextHost` 还不是由 V8 wra
 `[savedNode.textContent, savedFunction(), savedWindow.closed]` 是 `['old','old',true]`；关闭 DOM-opened
 popup 后，下一 task 中的
 `[savedNode.textContent, savedFunction(), popup.closed, popup.opener === opener]` 是
-`['old','old',true,true]`。这与上述 source lifecycle 分支一致，也把当前 Lightmount 的安全降级边界
+`['old','old',true,true]`。这与上述 source lifecycle 分支一致，也把当前 Moli 的安全降级边界
 固定成可复查的行为差异。
 
 #### Phase 5C：live child relation 与 Page-scoped opener edge
@@ -3167,7 +3221,7 @@ accessing Realm
   保留 top-level `blur()` no-op；
 - attribute getter 先校验 receiver，再在 target access-surface Context 读取 live relation/scalar；
   `window/self/frames` 直接返回 exact receiver，避免创建等价但不相等的 identity；
-- Chromium 依赖 V8 interface signature 拒绝错误 Location receiver；当前 Lightmount 的 minimal
+- Chromium 依赖 V8 interface signature 拒绝错误 Location receiver；当前 Moli 的 minimal
   cross-origin object 没有对应 template signature，因此 cached `href` setter 与 `replace` 在参数转换前
   显式验证 Location proxy brand。扩大矩阵曾捕获 `hrefSetter.call(null, ...)` 被错误当成访问方 global 的
   回归，修复后又加入 `replace.call(null, ...)` 防回归。
@@ -3211,7 +3265,7 @@ WPT
 这条边界：registry 决定“是哪一个 child”，observer-relative access 决定“本次能否 materialize/展开”，
 stable WindowProxy 决定“对象 identity 是哪一个”。
 
-##### Lightmount cutover
+##### Moli cutover
 
 实现没有给 synthetic facade 增加第二套动态 index/name trap，而是把责任收回已成熟的 stable
 WindowProxy/realm 基础：
@@ -3295,7 +3349,7 @@ opener Page 内创建一份 lightweight Window、Document 和 loader，再等 pr
   同一可复用 name group，但一个预先存在的 named iframe/window 仍可以被 noreferrer navigation 命中。
 
 本纵切阅读了上述 Chromium source/WPT，没有编译 Chromium，也没有运行 upstream WPT；这里的 WPT
-结果是合同对照，不是 Lightmount 新的通过声明。另用本地 `out/Default/chromedriver` 驱动
+结果是合同对照，不是 Moli 新的通过声明。另用本地 `out/Default/chromedriver` 驱动
 `out/Default/chrome`（`Chromium 147.0.7709.0`，headless），从 HTTP creator 分别打开
 `about:blank`：
 
@@ -3330,7 +3384,7 @@ header patch。拆出 destination Document referrer 后，`about:blank` 又稳�
 `about:blank#fragment` 后 same-document 路径同样失败，证明 initial empty Document 必须在默认 realm
 创建前独立接收 creator referrer，不能等待 navigation commit 补写。
 
-##### Lightmount cutover
+##### Moli cutover
 
 E1 把 creation policy、Page reservation、导航与 Document commit 串成一份 typed transaction：
 
@@ -3411,7 +3465,7 @@ browsing-context group，也不把所有 named producer 一次性塞进该 map�
 
 `window-open-noopener.html` 直接覆盖第 4 点；`windows/noreferrer-window-name.html` 同时覆盖 existing
 named target 可被命中与 newly-created noreferrer contexts 不应互相复用。E2A 沿用 E1 的源码/WPT 对照
-边界：本轮没有编译 Chromium，也没有运行 upstream WPT，因此这里只声明 Lightmount 聚焦回归，不声明
+边界：本轮没有编译 Chromium，也没有运行 upstream WPT，因此这里只声明 Moli 聚焦回归，不声明
 上述 WPT 已通过。
 
 ##### 稳定红灯：同一个 name 的两套 owner
@@ -3450,7 +3504,7 @@ undefined||false
   然后期待 `window.open()` 被该 map 重定向。新回归反向锁定：renderer-selected named popup 必须创建自己的
   exact related Page，旧 background target 的 URL/Document 和 active target 都不变。
 
-##### Lightmount cutover
+##### Moli cutover
 
 E2A 的 renderer/protocol 流程如下：
 
@@ -3566,7 +3620,7 @@ right: None
 这个 map 会把不相关 Fresh group 暴露成 browser-context-wide named target。代码审计同时确认 target name
 只存在于 lightweight/protocol projection，fresh Page 的首个真实 realm 没有 creator-frozen name 输入。
 
-##### Lightmount cutover
+##### Moli cutover
 
 E2B 把 group policy 与首个 realm name 作为 renderer creation decision 的一部分：
 
@@ -3655,7 +3709,7 @@ target 选择、opener/referrer policy、initial realm name、Page admission 和
 - 这些 case 同时说明 noopener policy 不能被实现成“先新建，再让 browser-context-wide name map 决定是否
   合并”。lookup 必须先在 source 可见的 browsing-context namespace 内完成，只有 miss 才执行 group split。
 
-本轮没有编译 Chromium，也没有运行 upstream WPT，因此上述内容仍是源码/WPT 合同对照。Lightmount 当前
+本轮没有编译 Chromium，也没有运行 upstream WPT，因此上述内容仍是源码/WPT 合同对照。Moli 当前
 先覆盖 top-level 或 related auxiliary source 中具有完整 creator capability 的普通 named、可解析、非
 `javascript:` hyperlink。现有 `navigate_hyperlink_target_browsing_context()` 仍保证当前 Page 的 named
 iframe 先于 related top-level lookup；但 child-frame source 的完整 subtree/Page/related-Pages ordering、
@@ -3689,7 +3743,7 @@ same-name suppress-opener links: left 1 Target.targetCreated
 name projection，再执行 existing related target 的 `rel=noreferrer` 导航；只有 renderer group lookup
 仍能精确复用原 Page，并保持它已有的 name/opener edge。
 
-##### Lightmount cutover
+##### Moli cutover
 
 E2C 将 hyperlink 路径改为下面的 owner 顺序：
 
@@ -3784,7 +3838,7 @@ renderer 只把 URL 交给 protocol，POST 会静默变成 GET；若只保留 re
   `form-submission-0/submit-entity-body.html` 又覆盖 urlencoded、multipart、text/plain 的 exact entity
   body。E2D 没有运行 upstream WPT，因此这些仍是源码/WPT 合同对照，不是通过率声明。
 
-Lightmount 旧路径在 form owner 内发生了两个稳定分叉：
+Moli 旧路径在 form owner 内发生了两个稳定分叉：
 
 ```text
 ordinary name
@@ -3899,21 +3953,21 @@ E2D 建立以下窄不变量：
 接入前/后的聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(per_page_isolate_policy_keeps_window_open_routes_page_owned)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前：1 failed，named form popup activation left 0/right 1。
 # 接入后：1 passed；覆盖 Related creation、exact named POST reuse、target NavigateEvent/FormData cancellation、
 # 两个 same-name Fresh form、base target=_blank、空 submitter formtarget override 和 exact request fields。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前：2 failed，两个 case 的 Target.targetCreated 都为空。
 # 接入后：2 passed；HTTP server 与 Network.requestWillBeSent 同时验证 POST、raw body、Content-Type、
 # Referer/noreferrer、Related reuse、Fresh _blank、opener 保留/抑制、window.name 与唯一 response Document。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(form_target_blank_reloads_rel_opener_policy_for_each_submission) | test(canceled_post_form_navigation_aborts_signal_without_synthetic_timer) | test(detached_child_form_submit_targets_named_iframe_without_shadow_controls) | test(formdata_event_appended_entries_are_submitted_to_named_iframe) | test(distinct_forms_keep_distinct_pending_child_target_submissions) | test(programmatic_form_submit_keeps_successive_distinct_child_targets) | test(form_top_and_parent_targets_queue_plain_top_level_navigation) | test(renderer_top_level_form_post_preserves_request_through_document_commit) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 14 passed；覆盖 form current/child/auxiliary 三条 request owner 与相邻 hyperlink/referrer/group 路径。
@@ -3944,7 +3998,7 @@ fallback，而是把查找提升为 renderer-owned、source-relative 的 frame-t
   related Page 内的 nested name。因为 source 不能访问 target 及其任何 ancestor，旧 nested candidate
   必须被跳过，最终打开同名 top-level context；回传的 `isTop` 必须为 `true`。
 
-本轮没有编译 Chromium，也没有运行 upstream WPT；以上仍是源码与 WPT 合同对照。Lightmount 的本地
+本轮没有编译 Chromium，也没有运行 upstream WPT；以上仍是源码与 WPT 合同对照。Moli 的本地
 回归复现相同的树顺序和普通 origin/ancestor 决策，不把它表述为完整 `LocalFrame::CanNavigate()`。
 
 ##### 稳定红灯与违反路径
@@ -4033,13 +4087,13 @@ E2E 建立以下窄不变量：
 接入过程中与最终聚焦证据：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_named_frame_lookup_follows_chromium_frame_tree_order)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 13005909-fbfa-4adc-a01c-30b8ccd0c0c8：接入前 1 failed，稳定暴露上述四个错误选择。
 # run 46408fd0-0683-4ab8-b5db-c9637796afd1：origin/owner 修正后 1 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | \
       test(named_frame_lookup_skips_candidate_the_source_cannot_navigate)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
@@ -4047,12 +4101,12 @@ cargo nextest run -p lightmount-renderer-v8 \
 # 第二条由 data: opaque child 发起 lookup；同名 current-Page candidate 及 top ancestor 均不可访问，
 # 因而必须创建新 auxiliary Page，并验证旧 candidate marker/URL 未变化。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | test(named_frame_lookup_skips_candidate_the_source_cannot_navigate) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(window_open_noopener_navigates_existing_named_iframe_and_returns_null) | test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(hyperlink_javascript_url_csp_checks_the_source_document_before_target_selection) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 067d4968-3fc3-4692-b512-5c38faa76cf5：10 passed；覆盖 E2E 与 E2A-E2D/JavaScript-CSP 邻接面。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | \
       test(named_frame_lookup_skips_candidate_the_source_cannot_navigate)' \
   --stress-count 50 --flaky-result fail --test-threads 8 --no-fail-fast
@@ -4174,19 +4228,19 @@ production-style renderer 回归锁住：
   top-level protocol handoff 与 hyperlink/referrer 邻接行为保持不变。
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(detached_child_form_submit_targets_named_iframe_without_shadow_controls) | \
       test(related_page_named_form_post_uses_nested_target_owner_and_exact_request)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 4980908e-6d47-43ae-b615-4543169a5164：2 passed；覆盖 request-aware fixture 与
 # related-child HTTP/Referer/document.referrer commit。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(related_page_named_form_post_uses_nested_target_owner_and_exact_request) | test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | test(named_frame_lookup_skips_candidate_the_source_cannot_navigate) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(form_target_blank_reloads_rel_opener_policy_for_each_submission) | test(canceled_post_form_navigation_aborts_signal_without_synthetic_timer) | test(detached_child_form_submit_targets_named_iframe_without_shadow_controls) | test(formdata_event_appended_entries_are_submitted_to_named_iframe) | test(submit_button_click_supersedes_programmatic_submit_after_target_change) | test(distinct_forms_keep_distinct_pending_child_target_submissions) | test(programmatic_form_submit_keeps_successive_distinct_child_targets) | test(form_top_and_parent_targets_queue_plain_top_level_navigation) | test(renderer_top_level_form_post_preserves_request_through_document_commit) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 90b62837-12de-4bbd-95b3-136a83d35c32：18 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | \
       test(related_page_named_form_post_uses_nested_target_owner_and_exact_request)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
@@ -4228,7 +4282,7 @@ form navigation 已被普通 `location` navigation 替换，稍后的 submitter 
 实现前的 focused run 同时固定两条失败：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(submitter_cancels_previous_same_form_navigation_in_a_related_page_child) | \
       test(submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_target)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
@@ -4291,7 +4345,7 @@ source HTMLFormElement state
 ##### 本纵切建立的回归与当前证据
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(submitter_cancels_previous_same_form_navigation_in_a_related_page_child) | \
       test(submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_target)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
@@ -4299,12 +4353,12 @@ cargo nextest run -p lightmount-renderer-v8 \
 # related case 已是 in-flight HTTP 版本：A transport close、A 保持 about:blank、B request/Document commit
 # 与 response body 均被断言；local case 证明 stale form token 不会清掉 replacement navigation。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E '<E2G 两条回归 + E2F/form/popup 邻接矩阵 18 条>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 865e048e-dc64-4084-9d59-09947ce6d1ca：20 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(submitter_cancels_previous_same_form_navigation_in_a_related_page_child) | \
       test(submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_target) | \
       test(child_module_producer_boundaries_require_exact_task_owner)' \
@@ -4312,7 +4366,7 @@ cargo nextest run -p lightmount-renderer-v8 \
 # run a3cc7c41-c243-46cc-82a2-f7df67d7eb76：3 passed；第三条锁住 stale owner 不得清除
 # replacement Document 的 module/parser ledger，exact current owner 可以清除。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(submitter_cancels_previous_same_form_navigation_in_a_related_page_child) | \
       test(submit_button_does_not_cancel_a_newer_non_form_navigation_in_the_previous_target)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
@@ -4325,7 +4379,7 @@ cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
 # 将主动 loader.cancel() 错误放进通用 child-load clear，边界过宽。修复保留通用 historical terminal，
 # 只在 exact form-cancel binding 命中时关闭 transport。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(stale_same_root_terminal_does_not_settle_newer_exact_navigation) | \
       test(response_for_replaced_child_document_is_historical_network_only) | \
       test(nested_stale_child_response_retains_producer_captured_parent_frame) | \
@@ -4371,13 +4425,13 @@ cross-origin/downgrade 与 Fetch URL override 更会继续基于错误 source �
   navigation policy 输入。也就是说 source 是 causal/security input，target Frame/Page 才是 scheduler、
   loader 与 commit owner，两者不能合成一项“当前 root”；
 - Chromium 的 `ResourceRequest` 保存 referrer URL/policy，由 network navigation 对实际 destination 处理；
-  因而 Lightmount 也不能把 initial URL 的最终 `Referer` 字符串当作 redirect/DevTools URL override 的
+  因而 Moli 也不能把 initial URL 的最终 `Referer` 字符串当作 redirect/DevTools URL override 的
   authoritative transport input。
 
 实现前的两个 protocol 回归分别固定 direct + redirect/cross-origin 与 Fetch URL override 的违反路径：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(child_form_top_navigation_keeps_source_referrer_across_redirect) | \
       test(child_form_top_navigation_recomputes_source_referrer_after_fetch_url_override)' \
   --no-fail-fast
@@ -4439,7 +4493,7 @@ source element / entered Window
 ##### 本纵切建立的回归与当前证据
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(child_form_top_navigation_keeps_source_referrer_across_redirect) | \
       test(child_form_top_navigation_recomputes_source_referrer_after_fetch_url_override)' \
   --no-fail-fast
@@ -4448,7 +4502,7 @@ cargo nextest run -p lightmount-protocol \
 # unsafe-url policy 下的完整 child URL；第二条断言 Fetch pause、URL-overridden transport 与 commit
 # Document 都保留同一 child source。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(child_form_top_target_carries_exact_child_window_document_source) | \
       test(child_window_open_top_carries_exact_source_and_noreferrer_policy) | \
       test(child_form_top_navigation_keeps_source_referrer_across_redirect) | \
@@ -4458,19 +4512,19 @@ cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
 # renderer 两条不是 URL-only 断言：它们比较 exact frame id/local-window id/document id，并锁住
 # window.open(..., `_top`, `noreferrer`) 的 suppression bit。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   renderer_navigation_source_recomputes_default_policy_for_actual_destination \
   --no-fail-fast
 # run e0753570-aed5-4b57-8e6e-62c0b9f2bcb1：1 passed；默认 policy 的 same-origin full URL、
 # cross-origin origin-only、HTTPS→HTTP downgrade 清空，以及 noreferrer/explicit-header inference gate
 # 均在 carrier 边界锁定。
 
-cargo nextest run -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-fetch -p moli-renderer-v8 -p moli-protocol \
   -E '<E2H 五条核心回归 + form/popup/Fetch/auth/response-stream 邻接矩阵 13 条>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run e78b5f4e-eefb-4635-8380-fddb15fcf3bf：18 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E '<E2H 五条核心回归>' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
@@ -4481,7 +4535,7 @@ cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
 # 两条失败分别是 websocket parser-script Network/DCL backlog 与 file-chooser document-replacement
 # shared-id 观察；均不在本轮改动路径，但由于涉及 lifecycle/currentness，继续按 flaky 规则复跑。
 
-cargo nextest run -p lightmount -p lightmount-protocol \
+cargo nextest run -p moli -p moli-protocol \
   -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded) | \
       test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
@@ -4500,7 +4554,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 git pull -r origin master
 # Current branch popup-refactor is up to date；origin/master 没有基线漂移，HEAD 未重写。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E '<E2H 五条核心回归>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # 同步后 run ccdb722e-7685-4e10-96a3-e381b9d19b0a：5 passed。
@@ -4540,12 +4594,12 @@ Page/target/storage work，违反本章的 creation transaction 不变量。
 renderer 回归先固定三个违反路径：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 sandbox_without_allow_popups
+cargo nextest run -p moli-renderer-v8 sandbox_without_allow_popups
 # run 4628abb3-0e05-4911-961b-58a860618203：2 failed。
 # window.open(_blank/named-miss) 都返回非 null；anchor/form 也留下 popup activation。
 # 同一 sandbox child 以自己的 ordinary name 为 target 已正确复用 existing context，证明失败点只在 new target。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   response_csp_sandbox_requires_allow_popups_for_auxiliary_creation
 # run 0eed2bb2-408b-40df-82d4-7257a370679a：1 failed；`sandbox allow-scripts` 仍创建 popup。
 ```
@@ -4592,20 +4646,20 @@ source Window/element policy snapshot
 ##### 当前证据与明确未完成项
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 sandbox_without_allow_popups
+cargo nextest run -p moli-renderer-v8 sandbox_without_allow_popups
 # run 734056d9-4ad8-4817-93be-2061ae7d33af：2 passed。
 
-cargo nextest run -p lightmount-renderer-v8 sandbox
+cargo nextest run -p moli-renderer-v8 sandbox
 # 首次实现后 run f736c117-5418-4a76-827e-ccbfad47c86d：24 passed。
 # 补入 direct-URL WPT 等价回归后 run e38bfe19-78a8-484a-987c-50f9d66df6b2：27 passed。
 # 覆盖 attribute/CSP parser、window.open/link/form block、response CSP、既有 non-escape/escape popup、
 # nested top-navigation denial、document.domain 与 sandbox storage 邻接行为。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   auxiliary_creation_policy_separates_popup_admission_from_sandbox_escape
 # run 45b184dc-66b5-47e4-922f-9a457cc281de：1 passed；escape-only 拒绝、propagating/escaping policy 分叉。
 
-cargo nextest run -p lightmount-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
 # run 772090fe-b0e7-46bc-9f3c-1169a8feefbb：20/20 iterations passed，每轮 7/7。
@@ -4614,13 +4668,13 @@ cargo nextest run -p lightmount-renderer-v8 -E '<E2I 七条 admission/inheritanc
 本轮也用当前 release binary 跑了三个最贴近的 upstream WPT，但结果不能被折算成全绿：
 
 ```bash
-uv run --project lightmount-benchmark python -m lightmount_benchmark.wpt_cross \
-  --wpt-root ../wpt --engine lightmount --mode cli \
-  --lightmount-bin target/release/lightmount \
+uv run --project moli-benchmark python -m moli_benchmark.wpt_cross \
+  --wpt-root ../wpt --engine moli --mode cli \
+  --moli-bin target/release/moli \
   --case html/browsers/sandboxing/sandbox-disallow-popups.html \
   --case html/semantics/embedded-content/the-iframe-element/iframe_sandbox_popups_nonescaping-1.html \
   --case html/semantics/embedded-content/the-iframe-element/iframe_sandbox_popups_escaping-1.html
-# /tmp/lightmount-wpt-popup-sandbox-e2i-20260805：fail=1、timeout=2。
+# /tmp/moli-wpt-popup-sandbox-e2i-20260805：fail=1、timeout=2。
 ```
 
 为了避免把旧的 `wpt-cross-current` pass 分类或 fixture 限制误当作本轮产品回归，又从本轮未修改起点
@@ -4657,11 +4711,11 @@ cargo clippy --workspace --all-targets -- -D warnings
 git pull -r origin master
 # origin/master 从 d4070fec16 前进到 780d9fe8ed；43 个 topic commit 无冲突完成 rebase。
 
-cargo nextest run -p lightmount-renderer-v8 sandbox \
+cargo nextest run -p moli-renderer-v8 sandbox \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # rebase 后 run 5efdca76-c6a2-4ddd-b19f-5b1a162833d0：27 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<E2I 七条 admission/inheritance 核心回归>' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
 # rebase 后 run 85e6aa59-bf56-404c-ac5c-556ab50f70bb：20/20 iterations passed，每轮 7/7。
@@ -4776,7 +4830,7 @@ protocol 红测从带 `Content-Security-Policy: sandbox allow-scripts allow-popu
 Fresh target，随后在 target realm 同时观察 `location.origin` 与 `document.domain`：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   noopener_popup_retains_creator_sandbox_policy_across_document_navigations \
   --no-fail-fast
 # red run b1abfc80-23bd-4bc8-aa51-addfc66cad5b：1 failed；
@@ -4796,23 +4850,23 @@ creator 创建、由 target response CSP 重新 sandbox 的 Fresh realm。前四
 `origin|location.origin|domain = null|null|SecurityError`，且 anchor 与 form 共享同一个 element Fresh producer：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 8e1a6134-991b-43ab-9c0e-4620a9787d0b：2 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   auxiliary_creation_policy_separates_popup_admission_from_sandbox_escape \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run ead96a1d-3b87-4f29-8755-1544d4c25268：1 passed；
 # inherited/escaped typed carrier 与 E2I policy container 的 sandbox 完全一致。
 
-cargo nextest run -p lightmount-renderer-v8 sandbox \
+cargo nextest run -p moli-renderer-v8 sandbox \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 7d65f712-aa7b-4a52-a5ba-2ef83a3b7d89：27 passed；覆盖 E2I admission、
 # inheritance/escape 与相邻 origin/script/document.domain/storage/top-navigation sandbox 行为。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation) or test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) or test(anchor_blank_target_uses_implicit_noopener)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
@@ -4855,7 +4909,7 @@ topic commit 重放后还有一个 getter 读取已删除字段，属于 Git 未
 上补只读 accessor，并让 scheduler getter 从同一 ingress-frozen policy 读取，没有恢复第二份 method 分类。
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(noopener_popup_retains_creator_sandbox_policy_across_document_navigations) or test(fresh_noopener_popup_applies_response_sandbox_before_realm_observation) or test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) or test(anchor_blank_target_uses_implicit_noopener)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
@@ -4970,7 +5024,7 @@ frozen result 取得 `userGesture`，发布边界会断言两者一致。
 
 `RendererBrowserContextRuntime` 新增公开的 `RendererPopupBlockerPolicy`：
 
-- `AllowWithoutTransientActivation` 是 Lightmount 默认值，保持现有 headless automation/抓取工作负载不会因
+- `AllowWithoutTransientActivation` 是 Moli 默认值，保持现有 headless automation/抓取工作负载不会因
   新 blocker 突然少建 target；但如果创建时确实存在 activation，仍必须消费；
 - `RequireTransientActivation` 提供严格 Chromium-like admission，可由 embedder/browser profile 配置；没有
   active grant 时 `window.open()` 返回 `null`，且不会 reserve Page、创建 lightweight record、发布 owner action
@@ -5030,7 +5084,7 @@ proxy 的逐 frame replication 模型。
 named target reuse 不消费、后续 new context 才消费：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(protocol_user_gesture_persists_until_new_auxiliary_creation_consumes_it) or test(existing_named_target_does_not_consume_popup_user_activation)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # red run 06567c3a-daa8-4856-9551-85ba549aead2：2 failed。
@@ -5047,17 +5101,17 @@ typed ledger/admission 接通后的首个同集 run：
 synthetic vs trusted mouse，以及 Escape/non-Escape keyboard 与 touch release：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 -E '<E2K 八条 ledger/admission/input 回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<E2K 八条 ledger/admission/input 回归>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 770ad35c-b82d-4b9e-9259-f5395b1bea71：8 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(popup) or test(window_open)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run e1968a1a-c186-4977-9441-ffa93df539d2：111 passed。
 ```
 
-协议层新增一个 `Runtime.evaluate(userGesture=true)` 命令连续创建两个 `_blank` 的回归。Lightmount 默认策略允许
+协议层新增一个 `Runtime.evaluate(userGesture=true)` 命令连续创建两个 `_blank` 的回归。Moli 默认策略允许
 两个 target 都创建，但 expression 在第一次之后观察到 `[isActive, hasBeenActive] == [false,true]`，两个
 `Page.windowOpen.userGesture` 必须依次为 `true,false`。该用例与其他六条 owner 回归一起通过：
 
@@ -5076,7 +5130,7 @@ WindowProxy、不发布第二个 target/event，并返回 `reused=true,active=tr
 event observation 一起复跑：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(page_window_open_observes_pre_consumption_activation_for_each_new_context) or test(window_open_named_target_reuses_existing_popup_target)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 94124b0c-0868-4886-8667-98034a19b569：2 passed。
@@ -5090,7 +5144,7 @@ cargo nextest run --no-fail-fast
 # 16058 tests run，16057 passed / 1 failed / 18 skipped；唯一失败为
 # websocket_bidi_call_function_user_activation_controls_navigator_and_copy。
 
-cargo nextest run -p lightmount \
+cargo nextest run -p moli \
   -E 'test(websocket_bidi_call_function_user_activation_controls_navigator_and_copy)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run a3bcc91e-7fb4-4e0d-870f-e54a6d35edf2：1 passed。
@@ -5119,24 +5173,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 限制，不能写成产品通过：
 
 ```bash
-cargo build --release -p lightmount
+cargo build --release -p moli
 # passed；1m 30s；binary sha256
 # e26ecd53a37532422425bf26df09752127dc1f008375a796c30f2cb977433571。
 
-uv run --project lightmount-benchmark python -m lightmount_benchmark.wpt_cross \
-  --wpt-root ../wpt --engine lightmount --mode cdp \
-  --lightmount-bin target/release/lightmount \
-  --output-dir /tmp/lightmount-wpt-popup-activation-e2k-20260805-1 \
+uv run --project moli-benchmark python -m moli_benchmark.wpt_cross \
+  --wpt-root ../wpt --engine moli --mode cdp \
+  --moli-bin target/release/moli \
+  --output-dir /tmp/moli-wpt-popup-activation-e2k-20260805-1 \
   --case html/browsers/windows/consume-user-activation/window-open.html
 # fail=1；harness OK；2 subtests 中 1 pass / 1 fail。
 # fail: Opening an existing window should not consume user activation。
 
 # 同一 binary/matrix 的 CLI mode：
-# /tmp/lightmount-wpt-popup-activation-e2k-20260805-cli-1；同样 1 pass / 1 fail。
+# /tmp/moli-wpt-popup-activation-e2k-20260805-cli-1；同样 1 pass / 1 fail。
 ```
 
 这个 fail 不能反推 production existing-target consume 仍错误：仓库
-`lightmount-benchmark/lightmount_benchmark/wpt_cross/server.py` 注入的
+`moli-benchmark/moli_benchmark/wpt_cross/server.py` 注入的
 `test_driver_internal.click()` 使用页面内 `dispatchEvent(new MouseEvent(...))`，所以事件必然
 `isTrusted == false`，按规范与 E2K 实现都不能授予 activation。第一个“new window consumes”subtest 只是从未
 active 的 `false` 得到弱通过，第二个 bless 后仍为 false 才暴露 bridge 缺口。用同一 runner 跑系统 Chromium
@@ -5254,7 +5308,7 @@ form node
 这是 source permission，不是 target property。missing/detached owner 不凭空构造 sandbox denial；existing
 connected/currentness checks 与后续 navigation owner 仍负责淘汰 detached/stale work。
 
-Lightmount 当前两条执行链如下：
+Moli 当前两条执行链如下：
 
 ```text
 requestSubmit / trusted activation
@@ -5292,7 +5346,7 @@ initial empty Page、window-open observation 与 activation consume，但没有 
 最初四条 owner 回归在实现前得到 clean semantic red：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 -E '<最初四条 allow-forms owner 回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<最初四条 allow-forms owner 回归>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 95a8449a-ede2-4d46-814d-ec2155b75469：1 passed / 3 failed。
 # requestSubmit + direct submit 实际为 submit|formdata|formdata；response CSP sandbox 仍允许 navigation；
@@ -5300,21 +5354,21 @@ cargo nextest run -p lightmount-renderer-v8 -E '<最初四条 allow-forms owner 
 ```
 
 其中最初把 direct `_blank` denial 写成“绝不创建/绝不消费”的断言，在上述 Chromium probe 后被删除：它会把
-Lightmount 在 E2L 时尚缺 creation-only carrier 的行为误写成浏览器合同。E2L 当时的 owner 回归改为只要求
+Moli 在 E2L 时尚缺 creation-only carrier 的行为误写成浏览器合同。E2L 当时的 owner 回归改为只要求
 `requestSubmit()` 的早门禁在 target work 前保留 activation；direct submit 则锁住 `formdata` 后不导航
 existing target。最终 10 条 policy/form/tokenizer 回归、更宽的 form/sandbox slice 与 popup/window-open 邻接
 slice 均通过：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 -E '<E2L 十条 form/CSP/attribute/tokenizer owner 回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<E2L 十条 form/CSP/attribute/tokenizer owner 回归>' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 62754038-2ec1-4d08-838b-7591a2acabea：10 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -E 'test(form) or test(sandbox)' \
+cargo nextest run -p moli-renderer-v8 -E 'test(form) or test(sandbox)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run fac06157-0d1d-4dcd-b842-6a4a380946f5：327 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -E 'test(popup) or test(window_open)' \
+cargo nextest run -p moli-renderer-v8 -E 'test(popup) or test(window_open)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 3e746aa3-2dfd-4171-9324-da916cd4a022：113 passed。
 ```
@@ -5361,7 +5415,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 git pull -r origin master
 # Current branch popup-refactor is up to date.
 
-cargo nextest run -p lightmount-renderer-v8 -E '<E2L 十条 owner 回归>' \
+cargo nextest run -p moli-renderer-v8 -E '<E2L 十条 owner 回归>' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
 # run 75cbfdfd-4b70-4008-af58-6deea4913fb4：20/20 iterations passed，每轮 10/10。
@@ -5382,7 +5436,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 E2L 完成的是 source-Document policy 与 actual navigation gate，不把以下内容伪装成已经对齐：
 
 - **E2L.1 creation-only target carrier**：direct `form.submit()` 在 Blink 中先 target selection，再晚门禁；new
-  target 可以只留下 initial empty Page，并可能经过 popup blocker/activation consume。E2L 入库时 Lightmount
+  target 可以只留下 initial empty Page，并可能经过 popup blocker/activation consume。E2L 入库时 Moli
   仍在晚门禁前直接返回；该缺口现已由下节 E2L.1 完成；
 - E2L 入库时完整 sandbox/top-level `CanNavigate` 属于后续 E2M，不能塞进 form owner；其中 local
   sandbox navigation flags、`allow-top-navigation[-by-user-activation]`、opener/ancestor relation 与
@@ -5487,25 +5541,25 @@ Document loader。这样 allowed form 走真实 initial-Document replacement，d
 实现阶段先锁住三层 owner：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(sandbox_without_allow_forms_blocks_existing_target_navigation) or test(sandboxed_request_submit_denial_precedes_popup_activation_consumption) or test(sandboxed_direct_submit_creates_only_the_initial_empty_popup_before_late_denial) or test(sandboxed_direct_form_submit_creates_related_initial_page_without_destination)' \
   --no-fail-fast
 # 最终实现复跑 run d20ac427-d134-41a0-ba24-423233a9a8a7：4 passed。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(creation_only_popup_keeps_initial_document_without_scheduling_or_url_rescan) or test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) or test(inline_about_blank_navigation_preserves_query_and_fragment)' \
   --no-fail-fast
 # 最终实现复跑 run b0cb8662-2f38-451b-9b5a-56f3c33078bd：3 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -E 'test(form) or test(sandbox)' \
+cargo nextest run -p moli-renderer-v8 -E 'test(form) or test(sandbox)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # 最终实现复跑 run 0136b84d-6f7d-4e24-ad52-2fe51af1510e：329 passed。
 
-cargo nextest run -p lightmount-renderer-v8 -E 'test(popup) or test(window_open)' \
+cargo nextest run -p moli-renderer-v8 -E 'test(popup) or test(window_open)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # 最终实现复跑 run eb44d99b-e87a-4e71-a48e-5a15ad2a78f7：114 passed。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(popup) or test(same_document) or test(renderer_fragment_navigation_preserves_initial_document_residence) or test(inline_about_blank_navigation_preserves_query_and_fragment)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # 最终实现复跑 run eca682f6-e911-41a2-be26-d9ca4d8d7a16：68 passed。
@@ -5537,7 +5591,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 第一次 full-nextest 尝试 run `4746c10b-b985-4f08-adb7-4630e614c8eb` 在系统 `/tmp` tmpfs 已满时启动，首批
 99 个失败均为 `ENOSPC` 或其下载落盘连锁超时，运行在 2769 passed 后主动中止；这不是行为门禁证据。没有删除
-来源不明的历史 `/tmp/lightmount-*` 内容，而是把第二次完整运行隔离到仓库文件系统的临时目录；有效 run 全量
+来源不明的历史 `/tmp/moli-*` 内容，而是把第二次完整运行隔离到仓库文件系统的临时目录；有效 run 全量
 通过后已清理本轮 132 KiB fixture。
 
 随后执行 `git pull -r origin master`，成功 rebase 到 `origin/master@815b44cbf0`。本次 master 增量是 TCP
@@ -5585,7 +5639,7 @@ E2E 在 named frame resolver 内实现过一份窄的 self / `javascript:` exact
 typed target host/scope 和最终 destination URL，owner 返回稳定 denial reason；选择、报告和真正 scheduling 仍由
 各 API 自己负责。
 
-这里的 **local** 指 Lightmount 当前拥有的 `Top` / `Child(DomHandle)` /
+这里的 **local** 指 Moli 当前拥有的 `Top` / `Child(DomHandle)` /
 `LightweightPopup(id)`，以及 shared related-agent 中另一个真实 Page 的这些 local endpoint。它不表示本轮已经
 虚构出 Chromium 的 `RemoteFrame`、fenced-frame root 或 browser embedder decision。
 
@@ -5605,7 +5659,7 @@ typed target host/scope 和最终 destination URL，owner 返回稳定 denial re
 - destination relation 先比较 target current security origin，再比较相同 protocol 下非空
   domain-and-registry；IP、single-label host 和 public suffix 不进入后者；
 - `CanAccessAncestor()` 还包含 file/local-origin compatibility 分支，`LocalFrame::CanNavigate()` 也会发送
-  `DidBlockNavigation`、console diagnostic/use-counter。Lightmount 本轮没有伪装这些尚无 owner 的分支已完成。
+  `DidBlockNavigation`、console diagnostic/use-counter。Moli 本轮没有伪装这些尚无 owner 的分支已完成。
 
 本地 authority 按同一顺序实现以下可表达矩阵：
 
@@ -5654,7 +5708,7 @@ initial/local bootstrap、failed-start fallback 与 `javascript:` string-result 
 freeze boundary。
 
 Fresh/legacy popup 的 propagated sandbox record 同步携带 navigation/top flags。response CSP 仍只能收紧；其
-`allow-top-navigation` 不会变成 frame-owner exception。`lightmount-site` 作为 renderer 的直接依赖，只用于
+`allow-top-navigation` 不会变成 frame-owner exception。`moli-site` 作为 renderer 的直接依赖，只用于
 Chromium domain-and-registry fallback，并显式排除 IP、localhost/single-label 与 public suffix。
 
 ##### stable endpoint、source base 与调用入口
@@ -5691,7 +5745,7 @@ navigation、browser/CDP navigation 与 Service Worker `Client.navigate()` 是 t
 实现阶段先用三条 red-to-green owner 回归锁住最容易被 wrapper/marker 掩盖的边界：
 
 ```bash
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
   -E '<frame-owner/CSP token intersection | cross-origin source-base relative Location | typed lightweight opener>' \
   --no-fail-fast
 # run 1acdcf89-6093-4fa6-9267-c9d17b11ab9d：3 passed。
@@ -5701,15 +5755,15 @@ TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
 owner-focused slice：
 
 ```bash
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
   -E '<E2M.1 10 条新增 + 7 条既有 owner 回归>' --no-fail-fast
 # run 431a1261-bb2b-4b27-b691-f93f0d3dd0ee：17 passed。
 
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 sandbox --no-fail-fast
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 sandbox --no-fail-fast
 # run 98e7feea-44c5-4adf-ac82-7b06e943f311：44 passed。
 
 for iteration in $(seq 1 20); do
-  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
     -E '<同一 17 条 owner-focused 回归>' --no-fail-fast
 done
 # first run 9f54b8fc-5bc1-4570-b0f5-0982a0baf21c，
@@ -5786,7 +5840,7 @@ realm 同步执行”的不准确表述：
 
 为确认容易从源码误读的 FIFO/cancellation 顺序，本轮还用同一 checkout 的
 `out/Default/chrome`（Chrome 147.0.7709.0，WebKit revision `a03603fe9af6`）跑了临时 CDP 最小探针；它不是
-Lightmount 提交门禁，但结果与上述 owner 一致：
+Moli 提交门禁，但结果与上述 owner 一致：
 
 ```text
 同一 target 连续 JS URL       -> queued-first, queued-second
@@ -5866,21 +5920,21 @@ completion、执行中启动 navigation、FIFO batch、ordinary supersession、D
 Fresh noopener no-execution，以及 protocol activation 的 exact residence / `NoDestination`。
 
 ```bash
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-renderer-v8 \
   javascript_popup_producers_queue_the_final_related_target_page_realm --no-fail-fast
 # run 5aeecb11-4910-41a6-806e-79e323a6e9f2：1 passed；含无需外部 target command 的
 # cross-Page owner wake，以及 Window 与 element ordinary supersession。
 
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 javascript \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-renderer-v8 javascript \
   --no-fail-fast
 # 最终 run f7b0d01d-7deb-4acf-8f34-e4994ce11583：32 passed。
 
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-renderer-v8 \
   -E '<同一 4 条核心回归>' \
   --stress-count 20 --flaky-result fail --test-threads 4
 # 最终 run e97c108f-3e18-424f-bd92-b8cf7868a04f：20/20 iterations passed，每轮 4/4。
 
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-protocol \
   rust_cdp_chromium_target_window_open_javascript_url_still_reports_popup_target \
   creation_only_popup_keeps_initial_document_without_scheduling_or_url_rescan \
   --no-fail-fast
@@ -5889,7 +5943,7 @@ TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
 ```
 
 本轮阅读了 upstream WPT 源码，但没有把临时 Chromium CDP probe 或旧
-`wpt-cross-current` 关键字快照伪装成 Lightmount WPT pass。最终 full workspace gate 与 rebase 后证据记录在本文
+`wpt-cross-current` 关键字快照伪装成 Moli WPT pass。最终 full workspace gate 与 rebase 后证据记录在本文
 统一验证章节。
 
 ##### E2N 有意保留的边界与下一步
@@ -5905,9 +5959,10 @@ TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
 - G1 后 local committed-response COOP group sever 已进入 Page replacement owner；RemoteFrame/fenced target、
   isolated world、真正 remote endpoint 与 cross-process scheduler 仍不在本地 Page queue 能表达的范围；
 - legacy lightweight JS executor 仍服务 standalone fixture/compatibility fallback。E2N 的结论是 primary owner 已
-  迁移，不是 Phase 6 已可直接删除；当前宽口径 surface 仍为 112 个 Rust 文件、1393 处命中；
+  迁移，不是 Phase 6 已可直接删除；2026-08-23 当前宽口径 surface 仍为 112 个 tracked Rust 文件、1492 处命中；
 - E2O 后规划的非 DOM creation producer 与 focused protocol evidence 已由 E3 完成，local close/unload 又由 L1
-  完成。后续按 focus、group/remote、identity/lifetime 收口后，才进入 Phase 6 删除双栈。
+  完成。后续 focus、group/remote 与 identity/lifetime 中，local owner 已依次由 L2、G1-G6、P6R2/P6R3 收口；
+  当前进入 Phase 6 compatibility reachability 与依赖层删除。
 
 #### Phase 5E2O：target Trusted Types、`form-action` 与 source-selection ordering
 
@@ -5959,9 +6014,9 @@ reporting realm 和脚本字符串。new-context miss 则不同：Blink 在创�
 `content-security-policy/form-action/form-action-src-javascript-blocked.sub.html`、
 `form-action-src-javascript-prevented.html` 和
 `content-security-policy/script-src/javascript-window-open-blocked.html`。这些文件用于确定行为矩阵；本轮仍不把
-“阅读 upstream source”写成 Lightmount WPT pass。
+“阅读 upstream source”写成 Moli WPT pass。
 
-##### Lightmount owner 与实现
+##### Moli owner 与实现
 
 - `trusted_types.rs` 新增 navigation 专用 string conversion。它在当前 entered target realm 调 default
   `createScript(value, "TrustedScript", "Location href")`，消费 callback exception；enforce 返回 `None`，
@@ -5998,7 +6053,7 @@ source CSP 命中 existing target 仍返回相同 proxy 但不 queue、`_self` r
 producer handoff。
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   popup_policy_checks_keep_existing_and_new_target_order_distinct \
   window_open_javascript_url_source_csp_preserves_the_selected_self_target \
   new_javascript_popup_uses_source_trusted_types_only_as_a_creation_preflight \
@@ -6006,7 +6061,7 @@ cargo nextest run -p lightmount-renderer-v8 \
   form_action_csp_runs_after_new_target_selection_and_skips_prevented_submission
 # run 30aa06df-c30f-4862-b85f-23bf5b9401f1：5 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   javascript_location_navigation_enforces_target_trusted_types_without_throwing \
   javascript_location_navigation_uses_the_target_default_policy_rewrite \
   javascript_location_navigation_report_only_default_policy_exception_continues_original \
@@ -6015,7 +6070,7 @@ cargo nextest run -p lightmount-renderer-v8 \
   iframe_javascript_url_uses_the_stable_child_target_trusted_types_policy
 # run 574ba472-336a-4404-b6ac-4b35049c7135：6 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   javascript_popup_producers_queue_the_final_related_target_page_realm \
   sandboxed_direct_form_submit_creates_related_initial_page_without_destination \
   form_javascript_url_csp_checks_the_source_document_before_target_selection \
@@ -6023,10 +6078,10 @@ cargo nextest run -p lightmount-renderer-v8 \
   submitter_cancels_previous_same_form_navigation_in_a_related_page_child
 # run 32901ca0-40d6-4edd-8dbc-d6d651efbe14：5 passed。
 
-cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+cargo clippy -p moli-renderer-v8 --all-targets -- -D warnings
 # passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   javascript_navigation_default_policy_rejects_an_invalid_reconstructed_url \
   form_action_is_navigation_specific_and_has_no_default_src_fallback \
   report_only_default_policy_transforms_or_preserves_by_callback_outcome \
@@ -6038,7 +6093,7 @@ cargo nextest run -p lightmount-renderer-v8 \
 
 - Service Worker `clients.openWindow()`、notification navigation 等非 DOM producer 当时仍显式进入 lightweight
   owner；E3 已按这一边界把它们改成 browser-context source + Fresh Page，没有复用 root Window 作为假 source；
-- Lightmount 对 ordinary form scheme 也在 renderer 做 `form-action`，因为当前没有 Chromium browser-process
+- Moli 对 ordinary form scheme 也在 renderer 做 `form-action`，因为当前没有 Chromium browser-process
   navigation policy continuation。redirect chain、response-stage URL override 与每 hop 的 form-action 语义仍需随
   browser/network navigation policy owner 补齐；
 - isolated world 的 bypass、RemoteFrame/fenced target、cross-process scheduler 与 disconnected WindowProxy 不在
@@ -6069,7 +6124,7 @@ navigation 的因果 source，以及谁有权完成 worker Promise。阶段验�
 | browser creation source | `content/browser/service_worker/service_worker_client_utils.cc:498-550` | 新 WebContents 使用 worker script URL 生成 referrer/initiator origin，并标记 service-worker open-window；不是借当前 tab 的 root Document 充当 initiator |
 | commit/current client lookup | `content/browser/service_worker/service_worker_client_utils.cc:410-447,698-748` | navigation 必须先 commit；随后按 RenderFrameHost 查 exact WindowClient，等待 execution-ready；Page 已销毁或 client 不可见时成功返回 null client |
 
-Lightmount 保留自身无 browser process 的结构差异，但对齐同一可观察 owner 语义：renderer browser-context runtime
+Moli 保留自身无 browser process 的结构差异，但对齐同一可观察 owner 语义：renderer browser-context runtime
 持有 Page/client registry，protocol target admission 仍是唯一 browser owner，worker runtime 只接收最终 typed
 completion。
 
@@ -6133,7 +6188,7 @@ retry 或第二个 JavaScript executor。
 ##### E3 聚焦证据
 
 ```bash
-TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p moli-renderer-v8 \
   browser_navigation_causal_command_drains_pending_javascript_url_tasks \
   clients_open_window_page_completion_requires_exact_reserved_page_identity \
   service_worker_clients_open_window_request_records_popup_activation \
@@ -6144,7 +6199,7 @@ TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount-renderer-v8 \
   service_worker_open_window_admits_about_url_to_parent_and_rejects_file_scheme
 # run 4902d822-c14e-4114-bd4e-5937bf7359a8：8 passed。
 
-TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p moli-protocol \
   service_worker_auxiliary_producers_use_fresh_pages_and_navigation_terminals \
   clients_open_window_continuation_survives_fetch_fulfill \
   ordinary_popup_navigation_then_javascript_url_preserves_renderer_protocol_order
@@ -6159,7 +6214,7 @@ Rust 回归写成 WPT pass。
 ##### Phase 5E local exit 后的边界
 
 - production SW/notification caller 已没有 `open_lightweight_popup_window()`；当前该符号只剩 DOM compatibility
-  facade 与 lightweight record 内部 reopen。全仓更宽的 lightweight 静态扫描仍为 112 个 Rust 文件、1393 处
+  facade 与 lightweight record 内部 reopen。2026-08-23 全仓更宽的 lightweight 静态扫描仍为 112 个 tracked Rust 文件、1492 处
   命中（包含测试、注释和兼容投影），所以 E3 不是 Phase 6 删除完成证明；
 - Phase 5L1 已把 script-closable、local subtree beforeunload/unload、renderer close ACK/timeout 收进真实 Page
   transaction；Phase 5L2 又完成本地 `focus()` 与 browser-context active/focused Page 事务。Chromium top-level
@@ -6180,29 +6235,31 @@ Rust 回归写成 WPT pass。
   command、replicated policy和 structured-clone attachment变成 strict versioned bytes，增加 execution-channel
   generation与 actor-admission前 queued cancellation，并按 Chromium锁住 cross-agent Wasm `messageerror`。真正 renderer
   process/channel/crash/restart、browser capability broker、agent reunification、fenced/embedder 完整
-  `CanNavigate`/activation/focus/unload 与 Reporting queue/source 隔离仍是后续最高风险 group/remote milestone；
-- group-safe opaque-origin nonce、被 JS 强引用的 detached Document/Node/realm lifetime 属于 identity/lifetime
-  milestone；redirect-time browser-process `form-action`、isolated-world bypass、file-local/diagnostic 和 focused WPT
-  仍是明确长尾。
+  replication 仍是 Chromium infrastructure gap；当前 Moli popup exit 只要求实际支持面上的 remote
+  `CanNavigate`/activation/focus/unload 与 Reporting 行为有明确实现或明确降级；
+- P6R2 已把 group-safe opaque-origin nonce 收进 top/child LocalWindow、related Page 与 strict remote frame
+  replication；P6R3 又让被 JS 强引用的 detached top/child Document、Node、function 与 realm 继续由原 native
+  owner 服务，并让无引用 realm 在 GC 后精确释放。redirect-time browser-process `form-action`、isolated-world
+  bypass、file-local/diagnostic 和 focused WPT 仍是明确长尾。
 
-##### 距离最终架构的剩余工作量（2026-08-22）
+##### 距离最终架构的剩余工作量（2026-08-23）
 
-这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。Phase 5G6B1 后，常用 DOM popup
-路径约完成 99%；以“能删除 lightweight 双栈并具备 Chromium-shaped group/lifetime owner”为终态，约完成
-94-95%。剩余 5-6% 仍集中在风险最高的真正 cross-process、lifetime 与最终删除工作，不能按当前测试数量线性
-外推：
+这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。P6R7 后，常用 DOM popup
+路径约完成 99%；以“在 Moli 当前单进程产品边界内删除 production lightweight 双栈，并具备稳定
+group/lifetime owner”为终态，同样约完成 99%。旧 owner 的实际删除和 direct Browser cross-document history
+handoff 已经完成，剩余工作集中在 remote 语义长尾和 focused WPT/CDP 重新验收，不能按当前测试数量线性外推：
 
 | 大里程碑 | 必须形成的 exit condition | 规模/风险判断 |
 | --- | --- | --- |
-| group/remote model | G1-G6A 已完成 local COOP、cross-agent top/child owner；G6B1 已完成 strict versioned command/policy/clone wire、channel generation和 queued cancellation；exit 还需真实 renderer process/channel/crash/restart、browser capability broker、完整 Reporting source/queue、agent reunification、fenced/embedder 完整 policy/activation/focus/unload replication | 仍是最高风险；1-2 个大纵切及若干 closure 提交 |
-| identity/lifetime closure | group-safe opaque-origin nonce；JS 强引用 detached Document/Node/realm 可存活；remote scheduler 与 GC/owner 协同 | 大；3-5 个提交 |
-| Phase 6 removal | 删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle、protocol 第二 Page/navigation 与所有 fallback；用静态扫描 + WPT/CDP 证明无 production 回退 | 大且机械面广；4-7 个提交 |
+| 当前产品的 remote semantic closure | remote `javascript:`/isolated world、descendant unload/focus、form `NavigateEvent`/`FormData` source carrier按实际 production reachability收口；Reporting/file-local/diagnostic按产品支持面分级，不要求先造 OS process | 中到大；2-4 个内聚提交 |
+| identity/lifetime closure | P6R2 已完成 group-safe opaque-origin nonce；P6R3 已完成真实 local top/child Document realm 的 retain/detach/GC owner 协同、执行资源退休与安全 V8 handle 释放。remote endpoint/process capability lifetime 继续归 remote milestone | 当前产品 local exit 已完成；remote 长尾随上一行收口 |
+| Phase 6 readiness/removal | P6R4 已物理删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle 与 protocol compatibility fallback；tracked Rust 宽口径旧模型扫描为零。剩余 exit 是 focused WPT/CDP 重新分类与 full gate/rebase 后复验 | 代码删除已完成；验收与证据债为小到中 |
+| 可选 Chromium infrastructure | 真实 renderer process/channel/crash/restart、browser capability broker、agent reunification、fenced/guest 完整 replication | 仅在产品决定采用多进程/OOPIF 时另立项目，不计入当前 popup exit |
 
-合计仍应按约 7-13 个内聚提交和三个大阶段验收来规划；其中 Phase 6 机械面大，不能用剩余风险百分比直接换算
-提交数。最不合理的下一步仍是直接删除
-record：当前 112 个 Rust 文件、1393 处宽口径 lightweight 命中说明 compatibility projection/test 和真实旧
-owner 尚未完成解耦。下一阶段应以 G6B2 **real renderer process lifecycle + browser capability broker** 为一个大纵切，
-随后整体完成 agent reunification、fenced/embedder 与 Reporting closure，而不是重新退回逐 API 修补。
+P6R4 证明此前“先按 reachability 和 owner dependency 拆除”的顺序是必要的，但不再需要把同一删除切成更多微型提交。
+下一阶段只保留两个大 exit：一是把实际 production 可达的 remote `javascript:`、isolated world、descendant lifecycle
+与 Reporting/file-local 分级收口；二是重跑 focused WPT/CDP slice 并更新旧 timeout/fail 分类。真实多进程 lifecycle
+只在独立产品决策下推进。
 
 ##### E1-E2O/E3 完成后的 Phase 5E 范围
 
@@ -6245,10 +6302,10 @@ E3 是 local/Fresh creation-policy exit，不是 COOP/remote group model 或 Pha
   并消费 E2K activation、sandbox navigation/top flags、typed opener relation 与 destination origin/site
   exception；fenced tree、完整 remote top/opener exception、file-local compatibility、browser embedder fallback 与
   diagnostic 仍未实现；E2L forms gate 与 navigation policy 保持独立；
-- E2J 已为 sandboxed Fresh top-level 的每个 Document 分配 browser-context 唯一 storage nonce；但跨 Page
-  精确继承的 opaque origin 在 Window access equality 上仍只有 V8 security token 能区分；Rust
-  `WindowAccessOrigin` 为避免 host-local owner id 碰撞会拒绝 related-host opaque equality，后续需要独立、
-  group-safe 的 opaque origin nonce，不能把本轮 tuple-origin 修正外推到该路径；
+- E2J 已为 sandboxed Fresh top-level 的每个 Document 分配 browser-context 唯一 storage nonce；P6R2 又把同一
+  nonce 提升为 Rust `WindowAccessOrigin` 的 non-serialized identity，并让 inherited auxiliary `about:blank`
+  通过 creator StorageKey 复制 exact nonce。related host 不再比较会碰撞的 `LocalWindowId`，也不再把所有 opaque
+  equality 一律拒绝；独立创建的两个 `null` origin 因 nonce 不同继续 fail closed；
 - E2I 已让 `allow-popups` / escape-sandbox 的 **new-context admission** 使用 typed policy；E2J 已补 Fresh
   no-local-proxy sandbox handoff；E2K 已补 transient/sticky activation 和 browser-context popup-blocker
   decision；E2L 已补 attribute/CSP/inherited `allow-forms` 和 source gate；E2L.1 已补 direct-submit
@@ -6274,8 +6331,8 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
 | --- | --- | --- |
 | close/unload remote 与 compatibility 长尾 | Phase 5L1 已统一真实 local Page 的 script-closable、subtree beforeunload、一次 dialog、network drain、pagehide/unload、renderer ACK/timeout 与 target teardown；G6A 的 remote child proxy 在 root/target teardown 后会 disconnected，但 remote descendant beforeunload/unload ACK 尚未进入跨 endpoint 事务；compatibility lightweight 也未迁移 | group/remote owner + Phase 6 compatibility removal |
 | focus / active Page remote 长尾 | Phase 5L2 已完成 local Page/focused-frame authority、native `document.hasFocus()`、events/CSS、target activation/focus emulation/window-state/create/close promotion；G5 的 remote top-level focus 在 source 侧消费 activation/opener admission，并由 target Page ACK；G6A 没有伪造 nested focus，top-level `blur()` 保持 Chromium no-op | group/remote owner仍负责 remote child/process death 与 embedder activation endpoint |
-| retained detached Document values | Document host retirement 后旧 function/DOM wrapper 当前安全抛 `TypeError`；Chromium 中被 JS 强引用的 detached Node/realm 仍可继续存活和读取 | 为 DocumentRuntime、realm 和 wrappers 建立 GC/owner 协同 lifetime，避免用 raw host pointer 决定对象寿命 |
-| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification producer；G1-G5 已完成 local COOP、group endpoint 与 cross-agent top-level；G6A 已完成 related remote child tree、stable proxy、named/Location/message/scheduler route、ACK deadline 与 Page teardown disconnect | group/remote owner继续负责完整 Reporting queue/source、wire-safe process transport/death、agent reunification、fenced/file-local、完整 activation/focus/unload replication 与 diagnostic |
+| retained detached Document values | P6R3 已完成：stable WindowProxy 继续投影 current Window；被作者保存的旧 Document/Node/function 仍读写原 detached DOM，`defaultView`/Window execution authority 已关闭；最后引用删除并 GC 后 old top/child Context、host 与 native DOM 精确回到基线 | 当前产品 local exit 已满足；保留真实站点长跑 RSS 与未来不可信跨进程 capability lifetime 观察 |
+| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification producer；G1-G5 已完成 local COOP、group endpoint 与 cross-agent top-level；G6A/G6B1 已完成 related remote child tree、stable proxy、named/Location/message/scheduler route、strict wire、channel currentness、ACK deadline 与 Page teardown disconnect | group/remote owner继续负责当前产品可达的 remote JavaScript URL、descendant unload/focus、Reporting/file-local/diagnostic；真实 process/fenced/guest 是可选基础设施项目 |
 
 下一批按以下顺序推进，避免把动态状态继续塞进静态 surface：
 
@@ -6331,21 +6388,21 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
    WindowProxy/opener projection、remote named reuse 与 typed protocol target ACK；Phase 5G6A 已完成 agent-neutral
    remote child tree、stable nested proxy、related named target/Location/postMessage、exact scheduler cancellation、
    ACK deadline 与 Page teardown disconnect；Phase 5G6B1 已完成 versioned command/frame-policy/structured-clone
-   wire、execution-channel generation与 queued ACK cancellation。下一步以 G6B2 完成真实 renderer process lifecycle
-   与 browser capability broker，随后
-   整体关闭 agent reunification、fenced/embedder policy/lifecycle 与 Reporting，再进入 identity/lifetime closure（opaque-origin nonce/
-   detached realm），最后执行 Phase 6 lightweight 双栈删除。focused WPT、diagnostics/file-local 随对应 milestone
-   提供证据。
+   wire、execution-channel generation与 queued ACK cancellation。下一步不再把真实 renderer process 当作 popup
+   blocker；P6R1-P6R3 已完成 creation caller graph 与当前产品 local identity/lifetime closure，P6R4 又按
+   facade→loader/parser→protocol fallback 的依赖顺序物理删除 lightweight 双栈。现在只把实际 production
+   可达的 remote JavaScript URL、descendant lifecycle 与 Reporting/file-local 分级收口，并用 focused WPT/CDP
+   重新验收。多进程 renderer/capability broker 仅在独立产品决策后继续。
 
 Phase 5A 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(data_url_child_document_is_cross_origin_to_parent) | test(child_window_proxy_identity_survives_cross_origin_round_trip)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 4 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；包含 error commit、Window allowlist、postMessage、location assign/replace
@@ -6359,17 +6416,17 @@ cargo nextest run \
 Phase 5B 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream) or test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers) or test(related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm) or test(child_navigation_retires_runtime_binding_context_and_stale_function) or test(child_navigation_retires_local_window_owned_xhr) or test(child_navigation_aborts_fetch_and_detaches_keepalive)' \
   --no-fail-fast
 # 7 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(popup_window_close_retires_target_and_parks_stable_window_proxy) or test(target_close_parks_the_same_stable_popup_window_proxy) or test(popup_transport_failure_commits_error_document_in_stable_auxiliary_page)' \
   --no-fail-fast
 # 3 passed
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(stale_window_close_termination_cannot_retire_current_page_residence)' \
   --no-fail-fast
 # 1 passed；最终 termination continuation 会再次拒绝 stale Page generation
@@ -6378,7 +6435,7 @@ cargo nextest run -p lightmount-protocol \
 Phase 5C 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_script_agent_experiment_shares_isolate_and_survives_source_close) or test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm) or test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers)' \
   --no-fail-fast
 # 4 passed；覆盖 live index/name/ownKeys、then/open shadow、显式 sever、opener discard、
@@ -6388,16 +6445,16 @@ cargo nextest run -p lightmount-renderer-v8 \
 Phase 5D1 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) or test(data_url_child_document_is_cross_origin_to_parent) or test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) or test(child_window_proxy_identity_survives_cross_origin_round_trip)' \
   --no-fail-fast
 # 4 passed；覆盖 related/detached top-level Location、generic child Location、
 # origin migration 和 stable WindowProxy navigation round-trip
 
-cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+cargo clippy -p moli-renderer-v8 --all-targets -- -D warnings
 # passed
 
-cargo nextest run -p lightmount-core \
+cargo nextest run -p moli-core \
   -E 'test(cross_origin_window_proxy_exposes_standard_noop_shape)' \
   --no-fail-fast
 # 1 passed；同步淘汰 core 集成层中 denied Location descriptor/has 的旧预期
@@ -6418,14 +6475,14 @@ cargo nextest run \
 # 首次 10/11 passed；唯一失败是 document named-child collision 仍期待旧 denied accessor。
 # 按 Chromium precedence 更新该回归后单独复跑通过；上述最终 4-case owner matrix 随后全通过。
 
-cargo check -p lightmount-renderer-v8
+cargo check -p moli-renderer-v8
 # passed
 ```
 
 Phase 5D2.5 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-core --test history_child \
+cargo nextest run -p moli-core --test history_child \
   -E 'test(cross_origin_window_proxy_exposes_named_child_frames)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 新 mutation matrix 在旧实现上稳定失败：child 已回复完成 rename/remove/append，parent 读取
@@ -6442,7 +6499,7 @@ cargo nextest run \
 # 11 passed；覆盖 related/generic live owner、pre-materialized shell、realm-gap snapshot、
 # navigation round-trip、source identity、Location/Window internal-method matrix。
 
-cargo check -p lightmount-renderer-v8
+cargo check -p moli-renderer-v8
 # passed
 ```
 
@@ -6461,14 +6518,14 @@ cargo nextest run \
 # 首次 13/14 passed：唯一失败把 href setter 的 null receiver 当成访问方 global；
 # 在 WebIDL conversion 前补 Location brand，并新增 replace null-receiver probe 后，最终 14 passed。
 
-cargo clippy -p lightmount-renderer-v8 --all-targets -- -D warnings
+cargo clippy -p moli-renderer-v8 --all-targets -- -D warnings
 # passed
 ```
 
 Phase 5D3b 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-core --test history_child \
+cargo nextest run -p moli-core --test history_child \
   -E 'test(cross_origin_child_endpoint_projection_is_relative_to_the_observer)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 旧实现稳定失败：B 经 parent.frames[1] 得到的 C 仍按 A/C origin 保持 restricted，
@@ -6476,7 +6533,7 @@ cargo nextest run -p lightmount-core --test history_child \
 # stable top WindowProxy + observer/target projection 接入后 1 passed；随后加入 named lookup
 # 与 named/indexed descriptor identity 后仍为 1 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；跨 host related opener 与 popup parent 分别对同一个 child 得到 allowed/denied，
@@ -6488,45 +6545,45 @@ cargo nextest run \
 # 15 passed；覆盖 D3a membrane、D3b same-host/cross-host endpoint、live registry、
 # navigation/realm gap、source identity、popup error Document 与 Location/Window internal methods。
 
-cargo check -p lightmount-renderer-v8
+cargo check -p moli-renderer-v8
 # passed
 ```
 
 Phase 5E1 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(noreferrer_implies_noopener_and_last_value_wins) | test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(window_open_noopener_lightweight_popup_uses_fresh_session_storage)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 4 passed；覆盖 production activation 不再携带 popup_id、Fresh agent、feature precedence、
 # hyperlink 动态 rel policy 和 standalone fresh session-storage fallback。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy) | test(anchor_blank_target_uses_implicit_noopener) | test(popup_initial_about_blank_adopts_renderer_page_and_related_script_agent)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 3 passed；覆盖 noopener/noreferrer/implicit-noopener 的 single request、network Referer、
 # initial/destination document.referrer、精确 about:blank 与 fragment same-document、null opener、
 # target attach，以及保留 opener 路径不回归；主矩阵内包含 6 条 activation case。
 
-cargo nextest run -p lightmount-fetch \
+cargo nextest run -p moli-fetch \
   navigation_referrer_is_distinct_from_http_header_eligibility \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；证明非 HTTP destination 的 Document referrer 与 HTTP Referer eligibility 分离。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   local_storage_mutations_fan_out_across_targets_without_leaking_session_storage \
   --no-fail-fast --status-level fail --final-status-level fail
 # 默认 nextest 栈首次全量稳定 SIGABRT 后，detached HEAD 基线通过；heap-owned commit
 # environment 修复后首次 + 连续 10 次聚焦复跑均通过。
 
-cargo check -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol --tests
+cargo check -p moli-fetch -p moli-renderer-v8 -p moli-protocol --tests
 # passed
 ```
 
 Phase 5E2A 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   window_open_named_target_reuse_is_owned_by_the_renderer_page_group \
   --no-fail-fast --status-level fail --final-status-level fail
 # 红灯：target 初次观察为 `undefined||false`，而 creator 已观察到
@@ -6534,50 +6591,50 @@ cargo nextest run -p lightmount-protocol \
 # 回归包含动态 window.name、主动清空 protocol target_window_names、noopener
 # exact reuse、无新 Target.targetCreated，以及原 opener edge 保留。
 
-cargo nextest run -p lightmount-protocol window_open_named_target \
+cargo nextest run -p moli-protocol window_open_named_target \
   --no-fail-fast --status-level fail --final-status-level fail
 # 4 passed；覆盖既有 named target、same-command reuse、renderer group authority
 # 与旧 catchall/target projection 兼容面。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   per_page_isolate_policy_keeps_window_open_routes_page_owned \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；首次 named activation 携带 RelatedAuxiliaryPage reservation，普通和
 # noopener reuse 均携带同一 RendererResolvedPopupTarget，且不预留第二个 Page。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   window_open_noopener_navigates_existing_named_iframe_and_returns_null \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；existing iframe 仍导航、返回 null，且不产生 popup activation。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   protocol_name_projection_cannot_redirect_popup_to_unrelated_background_owner \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed；手工写入的 protocol name projection 无权把 renderer 新建决定重定向到
 # unrelated background Page，且不会 promote/导航该旧 target。
 
-cargo check -p lightmount-renderer-v8 -p lightmount-protocol
+cargo check -p moli-renderer-v8 -p moli-protocol
 # passed
 ```
 
 Phase 5E2B 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   per_page_isolate_policy_keeps_window_open_routes_page_owned \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前稳定失败：named suppress-opener activation 的 popup_id 为 Some(2)，预期 None。
 # 接入后 1 passed；同时覆盖 FreshUnnamed/FreshNamed/Related typed disposition、
 # noopener+noreferrer 各自的 Fresh admission、相同 name 的两次 reservation 使用不同 Page id。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   named_suppress_opener_window_open_creates_distinct_fresh_groups_with_live_names \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前稳定失败：browser-context target_window_names 暴露后一个 Fresh target（Some("TID-2")）。
 # 接入后 1 passed；覆盖两个 Target.targetCreated、无全局 name projection、两个真实 realm 的
 # requested window.name/null opener、每个 private group 的 self-only exact reuse 与另一 target 不被导航。
 
-cargo check -p lightmount-protocol
+cargo check -p moli-protocol
 # passed
 ```
 
@@ -6587,27 +6644,27 @@ E2C 完成后删除；它要求 opener-local mirrored loader 发起请求，不�
 Phase 5E2C 聚焦验证：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   per_page_isolate_policy_keeps_window_open_routes_page_owned \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前稳定失败：named opener hyperlink 的 new_target_disposition 为 None，预期 Some(Related)。
 # 接入后 1 passed；同时覆盖 existing target 的 exact renderer residence、noreferrer 不暴露/重写 opener，
 # 以及两次同名 suppress-opener hyperlink 得到两个 FreshNamed Page reservation。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 接入前 2 failed：Related target realm 为 `|false|#related-two`，且两个同名 suppress-opener link
 # 只产生一个 Target.targetCreated；接入后 2 passed。回归覆盖清空 protocol name projection 后 exact reuse、
 # existing opener edge 保留、Fresh target 不发布全局 name，以及两个真实 realm 的 name/null opener。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(window_open_named_target_reuses_existing_popup_target) | test(window_open_named_target_reuse_is_owned_by_the_renderer_page_group) | test(named_suppress_opener_window_open_creates_distinct_fresh_groups_with_live_names) | test(window_open_named_target_reused_in_same_command_emits_one_page_event) | test(anchor_blank_target_uses_implicit_noopener) | test(anchor_blank_target_with_rel_opener_preserves_exact_opener) | test(protocol_name_projection_cannot_redirect_popup_to_unrelated_background_owner)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 7 passed；覆盖相邻 window.open name authority、E2B Fresh split、hyperlink `_blank` 两种 opener policy
 # 与 unrelated protocol projection 不回归。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(window_open_noopener_navigates_existing_named_iframe_and_returns_null)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 2 passed；覆盖动态 rel policy 与 existing named iframe 优先级。
@@ -6662,7 +6719,7 @@ cargo nextest run --no-fail-fast
 # case 与本纵切路径不相交，在首次高并发 workspace 运行中失败。
 
 for run in {1..5}; do
-  cargo nextest run -p lightmount \
+  cargo nextest run -p moli \
     -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded) or test(websocket_cdp_runtime_evaluate_uses_committed_page_while_parser_blocking_source_is_pending)' \
     --no-fail-fast || exit 1
 done
@@ -6827,7 +6884,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 Phase 5E2D 提交门禁结果：
 
 ```bash
-cargo nextest run -p lightmount-core \
+cargo nextest run -p moli-core \
   -E 'test(wpt_compat_case_form_submitter_target_fallback_basic)' \
   --no-fail-fast --status-level fail --final-status-level fail
 # 1 passed。首次全量门禁暴露本地 port 仍把显式空 formtarget 当作 missing；fixture 按当前
@@ -6853,7 +6910,7 @@ git pull -r origin master
 # 无文本冲突；把 37 个 popup 分支提交从 cac2e67294 重放到 b016375769，E2D 提交变为
 # d209eb3430。
 
-cargo nextest run -p lightmount -p lightmount-protocol \
+cargo nextest run -p moli -p moli-protocol \
   -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded) | \
       test(parser_tail_dom_mutations_precede_the_dcl_binding_refresh)' \
   --stress-count 100 --flaky-result fail --test-threads 8 --no-fail-fast
@@ -6902,12 +6959,12 @@ E2E rebase 后集成门禁：
 ```bash
 git pull -r origin master
 # origin/master 从 b016375769 前进到 744e161dad；39 个 popup 分支提交完成重放。
-# 旧 continuation-fence 提交与新 master 在 lightmount-protocol-cdp/src/wire.rs 有一个内容冲突：
+# 旧 continuation-fence 提交与新 master 在 moli-protocol-cdp/src/wire.rs 有一个内容冲突：
 # 合并结果同时保留 master 的 Debugger/IO-route exceptions，以及旧提交的 Runtime control-method
 # exceptions 和 Page.getNavigationHistory continuation fence。
 
-cargo nextest run -p lightmount-protocol-cdp -p lightmount-renderer-v8 -p lightmount-protocol \
-  -E 'package(lightmount-protocol-cdp) | test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | test(named_frame_lookup_skips_candidate_the_source_cannot_navigate) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(window_open_noopener_navigates_existing_named_iframe_and_returns_null) | test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(hyperlink_javascript_url_csp_checks_the_source_document_before_target_selection) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request)' \
+cargo nextest run -p moli-protocol-cdp -p moli-renderer-v8 -p moli-protocol \
+  -E 'package(moli-protocol-cdp) | test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | test(named_frame_lookup_skips_candidate_the_source_cannot_navigate) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(window_open_noopener_navigates_existing_named_iframe_and_returns_null) | test(hyperlink_target_blank_reloads_rel_opener_policy_for_each_activation) | test(hyperlink_javascript_url_csp_checks_the_source_document_before_target_selection) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run ce377834-850c-48c9-8f2d-4b4f867db090：19 passed；包含 wire crate 全部单测和 10 条 popup 邻接回归。
 
@@ -6932,7 +6989,7 @@ cargo nextest run --no-fail-fast --status-level fail --final-status-level fail
 # 三个 failure 都是 charset/data URL form 用例仍断言 GET named iframe 必须使用旧 URL bootstrap；
 # runtime 已正确产生 typed Request(GET, body=None)。断言改为同时验证编码 URL、method/body 和 Referer。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(form_submission_rewrites_charset_control_from_accept_charset) | \
       test(form_get_submission_uses_document_encoding_for_query) | \
       test(iso_2022_jp_get_form_data_url_target_posts_stateful_values)' \
@@ -6960,7 +7017,7 @@ git pull -r origin master
 # master 新增 test(cdp): stabilize shadow DOM navigation fixtures，只修改 protocol DOM 测试 fixture，
 # 不与 E2F form/child owner 代码重叠。
 
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(related_page_named_form_post_uses_nested_target_owner_and_exact_request) | test(related_page_named_frame_lookup_follows_chromium_frame_tree_order) | test(named_frame_lookup_skips_candidate_the_source_cannot_navigate) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(form_target_blank_reloads_rel_opener_policy_for_each_submission) | test(canceled_post_form_navigation_aborts_signal_without_synthetic_timer) | test(detached_child_form_submit_targets_named_iframe_without_shadow_controls) | test(formdata_event_appended_entries_are_submitted_to_named_iframe) | test(submit_button_click_supersedes_programmatic_submit_after_target_change) | test(distinct_forms_keep_distinct_pending_child_target_submissions) | test(programmatic_form_submit_keeps_successive_distinct_child_targets) | test(form_top_and_parent_targets_queue_plain_top_level_navigation) | test(renderer_top_level_form_post_preserves_request_through_document_commit) | test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request) | test(base_target_blank_form_post_creates_fresh_target_with_exact_request) | test(named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group) | test(named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names) | test(noopener_and_noreferrer_popups_have_one_real_navigation_with_creator_referrer_policy)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run b226a25f-d8b8-4e8b-bc6f-17a35490c5e1：18 passed。
@@ -7003,22 +7060,22 @@ git pull -r origin master
 # 唯一文本冲突位于 script_vm.rs import，合并后同时保留 master 的
 # with_scoped_inspector_microtasks 与 popup 分支的 set_object_slot。
 
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
   loaded_child_document_retains_exact_network_response_body --no-fail-fast
 # run ec97fd16-bd36-4ff5-9d3a-0d8d05f06f66：1 passed。
 # master 新增的 body-preservation fixture 调用分支已扩展的 child response API 时缺少
 # document_referrer；该用例不构造 referrer，显式补 None，而 production caller 继续传
 # exact referrer。这是 rebase 后的语义编译冲突，不是用旧签名绕开新 carrier。
 
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
   -E '<E2M.1 10 条新增 + 7 条既有 owner 回归>' --no-fail-fast
 # run adff7e28-bbe6-4a5a-93f7-4f73de32aa11：17 passed。
 
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 sandbox --no-fail-fast
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 sandbox --no-fail-fast
 # run 352d8e23-7e14-498d-82d1-905222e8376d：44 passed。
 
 for iteration in $(seq 1 20); do
-  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-renderer-v8 \
+  TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-renderer-v8 \
     -E '<同一 17 条 owner-focused 回归>' --no-fail-fast
 done
 # first run 36a54882-e0e9-4c4e-80af-ff12ad60b1ed，
@@ -7027,7 +7084,7 @@ done
 
 第一次 rebase 后全量命令在进入测试前因工作区文件系统 `ENOSPC` 失败，不能算门禁结果。
 当时 `target` 为 191 GiB，其中 `target/debug/deps` 为 165 GiB；先用
-`cargo clean -p lightmount-renderer-v8 --dry-run` 精确确认范围，再执行同一 package clean，删除
+`cargo clean -p moli-renderer-v8 --dry-run` 精确确认范围，再执行同一 package clean，删除
 316 个可重建 artifact、释放 23.4 GiB，没有清理源码、git 数据或用户目录。随后第一轮有效全量
 run `39fd13c7-2e49-4027-8e16-44aac0fd08a3` 为 16102 passed、2 failed、18 skipped：
 
@@ -7042,12 +7099,12 @@ run `39fd13c7-2e49-4027-8e16-44aac0fd08a3` 为 16102 passed、2 failed、18 skip
 修正后的精确、压力与最终全量证据：
 
 ```bash
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-protocol \
   local_storage_mutations_fan_out_across_targets_without_leaking_session_storage \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run 74a940e5-d3f6-4ba8-b9ee-37eff62fb3c7：1 passed。
 
-TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2m1-check cargo nextest run -p moli-protocol \
   -E 'test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement) | \
       test(local_storage_mutations_fan_out_across_targets_without_leaking_session_storage)' \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
@@ -7101,7 +7158,7 @@ TMPDIR=<repo>/tmp/e2n-build cargo nextest run --no-fail-fast \
   owner-boundary 修复，见下一节：
 
 ```bash
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-protocol \
   file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement \
   emitted_child_frame_unique_context_id_selects_that_realm \
   --stress-count 20 --flaky-result fail --test-threads 2
@@ -7177,14 +7234,14 @@ binding 可能在 replacement reset 前登记后被清除，也可能在 reset �
 修复后的证据：
 
 ```bash
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement) or \
       test(file_chooser_opened_preserves_typed_automation_sidecar) or \
       test(document_open_replacement_preserves_causal_file_chooser_activation)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run d89a8ca5-dc41-4738-ae32-c13e98261c2f：3 passed。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   file_chooser_opened_renderer_backend_node_id_is_scoped_to_document_replacement \
   --stress-count 50 --flaky-result fail --test-threads 4 --no-fail-fast
 # run d34eae85-3c81-442d-8a65-8c4fe4f2a1cd：50/50 iterations passed。
@@ -7215,13 +7272,13 @@ origin/master..HEAD` 的 51 项均为 `=`。最终关键提交为 E2N `967f431ce
 没有把 clean rebase 当作行为证明：
 
 ```bash
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(runtime_script_uses_document_referer_and_script_cdp_initiator) or \
       test(prepared_runtime_script_start_captures_document_and_base_urls_at_prepare_time)' \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run c1171701-ca84-4797-a0d1-d5e0398c1e3c：2 passed。
 
-TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-renderer-v8 javascript \
+TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p moli-renderer-v8 javascript \
   --no-fail-fast --status-level fail --final-status-level fail --failure-output immediate
 # run af1ff832-3535-42a0-9571-4c6323aaff64：32 passed。
 
@@ -7250,19 +7307,19 @@ cargo nextest run --no-fail-fast
 # 首次 run 5ee77e9a-8af4-4d94-bcc3-6da87dd0ab41：16144 passed、1 failed、18 skipped。
 ```
 
-唯一 failure 是 `lightmount-wpt-compat::concurrent_report_writes_never_expose_partial_payloads`。没有把它直接归类
+唯一 failure 是 `moli-wpt-compat::concurrent_report_writes_never_expose_partial_payloads`。没有把它直接归类
 为 flaky：聚焦复跑的 stderr 明确为 temporary report write `ENOSPC`；`df` 显示 `/tmp` 是独立 44 GB tmpfs，
 当时可用空间只有 224 KB，而宿主磁盘仍有约 29 GB。该用例和 popup/Trusted Types/form-action 路径没有代码
 交集。没有删除 `/tmp` 中来源不明的历史目录，而是创建仓库磁盘上的独立 TMPDIR，再用同一代码重跑：
 
 ```bash
-TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p lightmount-wpt-compat \
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p moli-wpt-compat \
   concurrent_report_writes_never_expose_partial_payloads \
   --stress-count 20 --flaky-result fail --test-threads 4 --no-fail-fast \
   --failure-output immediate
 # run aaf6fa25-faa4-4f41-8b77-ef61c9ece2b7：20/20 iterations passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   window_open_named_lightweight_popup_reuses_without_recloning_session_storage \
   existing_named_target_does_not_consume_popup_user_activation \
   lightweight_popup_javascript_url_uses_inline_navigation_csp_not_eval_csp \
@@ -7333,7 +7390,7 @@ workspace 调度竞争下暴露，不能继续保留“立即扫描测试缓冲�
 
 ```bash
 TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run \
-  -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol \
+  -p moli-fetch -p moli-renderer-v8 -p moli-protocol \
   -E 'test(dropping_raw_response_releases_lifetime_lease_before_completion_receiver) or \
       test(memory_cache_tee_drop_after_body_eof_cancels_pending_completion_and_releases_exact_runtime) or \
       test(emitted_child_frame_unique_context_id_selects_that_realm) or \
@@ -7341,7 +7398,7 @@ TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run \
   --no-fail-fast
 # run bd0108ae-f685-4669-be2a-056c128a788b：4 passed。
 
-TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/e2o-gate.NW0yVs cargo nextest run -p moli-protocol \
   emitted_child_frame_unique_context_id_selects_that_realm \
   --stress-count 100 --flaky-result fail --test-threads 4 --no-fail-fast
 # run 81eb99a1-0fcf-4794-9731-5ab676f2a60c：100/100 iterations passed。
@@ -7396,11 +7453,11 @@ git pull -r origin master
 全量门禁中间有一项不能隐去的既有并发风险：run
 `4cdda0f7-af3b-43e7-a865-d378f2151081` 为 16150 passed、1 failed、18 skipped，唯一失败是
 `websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded` 未在目标 DCL 采样前观察到 parser
-script 的 `Network.requestWillBeSent`。本轮没有修改 `lightmount` WebSocket fixture；该用例也曾在 E2H、E2J、D1
+script 的 `Network.requestWillBeSent`。本轮没有修改 `moli` WebSocket fixture；该用例也曾在 E2H、E2J、D1
 等 full-workspace 门禁中呈现相同的“workspace 并发失败、focused stress 通过”形状。当前复核为：
 
 ```bash
-TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount \
+TMPDIR=<repo>/tmp/phase5e cargo nextest run -p moli \
   websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded \
   --stress-count 100 --flaky-result fail --test-threads 8 --no-fail-fast \
   --status-level fail --final-status-level fail --failure-output immediate
@@ -7439,7 +7496,7 @@ target teardown，不给 lightweight record 增加第二套 unload owner。
   `dom_window.cc:779-782` 的 top-level `blur()` 只记录 access metric。因此本轮没有实现一个错误的对称
   blur transaction；该 active Page milestone 后续已由 Phase 5L2 完成。
 
-##### Lightmount owner 与不变量
+##### Moli owner 与不变量
 
 1. `RendererPageReservationToken` 和跨 Document 保留的 `RendererPageScriptEnvironment` 现在携带
    `opened_by_dom`。DOM auxiliary 为 true，普通 browser/SW/notification Page 为 false；browser-context
@@ -7493,12 +7550,12 @@ TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run \
 # run 00a70b7c-3ac4-43b9-895d-190c968bd8bd：400 passed、15774 skipped；覆盖 workspace
 # close/beforeunload/unload、HTTP frontend fence 和 exact attached-session owner scope。
 
-TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p moli-protocol \
   -E 'test(close_aborts_paused_runtime_fetch_subresource) | test(close_aborts_paused_response_stage_runtime_xhr_subresource) | test(close_aborts_paused_runtime_xhr_auth_subresource) | test(devtools_command_executes_target_pending_activate_and_close) | test(devtools_target_legacy_close_drains_runtime_ready_events_without_serializing_them)' \
   --no-fail-fast
 # run 81c1b29d-69a6-4f63-ad50-b9f2bd086839：5 passed。
 
-TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p moli-protocol \
   -E 'test(session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route) or \
       test(command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope) or \
       test(patchright_over_cdp_auto_attach_sweep_replacement_targets_keep_thin_handle_cleanup_isolated_per_browser_context_without_runtime_enable) or \
@@ -7510,7 +7567,7 @@ TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
 # owner/Patchright 聚焦 run d3b022eb-8e3d-4f62-90ce-3e3fe3d10604：7 passed、3353 skipped；证明两个 BrowserContext
 # 同时保留 Page/session 时，先关闭 inactive owner 不会遗留 target，replacement 仍恢复各自 preload/binding。
 
-TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p moli-protocol \
   -E 'test(session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route) | \
       test(command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope) | \
       test(close_background_target_emits_detached_events_and_clears_attached_sessions) | \
@@ -7534,7 +7591,7 @@ git diff --check
 
 这两组是本地 renderer/protocol owner 回归，不是外部 WPT 结果。L1 当时明确不包含的 browser-context
 `focus()` 已由下述 L2 完成；COOP/RemoteFrame beforeunload、lightweight compatibility unload 或 JS-retained
-detached realm lifetime 仍不会因为 local Page close 已闭环而自动成立。
+detached realm lifetime 当时都不会因为 local Page close 已闭环而自动成立。后者现已由 P6R3 独立完成。
 
 #### Phase 5L2：browser-context active Page 与 focus transaction closure
 
@@ -7559,7 +7616,7 @@ focused，或者 active element identity 会在切换时被错误清空。
   Window `focus` 后 element `focus` / `focusin`。本实现只对 local frame tree 固化该顺序；RemoteFrame/embedder
   分支留给下一阶段。
 
-##### Lightmount owner 与不变量
+##### Moli owner 与不变量
 
 1. `RendererPageReservationToken` 分别冻结 initial active-target 与 effective-focus，protocol 在 parser/author
    script 可观察前按 exact target slot 覆盖：active Page 通常为 active+focused，background/auxiliary Page
@@ -7598,7 +7655,7 @@ modal-prompt owner barrier：
 
 ```bash
 TMPDIR=<repo>/.tmp cargo nextest run \
-  -p lightmount -p lightmount-protocol -p lightmount-renderer-v8 \
+  -p moli -p moli-protocol -p moli-renderer-v8 \
   -E 'test(top_level_page_focus_preserves_active_element_and_restores_effective_focus) | \
       test(related_cross_origin_window_focus_publishes_target_page_owner_action) | \
       test(document_has_focus_projects_the_page_focused_frame_ancestry) | \
@@ -7618,7 +7675,7 @@ TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
 # 首轮 run 9b51a24a-5e84-4518-bf1c-c7dbe293a497：16160 passed、1 failed、18 skipped；
 # 唯一 failure 是既有 parser/network backlog fixture 在全 workspace contention 下的一次调度失败。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli \
   -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded)' \
   --stress-count 100 --flaky-result fail --test-threads 8 --no-fail-fast \
   --status-level fail --final-status-level fail
@@ -7672,11 +7729,11 @@ scheduler 继续承载导航后的 Document。
   virtual browsing-context group。本纵切只实现**最终可提交 response 的 enforced policy**，不伪装成已经实现
   report-only/Reporting API 或 redirect-hop virtual group。
 
-本轮只对 potentially trustworthy URL 接受 COOP；`same-origin + COEP` 提升为独立
-`SameOriginPlusCoep` policy。opaque origin 暂时 fail closed：serialized origin 为 `null` 时不把两个 Document
-判成同源，等待 identity/lifetime 阶段的 group-safe opaque-origin nonce。
+G1 当时只对 potentially trustworthy URL 接受 COOP；`same-origin + COEP` 提升为独立
+`SameOriginPlusCoep` policy。其 opaque origin comparison 当时暂时 fail closed；P6R2 已用 group-safe
+opaque-origin nonce 替换该临时状态，但 COOP 对 opaque/potentially-trustworthy 的完整外部矩阵仍待 focused WPT。
 
-##### Lightmount owner、不变量与 commit 顺序
+##### Moli owner、不变量与 commit 顺序
 
 1. `BrowsingContextGroupId` 是 renderer owner 分配的 typed identity，与 `ScriptAgentId` 分离。普通 related
    auxiliary Page 同时加入 opener 的 related group 与 script agent；本轮也修正了旧 admission 只共享 isolate、
@@ -7716,32 +7773,32 @@ handoff id 回退并被 currentness 拒绝。最终实现分别收回 related-gr
 ##### G1 聚焦证据与明确保留项
 
 ```bash
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-renderer-v8 \
   cross_origin_isolation --no-fail-fast
 # 8 passed；覆盖 header/trustworthiness/COEP 派生与 Chromium swap matrix。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-renderer-v8 \
   coop_commit_switches_related_page_group_and_disconnects_old_window_proxy \
   --no-fail-fast
 # 1 passed；覆盖 provisional cancel、group/agent/isolate/proxy switch、旧 proxy disconnect、
 # 同 Page/owner、旧 membership 退役，以及第二次 same-policy navigation 保持 group/scheduler。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-renderer-v8 \
   prepared_live_page_replacement --no-fail-fast
 # 5 passed；普通 replacement/cancel 仍保持原 isolate、WindowProxy 与 output ownership。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-renderer-v8 \
   related_page_script_agent_experiment_shares_isolate_and_survives_source_close \
   --no-fail-fast
 # 1 passed；修正 related group constructor 后，source close 的既有 agent lifetime 不回归。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-protocol \
   popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
   --no-fail-fast
 # 1 passed；覆盖真实 HTTP COOP response、auto-attach waiting target、同 session context rollover、
 # 无 target create/destroy、new opener/name 与 opener-held old proxy closed。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-protocol \
   popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
   --stress-count 500 --test-threads 8 --flaky-result fail --max-fail 1
 # run ecbca0b8-d8b6-41d7-ab95-45c87b2a7b61：500/500 passed。
@@ -7800,25 +7857,25 @@ constructor，没有把旧 carrier 重新加回生产 API。
 本次 post-rebase 聚焦证据：
 
 ```bash
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-renderer-v8 \
   -E 'test(/script_vm::inspector_pause::tests/)' --no-fail-fast
 # run 4dc4c99b-c7be-4685-8bef-3a37699b49e3：17 passed。
 
 TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
-  -p lightmount-protocol-cdp -p lightmount-protocol -p lightmount \
+  -p moli-protocol-cdp -p moli-protocol -p moli \
   -E 'test(debugger_execution_controls_admit_exact_command_output_barriers) | \
       test(renderer_inspector_batches_keep_their_command_response_side) | \
       test(debugger_transition_messages_wait_for_the_exact_command_response) | \
       test(websocket_cdp_debugger_step_out_responds_before_resumed_and_caller_pause)'
 # run 8d285de8-a8a3-421c-a009-390eee80ca22：4 passed。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli \
   websocket_cdp_debugger_step_out_responds_before_resumed_and_caller_pause \
   --stress-count 500 --test-threads 1 --flaky-result fail --max-fail 1
 # run a1746b4a-3946-4fc0-af87-290151c1d33f：500/500 passed。
 
 TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
-  -p lightmount-renderer-v8 -p lightmount-protocol \
+  -p moli-renderer-v8 -p moli-protocol \
   -E 'test(coop_commit_switches_related_page_group_and_disconnects_old_window_proxy) | \
       test(popup_coop_commit_keeps_target_session_and_severs_old_group_proxy) | \
       test(/prepared_live_page_replacement/) | \
@@ -7826,7 +7883,7 @@ TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
       test(coop_group_swap_matrix_matches_chromium_for_committed_and_initial_empty_documents)'
 # run 1b6cdb06-183c-4279-95c8-b57560c7f52e：9 passed。
 
-TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/.tmp cargo nextest run -p moli-protocol \
   popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
   --stress-count 500 --test-threads 8 --flaky-result fail --max-fail 1
 # run c423cef4-674d-4a0f-a8a2-17c52a5392ee：500/500 passed。
@@ -7845,7 +7902,7 @@ git diff --check
 # passed。
 ```
 
-Chromium 对照 checkout 仍是 `a03603fe9af6`；这次只同步 Lightmount master，没有对照基线漂移。post-rebase
+Chromium 对照 checkout 仍是 `a03603fe9af6`；这次只同步 Moli master，没有对照基线漂移。post-rebase
 workspace 门禁已按新 Rust 基线完整复跑，不能沿用 rebase 前的 16165/18 结果。
 
 这些是 renderer/protocol integration evidence，不是 upstream WPT 结果。G1 的 exit condition 是“本地真实 Page
@@ -7859,7 +7916,8 @@ G2-G6 保留了以下范围；紧随其后的阶段记录说明哪些已经关�
   RemoteFrame 进入 G6；
 - RemoteFrame/fenced/embedder `CanNavigate`、跨进程 activation/focus/unload replication；
 - protocol opener/group projection 是否随 sever 更新的明确契约；
-- group-safe opaque-origin nonce、JS-retained detached DOM/realm lifetime，之后才能进入 Phase 6 删除。
+- P6R2 已完成 group-safe opaque-origin nonce，P6R3 已完成 JS-retained detached DOM/realm lifetime；Phase 6
+  现在进入 compatibility reachability 与依赖层删除。
 
 #### Phase 5G2：redirect-chain COOP status、report-only virtual group 与 exact output reservation
 
@@ -7886,7 +7944,7 @@ navigation-owned status。真实 browsing-context-group 是否切换、report-on
   response source 建立，navigation-to/from report 需要按 origin/source 关系清除敏感 URL，并使用该 response
   reporter，而不是最终 Document 提交后再回读 headers。
 
-Lightmount G2 实现上述 redirect-chain enforced swap、主 report-only virtual group 与 navigation report 的
+Moli G2 实现上述 redirect-chain enforced swap、主 report-only virtual group 与 navigation report 的
 可观察语义。Chromium 另有 feature-controlled `same-origin-allow-popups-by-default` 第二 virtual group、完整
 ReportingService source/NetworkAnonymizationKey 生命周期和 Window access reports；这些没有被 G2 冒充完成，留在
 后续 Reporting/remote closure。
@@ -7933,19 +7991,19 @@ ReportingService source/NetworkAnonymizationKey 生命周期和 Window access re
 ##### G2 聚焦证据与明确保留项
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   cross_origin_isolation --no-fail-fast
 # run 671dbcee-044e-4f33-9ada-f4fd12dc05b5：11 passed；覆盖 header/endpoint 解析、enforced
 # Chromium matrix、redirect 累积和 report-only virtual group/report。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(newer_live_page_replacement_reservation_supersedes_unconsumed_nonce) | \
       test(canceling_prepared_live_page_replacement_preserves_page_environment_and_output_stream)' \
   --no-fail-fast
 # run 6db5be58-2f62-4af0-a48e-cb708c757e1d：2 passed；同一 Page 的 overlapping/canceled
 # replacement 保持 exact reservation 与旧环境 currentness。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   -E 'test(popup_coop_redirect_survives_fetch_response_override_and_severs_old_group_proxy) | \
       test(popup_coop_redirect_then_transport_error_still_severs_old_group_proxy) | \
       test(stale_page_release_cannot_clear_newer_same_page_owner_reservation) | \
@@ -7988,7 +8046,8 @@ generation 与 routed-operation currentness，G5 再关闭 same-group cross-agen
   script agent 路由，但没有伪装成 Mojo/IPC 或 remote child tree；
 - RemoteFrame/fenced/embedder `CanNavigate`、跨进程 activation/focus/unload replication，以及 protocol
   opener/group projection 契约；
-- group-safe opaque-origin nonce 与 JS-retained detached DOM/realm lifetime，之后才具备 Phase 6 删除前置条件。
+- P6R2/P6R3 已分别完成 group-safe opaque-origin nonce 与 JS-retained detached DOM/realm lifetime；Phase 6
+  只再等待当前产品可达 remote 语义和 compatibility caller graph 收口。
 
 #### Phase 5G3：sandboxed-COOP blocked response、redirect stop 与 authoritative error Document
 
@@ -8026,7 +8085,7 @@ frame policy replication 与 browser-process ReportingService 仍留给后续 mi
    `RendererAuxiliaryBrowsingContextPolicy` 与**当前有效 response** 的 enforced CSP sandbox，再检查 potentially
    trustworthy response 上的 enforced COOP；protocol/fetch 只消费 typed 结果，不复制 sandbox token 或 COOP
    parser。
-2. `lightmount-fetch::Request` 新增通用 `RedirectResponseFollowPolicy` callback。它不知道 COOP/sandbox，只保证
+2. `moli-fetch::Request` 新增通用 `RedirectResponseFollowPolicy` callback。它不知道 COOP/sandbox，只保证
    callback 拒绝时把当前 redirect response 作为 terminal 返回，并且不发出下一 hop。buffered、HTML streaming、
    raw streaming 与两条 cache-hit redirect 路径都经过这一门槛；protocol 为 top-level navigation 冻结同一
    renderer sanitizer callback。fixture 用服务端原子计数证明 blocked redirect target 的请求数保持为 0。
@@ -8063,7 +8122,7 @@ frame policy replication 与 browser-process ReportingService 仍留给后续 mi
 
 ```bash
 TMPDIR=<repo>/tmp/phase5g3-check cargo nextest run \
-  -p lightmount-fetch -p lightmount-renderer-v8 -p lightmount-protocol \
+  -p moli-fetch -p moli-renderer-v8 -p moli-protocol \
   -E 'test(request_redirect_response_policy_can_stop_follow_before_next_exchange) | \
       test(coop_response_is_blocked_by_response_or_inherited_sandbox_before_commit) | \
       test(report_only_coop_and_bypassed_response_csp_do_not_block) | \
@@ -8075,7 +8134,7 @@ TMPDIR=<repo>/tmp/phase5g3-check cargo nextest run \
 # run 27641c98-fd15-493c-b699-0a3cb3ab43f3：7 passed；同时锁住 response CSP 不跨
 # Document 持久化、原 blocked response URL/status、唯一 loadingFailed/no loadingFinished 和 redirect target 零请求。
 
-TMPDIR=<repo>/tmp/phase5g3-check cargo nextest run -p lightmount-protocol \
+TMPDIR=<repo>/tmp/phase5g3-check cargo nextest run -p moli-protocol \
   popup_response_csp_sandbox_does_not_block_later_unsandboxed_coop_navigation \
   --stress-count 100 --test-threads 8 --flaky-result fail --max-fail 1
 # run 58e9343f-60be-4c96-ab09-474160d124af：100/100 passed。
@@ -8097,7 +8156,7 @@ git diff --check
 G3 提交后按 topic 约定执行 `git pull -r origin master`。`origin/master` 从 `45c532c5eb` 前进到
 `2a79fed82e`，64 个 popup topic commit 全部重放，没有跳过提交。master 增量包含一项 renderer lazy
 Window surface realm-owner 修复和五项 agent-episode benchmark/docs 改动。唯一文本冲突发生在
-`lightmount-renderer-v8/src/runtime/tests.rs` 的 helper 插入点；合并结果同时保留 master 的
+`moli-renderer-v8/src/runtime/tests.rs` 的 helper 插入点；合并结果同时保留 master 的
 `assert_window_performance_surface_for_test` 和 popup topic 的 related-script-agent memory/accounting helpers，
 没有选择性删除任一侧测试。因为该冲突涉及 Rust 测试结构，最终 tree 重新执行完整门禁：
 
@@ -8113,7 +8172,7 @@ TMPDIR=<repo>/tmp/phase5g3-rebase-clippy cargo clippy --workspace --all-targets 
 ```
 
 最终分支相对 `origin/master@2a79fed82e` 落后 0、领先 64。Chromium 对照 checkout 仍固定在
-`a03603fe9af6`，本次 Lightmount rebase 没有改变对照基线。
+`a03603fe9af6`，本次 Moli rebase 没有改变对照基线。
 
 上述 protocol 回归使用真实 HTTP redirect、Fetch response-stage fulfill、Page/Runtime/Network CDP events 和真实
 auxiliary Page replacement；它们不是纯 header parser 单测。外部 focused upstream WPT 本轮仍未运行，因此不能把
@@ -8124,9 +8183,10 @@ generation/currentness，G5 又关闭 same-group cross-agent top-level replaceme
 - 完整 ReportingService source/queue、partition/NIK、access report 与第二 virtual group；
 - 真正跨进程 RemoteWindowProxy/RemoteFrame transport、process death 与 agent reunification；
 - RemoteFrame/fenced/embedder `CanNavigate`、policy/activation/focus/unload replication；
-- group-safe opaque-origin nonce、JS-retained detached DOM/realm lifetime，之后才进入 Phase 6。
+- P6R2/P6R3 已分别完成 group-safe opaque-origin nonce 与 JS-retained detached DOM/realm lifetime；下一阶段进入
+  Phase 6 compatibility reachability/removal。
 
-全量门禁提供了两项额外证据。第一次 build 在 `lightmount-core` test target 发现新增可选 redirect-policy 参数的
+全量门禁提供了两项额外证据。第一次 build 在 `moli-core` test target 发现新增可选 redirect-policy 参数的
 两处 caller 漏传，以及两处机械 `None` 落到相邻 inline-page 调用；只修正四个测试签名后重新编译，production
 crate 没有对应失败。随后 run `b2bbf80b-c59d-4ee5-884f-8565e5e4f299` 为 16185 passed、1 failed、18 skipped：
 唯一失败是 WPT 反向控制看到 final `Page.frameNavigated` 后立即 evaluate，并发下尚未等到 final default realm/load，
@@ -8155,7 +8215,7 @@ group-visible WindowProxy endpoint”误写成“恰好还在同一 isolate 里�
 - `third_party/blink/renderer/core/frame/dom_window.cc` 与 `web_frame_test.cc`：close/focus 先做当前 endpoint admission，
   remote close 是 owner request；COOP 旧 proxy 可继续被 JS 强引用，但不再获得 replacement group 的 local authority。
 
-Lightmount G4 关闭 typed identity/currentness 和 disconnected drop 这一层，不冒充已经有 Chromium 的跨进程 frame
+Moli G4 关闭 typed identity/currentness 和 disconnected drop 这一层，不冒充已经有 Chromium 的跨进程 frame
 IPC。G4 入库时 live related endpoint 仍只在同一 script agent 中 materialize；紧随其后的 G5 已把这个 admission
 扩展到 same-group cross-agent top-level typed command/ACK。真正跨进程 transport、RemoteFrame/fenced policy
 replication 和 process-death disconnect 仍明确留给 G6。
@@ -8203,39 +8263,39 @@ replication 和 process-death disconnect 仍明确留给 G6。
 ##### G4 聚焦与压力证据
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   coop_commit_switches_related_page_group_and_disconnects_old_window_proxy
 # run 517c6133-b04e-43d7-a512-d8ecb49cfccd：1 passed；覆盖 canceled/same-group endpoint
 # pair 保留、COOP fresh pair、四类 stale operation、closed/opener/length 和 replacement currentness。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   -E 'test(related_page_script_agent_exposes_chromium_cross_origin_window_proxy_surface) | \
       test(related_cross_origin_window_focus_publishes_target_page_owner_action) | \
       test(related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm)'
 # run fe84ef7d-9ac5-44a1-8038-836568d5cc98：3 passed；证明 live endpoint 的 child/name、Location、
 # focus 与 close 没有因 identity owner 抽取而退化。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   popup_coop_redirect_survives_fetch_response_override_and_severs_old_group_proxy
 # run 28cc7a25-33ed-48fe-afa9-b18b62f0ed1d：1 passed；真实 HTTP redirect + Fetch fulfill + CDP
 # target/session/realm replacement，并执行 stale operation matrix。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   coop_commit_switches_related_page_group_and_disconnects_old_window_proxy \
   --stress-count 100 --test-threads 8 --flaky-result fail --max-fail 1
 # run c54a0a98-f57c-4ce0-8a10-457397c6db4b：100/100 passed。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   popup_coop_redirect_survives_fetch_response_override_and_severs_old_group_proxy \
   --stress-count 50 --test-threads 8 --flaky-result fail --max-fail 1
 # run c6469dcc-305d-47cd-aada-511ceeaac9be：50/50 passed。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   module_runtime::graph::tests::external_module_root_uses_import_map_integrity_when_element_integrity_is_absent
 # run c6dc0f05-b510-4a06-a17c-74b111b015b0：1 passed；证明 owner-less standalone realm
 # 不要求或伪造 Page-group endpoint。
 
-cargo nextest run -p lightmount-renderer-v8 --no-fail-fast \
+cargo nextest run -p moli-renderer-v8 --no-fail-fast \
   --status-level fail --final-status-level fail
 # run 8ada8626-efc6-439c-a80c-b465a604a36f：7203 passed、4 skipped。
 
@@ -8260,7 +8320,8 @@ Page owner。最终实现把该要求收窄到 related Page surface，并用 ren
   RemoteFrame/process-death command/ACK transport；
 - 完整 RemoteFrame/fenced/embedder `CanNavigate`、activation/focus/unload 和 opener/group policy replication；
 - ReportingService source/queue、partition/NIK、access report 与第二 virtual group；
-- 随后的 group-safe opaque-origin nonce、JS-retained detached DOM/realm lifetime，最后才进入 Phase 6。
+- P6R2 已完成随后的 group-safe opaque-origin nonce，P6R3 已完成 JS-retained detached DOM/realm lifetime；下一阶段
+  进入 Phase 6 compatibility reachability/removal。
 
 #### Phase 5G5：same-group cross-agent top-level RemoteWindowProxy transport
 
@@ -8285,7 +8346,7 @@ proxy、target name、`window.opener`、`MessageEvent.source` 和 protocol Targe
 - `content/browser/renderer_host/render_frame_proxy_host.cc`：browser owner 解析 exact target host，复核 target
   liveness/current origin/related SiteInstanceGroup，并把 source local token 翻译成 target process 的 remote token。
 
-Lightmount 没有 Chromium 的 SiteInstance/Mojo process 拓扑。G5 因此实现的是同一 renderer/protocol runtime 内的
+Moli 没有 Chromium 的 SiteInstance/Mojo process 拓扑。G5 因此实现的是同一 renderer/protocol runtime 内的
 **cross-agent top-level transport seam**：V8 handle 已完全隔离，操作必须穿过 typed output、exact protocol target
 Page 和 target renderer ACK。G5 交付时 carrier仍是进程内 Rust capability，也没有 remote child `FrameTree`；G6A
 随后补 child owner，G6B1 再替换为 process-neutral versioned wire。真实 SiteInstance/Mojo process拓扑仍未实现。
@@ -8366,24 +8427,24 @@ Page 和 target renderer ACK。G5 交付时 carrier仍是进程内 Rust capabili
 ##### G5 聚焦证据
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   cross_origin_related_page_commit_moves_local_window_to_remote_agent_and_routes_commands
 # run 11b1a446-a050-47ac-888b-628fecb8ec8b：1 passed；覆盖 provisional cancel、fresh agent、
 # stable group/endpoint/old proxy、opener、window.open/hyperlink/POST form remote named reuse、
 # form body/header、structured-clone MessageEvent.source、focus、Location assign、close 与 target ACK。
 
-cargo nextest run -p lightmount-renderer-v8 \
+cargo nextest run -p moli-renderer-v8 \
   coop_commit_switches_related_page_group_and_disconnects_old_window_proxy
 # run ee0309a5-f53a-4536-8c3c-6da587eca76d：1 passed；新增同 Page residence 的 stale in-flight
 # remote command，证明 COOP fresh endpoint 在 target 端返回 false。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   cross_origin_popup_remote_window_proxy_routes_through_exact_background_target
 # run 30fc750f-4517-466c-aae5-a58e29f1b71b：1 passed；两个真实 localhost origin、auto-attached
 # popup Page.navigate、same-group agent split、单 background target/named reuse、typed protocol ingress、
 # structured message 与 canonical opener source。
 
-cargo nextest run -p lightmount-protocol \
+cargo nextest run -p moli-protocol \
   named_form_post_reuses_renderer_group_target_and_preserves_exact_request \
   --stress-count 100 --test-threads 8 --flaky-result fail --max-fail 1
 # run f59c9a7b-a8d8-4046-977a-37eb56c87d2c：100/100 passed。
@@ -8397,7 +8458,7 @@ TMPDIR=<repo>/.phase5g5-nextest.JpKlvb cargo nextest run --no-fail-fast
 # pre-rebase run c36a3343-8e82-483f-bdcb-70e647759ff5：16189 passed、18 skipped。
 
 git pull -r origin master
-# 无冲突；Lightmount 基线更新到 origin/master@1464757bd8，topic 的 66 个提交完整重放。
+# 无冲突；Moli 基线更新到 origin/master@1464757bd8，topic 的 66 个提交完整重放。
 
 TMPDIR=<repo>/.phase5g5-rebase-nextest.svCOJv cargo nextest run --no-fail-fast
 # post-rebase run add4c59c-8cf5-43d8-89de-02b4f0d7e5ee：16241 passed、18 skipped。
@@ -8432,8 +8493,8 @@ fixture 已显式启用 document continuation scheduler，却在 cross-agent com
 - postMessage 已覆盖 related top-level source/opener；arbitrary remote subframe source token、on-demand opener-chain
   projection、BFCache/pending-deletion delivery 仍属于 RemoteFrame 阶段；
 - ReportingService source/queue、partition/NIK、access report 与第二 virtual group 没有因 typed transport 自动完成；
-- group-safe opaque-origin nonce、JS-retained detached Document/Node/realm lifetime 与跨 agent GC 仍属于下一独立
-  identity/lifetime milestone。
+- P6R2 已完成 group-safe opaque-origin nonce，P6R3 已完成真实 local top/child Document/Node/realm lifetime；未来
+  不可信跨进程 capability GC/崩溃回收仍属于可选 process-lifecycle milestone。
 
 #### Phase 5G6A：agent-neutral RemoteFrame tree、exact nested route 与 transport teardown
 
@@ -8447,7 +8508,7 @@ G6 总 exit 仍包括真正 OS process/IPC、process failure、agent reunificati
 所以本节明确命名为 G6A；它提供可以被未来 wire transport 复用的 identity/currentness/target-owner 边界，但不把
 同一进程中的 Rust carrier 冒充 Chromium 的 SiteInstance/Mojo 拓扑。
 
-##### Chromium 对照与 Lightmount 的取舍
+##### Chromium 对照与 Moli 的取舍
 
 对照继续固定在 `/home/donoughliu/chromium/src@a03603fe9af6`，本轮重新核对了以下 owner：
 
@@ -8469,7 +8530,7 @@ G6 总 exit 仍包括真正 OS process/IPC、process failure、agent reunificati
   facade detach、process-side proxy失联和 browser-owned logical frame state。IPC channel 断开不应把同数字 routing id
   解析成另一个 frame。
 
-Lightmount 没有 SiteInstanceGroup、RenderFrameHost/ProxyHost 或 Mojo。G6A 因此选择最小但形状正确的分层：
+Moli 没有 SiteInstanceGroup、RenderFrameHost/ProxyHost 或 Mojo。G6A 因此选择最小但形状正确的分层：
 logical related Page 共享 agent-neutral frame snapshots；每个 observer agent 只 materialize自己的 V8 facade；
 operation 通过 source output journal/protocol target Page/target Frame scheduler 三段 owner route。G6A 交付时 snapshot
 仍是进程内共享 Rust value，`V8StructuredClonePayload` 也可能带进程内 capability；后续 G6B1 已把两者替换为 strict
@@ -8553,7 +8614,7 @@ versioned process-neutral wire，但仍没有实际 Mojo/process channel。
 ##### G6A 聚焦证据
 
 ```bash
-TMPDIR=<repo>/.g6-retest-* cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.g6-retest-* cargo nextest run -p moli-renderer-v8 \
   -E 'test(remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands)' \
   --no-fail-fast
 # 最终 focused run ea066025-cf66-4050-8d3a-0d66098789b5：1 passed。
@@ -8561,13 +8622,13 @@ TMPDIR=<repo>/.g6-retest-* cargo nextest run -p lightmount-renderer-v8 \
 # Location.replace typed source/referrer、named target、POST request、source id→target load binding、
 # same-form cancel(A)→navigate(B) 与 root replacement stale proxy。
 
-TMPDIR=<repo>/.g6-stress-* cargo nextest run -p lightmount-renderer-v8 \
+TMPDIR=<repo>/.g6-stress-* cargo nextest run -p moli-renderer-v8 \
   -E 'test(remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands)' \
   --stress-count 100 --no-fail-fast
 # run ce059f8f-52ac-4c92-9e48-997aae1e8ca1：100/100 iterations passed。
 
 TMPDIR=<repo>/.g6-focused-* cargo nextest run \
-  -p lightmount-renderer-v8 -p lightmount-protocol \
+  -p moli-renderer-v8 -p moli-protocol \
   -E 'test(remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands) | \
       test(cross_origin_related_page_commit_moves_local_window_to_remote_agent_and_routes_commands) | \
       test(cross_origin_popup_remote_window_proxy_routes_through_exact_background_target)' \
@@ -8641,10 +8702,10 @@ attachment。这样的接口在同一进程内可以通过，却无法证明发�
 - `third_party/blink/renderer/core/frame/local_dom_window.cc`：locked message 的 source agent-cluster id 与接收 Window
   不一致时，在反序列化网页值前把事件变成 `messageerror`；
 - `third_party/blink/public/common/messaging/cloneable_message.h` 的 FileSystemAccess 注释同时要求接收端 origin check 和
-  browser-process `FileSystemAccessManager` 二次授权。Lightmount 尚无对应 broker，因此不能通过复制 renderer 内部
+  browser-process `FileSystemAccessManager` 二次授权。Moli 尚无对应 broker，因此不能通过复制 renderer 内部
   handle 来伪造支持。
 
-Lightmount 当前使用严格 JSON schema 作为进程中立 seam；选择 JSON 是当前可测试实现，不是未来 IPC 格式承诺。
+Moli 当前使用严格 JSON schema 作为进程中立 seam；选择 JSON 是当前可测试实现，不是未来 IPC 格式承诺。
 G6B1 的 exit condition 是“carrier 可以仅靠 bytes + routing header 重建并拒绝伪造输入”，而不是“renderer 已经被
 拆成独立 OS process”。
 
@@ -8686,6 +8747,8 @@ G6B1 的 exit condition 是“carrier 可以仅靠 bytes + routing header 重建
 3. full-tree validator拒绝重复 frame id、缺失 parent、parent cycle、跨 Page root、非 canonical origin、非法
    credentialless nonce和超限 policy/string。稳定 observer proxy仍可保留，但任何一次 lookup/operation都必须消费
    最新完整 tree，而不能信任曾经 decode成功的单节点。
+4. frame name、URL、policy 和树规模都可能受网页控制。publication 若发现非法或超限值，会先推进 revision、清空
+   已发布 tree 并记录 warning；不会以 `assert` / `expect` 杀死 renderer，也不会让上一个合法 revision 继续被路由。
 
 ##### Structured clone 的 process-neutral attachment
 
@@ -8729,11 +8792,11 @@ G6B1 的 exit condition 是“carrier 可以仅靠 bytes + routing header 重建
 ##### G6B1 聚焦证据
 
 ```bash
-cargo check -p lightmount-renderer-v8 -p lightmount-core -p lightmount-protocol --tests
+cargo check -p moli-renderer-v8 -p moli-core -p moli-protocol --tests
 # 通过；覆盖本轮三个 Rust owner边界的完整 test build。
 
 TMPDIR=<repo>/.g6b-focused.m2YE7E cargo nextest run \
-  -p lightmount-renderer-v8 -p lightmount-protocol \
+  -p moli-renderer-v8 -p moli-protocol \
   -E 'test(remote_window_proxy_wire_rejects_unknown_versions_and_fields) | \
       test(remote_window_proxy_wire_round_trips_process_neutral_clone_attachments) | \
       test(remote_frame_replication_snapshot_uses_strict_versioned_wire) | \
@@ -8753,6 +8816,34 @@ cargo fmt --all --check
 TMPDIR=<repo>/.g6b-focused.m2YE7E cargo clippy --workspace --all-targets -- -D warnings
 # 均通过；clippy 1m33s。
 ```
+
+2026-08-22 把完整 popup commit series rebase 到 Moli master 后，又在最终工作树复核了一次，而没有沿用上面的
+pre-rebase 结果：
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run \
+  -p moli-renderer-v8 -p moli-protocol \
+  -E 'test(remote_child_navigation_wire_rejects_oversized_header_fields) | \
+      test(remote_frame_replication_snapshot_uses_strict_versioned_wire) | \
+      test(remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands)' \
+  --no-fail-fast
+# run 8a8c81a7-0caa-4524-88c7-7f8fb4e89c7f：3/3 passed。
+
+# G5/G6B joint matrix：run 1b03c300-50a9-4c73-aba5-c6dd6602e9c3，8/8 passed。
+# G6A exact child route stress：run 8a560a50-c767-4fc0-9b22-85fdb49fd725，100/100 passed。
+
+TMPDIR=<repo>/target/tmp cargo nextest run \
+  --no-fail-fast --status-level fail --final-status-level fail
+# final run b2fc95ed-85bc-48ef-b062-636d56ddb65a：16094 passed、14 skipped；101.376s。
+
+cargo fmt --all --check
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# 均通过；clippy 47.48s。
+```
+
+这次复核额外发现 publication 对网页可控 frame name/URL/policy/树规模仍使用 `assert` / `expect`，以及 child
+navigation header 只限制数量而未限制单字段大小。最终实现已改为 invalid/oversize publication 推进 revision 并
+清空旧树、wire decode 拒绝超限 method/header；相应 focused case 和 full gate 都在上述最终工作树上通过。
 
 这组用例同时锁住 strict version/unknown-field/forged-origin/duplicate-port拒绝、合法 body 与 browser-validated route
 header不一致时拒绝、正常 attachment round trip、
@@ -8779,13 +8870,20 @@ same-process fault seam；没有 fork renderer或注入 OS channel failure。
   pending-deletion delivery、on-demand opener chain与 source terminal completion notification仍缺；
 - remote form method/body/referrer/scheduler已完整，但 target-realm `NavigateEvent` 的 source element/`FormData` V8
   值、remote `javascript:`/isolated-world尚无 wire carrier；
-- ReportingService queue/source/partition/NIK、group-safe opaque-origin nonce与 JS-retained detached realm仍属于后续
-  group/identity milestone。
+- P6R2 已完成 group-safe opaque-origin nonce，P6R3 已完成真实 local Document realm 的 JS-retained
+  detach/GC owner 协同；ReportingService queue/source/partition/NIK 与未来不可信跨进程 capability lifetime
+  仍属于后续 group/identity 长尾。
 
-下一大纵切是 **G6B2 real renderer process lifecycle**：让 browser owner真正持有 process/channel generation与
-request tombstone，建立 spawn/disconnect/crash/restart/rebind，使用 protocol fault injection证明 queued/running ACK、
-frame revision和 retained proxy不会跨 process generation串线。同时引入 browser capability broker，至少关闭
-FileSystemHandle/OPFS token路径。完成后再整体处理 agent reunification、fenced/embedder与 Reporting closure。
+2026-08-22 复核后不再把 **G6B2 real renderer process lifecycle** 列为 popup 当前终态的下一刀。它只在 Moli
+另行采用多进程 renderer 时启动，届时需要 browser owner真正持有 process/channel generation与 request tombstone，
+建立 spawn/disconnect/crash/restart/rebind，并用 protocol fault injection证明 queued/running ACK、frame revision和
+retained proxy不会跨 process generation串线。当前下一大纵切是 **Phase 6 compatibility reachability/removal**。
+P6R1 已画清并关闭三个 compatibility creation 文件的 production caller，P6R2 收敛 group-safe opaque origin，
+P6R3 又完成 JS-retained detached Document/Node/realm lifetime；P6R4 已按 facade → loader/parser → protocol fallback
+的 owner 依赖顺序物理拆除旧栈。与此同时，
+remote `javascript:` / isolated-world、remote descendant lifecycle 和 Reporting/file-local 等当前可达长尾继续在同一
+typed endpoint 上补齐。fenced/guest/embedder 与 browser capability broker 保持独立可选项目，不能阻塞 Moli 的
+单进程 popup 收口。
 
 ### Phase 6：删除 lightweight 专用模型
 
@@ -8793,28 +8891,721 @@ E3 已达到“所有已迁移 production creation producer 都创建真实 auxi
 focus/active Page closure，Phase 5G1-G6A 又完成 local committed-response/redirect-chain COOP group status、
 sandbox blocked-response transaction、group-qualified disconnected endpoint routing、same-group cross-agent
 top-level command/ACK 与 agent-neutral remote child route；Phase 5G6B1 再让 command/policy/clone carrier进程中立、
-版本化且可严格拒绝伪造 route，并以 channel generation隔离 outgoing/replacement agent。当前仍没有真实 renderer
-process lifecycle与 browser capability broker，因此还没有达到安全删除条件：process/identity、fenced/embedder
-长尾仍可能调用 compatibility
-endpoint，测试和 standalone adapter 也仍把旧类型
-当作行为夹具。2026-08-22 按 `rg -l/-o 'lightweight_popup|LightweightPopup|lightweight popup' -g '*.rs'`
-得到的宽口径扫描为 112 个 Rust 文件、1393 处
-`lightweight_popup|LightweightPopup|lightweight popup` 命中；直接 creation symbol 只剩
-`native_bridge/element/activation/targets.rs`、`context_bootstrap/window_runtime/dialogs.rs` 与
-`native_bridge/context_host/popups.rs` 的 DOM compatibility/reopen 路径。这个数字包含测试、注释和投影，不能按
-命中数机械删除，但也足以否定“一次清理提交即可完成”。
+版本化且可严格拒绝伪造 route，并以 channel generation隔离 outgoing/replacement agent。真实 renderer process
+lifecycle与 browser capability broker 不是删除旧栈的产品前置。P6R1 已关闭 production compatibility creation，
+P6R2 已完成 group-safe opaque-origin identity，P6R3 已完成真实 local Document realm 的 JS-retained lifetime。
+P6R3 结束时仍不适合整块盲删，因为测试与 standalone adapter 把旧类型当作行为夹具；当时按
+`git grep -l -E 'lightweight_popup|LightweightPopup|lightweight popup' -- '*.rs'` 与对应 occurrence 统计，
+宽口径扫描仍为 112 个 tracked Rust 文件、1492 处命中。P6R4 先恢复通用夹具、再沿 owner dependency 删除旧类型，
+最终以 `rg -ni 'lightweight[ _-]?popup|LightweightPopup' --glob '*.rs'` 复核为零命中。这个前后差异也说明原判断
+“不能按命中数机械删除”是正确的，但 reachability 前置满足后应直接物理删除，不能继续用 `cfg(test)` 保留整套旧 owner。
 
-当 group/identity 前置条件满足后，按 owner dependency 顺序删除：
+#### P6R1：production creation exit 与完整 initial Page handoff
 
-- `LightweightPopupBrowsingContextRecord`；
-- popup shared-context alias registration；
-- popup 专用 `with(window)` script wrapper；
-- mirrored popup parser/loader/lifecycle；
-- protocol 中创建第二 PageVM/第二 navigation 的路径；
-- root/child/lightweight 三分的 popup source 特例，改用统一 browsing-context identity。
+对三个直接 caller 反向复核后的结论比旧文档更强：有 renderer owner 的 `window.open()`、hyperlink 和 form
+new-context 路径此前虽调用名为 `open_lightweight_popup_window()` 的 facade，实际已经优先 reserve exact
+`RendererPendingAuxiliaryPage`，并在 opener owner turn 中构造完整 initial Page/Document/realm。legacy record 只在
+allocator 缺失或 staging 失败时回退创建；后者会重新引入第二套 loader/parser owner，且会让 unit test 在真实 Page
+staging 回归时假通过。
 
-删除应由 grep、focused nextest、WPT slice 和 CDP integration test 共同证明，不能只因
-类型暂时没有调用而移除。
+P6R1 将这条边界改成结构性不变量：
+
+- Chromium 对照仍固定在 `a03603fe9af6`：Blink `CreateNewWindow()` 从 embedder 得到 `Page` 后立即要求
+  `page->MainFrame()` 并返回该 frame；`LocalDOMWindow::open()` 在 `FindOrCreateFrameForNavigation()` 选定/创建 exact
+  frame 后才启动 navigation并返回它的 `DomWindow()`。Moli 因此不保留脱离 Page 的 production synthetic shell；
+- production DOM caller 只调用 `open_renderer_owned_related_auxiliary_page()`；它必须同步创建完整 staged initial
+  Page，并返回同一个 stable WindowProxy 与 exact Page reservation；
+- owner-backed staging 失败统一 fail closed，随后只能发布不带 local proxy/reservation 的 browser-owned action，
+  不能创建 lightweight record 兜底；
+- `create_lightweight_popup_window()`、standalone Window shell/Navigator/storage aliases/close method、legacy named
+  reopen 与两个 caller 中的 lookup branch 全部只在 `cfg(test)` 编译；test fallback 又显式拒绝任何已绑定 Page
+  allocator 的 host，避免掩盖 production staging regression；
+- 删除 `RendererStagedAuxiliaryWindowProxyRegistry` 及 protocol-created Page 的延迟消费分支。同步 handoff 只保留
+  `staged_related_initial_empty_pages`，其中一个 entry 已经是完整 `PageVm`，protocol 以 exact reservation 消费一次；
+- 仍保留 `LightweightPopupBrowsingContextRecord` 及其 mirrored loader/parser 供 standalone compatibility fixtures。
+  因此本纵切证明“production 不再创建旧 owner”，不等于 Phase 6 record 删除完成。
+
+#### P6R2：group-safe opaque-origin identity 与 LocalWindow lifetime
+
+P6R1 后重新审计 `WindowAccessOrigin`、StorageKey、child owner transition、related group replication 与 legacy
+compatibility record，确认原来的安全降级仍有两项结构性问题：跨 host opaque origin 一律拒绝会误伤合法 inherited
+auxiliary `about:blank`；child storage nonce 只按 iframe `DomHandle` 缓存，又会在 replacement navigation 后误复用旧
+opaque identity。直接把缓存改成 `FrameDocumentTaskOwner` 也不正确，因为 `document.open()` 会换 DocumentId、但按
+Chromium 语义必须保留 LocalWindow 与 origin。
+
+固定 Chromium `a03603fe9af6` 对照如下：
+
+- `third_party/blink/renderer/platform/weborigin/security_origin.cc:173-210` 的 copy constructors 复制
+  `nonce_if_opaque_`；`249-317` 区分 unique opaque、带既有 nonce reconstruction 与 sandbox 指定 nonce；
+- `security_origin.cc:566-611` 的 `IsSameOriginWith()` / `IsSameOriginDomainWith()` 在任一 origin opaque 时只比较
+  `nonce_if_opaque_`；两个公开序列化都为 `null` 的 origin 不因此相同；
+- `security_origin.cc:708-712` 的 `DeriveNewOpaqueOrigin()` 必须生成新 nonce；
+- `sandboxed_opaque_security_origin_creator.h:17-29` 只允许 DocumentLoader 以指定 nonce 构造 sandboxed origin，说明
+  nonce 是 loader/owner carrier，不是 URL 字符串或 renderer-local Window 编号。
+
+Moli 的单进程 owner 由此形成以下不变量：
+
+1. `OpaqueOriginNonce` 由共享 `RendererBrowserContextRuntime::next_opaque_origin_nonce()` 非零单调分配，不再误命名为
+   WebStorage-only allocator。top-level host 在构造时即绑定 identity；
+   inherited auxiliary Page 从 creator StorageKey 复用 exact nonce，独立 opaque Page 分配新 nonce。
+2. child own-opaque binding 保存 `(DomHandle, LocalWindowId, nonce)`。initial install 与 navigation commit 在脚本可观察
+   前刷新；LocalWindow replacement 换 nonce，`document.open()` 的 Document-only replacement 保留 nonce，detach 删除
+   binding。network partition 与 Window access 消费同一 identity，不再各自维护生命周期。
+3. Rust `WindowAccessOrigin` 从 host-local `WindowExecutionContextOwner` 改为 `OpaqueOriginNonce`。related host 可以比较
+   inherited exact nonce，独立 `null` origin 仍拒绝；V8 security token 继续是优化/VM boundary，不再是 Rust owner
+   缺失时的唯一正确性来源。
+4. related top-level state复制 current opaque nonce；remote frame snapshot/wire 增加 nonce并升为 v2。ingress严格拒绝
+   missing/zero/mismatched nonce、tuple-with-nonce 和 opaque `document.domain`；remote target/ancestor `CanNavigate`
+   comparison消费复制 identity。
+5. legacy lightweight compatibility record仍编译的 opaque路径改为从它已有的 StorageKey 取 nonce，避免测试双栈继续
+   制造另一套 owner identity；这不重新开放 production creation caller。
+
+真实 related auxiliary 回归锁住 `data:` opener → staged initial `about:blank` → protocol adoption：adoption 前后 opener
+都能访问同一个 popup Document；另一个独立 related `data:` Page 即使公开 origin 同为 `null` 仍抛 `SecurityError`。
+child 回归同时锁住 `document.open()` 保留 nonce与普通 opaque navigation 换 nonce；strict-wire 回归覆盖合法 round-trip
+和四类伪造输入。`MessageEvent.origin` 继续只暴露发送时的公开 `null`，没有把 nonce泄露给脚本，也没有错误地按 source
+当前 Document重验 queued message。
+
+P6R2 最终工作树的验证证据如下；focused matrix 同时覆盖 inherited child、真实 related auxiliary、独立 opaque
+拒绝、LocalWindow lifetime 与 strict remote wire，完整 workspace gate 没有沿用修改前结果：
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E 'test(child_opaque_origin_nonce_follows_local_window_lifetime) | \
+      test(related_auxiliary_page_inherits_exact_opaque_origin_nonce) | \
+      test(remote_frame_replication_snapshot_uses_strict_versioned_wire) | \
+      test(inherited_opaque_srcdoc_reuses_initial_empty_child_local_window) | \
+      test(opaque_origin_access_requires_the_same_non_serialized_identity) | \
+      test(related_pages_use_the_shared_browser_context_opaque_nonce)'
+# final run 243757ed-b89f-41c7-a3a2-e6c523a91991：6/6 passed。
+
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast
+# final run 6c820911-5bd8-43bd-9cc8-c7295914c2c9：16096 passed、14 skipped；100.802s。
+
+cargo fmt --all --check
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# 均通过；clippy 1m31s。
+```
+
+这份 nonce 是当前可信单进程 browser-context 内的 identity，不是未来不可信 renderer IPC 的 authentication token。
+若 Moli 另行采用多进程，需要像 Chromium `UnguessableToken` 一样由 browser owner签发并校验，而不能把单调 u64
+当安全 capability。P6R3 已完成后续真实 local Document realm 的 JS-retained lifetime；未来若引入不可信 renderer
+process，opaque identity 的签发和 retained remote capability 回收仍须由 browser owner 重新建立。
+
+#### P6R3：JS-retained detached Document realm 与无 Oilpan GC owner
+
+P6R2 后的 revisit 发现，旧的“Page teardown 就断开 Context host pointer”虽然避免 use-after-free，却比 Chromium
+过早销毁语义：作者从 iframe/popup 旧 realm 保存的 function、Document 或 Node 会立刻 `TypeError`，而不是在最后
+JS 引用消失前继续服务原 detached DOM。简单让 Context slot 强持 `JsContextHost` 也不成立，因为 Moli 没有 Oilpan；
+任何 `Context → Rust slot/host → v8::Global → Context` 都会成为 V8 无法追踪的自保活环。
+
+固定 Chromium `a03603fe9af6` 的实现对照与本地 Chromium 行为探针给出以下边界：
+
+- `LocalWindowProxy`/`ScriptState` 把 outer stable WindowProxy 与 inner global/Document lifetime 分开；navigation 后保存的
+  closure 仍执行在旧 inner realm，保存的 Document/Node 仍可读取和修改，但 outer `window` 继续指向 browsing context
+  的 current WindowProxy；
+- `Window.document` 是 `[LegacyUnforgeable, CachedAccessor=kWindowDocument]`。Blink 用
+  `FunctionTemplate::NewWithCache` 和 realm-private cache 保存创建 realm 的 Document，不是每次从 stable outer proxy
+  动态解析 current Document；
+- 从 frame detach 后，保存的旧 Document/Node/function 仍可用，`Document.defaultView` 为 `null`，保存的旧 Window
+  已 `closed`。detach 前注册的 Window event listener 不再被调度，旧 custom-element registry 也不会 upgrade 新建元素；
+  这说明要保留 DOM/realm 值，同时退休 LocalDOMWindow/ExecutionContext 服务；
+- retained old child `AbortSignal` 在 navigation 后仍同步更新 `aborted`/`reason`，也仍能作为 live parent target 的
+  cancellation source；但旧 signal 的 direct listener/`onabort` 不再运行，`onabort` 读回 `null`。反方向上，旧 child
+  创建并挂到 live parent `Document` 或 parent `AbortSignal` 的 callback 也不再运行，因此 callback owner 必须取 function
+  creation realm，不能只看 event target/signal realm；
+- 最后 JS 引用删除并 GC 后，old inner global、Document 与 native backing 可以一起回收。保留 active timer、observer、
+  IndexedDB resolver 或 wrapper-cache strong Global 都会违反这条边界。
+
+Moli 由此建立一组不依赖 tracing GC 的显式 owner 规则：
+
+1. `ContextHostPointerSlot` 在可失败 bootstrap 阶段仍是 non-owning pointer；任何真实 Document realm 在对脚本或
+   Inspector publication **之前**必须 promotion 为 Context-owned `Rc<JsContextHost>`。default world、child default
+   world、isolated world 和 prebootstrap residence 都走同一强制边界，promotion 失败则整个 bootstrap fail closed。
+2. host lifecycle 明确分为 `Active → Detached → Destroyed`。`ScriptVm` teardown 把原地址稳定的
+   `Box<DocumentRuntime>` 转移给 retained host；因此旧 wrapper 的 raw runtime pointer 在最后 Context GC 前仍有效，
+   临时 WindowProxy facade 则保持 non-owning 并在 detach 后 fail closed。
+3. teardown 只退休 execution authority，不销毁 native DOM graph。timer、event callback、parser/document.write、
+   module continuation、fetch/XHR/EventSource、worker、message/port、BroadcastChannel/WebSocket、observer、
+   custom-element reaction、History/Navigation、media/rendering、service worker、IndexedDB 等 owner 都在进入 isolate
+   时取消或清空；isolate 级
+   IndexedDB checkpoint queue 按 exact retiring Context 删除，不能误清同 agent 的其他 related Page。
+4. active wrapper/intrinsic/DOMException caches 使用 strong handle 保证 identity/expando；detach 时转换为 weak handle。
+   Context-local IndexedDB table、AbortStore、pending network-body resolver/error reason 与 Resource Timing secondary buffer
+   按 exact realm 拆环。跨 realm event/Abort callback 按 callback creation realm 退休；Page scheduler 已接纳的 exact
+   Document task payload 仍由其 typed task owner 在 selected/discard turn 消费，不能与无 owner 的 host cache 混为一谈。
+   slot 中仍含 Weak handle 的 Rust
+   state 延迟到 Context annex finalization 后，再在普通 entered-isolate 栈上释放，避免从 V8 GC callback 直接 reset
+   persistent handle；isolate shutdown 则在 `OwnedIsolate` 尚存活时完成最终 drain。
+5. vendor V8 shim 暴露 `FunctionTemplate::new_with_cache()`，`window.document` 按 Blink cached-accessor 语义安装为
+   enumerable、non-configurable、无 setter 的 own accessor。stable WindowProxy navigation 后投影 replacement
+   Document，而旧 closure 里的 accessor 仍返回旧 Document，二者不会被一个动态 getter混为一体。cached value 只在
+   stable proxy 仍由 exact current LocalWindow realm 注册时原位更新；真正的 LocalWindow replacement 先 detach 旧
+   Context，再由 replacement Context 更新同一 outer proxy，不能在 commit 中间把新 Document 写进旧 inner global。
+
+回归把保活和回收写成可精确计数的双向不变量：related top-level navigation/close 后，保存的旧 Document、Node、
+function 能继续读取和修改；保存 child realm 值时 old top+child host 继续存活；删除最后引用并触发 GC 后 native
+Document host、detached Context 和 wrapper strong-entry 数都回到操作前基线。另一个 case 在旧 top+child realm 中先
+创建 custom elements、AbortController、MutationObserver、长 timer、Window listener 与 pending
+`indexedDB.databases()`，teardown 后不保留任何额外 realm。child case 还同时保留 pending `Response.text()` resolver、
+errored body reason 和 Resource Timing overflow entry，验证三类共享 host strong edge 在 exact realm teardown 后从
+`(1, 1, 1)` 归零；live parent target 上由 old child 创建的 Abort callback 也必须被清掉。聚焦证据：
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E 'test(related_page_script_agent_transfers_stable_window_proxy_objects_and_dom_wrappers) | \
+      test(related_page_script_agent_releases_replaced_and_closed_peer_realms) | \
+      test(related_page_script_agent_releases_detached_host_v8_roots_and_child_realm) | \
+      test(related_page_script_agent_retains_and_releases_detached_child_dom_values) | \
+      test(assigning_document_does_not_replace_legacy_unforgeable_document_alias) | \
+      test(child_navigation_aborts_fetch_and_detaches_keepalive) | \
+      test(child_navigation_retains_and_releases_detached_dom_realm) | \
+      test(dom_wrapper_expando_survives_renderer_document_isolate_garbage_collection) | \
+      test(context_wrapper_cache_is_weakened_on_script_vm_teardown) | \
+      test(child_default_bridge_ref_is_released_on_child_context_teardown) | \
+      test(detached_first_exposure_retires_prebootstrapped_child_realm) | \
+      test(child_navigation_retires_websocket_execution_context) | \
+      test(scalar_buffer_state_keeps_pending_and_capacity_orthogonal)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# run d0f5f632-a0b4-4318-af2d-3cac6ced8fdc：13/13 passed。
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 -p moli-v8-util \
+  -E 'test(/abort_signal/) | \
+      test(indexed_db_detached_realm_methods_keep_receiver_realm_state) | \
+      test(indexed_db_transaction_stays_active_through_creation_task_microtasks) | \
+      test(related_page_script_agent_keeps_indexed_db_manager_routes_page_local) | \
+      test(reused_global_proxy_keeps_intrinsic_maps_isolated_by_context)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# run 5ba7de6f-5cc5-4982-9df1-61764680eba8：20/20 passed。
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 \
+  -E 'test(related_page_script_agent_releases_replaced_and_closed_peer_realms) | \
+      test(related_page_script_agent_releases_detached_host_v8_roots_and_child_realm) | \
+      test(related_page_script_agent_retains_and_releases_detached_child_dom_values) | \
+      test(child_navigation_retains_and_releases_detached_dom_realm)' \
+  --stress-count 10 --flaky-result fail --test-threads 4 --no-fail-fast
+# run 11e148f1-d64c-4a96-8bd6-c2c7d8e1dbae：10/10 iterations passed，40/40 case executions。
+```
+
+最终 workspace revisit 没有只沿用 focused 证据。第一次 full nextest 暴露并修正了三条共同边界：
+
+- related Page 会在已 entered、已借用的 source isolate 回调内同步 bootstrap。deferred host-release queue 因此直接挂在
+  可重入的 `RendererDocumentIsolateHandle` 上，不能为读取队列再次借用 isolate holder；popup/target 创建簇不再触发
+  `RefCell already mutably borrowed`；
+- initial-empty LocalWindow reuse 要原位刷新 `Window.document` cache，LocalWindow replacement 则必须保留旧 realm
+  cache。刷新现在由 exact current realm registration 判定，同时覆盖 retained-old-function 与 initial-empty rebind 两组
+  相反回归；
+- Page teardown 在清掉 output journal 前先退休 DedicatedWorker 并发布 `Target.destroyed`。retained host 延长 native
+  lifetime，不能改变 browser-observable worker lifecycle 的输出顺序。
+
+修正后三者的 9-case combined retained/rebind/form matrix run
+`134ba336-2424-41c6-b069-695e6eed927e` 为 9/9 passed；最终
+`cargo nextest run --no-fail-fast --status-level fail --final-status-level fail` run
+`da20df0e-a03f-4155-8d86-7f37c116d615` 为 16100/16100 passed、14 skipped；
+`cargo fmt --all --check` 与 `cargo clippy --workspace --all-targets -- -D warnings` 通过。
+
+P6R3 没有声称解决 V8/Rust 全仓所有内存问题，也没有用单元回归代替真实站点 RSS 长跑。AbortSignal 与 pending
+network-body source 中已经不含 detached-realm strong edge 的纯 Rust/scalar record，仍可能存活到后续显式取消或 Page
+host teardown；这是资源表 compaction/RSS 观察项，不再是 Context 自保活环。P6R3 完成的是 Phase 6
+所需的 local Document lifetime owner：有 JS 引用时语义可用，无引用时不形成跨堆强环，Page execution resource
+不会在 detached realm 中复活。多进程 remote capability 的认证/崩溃回收继续是可选基础设施；当前产品的 remote
+JavaScript URL、descendant lifecycle、Reporting/file-local 等语义长尾仍按 G6 endpoint owner 收口。
+
+#### P6R4：物理删除 compatibility owner 与 protocol fallback
+
+P6R3 后对“把旧实现留在 `cfg(test)` 还是直接删掉”的 revisit 结论是分层处理。完整 browsing-context owner、realm alias、
+parser/loader 和 lifecycle 不能因为 production caller 已断开就继续留在 test build；那会让 standalone `ScriptVm` 测试继续
+验证一套产品永远不会执行的语义，也会让后续 owner 改动同时维护两套 currentness。只有不创建 owner、不调度任务的纯数据
+构造器或 test-only 查询 accessor 可以保留 `cfg(test)`。因此 P6R4 没有把旧栈整体改成 conditional compilation，而是按
+依赖层物理删除。
+
+删除后的 owner 边界如下：
+
+1. `context_host/popups.rs` 只保留真实 related auxiliary Page 的 reservation、initial empty Document/realm staging、
+   sessionStorage snapshot、opaque storage scope 和 pending activation 输出。成功的 `OpenedAuxiliaryBrowsingContext` 现在必然
+   携带 exact `RendererPendingAuxiliaryPage`、storage snapshot 与 initial storage key，不再暴露永远为 `true`/`Some` 的
+   compatibility-shaped 字段。
+2. 删除 `LightweightPopupBrowsingContextRecord` 及其 Document/LocalWindow/navigation token、active-scope alias、shared-context
+   realm registration、`with(window)` global 扫描和 synthetic Window/Navigator/storage facade。timer、XHR、fetch、worker、
+   message port、BroadcastChannel、WebSocket、IndexedDB、CSP、document.domain、focus/history/storage event 等 owner 分支只剩
+   Page root 或 child-frame typed identity。
+3. 删除 popup 专用 document/classic-script fetch target、resource completion terminal、DOM-manipulation/load-event queue、
+   mirrored parser/script executor 和对应 `PageVm` arbitration 文件。一个 auxiliary URL 从 initial Page adoption 起只可能由
+   target Page 的正常 loader/parser/lifecycle 提交。
+4. protocol 删除 popup-only `RendererWindowDocumentSource`、remote wire source 和 JavaScript-dialog parking route。真实 auxiliary
+   Page 的 top-level source就是该 Page 的 `RootFrame`；popup target 创建、attach、dialog 与 navigation 不再从 opener attachment
+   猜测第二个 Document owner。
+5. Classic WebDriver 的 popup Window reference 行为没有随旧 owner 一起删除。host bridge 改为从真实 auxiliary WindowProxy 的
+   private reservation id 读取，并由 protocol target 的 `moli_popup_id` 映射到稳定 window handle；旧的
+   `__moliHostLightweightPopupIdForObject` 名称和 host-record lookup 一并消失。
+6. 旧 standalone self-loop 测试随其 owner 删除；真实 Page/PageVM/CDP/Classic WebDriver 测试继续作为权威覆盖。一次过宽的测试块
+   删除曾带走通用 Service Worker HTTP server fixture，P6R4 在编译复核时只恢复这些纯夹具，没有恢复任何 legacy popup 行为。
+
+第一次 workspace full nextest 还暴露了 17 条旧 fixture 债。其中 15 条会让无 owner 的 standalone `ScriptVm`/单 Page task
+executor 自己创建、导航并驱动 destination popup Page，删除 fallback 后分别表现为 `window.open()` 返回 `null` 或永远等不到
+目标 Page 网络/消息；给 test allocator 增加 staging owner 只会在 `cfg(test)` 重建被删除的双栈，因此这些用例连同三个独占
+server/cache helper 一并删除。剩余两条仍有独立价值：WebIDL 参数转换用例改为断言无 Page owner 时有效 `open()` 返回 `null`，
+direct-V8-call inventory 则删除已经消失的 popup callback entry。没有用 ignore、timeout 放宽或 test-only popup runtime 把全量门禁
+改绿。
+
+本轮 Rust 与同步文档改动的提交前 diff 为 149 个文件、1297 行新增、17896 行删除，净删除 16599 行。静态证据为：
+
+```bash
+rg -ni 'lightweight[ _-]?popup|LightweightPopup' --glob '*.rs' --glob '!target/**' .
+# zero matches
+
+TMPDIR=<repo>/target/tmp cargo check --workspace --all-targets --message-format short
+# passed without warnings；删除旧 fixture 后的 package all-targets check 同样零 warning。
+```
+
+真实 owner 聚焦矩阵同时覆盖 opaque-origin inheritance、DOM 三入口 policy、initial Page adoption、stable opener WindowProxy、
+204/205 no-commit、ordinary→`javascript:` ordering、Service Worker producer 和 Classic WebDriver Window reference；另外把 WebIDL
+无 owner 返回值与 direct V8 call inventory 放进同一次聚焦复核：
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-renderer-v8 -p moli-protocol -p moli \
+  -E 'test(related_auxiliary_page_inherits_exact_opaque_origin_nonce) | \
+      test(javascript_popup_producers_queue_the_final_related_target_page_realm) | \
+      test(popup_policy_checks_keep_existing_and_new_target_order_distinct) | \
+      test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | \
+      test(popup_initial_about_blank_adopts_renderer_page_and_related_script_agent) | \
+      test(popup_no_commit_responses_preserve_initial_document_before_redirect_replacement) | \
+      test(ordinary_popup_navigation_then_javascript_url_preserves_renderer_protocol_order) | \
+      test(service_worker_auxiliary_producers_use_fresh_pages_and_navigation_terminals) | \
+      test(webdriver_classic_execute_script_round_trips_window_and_frame_references) | \
+      test(window_dialog_and_open_arguments_use_webidl_conversion) | \
+      test(direct_v8_call_inventory_is_frozen)' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# run e166e582-e1bd-4c6c-aed9-408cc4d1d8af：11/11 passed，其中 9 条是真实多 Page popup 路径。
+
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# clippy 等价化简后的最终 run 7f1f0832-47a2-4565-b264-d8bb583c2678：
+# 15963/15963 passed，14 skipped；执行阶段 100.407s。
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 31s。
+```
+
+静态扫描、focused matrix 与 workspace 三门禁已经满足本地 Phase 6 compatibility owner 删除 exit。提交后的
+`git pull -r origin master` 与必要复验仍按仓库流程执行；focused WPT/CDP slice 重新分类继续是外部兼容性证据债，不能被这次
+Rust 删除和 nextest 机械替代。
+
+#### P6R5：production direct Browser auxiliary Page owner
+
+P6R4 删除旧 owner 后，protocol/CDP 路径仍有 `CdpConnection` 的 target scheduler 消费
+`RendererOwnerAction`，但 CLI/WebFetch 直接构造的 `Browser` 没有对应 output ingress。这里不是 test fixture 缺口：`moli fetch`
+是 release binary 的生产入口。renderer 会同步返回真实 related WindowProxy 并 stage 真实 Page，随后发布 popup activation；如果没有
+browser owner 采纳 reservation、持有 `Page` 并驱动 target navigation，opener 看到的 proxy 虽然存在，destination、跨 Page
+`Location`、`postMessage` 和 close transaction 都不会继续。P6R4 前旧 lightweight self-loop 曾遮住这条缺口，删除后首个真实 CLI WPT
+把它暴露为稳定的 120 秒 timeout。
+
+因此“整套放进 `cfg(test)` 还是删掉”的边界已经固定：
+
+- 完整 browsing-context/Document/parser/loader/lifecycle owner 不能放进 `cfg(test)`；direct `Browser` owner 是 release production
+  路径，必须与 protocol scheduler 一样消费 typed renderer output；
+- 旧 lightweight record、realm alias、mirrored loader/parser 和 self-loop 已在 P6R4 物理删除，P6R5 没有恢复任何旧类型或兼容分支；
+- 只有不创建 owner、不推进 Page task 的纯测试工厂、查询 accessor、同一 production output stream 的只读 fan-out observer 和断言
+  helper 可以保留 `cfg(test)`。测试不能替换 BrowserContext 唯一 transport。
+
+P6R5 的 owner 链如下：
+
+```text
+renderer Page output stream
+  -> exact (RendererOwnerLocalHostId, PageId) residence router
+     -> owner-local auxiliary actor: owns the non-Send core Page on a LocalSet
+     -> externally held root Page: exact browser-owner Page command, no handle/lifetime transfer
+```
+
+具体收口内容：
+
+1. `Browser::new()` 安装一个 shared-by-clones 的 output transport consumer；一个 dedicated current-thread Tokio `LocalSet` 持有所有
+   direct-Browser auxiliary actor。每个 actor 采纳 renderer 已经 stage 的 reservation，创建或复用同一 initial `about:blank` Page，
+   并串行处理 exact navigation、RemoteWindowProxy、focus 和 close/unload 命令。`BrowserLifetimeOwner` 在 renderer/network/storage
+   owner 前先停掉这条 lane，避免 auxiliary task 越过 browser teardown。
+2. destination 不再序列化成 synthetic `location = ...`。新的 crate-local Page command 携带冻结后的
+   `RendererTopLevelNavigationRequest`，完整保留 method、body、headers、request kind 与 source/referrer carrier，再由 target Page
+   自己的 standalone follow state machine完成唯一 loader/parser/Document replacement。Service Worker `clients.openWindow()` 的
+   continuation也只在该 exact Page commit 后解析。
+3. named reuse、`focus()` 或 related `postMessage` 命中调用方仍持有的 root Page 时，router 通过
+   `(owner-local-host, PageId)` 进入 renderer owner，而不要求克隆/转移 `RendererPageHandle`。回归确认 named reuse 导航原 root 且
+   owner registry 仍只有一个 Page；不会因为 local actor map miss 静默创建或丢掉 target。
+4. `window.open()` 新建 target 时，请求 URL 为空或是无 query/fragment 的 `about:blank` 都直接暴露同步 stage 的 initial empty
+   Document，不再 admission 后排第二次 `about:blank` navigation。`about:blank#fragment` 仍是 target Page 必须推进的 destination work；
+   已有 named target 被 `window.open("about:blank", name)` 命中时也仍是一次真实 replacement navigation。exact blank、带
+   fragment 及 new/reuse 三种语义不能共用一个 URL shortcut。
+5. related opener 调用 target `Location` 时，执行 turn 属于 opener、navigation owner 属于 target。location callback 现在比较
+   incumbent host 与 target host；跨 Page 时显式发布 target-residence wake，避免请求只留在 target pending slot，等待一次无关 target
+   command 才偶然推进。
+6. stage related Page 时同时安装 exact `RendererDocumentIsolateAllocator`。initial realm adoption 后发生 Document replacement 可以继续
+   在同一 Page slot 创建 target-owned realm；缺少 allocator 不再把已 committed 的旧 Document 留成不可恢复空 shell。若 committed
+   bootstrap 仍失败，owner restore 只对有 live `ScriptVm` 的 Page 建 output fence，让空 retiring shell 能确定性 teardown，而不会读取
+   已消失的 output journal。
+7. Related activation 继续使用 creator 冻结的 session-storage snapshot；Fresh/noopener activation 没有该 snapshot 时创建独立
+   session-storage namespace，不再误用 partition root store。direct `Browser` 回归先在 root 写 marker，再通过 exact Page command 读取 Fresh
+   target，确认结果为 `null`。
+8. initial Page materialization 不再丢弃 `top_level_browsing_context_closing` creation diagnostic。`open(url); popup.close()` 在同一同步 turn
+   完成时，owner 会先采纳可观察的 staged target、拒绝发布 destination navigation，再按该 Page 自己的 close FIFO 完成 teardown；回归用
+   nonblocking destination listener 证明不是“已经发请求再取消”。若来源是 Service Worker，相应 `clients.openWindow()` continuation 明确解析为
+   null。
+
+本轮新增四个 direct `Browser` 回归。第一条从调用方 root 打开 initial `about:blank`，用相对 URL 完成首次 replacement，再跨源导航并
+通过 exact RemoteWindowProxy 把 `postMessage` 送回 externally held opener，最后验证 `window.close()` 只 retire auxiliary Page。第二条
+把 root 命名后执行 `window.open(destination, rootName)`，验证 exact named reuse 导航同一个 PageId、registry 保持一个 Page。renderer
+邻接回归另验证 related WindowProxy 的 `Location` assignment 会唤醒并导航 exact standalone target。第三、四条分别锁住 Fresh
+session-storage namespace 和同步 close 的零 destination-fetch 副作用。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-core -p moli-renderer-v8 -p moli-protocol \
+  -E '<P6R5 direct Browser 四条 + cross-Page wake + about:blank new/reuse + protocol 204 no-commit + named form>' \
+  --no-fail-fast
+# final focused run 8b71775e-2d50-44a9-b118-e630692548e2：8/8 passed。
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-protocol \
+  -E 'test(named_form_post_reuses_renderer_group_target_and_preserves_exact_request)' \
+  --stress-count 20 --flaky-result fail --no-fail-fast
+# run 78c91785-8ed2-4b8b-9466-e46ccf63d0ab：20/20 iterations passed。
+```
+
+真实 WPT 证据使用 debug binary SHA-256
+`67217017b0b63df1aa93f60ec05643a5a4cd16fcc554f9313af63f8ba476013b`、Chromium/WPT
+`a03603fe9af6230a12f1b2fb2c18a7d003a0d937`、固定 6 个
+`initial-empty-document/window-open-*` case。单例 A/B 中，`window-open-aboutblank.html` 从 P6R4 后 CLI 的
+120087 ms timeout 变成 2541 ms、2/2 subtest pass。完整六例结果为：
+
+| case | CLI | CDP | 当前判断 |
+| --- | --- | --- | --- |
+| `window-open-aboutblank.html` | pass | pass | P6R5 production owner/wake 已闭环 |
+| `window-open-history-length.html` | pass | pass | 新 target initial history 投影正确 |
+| `window-open-nourl.html` | timeout | harness-stalled | 两入口共有的后续 navigation/message 或 history replacement 缺口 |
+| `window-open-204.html` | timeout | harness-stalled | 204 no-commit 后的后续 navigation/message 缺口 |
+| `window-open-204-fragment.html` | 2 fail | 2 fail | second relative Location 报 invalid URL；不是 CLI owner 特例 |
+| `window-open-204-pushState-replaceState.html` | 2 fail | 2 fail | initial-empty History mutation 后 second Location 报 invalid URL |
+
+CLI 汇总为 2 pass / 2 fail / 2 timeout，CDP 为 2 pass / 2 fail / 2 harness-stalled；两个 mode 的 failure names 与
+invalid-URL 形状一致。这把旧的笼统“CLI pumping 缺口”重新分类成两层：P6R5 已解决 direct `Browser` 无 owner 的基础阻断，剩余四例是
+protocol/direct-Browser 共享的 initial-empty/no-commit URL、history replacement 或 second-navigation currentness 语义债。后续应以这四例
+为一个纵切修 renderer owner，不应恢复 lightweight fallback、放宽 timeout 或建立 test-only popup runtime。最终原始输出分别在
+`/tmp/moli-popup-wpt-cli-owner-20260823-closing-storage` 和
+`/tmp/moli-popup-wpt-cdp-owner-20260823-closing-storage`。
+
+P6R5 提交时保留三个明确工程边界。当前一个 `Browser` 使用一条 dedicated owner thread，而不是每 popup 一条；后续若 direct root Page 本身
+迁入统一 browser scheduler，可以合并线程，但不能丢掉 exact residence/actor ownership。其次，这条 owner只消费 direct API 需要推进的
+Page coordination action；download/file chooser/dialog 等没有 direct-API policy surface 的动作仍沿用既有行为，需要在相应产品能力纵切中
+定义默认策略，不能由 popup owner 猜测 protocol UI 行为。第三，cross-document `history.back()`/`forward()` 当时仍需要 protocol 已有的
+session-history controller，direct owner 会忽略 `TopLevelHistoryTraversal` action。P6R7 已通过 renderer-frozen exact seed 与
+root/auxiliary 共用的 Page command 收口这项边界，没有建立第二份 test-only history controller。
+
+提交前完整门禁：
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast
+# run cd2a2771-8fa2-4a03-9d27-36e8691001ea：15968 passed、14 skipped。
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+#### P6R6 initial-empty、target queue 与 history commit 收口
+
+P6R5 上面的六例表保留为历史基线。那次结果已经把 direct `Browser` 缺少 production owner 的问题与 renderer
+共同语义债分开，但后四例仍分别表现为 timeout、harness-stalled 和 invalid URL。P6R6 沿真实 Page owner 链回查后，
+找到四个会互相放大的缺口。
+
+##### Initial empty fallback base
+
+`pushState()`、`replaceState()` 和 fragment 更新会改变
+`Document.URL`，此前同一个 setter 也清掉了 creator 继承的 fallback base。后续相对 Location 因而以变化后的
+`about:blank` 解析并报 invalid URL。`NativeDocument` 现在提供保留 fallback base 的窄更新入口，renderer 只在
+current initial-empty same-document 更新时使用它。普通 Document URL replacement 仍会清掉旧 fallback，避免把
+creator base 带进后续真实 Document。
+
+这里还要区分 top-level 与 child 的 History URL 解析。top-level initial empty Document 已经通过
+`pushState()` 或 `replaceState()` 改变可见 URL 后，下一次 History API 的相对可选 URL 以当前可见
+`Document.URL` 解析，同时继续保留 creator fallback 供 Location 等 URL API 使用。child initial empty
+Document 仍参与 joint session history，并继续使用继承的 parent base。第一次把 top-level 规则直接应用到
+child 后，有 8 条既有 child history/hashchange 回归稳定失败。收窄分支后，这 8 条与新增 top-level 回归
+一起恢复为 9/9 passed。
+
+##### Target Page 唯一 destination queue
+
+此前 activation 保留 `open(url)` 的请求，target Page 自己只持有
+后来发生的 Location 请求。两者由不同 owner 排队，同一 author turn 内的 `open(old); popup.location = new` 可能先
+提交 `new`，protocol 随后又 replay `old`。现在 renderer 在同步 stage target Page 时就把完整 destination request
+放入该 Page 唯一 pending slot。成功排队后，popup activation 只负责 creation 和 requested-URL observation，不再携带
+第二份 destination。later Location、form 或 JavaScript URL 按同一个 target-local replace/FIFO 规则竞争。
+
+```text
+creator turn
+  -> reserve and stage the real related Page
+  -> queue open(url) in the target Page pending slot
+  -> a later Location request replaces that same slot
+  -> Browser or protocol owner adopts the Page
+  -> Page creation diagnostics transfer the winning request once
+  -> protocol installs exact target-local Held authority
+  -> exactly one winning request reaches loader and commit
+```
+
+最初实现只完成了 target Page 内的唯一 queue，却仍让 adopted Page 在稍后的普通 renderer output 中发布
+winning request。该发布会和 debugger hold、Fetch interception、named reuse、`Page.navigate` 争夺同一
+target。现在 staged related initial Page 带有明确的创建标记。owner 在 Page admission 的创建回复中取走
+winning non-JavaScript request，并通过 `RendererPageCreationDiagnostics.initial_top_level_navigation` 交给
+protocol。protocol 随后把完整 request、history seed、Page residence generation 与 target route 冻结到
+`PopupTargetNavigationOwnerAction`，先进入 `Held`，再由同一 target owner 发布和消费。activation 与
+target-local request 同时存在会被当成重复 authority 拒绝，不能再依靠相邻 output 的顺序猜测赢家。
+
+`window.open()` 无 URL 后同一轮设置 `popup.location.href` 还暴露了一个更窄的旧条件。target 的观测 URL
+仍为 `about:blank`，旧代码即使拿到 exact claim，也要求 target URL 已经改变，结果会把真实 claim
+静默丢弃。claimed 路径现在直接比较 claim request 与 current initial URL，并继续检查 exact Page
+currentness 和 pending cross-document navigation。两者不同才启动 replacement。显式 `about:blank`
+仍留在唯一 initial Document，不会制造伪 replacement。
+
+JavaScript URL 也遵守 target-local 顺序。已经同步 handoff 的 ordinary navigation 保留在队首，随后产生的
+JavaScript URL task 排在其后。更晚的 ordinary navigation 会替换整个待执行序列。这样
+`window.open(ordinary); window.open(javascript:, sameName)` 保持 ordinary 到 JavaScript 的因果顺序，
+同时 `open(old); location = winning` 仍只保留 winning ordinary request。
+
+##### Incumbent source
+
+相对 URL base 已经改为读取 incumbent realm，但 Location request 的 source 一度仍从
+target realm 重建。direct Browser 回归明确观察到第二次 opener-driven navigation 的 `document.referrer` 等于 popup
+前一页 URL。Location 现在从 incumbent execution context 捕获 source Window、Document URL 和 Referrer Policy。
+异步 RemoteWindowProxy command 继续使用命令中已有的 active typed source 覆盖 target-local projection。两条路径随后
+进入同一个 `RendererTopLevelNavigationSource` carrier。
+
+##### Renderer-authored history seed
+
+renderer 的 `PendingLocationNavigation.entry_seed` 已正确表达 initial-entry replacement 与
+后续 push，但发布 `RendererDocumentSourcedTopLevelLocationNavigation` 时曾丢掉它。protocol replacement 因此每次从
+长度 1 重建，`window-open-nourl.html` 和 `window-open-204.html` 的第二次导航都得到错误的 `history.length`。现在 seed
+沿以下路径传递，并在 replacement realm 的 document-start work 前安装。
+
+```text
+PendingLocationNavigation.entry_seed
+  -> RendererDocumentSourcedTopLevelLocationNavigation
+  -> RendererPageCreationDiagnostics for a staged related Page
+  -> PopupTargetNavigationClaimIdentity
+  -> NavigationDispatchState
+  -> RendererMainDocumentCommitSeed
+  -> RendererMainDocumentCommit
+  -> HTML, streaming raw, and NativeDom Page build paths
+```
+
+这次也修正了 direct loader 的 referrer 边界。带 typed source 的 request 不再把 creator-policy 结果冻结成显式
+`Referer` header。direct owner 把 source URL 设为 network initiator，把 source policy 交给共享 fetch path，使每个
+redirect destination 都重新计算 HTTP `Referer`。最终 Document referrer 按实际 commit URL 计算。protocol 继续把
+source-policy header 标记为 generated，并在 transport 前移除 preflight projection。只有没有 typed source 的遗留
+producer 才使用 frozen explicit-header fallback。
+
+验证过程保留了几次有定位价值的失败。direct Browser referrer 首次断言发现 incumbent source 仍被 target
+realm 覆盖，run `5fa7b3fe-5972-400b-b400-f4faf4e1d7f0` 得到 8/9。修正 Location capture 后，最小复跑
+`51a07db1-0c55-4b6f-b152-673ed15000a6` 得到 4/4。target admission 第一个 full run 又暴露 9 条 protocol
+回归，原因是 winning staged request 仍作为较晚 renderer output 发布。改成 Page creation diagnostic transfer 后，
+聚焦 run `0a81a363-8733-44d5-a4cc-fbaecc0342fc` 得到 19/19。
+
+History URL base 最初被统一改成 visible Document URL，随后 full run
+`c07e8aa8-e142-4975-b75d-54f97d57ad9b` 得到 15968 passed、8 failed、14 skipped。8 条失败全部属于
+child initial-empty joint-history。收窄 top-level 分支后，run `8a631928-0cd0-47e4-8068-8b5397abeb7b`
+得到 9/9，随后 full run `ead46364-8977-4440-8ce9-c00a0741fdbc` 得到 15976 passed、14 skipped。
+
+真实 CDP WPT 最后发现一条 Rust 集成测试没有覆盖的边界。首次 final-code 六例得到 5 pass 和 1
+`harness-stalled`，唯一失败为 `window-open-nourl.html`。独立单例仍在 120 秒稳定 stalled。target inspection
+显示 opener 已 complete，popup 仍停在 `about:blank`，没有 pending navigation。新增 renderer delegated-diagnostics
+回归证明 request 已完整离开 staged Page，新增 protocol 回归随后证明旧 target-URL heuristic 丢弃了 exact claim。
+修正 claimed predicate 后，独立 CDP 单例恢复为 pass。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run \
+  -p moli-dom -p moli-renderer-v8 -p moli-core -p moli-protocol \
+  -E '<initial-empty fallback base + target admission + typed source/referrer + history seed 十九条>' \
+  --no-fail-fast
+# run 0a81a363-8733-44d5-a4cc-fbaecc0342fc
+# 19/19 passed, 12797 skipped by the focused filter
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-protocol \
+  -E '<same-turn old-to-winning + no-URL Location + explicit about:blank sandbox carrier>' \
+  --stress-count 20 --test-threads 4 --no-fail-fast
+# run b9195258-65e6-43fa-a61c-878ece415ba4
+# 20/20 stress iterations passed
+
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run fdfd7204-0e66-4f55-ab2d-d50deea8d12e
+# 15978 passed, 14 skipped
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-core \
+  -E '<standalone Fresh popup owner record + Fetch pause/continue 四条>' \
+  --stress-count 20 --test-threads 4 --no-fail-fast
+# run 0bc73f6c-2e2d-41c6-9f97-5779ae4169ac
+# 20/20 stress iterations passed，每轮 4/4
+
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run de913608-21cf-451a-8886-0d5783b57558
+# 15978 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+外部证据使用 debug binary SHA-256
+`137c7a8772906f7c46ad629cc230fdd57110e9685d4dfe5cf39b4f3aeeedf0f1`。WPT checkout 固定为
+`db95fafd1fcef8428805e41eb5705d444e8c67ce`，Chromium 对照仍为
+`a03603fe9af6230a12f1b2fb2c18a7d003a0d937`。固定 case 顺序、每例 120 秒 timeout，CLI 使用 process-pool，
+CDP 对六例各启一个 worker。两个 mode 均为 6/6 case、13/13 subtest 通过，无 fail、timeout、notrun、harness error
+或 JS exception。
+
+| case | CLI | CDP | P6R6 结果 |
+| --- | --- | --- | --- |
+| `window-open-aboutblank.html` | 2/2 pass | 2/2 pass | exact blank 仍复用唯一 initial Document |
+| `window-open-history-length.html` | 3/3 pass | 3/3 pass | initial history projection 保持正确 |
+| `window-open-nourl.html` | 2/2 pass | 2/2 pass | no-URL 后续 replacement 与 history seed 均正确 |
+| `window-open-204.html` | 2/2 pass | 2/2 pass | 204 no-commit 后的下一次 commit 正确 |
+| `window-open-204-fragment.html` | 2/2 pass | 2/2 pass | fragment 更新保留 creator fallback base |
+| `window-open-204-pushState-replaceState.html` | 2/2 pass | 2/2 pass | History mutation 后相对 Location 与 replacement 均正确 |
+
+原始输出保存在
+`/tmp/moli-popup-wpt-cli-p6r6-final-owner-20260823-1` 和
+`/tmp/moli-popup-wpt-cdp-p6r6-final-owner-20260823-1`。这组 focused 结果只证明列出的 initial-empty cases，不能替代
+更宽的 popup、sandbox、COOP 与 remote WPT 分类。
+
+`StandaloneAuxiliaryPageObservation` 及其 enum、sender、Browser 注册入口和 admission 前 hook 已全部删除。
+Fresh popup 回归现在先等待 renderer owner 的 active Page records 出现第二个已采纳 Page，再按该 Page identity 发送 exact
+Page command 检查 session storage，最后通过同一 identity 关闭目标。测试无法再用 reservation 已产生冒充 owner 已完成采纳。
+
+三条 Fetch pause 回归改用一次绑定的 production renderer output transport。helper 按 exact Page residence 过滤 typed
+`SubresourceFetchPause`，取得真实 `internal_id` 后调用 Page 的 production continue command。最初尝试在 Browser 已创建后把 transport
+换给测试，聚焦 run `a5a44072-89e8-4a11-9e82-2bd182208fdf` 得到 1/4。三个失败都由
+`one BrowserContext renderer output stream cannot change protocol transport` invariant 拒绝。最终测试改为先给独立
+`NavigationEngine` 绑定 transport，再创建 Page。聚焦 run `19171115-ff2a-4a61-b09b-ba2252330c8b` 得到 4/4，随后
+20 轮并发复跑全部通过。
+
+这次清理没有重跑外部 WPT。release 行为只增加 renderer owner active Page records 的只读有序快照，popup admission、导航和
+Fetch 执行没有改变。上面的 CLI/CDP 结果仍是前一笔 P6R6 browser-semantics commit 的证据，不表示新 commit 产生了相同 binary hash。
+
+P6R6 结束时仍有两项明确工作。direct Browser 当时尚未拥有 cross-document `history.back()` / `forward()` controller，remote
+JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP 也仍需单独验收。固定六例已经从 remaining-risk 列表移除，后续不能
+继续沿用 P6R5 的 2 pass / 2 fail / 2 timeout 作为当前状态。第一项现由 P6R7 收口。
+
+#### P6R7 direct Browser cross-document history owner
+
+P6R6 已经让 renderer-authored history seed 穿过 protocol replacement，但 direct `Browser` owner 仍有两处断点。
+`RendererOwnerAction::TopLevelHistoryTraversal` 只带 delta，standalone owner 收到后直接忽略。它没有 protocol 的
+`TargetNavigationHistoryState`，无法从 delta 独立找回目标 entry。另一条 Location owner action 虽然已经带有
+`NavigationHistoryEntrySeed`，`StandaloneAuxiliaryPageCommand::Navigate` 和 target Page command 仍只传 request，seed
+在进入 loader 前丢失。root Page 和 Browser-owned auxiliary Page 因而都可能在第一次 replacement 后只剩局部 history。
+
+本轮把两条路径收进同一个 typed handoff。
+
+1. 已知的 top-level cross-document History traversal 在 renderer 选中目标 entry 时，同时冻结 delta 与完整
+   `NavigationHistoryEntrySeed`。seed 的 current entry 就是 destination，保留全部 entry URL、state、key、document id、
+   navigation index 和 traverse activation。renderer 无法选出 entry 时仍只发布 delta。这类记录供拥有 browser history
+   controller 的 consumer 处理，direct `Browser` 会把它当作 no-op。
+2. standalone owner 按 action 所在的 exact Page residence 路由 destination。Browser 自己持有的 auxiliary Page 进入该
+   Page actor 的串行 command queue，调用方仍持有的 root Page 进入 renderer browser-owner command。两者都使用现有
+   `FollowTopLevelNavigationInStandaloneAdapter`，并把 request 与 seed 一起安装进 target Page 的唯一 pending navigation slot。
+3. 普通 `TopLevelLocationNavigation` 走同一条 seed handoff。这个补口覆盖 Navigation API cross-document traverse，也覆盖
+   opener 通过 stable RemoteWindowProxy 连续导航真实 popup 的路径。loader、parser、Document replacement、204/no-commit
+   和 currentness 仍由 target Page 原有 state machine 负责。
+4. protocol target 保留 browser session-history controller 的最终决定权。它只按 action delta 解析 browser entry，不允许
+   renderer seed 覆盖或否决结果。browser 发起的连续 `Page.navigate` 可能让 browser history 比当前 renderer realm 的局部
+   seed 更长。第一次实现把两边 index 当作强一致条件，focused run 中 protocol back 留在第二页，证明这种校验会把 direct
+   fallback 错当成 protocol authority。删掉反向否决后，原有 browser-owned history 回归恢复。
+5. renderer output transport 的 retained-memory charge 现在包含 Location 与 History action 携带的 serialized entries 和
+   activation。长 history 不再按零字节或仅按 request URL 进入有界 transport。
+
+生产链现在保持以下责任划分。
+
+```text
+History API selects a known cross-document entry
+  -> renderer freezes delta plus exact destination seed
+  -> direct Browser routes by exact Page residence
+  -> target Page records request plus seed in one pending slot
+  -> target Page loader commits one replacement Document
+
+protocol consumer receives the same action
+  -> browser session-history controller resolves delta
+  -> renderer seed remains a direct-Browser fallback
+  -> browser entry starts the existing protocol navigation transaction
+```
+
+回归覆盖四个边界。renderer 单元测试检查 back action 中的 destination URL、current index、完整 entry list 与 traverse
+activation。direct root Page 回归先写入两端 `history.state`，再执行 back/forward，确认 PageId、history length 和两端 state
+都保留。Browser-owned auxiliary Page 回归通过 stable opener proxy 连续完成两次真实 navigation，再在 exact popup Page 上
+执行 back/forward，确认同一 Page residence 往返并最终通过 `window.close()` 退休。protocol 既有回归继续证明连续
+`Page.navigate` 后的 renderer `history.back()` 服从 browser-owned history。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run \
+  -p moli-renderer-v8 -p moli-core -p moli-protocol \
+  -E '<typed traversal seed + direct root/auxiliary back-forward + protocol browser authority 四条>' \
+  --no-fail-fast --status-level fail --final-status-level fail
+# run 58754570-4f66-4a86-ab8d-15ecfb63b80e
+# 4/4 passed, 12658 skipped by the focused filter
+
+TMPDIR=<repo>/target/tmp cargo nextest run -p moli-core \
+  -E '<direct root/auxiliary back-forward 两条>' \
+  --stress-count 20 --test-threads 4 --no-fail-fast
+# run 62e53c2f-abaf-4774-a530-67925c1da542
+# 20/20 stress iterations passed，每轮 2/2
+```
+
+当前代码构建的 release binary SHA-256 为
+`c37d11c6f71333c36015758519ce5a15f32445f435287d6c19de406c928409fa`。WPT checkout 固定为
+`db95fafd1fcef8428805e41eb5705d444e8c67ce`，Chromium 对照仍为
+`a03603fe9af6230a12f1b2fb2c18a7d003a0d937`。上游
+`history_back_1.html` 和 `history_forward_1.html` 都由 opener 创建真实 popup，再检查跨文档 traversal 后回传的页面序列。
+两例在 CLI 与 CDP mode 均为 2/2 case、2/2 subtest 通过，harness status 均为 OK，没有 fail、timeout 或 notrun。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo build --release -p moli
+# passed
+
+uv run --project moli-benchmark python -m moli_benchmark.wpt_cross \
+  --wpt-root /home/donoughliu/code/wpt --engine moli --mode cli \
+  --moli-bin target/release/moli \
+  --output-dir /tmp/moli-wpt-popup-history-p6r7-cli-20260823-1 \
+  --case html/browsers/history/the-history-interface/history_back_1.html \
+  --case html/browsers/history/the-history-interface/history_forward_1.html
+# pass=2
+
+uv run --project moli-benchmark python -m moli_benchmark.wpt_cross \
+  --wpt-root /home/donoughliu/code/wpt --engine moli --mode cdp \
+  --moli-bin target/release/moli \
+  --output-dir /tmp/moli-wpt-popup-history-p6r7-cdp-20260823-1 \
+  --case html/browsers/history/the-history-interface/history_back_1.html \
+  --case html/browsers/history/the-history-interface/history_forward_1.html
+# pass=2
+```
+
+提交前仓库门禁也已完成。
+
+```bash
+TMPDIR=<repo>/target/tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail --failure-output immediate
+# run 1edbe053-59e5-4c68-8251-93f39b0be1a2
+# 15981 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+TMPDIR=<repo>/target/tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed
+```
+
+P6R7 收口的是当前单进程 direct owner 的跨文档 traversal handoff。BFCache、POST history resubmission、scroll restoration
+和 crash restore 属于整个 session-history 子系统，不能从这组 popup 回归外推为已经完成。popup 计划剩余的本地重点为
+remote JavaScript URL、descendant lifecycle 与更宽 focused WPT/CDP 重新分类。前一笔已经删除的
+`StandaloneAuxiliaryPageObservation` 不会以 history observer 或 test-only controller 的形式恢复。
 
 ## 验收不变量
 
@@ -8867,15 +9658,15 @@ endpoint，测试和 standalone adapter 也仍把旧类型
 popup 当前路径：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
-  -E 'test(window_open_non_about_returns_lightweight_popup_and_dispatches_load) | test(window_open_emits_popup_target_created_from_runtime_work) | test(window_open_hands_off_session_storage_snapshot_and_initial_storage_key) | test(rust_cdp_playwright_multi_context_popup_route_and_evaluate_contract)' \
+cargo nextest run -p moli-core -p moli-renderer-v8 -p moli-protocol \
+  -E 'test(direct_browser_owner_drives_related_auxiliary_page_and_remote_opener_message) | test(direct_browser_owner_routes_named_reuse_to_externally_held_root_page) | test(direct_browser_owner_preserves_root_history_across_cross_document_back_and_forward) | test(direct_browser_owner_preserves_auxiliary_history_across_cross_document_traversal) | test(top_level_cross_document_history_traversal_carries_the_exact_destination_seed) | test(renderer_history_back_uses_browser_owned_navigation_history) | test(related_window_proxy_location_wakes_the_exact_standalone_target_page) | test(per_page_isolate_policy_keeps_window_open_routes_page_owned) | test(popup_no_commit_responses_preserve_initial_document_before_redirect_replacement)' \
   --no-fail-fast --status-level fail --final-status-level fail
 ```
 
 child stable proxy / realm 基线：
 
 ```bash
-cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
+cargo nextest run -p moli-renderer-v8 -p moli-protocol \
   -E 'test(initial_empty_same_origin_commit_reuses_local_window_exactly_once) | test(same_origin_child_window_migration_to_cross_origin_installs_denied_surface) | test(child_window_proxy_identity_survives_cross_origin_round_trip) | test(per_page_isolate_policy_uses_distinct_isolates_and_isolates_contexts) | test(per_page_isolate_policy_reuses_navigation_isolate_and_replaces_contexts) | test(popup_target_diagnostics_report_distinct_page_vm_document_isolates)' \
   --no-fail-fast --status-level fail --final-status-level fail
 ```
@@ -8897,7 +9688,7 @@ cargo nextest run -p lightmount-renderer-v8 -p lightmount-protocol \
 - iframe sandbox popup cases；
 - anchor/area/form `_blank` + opener/noopener/noreferrer cases。
 
-每轮要记录 Lightmount commit、Chromium/WPT commit、binary build profile、case timeout、
+每轮要记录 Moli commit、Chromium/WPT commit、binary build profile、case timeout、
 parallelism、case list 和 subtest 详情。focused WPT 不应覆盖仓库 full baseline list。
 
 ### 合并前仓库验证

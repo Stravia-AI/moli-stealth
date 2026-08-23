@@ -339,7 +339,6 @@ impl JsContextHost {
         &mut self,
         child_handle: DomHandle,
     ) {
-        self.note_lightweight_popup_child_frame_load_started(child_handle);
         let released_parent = self
             .frame_owner_store
             .begin_child_frame_parent_document_load(child_handle);
@@ -391,7 +390,6 @@ impl JsContextHost {
         &mut self,
         child_handle: DomHandle,
     ) {
-        self.note_lightweight_popup_child_frame_load_started(child_handle);
         let released_parent = self
             .frame_owner_store
             .rebind_active_child_frame_parent_document_load(child_handle);
@@ -424,7 +422,6 @@ impl JsContextHost {
             "settled child navigation without load dispatch"
         );
         self.clear_pending_remote_frame_navigation_for_load(expected);
-        self.note_lightweight_popup_child_frame_load_finished(child_handle);
         let released_parent = self
             .frame_owner_store
             .cancel_child_frame_parent_document_load(child_handle);
@@ -443,7 +440,6 @@ impl JsContextHost {
                 .current_child_document_task_owner(child_handle)
                 .is_none()
         );
-        self.note_lightweight_popup_child_frame_load_finished(child_handle);
         let released_parent = self
             .frame_owner_store
             .cancel_child_frame_parent_document_load(child_handle);
@@ -481,7 +477,6 @@ impl JsContextHost {
         &mut self,
         child_handle: DomHandle,
     ) {
-        self.note_lightweight_popup_child_frame_load_finished(child_handle);
         let released_parent = self.frame_owner_store.detach_child_frame(child_handle);
         if let Some(completion) = released_parent {
             self.reconcile_parent_lifecycle_after_descendant_completion(completion);

@@ -8678,16 +8678,28 @@ fn assigning_document_does_not_replace_legacy_unforgeable_document_alias() {
     let result = vm
         .eval(
             r#"
-            [
-                document === globalThis.document,
-                typeof document.createElement,
-                document.hacked === true
-            ].join("|")
+            (() => {
+                const descriptor = Object.getOwnPropertyDescriptor(window, "document");
+                return JSON.stringify({
+                    sameDocument: document === globalThis.document,
+                    createElementType: typeof document.createElement,
+                    assignmentIgnored: document.hacked !== true,
+                    own: Object.hasOwn(window, "document"),
+                    getterType: typeof descriptor.get,
+                    getterName: descriptor.get.name,
+                    setterType: typeof descriptor.set,
+                    enumerable: descriptor.enumerable,
+                    configurable: descriptor.configurable
+                });
+            })()
             "#,
         )
         .expect("document alias reassignment probe should evaluate");
 
-    assert_eq!(result, "true|function|false");
+    assert_eq!(
+        result,
+        r#"{"sameDocument":true,"createElementType":"function","assignmentIgnored":true,"own":true,"getterType":"function","getterName":"get document","setterType":"undefined","enumerable":true,"configurable":false}"#
+    );
 }
 #[test]
 fn iframe_id_named_window_property_returns_element_not_child_window() {

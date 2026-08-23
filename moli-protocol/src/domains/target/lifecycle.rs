@@ -729,6 +729,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
                         request.clone(),
                         navigation_referrer.clone(),
                         document_referrer.clone(),
+                        None,
                         PopupTargetNavigationKind::NamedTargetReuse,
                         service_worker_clients_open_window_continuation.clone(),
                         drain_pending_javascript_tasks_before_commit,
@@ -878,6 +879,52 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         return None;
     };
 
+    let top_level_browsing_context_closing =
+        creation_diagnostics.top_level_browsing_context_closing;
+    let captured_initial_navigation = creation_diagnostics
+        .initial_top_level_navigation
+        .map(|navigation| *navigation);
+    if captured_initial_navigation.is_some() && destination_request.is_some() {
+        tracing::error!(
+            browser_context_id,
+            target_id,
+            "popup admission received duplicate activation and target-local initial navigation authorities"
+        );
+        rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
+        return None;
+    }
+    if captured_initial_navigation.is_some()
+        && service_worker_clients_open_window_continuation.is_some()
+    {
+        tracing::error!(
+            browser_context_id,
+            target_id,
+            "window-owned target-local navigation carried a ServiceWorker continuation"
+        );
+        rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
+        return None;
+    }
+    let (
+        destination_request,
+        navigation_history_entry_seed,
+        navigation_referrer,
+        document_referrer,
+    ) = if let Some(navigation) = captured_initial_navigation {
+        (
+            Some(navigation.request().clone()),
+            navigation.navigation_history_entry_seed().cloned(),
+            None,
+            None,
+        )
+    } else {
+        (
+            destination_request,
+            None,
+            navigation_referrer,
+            document_referrer,
+        )
+    };
+
     if destination_request.is_none() {
         if !conn.stage_popup_target_without_destination_navigation(&target_id) {
             rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id)
@@ -896,7 +943,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         .await;
     }
     let request = destination_request.expect("destination request was checked");
-    let navigation = if creation_diagnostics.top_level_browsing_context_closing {
+    let navigation = if top_level_browsing_context_closing {
         // `open(url); popup.close()` may run completely inside the opener's
         // synchronous V8 turn, before protocol admits the auxiliary Page. Its
         // close record remains in the staged Page FIFO; do not start a network
@@ -910,6 +957,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
             request,
             navigation_referrer,
             document_referrer,
+            navigation_history_entry_seed,
             PopupTargetNavigationKind::InitialDocument,
             service_worker_clients_open_window_continuation,
             drain_pending_javascript_tasks_before_commit,
@@ -926,7 +974,7 @@ pub(crate) async fn create_popup_target_from_renderer_output_background_events_a
         rollback_incomplete_popup_target_async(conn, Some(&browser_context_id), &target_id).await;
         return None;
     }
-    let navigation = if creation_diagnostics.top_level_browsing_context_closing
+    let navigation = if top_level_browsing_context_closing
         || conn.auto_attach_wait_for_debugger_on_start
     {
         None
@@ -1246,6 +1294,7 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
     let url = request.url().to_owned();
     let referrer = claim.referrer().map(str::to_owned);
     let document_referrer = claim.document_referrer().map(str::to_owned);
+    let navigation_history_entry_seed = claim.navigation_history_entry_seed().cloned();
     let kind = claim.kind();
     let drain_pending_javascript_tasks_before_commit =
         claim.drain_pending_javascript_tasks_before_commit();
@@ -1295,6 +1344,7 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
         PopupTargetNavigationKind::InitialDocument => {
             if !conn.runtime_session_owner_should_start_claimed_popup_initial_document_navigation(
                 execution_session_id,
+                &url,
             ) {
                 return false;
             }
@@ -1314,6 +1364,7 @@ async fn execute_popup_target_navigation_owner_action_background_events_async(
             request.request_body(),
             request.request_headers(),
             request.browser_navigation_kind(),
+            navigation_history_entry_seed.as_ref(),
             service_worker_clients_open_window_continuation,
             drain_pending_javascript_tasks_before_commit,
         ),

@@ -4,7 +4,6 @@ use std::{
     cell::RefCell,
     collections::HashMap,
     fmt,
-    rc::Rc,
     sync::Arc,
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
@@ -113,7 +112,6 @@ pub(crate) use self::page_vm::AuthorizedCurrentPageMiscPlatformApiTask;
 pub(crate) use self::page_vm::AuthorizedCurrentPageModuleReaction;
 pub(crate) use self::page_vm::AuthorizedCurrentPageNavigationApiTask;
 pub(crate) use self::page_vm::AuthorizedCurrentPageOpfsTask;
-pub(crate) use self::page_vm::AuthorizedCurrentPagePopupLoadEvent;
 pub(crate) use self::page_vm::AuthorizedCurrentPageRenderingUpdate;
 pub(crate) use self::page_vm::AuthorizedCurrentPageServiceWorkerClientMessage;
 pub(crate) use self::page_vm::AuthorizedCurrentPageServiceWorkerInternalTask;
@@ -190,7 +188,6 @@ pub enum RendererOwnerResourceActivitySource {
     ChildClassicScript,
     ChildBlockingStylesheet,
     Stylesheet,
-    PopupDocument,
     ModuleGraphFetch,
     ServiceWorker,
     WebCryptoTask,
@@ -402,9 +399,7 @@ pub(crate) use self::page_vm::{
     AuthorizedCurrentMainDynamicImportGraphFetchCompletion,
     AuthorizedCurrentMainParserModuleGraphFetchCompletion,
     AuthorizedCurrentMainRuntimeModuleGraphFetchCompletion,
-    AuthorizedCurrentPopupClassicScriptLoadCompletion,
-    AuthorizedCurrentPopupDocumentLoadCompletion, AuthorizedLiveMainModulepreloadFetchCompletion,
-    CurrentChildDocumentLoadApplication,
+    AuthorizedLiveMainModulepreloadFetchCompletion, CurrentChildDocumentLoadApplication,
 };
 pub(in crate::runtime) use self::page_vm::{
     PageVmCommittedNavigationBootstrap, PageVmDocumentCommitPreparation,
@@ -768,25 +763,19 @@ impl RendererStagedAuxiliaryWindowProxy {
     }
 }
 
-#[derive(Default)]
-struct RendererStagedAuxiliaryWindowProxyRegistry {
-    by_page_id: HashMap<PageId, RendererStagedAuxiliaryWindowProxy>,
-}
-
 /// Page-local allocation and handoff capability for auxiliary browsing
 /// contexts created synchronously by one opener realm.
 ///
-/// The registry intentionally stays owner-local: V8 handles never cross the
-/// renderer/protocol transport carried by [`RendererPendingAuxiliaryPage`]. A
-/// related Page admitted to the same script agent consumes its exact staged
-/// proxy once during its initial realm bootstrap.
+/// Related Pages are now staged as a complete initial Page/Document/realm in
+/// the opener's owner turn. The allocator therefore carries only typed Page
+/// identity and the owner capability; it no longer keeps a second loose
+/// WindowProxy registry for a later protocol-created Page to consume.
 #[derive(Clone)]
 pub(crate) struct RendererAuxiliaryPageReservationAllocator {
     owner: Option<owner_local_store::RendererOwnerLocalContext>,
     local_host_id: RendererOwnerLocalHostId,
     opener_page_id: PageId,
     next_page_id: Arc<AtomicU64>,
-    staged_window_proxies: Rc<RefCell<RendererStagedAuxiliaryWindowProxyRegistry>>,
 }
 
 impl fmt::Debug for RendererAuxiliaryPageReservationAllocator {
@@ -794,10 +783,6 @@ impl fmt::Debug for RendererAuxiliaryPageReservationAllocator {
         f.debug_struct("RendererAuxiliaryPageReservationAllocator")
             .field("local_host_id", &self.local_host_id)
             .field("opener_page_id", &self.opener_page_id)
-            .field(
-                "staged_window_proxy_count",
-                &self.staged_window_proxies.borrow().by_page_id.len(),
-            )
             .finish_non_exhaustive()
     }
 }
@@ -814,9 +799,6 @@ impl RendererAuxiliaryPageReservationAllocator {
             local_host_id,
             opener_page_id,
             next_page_id,
-            staged_window_proxies: Rc::new(RefCell::new(
-                RendererStagedAuxiliaryWindowProxyRegistry::default(),
-            )),
         }
     }
 
@@ -831,9 +813,6 @@ impl RendererAuxiliaryPageReservationAllocator {
             local_host_id,
             opener_page_id,
             next_page_id,
-            staged_window_proxies: Rc::new(RefCell::new(
-                RendererStagedAuxiliaryWindowProxyRegistry::default(),
-            )),
         }
     }
 
@@ -862,46 +841,6 @@ impl RendererAuxiliaryPageReservationAllocator {
             browsing_context_id: BrowsingContextId::auxiliary_top_level(page_id.as_u64()),
             page_reservation,
         }
-    }
-
-    pub(crate) fn stage_related_window_proxy(
-        &self,
-        pending: RendererPendingAuxiliaryPage,
-        staged: RendererStagedAuxiliaryWindowProxy,
-    ) -> Result<()> {
-        let reservation = pending.page_reservation();
-        ensure!(
-            reservation.local_host_id() == self.local_host_id,
-            "auxiliary WindowProxy reservation belongs to a different renderer owner"
-        );
-        ensure!(
-            matches!(
-                reservation.script_agent_admission(),
-                RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id }
-                    if opener_page_id == self.opener_page_id
-            ),
-            "only a related auxiliary Page may adopt its opener-created WindowProxy"
-        );
-        let mut registry = self.staged_window_proxies.borrow_mut();
-        let std::collections::hash_map::Entry::Vacant(entry) =
-            registry.by_page_id.entry(reservation.page_id())
-        else {
-            return Err(anyhow!(
-                "auxiliary Page already has a staged opener WindowProxy"
-            ));
-        };
-        entry.insert(staged);
-        Ok(())
-    }
-
-    pub(crate) fn take_related_window_proxy(
-        &self,
-        page_id: PageId,
-    ) -> Option<RendererStagedAuxiliaryWindowProxy> {
-        self.staged_window_proxies
-            .borrow_mut()
-            .by_page_id
-            .remove(&page_id)
     }
 
     pub(crate) fn stage_related_initial_empty_page_in_scope(

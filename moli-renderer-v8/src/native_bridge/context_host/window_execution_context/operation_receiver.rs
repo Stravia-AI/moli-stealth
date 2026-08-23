@@ -1,4 +1,4 @@
-use super::super::{JsContextHost, OwnerDispatchScope, lightweight_popup_id_from_window};
+use super::super::{JsContextHost, OwnerDispatchScope};
 use super::WindowExecutionContextBinding;
 use crate::{
     context_bootstrap::{CHILD_BROWSING_CONTEXT_HANDLE_SLOT, is_window_receiver},
@@ -81,28 +81,19 @@ impl WindowOperationReceiver {
             return Err(WindowOperationReceiverCaptureError::CrossOrigin);
         }
 
-        let binding_at_capture = match target_scope {
-            OwnerDispatchScope::LightweightPopup(_) => host
-                .clone_window_execution_context_binding(scope, target_owner, target_scope)
-                .filter(|binding| {
-                    relevant_context.is_some_and(|context| binding.context(scope) == context)
-                }),
-            OwnerDispatchScope::Top | OwnerDispatchScope::Child(_) => {
-                match (relevant_context, relevant_identity) {
-                    (Some(context), Some(identity))
-                        if identity.owner() == target_owner
-                            && identity.dispatch_scope() == target_scope =>
-                    {
-                        Some(WindowExecutionContextBinding::new(
-                            target_owner,
-                            target_scope,
-                            identity.realm_token(),
-                            v8::Global::new(scope, context),
-                        ))
-                    }
-                    _ => None,
-                }
+        let binding_at_capture = match (relevant_context, relevant_identity) {
+            (Some(context), Some(identity))
+                if identity.owner() == target_owner
+                    && identity.dispatch_scope() == target_scope =>
+            {
+                Some(WindowExecutionContextBinding::new(
+                    target_owner,
+                    target_scope,
+                    identity.realm_token(),
+                    v8::Global::new(scope, context),
+                ))
             }
+            _ => None,
         };
 
         Ok(Self { binding_at_capture })
@@ -133,8 +124,4 @@ fn marked_window_dispatch_scope(
     get_private_value(scope, receiver, CHILD_BROWSING_CONTEXT_HANDLE_SLOT)
         .and_then(|value| child_window_handle_from_marker_data(scope, value))
         .map(OwnerDispatchScope::Child)
-        .or_else(|| {
-            lightweight_popup_id_from_window(scope, receiver)
-                .map(OwnerDispatchScope::LightweightPopup)
-        })
 }

@@ -1,5 +1,6 @@
 use super::{
-    JsContextHost, OwnerDispatchScope, WindowExecutionContextIdentity, WindowExecutionContextOwner,
+    JsContextHost, OwnerDispatchScope, WindowExecutionContextIdentity,
+    window_security_tokens::WindowAccessOrigin,
 };
 use crate::{
     browsing_context_model::BrowsingContextAccessOrigin, document_runtime::DomHandle,
@@ -265,10 +266,16 @@ impl JsContextHost {
         let tree = environment.remote_frame_tree_snapshot(target.token.endpoint)?;
         let mut candidate = Some(target.clone());
         while let Some(snapshot) = candidate {
-            let target_origin = BrowsingContextAccessOrigin::from_serialized_origin(
-                snapshot.serialized_origin,
-                snapshot.document_domain,
-            )?;
+            let target_origin = if snapshot.serialized_origin == "null" {
+                BrowsingContextAccessOrigin::Opaque {
+                    identity: snapshot.opaque_origin_nonce,
+                }
+            } else {
+                BrowsingContextAccessOrigin::from_serialized_origin(
+                    snapshot.serialized_origin,
+                    snapshot.document_domain,
+                )?
+            };
             if source_origin.can_access(&target_origin) {
                 return Some(true);
             }
@@ -279,16 +286,22 @@ impl JsContextHost {
             });
         }
         let top = environment.remote_top_level_target_snapshot(target.token.endpoint)?;
-        let top_origin = BrowsingContextAccessOrigin::from_serialized_origin(
-            top.current_serialized_origin,
-            None,
-        )?;
+        let top_origin = if top.current_serialized_origin == "null" {
+            BrowsingContextAccessOrigin::Opaque {
+                identity: top.current_opaque_origin_nonce,
+            }
+        } else {
+            BrowsingContextAccessOrigin::from_serialized_origin(
+                top.current_serialized_origin,
+                None,
+            )?
+        };
         Some(source_origin.can_access(&top_origin))
     }
 
     pub(crate) fn navigation_api_base_url_for_identity(
         &self,
-        scope: &mut v8::PinScope<'_, '_>,
+        _scope: &mut v8::PinScope<'_, '_>,
         identity: WindowExecutionContextIdentity,
     ) -> Option<Url> {
         if !self.window_execution_context_identity_is_current(identity) {
@@ -300,9 +313,6 @@ impl JsContextHost {
                 .document_base_url()
                 .or_else(|| Some(self.document_url().clone())),
             OwnerDispatchScope::Child(handle) => self.child_browsing_context_base_url(handle),
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.lightweight_popup_request_base_url(scope, popup_id)
-            }
         }
     }
 
@@ -350,7 +360,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(source) => {
                 target != source && self.child_handle_is_descendant_of(target, source)
             }
-            OwnerDispatchScope::LightweightPopup(_) => false,
         }
     }
 
@@ -396,7 +405,7 @@ impl JsContextHost {
                     .child_browsing_context_parent_handle(child)
                     .map(OwnerDispatchScope::Child)
                     .unwrap_or(OwnerDispatchScope::Top),
-                OwnerDispatchScope::Top | OwnerDispatchScope::LightweightPopup(_) => return false,
+                OwnerDispatchScope::Top => return false,
             };
         }
     }
@@ -457,10 +466,6 @@ impl JsContextHost {
         scope: &mut v8::PinScope<'_, '_>,
         target_scope: OwnerDispatchScope,
     ) -> Option<(*const JsContextHost, OwnerDispatchScope)> {
-        if let OwnerDispatchScope::LightweightPopup(popup_id) = target_scope {
-            let opener = self.lightweight_popup_opener_endpoint(popup_id)?;
-            return Some((self as *const Self, opener.dispatch_scope()));
-        }
         if target_scope != OwnerDispatchScope::Top {
             return None;
         }
@@ -478,12 +483,10 @@ impl JsContextHost {
         let Some(target_origin) = self.window_access_origin_for_dispatch_scope(target_scope) else {
             return false;
         };
-        let Some(destination_origin) =
-            BrowsingContextAccessOrigin::<WindowExecutionContextOwner>::from_serialized_origin(
-                moli_url::origin_ascii_serialization(destination_url),
-                None,
-            )
-        else {
+        let Some(destination_origin) = WindowAccessOrigin::from_serialized_origin(
+            moli_url::origin_ascii_serialization(destination_url),
+            None,
+        ) else {
             return false;
         };
         target_origin.can_access(&destination_origin)
@@ -546,9 +549,9 @@ impl JsContextHost {
     }
 }
 
-fn origin_without_document_domain(
-    origin: BrowsingContextAccessOrigin<WindowExecutionContextOwner>,
-) -> BrowsingContextAccessOrigin<WindowExecutionContextOwner> {
+fn origin_without_document_domain<OpaqueIdentity>(
+    origin: BrowsingContextAccessOrigin<OpaqueIdentity>,
+) -> BrowsingContextAccessOrigin<OpaqueIdentity> {
     match origin {
         BrowsingContextAccessOrigin::Opaque { identity } => {
             BrowsingContextAccessOrigin::Opaque { identity }
@@ -592,8 +595,5 @@ fn navigation_window_endpoint<'s>(
 }
 
 fn target_scope_is_outermost(scope: OwnerDispatchScope) -> bool {
-    matches!(
-        scope,
-        OwnerDispatchScope::Top | OwnerDispatchScope::LightweightPopup(_)
-    )
+    matches!(scope, OwnerDispatchScope::Top)
 }

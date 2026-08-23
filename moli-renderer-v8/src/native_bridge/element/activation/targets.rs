@@ -268,9 +268,6 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
     }
 
     let source_host = unsafe { &mut *source_host_ptr };
-    if matches!(source_scope, OwnerDispatchScope::LightweightPopup(_)) {
-        return None;
-    }
     let source_identity = if source_host.entered_owner_dispatch_scope(scope) == source_scope {
         source_host.current_runtime_window_execution_context_identity(scope)
     } else {
@@ -381,7 +378,6 @@ pub(crate) fn resolve_named_browsing_context_target_for_navigation<'s>(
                 }
             }
         }
-        OwnerDispatchScope::LightweightPopup(_) => unreachable!(),
     }
 
     for candidate in top_level_targets {
@@ -658,18 +654,23 @@ fn is_javascript_navigation_request(request: &RendererTopLevelNavigationRequest)
     url::Url::parse(request.url()).is_ok_and(|url| url.scheme() == "javascript")
 }
 
-fn queue_renderer_owned_top_level_javascript_url_navigation_for_host(
+fn queue_renderer_owned_top_level_navigation_for_host(
     target_host_ptr: *mut JsContextHost,
     request: RendererTopLevelNavigationRequest,
 ) -> bool {
-    if !is_javascript_navigation_request(&request) {
-        return false;
-    }
     let target_host = unsafe { &mut *target_host_ptr };
     if target_host.root_document_lifecycle_identity().is_none() {
         return false;
     }
     target_host.record_cross_page_renderer_top_level_navigation_request(request, None)
+}
+
+fn queue_renderer_owned_top_level_javascript_url_navigation_for_host(
+    target_host_ptr: *mut JsContextHost,
+    request: RendererTopLevelNavigationRequest,
+) -> bool {
+    is_javascript_navigation_request(&request)
+        && queue_renderer_owned_top_level_navigation_for_host(target_host_ptr, request)
 }
 
 fn cancel_pending_renderer_owned_javascript_url_navigation_for_host(
@@ -710,6 +711,22 @@ pub(crate) fn queue_renderer_owned_top_level_javascript_url_navigation_for_windo
 ) -> bool {
     context_host_ptr_from_window_object(scope, target_window).is_some_and(|target_host_ptr| {
         queue_renderer_owned_top_level_javascript_url_navigation_for_host(target_host_ptr, request)
+    })
+}
+
+/// Queues the first destination on a newly staged related Page itself.
+///
+/// The popup activation then owns only creation/observation. A later Location
+/// assignment in the same author turn replaces this exact target-local slot,
+/// so direct Browser and protocol owners cannot replay an older activation URL
+/// after adopting the Page.
+pub(crate) fn queue_renderer_owned_top_level_navigation_for_window(
+    scope: &mut v8::PinScope<'_, '_>,
+    target_window: v8::Local<'_, v8::Object>,
+    request: RendererTopLevelNavigationRequest,
+) -> bool {
+    context_host_ptr_from_window_object(scope, target_window).is_some_and(|target_host_ptr| {
+        queue_renderer_owned_top_level_navigation_for_host(target_host_ptr, request)
     })
 }
 
@@ -825,17 +842,6 @@ fn element_popup_creator<'s>(
         let policy_container = runtime.document_policy_container().clone();
         return Some(ElementPopupCreator {
             opener: scope.get_current_context().global(scope),
-            base_url,
-            document_url: outgoing_navigation_source_url(&raw_document_url, &policy_container),
-            policy_container,
-        });
-    }
-    if let Some(popup_id) = runtime.lightweight_popup_id_for_document_handle(document) {
-        let policy_container = runtime
-            .lightweight_popup_policy_container(popup_id)?
-            .clone();
-        return Some(ElementPopupCreator {
-            opener: runtime.lightweight_popup_window(scope, popup_id)?,
             base_url,
             document_url: outgoing_navigation_source_url(&raw_document_url, &policy_container),
             policy_container,
@@ -1380,11 +1386,6 @@ fn source_document_policy_container(
     if source_document == source_host.document_handle() {
         return Some(source_host.document_policy_container().clone());
     }
-    if let Some(popup_id) = source_host.lightweight_popup_id_for_document_handle(source_document) {
-        return source_host
-            .lightweight_popup_policy_container(popup_id)
-            .cloned();
-    }
     source_host
         .child_browsing_context_host_for_document_handle(source_document)
         .and_then(|handle| source_host.child_browsing_context_policy_container_snapshot(handle))
@@ -1716,65 +1717,6 @@ fn navigate_element_popup_target<'s, 'entries>(
         runtime.record_pending_popup_activation(activation, None);
         return true;
     }
-    let has_live_lightweight_target = opener.is_some()
-        && runtime
-            .live_lightweight_popup_id_for_name(target_name)
-            .is_some();
-    if has_live_lightweight_target {
-        // The legacy compatibility target is still an existing browsing
-        // context. Preserve Blink's late ordering: select it first, then run
-        // allow-forms, source JavaScript-URL CSP, and form-action before any
-        // loader/parser mutation. A denial must not fall through to creation.
-        if !destination_policy.allows_form_submission(runtime, source_handle)
-            || !source_javascript_url_allowed_by_csp_for_owner(
-                scope,
-                runtime,
-                dispatch_scope,
-                resolved_url,
-            )
-            || !destination_policy.allows_form_action(scope, runtime, source_handle, resolved_url)
-        {
-            return true;
-        }
-        let Some(opened_popup) = runtime.reopen_existing_lightweight_popup_window(
-            scope,
-            opener,
-            None,
-            target_name,
-            resolved_url,
-            creator.base_url.clone(),
-            creator.policy_container.clone(),
-        ) else {
-            // Selection succeeded, so a stale compatibility endpoint is a
-            // consumed existing-target attempt rather than a creation miss.
-            return true;
-        };
-        let popup_id = opened_popup.popup_id;
-        let session_storage_store = runtime.lightweight_popup_session_storage_store(popup_id);
-        let initial_empty_document_storage_key =
-            runtime.lightweight_popup_initial_empty_document_storage_key(popup_id);
-        let activation = popup_activation_with_destination_policy(
-            RendererPendingPopupActivation::window(
-                root_document,
-                source,
-                !relations.suppress_opener,
-                Some(popup_id),
-                resolved_url.to_owned(),
-                target_name.to_owned(),
-                disposition,
-            ),
-            navigation_request,
-            true,
-        )
-        .with_navigation_referrers(
-            navigation_referrer,
-            initial_document_referrer,
-            document_referrer,
-        )
-        .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key);
-        runtime.record_pending_popup_activation(activation, None);
-        return true;
-    }
     if !source_javascript_url_allows_new_context_by_policy(
         scope,
         runtime,
@@ -1838,18 +1780,20 @@ fn navigate_element_popup_target<'s, 'entries>(
     } else {
         resolved_url
     };
-    let Some(opened_popup) = runtime.open_lightweight_popup_window(
-        scope,
-        runtime_ptr,
-        opener,
-        None,
-        target_name,
-        synchronous_creation_url,
-        Some(!relations.suppress_opener),
-        true,
-        creator.base_url,
-        creator_policy,
-    ) else {
+    let creator_policy_container = creator_policy.into_policy_container();
+    let opened_popup = opener.and_then(|opener| {
+        runtime.open_renderer_owned_related_auxiliary_page(
+            scope,
+            runtime_ptr,
+            opener,
+            None,
+            target_name,
+            synchronous_creation_url,
+            creator.base_url.clone(),
+            creator_policy_container.clone(),
+        )
+    });
+    let Some(opened_popup) = opened_popup else {
         let destination_navigation_allowed =
             destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
         let window_open_event = RendererPendingWindowOpenEvent::browser_window(
@@ -1881,40 +1825,32 @@ fn navigate_element_popup_target<'s, 'entries>(
         return true;
     };
     let popup_id = opened_popup.popup_id;
-    let session_storage_store = opened_popup
-        .captured_session_storage_store
-        .clone()
-        .or_else(|| runtime.lightweight_popup_session_storage_store(popup_id));
-    let initial_empty_document_storage_key = opened_popup
-        .captured_initial_empty_document_storage_key
-        .clone()
-        .or_else(|| runtime.lightweight_popup_initial_empty_document_storage_key(popup_id));
+    let session_storage_store = Some(opened_popup.captured_session_storage_store.clone());
+    let initial_empty_document_storage_key = Some(
+        opened_popup
+            .captured_initial_empty_document_storage_key
+            .clone(),
+    );
     let pending_auxiliary_page = opened_popup.pending_auxiliary_page;
-    let new_target_disposition = (opened_popup.created_new_browsing_context
-        && pending_auxiliary_page.is_some()
-        && !relations.suppress_opener)
-        .then_some(RendererPopupNewTargetDisposition::Related);
-    let window_open_event = opened_popup.created_new_browsing_context.then(|| {
-        RendererPendingWindowOpenEvent::browser_window(
-            resolved_url,
-            target_name,
-            creation_user_activation.user_gesture(),
-        )
-    });
+    let new_target_disposition =
+        (!relations.suppress_opener).then_some(RendererPopupNewTargetDisposition::Related);
+    let window_open_event = RendererPendingWindowOpenEvent::browser_window(
+        resolved_url,
+        target_name,
+        creation_user_activation.user_gesture(),
+    );
     let destination_navigation_allowed =
         destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
-    if destination_navigation_allowed
-        && pending_auxiliary_page.is_some()
-        && is_javascript_navigation_request(&navigation_request)
-        && !queue_renderer_owned_top_level_javascript_url_navigation_for_window(
+    let destination_queued = destination_navigation_allowed
+        && queue_renderer_owned_top_level_navigation_for_window(
             scope,
             opened_popup.window,
             navigation_request.clone(),
-        )
-    {
+        );
+    if destination_navigation_allowed && !destination_queued {
         tracing::warn!(
             popup_id,
-            "new related javascript URL target lost its staged renderer Page owner"
+            "new related element target lost its staged renderer Page navigation owner"
         );
     }
     let activation = popup_activation_with_destination_policy(
@@ -1929,25 +1865,26 @@ fn navigate_element_popup_target<'s, 'entries>(
         ),
         navigation_request,
         destination_navigation_allowed,
-    )
+    );
+    let activation = if destination_queued {
+        activation.without_destination_navigation_with_requested_url_observation()
+    } else {
+        activation
+    }
     .with_navigation_referrers(
         navigation_referrer,
         initial_document_referrer,
         document_referrer,
     )
     .with_initial_auxiliary_state(session_storage_store, initial_empty_document_storage_key)
-    .with_pending_auxiliary_page(pending_auxiliary_page);
+    .with_pending_auxiliary_page(Some(pending_auxiliary_page));
     let activation = if let Some(disposition) = new_target_disposition {
         activation.with_new_target_disposition(disposition)
     } else {
         activation
     };
-    let activation = if opened_popup.created_new_browsing_context {
-        activation.with_creation_user_activation(creation_user_activation)
-    } else {
-        activation
-    };
-    runtime.record_pending_popup_activation(activation, window_open_event);
+    let activation = activation.with_creation_user_activation(creation_user_activation);
+    runtime.record_pending_popup_activation(activation, Some(window_open_event));
     true
 }
 
@@ -2091,9 +2028,6 @@ fn browsing_context_window_for_dispatch_scope<'s>(
         crate::native_bridge::OwnerDispatchScope::Child(handle) => {
             runtime.existing_child_browsing_context_window_wrapper(scope, handle)
         }
-        crate::native_bridge::OwnerDispatchScope::LightweightPopup(popup_id) => {
-            runtime.lightweight_popup_window(scope, popup_id)
-        }
     }
 }
 
@@ -2106,11 +2040,6 @@ fn browsing_context_dispatch_scope_for_node(
     let document = runtime.dom_host().owner_document_handle(source_handle)?;
     if document == runtime.document_handle() {
         return Some(crate::native_bridge::OwnerDispatchScope::Top);
-    }
-    if let Some(popup_id) = runtime.lightweight_popup_id_for_document_handle(document) {
-        return Some(crate::native_bridge::OwnerDispatchScope::LightweightPopup(
-            popup_id,
-        ));
     }
     runtime
         .child_browsing_context_handle_by_document_handle(scope, document)
@@ -2293,23 +2222,6 @@ pub(super) fn navigate_hyperlink_source_browsing_context(
         crate::native_bridge::OwnerDispatchScope::Top => false,
         crate::native_bridge::OwnerDispatchScope::Child(handle) => unsafe { &mut *runtime_ptr }
             .navigate_child_browsing_context_to_url(scope, handle, resolved_url),
-        crate::native_bridge::OwnerDispatchScope::LightweightPopup(popup_id) => {
-            let Some(source_window) =
-                unsafe { &*runtime_ptr }.lightweight_popup_window(scope, popup_id)
-            else {
-                return false;
-            };
-            navigate_special_target_from_window(
-                scope,
-                runtime_ptr,
-                source_window,
-                Some(SpecialBrowsingContextTarget::Current),
-                resolved_url,
-                unsafe { &*runtime_ptr }
-                    .renderer_top_level_navigation_source_for_dispatch_scope(dispatch_scope, false),
-            )
-            .is_some()
-        }
     }
 }
 

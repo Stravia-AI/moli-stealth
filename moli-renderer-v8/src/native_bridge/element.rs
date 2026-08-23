@@ -123,6 +123,7 @@ pub(crate) use activation::{
     cancel_pending_renderer_owned_javascript_url_navigation_for_window,
     existing_browsing_context_target_window, navigate_existing_browsing_context_target,
     queue_renderer_owned_top_level_javascript_url_navigation_for_window,
+    queue_renderer_owned_top_level_navigation_for_window,
     resolve_named_browsing_context_target_for_navigation,
     source_javascript_url_allowed_by_csp_for_owner,
     source_javascript_url_allows_new_context_by_policy,

@@ -37,7 +37,6 @@ const RAW_GLOBAL_FUNCTION_ALLOWLIST: &[(&str, usize)] = &[
     ("custom_elements/definition_callbacks.rs", 1),
     ("host/timers.rs", 1),
     ("native_bridge/abort.rs", 3),
-    ("native_bridge/abort/event.rs", 1),
     ("native_bridge/history_queue.rs", 3),
     ("script_vm/frame_script_jobs.rs", 3),
     ("worker/abort.rs", 3),
@@ -218,11 +217,6 @@ const DIRECT_V8_CALL_ALLOWLIST: &[AllowedDirectCallFile] = &[
     allowed(
         "native_bridge/context_host/host_loads.rs",
         1,
-        DirectCallOwner::NativeForwardingOrScript,
-    ),
-    allowed(
-        "native_bridge/context_host/popups.rs",
-        2,
         DirectCallOwner::NativeForwardingOrScript,
     ),
     allowed(

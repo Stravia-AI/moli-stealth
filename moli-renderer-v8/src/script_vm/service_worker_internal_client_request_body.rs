@@ -167,21 +167,6 @@ impl ScriptVm {
                 })?;
                 return Ok(ServiceWorkerInternalBodyEffect::InternalActionApplied);
             }
-            crate::native_bridge::OwnerDispatchScope::LightweightPopup(_) => {
-                browser_context_runtime
-                    .service_worker_runtime()
-                    .enqueue_client_navigate_completed(
-                        crate::types::ServiceWorkerClientNavigateCompletion {
-                            request_id: completion.request_id,
-                            source_version_id: completion.source_version_id,
-                            source_run: completion.source_run,
-                            result: Err(ServiceWorkerClientNavigateError::type_error(
-                                "The client was not found.",
-                            )),
-                        },
-                    );
-                return Ok(ServiceWorkerInternalBodyEffect::InternalActionApplied);
-            }
             crate::native_bridge::OwnerDispatchScope::Top => {}
         }
         if self

@@ -124,7 +124,16 @@ fn mutate_history_object<'s>(
             return;
         }
     };
-    let resolve_base_href = if history_url_inherits_origin(scope, owner, &current_href) {
+    let resolve_base_href = if runtime_window_is_global(scope, owner)
+        && navigation_document_is_initial_empty(scope, owner)
+    {
+        // A top-level initial about:blank keeps its visible Document URL for
+        // History mutation even though same-origin checks below still use the
+        // creator-derived reference URL. This is distinct from a child
+        // initial about:blank, whose joint-history URL continues to resolve
+        // through its inherited parent base.
+        &current_href
+    } else if history_url_inherits_origin(scope, owner, &current_href) {
         current_url.as_str()
     } else {
         &current_href
@@ -312,13 +321,6 @@ fn mutate_history_object<'s>(
             HistoryMutationKind::Replace => SameDocumentHistoryUpdate::Replace,
         };
         host.record_same_document_navigation(&url, "historyApi", history_update);
-    } else if let Some(popup_id) =
-        crate::native_bridge::lightweight_popup_id_from_window(scope, owner)
-        && let Some(host_ptr) = context_host_ptr_from_global_bridge(scope)
-        && let Some(document_handle) =
-            unsafe { &*host_ptr }.lightweight_popup_document_handle(popup_id)
-    {
-        let _ = unsafe { &mut *host_ptr }.set_dom_document_url_for_handle(document_handle, url);
     }
 }
 

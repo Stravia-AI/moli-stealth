@@ -2119,9 +2119,6 @@ fn navigation_owner_window_for_handle<'s>(
     if document_handle == runtime.document_handle() {
         return Some(scope.get_current_context().global(scope));
     }
-    if let Some(popup_id) = runtime.lightweight_popup_id_for_document_handle(document_handle) {
-        return runtime.lightweight_popup_window(scope, popup_id);
-    }
     let child_handle =
         runtime.child_browsing_context_handle_by_document_handle(scope, document_handle)?;
     runtime.existing_child_browsing_context_window_wrapper(scope, child_handle)

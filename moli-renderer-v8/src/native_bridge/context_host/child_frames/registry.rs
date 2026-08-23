@@ -459,6 +459,7 @@ impl JsContextHost {
                             "new child frame refresh must capture initial-empty init inputs",
                         ),
                     );
+                    let _ = self.ensure_child_opaque_origin_nonce(handle);
                     if initial_about_blank_document_is_complete {
                         let _ = self.dispatch_ready_child_initial_empty_load_synchronously(
                             scope,
@@ -510,7 +511,7 @@ impl JsContextHost {
                 self.clear_child_window_event_listeners(handle);
                 self.close_broadcast_channels_for_child_context(handle);
                 self.disconnect_shared_worker_clients_for_child_context(handle);
-                self.child_web_storage_opaque_context_nonces.remove(&handle);
+                self.child_opaque_origin_nonce_bindings.remove(&handle);
                 self.retire_current_child_navigation_commit_task(handle);
                 self.cancel_child_document_script_work(handle);
                 None
@@ -654,7 +655,7 @@ impl JsContextHost {
             self.clear_child_window_event_listeners(handle);
             self.close_broadcast_channels_for_child_context(handle);
             self.disconnect_shared_worker_clients_for_child_context(handle);
-            self.child_web_storage_opaque_context_nonces.remove(&handle);
+            self.child_opaque_origin_nonce_bindings.remove(&handle);
         }
         self.publish_related_page_remote_frame_tree();
     }
@@ -699,11 +700,6 @@ impl JsContextHost {
             })
             .collect::<Vec<_>>();
         let mut handles = handles;
-        for popup_id in self.open_lightweight_popup_ids() {
-            if let Some(document_handle) = self.lightweight_popup_document_handle(popup_id) {
-                self.collect_child_browsing_context_host_handles(document_handle, &mut handles);
-            }
-        }
         handles.retain(|handle| {
             self.is_child_browsing_context_host_handle(*handle)
                 && self.child_browsing_context_host_is_active(*handle)
@@ -787,7 +783,7 @@ impl JsContextHost {
             .retain(|handle, _| live_handles.contains(handle));
         self.child_window_event_listeners
             .retain(|handle, _| live_handles.contains(handle));
-        self.child_web_storage_opaque_context_nonces
+        self.child_opaque_origin_nonce_bindings
             .retain(|handle, _| live_handles.contains(handle));
         self.pending_child_document_navigations
             .retain(|_, pending| live_handles.contains(&pending.target.child_handle()));

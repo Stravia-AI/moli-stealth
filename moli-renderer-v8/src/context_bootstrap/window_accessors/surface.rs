@@ -9,7 +9,6 @@ fn window_uses_page_top_level_opener_edge<'s>(
     receiver: v8::Local<'s, v8::Object>,
 ) -> bool {
     window_child_context_handle(scope, receiver).is_none()
-        && crate::native_bridge::lightweight_popup_id_from_window(scope, receiver).is_none()
 }
 
 fn window_inner_surface_dimension<'s>(

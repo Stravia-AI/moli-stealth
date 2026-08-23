@@ -54,10 +54,7 @@ pub(in crate::context_bootstrap) fn window_child_context_handle<'s>(
         }
         let current_context = scope.get_current_context();
         let receiver_context = receiver.get_creation_context(scope);
-        if receiver_context == Some(current_context)
-            && crate::native_bridge::lightweight_popup_id_from_window(scope, receiver).is_none()
-            && crate::native_bridge::cross_origin_lightweight_popup_id(scope, receiver).is_none()
-        {
+        if receiver_context == Some(current_context) {
             // V8 can invoke a Window accessor with the current realm's
             // WindowProperties/proxy holder as `this` rather than the global
             // proxy itself. Its creation context is still the exact current
@@ -89,8 +86,7 @@ pub(in crate::context_bootstrap) fn window_child_context_handle<'s>(
     }
     match identity.dispatch_scope() {
         crate::native_bridge::OwnerDispatchScope::Child(handle) => Some(handle),
-        crate::native_bridge::OwnerDispatchScope::Top
-        | crate::native_bridge::OwnerDispatchScope::LightweightPopup(_) => None,
+        crate::native_bridge::OwnerDispatchScope::Top => None,
     }
 }
 

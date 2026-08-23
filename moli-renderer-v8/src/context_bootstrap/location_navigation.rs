@@ -247,13 +247,19 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
         }
     };
     let exact_same_href = current_href == resolved.as_str();
-    let navigation_source = context_host_ptr_from_global_bridge(scope).and_then(|host_ptr| {
-        let host = unsafe { &*host_ptr };
-        host.renderer_top_level_navigation_source_for_dispatch_scope(
-            host.entered_owner_dispatch_scope(scope),
-            false,
-        )
-    });
+    let incumbent_context = scope
+        .get_incumbent_context()
+        .unwrap_or_else(|| scope.get_current_context());
+    let navigation_source =
+        context_host_ptr_from_context_slot(incumbent_context).and_then(|host_ptr| {
+            let host = unsafe { &*host_ptr };
+            let identity =
+                host.window_execution_context_identity_for_v8_context(scope, incumbent_context)?;
+            host.renderer_top_level_navigation_source_for_dispatch_scope(
+                identity.dispatch_scope(),
+                false,
+            )
+        });
     if !matches!(kind, LocationNavigationKind::Reload)
         && exact_same_href
         && source_element.is_none()
@@ -280,17 +286,6 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
         && matches!(
             navigation_reload_admission(scope, owner),
             NavigationReloadAdmission::NoCommittedHistoryItem
-        )
-    {
-        return;
-    }
-    if let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, owner)
-        && let Some(host_ptr) = context_host_ptr_from_global_bridge(scope)
-        && unsafe { &mut *host_ptr }.navigate_lightweight_popup_window_to_url(
-            scope,
-            popup_id,
-            resolved.clone(),
-            kind,
         )
     {
         return;
@@ -670,8 +665,22 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
     if let Some(source) = navigation_source {
         request = request.with_source(source);
     }
-    unsafe { &mut *host_ptr }
-        .record_pending_renderer_top_level_navigation_request(request, entry_seed);
+    let host = unsafe { &mut *host_ptr };
+    let incumbent_host_ptr = scope
+        .get_incumbent_context()
+        .and_then(context_host_ptr_from_context_slot);
+    if incumbent_host_ptr.is_some_and(|incumbent_host_ptr| incumbent_host_ptr != host_ptr) {
+        // A same-agent related WindowProxy can invoke the target Location
+        // object while the opener owns the executing Page turn. The target
+        // JsContextHost is therefore outside its ordinary navigation-handoff
+        // scope. Wake that exact Page explicitly; otherwise a standalone
+        // owner leaves the request pending until unrelated target work happens
+        // to run (a browser-delegated Page can mask this by publishing the
+        // request during such a later turn).
+        host.record_cross_page_renderer_top_level_navigation_request(request, entry_seed);
+    } else {
+        host.record_pending_renderer_top_level_navigation_request(request, entry_seed);
+    }
 }
 
 fn browsing_context_navigation_denial<'s>(

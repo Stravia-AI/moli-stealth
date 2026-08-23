@@ -213,9 +213,9 @@ pub(crate) enum WindowProxyAccess {
 
 /// Origin projection used by WindowProxy access checks.
 ///
-/// The opaque identity is generic because the execution-context owner is a
-/// script-agent concern, while tuple-origin comparison is shared by nested and
-/// top-level browsing contexts.
+/// The opaque identity is generic so the comparison primitive does not choose
+/// its owner. Window access supplies a browser-context-qualified origin nonce;
+/// tuple-origin comparison remains shared by nested and top-level contexts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum BrowsingContextAccessOrigin<OpaqueIdentity> {
     Opaque {
@@ -229,6 +229,7 @@ pub(crate) enum BrowsingContextAccessOrigin<OpaqueIdentity> {
 }
 
 impl<OpaqueIdentity> BrowsingContextAccessOrigin<OpaqueIdentity> {
+    #[cfg(test)]
     pub(crate) fn opaque(identity: OpaqueIdentity) -> Self {
         Self::Opaque {
             identity: Some(identity),
@@ -251,15 +252,6 @@ impl<OpaqueIdentity> BrowsingContextAccessOrigin<OpaqueIdentity> {
             scheme,
             document_domain,
         })
-    }
-
-    pub(crate) fn serialized_origin(&self) -> String {
-        match self {
-            Self::Opaque { .. } => "null".to_owned(),
-            Self::Tuple {
-                serialized_origin, ..
-            } => serialized_origin.clone(),
-        }
     }
 }
 

@@ -12,8 +12,8 @@ use crate::{
     },
     dom::native::Node,
     native_bridge::{
-        active_child_window_handle, active_lightweight_popup_id,
-        child_window_handle_from_marker_data, entered_child_window_handle,
+        active_child_window_handle, child_window_handle_from_marker_data,
+        entered_child_window_handle,
     },
     util::get_private_value,
 };
@@ -72,9 +72,6 @@ impl JsContextHost {
             OwnerDispatchScope::Top => self.document_policy_container().clone(),
             OwnerDispatchScope::Child(handle) => {
                 self.child_browsing_context_policy_container_snapshot(handle)?
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.lightweight_popup_policy_container(popup_id)?.clone()
             }
         })
     }
@@ -142,9 +139,6 @@ impl JsContextHost {
         &self,
         handle: DomHandle,
     ) -> Option<OwnerDispatchScope> {
-        if let Some(popup_id) = self.lightweight_popup_id_for_node_owner_document(handle) {
-            return Some(OwnerDispatchScope::LightweightPopup(popup_id));
-        }
         let node = self.dom_host().node(handle)?;
         let owner_document = if node.is_document() {
             handle
@@ -285,20 +279,6 @@ impl JsContextHost {
                     ),
                 )
             }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let document_url = self.lightweight_popup_document_url(popup_id)?;
-                let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-                Some(
-                    unsafe { &*self.runtime }.form_action_csp_check_for_child_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &document_url,
-                        &policy_container.response_content_security_policies,
-                        &policy_container.response_content_security_report_only_policies,
-                        &policy_container.content_security_reporting_endpoints,
-                        request_url,
-                    ),
-                )
-            }
         }
     }
 
@@ -310,11 +290,11 @@ impl JsContextHost {
         source: &str,
     ) -> bool {
         let Some(check) = self.inline_source_csp_check_for_owner(scope, owner, kind, source) else {
-            // Deliberately fail open only while a child or lightweight popup
-            // has no active document URL/policy context (for example during a
-            // navigation swap). CSP is document-scoped: applying the top-level
-            // or the previous document's policy here would enforce the wrong
-            // owner. Committed documents must always produce a check.
+            // Deliberately fail open only while the exact document owner has
+            // no active URL/policy context (for example during a navigation
+            // swap). CSP is document-scoped: applying another document's
+            // policy here would enforce the wrong owner. Committed documents
+            // must always produce a check.
             return true;
         };
         let (report_only_violation, enforced_violation) = check.into_violations();
@@ -366,22 +346,6 @@ impl JsContextHost {
                     ),
                 )
             }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let document_url = self.lightweight_popup_document_url(popup_id)?;
-                let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-                // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-                Some(
-                    unsafe { &*self.runtime }.inline_source_csp_check_for_child_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &document_url,
-                        &policy_container.response_content_security_policies,
-                        &policy_container.response_content_security_report_only_policies,
-                        &policy_container.content_security_reporting_endpoints,
-                        kind,
-                        source,
-                    ),
-                )
-            }
         }
     }
 
@@ -416,21 +380,6 @@ impl JsContextHost {
                     ),
                 )
             }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                let document_url = self.lightweight_popup_document_url(popup_id)?;
-                let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-                Some(
-                    unsafe { &*self.runtime }.inline_script_element_csp_check_for_child_document(
-                        self.lightweight_popup_document_handle(popup_id),
-                        &document_url,
-                        &policy_container.response_content_security_policies,
-                        &policy_container.response_content_security_report_only_policies,
-                        &policy_container.content_security_reporting_endpoints,
-                        source,
-                        request,
-                    ),
-                )
-            }
         }
     }
 
@@ -440,9 +389,6 @@ impl JsContextHost {
     ) -> OwnerDispatchScope {
         if let Some(handle) = entered_child_window_handle(scope) {
             return OwnerDispatchScope::Child(handle);
-        }
-        if let Some(popup_id) = active_lightweight_popup_id(scope) {
-            return OwnerDispatchScope::LightweightPopup(popup_id);
         }
         OwnerDispatchScope::Top
     }
@@ -520,13 +466,6 @@ impl JsContextHost {
                     redirect_status,
                 ),
             ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .document_connect_csp_check_for_lightweight_popup_with_redirect_status(
-                    popup_id,
-                    document_url,
-                    request_url,
-                    redirect_status,
-                ),
         }
     }
 
@@ -544,29 +483,6 @@ impl JsContextHost {
         )
         .map(|check| check.into_violations().1.is_none())
         .unwrap_or(true)
-    }
-
-    fn document_connect_csp_check_for_lightweight_popup_with_redirect_status(
-        &self,
-        popup_id: u64,
-        document_url: &url::Url,
-        request_url: &url::Url,
-        redirect_status: ContentSecurityPolicyRedirectStatus,
-    ) -> Option<DocumentContentSecurityPolicyCheck> {
-        let policy_container = self.lightweight_popup_policy_container(popup_id)?;
-        // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
-        Some(
-            unsafe { &*self.runtime }
-                .document_connect_csp_check_for_child_document_with_redirect_status(
-                    self.lightweight_popup_document_handle(popup_id),
-                    document_url,
-                    &policy_container.response_content_security_policies,
-                    &policy_container.response_content_security_report_only_policies,
-                    &policy_container.content_security_reporting_endpoints,
-                    request_url,
-                    redirect_status,
-                ),
-        )
     }
 
     fn document_connect_csp_check_for_child_document_with_redirect_status(
@@ -1269,10 +1185,6 @@ impl JsContextHost {
                 .dispatch_child_content_security_policy_violation_event_without_report_best_effort(
                     scope, handle, violation,
                 ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .dispatch_lightweight_popup_content_security_policy_violation_event_without_report_best_effort(
-                    scope, popup_id, violation,
-                ),
         }
     }
 
@@ -1334,16 +1246,6 @@ impl JsContextHost {
                     .record_content_security_policy_inspector_issue(target, violation);
                 self.dispatch_child_content_security_policy_violation_event_best_effort(
                     scope, handle, violation,
-                );
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                // A lightweight popup shares this renderer owner only until it
-                // is projected as its own DevTools target. Publishing through
-                // the opener PageVM would leak the popup issue to the wrong
-                // target; popup-owned Audits delivery needs an explicit owner
-                // handoff alongside popup activation.
-                self.dispatch_lightweight_popup_content_security_policy_violation_event_best_effort(
-                    scope, popup_id, violation,
                 );
             }
         }

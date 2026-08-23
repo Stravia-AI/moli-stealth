@@ -40,8 +40,12 @@ struct ChildWindowProxyFacadeContextHandle(DomHandle);
 pub(in crate::native_bridge::context_host) struct ChildWindowProxyRecords {
     records: HashMap<BrowsingContextId, ChildWindowProxyRecord>,
     context_ids_by_owner_handle: HashMap<DomHandle, BrowsingContextId>,
-    detached_content_window_wrappers: HashMap<DomHandle, v8::Global<v8::Object>>,
-    detached_content_document_wrappers: HashMap<DomHandle, v8::Global<v8::Object>>,
+    // Detached iframe wrappers are an identity lookup, not a native owner.
+    // The iframe wrapper's private cache or another author reference keeps a
+    // live value strong; these maps must not keep an otherwise unreachable
+    // child realm alive through the page host.
+    detached_content_window_wrappers: HashMap<DomHandle, v8::Weak<v8::Object>>,
+    detached_content_document_wrappers: HashMap<DomHandle, v8::Weak<v8::Object>>,
 }
 
 #[derive(Default)]
@@ -408,7 +412,7 @@ impl ChildWindowProxyRecords {
     ) -> Option<v8::Local<'s, v8::Object>> {
         self.detached_content_document_wrappers
             .get(&handle)
-            .map(|wrapper| v8::Local::new(scope, wrapper))
+            .and_then(|wrapper| wrapper.to_local(scope))
     }
 
     pub(in crate::native_bridge::context_host) fn set_detached_content_document(
@@ -418,7 +422,7 @@ impl ChildWindowProxyRecords {
         document: v8::Local<'_, v8::Object>,
     ) {
         self.detached_content_document_wrappers
-            .insert(handle, v8::Global::new(scope, document));
+            .insert(handle, v8::Weak::new(scope, document));
     }
 
     pub(in crate::native_bridge::context_host) fn detached_content_window<'s>(
@@ -428,7 +432,7 @@ impl ChildWindowProxyRecords {
     ) -> Option<v8::Local<'s, v8::Object>> {
         self.detached_content_window_wrappers
             .get(&handle)
-            .map(|wrapper| v8::Local::new(scope, wrapper))
+            .and_then(|wrapper| wrapper.to_local(scope))
     }
 
     pub(in crate::native_bridge::context_host) fn set_detached_content_window(
@@ -438,7 +442,7 @@ impl ChildWindowProxyRecords {
         window: v8::Local<'_, v8::Object>,
     ) {
         self.detached_content_window_wrappers
-            .insert(handle, v8::Global::new(scope, window));
+            .insert(handle, v8::Weak::new(scope, window));
     }
 
     pub(in crate::native_bridge::context_host) fn clear_detached_content_surfaces(
@@ -477,7 +481,6 @@ const CROSS_ORIGIN_REMOTE_FRAME_PROJECTION_SLOT: &str = "__moliCrossOriginRemote
 const CROSS_ORIGIN_LOCAL_TOP_WINDOW_SLOT: &str = "__moliCrossOriginLocalTopWindow";
 const CLOSED_TOP_LEVEL_WINDOW_ACCESS_SURFACE_SLOT: &str = "__moliClosedTopLevelWindowAccessSurface";
 const CLOSED_TOP_LEVEL_WINDOW_MARKER_SLOT: &str = "__moliClosedTopLevelWindow";
-const CROSS_ORIGIN_LIGHTWEIGHT_POPUP_ID_SLOT: &str = "__moliCrossOriginLightweightPopupId";
 const CROSS_ORIGIN_WINDOW_NAMED_CHILD_SLOTS: &str = "__moliCrossOriginWindowNamedChildSlots";
 
 const CROSS_ORIGIN_ACCESS_ERROR: &str =
@@ -747,33 +750,18 @@ pub(super) fn window_access_is_allowed(
         return true;
     }
 
-    let Some((accessing_host_ptr, accessing_identity)) = (|| {
-        let host_ptr = crate::util::context_host_ptr_from_context_slot(accessing_context)?;
-        let identity = unsafe { &*host_ptr }
-            .window_execution_context_identity_for_access_check(accessing_context)?;
-        Some((host_ptr, identity))
-    })() else {
+    let Some(accessing_host_ptr) =
+        crate::util::context_host_ptr_from_context_slot(accessing_context)
+    else {
         return false;
     };
-    let Some((accessed_host_ptr, accessed_identity)) = (|| {
-        let host_ptr = crate::util::context_host_ptr_from_context_slot(accessed_context)?;
-        let identity = unsafe { &*host_ptr }
-            .window_execution_context_identity_for_access_check(accessed_context)?;
-        Some((host_ptr, identity))
-    })() else {
+    let Some(accessed_host_ptr) = crate::util::context_host_ptr_from_context_slot(accessed_context)
+    else {
         return false;
     };
-    if accessing_host_ptr == accessed_host_ptr {
-        let host = unsafe { &*accessing_host_ptr };
-        return host.window_execution_context_can_access(accessing_identity, accessed_identity);
-    }
     let accessing_host = unsafe { &*accessing_host_ptr };
     let accessed_host = unsafe { &*accessed_host_ptr };
-    accessing_host.window_execution_context_can_access_related_page(
-        accessing_identity,
-        accessed_host,
-        accessed_identity,
-    )
+    accessing_host.window_realms_can_access(accessing_context, accessed_host, accessed_context)
 }
 
 impl JsContextHost {
@@ -1173,7 +1161,7 @@ impl JsContextHost {
         crate::util::install_context_host_pointer_slot(
             context,
             self as *mut Self,
-            self.context_host_liveness_handle(),
+            self.context_host_lifecycle_handle(),
         );
         let previous = context.set_slot(Rc::new(ChildWindowProxyFacadeContextHandle(handle)));
         debug_assert!(previous.is_none());
@@ -1315,7 +1303,7 @@ impl JsContextHost {
         crate::util::install_context_host_pointer_slot(
             facade_context_local,
             self as *mut Self,
-            self.context_host_liveness_handle(),
+            self.context_host_lifecycle_handle(),
         );
         let proxy_global;
         {
@@ -1384,7 +1372,7 @@ impl JsContextHost {
         crate::util::install_context_host_pointer_slot(
             facade_context_local,
             self as *mut Self,
-            self.context_host_liveness_handle(),
+            self.context_host_lifecycle_handle(),
         );
         let proxy_global;
         {
@@ -1639,7 +1627,7 @@ impl JsContextHost {
         crate::util::install_context_host_pointer_slot(
             facade_context_local,
             self as *mut Self,
-            self.context_host_liveness_handle(),
+            self.context_host_lifecycle_handle(),
         );
         let previous =
             facade_context_local.set_slot(Rc::new(ChildWindowProxyFacadeContextHandle(handle)));
@@ -1840,11 +1828,6 @@ impl JsContextHost {
         handle: DomHandle,
         top: v8::Local<'s, v8::Object>,
     ) -> v8::Local<'s, v8::Object> {
-        if let Some(window) =
-            self.child_browsing_context_popup_owner_window_for_realm(scope, handle)
-        {
-            return window;
-        }
         self.child_browsing_context_parent_handle(handle)
             .and_then(|parent| self.existing_child_browsing_context_window_wrapper(scope, parent))
             .unwrap_or(top)
@@ -1874,10 +1857,7 @@ impl JsContextHost {
             .or(existing_top)
             .filter(|top| !is_cross_origin_window_proxy(scope, *top))
             .unwrap_or_else(|| self.child_browsing_context_root_window(scope, handle, global));
-        let popup_owner = self.child_browsing_context_popup_owner_window_for_realm(scope, handle);
-        let top = if let Some(window) = popup_owner {
-            window
-        } else if same_origin_with_top {
+        let top = if same_origin_with_top {
             root
         } else {
             self.cross_origin_window_endpoint_projection_for_child(
@@ -1887,9 +1867,7 @@ impl JsContextHost {
             )
             .unwrap_or(window)
         };
-        let parent = if let Some(window) = popup_owner {
-            window
-        } else if same_origin_with_top {
+        let parent = if same_origin_with_top {
             stable_parent
                 .or(existing_parent)
                 .unwrap_or_else(|| self.child_browsing_context_parent_window(scope, handle, top))
@@ -1898,6 +1876,8 @@ impl JsContextHost {
         };
         set_object_slot(scope, window, "__moliWindowParent", parent.into());
         set_object_slot(scope, window, "__moliWindowTop", top.into());
+        set_private_value(scope, window, "__moliWindowParent", parent.into());
+        set_private_value(scope, window, "__moliWindowTop", top.into());
     }
 
     pub(in crate::native_bridge::context_host) fn child_window_object_slot<'s>(
@@ -1940,12 +1920,6 @@ impl JsContextHost {
                 .unwrap_or_else(|| self.child_browsing_context_parent_window(scope, handle, top));
             return (parent, top);
         };
-
-        if let Some(popup_owner) =
-            self.child_browsing_context_popup_owner_window_for_realm(scope, handle)
-        {
-            return (popup_owner, popup_owner);
-        }
 
         if self.child_browsing_context_is_same_origin_with_top(handle) {
             let top = self
@@ -1994,11 +1968,6 @@ impl JsContextHost {
         handle: DomHandle,
         fallback: v8::Local<'s, v8::Object>,
     ) -> v8::Local<'s, v8::Object> {
-        if let Some(window) =
-            self.child_browsing_context_popup_owner_window_for_realm(scope, handle)
-        {
-            return window;
-        }
         if let Some(parent_handle) = self.child_browsing_context_parent_handle(handle)
             && let Some(parent_top) = self
                 .child_window_proxy_records
@@ -2014,22 +1983,6 @@ impl JsContextHost {
             return top_context.global(scope);
         }
         fallback
-    }
-
-    fn child_browsing_context_popup_owner_window_for_realm<'s>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, '_>,
-        handle: DomHandle,
-    ) -> Option<v8::Local<'s, v8::Object>> {
-        let popup_id = self.child_browsing_context_popup_owner_id(handle)?;
-        if self.child_window_can_access_lightweight_popup(handle, popup_id) {
-            return self.lightweight_popup_window(scope, popup_id);
-        }
-        self.cross_origin_window_endpoint_projection_for_child(
-            scope,
-            handle,
-            PendingWindowMessageEndpoint::LightweightPopup(popup_id),
-        )
     }
 
     fn cross_origin_window_endpoint_projection_for_child<'s>(
@@ -2067,39 +2020,6 @@ impl JsContextHost {
             }
             PendingWindowMessageEndpoint::ChildWindow(handle) => {
                 self.child_browsing_context_cross_origin_window_proxy(scope, handle)
-            }
-            PendingWindowMessageEndpoint::LightweightPopup(popup_id) => {
-                if let Some(projection) = self
-                    .child_window_proxy_records
-                    .cross_origin_endpoint_projection(scope, accessing_handle, endpoint)
-                {
-                    return Some(projection);
-                }
-                let projection = build_cross_origin_popup_window_proxy(scope, popup_id);
-                self.child_window_proxy_records
-                    .set_cross_origin_endpoint_projection(
-                        scope,
-                        accessing_handle,
-                        endpoint,
-                        projection,
-                    );
-                let opener = if let Some(opener_endpoint) =
-                    self.lightweight_popup_opener_endpoint(popup_id)
-                    && opener_endpoint != endpoint
-                {
-                    self.cross_origin_window_endpoint_projection_for_child(
-                        scope,
-                        accessing_handle,
-                        opener_endpoint,
-                    )
-                    .map(v8::Local::<v8::Value>::from)
-                    .unwrap_or_else(|| v8::null(scope).into())
-                } else {
-                    v8::null(scope).into()
-                };
-                let storage = cross_origin_proxy_storage_object(scope, projection);
-                set_cross_origin_object_slot(scope, storage, "opener", opener);
-                Some(projection)
             }
         }
     }
@@ -2461,41 +2381,19 @@ fn build_detached_cross_origin_window_index_proxy<'s>(
 fn build_cross_origin_top_window_proxy<'s>(
     scope: &mut v8::PinScope<'s, '_>,
 ) -> v8::Local<'s, v8::Object> {
-    build_cross_origin_top_level_window_proxy(scope, PendingWindowMessageEndpoint::TopWindow)
-}
-
-fn build_cross_origin_popup_window_proxy<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    popup_id: u64,
-) -> v8::Local<'s, v8::Object> {
-    build_cross_origin_top_level_window_proxy(
-        scope,
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id),
-    )
+    build_cross_origin_top_level_window_proxy(scope)
 }
 
 fn build_cross_origin_top_level_window_proxy<'s>(
     scope: &mut v8::PinScope<'s, '_>,
-    endpoint: PendingWindowMessageEndpoint,
 ) -> v8::Local<'s, v8::Object> {
     let window = new_null_prototype_object(scope);
-    match endpoint {
-        PendingWindowMessageEndpoint::TopWindow => set_private_value(
-            scope,
-            window,
-            window_host::TOP_WINDOW_MESSAGE_ENDPOINT_SLOT,
-            v8::Boolean::new(scope, true).into(),
-        ),
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id) => set_private_value(
-            scope,
-            window,
-            CROSS_ORIGIN_LIGHTWEIGHT_POPUP_ID_SLOT,
-            v8::BigInt::new_from_u64(scope, popup_id).into(),
-        ),
-        PendingWindowMessageEndpoint::ChildWindow(_) => {
-            unreachable!("top-level Window projection cannot target a child frame")
-        }
-    }
+    set_private_value(
+        scope,
+        window,
+        window_host::TOP_WINDOW_MESSAGE_ENDPOINT_SLOT,
+        v8::Boolean::new(scope, true).into(),
+    );
     set_private_value(
         scope,
         window,
@@ -2658,6 +2556,10 @@ pub(in crate::native_bridge::context_host::child_frame_runtime) fn install_child
     set_object_slot(scope, window, "__moliWindowParent", parent.into());
     set_object_slot(scope, window, "__moliWindowTop", top.into());
     set_object_slot(scope, window, "__moliWindowFrames", window.into());
+    set_private_value(scope, window, "__moliWindowSelf", window.into());
+    set_private_value(scope, window, "__moliWindowParent", parent.into());
+    set_private_value(scope, window, "__moliWindowTop", top.into());
+    set_private_value(scope, window, "__moliWindowFrames", window.into());
 }
 
 fn set_cross_origin_object_slot(
@@ -3283,7 +3185,6 @@ fn child_window_cross_origin_handler_data<'s>(
             super::super::OwnerDispatchScope::Child(handle) => host
                 .child_window_proxy_records
                 .cross_origin_handler_data(scope, handle),
-            super::super::OwnerDispatchScope::LightweightPopup(_) => None,
         };
     }
 
@@ -3886,20 +3787,6 @@ pub(crate) fn top_level_window_proxy_is_finally_closed<'s>(
 ) -> bool {
     get_cross_origin_proxy_private_value(scope, object, CLOSED_TOP_LEVEL_WINDOW_MARKER_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
-}
-
-pub(crate) fn cross_origin_lightweight_popup_id<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    object: v8::Local<'s, v8::Object>,
-) -> Option<u64> {
-    let value = get_cross_origin_proxy_private_value(
-        scope,
-        object,
-        CROSS_ORIGIN_LIGHTWEIGHT_POPUP_ID_SLOT,
-    )?;
-    let value = v8::Local::<v8::BigInt>::try_from(value).ok()?;
-    let (popup_id, lossless) = value.u64_value();
-    lossless.then_some(popup_id)
 }
 
 fn cross_origin_accessing_context<'s>(

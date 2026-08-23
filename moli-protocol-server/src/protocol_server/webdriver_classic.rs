@@ -1244,7 +1244,7 @@ fn classic_script_argument_deserializer_function(user_function: String) -> Strin
          if (value === window) {{\n\
          return {{ '{CLASSIC_SCRIPT_WEB_REFERENCE_MARKER}': '{CLASSIC_SCRIPT_WEB_REFERENCE_WINDOW}' }};\n\
          }}\n\
-         const popupId = __moliHostLightweightPopupIdForObject(value);\n\
+         const popupId = __moliHostAuxiliaryPopupIdForObject(value);\n\
          if (popupId) return {{ '{CLASSIC_SCRIPT_WEB_REFERENCE_MARKER}': '{CLASSIC_SCRIPT_WEB_REFERENCE_POPUP_WINDOW}', '{CLASSIC_SCRIPT_WEB_REFERENCE_POPUP_ID}': String(popupId) }};\n\
          const backendNodeId = __moliHostChildFrameOwnerBackendNodeIdForWindow(value);\n\
          if (typeof backendNodeId === 'number') {{\n\

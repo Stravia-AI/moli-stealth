@@ -19,7 +19,7 @@ use crate::runtime::{
     PageVmPendingPhaseOneNavigation, PendingDocumentLifecycleTurn, RendererBrowserContextRuntime,
     RendererDocumentLifecycleTransition, RendererDocumentTerminationReason,
     RendererLifecycleStartReason, RendererPendingDownloadActivation,
-    RendererPendingDownloadResponse,
+    RendererPendingDownloadResponse, RendererTopLevelNavigationSource,
 };
 
 use super::{PageVm, PageVmEnvConfig, PageVmRuntimeHooks};
@@ -38,6 +38,16 @@ pub(super) enum LoadedFollowedLocationNavigation {
         response_headers: Vec<(String, String)>,
         raw_body: ExternalRawDocumentBodyStream,
     },
+}
+
+impl LoadedFollowedLocationNavigation {
+    pub(super) fn final_document_url(&self) -> Option<&Url> {
+        match self {
+            Self::NoDocument | Self::Download(_) => None,
+            Self::StreamingDocument { response, .. } => Some(&response.final_url),
+            Self::ExternalDocument { final_url, .. } => Some(final_url),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -65,7 +75,8 @@ impl LoadedFollowedLocationNavigation {
 
 pub(super) async fn load_followed_location_navigation(
     loader: &ResourceRequestClient,
-    initiator_url: Url,
+    target_document_url: Url,
+    navigation_source: Option<&RendererTopLevelNavigationSource>,
     url: Url,
     request_method: String,
     request_body: Option<Vec<u8>>,
@@ -108,7 +119,8 @@ pub(super) async fn load_followed_location_navigation(
         });
     }
     let request = build_followed_location_navigation_request(
-        &initiator_url,
+        &target_document_url,
+        navigation_source,
         &url,
         &request_method,
         request_body,
@@ -458,19 +470,50 @@ fn external_raw_document_body_from_materialized_response(
 }
 
 fn build_followed_location_navigation_request(
-    initiator_url: &Url,
+    target_document_url: &Url,
+    navigation_source: Option<&RendererTopLevelNavigationSource>,
     url: &Url,
     request_method: &str,
     request_body: Option<Vec<u8>>,
     request_headers: Vec<(String, String)>,
     browser_navigation_kind: BrowserNavigationRequestKind,
 ) -> Result<Request> {
+    let source_url = navigation_source.and_then(|source| Url::parse(source.source_url()).ok());
+    let initiator_url = source_url.as_ref().unwrap_or(target_document_url);
     Request::new_bytes(request_method, url.as_str(), request_body, request_headers).map(|request| {
-        request
+        let mut request = request
             .with_top_level_navigation_cookie_context()
             .with_browser_navigation_kind(browser_navigation_kind)
-            .with_initiator_url(initiator_url)
+            .with_initiator_url(initiator_url);
+        if let Some(source) = navigation_source {
+            request = if source.suppresses_referrer() {
+                request.without_inferred_referrer()
+            } else {
+                request.with_referrer_policies(None, source.referrer_policy().map(str::to_owned))
+            };
+        }
+        request
     })
+}
+
+pub(super) fn followed_navigation_document_referrer(
+    navigation_source: Option<&RendererTopLevelNavigationSource>,
+    final_url: &Url,
+) -> Option<String> {
+    let source = navigation_source?;
+    if source.suppresses_referrer() {
+        return Some(String::new());
+    }
+    let source_url = Url::parse(source.source_url()).ok()?;
+    Some(
+        moli_fetch::navigation_referrer_value(
+            &source_url,
+            final_url,
+            None,
+            source.referrer_policy(),
+        )
+        .unwrap_or_default(),
+    )
 }
 
 fn about_blank_navigation_response(url: &Url) -> Option<moli_fetch::Response> {
@@ -521,6 +564,7 @@ pub(in crate::runtime) struct PageVmPreparedFollowedNavigationCommit {
     initiator_url: Url,
     navigation_handoff: crate::page_task_queue::RendererTopLevelNavigationHandoff,
     loaded: LoadedFollowedLocationNavigation,
+    initial_document_referrer: Option<String>,
     navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
     reserved_service_worker_client_id: Option<crate::service_worker_runtime::ServiceWorkerClientId>,
     service_worker_client_navigate: Option<crate::types::ServiceWorkerClientNavigateContinuation>,
@@ -704,6 +748,7 @@ impl PageVm {
         let request_body = pending.request_body.clone();
         let request_headers = pending.request_headers.clone();
         let browser_navigation_kind = pending.browser_navigation_kind;
+        let navigation_source = pending.navigation_source.clone();
         let reserved_service_worker_client_id = pending
             .reserved_service_worker_client
             .map(|reserved| reserved.release());
@@ -713,6 +758,7 @@ impl PageVm {
         let loaded = match load_followed_location_navigation(
             &self.request_client,
             initiator_url.clone(),
+            navigation_source.as_ref(),
             url,
             request_method,
             request_body,
@@ -756,6 +802,9 @@ impl PageVm {
             loaded @ (LoadedFollowedLocationNavigation::StreamingDocument { .. }
             | LoadedFollowedLocationNavigation::ExternalDocument { .. }) => loaded,
         };
+        let initial_document_referrer = loaded.final_document_url().and_then(|final_url| {
+            followed_navigation_document_referrer(navigation_source.as_ref(), final_url)
+        });
 
         let termination = self.document_lifecycle.request_termination(
             self.document_lifecycle.identity(),
@@ -777,6 +826,7 @@ impl PageVm {
                 initiator_url,
                 navigation_handoff,
                 loaded,
+                initial_document_referrer,
                 navigation_bootstrap_entry: pending.entry_seed,
                 reserved_service_worker_client_id,
                 service_worker_client_navigate,
@@ -794,6 +844,7 @@ impl PageVm {
         let PageVmPreparedFollowedNavigationCommit {
             initiator_url,
             loaded,
+            initial_document_referrer,
             navigation_bootstrap_entry,
             reserved_service_worker_client_id,
             service_worker_client_navigate,
@@ -803,6 +854,7 @@ impl PageVm {
         let outcome = match self
             .bootstrap_followed_location_navigation(
                 loaded,
+                initial_document_referrer,
                 navigation_bootstrap_entry,
                 reserved_service_worker_client_id,
                 stage,
@@ -983,12 +1035,13 @@ impl PageVm {
             initiator_url,
             navigation_handoff,
             loaded,
+            initial_document_referrer,
             navigation_bootstrap_entry,
             reserved_service_worker_client_id,
             service_worker_client_navigate,
             stage,
         } = prepared;
-        let env = self.followed_location_navigation_env();
+        let env = self.followed_location_navigation_env(initial_document_referrer);
         let runtime_hooks = self.runtime_hooks.clone().for_cross_document_commit();
         let browser_context_runtime = runtime_hooks.browser_context_runtime.clone();
         let local_executor = self.local_executor.clone();
@@ -1260,10 +1313,13 @@ impl PageVm {
         }
     }
 
-    fn followed_location_navigation_env(&self) -> PageVmEnvConfig {
+    fn followed_location_navigation_env(
+        &self,
+        initial_document_referrer: Option<String>,
+    ) -> PageVmEnvConfig {
         PageVmEnvConfig {
             main_document_commit: None,
-            initial_document_referrer: None,
+            initial_document_referrer,
             initial_top_level_browsing_context_name: None,
             auxiliary_browsing_context_policy: None,
             web_storage: self.vm().web_storage_handles(),
@@ -1309,6 +1365,7 @@ impl PageVm {
     async fn bootstrap_followed_location_navigation(
         &mut self,
         loaded: LoadedFollowedLocationNavigation,
+        initial_document_referrer: Option<String>,
         navigation_bootstrap_entry: Option<crate::native_bridge::NavigationHistoryEntrySeed>,
         reserved_service_worker_client_id: Option<
             crate::service_worker_runtime::ServiceWorkerClientId,
@@ -1325,7 +1382,7 @@ impl PageVm {
             LoadedFollowedLocationNavigation::StreamingDocument { .. }
                 | LoadedFollowedLocationNavigation::ExternalDocument { .. }
         ));
-        let env = self.followed_location_navigation_env();
+        let env = self.followed_location_navigation_env(initial_document_referrer);
         let runtime_hooks = self.runtime_hooks.clone().for_cross_document_commit();
         if runtime_hooks.has_renderer_page_script_environment() {
             self.commit_main_window_proxy_navigation()?;
@@ -1348,7 +1405,11 @@ impl PageVm {
 
 #[cfg(test)]
 mod tests {
-    use super::{about_blank_navigation_response, build_followed_location_navigation_request};
+    use super::{
+        about_blank_navigation_response, build_followed_location_navigation_request,
+        followed_navigation_document_referrer,
+    };
+    use crate::runtime::RendererTopLevelNavigationSource;
     use moli_fetch::{BrowserNavigationRequestKind, outgoing_request_headers};
     use url::Url;
 
@@ -1360,6 +1421,7 @@ mod tests {
 
         let request = build_followed_location_navigation_request(
             &initiator_url,
+            None,
             &target_url,
             "GET",
             None,
@@ -1403,6 +1465,7 @@ mod tests {
 
         let request = build_followed_location_navigation_request(
             &initiator_url,
+            None,
             &target_url,
             "GET",
             None,
@@ -1433,6 +1496,7 @@ mod tests {
 
         let request = build_followed_location_navigation_request(
             &initiator_url,
+            None,
             &target_url,
             "POST",
             Some(body.clone()),
@@ -1470,6 +1534,83 @@ mod tests {
                 .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
                 .map(|(_, value)| value.as_str()),
             Some("text/html; charset=utf-8")
+        );
+    }
+
+    #[test]
+    fn followed_navigation_uses_typed_source_policy_instead_of_target_document() {
+        let target_document_url = Url::parse("about:blank").unwrap();
+        let source_url = Url::parse("https://source.test/path/page?query=1#fragment").unwrap();
+        let destination = Url::parse("https://destination.test/start").unwrap();
+        let source = RendererTopLevelNavigationSource::browser_context(
+            source_url.to_string(),
+            Some("origin".to_owned()),
+            false,
+        );
+
+        let request = build_followed_location_navigation_request(
+            &target_document_url,
+            Some(&source),
+            &destination,
+            "GET",
+            None,
+            Vec::new(),
+            BrowserNavigationRequestKind::Navigate,
+        )
+        .unwrap();
+        let headers = outgoing_request_headers(&Default::default(), &request, None);
+
+        assert_eq!(
+            request.cookie_context.initiator_url.as_ref(),
+            Some(&source_url)
+        );
+        assert_eq!(
+            request
+                .subresource_request_metadata()
+                .and_then(|metadata| metadata.document_referrer_policy.as_deref()),
+            Some("origin")
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("referer"))
+                .map(|(_, value)| value.as_str()),
+            Some("https://source.test/")
+        );
+        assert_eq!(
+            followed_navigation_document_referrer(Some(&source), &destination).as_deref(),
+            Some("https://source.test/")
+        );
+    }
+
+    #[test]
+    fn followed_navigation_typed_source_can_suppress_referrers() {
+        let target_document_url = Url::parse("about:blank").unwrap();
+        let source_url = Url::parse("https://source.test/path/page").unwrap();
+        let destination = Url::parse("https://destination.test/start").unwrap();
+        let source =
+            RendererTopLevelNavigationSource::browser_context(source_url.to_string(), None, true);
+
+        let request = build_followed_location_navigation_request(
+            &target_document_url,
+            Some(&source),
+            &destination,
+            "GET",
+            None,
+            Vec::new(),
+            BrowserNavigationRequestKind::Navigate,
+        )
+        .unwrap();
+        let headers = outgoing_request_headers(&Default::default(), &request, None);
+
+        assert!(
+            headers
+                .iter()
+                .all(|(name, _)| !name.eq_ignore_ascii_case("referer"))
+        );
+        assert_eq!(
+            followed_navigation_document_referrer(Some(&source), &destination).as_deref(),
+            Some("")
         );
     }
 }

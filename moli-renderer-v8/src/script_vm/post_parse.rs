@@ -308,6 +308,7 @@ impl ScriptVmContextBootstrap {
             host_ptr,
             mode,
             runtime_observable_context_token,
+            local_context,
         )?;
         // SecureContext is origin-based, not document-URL-based. Initial
         // about:blank/srcdoc child contexts can keep about:* document URLs while
@@ -409,6 +410,11 @@ impl ScriptVmContextBootstrap {
         if let Some(registration) = realm_registration.as_mut() {
             registration.commit();
         }
+        crate::util::retain_context_host_for_document_realm(
+            local_context,
+            context_host,
+            unsafe { &*host_ptr }.deferred_context_host_release_queue(),
+        );
         Ok(Self {
             context: v8::Global::new(scope, local_context),
             runtime_observable_context_token,
@@ -486,6 +492,7 @@ impl PendingWindowRealmBootstrapRegistration {
         host: *mut JsContextHost,
         mode: WindowContextBootstrapMode,
         realm_token: crate::native_bridge::RuntimeObservableContextToken,
+        context: v8::Local<'_, v8::Context>,
     ) -> Result<Option<Self>> {
         let Some((owner, dispatch_scope, access_policy)) = mode.registration() else {
             return Ok(None);
@@ -498,11 +505,21 @@ impl PendingWindowRealmBootstrapRegistration {
         ) {
             anyhow::bail!("failed to register Window realm before runtime bootstrap");
         }
-        Ok(Some(Self {
+        let registration = Self {
             host,
             realm_token,
             committed: false,
-        }))
+        };
+        let identity = crate::native_bridge::WindowExecutionContextIdentity::new(
+            owner,
+            dispatch_scope,
+            realm_token,
+            access_policy,
+        );
+        if !unsafe { &*host }.install_window_access_check_principal_for_context(context, identity) {
+            anyhow::bail!("failed to install Window realm access-check principal");
+        }
+        Ok(Some(registration))
     }
 
     fn commit(&mut self) {

@@ -521,8 +521,7 @@ pub(crate) fn report_event_callback_exception<'s>(
     let child_handle = child_handle.or_else(|| {
         relevant_identity.and_then(|identity| match identity.dispatch_scope() {
             crate::native_bridge::OwnerDispatchScope::Child(handle) => Some(handle),
-            crate::native_bridge::OwnerDispatchScope::Top
-            | crate::native_bridge::OwnerDispatchScope::LightweightPopup(_) => None,
+            crate::native_bridge::OwnerDispatchScope::Top => None,
         })
     });
     if let Some(handle) = child_handle {

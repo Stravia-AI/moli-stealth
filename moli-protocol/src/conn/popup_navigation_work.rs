@@ -14,6 +14,7 @@ pub(crate) struct PopupTargetNavigationClaimIdentity {
     request: Box<moli_core::page::RendererTopLevelNavigationRequest>,
     referrer: Option<String>,
     document_referrer: Option<String>,
+    navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
     kind: PopupTargetNavigationKind,
     drain_pending_javascript_tasks_before_commit: bool,
 }
@@ -45,6 +46,12 @@ impl PopupTargetNavigationClaimIdentity {
 
     pub(crate) fn document_referrer(&self) -> Option<&str> {
         self.document_referrer.as_deref()
+    }
+
+    pub(crate) fn navigation_history_entry_seed(
+        &self,
+    ) -> Option<&moli_page_types::NavigationHistoryEntrySeed> {
+        self.navigation_history_entry_seed.as_deref()
     }
 
     pub(crate) fn kind(&self) -> PopupTargetNavigationKind {
@@ -121,6 +128,7 @@ impl PopupTargetNavigationOwnerAction {
         request: moli_core::page::RendererTopLevelNavigationRequest,
         referrer: Option<String>,
         document_referrer: Option<String>,
+        navigation_history_entry_seed: Option<moli_page_types::NavigationHistoryEntrySeed>,
         kind: PopupTargetNavigationKind,
         service_worker_clients_open_window_continuation: Option<
             moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
@@ -153,6 +161,7 @@ impl PopupTargetNavigationOwnerAction {
                 request: Box::new(request),
                 referrer,
                 document_referrer,
+                navigation_history_entry_seed: navigation_history_entry_seed.map(Box::new),
                 kind,
                 drain_pending_javascript_tasks_before_commit,
             },

@@ -447,6 +447,8 @@ pub(crate) struct LoadedPageCreationDiagnosticsParts {
     pub(crate) renderer_output_predecessor: Option<RendererOutputFence>,
     pub(crate) document_continuation_observer:
         Option<moli_core::page::RendererDocumentContinuationObserver>,
+    pub(crate) initial_top_level_navigation:
+        Option<Box<moli_core::page::RendererDocumentSourcedTopLevelLocationNavigation>>,
     pub(crate) top_level_browsing_context_closing: bool,
 }
 
@@ -457,6 +459,7 @@ fn loaded_page_creation_diagnostics_parts(
         initial_runtime_realms: diagnostics.initial_runtime_realms,
         renderer_output_predecessor: diagnostics.renderer_output_predecessor,
         document_continuation_observer: diagnostics.document_continuation_observer,
+        initial_top_level_navigation: diagnostics.initial_top_level_navigation,
         top_level_browsing_context_closing: diagnostics.top_level_browsing_context_closing,
     }
 }
@@ -2406,8 +2409,24 @@ impl CdpConnection {
     pub(crate) fn runtime_session_owner_should_start_claimed_popup_initial_document_navigation(
         &self,
         session_id: Option<&str>,
+        claimed_url: &str,
     ) -> bool {
-        self.runtime_session_owner_should_start_unclaimed_initial_document_navigation(session_id)
+        // The exact target-local claim is the replacement-URL authority. A
+        // same-turn `window.open(); popup.location = url` starts with
+        // observational target metadata still set to `about:blank`, so the
+        // unclaimed target-URL heuristic would incorrectly discard this
+        // already-frozen request. Retain only the target state checks here;
+        // stale Page/claim identity was validated before this predicate.
+        let claimed_url = Url::parse(claimed_url).ok();
+        let initial_url = self.runtime_session_owner_initial_empty_document_url(session_id);
+        self.runtime_session_owner_target_is_initial_about_blank(session_id)
+            && claimed_url
+                .zip(initial_url)
+                .is_some_and(|(claimed_url, initial_url)| claimed_url != initial_url)
+            && !self
+                .runtime_session_owner_initial_empty_document_has_pending_cross_document_navigation(
+                    session_id,
+                )
     }
 
     fn runtime_session_owner_should_start_unclaimed_initial_document_navigation(

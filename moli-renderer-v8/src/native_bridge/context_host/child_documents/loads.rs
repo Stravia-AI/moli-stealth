@@ -7,6 +7,7 @@ use super::{
 #[cfg(test)]
 use crate::referrer_policy::response_referrer_policy_from_headers;
 use crate::{
+    browsing_context_model::BrowsingContextAccessOrigin,
     content_security_policy::{
         ContentSecurityPolicyViolationEventFields, send_content_security_policy_reports,
     },
@@ -748,20 +749,14 @@ impl JsContextHost {
         let mut current = handle;
         for _ in 0..=self.child_browsing_contexts.len() {
             let parent = self.child_browsing_context_parent_handle(current);
-            let owner_scope = match parent {
-                Some(parent) => OwnerDispatchScope::Child(parent),
-                None => self.child_browsing_context_popup_owner_id(current).map_or(
-                    OwnerDispatchScope::Top,
-                    OwnerDispatchScope::LightweightPopup,
-                ),
-            };
+            let owner_scope = parent.map_or(OwnerDispatchScope::Top, OwnerDispatchScope::Child);
             let origin = self
                 .window_access_origin_for_dispatch_scope(owner_scope)
-                .and_then(|origin| {
-                    let serialized = origin.serialized_origin();
-                    (serialized != "null")
-                        .then(|| url::Url::parse(&serialized).ok())
-                        .flatten()
+                .and_then(|origin| match origin {
+                    BrowsingContextAccessOrigin::Opaque { .. } => None,
+                    BrowsingContextAccessOrigin::Tuple {
+                        serialized_origin, ..
+                    } => url::Url::parse(&serialized_origin).ok(),
                 });
             ancestors.push(origin);
             let Some(parent) = parent else {

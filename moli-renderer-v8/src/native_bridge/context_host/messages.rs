@@ -68,7 +68,6 @@ impl PendingWindowMessageSource {
 pub(crate) enum PendingWindowMessageEndpoint {
     TopWindow,
     ChildWindow(DomHandle),
-    LightweightPopup(u64),
 }
 
 impl PendingWindowMessageEndpoint {
@@ -76,7 +75,6 @@ impl PendingWindowMessageEndpoint {
         match self {
             Self::TopWindow => OwnerDispatchScope::Top,
             Self::ChildWindow(handle) => OwnerDispatchScope::Child(handle),
-            Self::LightweightPopup(popup_id) => OwnerDispatchScope::LightweightPopup(popup_id),
         }
     }
 
@@ -84,7 +82,6 @@ impl PendingWindowMessageEndpoint {
         match dispatch_scope {
             OwnerDispatchScope::Top => Self::TopWindow,
             OwnerDispatchScope::Child(handle) => Self::ChildWindow(handle),
-            OwnerDispatchScope::LightweightPopup(popup_id) => Self::LightweightPopup(popup_id),
         }
     }
 }
@@ -405,16 +402,5 @@ impl JsContextHost {
         &mut self,
     ) -> Option<Option<DomHandle>> {
         self.pending_active_child_window_restore.take()
-    }
-
-    pub(crate) fn defer_active_lightweight_popup_restore_after_microtasks(
-        &mut self,
-        previous: Option<u64>,
-    ) {
-        self.pending_active_lightweight_popup_restore = Some(previous);
-    }
-
-    pub(crate) fn take_deferred_active_lightweight_popup_restore(&mut self) -> Option<Option<u64>> {
-        self.pending_active_lightweight_popup_restore.take()
     }
 }

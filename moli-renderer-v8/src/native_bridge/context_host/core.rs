@@ -93,7 +93,15 @@ impl JsContextHost {
         environment.replicate_current_top_level_document(
             self.document_url(),
             &self.main_document_serialized_origin,
+            self.main_window_opaque_origin_nonce(),
         );
+        let identity = (environment.page_id(), environment.isolate_identity_key());
+        assert!(
+            self.page_script_agent_identity
+                .is_none_or(|previous| previous == identity),
+            "context host Page script-agent identity must not be rebound"
+        );
+        self.page_script_agent_identity = Some(identity);
         self.page_script_environment = Some(environment);
     }
 
@@ -191,12 +199,17 @@ impl JsContextHost {
     }
 
     pub(crate) fn shares_related_page_script_agent_with(&self, other: &Self) -> bool {
-        self.page_script_environment
-            .as_ref()
-            .zip(other.page_script_environment.as_ref())
-            .is_some_and(|(environment, other_environment)| {
-                environment.is_related_page_peer(other_environment)
+        self.page_script_agent_identity
+            .zip(other.page_script_agent_identity)
+            .is_some_and(|((page_id, isolate), (other_page_id, other_isolate))| {
+                page_id != other_page_id && isolate == other_isolate
             })
+    }
+
+    pub(crate) fn shares_page_script_agent_with(&self, other: &Self) -> bool {
+        self.page_script_agent_identity
+            .zip(other.page_script_agent_identity)
+            .is_some_and(|((_, isolate), (_, other_isolate))| isolate == other_isolate)
     }
 
     pub(crate) fn top_level_browsing_context_is_closed(&self) -> bool {
@@ -401,31 +414,6 @@ impl JsContextHost {
             .map(|allocator| allocator.reserve(false, false))
     }
 
-    pub(crate) fn stage_pending_auxiliary_window_proxy(
-        &self,
-        scope: &mut v8::PinScope<'_, '_>,
-        pending: RendererPendingAuxiliaryPage,
-        window_proxy: v8::Global<v8::Object>,
-        facade_context: v8::Global<v8::Context>,
-        inherits_creator_security_token: bool,
-    ) -> anyhow::Result<()> {
-        let inherited_security_token = inherits_creator_security_token.then(|| {
-            let facade_context = v8::Local::new(scope, &facade_context);
-            v8::Global::new(scope, facade_context.get_security_token(scope))
-        });
-        self.auxiliary_page_reservation_allocator
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("context host is missing its auxiliary Page allocator"))?
-            .stage_related_window_proxy(
-                pending,
-                RendererStagedAuxiliaryWindowProxy::new(
-                    window_proxy,
-                    facade_context,
-                    inherited_security_token,
-                ),
-            )
-    }
-
     pub(crate) fn stage_related_initial_empty_page_in_scope(
         &self,
         scope: &mut v8::PinScope<'_, '_>,
@@ -522,6 +510,7 @@ impl JsContextHost {
 impl JsContextHost {
     pub(crate) fn new(
         runtime: &mut DocumentRuntime,
+        deferred_context_host_release_queue: crate::script_vm::RendererDeferredContextHostReleaseQueue,
         mut frame_owner_store: FrameOwnerStore,
         bindings: NativeBridgeBindings,
         backend_node_registry: SharedRendererBackendNodeRegistry,
@@ -554,6 +543,13 @@ impl JsContextHost {
                 "FrameOwnerStore must retain the creator-frozen main Document origin"
             );
         }
+        let top_level_opaque_origin_nonce =
+            (main_document_serialized_origin == "null").then(|| {
+                top_level_storage_key
+                    .as_ref()
+                    .and_then(moli_storage_key::MoliStorageKey::opaque_nonce)
+                    .unwrap_or_else(|| browser_context_runtime.next_opaque_origin_nonce())
+            });
         let main_document_owner = frame_owner_store
             .current_main_document_task_owner()
             .expect("main frame owner must expose a task owner before client projection");
@@ -597,6 +593,8 @@ impl JsContextHost {
             super::visual_resource_generation::VisualResourceGeneration::default();
         let mut host = Self {
             runtime: runtime as *mut DocumentRuntime,
+            deferred_context_host_release_queue,
+            retained_document_runtime: None,
             layout_policy: moli_page_types::LayoutPolicy::default(),
             document_layout_state: RefCell::new(super::layout_state::DocumentLayoutState::default()),
             layout_pass_active: Cell::new(false),
@@ -614,11 +612,12 @@ impl JsContextHost {
             output_journal: None,
             auxiliary_page_reservation_allocator: None,
             page_script_environment: None,
+            page_script_agent_identity: None,
             top_level_page_active: true,
             page_context_resources_closed: false,
             top_level_beforeunload_in_progress: false,
             top_level_unload_dispatched: false,
-            context_host_liveness: Rc::new(Cell::new(true)),
+            context_host_lifecycle: Rc::new(Cell::new(crate::util::ContextHostLifecycle::Active)),
             page_default_context: None,
             v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry::default(),
             bridge: NativeDomBridge::new(bindings),
@@ -694,7 +693,6 @@ impl JsContextHost {
             pending_service_worker_ready: HashMap::new(),
             service_worker_registration_watchers: Vec::new(),
             service_worker_lifecycle_watched_scopes: HashSet::new(),
-            service_worker_popup_clients: HashMap::new(),
             pending_window_messages: VecDeque::new(),
             next_window_message_task_id:
                 crate::page_task_queue::RendererPageWindowMessageTaskId::from_raw(1),
@@ -702,7 +700,6 @@ impl JsContextHost {
             window_execution_contexts: HashMap::new(),
             current_window_message_source: None,
             pending_active_child_window_restore: None,
-            pending_active_lightweight_popup_restore: None,
             pending_child_subresource_request_scope_pop: false,
             pending_text_control_change_commit: None,
             directory_reader_callbacks:
@@ -786,8 +783,8 @@ impl JsContextHost {
             child_shared_worker_client_owner_ids: HashMap::new(),
             shared_worker_clients: SharedWorkerClientEndpointOwner::default(),
             top_level_storage_key,
-            web_storage_opaque_context_nonce: None,
-            child_web_storage_opaque_context_nonces: HashMap::new(),
+            top_level_opaque_origin_nonce,
+            child_opaque_origin_nonce_bindings: HashMap::new(),
             broadcast_channel_wrappers: HashMap::new(),
             form_past_named_items: HashMap::new(),
             button_element_targets: HashMap::new(),
@@ -818,16 +815,7 @@ impl JsContextHost {
             pending_download_activations: Vec::new(),
             #[cfg(test)]
             pending_popup_activations: Vec::new(),
-            next_lightweight_popup_id: 1,
-            next_lightweight_popup_local_window_id: 1,
-            next_lightweight_popup_document_id: 1,
-            next_lightweight_popup_document_load_id: 0,
-            next_lightweight_popup_classic_script_load_id: 0,
-            lightweight_popup_browsing_contexts: HashMap::new(),
-            lightweight_popup_window_names: HashMap::new(),
-            lightweight_popup_document_handles: HashMap::new(),
-            pending_lightweight_popup_document_loads: HashMap::new(),
-            pending_lightweight_popup_classic_script_loads: HashMap::new(),
+            next_auxiliary_browsing_context_id: 1,
             #[cfg(test)]
             pending_javascript_dialogs: Vec::new(),
             javascript_dialog_runtime,
@@ -1160,18 +1148,6 @@ impl JsContextHost {
             )
             .dom_manipulation()
             .hash_change_delivery()
-    }
-
-    pub(crate) fn page_popup_load_event_sender(
-        &self,
-    ) -> crate::page_task_queue::RendererPagePopupLoadEventSender {
-        self.page_task_capabilities
-            .get()
-            .expect(
-                "a live Page Window must install its complete Page task capabilities before popup load admission",
-            )
-            .dom_manipulation()
-            .popup_load_event()
     }
 
     pub(crate) fn page_file_entry_file_callback_sender(
@@ -2340,26 +2316,6 @@ impl JsContextHost {
         }
     }
 
-    pub(crate) fn clear_custom_element_registry_associations_for_document(
-        &mut self,
-        document_handle: DomHandle,
-    ) {
-        let stale_handles = self
-            .custom_element_registry_associations
-            .keys()
-            .copied()
-            .filter(|associated_handle| {
-                *associated_handle == document_handle
-                    || self.dom_host().owner_document_handle(*associated_handle)
-                        == Some(document_handle)
-            })
-            .collect::<Vec<_>>();
-        for handle in stale_handles {
-            self.custom_element_registry_associations
-                .shift_remove(&handle);
-        }
-    }
-
     pub(crate) fn effective_custom_element_registry_association(
         &self,
         handle: DomHandle,
@@ -2539,11 +2495,19 @@ impl JsContextHost {
         child_handle: DomHandle,
         prototype_name: &str,
     ) -> Option<v8::Local<'s, v8::Value>> {
-        let window = self.existing_child_browsing_context_window_wrapper(scope, child_handle)?;
-        let constructor =
-            window.get(scope, crate::util::v8_string(scope, prototype_name)?.into())?;
-        let constructor = v8::Local::<v8::Object>::try_from(constructor).ok()?;
-        constructor.get(scope, crate::util::v8str(scope, "prototype").into())
+        let dispatch_scope = OwnerDispatchScope::Child(child_handle);
+        let owner = self.current_window_execution_context_owner(dispatch_scope)?;
+        let (_, context) = self.window_execution_context(scope, owner, dispatch_scope)?;
+        let prototype = {
+            let child_scope = &mut v8::ContextScope::new(scope, context);
+            let prototype = crate::context_bootstrap::ensure_intrinsic_interface_prototype(
+                child_scope,
+                prototype_name,
+            )
+            .ok()?;
+            v8::Global::new(child_scope, prototype)
+        };
+        Some(v8::Local::new(scope, &prototype).into())
     }
 
     pub(crate) fn custom_elements_for_registry_key(

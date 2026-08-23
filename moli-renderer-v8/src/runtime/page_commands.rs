@@ -86,6 +86,19 @@ impl PageVm {
                 .vm_mut()
                 .navigate_top_level_same_document_from_browser(&url)
                 .map(RendererPageReply::Bool),
+            RendererPageCommand::FollowTopLevelNavigationInStandaloneAdapter {
+                request,
+                navigation_history_entry_seed,
+            } => {
+                self.vm_mut()
+                    .record_pending_renderer_top_level_navigation_request(
+                        request,
+                        navigation_history_entry_seed.map(|seed| *seed),
+                    );
+                Ok(RendererPageReply::Bool(
+                    self.vm().has_pending_location_navigation(),
+                ))
+            }
             RendererPageCommand::DispatchRemoteWindowProxyCommand(command) => self
                 .vm_mut()
                 .dispatch_remote_window_proxy_command(command)

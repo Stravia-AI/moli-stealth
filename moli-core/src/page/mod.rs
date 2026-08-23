@@ -26,6 +26,7 @@ mod renderer_command_support;
 mod resource_search_support;
 mod same_document_navigation_support;
 mod settings_support;
+mod standalone_navigation_support;
 mod subresource_support;
 mod testing_support;
 mod top_level_close_support;

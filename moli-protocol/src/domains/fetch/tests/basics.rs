@@ -1076,6 +1076,7 @@ async fn disable_clears_fetch_state() {
                 request_body: Some("payload".to_owned()),
                 request_body_bytes: Some(b"payload".to_vec()),
                 request_headers: vec![("x-auth".to_owned(), "1".to_owned())],
+                navigation_history_entry_seed: None,
                 request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                 timestamp: 0.0,
                 source_document_security: Default::default(),
@@ -1115,6 +1116,7 @@ async fn disable_clears_fetch_state() {
                     request_body: Some("payload".to_owned()),
                     request_body_bytes: Some(b"payload".to_vec()),
                     request_headers: vec![("x-auth".to_owned(), "1".to_owned())],
+                    navigation_history_entry_seed: None,
                     request_load_policy:
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
@@ -1340,6 +1342,7 @@ async fn continue_with_auth_rejects_invalid_response_without_consuming_pending_a
                     request_body: None,
                     request_body_bytes: None,
                     request_headers: Vec::new(),
+                    navigation_history_entry_seed: None,
                     request_load_policy:
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
@@ -1416,6 +1419,7 @@ async fn continue_with_auth_unsupported_challenge_preserves_pending_auth_navigat
                     request_body: None,
                     request_body_bytes: None,
                     request_headers: Vec::new(),
+                    navigation_history_entry_seed: None,
                     request_load_policy:
                         crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
                     timestamp: 0.0,
@@ -1589,6 +1593,7 @@ fn emit_auth_required_preserves_request_headers_and_post_data_shape() {
             request_body: Some("payload".to_owned()),
             request_body_bytes: Some(b"payload".to_vec()),
             request_headers: vec![("x-test".to_owned(), "yes".to_owned())],
+            navigation_history_entry_seed: None,
             request_load_policy: crate::conn::NavigationRequestLoadPolicy::DocumentInitiated,
             timestamp: 0.0,
             source_document_security: Default::default(),

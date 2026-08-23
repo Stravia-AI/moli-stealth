@@ -582,7 +582,7 @@ impl DocumentRuntime {
         if let Some(nonce) = self.policy_container.credentialless_storage_nonce {
             return nonce;
         }
-        let nonce = browser_context_runtime.next_web_storage_opaque_context_nonce();
+        let nonce = browser_context_runtime.next_opaque_origin_nonce();
         self.policy_container.credentialless_storage_nonce = Some(nonce);
         nonce
     }
@@ -1098,6 +1098,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn script_element_request_csp_violation_for_child_document(
         &self,
         document_handle: Option<DomHandle>,
@@ -1117,6 +1118,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn script_element_request_csp_violation_for_child_document_with_redirect_status(
         &self,
         document_handle: Option<DomHandle>,
@@ -1138,43 +1140,6 @@ impl DocumentRuntime {
             request_url,
             redirect_status,
             ContentSecurityPolicyDisposition::Enforce,
-            ContentSecurityPolicyScriptElementRequest::parser_inserted_with_nonce(nonce),
-        )
-    }
-
-    pub(crate) fn script_element_request_csp_report_only_violation_for_child_document(
-        &self,
-        document_url: &Url,
-        response_report_only_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-        request_url: &Url,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        self.script_element_request_csp_report_only_violation_for_child_document_with_redirect_status(
-            document_url,
-            response_report_only_policies,
-            response_reporting_endpoints,
-            request_url,
-            ContentSecurityPolicyRedirectStatus::NoRedirect,
-            None,
-        )
-    }
-
-    pub(crate) fn script_element_request_csp_report_only_violation_for_child_document_with_redirect_status(
-        &self,
-        document_url: &Url,
-        response_report_only_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-        request_url: &Url,
-        redirect_status: ContentSecurityPolicyRedirectStatus,
-        nonce: Option<&str>,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        document_script_element_url_policy_violation(
-            response_report_only_policies,
-            response_reporting_endpoints,
-            document_url,
-            request_url,
-            redirect_status,
-            ContentSecurityPolicyDisposition::Report,
             ContentSecurityPolicyScriptElementRequest::parser_inserted_with_nonce(nonce),
         )
     }
@@ -1293,6 +1258,7 @@ impl DocumentRuntime {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn inline_script_csp_violation_for_child_document(
         &self,
         document_handle: Option<DomHandle>,
@@ -1310,24 +1276,6 @@ impl DocumentRuntime {
             document_url,
             ContentSecurityPolicyNonUrlKind::DocumentInlineScript,
             ContentSecurityPolicyDisposition::Enforce,
-        )
-    }
-
-    pub(crate) fn inline_script_csp_report_only_violation_for_child_document(
-        &self,
-        document_url: &Url,
-        response_report_only_policies: &[String],
-        response_reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
-    ) -> Option<DocumentContentSecurityPolicyViolation> {
-        let policies = document_response_content_security_policy_strings(
-            response_report_only_policies,
-            response_reporting_endpoints,
-        );
-        document_non_url_policy_violation_from_document_policies(
-            policies,
-            document_url,
-            ContentSecurityPolicyNonUrlKind::DocumentInlineScript,
-            ContentSecurityPolicyDisposition::Report,
         )
     }
 

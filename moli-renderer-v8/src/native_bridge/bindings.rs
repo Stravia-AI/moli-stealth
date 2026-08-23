@@ -295,12 +295,12 @@ impl NativeBridgeBindings {
             window::sync_window_wrapper_function_identity(scope, wrapper);
             return;
         }
-        let BridgeHandle::Node(node_handle) = handle else {
+        let Some(node_handle) = handle.dom_handle() else {
             return;
         };
         let child_handle = {
             let host = unsafe { &*host_ptr };
-            let Some(document_handle) = host.dom_host().owner_document_handle(*node_handle) else {
+            let Some(document_handle) = host.dom_host().owner_document_handle(node_handle) else {
                 return;
             };
             let Some(child_handle) =
@@ -308,12 +308,17 @@ impl NativeBridgeBindings {
             else {
                 return;
             };
+            if host.child_browsing_context_document_handle(child_handle) != Some(document_handle) {
+                return;
+            }
             child_handle
         };
-        #[cfg(test)]
-        record_wrapper_owner_realm_custom_element_check_for_test();
-        if unsafe { &*host_ptr }.custom_element_handle_is_upgraded(*node_handle) {
-            return;
+        if matches!(handle, BridgeHandle::Node(_)) {
+            #[cfg(test)]
+            record_wrapper_owner_realm_custom_element_check_for_test();
+            if unsafe { &*host_ptr }.custom_element_handle_is_upgraded(node_handle) {
+                return;
+            }
         }
         let prototype_name = prototype_name_for_handle(host_ptr, handle);
         if let Some(prototype) = unsafe { &mut *host_ptr }
@@ -327,28 +332,6 @@ impl NativeBridgeBindings {
                 "V8 rejected the child-realm `{prototype_name}` wrapper prototype"
             );
         }
-    }
-
-    pub(super) fn instantiate_window_shell<'s, 'i>(
-        &mut self,
-        scope: &mut v8::PinScope<'s, 'i>,
-        host_ptr: *mut JsContextHost,
-    ) -> v8::Local<'s, v8::Object> {
-        let wrapper = self
-            .window_wrapper_template()
-            .new_instance(scope)
-            .expect("failed to instantiate synthetic Window wrapper");
-        let host_external = v8::External::new(scope, host_ptr as *mut c_void);
-        assert!(
-            wrapper.set_internal_field(0, host_external.into()),
-            "synthetic Window wrapper must expose its runtime field"
-        );
-        assert!(
-            wrapper.set_internal_field(1, v8::Number::new(scope, 0.0).into()),
-            "synthetic Window wrapper must expose its identity field"
-        );
-        set_named_constructor_prototype(scope, wrapper, "Window");
-        wrapper
     }
 
     pub(super) fn instantiate_window_proxy_shell<'s, 'i>(
@@ -393,8 +376,8 @@ impl NativeBridgeBindings {
             },
         );
         context.set_security_token(parent_security_token);
-        let host_liveness = unsafe { &*host_ptr }.context_host_liveness_handle();
-        crate::util::install_context_host_pointer_slot(context, host_ptr, host_liveness);
+        let host_lifecycle = unsafe { &*host_ptr }.context_host_lifecycle_handle();
+        crate::util::install_context_host_pointer_slot(context, host_ptr, host_lifecycle);
         {
             let facade_scope = &mut v8::ContextScope::new(scope, context);
             let global = context.global(facade_scope);

@@ -217,8 +217,17 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
                     .map(|body| body.len())
                     .unwrap_or_default(),
             )
-            .saturating_add(headers_charge(event.request_headers())),
-        RendererOwnerAction::TopLevelHistoryTraversal(_) => 0,
+            .saturating_add(headers_charge(event.request_headers()))
+            .saturating_add(
+                event
+                    .navigation_history_entry_seed()
+                    .map(navigation_history_entry_seed_charge)
+                    .unwrap_or(0),
+            ),
+        RendererOwnerAction::TopLevelHistoryTraversal(traversal) => traversal
+            .cross_document_destination()
+            .map(|(_, seed)| navigation_history_entry_seed_charge(seed))
+            .unwrap_or(0),
         RendererOwnerAction::SubresourceFetchPause { info, .. } => {
             info.renderer_transport_charge_bytes()
         }
@@ -251,6 +260,53 @@ fn headers_charge(headers: &[(String, String)]) -> usize {
                 .saturating_add(string_charge(value))
         },
     )
+}
+
+fn navigation_history_entry_seed_charge(
+    seed: &moli_page_types::NavigationHistoryEntrySeed,
+) -> usize {
+    let entries = seed.entries.iter().fold(
+        seed.entries.capacity().saturating_mul(std::mem::size_of::<
+            moli_page_types::NavigationHistorySerializedEntry,
+        >()),
+        |total, entry| total.saturating_add(navigation_history_entry_charge(entry)),
+    );
+    let activation = seed.activation.as_ref().map_or(0, |activation| {
+        navigation_history_entry_charge(&activation.entry)
+            .saturating_add(
+                activation
+                    .from
+                    .as_ref()
+                    .map(navigation_history_entry_charge)
+                    .unwrap_or(0),
+            )
+            .saturating_add(
+                activation
+                    .navigation_type
+                    .as_deref()
+                    .map(string_charge)
+                    .unwrap_or(0),
+            )
+    });
+    entries.saturating_add(activation)
+}
+
+fn navigation_history_entry_charge(
+    entry: &moli_page_types::NavigationHistorySerializedEntry,
+) -> usize {
+    [
+        Some(entry.url.as_str()),
+        entry.history_state_json.as_deref(),
+        entry.navigation_state_json.as_deref(),
+        entry.referrer_policy.as_deref(),
+        Some(entry.document_id.as_str()),
+        Some(entry.id.as_str()),
+        Some(entry.key.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .map(string_charge)
+    .sum()
 }
 
 fn child_frame_document_network_charge(

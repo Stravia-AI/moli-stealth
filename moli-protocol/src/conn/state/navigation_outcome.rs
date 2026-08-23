@@ -167,6 +167,7 @@ pub(crate) struct RendererMainDocumentCommitSeed {
     renderer_navigation_source: Option<Box<RendererTopLevelNavigationSource>>,
     inherited_security_origin: String,
     inherited_secure_context_type: String,
+    navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
 }
 
 impl RendererMainDocumentCommitSeed {
@@ -188,6 +189,7 @@ impl RendererMainDocumentCommitSeed {
                 .source_document_security
                 .secure_context_type
                 .clone(),
+            navigation_history_entry_seed: navigation.navigation_history_entry_seed.clone(),
         }
     }
 
@@ -209,6 +211,7 @@ impl RendererMainDocumentCommitSeed {
             renderer_navigation_source: source_document_security.renderer_navigation_source,
             inherited_security_origin: source_document_security.security_origin,
             inherited_secure_context_type: source_document_security.secure_context_type,
+            navigation_history_entry_seed: None,
         }
     }
 
@@ -267,6 +270,7 @@ impl RendererMainDocumentCommitSeed {
             security_origin,
             secure_context_type,
             timestamp: self.timestamp,
+            navigation_history_entry_seed: self.navigation_history_entry_seed.clone(),
             navigation_redirect_chain,
             auxiliary_browsing_context_policy: None,
             response_block: network_error_page.and_then(NetworkErrorPageNavigation::response_block),
@@ -476,6 +480,10 @@ pub struct NavigationDispatchState {
     /// projection for multipart form data containing binary file payloads.
     pub request_body_bytes: Option<Vec<u8>>,
     pub request_headers: Vec<(String, String)>,
+    /// Exact renderer-side session history to install when this navigation
+    /// commits. It travels with the load so Fetch pauses and redirects cannot
+    /// fall back to target-level history reconstruction.
+    pub navigation_history_entry_seed: Option<Box<moli_page_types::NavigationHistoryEntrySeed>>,
     pub request_load_policy: NavigationRequestLoadPolicy,
     pub timestamp: f64,
     /// Heap-owned because this source-Document commit environment travels

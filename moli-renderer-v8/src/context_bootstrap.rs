@@ -4,6 +4,7 @@ pub(crate) mod bridge_descriptor;
 mod broadcast_channel;
 mod canvas;
 mod constructors;
+pub(crate) use constructors::weaken_dom_exception_prototype_for_context_teardown;
 mod crypto;
 mod css_fontface_runtime;
 mod css_runtime;
@@ -33,6 +34,7 @@ pub(crate) use exposed_interfaces::{
     ready_interface_template_names as lazy_ready_constructor_template_names,
     storage_interface_materialization_count as lazy_storage_constructor_materialization_count,
 };
+pub(crate) use indexed_db::clear_indexed_db_runtime_state_table_for_context_teardown;
 mod location_history_storage;
 mod location_navigation;
 mod location_runtime;
@@ -281,8 +283,7 @@ pub use self::indexed_db::{
     new_indexed_db_manager,
 };
 pub(crate) use self::indexed_db::{
-    bind_indexed_db_factory_to_window_execution_context,
-    materialized_indexed_db_factory_for_window, scoped_indexed_db_factory,
+    bind_indexed_db_factory_to_window_execution_context, materialized_indexed_db_factory_for_window,
 };
 #[cfg(test)]
 pub(crate) use self::indexed_db::{
@@ -295,7 +296,7 @@ pub(in crate::context_bootstrap) use self::indexed_db::{
 pub(crate) use self::location_runtime::sync_global_location_runtime_state;
 pub(crate) use self::location_runtime::{
     sync_document_location_runtime_state_from_window,
-    sync_window_location_history_navigation_runtime_surface, sync_window_location_runtime_state,
+    sync_window_location_history_navigation_runtime_surface,
 };
 pub(crate) use self::media_cues::set_text_track_cue_track;
 pub(crate) use self::media_queries::{
@@ -321,15 +322,12 @@ pub(crate) use self::message_ports::{
     ensure_message_port_wrapper_for_id_in_realm, message_port_id_from_object,
 };
 pub(crate) use self::microtask_checkpoint::{
+    clear_agent_microtask_checkpoint_tasks_for_context_teardown,
     install_agent_microtask_checkpoint_tasks, run_end_of_microtask_checkpoint_tasks,
 };
-pub(crate) use self::navigation_bootstrap::{
-    install_window_location_history_navigation_runtime_state,
-    reset_window_location_history_navigation_runtime_state,
-};
+pub(crate) use self::navigation_bootstrap::reset_window_location_history_navigation_runtime_state;
 pub(crate) use self::navigation_events::dispatch_cross_document_navigation_navigate_event_for_window;
 pub(crate) use self::navigation_events::dispatch_srcdoc_navigation_navigate_event_for_window;
-pub(crate) use self::navigation_mutation::apply_local_window_location_navigation;
 pub(crate) use self::navigation_restore::{
     install_navigation_bootstrap_entry, install_navigation_bootstrap_entry_for_holder,
 };
@@ -366,6 +364,7 @@ pub(crate) use self::runtime_state::install_webassembly_runtime_state;
 #[cfg(feature = "wpt-extensions")]
 pub(crate) use self::runtime_state::install_wpt_webdriver_runtime_state;
 pub(crate) use self::runtime_state::set_window_origin_runtime_state;
+pub(crate) use self::runtime_state::sync_window_document_cached_accessor;
 pub(crate) use self::runtime_state::window_origin_runtime_state;
 pub(crate) use self::runtime_state::{
     ORIGINAL_WEBASSEMBLY_COMPILE_ERROR_CONSTRUCTOR_SLOT,
@@ -442,7 +441,6 @@ pub(crate) use self::trusted_types::{
 };
 pub(crate) use self::url_form::object_prototype_matches;
 pub(crate) use self::url_search_params_runtime::url_search_params_request_body;
-pub(crate) use self::web_storage::install_storage_aliases_for_window;
 pub use self::web_storage::{
     SharedWebStorageStore, WebStorageAreaKind, WebStorageMutation, WebStorageMutationRecord,
     WebStorageMutationSubscription, WebStorageString, deep_clone_shared_web_storage_store,
@@ -530,13 +528,6 @@ pub(crate) fn child_browsing_context_handle_for_current_realm_scope(
     }
     let owner = self::navigation_window::runtime_window_owner(scope, global);
     self::navigation_window::child_browsing_context_handle_for_runtime_owner(scope, owner)
-}
-
-pub(crate) fn build_lightweight_popup_window_navigator_object<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    owner_popup: u64,
-) -> Result<v8::Local<'s, v8::Object>> {
-    navigator_runtime::build_lightweight_popup_window_navigator_object(scope, owner_popup)
 }
 
 fn find_constructor_spec(name: &str) -> Result<self::specs::ConstructorSpec> {

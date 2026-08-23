@@ -97,11 +97,11 @@ struct HostBindingsDeclaration<'scope> {
     )]
     child_frame_owner_backend_node_id_for_window: (),
     #[webapi(
-        method = "__moliHostLightweightPopupIdForObject",
-        callback = host_lightweight_popup_id_for_object_callback,
+        method = "__moliHostAuxiliaryPopupIdForObject",
+        callback = host_auxiliary_popup_id_for_object_callback,
         data = self.external
     )]
-    lightweight_popup_id_for_object: (),
+    auxiliary_popup_id_for_object: (),
     #[webapi(
         method = "__moliHostBidiWindowRemoteValue",
         callback = host_bidi_window_remote_value_callback,
@@ -309,21 +309,21 @@ fn child_frame_owner_node_id_from_window<'s>(
     Some(NodeId::new(handle_index as usize))
 }
 
-fn host_lightweight_popup_id_for_object_callback(
+fn host_auxiliary_popup_id_for_object_callback(
     scope: &mut v8::PinScope<'_, '_>,
     args: v8::FunctionCallbackArguments<'_>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Ok(host_ptr) = context_host_ptr_from_callback_data(scope, args.data()) else {
+    if context_host_ptr_from_callback_data(scope, args.data()).is_err() {
         rv.set_null();
         return;
-    };
+    }
     let Some(object) = args.get(0).to_object(scope) else {
         rv.set_null();
         return;
     };
-    let host = unsafe { &mut *host_ptr };
-    let Some(popup_id) = host.lightweight_popup_id_for_window_proxy(scope, object) else {
+    let Some(popup_id) = crate::native_bridge::renderer_owned_auxiliary_popup_id(scope, object)
+    else {
         rv.set_null();
         return;
     };

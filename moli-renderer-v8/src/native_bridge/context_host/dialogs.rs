@@ -29,7 +29,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(handle) => {
                 self.document_url_for_child_context(handle).to_string()
             }
-            OwnerDispatchScope::LightweightPopup(_) => return None,
         };
         let dialog_id = self.allocate_javascript_dialog_id();
         let dialog = RendererPendingJavaScriptDialog::new(

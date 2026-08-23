@@ -193,14 +193,6 @@ impl JsContextHost {
                     document_id: owner.document_id.0,
                 }
             }
-            (
-                WindowDocumentOwner::LightweightPopup(owner),
-                OwnerDispatchScope::LightweightPopup(popup_id),
-            ) if owner.popup_id() == popup_id => RendererWindowDocumentSource::LightweightPopup {
-                popup_id,
-                popup_document_id: owner.document_id().as_u64(),
-            },
-            _ => return None,
         };
         Some((target, root_document, source))
     }
@@ -225,10 +217,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(handle) => (
                 self.child_browsing_context_document_handle(handle)?,
                 self.child_browsing_context_policy_container_snapshot(handle)?,
-            ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => (
-                self.lightweight_popup_document_handle(popup_id)?,
-                self.lightweight_popup_policy_container(popup_id)?.clone(),
             ),
         };
         let raw_source_url = self.document_url_for_handle(document);
@@ -267,11 +255,6 @@ impl JsContextHost {
             }
             OwnerDispatchScope::Child(handle) => {
                 WindowDocumentOwner::Frame(self.current_child_document_task_owner(handle)?)
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                WindowDocumentOwner::LightweightPopup(
-                    self.current_lightweight_popup_document_owner(popup_id)?,
-                )
             }
         };
         Some(WindowDocumentTaskTarget::new(owner, dispatch_scope))
@@ -320,11 +303,6 @@ impl JsContextHost {
                 self.ensure_prebootstrapped_child_default_context(scope, handle)
                     .ok()?;
                 self.child_browsing_context_document_handle(handle)?
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.ensure_lightweight_popup_execution_context(scope, popup_id)
-                    .then_some(())?;
-                self.lightweight_popup_document_handle(popup_id)?
             }
         };
         let identity = self.current_registered_window_execution_context_identity(dispatch_scope)?;

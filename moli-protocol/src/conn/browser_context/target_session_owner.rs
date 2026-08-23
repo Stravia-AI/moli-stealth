@@ -4972,6 +4972,7 @@ mod tests {
             security_origin: "https://nav.example".to_owned(),
             secure_context_type: "Secure".to_owned(),
             timestamp: 0.0,
+            navigation_history_entry_seed: None,
             navigation_redirect_chain: Vec::new(),
             auxiliary_browsing_context_policy: None,
             response_block: None,

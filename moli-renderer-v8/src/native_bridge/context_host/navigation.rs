@@ -262,14 +262,12 @@ impl JsContextHost {
 
     fn enqueue_pending_location_navigation(&mut self, pending: PendingLocationNavigation) {
         let is_javascript_url = pending.url.scheme() == "javascript";
-        let can_append_to_javascript_url_task_queue = is_javascript_url
-            && self.pending_top_level_navigations.iter().all(|pending| {
-                matches!(
-                    pending,
-                    PendingTopLevelNavigation::Location(pending)
-                        if pending.url.scheme() == "javascript"
-                )
-            });
+        // JavaScript URLs are queued target-Document tasks. They run after an
+        // ordinary navigation that was already synchronously handed to the
+        // browser owner, so they must not replace that request while a staged
+        // auxiliary Page is waiting for target admission. A later ordinary
+        // navigation still replaces the entire pending sequence.
+        let can_append_to_javascript_url_task_queue = is_javascript_url;
         if !can_append_to_javascript_url_task_queue {
             self.clear_pending_top_level_navigation();
         }
@@ -352,10 +350,28 @@ impl JsContextHost {
     }
 
     pub(crate) fn record_pending_top_level_history_traversal(&mut self, delta: i64) {
+        self.record_pending_top_level_history_traversal_action(
+            RendererPendingTopLevelHistoryTraversal::by_delta(delta),
+        );
+    }
+
+    pub(crate) fn record_pending_cross_document_top_level_history_traversal(
+        &mut self,
+        delta: i64,
+        entry_seed: NavigationHistoryEntrySeed,
+    ) {
+        self.record_pending_top_level_history_traversal_action(
+            RendererPendingTopLevelHistoryTraversal::cross_document(delta, entry_seed),
+        );
+    }
+
+    fn record_pending_top_level_history_traversal_action(
+        &mut self,
+        traversal: RendererPendingTopLevelHistoryTraversal,
+    ) {
         self.clear_pending_top_level_navigation();
-        let traversal = RendererPendingTopLevelHistoryTraversal { delta };
         if self.append_live_turn_owner_action(
-            crate::runtime::RendererOwnerAction::TopLevelHistoryTraversal(traversal),
+            crate::runtime::RendererOwnerAction::TopLevelHistoryTraversal(traversal.clone()),
         ) {
             return;
         }

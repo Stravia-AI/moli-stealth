@@ -9,6 +9,7 @@ use crate::{
         WINDOW_NAME_SLOT, bind_window_navigator_identity_seed, bind_window_performance_seed,
         install_navigation_bootstrap_entry_for_holder,
         reset_window_location_history_navigation_runtime_state, set_window_origin_runtime_state,
+        sync_window_document_cached_accessor,
         sync_window_location_history_navigation_runtime_surface,
     },
     native_bridge::{
@@ -63,6 +64,7 @@ pub(in crate::native_bridge::context_host::child_frame_runtime) fn initialize_ch
         .child_browsing_context_document_wrapper(scope, init.handle)
         .ok_or_else(|| anyhow::anyhow!("missing child Document wrapper"))?;
     sync_child_document_window_slots(scope, document, global, true);
+    sync_window_document_cached_accessor(scope, global, document);
     set_object_slot(scope, global, "document", document.into());
     validate_child_window_realm_snapshot(host, &snapshot)?;
 
@@ -127,6 +129,7 @@ pub(in crate::native_bridge::context_host::child_frame_runtime) fn rebind_child_
         .child_browsing_context_document_wrapper(scope, rebind.handle)
         .ok_or_else(|| anyhow::anyhow!("missing rebound child Document wrapper"))?;
     sync_child_document_window_slots(scope, document, global, true);
+    sync_window_document_cached_accessor(scope, global, document);
     set_object_slot(scope, global, "document", document.into());
     validate_child_window_realm_snapshot(host, &snapshot)
 }

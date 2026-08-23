@@ -309,6 +309,7 @@ impl JsContextHost {
                 expected_current_owner,
             )?;
         debug_assert_eq!(owner_transition.retired_owner(), expected_current_owner);
+        let _ = self.ensure_child_opaque_origin_nonce(handle);
 
         match owner_transition.local_window_owner_transition() {
             FrameLocalWindowOwnerTransition::Replaced { .. } => {

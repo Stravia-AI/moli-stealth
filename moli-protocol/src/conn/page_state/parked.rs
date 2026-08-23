@@ -195,12 +195,8 @@ impl BrowserContext {
     }
 
     pub(crate) fn remember_target_popup_id(&mut self, popup_id: Option<u64>, target_id: &str) {
-        if let Some(popup_id) = popup_id
-            && let Some(replaced_popup_id) =
-                self.target_popup_ids.insert(target_id.to_owned(), popup_id)
-            && replaced_popup_id != popup_id
-        {
-            self.dismiss_pending_popup_javascript_dialogs(replaced_popup_id);
+        if let Some(popup_id) = popup_id {
+            self.target_popup_ids.insert(target_id.to_owned(), popup_id);
         }
     }
 
@@ -210,15 +206,14 @@ impl BrowserContext {
     }
 
     pub(crate) fn forget_target_popup_id_for_target(&mut self, target_id: &str) {
-        if let Some(popup_id) = self.target_popup_ids.remove(target_id) {
-            self.dismiss_pending_popup_javascript_dialogs(popup_id);
-        }
+        self.target_popup_ids.remove(target_id);
     }
 
     pub(crate) fn target_popup_id(&self, target_id: &str) -> Option<u64> {
         self.target_popup_ids.get(target_id).copied()
     }
 
+    #[cfg(test)]
     pub(crate) fn target_id_for_popup_id(&self, popup_id: u64) -> Option<&str> {
         self.target_popup_ids
             .iter()

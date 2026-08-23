@@ -19,8 +19,7 @@ use super::{
         ComputedStyleDescriptor, ComputedStylePseudoKey, ComputedStyleTargetKey, JsContextHost,
         PendingWindowMessage, PendingWindowMessageEndpoint, PendingWindowMessageSource,
         RuntimeObservableContextToken, WindowExecutionContextOwner, WindowTaskTarget,
-        active_child_window_handle, active_lightweight_popup_id,
-        current_or_live_delegate_node_arg_handle,
+        active_child_window_handle, current_or_live_delegate_node_arg_handle,
         element::{
             ComputedStyleTargetContext, STYLE_DECLARATION_FORCED_EMPTY_COMPUTED_SLOT,
             STYLE_DECLARATION_PSEUDO_ELEMENT_SLOT, STYLE_DECLARATION_READ_DOCUMENT_SLOT,
@@ -34,8 +33,7 @@ use super::{
             prepare_legacy_activation_for_dispatched_click,
             queue_animation_start_for_listener_target, queue_scroll_observable_effects,
         },
-        enter_active_child_window_scope, enter_top_level_lightweight_popup_scope,
-        node_runtime_and_handle_from_object, throw_dom_exception,
+        enter_active_child_window_scope, node_runtime_and_handle_from_object, throw_dom_exception,
     },
     reflector::ReflectorId,
     script_provenance::CompiledStringProvenance,
@@ -670,9 +668,6 @@ fn window_timer_source_url<'s>(
             PendingWindowMessageEndpoint::ChildWindow(handle) => {
                 host.child_browsing_context_current_url(handle)
             }
-            PendingWindowMessageEndpoint::LightweightPopup(popup_id) => {
-                host.lightweight_popup_document_url(popup_id)
-            }
         };
         if let Some(owner_url) = owner_url {
             return owner_url;
@@ -996,16 +991,10 @@ pub(crate) fn window_post_message_callback<'s>(
         );
         return;
     };
-    // Blink captures the incumbent DOMWindow at API acceptance. Lightweight
-    // popups still share the top-level V8 context, so their active execution
-    // scope is the one necessary override; the ambient source marker is only
-    // a fallback for legacy execution paths that do not expose an incumbent
-    // context.
+    // Blink captures the incumbent DOMWindow at API acceptance.
     let related_page_source = incumbent_related_page_window_message_source(scope, host);
-    let source_identity = active_lightweight_popup_id(scope)
-        .map(PendingWindowMessageEndpoint::LightweightPopup)
-        .and_then(|endpoint| current_window_message_source_identity(scope, host, endpoint))
-        .or_else(|| incumbent_window_message_source_identity(scope, host))
+    let source_identity = incumbent_window_message_source_identity(scope, host);
+    let source_identity = source_identity
         .or_else(|| {
             host.current_window_message_source()
                 .and_then(|endpoint| current_window_message_source_identity(scope, host, endpoint))
@@ -1047,12 +1036,6 @@ pub(crate) fn window_post_message_callback<'s>(
         return;
     };
     let target = WindowTaskTarget::new(target_dispatch_scope, target_owner);
-    if let PendingWindowMessageEndpoint::LightweightPopup(popup_id) = target_endpoint
-        && !host.ensure_lightweight_popup_execution_context(scope, popup_id)
-    {
-        rv.set_undefined();
-        return;
-    }
     let Some(target_origin) = window_message_endpoint_origin(host, target_endpoint) else {
         rv.set_undefined();
         return;
@@ -1191,9 +1174,6 @@ pub(crate) fn scroll_window_to(
                 crate::native_bridge::OwnerDispatchScope::Top => Some(runtime.document_handle()),
                 crate::native_bridge::OwnerDispatchScope::Child(handle) => {
                     runtime.child_browsing_context_document_handle(handle)
-                }
-                crate::native_bridge::OwnerDispatchScope::LightweightPopup(popup_id) => {
-                    runtime.lightweight_popup_document_handle(popup_id)
                 }
             });
         let scrolling_element = document.and_then(|document| {
@@ -1762,9 +1742,6 @@ fn window_message_endpoint_origin(
         PendingWindowMessageEndpoint::ChildWindow(handle) => {
             host.child_browsing_context_target_origin(handle)
         }
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id) => {
-            host.lightweight_popup_origin(popup_id)
-        }
     }
 }
 
@@ -1838,10 +1815,6 @@ fn dispatch_window_message_event<'s>(
                     .map(Into::into)
                     .unwrap_or_else(|| v8::null(scope).into())
             }
-            PendingWindowMessageEndpoint::LightweightPopup(popup_id) => host
-                .lightweight_popup_window(scope, popup_id)
-                .map(Into::into)
-                .unwrap_or_else(|| v8::null(scope).into()),
         }
     };
     let init = WindowMessageEventInitDeclaration::new(data, origin, ports, source)
@@ -1867,7 +1840,6 @@ fn dispatch_window_message_event<'s>(
     match target {
         PendingWindowMessageEndpoint::TopWindow => {
             let _previous_active_child = enter_active_child_window_scope(scope, None);
-            let _previous_active_popup = enter_top_level_lightweight_popup_scope(scope);
             let _ = host.dispatch_public_event_best_effort(
                 scope,
                 host_ptr,
@@ -1878,9 +1850,6 @@ fn dispatch_window_message_event<'s>(
         }
         PendingWindowMessageEndpoint::ChildWindow(handle) => {
             host.dispatch_child_window_event(scope, handle, event_name, event);
-        }
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id) => {
-            host.dispatch_lightweight_popup_window_event(scope, popup_id, event_name, event);
         }
     }
 }
@@ -2216,14 +2185,6 @@ fn window_message_endpoint_from_receiver<'s>(
         );
     }
 
-    if let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, object) {
-        return Some(PendingWindowMessageEndpoint::LightweightPopup(popup_id));
-    }
-
-    if let Some(popup_id) = crate::native_bridge::cross_origin_lightweight_popup_id(scope, object) {
-        return Some(PendingWindowMessageEndpoint::LightweightPopup(popup_id));
-    }
-
     if get_private_value(scope, object, TOP_WINDOW_MESSAGE_ENDPOINT_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
         || crate::native_bridge::is_cross_origin_top_window_proxy(scope, object)
@@ -2301,15 +2262,9 @@ fn incumbent_window_message_source_identity(
 )> {
     let incumbent_context = scope.get_incumbent_context()?;
     let incumbent_global = incumbent_context.global(scope);
-    let endpoint = if let Some(popup_id) =
-        crate::native_bridge::lightweight_popup_id_from_window(scope, incumbent_global)
-    {
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id)
-    } else {
-        object_child_window_handle(scope, incumbent_global)
-            .map(PendingWindowMessageEndpoint::ChildWindow)
-            .unwrap_or(PendingWindowMessageEndpoint::TopWindow)
-    };
+    let endpoint = object_child_window_handle(scope, incumbent_global)
+        .map(PendingWindowMessageEndpoint::ChildWindow)
+        .unwrap_or(PendingWindowMessageEndpoint::TopWindow);
     let incumbent_scope = &mut v8::ContextScope::new(scope, incumbent_context);
     let identity = host.current_runtime_window_execution_context_identity(incumbent_scope)?;
     (identity.dispatch_scope() == endpoint.dispatch_scope()).then_some((

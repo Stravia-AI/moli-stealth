@@ -71,7 +71,7 @@ impl JsContextHost {
         global: v8::Local<'s, v8::Object>,
     ) -> Result<JsContextHostBridgeRef> {
         let host_ptr: *mut JsContextHost = (*host_rc).as_ptr();
-        let host_liveness = unsafe { &*host_ptr }.context_host_liveness_handle();
+        let host_lifecycle = unsafe { &*host_ptr }.context_host_lifecycle_handle();
         #[cfg(test)]
         let bridge_ref_count = unsafe { &*host_ptr }.bridge_ref_count.clone();
         #[cfg(not(test))]
@@ -85,7 +85,7 @@ impl JsContextHost {
         crate::util::install_context_host_pointer_slot(
             scope.get_current_context(),
             host_ptr,
-            host_liveness,
+            host_lifecycle,
         );
         Ok(bridge_ref)
     }

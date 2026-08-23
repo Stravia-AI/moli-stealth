@@ -241,10 +241,7 @@ fn current_window_storage_access_request_context(
         storage_key.origin(),
         &embedding_origin,
     ));
-    let outermost = matches!(
-        identity.dispatch_scope(),
-        OwnerDispatchScope::Top | OwnerDispatchScope::LightweightPopup(_)
-    );
+    let outermost = matches!(identity.dispatch_scope(), OwnerDispatchScope::Top);
     Some(StorageAccessRequestContext {
         ambient_storage_key,
         policy: StorageAccessRequestPolicy {

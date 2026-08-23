@@ -1148,6 +1148,16 @@ impl RendererOwnerLocalStore {
             .ok_or_else(|| anyhow!("related auxiliary bootstrap lost its agent membership"))?;
         let auxiliary_page_reservation_allocator =
             RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
+        let renderer_document_isolate_allocator = RendererDocumentIsolateAllocator::new(
+            owner.clone(),
+            page_id,
+            reservation.output_owner_reservation_id(),
+            reservation.script_agent_admission(),
+            reservation.opened_by_dom(),
+            reservation.initially_active(),
+            reservation.initially_focused(),
+            RendererExistingPageReplacementIsolation::PreserveBrowsingContextGroup,
+        );
         let page_script_environment = RendererPageScriptEnvironment::new_related(
             page_id.as_u64(),
             reservation.opened_by_dom(),
@@ -1195,6 +1205,7 @@ impl RendererOwnerLocalStore {
             owner_wake,
             owner.owner_state.browser_context_runtime.clone(),
         )
+        .with_renderer_document_isolate_allocator(renderer_document_isolate_allocator)
         .with_validated_staged_renderer_document_isolate(bootstrap, isolate_reservation.clone());
         // PageVm construction owns another clone. Keep its exceptional drop
         // local to this store session, then retire the reservation directly
@@ -1969,21 +1980,17 @@ impl RendererOwnerLocalStore {
         let v8_foreground_task_sender = page_runtime_task_source
             .v8_foreground_task_sender()
             .ok_or_else(|| anyhow!("owner-reserved Page is missing its V8 foreground source"))?;
-        let (bootstrap, staged_window_proxy, related_source_environment) =
-            match script_agent_admission {
-                RendererScriptAgentAdmission::Fresh => (
-                    RendererDocumentIsolateHandle::new_owner_reserved_page(
-                        v8_foreground_task_sender,
-                    )?,
-                    None,
-                    None,
-                ),
-                RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id } => {
-                    ensure!(
-                        opener_page_id != page_id,
-                        "a Page cannot use itself as its related script-agent source"
-                    );
-                    let source_environment = self
+        let (bootstrap, related_source_environment) = match script_agent_admission {
+            RendererScriptAgentAdmission::Fresh => (
+                RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?,
+                None,
+            ),
+            RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id } => {
+                ensure!(
+                    opener_page_id != page_id,
+                    "a Page cannot use itself as its related script-agent source"
+                );
+                let source_environment = self
                     .page_hosts
                     .get(&owner.local_host_id)
                     .and_then(|host| host.pages.get(&opener_page_id))
@@ -1995,17 +2002,14 @@ impl RendererOwnerLocalStore {
                             owner.local_host_id.as_u64()
                         )
                     })?;
-                    let staged_window_proxy = source_environment
-                        .auxiliary_page_reservation_allocator()
-                        .take_related_window_proxy(page_id);
-                    let bootstrap = source_environment
-                        .bootstrap_related_page_document_isolate(v8_foreground_task_sender)?;
-                    (bootstrap, staged_window_proxy, Some(source_environment))
-                }
-                RendererScriptAgentAdmission::ExistingPageReplacement { .. } => {
-                    unreachable!("live Page replacement admission returns before fresh allocation")
-                }
-            };
+                let bootstrap = source_environment
+                    .bootstrap_related_page_document_isolate(v8_foreground_task_sender)?;
+                (bootstrap, Some(source_environment))
+            }
+            RendererScriptAgentAdmission::ExistingPageReplacement { .. } => {
+                unreachable!("live Page replacement admission returns before fresh allocation")
+            }
+        };
         let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
         let reservation_id = self.next_renderer_document_isolate_reservation_id;
         self.next_renderer_document_isolate_reservation_id = self
@@ -2063,13 +2067,6 @@ impl RendererOwnerLocalStore {
                 page_runtime_task_source,
                 output_journal.clone(),
             )?,
-        };
-        let bootstrap = if let Some(staged_window_proxy) = staged_window_proxy {
-            page_script_environment
-                .install_staged_initial_main_window_proxy(staged_window_proxy)?;
-            bootstrap.with_reused_main_window_proxy()
-        } else {
-            bootstrap
         };
         let host = self.host_for_id(owner.local_host_id);
         host.reserved_renderer_document_isolates
@@ -2712,14 +2709,23 @@ impl RendererOwnerLocalStore {
                 "renderer page {} tried to reply before its lifecycle decider ran",
                 token.page_id.as_u64()
             );
+            let mut initial_top_level_navigation = None;
             if matches!(
                 entry.top_level_navigation_dispatch(),
                 RendererTopLevelNavigationDispatch::DelegateToBrowser
             ) {
-                entry
-                    .page_vm_mut()
-                    .vm_mut()
-                    .publish_pending_non_javascript_location_navigation()?;
+                if entry.page_vm().is_staged_related_initial_empty_page() {
+                    initial_top_level_navigation = entry
+                        .page_vm_mut()
+                        .vm_mut()
+                        .take_pending_document_sourced_top_level_location_navigation()?
+                        .map(Box::new);
+                } else {
+                    entry
+                        .page_vm_mut()
+                        .vm_mut()
+                        .publish_pending_non_javascript_location_navigation()?;
+                }
             }
             let javascript_dialog_broker = entry.page_vm().javascript_dialog_broker();
             let devtools_target = entry.page_vm().devtools_target();
@@ -2731,6 +2737,7 @@ impl RendererOwnerLocalStore {
                 initial_runtime_realms,
                 renderer_output_predecessor: None,
                 document_continuation_observer: None,
+                initial_top_level_navigation,
                 top_level_browsing_context_closing: entry
                     .page_vm()
                     .top_level_browsing_context_is_closed(),

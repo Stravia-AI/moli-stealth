@@ -17,14 +17,10 @@ impl JsContextHost {
         &self,
         scope: &mut v8::PinScope<'_, '_>,
     ) {
-        let main_document_child_count = self
+        let handles = self
             .top_level_child_browsing_context_handles_in_frame_tree_order()
-            .into_iter()
-            .filter(|handle| {
-                self.child_browsing_context_popup_owner_id(*handle)
-                    .is_none()
-            })
-            .count();
+            .into_iter();
+        let main_document_child_count = handles.count();
         if main_document_child_count == 0 {
             return;
         }
@@ -54,15 +50,16 @@ impl JsContextHost {
     /// agents. This is the only data those agents may use for RemoteFrame name
     /// lookup and WindowProxy projection; the target owner revalidates the
     /// root lifecycle and browsing-context id again when a command arrives.
-    pub(crate) fn publish_related_page_remote_frame_tree(&self) {
-        let Some(environment) = self.page_script_environment.as_ref() else {
+    pub(crate) fn publish_related_page_remote_frame_tree(&mut self) {
+        let Some(endpoint) = self.page_script_environment.as_ref().map(
+            crate::script_vm::RendererPageScriptEnvironment::top_level_window_proxy_endpoint_id,
+        ) else {
             return;
         };
         let Some(root_document) = self.root_document_lifecycle_identity() else {
             return;
         };
-        let endpoint = environment.top_level_window_proxy_endpoint_id();
-        let snapshots = self
+        let live_handles = self
             .child_browsing_context_handles_in_document_order()
             .into_iter()
             .filter(|handle| {
@@ -72,8 +69,19 @@ impl JsContextHost {
                         .node(*handle)
                         .is_some_and(|node| node.flags().in_document_tree())
             })
+            .collect::<Vec<_>>();
+        let snapshots = live_handles
+            .into_iter()
             .filter_map(|handle| {
                 let browsing_context_id = self.child_browsing_context_id_for_handle(handle)?;
+                let _ = self.ensure_child_opaque_origin_nonce(handle);
+                let access_origin = self.child_window_access_origin(handle)?;
+                let opaque_origin_nonce = match access_origin {
+                    super::super::window_security_tokens::WindowAccessOrigin::Opaque {
+                        identity,
+                    } => identity,
+                    super::super::window_security_tokens::WindowAccessOrigin::Tuple { .. } => None,
+                };
                 let entry = self.child_browsing_contexts.get(&handle)?;
                 Some(crate::script_vm::RendererRemoteFrameSnapshot {
                     revision: 0,
@@ -88,12 +96,15 @@ impl JsContextHost {
                     name: entry.window_name().to_owned(),
                     current_url: self.child_browsing_context_current_url(handle)?.to_string(),
                     serialized_origin: self.child_browsing_context_window_origin(handle)?,
+                    opaque_origin_nonce,
                     document_domain: self.child_browsing_context_document_domain_override(handle),
                     policy_container: entry.document_policy_container_snapshot(),
                 })
             })
             .collect();
-        environment.replicate_current_remote_frame_tree(snapshots);
+        if let Some(environment) = self.page_script_environment.as_ref() {
+            environment.replicate_current_remote_frame_tree(snapshots);
+        }
     }
 
     pub(crate) fn live_child_browsing_context_owner_snapshots(
@@ -113,14 +124,6 @@ impl JsContextHost {
                     .map(|owner| (handle, owner))
             })
             .collect()
-    }
-
-    pub(crate) fn child_browsing_context_popup_owner_id(&self, handle: DomHandle) -> Option<u64> {
-        let owner_document = self
-            .dom_host()
-            .node(handle)
-            .and_then(|node| node.owner_document())?;
-        self.lightweight_popup_id_for_document_handle(owner_document)
     }
 
     fn collect_child_browsing_context_handles_in_document_order_from_document(

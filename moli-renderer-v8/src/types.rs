@@ -1521,57 +1521,6 @@ impl ChildDocumentLoadCompletion {
     }
 }
 
-#[derive(Debug)]
-pub(super) struct PopupDocumentLoadCompletion {
-    target: crate::native_bridge::LightweightPopupDocumentFetchTarget,
-    pub(super) result: std::result::Result<PopupDocumentLoadOutcome, String>,
-}
-
-impl PopupDocumentLoadCompletion {
-    pub(crate) fn new(
-        target: crate::native_bridge::LightweightPopupDocumentFetchTarget,
-        result: std::result::Result<PopupDocumentLoadOutcome, String>,
-    ) -> Self {
-        Self { target, result }
-    }
-
-    pub(crate) fn target(&self) -> crate::native_bridge::LightweightPopupDocumentFetchTarget {
-        self.target
-    }
-}
-
-#[derive(Debug)]
-pub(super) struct PopupClassicScriptLoadCompletion {
-    target: crate::native_bridge::LightweightPopupClassicScriptFetchTarget,
-    pub(super) result: std::result::Result<LoadedChildScriptSource, String>,
-}
-
-impl PopupClassicScriptLoadCompletion {
-    pub(crate) fn new(
-        target: crate::native_bridge::LightweightPopupClassicScriptFetchTarget,
-        result: std::result::Result<LoadedChildScriptSource, String>,
-    ) -> Self {
-        Self { target, result }
-    }
-
-    pub(crate) fn target(&self) -> crate::native_bridge::LightweightPopupClassicScriptFetchTarget {
-        self.target
-    }
-}
-
-#[derive(Debug)]
-pub(super) enum PopupDocumentLoadOutcome {
-    Loaded(Box<LoadedChildDocument>),
-    IgnoredNavigation,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct LoadedChildScriptSource {
-    pub(super) final_url: Url,
-    pub(super) redirected: bool,
-    pub(super) source: String,
-}
-
 #[cfg(test)]
 #[derive(Debug)]
 pub(super) struct ModuleGraphFetchCompletion {

@@ -4390,6 +4390,24 @@ document.close();
     );
     assert_ne!(navigation.source_document(), replacement_document);
     assert_eq!(navigation.url(), "https://example.test/pending-target.html");
+    let history_seed = navigation
+        .navigation_history_entry_seed()
+        .expect("browser-owned cross-Document action must retain renderer history");
+    assert_eq!(
+        history_seed
+            .entries
+            .iter()
+            .find(|entry| entry.history_index == history_seed.current_index)
+            .map(|entry| entry.url.as_str()),
+        Some("https://example.test/pending-target.html")
+    );
+    assert_eq!(
+        history_seed
+            .activation
+            .as_ref()
+            .and_then(|activation| activation.navigation_type.as_deref()),
+        Some("push")
+    );
     page.close_async()
         .await
         .expect("document.open navigation identity test page should close");
@@ -8349,6 +8367,7 @@ JSON.stringify(["prepared", history.length])"##
             expression: r##"(() => {
   const popup = globalThis.__lm_related_close_popup;
   globalThis.__lm_saved_close_popup = popup;
+  globalThis.__lm_saved_peer_document = popup.document;
   globalThis.__lm_saved_peer_function = popup.__lm_peer_function;
   globalThis.__lm_saved_peer_node = popup.document.querySelector("#peer-node");
   popup.close();
@@ -8434,7 +8453,7 @@ JSON.stringify(["prepared", history.length])"##
 
     let (after_discard, _) = first_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r#"(() => {
+            expression: r##"(() => {
   const popup = globalThis.__lm_related_close_popup;
   const probe = callback => {
     try {
@@ -8448,6 +8467,10 @@ JSON.stringify(["prepared", history.length])"##
     identity: popup === globalThis.__lm_saved_close_popup,
     surface: [popup.closed, popup.opener === window, popup.length, popup.window === popup],
     deniedDocument: probe(() => popup.document),
+    retainedDocumentNodeIdentity: probe(() =>
+      globalThis.__lm_saved_peer_document.querySelector("#peer-node") ===
+        globalThis.__lm_saved_peer_node
+    ),
     retainedFunction: probe(() => globalThis.__lm_saved_peer_function()),
     retainedNodeRead: probe(() => globalThis.__lm_saved_peer_node.textContent),
     retainedNodeWrite: probe(() => {
@@ -8455,18 +8478,18 @@ JSON.stringify(["prepared", history.length])"##
       return globalThis.__lm_saved_peer_node.textContent;
     })
   });
-})()"#
+})()"##
                 .to_owned(),
             await_promise: false,
         })
         .await
-        .expect("retained proxy and wrappers should fail closed after target discard");
+        .expect("retained proxy and detached DOM values should remain safely observable");
     assert_eq!(
         renderer_json_value(after_discard),
         Some(serde_json::json!(
-            r#"{"identity":true,"surface":[true,true,0,true],"deniedDocument":["throw","SecurityError"],"retainedFunction":["throw","TypeError"],"retainedNodeRead":["throw","TypeError"],"retainedNodeWrite":["throw","TypeError"]}"#
+            r#"{"identity":true,"surface":[true,true,0,true],"deniedDocument":["throw","SecurityError"],"retainedDocumentNodeIdentity":["return","true"],"retainedFunction":["return","before-close"],"retainedNodeRead":["return","before-close"],"retainedNodeWrite":["return","after-close"]}"#
         )),
-        "final close must preserve the stable proxy identity while disconnecting every old host pointer entry point"
+        "final close must preserve the stable proxy identity and JS-retained detached DOM backing"
     );
 
     first_page
@@ -8517,6 +8540,10 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
     document.body.dataset.functionCall = value;
     return `${value}:${document.body.dataset.page}`;
   };
+  globalThis.__lm_related_window_access_function = (currentPage, relatedPage) => [
+    currentPage.document.body.dataset.page,
+    relatedPage.document.body.dataset.page,
+  ].join("|");
   return "prepared";
 })()"##
                 .to_owned(),
@@ -8544,9 +8571,12 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
             expression: r##"(() => {
   const peer = globalThis.__lm_related_peer_window;
   globalThis.__lm_related_saved_peer_window = peer;
+  globalThis.__lm_related_saved_peer_document = peer.document;
   peer.__lm_related_shared_object.count += 1;
   const peerNode = peer.document.querySelector("#peer-node");
   globalThis.__lm_related_saved_peer_function = peer.__lm_related_shared_function;
+  globalThis.__lm_related_saved_window_access_function =
+    peer.__lm_related_window_access_function;
   globalThis.__lm_related_saved_peer_node = peerNode;
   peerNode.textContent = "mutated-from-first";
   return JSON.stringify([
@@ -8618,6 +8648,12 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
         Some(serde_json::json!("[true,true,true,true,true,true,true]"))
     );
 
+    let before_navigation_heap = runtime_heap_usage_for_test(&second_page).await;
+    let before_navigation_native_contexts =
+        related_script_agent_memory_u64(&before_navigation_heap, &["numberOfNativeContexts"]);
+    let before_navigation_detached_contexts =
+        related_script_agent_memory_u64(&before_navigation_heap, &["numberOfDetachedContexts"]);
+
     let (navigation_reply, _) = second_page
         .run_async_command(
             RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
@@ -8639,14 +8675,14 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: r##"(() => {
   const peer = globalThis.__lm_related_peer_window;
-  const probe = callback => {
-    try {
-      callback();
-      return "allowed";
-    } catch (error) {
-      return error && error.name;
-    }
-  };
+  const oldFunctionResult = globalThis.__lm_related_saved_peer_function("after-navigation");
+  const oldNodeText = globalThis.__lm_related_saved_peer_node.textContent;
+  const oldDocumentNodeIdentity =
+    globalThis.__lm_related_saved_peer_document.querySelector("#peer-node") ===
+      globalThis.__lm_related_saved_peer_node;
+  globalThis.__lm_related_saved_peer_node.textContent = "old-node-after-navigation";
+  const oldRealmWindowAccess =
+    globalThis.__lm_related_saved_window_access_function(peer, window);
   return JSON.stringify([
     peer === globalThis.__lm_related_saved_peer_window,
     peer.closed,
@@ -8655,8 +8691,11 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
     peer.document.querySelector("#peer-node").textContent,
     typeof peer.__lm_related_shared_object,
     peer.opener === null,
-    probe(() => globalThis.__lm_related_saved_peer_function("after-navigation")),
-    probe(() => globalThis.__lm_related_saved_peer_node.textContent)
+    oldFunctionResult,
+    oldNodeText,
+    oldDocumentNodeIdentity,
+    globalThis.__lm_related_saved_peer_node.textContent,
+    oldRealmWindowAccess
   ]);
 })()"##
                 .to_owned(),
@@ -8667,9 +8706,53 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
     assert_eq!(
         renderer_json_value(after_navigation),
         Some(serde_json::json!(
-            "[true,false,\"replacement-ready\",\"replacement\",\"after-navigation\",\"undefined\",true,\"TypeError\",\"TypeError\"]"
+            "[true,false,\"replacement-ready\",\"replacement\",\"after-navigation\",\"undefined\",true,\"after-navigation:second\",\"mutated-from-first\",true,\"old-node-after-navigation\",\"replacement|first\"]"
         )),
-        "stable peer WindowProxy identity must survive Document replacement while retired realm wrappers fail closed"
+        "stable peer WindowProxy identity and JS-retained old Document values must survive replacement independently"
+    );
+
+    second_page
+        .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+        .await
+        .expect("retained old peer realm GC probe should complete");
+    let retained_old_realm_heap = runtime_heap_usage_for_test(&second_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&retained_old_realm_heap, &["numberOfNativeContexts"]),
+        before_navigation_native_contexts + 1,
+        "saved old Document, Node, and function must keep exactly one detached inner realm alive"
+    );
+    assert_eq!(
+        related_script_agent_memory_u64(&retained_old_realm_heap, &["numberOfDetachedContexts"]),
+        before_navigation_detached_contexts + 1,
+        "the JS-retained old inner realm must be reported as detached"
+    );
+
+    first_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"delete globalThis.__lm_related_saved_peer_document;
+delete globalThis.__lm_related_saved_peer_function;
+delete globalThis.__lm_related_saved_peer_node;
+delete globalThis.__lm_related_saved_window_access_function;
+true"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("old peer realm references should be releasable");
+    second_page
+        .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+        .await
+        .expect("released old peer realm GC probe should complete");
+    let released_old_realm_heap = runtime_heap_usage_for_test(&second_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&released_old_realm_heap, &["numberOfNativeContexts"]),
+        before_navigation_native_contexts,
+        "dropping the last author references must collect the old inner realm"
+    );
+    assert_eq!(
+        related_script_agent_memory_u64(&released_old_realm_heap, &["numberOfDetachedContexts"]),
+        before_navigation_detached_contexts,
+        "dropping the last author references must restore the detached-context baseline"
     );
 
     second_page
@@ -8680,6 +8763,139 @@ async fn related_page_script_agent_transfers_stable_window_proxy_objects_and_dom
         .close_async()
         .await
         .expect("related WindowProxy holder should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_auxiliary_page_inherits_exact_opaque_origin_nonce() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let source_url =
+        url::Url::parse("data:text/html,opaque-related-opener").expect("opaque source URL");
+    let mut source_page = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        "<!doctype html><body data-source='opaque-opener'>opaque opener</body>",
+    )
+    .await;
+
+    let (opened, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const popup = window.open("about:blank", "opaque-related-target");
+  globalThis.__opaqueRelatedTarget = popup;
+  popup.document.body.dataset.initial = "written-before-adoption";
+  return [popup !== null, popup.origin, popup.document === popup.document].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("opaque opener should synchronously create its related auxiliary Page");
+    assert_eq!(
+        renderer_json_value(opened),
+        Some(serde_json::json!("true|null|true")),
+        "the initial auxiliary Document must inherit the opener's exact opaque origin"
+    );
+    let creation_publications = output_rx.drain();
+    let creation_activations = popup_activations_for_page(&creation_publications, &source_page);
+    assert_eq!(creation_activations.len(), 1);
+    let pending_target = creation_activations[0]
+        .pending_auxiliary_page()
+        .expect("opaque related target should reserve its exact Page");
+    let mut target_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        pending_target.page_reservation(),
+        source_url,
+        "opaque-related-target",
+    )
+    .await;
+
+    let (after_adoption, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  const popup = globalThis.__opaqueRelatedTarget;
+  popup.document.body.dataset.afterAdoption = "still-same-origin";
+  return [
+    popup.document.body.dataset.initial,
+    popup.document.body.dataset.afterAdoption,
+    popup.origin
+  ].join("|");
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("opaque opener should retain DOM access after Page adoption");
+    assert_eq!(
+        renderer_json_value(after_adoption),
+        Some(serde_json::json!(
+            "written-before-adoption|still-same-origin|null"
+        ))
+    );
+
+    let distinct_url = url::Url::parse("data:text/html,distinct-opaque-related-page")
+        .expect("distinct opaque Page URL");
+    let mut distinct_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &source_page,
+        &loader,
+        distinct_url,
+        "<!doctype html><body>distinct opaque Page</body>",
+    )
+    .await;
+    let source_testing = RendererPageTestingHandle::new_for_testing(&source_page);
+    let distinct_testing = RendererPageTestingHandle::new_for_testing(&distinct_page);
+    source_testing
+        .install_related_page_window_proxy_for_experiment(
+            &distinct_testing,
+            "__distinctOpaqueRelatedPage",
+        )
+        .await
+        .expect("distinct opaque related Page should expose its restricted WindowProxy");
+    let (distinct_access, _) = source_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  try {
+    void globalThis.__distinctOpaqueRelatedPage.document;
+    return "unexpected-access";
+  } catch (error) {
+    return error && error.name;
+  }
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("distinct opaque related WindowProxy access should evaluate");
+    assert_eq!(
+        renderer_json_value(distinct_access),
+        Some(serde_json::json!("SecurityError")),
+        "equal public 'null' serialization must not merge distinct opaque origins"
+    );
+
+    distinct_page
+        .close_async()
+        .await
+        .expect("distinct opaque related Page should close");
+    target_page
+        .close_async()
+        .await
+        .expect("opaque auxiliary target Page should close");
+    source_page
+        .close_async()
+        .await
+        .expect("opaque source Page should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -9120,6 +9336,268 @@ async fn related_page_script_agent_releases_replaced_and_closed_peer_realms() {
     assert_eq!(final_accounting.destroyed, baseline_isolates.destroyed + 1);
     assert_eq!(final_accounting.live, baseline_isolates.live);
     assert_eq!(final_accounting.reserved, baseline_isolates.reserved);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_releases_detached_host_v8_roots_and_child_realm() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut anchor_page = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://example.test/detached-root-anchor").unwrap(),
+        "<!doctype html><body>detached root anchor</body>",
+    )
+    .await;
+    let anchor_heap = runtime_heap_usage_for_test(&anchor_page).await;
+    let anchor_native_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfNativeContexts"]);
+    let anchor_detached_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfDetachedContexts"]);
+
+    let mut peer_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &anchor_page,
+        &loader,
+        url::Url::parse("https://example.test/detached-root-peer").unwrap(),
+        "<!doctype html><body><iframe id='cycle-child' srcdoc='<body>child</body>'></iframe></body>",
+    )
+    .await;
+    let (prepared, _) = peer_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  customElements.define("x-cycle-root", class extends HTMLElement {});
+  document.body.append(document.createElement("x-cycle-root"));
+  globalThis.__cycleAbort = new AbortController();
+  globalThis.__cycleObserver = new MutationObserver(() => {});
+  globalThis.__cycleObserver.observe(document.body, {childList: true});
+  globalThis.__cycleTimer = setTimeout(() => {}, 60_000);
+  globalThis.__cycleDatabases = indexedDB.databases();
+  document.body.addEventListener("cycle", () => {});
+
+  const child = document.querySelector("#cycle-child").contentWindow;
+  child.eval(`
+    customElements.define("x-cycle-child", class extends HTMLElement {});
+    document.body.append(document.createElement("x-cycle-child"));
+    globalThis.__cycleAbort = new AbortController();
+    globalThis.__cycleObserver = new MutationObserver(() => {});
+    globalThis.__cycleObserver.observe(document.body, {childList: true});
+    globalThis.__cycleTimer = setTimeout(() => {}, 60_000);
+    globalThis.__cycleDatabases = indexedDB.databases();
+    document.body.addEventListener("cycle", () => {});
+  `);
+  return JSON.stringify([
+    child.document.body.lastElementChild.localName,
+    document.body.lastElementChild.localName
+  ]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("detached host V8-root fixture should initialize");
+    assert_eq!(
+        renderer_json_value(prepared),
+        Some(serde_json::json!("[\"x-cycle-child\",\"x-cycle-root\"]"))
+    );
+    let active_heap = runtime_heap_usage_for_test(&peer_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&active_heap, &["numberOfNativeContexts"]),
+        anchor_native_contexts + 2,
+        "the fixture should publish one peer top realm and one child realm"
+    );
+
+    peer_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression:
+                    r#"location.href = "data:text/html,detached-root-replacement"; "navigating""#
+                        .to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("detached host V8-root fixture should navigate");
+    peer_page
+        .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+        .await
+        .expect("detached host V8-root fixture should collect retired realms");
+    let replaced_heap = runtime_heap_usage_for_test(&peer_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&replaced_heap, &["numberOfNativeContexts"]),
+        anchor_native_contexts + 1,
+        "host-owned wrapper, child, observer, custom-element, and abort roots must not retain the old realms"
+    );
+    assert_eq!(
+        related_script_agent_memory_u64(&replaced_heap, &["numberOfDetachedContexts"]),
+        anchor_detached_contexts,
+        "unreferenced old top and child realms must both leave the detached-context inventory"
+    );
+
+    peer_page
+        .close_async()
+        .await
+        .expect("detached host V8-root peer should close");
+    anchor_page
+        .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+        .await
+        .expect("anchor should collect the closed replacement realm");
+    let closed_heap = runtime_heap_usage_for_test(&anchor_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&closed_heap, &["numberOfNativeContexts"]),
+        anchor_native_contexts
+    );
+    assert_eq!(
+        related_script_agent_memory_u64(&closed_heap, &["numberOfDetachedContexts"]),
+        anchor_detached_contexts
+    );
+
+    anchor_page
+        .close_async()
+        .await
+        .expect("detached host V8-root anchor should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_page_script_agent_retains_and_releases_detached_child_dom_values() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut anchor_page = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://example.test/detached-child-anchor").unwrap(),
+        "<!doctype html><body>detached child anchor</body>",
+    )
+    .await;
+    let anchor_heap = runtime_heap_usage_for_test(&anchor_page).await;
+    let anchor_native_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfNativeContexts"]);
+    let anchor_detached_contexts =
+        related_script_agent_memory_u64(&anchor_heap, &["numberOfDetachedContexts"]);
+
+    let mut peer_page = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &anchor_page,
+        &loader,
+        url::Url::parse("https://example.test/detached-child-peer").unwrap(),
+        "<!doctype html><body><iframe id='retained-child' srcdoc=\"<body><main id='child-node'>before-child</main></body>\"></iframe></body>",
+    )
+    .await;
+    let (child_prepared, _) = peer_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const child = document.querySelector("#retained-child").contentWindow;
+  child.__retainedChildFunction = child.eval(`value => {
+    document.querySelector("#child-node").dataset.call = value;
+    return value + ":" + document.querySelector("#child-node").textContent;
+  }`);
+  return child.document.querySelector("#child-node").textContent;
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("child detached-DOM fixture should initialize");
+    assert_eq!(
+        renderer_json_value(child_prepared),
+        Some(serde_json::json!("before-child"))
+    );
+
+    let anchor_testing = RendererPageTestingHandle::new_for_testing(&anchor_page);
+    let peer_testing = RendererPageTestingHandle::new_for_testing(&peer_page);
+    anchor_testing
+        .install_related_page_window_proxy_for_experiment(&peer_testing, "__lm_detached_child_peer")
+        .await
+        .expect("anchor should receive the peer stable WindowProxy");
+    let (retained, _) = anchor_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const peer = globalThis.__lm_detached_child_peer;
+  const child = peer.document.querySelector("#retained-child").contentWindow;
+  globalThis.__lm_saved_child_document = child.document;
+  globalThis.__lm_saved_child_function = child.__retainedChildFunction;
+  globalThis.__lm_saved_child_node = child.document.querySelector("#child-node");
+  return globalThis.__lm_saved_child_node.textContent;
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("anchor should retain child realm DOM values");
+    assert_eq!(
+        renderer_json_value(retained),
+        Some(serde_json::json!("before-child"))
+    );
+
+    peer_page
+        .run_async_command(
+            RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation {
+                expression:
+                    r#"location.href = "data:text/html,detached-child-replacement"; "navigating""#
+                        .to_owned(),
+                await_promise: false,
+            },
+        )
+        .await
+        .expect("peer should replace the top Document containing the child realm");
+    let (after_navigation, _) = anchor_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  const node = globalThis.__lm_saved_child_node;
+  const identity = globalThis.__lm_saved_child_document.querySelector("#child-node") === node;
+  const call = globalThis.__lm_saved_child_function("after-navigation");
+  node.textContent = "after-child-navigation";
+  return JSON.stringify([identity, call, node.textContent, node.dataset.call]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("retained child Document, Node, and function should remain usable");
+    assert_eq!(
+        renderer_json_value(after_navigation),
+        Some(serde_json::json!(
+            "[true,\"after-navigation:before-child\",\"after-child-navigation\",\"after-navigation\"]"
+        ))
+    );
+
+    anchor_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"delete globalThis.__lm_saved_child_document;
+delete globalThis.__lm_saved_child_function;
+delete globalThis.__lm_saved_child_node;
+true"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("retained child DOM values should be releasable");
+    peer_page
+        .run_async_command(RendererPageCommand::RuntimeCollectGarbage)
+        .await
+        .expect("released child realm should be collectable");
+    let released_heap = runtime_heap_usage_for_test(&peer_page).await;
+    assert_eq!(
+        related_script_agent_memory_u64(&released_heap, &["numberOfNativeContexts"]),
+        anchor_native_contexts + 1,
+        "the replacement peer should be the only realm beyond the anchor baseline"
+    );
+    assert_eq!(
+        related_script_agent_memory_u64(&released_heap, &["numberOfDetachedContexts"]),
+        anchor_detached_contexts,
+        "releasing child DOM values must collect both detached child and outgoing top realms"
+    );
+
+    peer_page
+        .close_async()
+        .await
+        .expect("detached child peer should close");
+    anchor_page
+        .close_async()
+        .await
+        .expect("detached child anchor should close");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -11772,6 +12250,266 @@ async fn popup_policy_checks_keep_existing_and_new_target_order_distinct() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn related_window_proxy_location_wakes_the_exact_standalone_target_page() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let opener_url = url::Url::parse("https://example.test/related-location-opener").unwrap();
+    let mut opener_page = create_test_html_page(
+        &runtime,
+        &loader,
+        opener_url.clone(),
+        "<!doctype html><body>related location opener</body>",
+    )
+    .await;
+    output_rx.drain();
+
+    let (open_result, _) = opener_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"
+(() => {
+  globalThis.__relatedLocationPopup = window.open("about:blank", "related-location-target");
+  return __relatedLocationPopup !== null;
+})()
+"#
+            .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related about:blank popup should open");
+    assert_eq!(
+        renderer_json_value(open_result),
+        Some(serde_json::json!(true))
+    );
+    let popup_publications = output_rx.drain();
+    let popup_activations = popup_activations_for_page(&popup_publications, &opener_page);
+    assert_eq!(popup_activations.len(), 1);
+    let popup_reservation = popup_activations[0]
+        .pending_auxiliary_page()
+        .expect("related popup should carry its staged Page reservation")
+        .page_reservation();
+    let mut popup_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        popup_reservation,
+        opener_url,
+        "related-location-target",
+    )
+    .await;
+    output_rx.drain();
+
+    let destination = "data:text/html,<title>cross-page-location</title><script>globalThis.__crossPageLocationLoaded=true</script>";
+    let (assignment_result, _) = opener_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                "__relatedLocationPopup.location.href = {destination:?}; 'assigned'"
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("opener should assign its related popup Location");
+    assert_eq!(
+        renderer_json_value(assignment_result),
+        Some(serde_json::json!("assigned"))
+    );
+
+    popup_page
+        .run_async_command(RendererPageCommand::WaitForScriptTruthy {
+            expression: "globalThis.__crossPageLocationLoaded === true".to_owned(),
+            timeout_ms: 2_000,
+            loader: loader.clone(),
+        })
+        .await
+        .expect("cross-Page Location assignment should wake and navigate the exact target Page");
+    let (popup_state, _) = popup_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "`${document.title}|${location.href}|${opener !== null}`".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("navigated related popup state should evaluate");
+    assert_eq!(
+        renderer_json_value(popup_state),
+        Some(serde_json::json!(format!(
+            "cross-page-location|{destination}|true"
+        )))
+    );
+
+    popup_page
+        .close_async()
+        .await
+        .expect("popup Page should close");
+    opener_page
+        .close_async()
+        .await
+        .expect("opener Page should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_new_popup_same_turn_location_replaces_initial_destination_queue() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let opener_url = url::Url::parse("https://example.test/initial-destination-opener").unwrap();
+    let mut opener_page = create_test_html_page(
+        &runtime,
+        &loader,
+        opener_url.clone(),
+        "<!doctype html><body>initial destination opener</body>",
+    )
+    .await;
+    output_rx.drain();
+
+    let old_destination = "data:text/html,<title>old-destination</title>";
+    let winning_destination = "data:text/html,<title>winning-destination</title>";
+    let (open_result, _) = opener_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"
+globalThis.__sameTurnPopup = window.open({old_destination:?}, "same-turn-target");
+__sameTurnPopup.location.href = {winning_destination:?};
+__sameTurnPopup !== null
+"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("same-turn popup retarget should evaluate");
+    assert_eq!(
+        renderer_json_value(open_result),
+        Some(serde_json::json!(true))
+    );
+
+    let publications = output_rx.drain();
+    let activations = popup_activations_for_page(&publications, &opener_page);
+    assert_eq!(activations.len(), 1);
+    assert!(
+        !activations[0].has_destination_navigation(),
+        "related target creation must not retain an older browser-owned destination"
+    );
+    let reservation = activations[0]
+        .pending_auxiliary_page()
+        .expect("related target should carry its staged Page")
+        .page_reservation();
+    let mut popup_page = adopt_staged_related_about_blank_test_page(
+        &runtime,
+        &loader,
+        reservation,
+        opener_url,
+        "same-turn-target",
+    )
+    .await;
+
+    let (popup_state, _) = popup_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "`${document.title}|${location.href}|${history.length}`".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("winning target Document should evaluate");
+    assert_eq!(
+        renderer_json_value(popup_state),
+        Some(serde_json::json!(format!(
+            "winning-destination|{winning_destination}|1"
+        )))
+    );
+
+    popup_page.close_async().await.expect("popup should close");
+    opener_page
+        .close_async()
+        .await
+        .expect("opener should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_new_popup_without_url_same_turn_location_owns_initial_destination() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let opener_url = url::Url::parse("https://example.test/no-url-destination-opener").unwrap();
+    let mut opener_page = create_test_html_page(
+        &runtime,
+        &loader,
+        opener_url.clone(),
+        "<!doctype html><body>no URL destination opener</body>",
+    )
+    .await;
+    output_rx.drain();
+
+    let destination = "data:text/html,<title>no-url-destination</title>";
+    let (open_result, _) = opener_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"
+globalThis.__sameTurnNoUrlPopup = window.open();
+__sameTurnNoUrlPopup.location.href = {destination:?};
+__sameTurnNoUrlPopup !== null
+"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("same-turn no-URL popup navigation should evaluate");
+    assert_eq!(
+        renderer_json_value(open_result),
+        Some(serde_json::json!(true))
+    );
+
+    let publications = output_rx.drain();
+    let activations = popup_activations_for_page(&publications, &opener_page);
+    assert_eq!(activations.len(), 1);
+    assert!(
+        !activations[0].has_destination_navigation(),
+        "no-URL target creation must leave destination authority on the staged Page"
+    );
+    let reservation = activations[0]
+        .pending_auxiliary_page()
+        .expect("related target should carry its staged Page")
+        .page_reservation();
+    let (mut popup_page, creation_diagnostics) =
+        adopt_staged_related_about_blank_test_page_delegating_navigation(
+            &runtime,
+            &loader,
+            reservation,
+            opener_url,
+            "",
+        )
+        .await;
+    let initial_navigation = creation_diagnostics
+        .initial_top_level_navigation
+        .expect("browser-delegated adoption should transfer the target-local destination");
+    assert_eq!(initial_navigation.request().url(), destination);
+    assert!(
+        initial_navigation.navigation_history_entry_seed().is_some(),
+        "initial-empty Location assignment should retain its replacement history seed"
+    );
+
+    let (popup_state, _) = popup_page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "`${document.title}|${location.href}|${history.length}`".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("browser-delegated initial empty Page should evaluate");
+    assert_eq!(
+        renderer_json_value(popup_state),
+        Some(serde_json::json!("|about:blank|1"))
+    );
+
+    popup_page.close_async().await.expect("popup should close");
+    opener_page
+        .close_async()
+        .await
+        .expect("opener should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
     let runtime = JsRuntime::initialize();
     let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
@@ -11913,8 +12651,7 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
 
     let (noopener_result, _) = second_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r#"window.open("about:blank#fresh-agent", "_blank", "noopener") === null"#
-                .to_owned(),
+            expression: r#"window.open("about:blank", "_blank", "noopener") === null"#.to_owned(),
             await_promise: false,
         })
         .await
@@ -11935,6 +12672,10 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
         noopener_popups[0].new_target_disposition(),
         Some(crate::RendererPopupNewTargetDisposition::FreshUnnamed),
         "the creator must freeze the unnamed Fresh-group policy"
+    );
+    assert!(
+        !noopener_popups[0].has_destination_navigation(),
+        "a fresh about:blank Page must expose its synchronous initial empty Document without scheduling a second navigation"
     );
     let noopener_page_reservation = noopener_popups[0]
         .pending_auxiliary_page()
@@ -11977,6 +12718,10 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
             Some(crate::RendererPopupNewTargetDisposition::FreshNamed),
             "the creator must freeze the named Fresh-group policy"
         );
+        assert!(
+            popups[0].has_destination_navigation(),
+            "an about:blank fragment remains destination work on the new Fresh Page"
+        );
         let reservation = popups[0]
             .pending_auxiliary_page()
             .expect("named fresh-group popup should reserve one real renderer Page")
@@ -11995,8 +12740,7 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
 
     let (first_named_result, _) = second_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r#"window.open("about:blank#named-first", "stable-popup") !== null"#
-                .to_owned(),
+            expression: r#"window.open("about:blank", "stable-popup") !== null"#.to_owned(),
             await_promise: false,
         })
         .await
@@ -12016,6 +12760,10 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
         first_named_popups[0].new_target_disposition(),
         Some(crate::RendererPopupNewTargetDisposition::Related),
         "opener-preserving named creation must remain in the related Page group"
+    );
+    assert!(
+        !first_named_popups[0].has_destination_navigation(),
+        "new related about:blank targets must retain their staged initial empty Document"
     );
     assert!(first_named_popups[0].resolved_target_page().is_none());
 
@@ -12041,6 +12789,10 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
     let reused_target = reused_named_popups[0]
         .resolved_target_page()
         .expect("named lookup should carry its exact already-live renderer Page");
+    assert!(
+        reused_named_popups[0].has_destination_navigation(),
+        "about:blank remains a navigation when window.open reuses an already-live named target"
+    );
     assert_eq!(
         reused_target.owner_local_host_id(),
         first_named_page.local_host_id()
@@ -12252,7 +13004,11 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
         Some(crate::RendererPopupNewTargetDisposition::Related),
         "opener-preserving named form creation must freeze related-group admission"
     );
-    assert_eq!(named_form_popups[0].request_method(), Some("GET"));
+    assert!(
+        !named_form_popups[0].has_destination_navigation(),
+        "new related form creation must leave its exact request on the target Page queue"
+    );
+    assert_eq!(named_form_popups[0].request_method(), None);
     assert_eq!(named_form_popups[0].request_body(), None);
 
     let (reused_named_form_result, _) = second_page
@@ -25891,6 +26647,62 @@ async fn adopt_staged_related_about_blank_test_page(
         .expect("staged related about:blank Page should load");
     assert!(pending_download.is_none());
     page
+}
+
+async fn adopt_staged_related_about_blank_test_page_delegating_navigation(
+    runtime: &JsRuntime,
+    loader: &ResourceRequestClient,
+    reservation: super::RendererPageReservationToken,
+    navigation_initiator_url: url::Url,
+    target_name: &str,
+) -> (RendererPageHandle, crate::RendererPageCreationDiagnostics) {
+    let about_blank = url::Url::parse("about:blank").expect("about:blank URL");
+    let initial_document_referrer = navigation_initiator_url.as_str().to_owned();
+    let pending = runtime
+        .start_create_html_page_from_response_with_inspector_session_restores(
+            reservation,
+            about_blank.clone(),
+            about_blank,
+            Some(navigation_initiator_url),
+            false,
+            0,
+            200,
+            vec![("content-type".to_owned(), "text/html".to_owned())],
+            loader,
+            crate::RendererWebStorageHandles::ephemeral(),
+            String::new(),
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            1.0,
+            Default::default(),
+            None,
+            false,
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+            None,
+            None,
+            RendererTopLevelNavigationDispatch::DelegateToBrowser,
+            None,
+            Some(initial_document_referrer),
+            Some(target_name.to_owned()),
+            None,
+        )
+        .expect("staged related about:blank Page should start");
+    let (page, _, diagnostics, _creation_artifacts, pending_download) = pending
+        .await_ready()
+        .await
+        .expect("staged related about:blank Page should load");
+    assert!(pending_download.is_none());
+    (page, diagnostics)
 }
 
 async fn create_related_test_html_page_with_indexed_db_manager_for_script_agent_experiment(

@@ -12,7 +12,7 @@ use chromiumoxide_cdp::cdp::browser_protocol::page::{
 };
 use moli_core::page::{
     ChildFrameDocumentOpenedSnapshot, CompletedPageCommand, PendingPageCommand,
-    SameDocumentHistoryUpdate,
+    RendererPendingTopLevelHistoryTraversal, SameDocumentHistoryUpdate,
 };
 use moli_core::runtime::NavigationEngine;
 use moli_fetch::NET_ERR_ABORTED_ERROR_TEXT;
@@ -2074,8 +2074,9 @@ fn start_history_traversal_url_fallback(
 pub(super) fn start_session_owner_history_traversal_from_renderer(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
-    delta: i64,
+    traversal: &RendererPendingTopLevelHistoryTraversal,
 ) -> PageCommandTaskStep {
+    let delta = traversal.delta();
     let reloaded_after_crash_session_ids =
         reloaded_after_crash_session_ids_for_session_owner(conn, session_id);
     let destination = DevToolsHistoryTraversalDestination::Delta(delta);
@@ -2095,6 +2096,10 @@ pub(super) fn start_session_owner_history_traversal_from_renderer(
                 return PageCommandTaskStep::Complete(CommandOutputPlan::success());
             }
         };
+    // Protocol targets retain the browser-side session-history controller as
+    // their authority. The renderer seed is a direct-Browser fallback and may
+    // describe only the realm-local suffix after browser-initiated navigation;
+    // it must not override or veto the browser-resolved entry here.
     start_resolved_history_traversal_command(
         conn,
         None,
@@ -2302,6 +2307,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     request_body: Option<&[u8]>,
     request_headers: &[(String, String)],
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    navigation_history_entry_seed: Option<&moli_page_types::NavigationHistoryEntrySeed>,
     service_worker_clients_open_window_continuation: Option<
         moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
     >,
@@ -2342,6 +2348,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
             request_method,
             request_body.map(<[u8]>::to_vec),
             request_headers.to_vec(),
+            navigation_history_entry_seed.cloned(),
             service_worker_clients_open_window_continuation,
             // The renderer has already settled the browsing-context action;
             // fetching and committing the destination is a new navigation
@@ -2940,6 +2947,7 @@ fn start_navigate_to_url_command_with_background_policy(
         None,
         Vec::new(),
         None,
+        None,
         allow_background_navigation,
         request_load_policy,
         initiator,
@@ -2969,6 +2977,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     request_method: &str,
     request_body: Option<Vec<u8>>,
     request_headers: Vec<(String, String)>,
+    navigation_history_entry_seed: Option<moli_page_types::NavigationHistoryEntrySeed>,
     service_worker_clients_open_window_continuation: Option<
         moli_core::page::RendererServiceWorkerClientsOpenWindowContinuation,
     >,
@@ -3056,6 +3065,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
             .map(|body| String::from_utf8_lossy(body).into_owned()),
         request_body_bytes: request_body,
         request_headers,
+        navigation_history_entry_seed: navigation_history_entry_seed.map(Box::new),
         request_load_policy,
         timestamp,
         source_document_security: Box::new(source_document_security),

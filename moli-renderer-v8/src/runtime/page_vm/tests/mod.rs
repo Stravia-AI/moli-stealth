@@ -149,7 +149,6 @@ mod modulepreload_start_completion;
 mod navigation_api_task;
 mod opfs;
 mod parser_written_script_residence;
-mod popup_document_completion;
 mod preferred_aspect_ratio;
 mod rendering_update;
 mod service_worker;

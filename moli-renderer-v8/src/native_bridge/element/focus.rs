@@ -554,9 +554,6 @@ fn current_execution_window_endpoint(
     if let Some(handle) = crate::native_bridge::active_child_window_handle(scope) {
         return PendingWindowMessageEndpoint::ChildWindow(handle);
     }
-    if let Some(popup_id) = crate::native_bridge::active_lightweight_popup_id(scope) {
-        return PendingWindowMessageEndpoint::LightweightPopup(popup_id);
-    }
     PendingWindowMessageEndpoint::TopWindow
 }
 
@@ -572,9 +569,6 @@ fn focused_window_endpoint(
     let document = runtime.dom_host().owner_document_handle(handle)?;
     if let Some(child_handle) = runtime.child_browsing_context_host_for_document_handle(document) {
         return Some(PendingWindowMessageEndpoint::ChildWindow(child_handle));
-    }
-    if let Some(popup_id) = runtime.lightweight_popup_id_for_document_handle(document) {
-        return Some(PendingWindowMessageEndpoint::LightweightPopup(popup_id));
     }
     (document == runtime.document_handle()).then_some(PendingWindowMessageEndpoint::TopWindow)
 }
@@ -600,10 +594,6 @@ fn dispatch_window_focus_event(
         }
         PendingWindowMessageEndpoint::ChildWindow(handle) => {
             runtime.dispatch_child_window_event(scope, handle, event_type, event);
-        }
-        PendingWindowMessageEndpoint::LightweightPopup(popup_id) => {
-            let _ =
-                runtime.dispatch_lightweight_popup_window_event(scope, popup_id, event_type, event);
         }
     }
 }

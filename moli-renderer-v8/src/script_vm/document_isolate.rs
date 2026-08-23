@@ -56,6 +56,67 @@ static DOCUMENT_ISOLATE_LIVE_COUNT: AtomicU64 = AtomicU64::new(0);
 static DOCUMENT_ISOLATE_RESERVED_COUNT: AtomicU64 = AtomicU64::new(0);
 static NEXT_SCRIPT_AGENT_ID: AtomicU64 = AtomicU64::new(1);
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RendererDeferredContextHostReleaseQueue {
+    inner: Rc<RendererDeferredContextHostReleaseQueueInner>,
+}
+
+struct RendererDeferredContextHostRelease {
+    _host: Rc<RefCell<JsContextHost>>,
+    retained_v8_handle_state: Vec<Box<dyn std::any::Any>>,
+}
+
+impl std::fmt::Debug for RendererDeferredContextHostRelease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("RendererDeferredContextHostRelease")
+            .field(
+                "retained_v8_handle_state_count",
+                &self.retained_v8_handle_state.len(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Default)]
+struct RendererDeferredContextHostReleaseQueueInner {
+    pending: RefCell<Vec<RendererDeferredContextHostRelease>>,
+    isolate_shutting_down: Cell<bool>,
+}
+
+impl RendererDeferredContextHostReleaseQueue {
+    pub(crate) fn defer(
+        &self,
+        host: Rc<RefCell<JsContextHost>>,
+        retained_v8_handle_state: Vec<Box<dyn std::any::Any>>,
+    ) {
+        let release = RendererDeferredContextHostRelease {
+            _host: host,
+            retained_v8_handle_state,
+        };
+        if self.inner.isolate_shutting_down.get() {
+            drop(release);
+            return;
+        }
+        self.inner.pending.borrow_mut().push(release);
+    }
+
+    fn drain_on_entered_isolate(&self) {
+        loop {
+            let pending = std::mem::take(&mut *self.inner.pending.borrow_mut());
+            if pending.is_empty() {
+                return;
+            }
+            drop(pending);
+        }
+    }
+
+    fn begin_isolate_shutdown(&self) {
+        self.drain_on_entered_isolate();
+        self.inner.isolate_shutting_down.set(true);
+    }
+}
+
 fn allocate_script_agent_id() -> ScriptAgentId {
     let value = NEXT_SCRIPT_AGENT_ID
         .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
@@ -388,6 +449,7 @@ struct RendererRelatedPageTopLevelTargetState {
     name: RefCell<String>,
     current_url: RefCell<String>,
     current_serialized_origin: RefCell<String>,
+    current_opaque_origin_nonce: Cell<Option<moli_storage_key::OpaqueOriginNonce>>,
     current_cross_origin_opener_policy:
         RefCell<Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy>>,
     /// Agent-neutral projection of the current root Document's nested frame
@@ -471,6 +533,7 @@ pub(crate) struct RendererRemoteTopLevelWindowProxyTarget {
     pub(crate) focused: bool,
     pub(crate) current_url: String,
     pub(crate) current_serialized_origin: String,
+    pub(crate) current_opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
     pub(crate) opener_endpoint: Option<TopLevelWindowProxyEndpointId>,
 }
 
@@ -497,11 +560,12 @@ pub(crate) struct RendererRemoteFrameSnapshot {
     pub(crate) name: String,
     pub(crate) current_url: String,
     pub(crate) serialized_origin: String,
+    pub(crate) opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
     pub(crate) document_domain: Option<String>,
     pub(crate) policy_container: crate::document_runtime::DocumentPolicyContainer,
 }
 
-const REMOTE_FRAME_SNAPSHOT_WIRE_VERSION: u16 = 1;
+const REMOTE_FRAME_SNAPSHOT_WIRE_VERSION: u16 = 2;
 const MAX_REMOTE_FRAME_SNAPSHOT_WIRE_BYTES: usize = 4 * 1024 * 1024;
 const MAX_REMOTE_FRAME_TREE_WIRE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_FRAME_TREE_SNAPSHOTS: usize = 4_096;
@@ -530,6 +594,7 @@ struct RendererRemoteFrameSnapshotWire {
     name: String,
     current_url: String,
     serialized_origin: String,
+    opaque_origin_nonce: Option<u64>,
     document_domain: Option<String>,
     policy_container: RendererRemoteDocumentPolicyWire,
 }
@@ -658,6 +723,7 @@ impl RendererRemoteFrameWireSnapshot {
             name: snapshot.name,
             current_url: snapshot.current_url,
             serialized_origin: snapshot.serialized_origin,
+            opaque_origin_nonce: snapshot.opaque_origin_nonce.map(|nonce| nonce.get()),
             document_domain: snapshot.document_domain,
             policy_container: snapshot.policy_container.into(),
         };
@@ -724,6 +790,21 @@ impl RendererRemoteFrameSnapshotWire {
         validate_remote_frame_string(&self.name, "name")?;
         validate_remote_frame_url(&self.current_url)?;
         validate_remote_frame_origin(&self.serialized_origin)?;
+        let opaque_origin_nonce = self
+            .opaque_origin_nonce
+            .map(|nonce| {
+                anyhow::ensure!(nonce != 0, "remote frame opaque-origin nonce is zero");
+                Ok(moli_storage_key::OpaqueOriginNonce::new(nonce))
+            })
+            .transpose()?;
+        anyhow::ensure!(
+            (self.serialized_origin == "null") == opaque_origin_nonce.is_some(),
+            "remote frame opaque-origin identity disagrees with its serialized origin"
+        );
+        anyhow::ensure!(
+            self.serialized_origin != "null" || self.document_domain.is_none(),
+            "remote opaque frame cannot carry document.domain"
+        );
         if let Some(domain) = self.document_domain.as_deref() {
             validate_remote_frame_string(domain, "document.domain")?;
         }
@@ -750,6 +831,7 @@ impl RendererRemoteFrameSnapshotWire {
             name: self.name,
             current_url: self.current_url,
             serialized_origin: self.serialized_origin,
+            opaque_origin_nonce,
             document_domain: self.document_domain,
             policy_container: self.policy_container.try_into()?,
         })
@@ -1106,6 +1188,7 @@ impl RendererPageScriptEnvironment {
             name: RefCell::new(String::new()),
             current_url: RefCell::new(String::new()),
             current_serialized_origin: RefCell::new(String::new()),
+            current_opaque_origin_nonce: Cell::new(None),
             current_cross_origin_opener_policy: RefCell::new(None),
             remote_frame_tree: RefCell::new(Vec::new()),
             remote_frame_tree_revision: Cell::new(0),
@@ -1386,16 +1469,6 @@ impl RendererPageScriptEnvironment {
         self.script_agent_id
     }
 
-    pub(crate) fn is_related_page_peer(&self, other: &Self) -> bool {
-        // One RendererDocumentIsolate owns exactly one script agent. Access
-        // checks run while that isolate is already mutably borrowed, so this
-        // hot path must use the stable Rc identity instead of borrowing the
-        // holder again to read its script-agent id.
-        self.page_id != other.page_id
-            && self.renderer_document_isolate.identity_key()
-                == other.renderer_document_isolate.identity_key()
-    }
-
     pub(crate) fn bootstrap_replacement_document_isolate(
         &self,
     ) -> Result<RendererDocumentIsolateBootstrap> {
@@ -1629,6 +1702,7 @@ impl RendererPageScriptEnvironment {
                 focused: target.focused.get(),
                 current_url: target.current_url.borrow().clone(),
                 current_serialized_origin: target.current_serialized_origin.borrow().clone(),
+                current_opaque_origin_nonce: target.current_opaque_origin_nonce.get(),
                 opener_endpoint: *target.opener_endpoint.borrow(),
             },
         ))
@@ -1643,10 +1717,23 @@ impl RendererPageScriptEnvironment {
         &self,
         url: &url::Url,
         serialized_origin: &str,
+        opaque_origin_nonce: Option<moli_storage_key::OpaqueOriginNonce>,
     ) {
+        assert_eq!(
+            serialized_origin == "null",
+            opaque_origin_nonce.is_some(),
+            "top-level opaque-origin replication requires one exact nonce"
+        );
+        assert!(
+            opaque_origin_nonce.is_none_or(|nonce| nonce.get() != 0),
+            "top-level opaque-origin replication rejects a zero nonce"
+        );
         *self.top_level_target.current_url.borrow_mut() = url.to_string();
         *self.top_level_target.current_serialized_origin.borrow_mut() =
             serialized_origin.to_owned();
+        self.top_level_target
+            .current_opaque_origin_nonce
+            .set(opaque_origin_nonce);
     }
 
     pub(crate) fn replicate_current_remote_frame_tree(
@@ -1860,6 +1947,7 @@ impl RendererPageScriptEnvironment {
                 focused: target.focused.get(),
                 current_url: target.current_url.borrow().clone(),
                 current_serialized_origin: target.current_serialized_origin.borrow().clone(),
+                current_opaque_origin_nonce: target.current_opaque_origin_nonce.get(),
                 opener_endpoint: *target.opener_endpoint.borrow(),
             })
     }
@@ -2162,6 +2250,12 @@ impl RendererDocumentIsolateTeardown {
 #[derive(Clone)]
 pub(crate) struct RendererDocumentIsolateHandle {
     inner: Rc<RefCell<RendererDocumentIsolateHolder>>,
+    // Keep the release queue on the re-entrant-safe handle as well as in the
+    // holder. Related Page construction can bootstrap a new realm while the
+    // source isolate holder is already mutably borrowed and entered by the
+    // window.open() callback. Looking the queue up through `inner` in that
+    // path would recursively borrow the holder and abort inside V8.
+    deferred_context_host_releases: RendererDeferredContextHostReleaseQueue,
 }
 
 impl std::fmt::Debug for RendererDocumentIsolateHandle {
@@ -2172,6 +2266,12 @@ impl std::fmt::Debug for RendererDocumentIsolateHandle {
 }
 
 impl RendererDocumentIsolateHandle {
+    pub(crate) fn deferred_context_host_release_queue(
+        &self,
+    ) -> RendererDeferredContextHostReleaseQueue {
+        self.deferred_context_host_releases.clone()
+    }
+
     #[cfg(test)]
     pub(crate) fn new_standalone_without_owner_reservation_for_test(
         v8_foreground_task_sender: RendererPageV8ForegroundTaskSender,
@@ -2197,8 +2297,12 @@ impl RendererDocumentIsolateHandle {
     ) -> Result<RendererDocumentIsolateBootstrap> {
         let (renderer_document_isolate, bridge_bindings, script_agent_page_membership) =
             RendererDocumentIsolateHolder::new_holder(v8_foreground_task_sender)?;
+        let deferred_context_host_releases = renderer_document_isolate
+            .deferred_context_host_releases
+            .clone();
         let renderer_document_isolate = Self {
             inner: Rc::new(RefCell::new(renderer_document_isolate)),
+            deferred_context_host_releases,
         };
         let isolate_backend = renderer_document_isolate.inspector_isolate_backend_handle();
         Ok(RendererDocumentIsolateBootstrap {
@@ -2267,6 +2371,7 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate, &mut RendererInspectorIsolateBackend) -> T,
     ) -> T {
         let mut holder = self.inner.borrow_mut();
+        let deferred_releases = holder.deferred_context_host_releases.clone();
         let RendererDocumentIsolateHolder {
             isolate,
             inspector_backend,
@@ -2275,7 +2380,11 @@ impl RendererDocumentIsolateHandle {
         let inspector_backend = inspector_backend
             .as_mut()
             .expect("document isolate Inspector backend missing before ScriptVm drop");
-        with_entered_owned_isolate_value(isolate, |isolate| op(isolate, inspector_backend))
+        with_entered_owned_isolate_value(isolate, |isolate| {
+            let result = op(isolate, inspector_backend);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn with_entered_renderer_document_isolate_and_inspector_mut<T>(
@@ -2283,6 +2392,7 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate, &mut RendererInspectorIsolateBackend) -> Result<T>,
     ) -> Result<T> {
         let mut holder = self.inner.borrow_mut();
+        let deferred_releases = holder.deferred_context_host_releases.clone();
         let RendererDocumentIsolateHolder {
             isolate,
             inspector_backend,
@@ -2291,7 +2401,11 @@ impl RendererDocumentIsolateHandle {
         let inspector_backend = inspector_backend
             .as_mut()
             .ok_or_else(|| anyhow!("document isolate Inspector backend unavailable"))?;
-        with_entered_owned_isolate(isolate, |isolate| op(isolate, inspector_backend))
+        with_entered_owned_isolate(isolate, |isolate| {
+            let result = op(isolate, inspector_backend);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn with_renderer_document_isolate_mut<T>(
@@ -2299,7 +2413,12 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate) -> T,
     ) -> T {
         let mut holder = self.inner.borrow_mut();
-        with_entered_owned_isolate_value(&mut holder.isolate, op)
+        let deferred_releases = holder.deferred_context_host_releases.clone();
+        with_entered_owned_isolate_value(&mut holder.isolate, |isolate| {
+            let result = op(isolate);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn with_entered_renderer_document_isolate<T>(
@@ -2307,7 +2426,12 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate) -> Result<T>,
     ) -> Result<T> {
         let mut holder = self.inner.borrow_mut();
-        with_entered_owned_isolate(&mut holder.isolate, op)
+        let deferred_releases = holder.deferred_context_host_releases.clone();
+        with_entered_owned_isolate(&mut holder.isolate, |isolate| {
+            let result = op(isolate);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn with_entered_renderer_document_isolate_and_bootstrap<T>(
@@ -2315,10 +2439,15 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate, &IsolateBootstrapCache) -> Result<T>,
     ) -> Result<T> {
         let mut holder = self.inner.borrow_mut();
+        let deferred_releases = holder.deferred_context_host_releases.clone();
         let RendererDocumentIsolateHolder {
             isolate, bootstrap, ..
         } = &mut *holder;
-        with_entered_owned_isolate(isolate, |isolate| op(isolate, &*bootstrap))
+        with_entered_owned_isolate(isolate, |isolate| {
+            let result = op(isolate, &*bootstrap);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn with_renderer_document_isolate_and_bootstrap_mut<T>(
@@ -2326,10 +2455,15 @@ impl RendererDocumentIsolateHandle {
         op: impl FnOnce(&mut v8::OwnedIsolate, &IsolateBootstrapCache) -> T,
     ) -> T {
         let mut holder = self.inner.borrow_mut();
+        let deferred_releases = holder.deferred_context_host_releases.clone();
         let RendererDocumentIsolateHolder {
             isolate, bootstrap, ..
         } = &mut *holder;
-        with_entered_owned_isolate_value(isolate, |isolate| op(isolate, &*bootstrap))
+        with_entered_owned_isolate_value(isolate, |isolate| {
+            let result = op(isolate, &*bootstrap);
+            deferred_releases.drain_on_entered_isolate();
+            result
+        })
     }
 
     pub(super) fn unregister_renderer_document_isolate_platform(&self) {
@@ -2356,6 +2490,7 @@ pub(super) struct RendererDocumentIsolateHolder {
     bootstrap: IsolateBootstrapCache,
     _platform_registration: V8PlatformIsolateRegistration,
     isolate: v8::OwnedIsolate,
+    deferred_context_host_releases: RendererDeferredContextHostReleaseQueue,
     // Declared after the isolate so destroyed/live accounting changes only
     // after `OwnedIsolate::drop` has completed disposal.
     _accounting: RendererDocumentIsolateAccountingGuard,
@@ -2526,6 +2661,7 @@ impl RendererDocumentIsolateHolder {
             bootstrap,
             _platform_registration: platform_registration,
             isolate,
+            deferred_context_host_releases: RendererDeferredContextHostReleaseQueue::default(),
             _accounting: RendererDocumentIsolateAccountingGuard::new(),
         }
     }
@@ -2540,6 +2676,7 @@ impl Drop for RendererDocumentIsolateHolder {
         unsafe {
             self.isolate.enter();
         }
+        self.deferred_context_host_releases.begin_isolate_shutdown();
     }
 }
 
@@ -2688,6 +2825,7 @@ mod tests {
             name: "wire-child".to_owned(),
             current_url: "https://frame.test/current".to_owned(),
             serialized_origin: "https://frame.test".to_owned(),
+            opaque_origin_nonce: None,
             document_domain: None,
             policy_container: crate::document_runtime::DocumentPolicyContainer::default(),
         };
@@ -2696,6 +2834,72 @@ mod tests {
         assert_eq!(
             encoded.decode().expect("valid snapshot should decode"),
             snapshot
+        );
+
+        let mut opaque = snapshot.clone();
+        opaque.serialized_origin = "null".to_owned();
+        opaque.opaque_origin_nonce = Some(moli_storage_key::OpaqueOriginNonce::new(61));
+        let encoded_opaque = RendererRemoteFrameWireSnapshot::encode(opaque.clone())
+            .expect("opaque snapshot with an exact nonce should encode");
+        assert_eq!(
+            encoded_opaque
+                .decode()
+                .expect("opaque snapshot should decode"),
+            opaque
+        );
+
+        let mut missing_opaque_nonce: serde_json::Value =
+            serde_json::from_slice(&encoded.bytes).expect("snapshot wire JSON");
+        missing_opaque_nonce["serializedOrigin"] = serde_json::json!("null");
+        let missing_opaque_nonce = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(
+                serde_json::to_vec(&missing_opaque_nonce).expect("mutated opaque wire JSON"),
+            ),
+        };
+        assert!(
+            missing_opaque_nonce.decode().is_err(),
+            "opaque remote frame ingress must require its exact nonce"
+        );
+
+        let mut tuple_with_opaque_nonce: serde_json::Value =
+            serde_json::from_slice(&encoded.bytes).expect("snapshot wire JSON");
+        tuple_with_opaque_nonce["opaqueOriginNonce"] = serde_json::json!(67);
+        let tuple_with_opaque_nonce = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(
+                serde_json::to_vec(&tuple_with_opaque_nonce)
+                    .expect("mutated tuple-origin wire JSON"),
+            ),
+        };
+        assert!(
+            tuple_with_opaque_nonce.decode().is_err(),
+            "tuple-origin remote frame ingress must reject an opaque nonce"
+        );
+
+        let mut zero_opaque_nonce: serde_json::Value =
+            serde_json::from_slice(&encoded_opaque.bytes).expect("opaque snapshot wire JSON");
+        zero_opaque_nonce["opaqueOriginNonce"] = serde_json::json!(0);
+        let zero_opaque_nonce = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(
+                serde_json::to_vec(&zero_opaque_nonce).expect("mutated opaque wire JSON"),
+            ),
+        };
+        assert!(
+            zero_opaque_nonce.decode().is_err(),
+            "opaque remote frame ingress must reject a zero nonce"
+        );
+
+        let mut opaque_with_document_domain: serde_json::Value =
+            serde_json::from_slice(&encoded_opaque.bytes).expect("opaque snapshot wire JSON");
+        opaque_with_document_domain["documentDomain"] = serde_json::json!("frame.test");
+        let opaque_with_document_domain = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(
+                serde_json::to_vec(&opaque_with_document_domain)
+                    .expect("mutated opaque document.domain wire JSON"),
+            ),
+        };
+        assert!(
+            opaque_with_document_domain.decode().is_err(),
+            "opaque remote frame ingress must reject document.domain"
         );
 
         let mut value: serde_json::Value =

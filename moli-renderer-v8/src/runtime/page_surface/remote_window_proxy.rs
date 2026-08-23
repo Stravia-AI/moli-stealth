@@ -771,10 +771,6 @@ enum RemoteWindowDocumentSourceWire {
         local_window_id: u64,
         document_id: u64,
     },
-    LightweightPopup {
-        popup_id: u64,
-        popup_document_id: u64,
-    },
 }
 
 impl From<RendererWindowDocumentSource> for RemoteWindowDocumentSourceWire {
@@ -789,13 +785,6 @@ impl From<RendererWindowDocumentSource> for RemoteWindowDocumentSourceWire {
                 frame_id,
                 local_window_id,
                 document_id,
-            },
-            RendererWindowDocumentSource::LightweightPopup {
-                popup_id,
-                popup_document_id,
-            } => Self::LightweightPopup {
-                popup_id,
-                popup_document_id,
             },
         }
     }
@@ -821,19 +810,6 @@ impl TryFrom<RemoteWindowDocumentSourceWire> for RendererWindowDocumentSource {
                     frame_id,
                     local_window_id,
                     document_id,
-                }
-            }
-            RemoteWindowDocumentSourceWire::LightweightPopup {
-                popup_id,
-                popup_document_id,
-            } => {
-                ensure!(
-                    popup_id != 0 && popup_document_id != 0,
-                    "remote navigation lightweight source contains a zero identity"
-                );
-                Self::LightweightPopup {
-                    popup_id,
-                    popup_document_id,
                 }
             }
         })

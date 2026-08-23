@@ -994,6 +994,23 @@ impl DomHost {
     }
 
     pub fn set_document_url_for_handle(&mut self, document_handle: DomHandle, url: Url) -> bool {
+        self.set_document_url_for_handle_with_fallback_base_update(document_handle, url, true)
+    }
+
+    pub fn set_document_url_for_handle_preserving_fallback_base(
+        &mut self,
+        document_handle: DomHandle,
+        url: Url,
+    ) -> bool {
+        self.set_document_url_for_handle_with_fallback_base_update(document_handle, url, false)
+    }
+
+    fn set_document_url_for_handle_with_fallback_base_update(
+        &mut self,
+        document_handle: DomHandle,
+        url: Url,
+        update_fallback_base: bool,
+    ) -> bool {
         let Some(document) = self
             .node_mut(document_handle)
             .and_then(|node| node.data_mut().as_document_mut())
@@ -1003,7 +1020,11 @@ impl DomHost {
         if document.url() == &url {
             return false;
         }
-        document.set_url(url);
+        if update_fallback_base {
+            document.set_url(url);
+        } else {
+            document.set_url_preserving_fallback_base(url);
+        }
         self.dom.process_base_element(document_handle, true);
         self.record_mutation(MutationScope::LocalState);
         self.update_document_target_from_url(document_handle);

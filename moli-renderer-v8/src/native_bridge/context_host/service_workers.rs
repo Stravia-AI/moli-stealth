@@ -121,11 +121,6 @@ impl JsContextHost {
                 self.frame_owner_store
                     .current_child_document_task_owner(handle)?,
             ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                WindowDocumentOwner::LightweightPopup(
-                    self.current_lightweight_popup_document_owner(popup_id)?,
-                )
-            }
         };
         Some(ServiceWorkerWindowOwner {
             dispatch_scope,
@@ -161,12 +156,6 @@ impl JsContextHost {
                     .storage_key()
                     .clone(),
             ),
-            OwnerDispatchScope::LightweightPopup(popup_id) => (
-                self.lightweight_popup_document_url(popup_id)?,
-                self.storage_context_for_lightweight_popup(popup_id)?
-                    .storage_key()
-                    .clone(),
-            ),
         };
         Some(ServiceWorkerWindowRequestContext {
             owner,
@@ -189,11 +178,6 @@ impl JsContextHost {
                         .current_child_document_task_owner(handle)
                         == Some(document_owner)
                 }
-                (
-                    OwnerDispatchScope::LightweightPopup(popup_id),
-                    WindowDocumentOwner::LightweightPopup(document_owner),
-                ) => document_owner.popup_id() == popup_id,
-                _ => false,
             }
     }
 
@@ -201,9 +185,6 @@ impl JsContextHost {
         match owner {
             WindowDocumentOwner::Frame(owner) => {
                 self.frame_owner_store.document_task_owner_is_current(owner)
-            }
-            WindowDocumentOwner::LightweightPopup(owner) => {
-                self.lightweight_popup_document_owner_is_current(owner)
             }
         }
     }
@@ -220,14 +201,6 @@ impl JsContextHost {
             (WindowDocumentOwner::Frame(owner), OwnerDispatchScope::Child(handle)) => {
                 self.current_child_document_task_owner(handle) == Some(owner)
             }
-            (
-                WindowDocumentOwner::LightweightPopup(owner),
-                OwnerDispatchScope::LightweightPopup(popup_id),
-            ) => {
-                owner.popup_id() == popup_id
-                    && self.current_lightweight_popup_document_owner(popup_id) == Some(owner)
-            }
-            _ => false,
         }
     }
 
@@ -897,14 +870,6 @@ impl JsContextHost {
                     self.browser_context_runtime
                         .service_worker_controller_for_client(client_id)
                 }),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .service_worker_popup_clients
-                .get(&popup_id)
-                .copied()
-                .and_then(|client_id| {
-                    self.browser_context_runtime
-                        .service_worker_controller_for_client(client_id)
-                }),
         }
     }
 
@@ -935,12 +900,7 @@ impl JsContextHost {
         if let Some(handle) = self.service_worker_child_client_handle(client_id) {
             return Some(OwnerDispatchScope::Child(handle));
         }
-        self.service_worker_popup_clients
-            .iter()
-            .find_map(|(popup_id, popup_client_id)| {
-                (*popup_client_id == client_id)
-                    .then_some(OwnerDispatchScope::LightweightPopup(*popup_id))
-            })
+        None
     }
 
     pub(crate) fn service_worker_window_client_completion_owner(
@@ -1034,66 +994,6 @@ impl JsContextHost {
             entry.set_pending_service_worker_client_navigation(continuation);
         }
         Ok(())
-    }
-
-    pub(crate) fn register_or_update_service_worker_popup_client(
-        &mut self,
-        document_owner: crate::native_bridge::LightweightPopupDocumentOwner,
-        document_url: Url,
-    ) -> Option<ServiceWorkerClientId> {
-        if !self.lightweight_popup_document_owner_is_current(document_owner) {
-            tracing::debug!(
-                ?document_owner,
-                %document_url,
-                "ignored service worker client projection for stale popup document"
-            );
-            return None;
-        }
-        let popup_id = document_owner.popup_id();
-        let storage_key = service_worker_first_party_storage_key(&document_url);
-        if let Some(client_id) = self.service_worker_popup_clients.get(&popup_id).copied() {
-            self.browser_context_runtime
-                .update_service_worker_client_document(
-                    client_id,
-                    document_url,
-                    storage_key,
-                    ServiceWorkerClientFrameType::TopLevel,
-                    Some(WindowDocumentOwner::LightweightPopup(document_owner)),
-                );
-            return Some(client_id);
-        }
-        let client_id = self.browser_context_runtime.register_service_worker_client(
-            document_url,
-            storage_key,
-            ServiceWorkerClientFrameType::TopLevel,
-            Some(WindowDocumentOwner::LightweightPopup(document_owner)),
-            self.service_worker_task_sender(),
-        );
-        self.service_worker_popup_clients
-            .insert(popup_id, client_id);
-        Some(client_id)
-    }
-
-    pub(crate) fn update_service_worker_popup_client_if_registered(
-        &mut self,
-        popup_id: u64,
-        document_url: Url,
-    ) -> bool {
-        let Some(client_id) = self.service_worker_popup_clients.get(&popup_id).copied() else {
-            return false;
-        };
-        let Some(document_owner) = self.current_lightweight_popup_document_owner(popup_id) else {
-            return false;
-        };
-        let storage_key = service_worker_first_party_storage_key(&document_url);
-        self.browser_context_runtime
-            .update_service_worker_client_document(
-                client_id,
-                document_url,
-                storage_key,
-                ServiceWorkerClientFrameType::TopLevel,
-                Some(WindowDocumentOwner::LightweightPopup(document_owner)),
-            )
     }
 
     pub(crate) fn register_or_update_service_worker_child_client(
@@ -1350,11 +1250,6 @@ impl JsContextHost {
             WorkerOwnerScope::Child(handle) => self
                 .frame_owner_service_worker_client_id_for_child(handle)
                 .unwrap_or(self.service_worker_client_id),
-            WorkerOwnerScope::LightweightPopup(popup_id) => self
-                .service_worker_popup_clients
-                .get(&popup_id)
-                .copied()
-                .unwrap_or(self.service_worker_client_id),
         }
     }
 
@@ -1367,11 +1262,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(handle) => self
                 .frame_owner_service_worker_client_id_for_child(handle)
                 .unwrap_or(self.service_worker_client_id),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .service_worker_popup_clients
-                .get(&popup_id)
-                .copied()
-                .unwrap_or(self.service_worker_client_id),
         }
     }
 
@@ -1381,20 +1271,6 @@ impl JsContextHost {
     ) -> Option<ServiceWorkerClientId> {
         self.frame_owner_current_child_snapshot(handle)
             .and_then(|snapshot| snapshot.settings.service_worker_client_id)
-    }
-
-    pub(crate) fn unregister_service_worker_popup_client(&mut self, popup_id: u64) {
-        if let Some(client_id) = self.service_worker_popup_clients.remove(&popup_id) {
-            self.browser_context_runtime
-                .unregister_service_worker_client(client_id);
-        }
-    }
-
-    pub(crate) fn unregister_all_service_worker_popup_clients(&mut self) {
-        for (_, client_id) in self.service_worker_popup_clients.drain() {
-            self.browser_context_runtime
-                .unregister_service_worker_client(client_id);
-        }
     }
 
     pub(crate) fn service_worker_registration_for_client(
@@ -1464,11 +1340,6 @@ impl JsContextHost {
                 .get(&handle)
                 .and_then(|entry| entry.service_worker_client_id())
                 .zip(self.child_browsing_context_current_url(handle)),
-            OwnerDispatchScope::LightweightPopup(popup_id) => self
-                .service_worker_popup_clients
-                .get(&popup_id)
-                .copied()
-                .zip(self.lightweight_popup_document_url(popup_id)),
         }) else {
             return false;
         };

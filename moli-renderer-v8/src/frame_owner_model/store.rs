@@ -2424,25 +2424,6 @@ impl FrameOwnerStore {
             .map(|state| state.binding)
     }
 
-    pub(crate) fn current_child_frame_load_is_pending(&self, child_handle: DomHandle) -> bool {
-        let Some(frame_id) = self.frame_ids_by_child_handle.get(&child_handle) else {
-            return false;
-        };
-        let Some(frame) = self.frames.get(frame_id) else {
-            return false;
-        };
-        if frame.navigation_load.is_some() {
-            return true;
-        }
-        frame
-            .current_document_id
-            .and_then(|document_id| self.documents.get(&document_id))
-            .is_some_and(|document| {
-                document.lifecycle == DocumentLifecycleState::Current
-                    && document.lifecycle_progress.child_load_delivery_is_pending()
-            })
-    }
-
     pub(crate) fn begin_child_frame_parent_document_load(
         &mut self,
         child_handle: DomHandle,

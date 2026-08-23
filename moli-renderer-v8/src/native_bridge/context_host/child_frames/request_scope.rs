@@ -51,17 +51,6 @@ impl WebStorageScope {
         Self { context, area_key }
     }
 
-    pub(crate) fn from_parts(
-        origin: String,
-        area_key: String,
-        storage_key: MoliStorageKey,
-    ) -> Self {
-        Self {
-            context: StorageContextScope::new(origin, storage_key),
-            area_key,
-        }
-    }
-
     pub(crate) fn origin(&self) -> &str {
         self.context.origin()
     }
@@ -294,11 +283,9 @@ impl JsContextHost {
     ) -> Option<String> {
         let entry = self.child_browsing_contexts.get(&handle)?;
         let current_url = self.child_browsing_context_current_url(handle)?;
-        let nonce = entry.document_credentialless_storage_nonce().or_else(|| {
-            self.child_web_storage_opaque_context_nonces
-                .get(&handle)
-                .copied()
-        });
+        let nonce = entry
+            .document_credentialless_storage_nonce()
+            .or_else(|| self.child_own_opaque_origin_nonce(handle));
         let top_level_site = site_for_url(self.document_url());
         let origin = self.child_browsing_context_network_partition_origin(handle)?;
         let relation =
@@ -426,9 +413,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(handle) => {
                 self.storage_context_for_child_browsing_context(handle)
             }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.storage_context_for_lightweight_popup(popup_id)
-            }
         }
     }
 
@@ -444,9 +428,6 @@ impl JsContextHost {
             OwnerDispatchScope::Child(handle) => {
                 self.child_browsing_context_secure_context_url(handle)
             }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.lightweight_popup_document_url(popup_id)
-            }
         }
     }
 
@@ -456,14 +437,6 @@ impl JsContextHost {
     ) -> Option<ActiveStorageContext> {
         let top_origin = moli_url::origin_ascii_serialization(self.document_url());
         self.child_browsing_context_web_storage_scope(handle, &top_origin)
-            .map(|scope| ActiveStorageContext::new(scope.into_storage_context()))
-    }
-
-    pub(crate) fn storage_context_for_lightweight_popup(
-        &mut self,
-        popup_id: u64,
-    ) -> Option<ActiveStorageContext> {
-        self.lightweight_popup_bound_web_storage_scope(popup_id)
             .map(|scope| ActiveStorageContext::new(scope.into_storage_context()))
     }
 
@@ -477,18 +450,13 @@ impl JsContextHost {
 
     pub(crate) fn ambient_storage_context(
         &mut self,
-        scope: &mut v8::PinScope<'_, '_>,
+        _scope: &mut v8::PinScope<'_, '_>,
         active_child_handle: Option<DomHandle>,
     ) -> ActiveStorageContext {
         let active_child_handle = active_child_handle
             .or_else(|| self.active_child_subresource_request_scopes.last().copied());
         if let Some(handle) = active_child_handle
             && let Some(context) = self.storage_context_for_child_browsing_context(handle)
-        {
-            return context;
-        }
-        if let Some(popup_id) = crate::native_bridge::active_lightweight_popup_id(scope)
-            && let Some(context) = self.storage_context_for_lightweight_popup(popup_id)
         {
             return context;
         }
@@ -505,10 +473,8 @@ impl JsContextHost {
         url: &Url,
     ) -> WebStorageScope {
         let origin = moli_url::origin_ascii_serialization(url);
-        let opaque_nonce = moli_storage_key::url_needs_opaque_nonce(url).then(|| {
-            self.browser_context_runtime
-                .next_web_storage_opaque_context_nonce()
-        });
+        let opaque_nonce = moli_storage_key::url_needs_opaque_nonce(url)
+            .then(|| self.browser_context_runtime.next_opaque_origin_nonce());
         let storage_key = MoliStorageKey::first_party_from_url(url, opaque_nonce);
         WebStorageScope::new(origin, storage_key)
     }
@@ -530,7 +496,7 @@ impl JsContextHost {
             let storage_key = MoliStorageKey::new(
                 "null".to_owned(),
                 top_level_site,
-                Some(self.ensure_child_web_storage_opaque_context_nonce(handle)),
+                Some(self.ensure_child_opaque_origin_nonce(handle)?),
                 relation,
             )
             .with_cross_site_ancestor();
@@ -603,10 +569,7 @@ impl JsContextHost {
             let storage_key = MoliStorageKey::new(
                 "null".to_owned(),
                 top_level_site,
-                Some(
-                    self.browser_context_runtime
-                        .next_web_storage_opaque_context_nonce(),
-                ),
+                Some(self.browser_context_runtime.next_opaque_origin_nonce()),
                 relation,
             );
             return WebStorageScope::new("null".to_owned(), storage_key);
@@ -630,7 +593,7 @@ impl JsContextHost {
             return WebStorageScope::new(storage_key.origin().to_owned(), storage_key.clone());
         }
         let opaque_nonce = moli_storage_key::url_needs_opaque_nonce(self.document_url())
-            .then(|| self.ensure_web_storage_opaque_context_nonce());
+            .then(|| self.ensure_top_level_opaque_origin_nonce());
         let storage_key = MoliStorageKey::from_url_and_top_level_site(
             self.document_url(),
             site_for_url(self.document_url()),
@@ -639,34 +602,57 @@ impl JsContextHost {
         WebStorageScope::new(origin.to_owned(), storage_key)
     }
 
-    fn ensure_web_storage_opaque_context_nonce(&mut self) -> OpaqueOriginNonce {
-        if let Some(nonce) = self.web_storage_opaque_context_nonce {
+    fn ensure_top_level_opaque_origin_nonce(&mut self) -> OpaqueOriginNonce {
+        if let Some(nonce) = self.top_level_opaque_origin_nonce {
             return nonce;
         }
-        let nonce = self
-            .browser_context_runtime
-            .next_web_storage_opaque_context_nonce();
-        self.web_storage_opaque_context_nonce = Some(nonce);
+        let nonce = self.browser_context_runtime.next_opaque_origin_nonce();
+        self.top_level_opaque_origin_nonce = Some(nonce);
         nonce
     }
 
-    fn ensure_child_web_storage_opaque_context_nonce(
+    pub(in crate::native_bridge::context_host) fn child_own_opaque_origin_nonce(
+        &self,
+        handle: DomHandle,
+    ) -> Option<OpaqueOriginNonce> {
+        let owner = self.current_child_document_task_owner(handle)?;
+        let binding = self.child_opaque_origin_nonce_bindings.get(&handle)?;
+        (binding.local_window_id == owner.local_window_id).then_some(binding.nonce)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn child_opaque_origin_nonce_for_test(
+        &self,
+        handle: DomHandle,
+    ) -> Option<OpaqueOriginNonce> {
+        self.child_own_opaque_origin_nonce(handle)
+    }
+
+    pub(in crate::native_bridge::context_host) fn ensure_child_opaque_origin_nonce(
         &mut self,
         handle: DomHandle,
-    ) -> OpaqueOriginNonce {
-        if let Some(nonce) = self
-            .child_web_storage_opaque_context_nonces
-            .get(&handle)
-            .copied()
-        {
-            return nonce;
+    ) -> Option<OpaqueOriginNonce> {
+        if !self.child_browsing_context_has_opaque_origin(handle) {
+            self.child_opaque_origin_nonce_bindings.remove(&handle);
+            return None;
         }
-        let nonce = self
-            .browser_context_runtime
-            .next_web_storage_opaque_context_nonce();
-        self.child_web_storage_opaque_context_nonces
-            .insert(handle, nonce);
-        nonce
+        let local_window_id = self
+            .current_child_document_task_owner(handle)?
+            .local_window_id;
+        if let Some(binding) = self.child_opaque_origin_nonce_bindings.get(&handle)
+            && binding.local_window_id == local_window_id
+        {
+            return Some(binding.nonce);
+        }
+        let nonce = self.browser_context_runtime.next_opaque_origin_nonce();
+        self.child_opaque_origin_nonce_bindings.insert(
+            handle,
+            super::super::ChildOpaqueOriginNonceBinding {
+                local_window_id,
+                nonce,
+            },
+        );
+        Some(nonce)
     }
 
     pub(in crate::native_bridge::context_host) fn ensure_top_document_credentialless_storage_nonce(
@@ -714,20 +700,10 @@ impl JsContextHost {
                 .is_some_and(|entry| entry.document_sandbox_allows_scripts())
     }
 
-    pub(crate) fn lightweight_popup_scripting_enabled(&self, popup_id: u64) -> bool {
-        !self.script_execution_disabled()
-            && self
-                .lightweight_popup_policy_container(popup_id)
-                .is_some_and(|policy| policy.sandbox.allows_scripts)
-    }
-
     pub(crate) fn document_scripting_enabled(&self, document_handle: DomHandle) -> bool {
         if document_handle == self.document_handle() {
             return !self.script_execution_disabled()
                 && self.document_policy_container().sandbox.allows_scripts;
-        }
-        if let Some(popup_id) = self.lightweight_popup_id_for_document_handle(document_handle) {
-            return self.lightweight_popup_scripting_enabled(popup_id);
         }
         self.child_browsing_context_host_for_document_handle(document_handle)
             .map(|handle| self.child_browsing_context_scripting_enabled(handle))
@@ -741,9 +717,6 @@ impl JsContextHost {
             OwnerDispatchScope::Top => {
                 !self.script_execution_disabled()
                     && self.document_policy_container().sandbox.allows_scripts
-            }
-            OwnerDispatchScope::LightweightPopup(popup_id) => {
-                self.lightweight_popup_scripting_enabled(popup_id)
             }
             OwnerDispatchScope::Child(handle) => {
                 self.child_browsing_context_scripting_enabled(handle)

@@ -1421,15 +1421,8 @@ impl JsContextHost {
 
     fn style_source_document_context_for_read_document(
         &self,
-        read_document: DomHandle,
+        _read_document: DomHandle,
     ) -> OwnedStyleSourceDocumentContext {
-        if read_document != self.document_handle()
-            && self
-                .lightweight_popup_id_for_document_handle(read_document)
-                .is_some()
-        {
-            return OwnedStyleSourceDocumentContext::new(read_document);
-        }
         self.style_source_document_context()
     }
 
@@ -1815,7 +1808,11 @@ impl JsContextHost {
     }
 
     pub(crate) fn set_document_url(&mut self, url: url::Url) -> bool {
-        let target_change = DocumentRuntime::set_document_url(self, url);
+        let target_change = if self.root_document_is_initial_empty() {
+            DocumentRuntime::set_document_url_preserving_fallback_base(self, url)
+        } else {
+            DocumentRuntime::set_document_url(self, url)
+        };
         if let Some((previous_target, next_target)) = target_change {
             self.note_target_style_activity(previous_target, next_target);
         }

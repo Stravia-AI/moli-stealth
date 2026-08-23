@@ -2948,6 +2948,328 @@ async fn window_open_named_target_reuses_existing_popup_target() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn related_popup_location_history_seed_survives_protocol_replacement() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-history-seed",
+                "TID-popup-history-opener",
+                "<main>popup history opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15301,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "globalThis.__historySeedPopup = window.open(); __historySeedPopup !== null",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 15301)["result"]["result"]["value"],
+                json!(true)
+            );
+            let popup_target_id = ctx
+                .sent
+                .iter()
+                .find(|message| message["method"] == json!("Target.targetCreated"))
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .expect("window.open without a URL should create an initial-empty target")
+                .to_owned();
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15302,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 15302)["result"]["sessionId"]
+                .as_str()
+                .expect("popup session id")
+                .to_owned();
+            ctx.sent.clear();
+
+            let destinations = [
+                (
+                    15303,
+                    "data:text/html,%3Ctitle%3Ehistory-one%3C/title%3E",
+                    1,
+                ),
+                (
+                    15305,
+                    "data:text/html,%3Ctitle%3Ehistory-two%3C/title%3E",
+                    2,
+                ),
+            ];
+            for (command_id, destination, expected_length) in destinations {
+                ctx.process_async(json!({
+                    "id": command_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": format!(
+                            "__historySeedPopup.location.href = {destination:?}; 'queued'"
+                        ),
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, command_id)["result"]["result"]["value"],
+                    json!("queued")
+                );
+                ctx.wait_until_scheduler_state(
+                    "related popup Location navigation commit",
+                    |conn| {
+                        conn.browser_context
+                            .as_ref()
+                            .and_then(|browser_context| {
+                                browser_context.background_target(&popup_target_id)
+                            })
+                            .is_some_and(|target| target.target_url() == destination)
+                    },
+                )
+                .await;
+                ctx.wait_for_document_continuation_for_test(
+                    Some(&popup_session_id),
+                    "related popup history-seed Document continuation",
+                )
+                .await;
+
+                let evaluate_id = command_id + 1;
+                ctx.process_async(json!({
+                    "id": evaluate_id,
+                    "sessionId": popup_session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "JSON.stringify({href: location.href, length: history.length})",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, evaluate_id)["result"]["result"]["value"],
+                    json!(format!(
+                        "{{\"href\":{destination:?},\"length\":{expected_length}}}"
+                    ))
+                );
+                ctx.sent.clear();
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_popup_same_turn_retarget_admits_only_winning_initial_navigation() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-initial-winner",
+                "TID-popup-initial-winner-opener",
+                "<main>popup initial winner opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            let old_destination = "data:text/html,%3Ctitle%3Eold-destination%3C/title%3E";
+            let winning_destination =
+                "data:text/html,%3Ctitle%3Ewinning-destination%3C/title%3E";
+            ctx.process_async(json!({
+                "id": 15311,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "(() => {{ const popup = window.open({old_destination:?}, 'initial-winner'); popup.location.href = {winning_destination:?}; return popup !== null; }})()"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 15311)["result"]["result"]["value"],
+                json!(true)
+            );
+            let created_targets = ctx
+                .sent
+                .iter()
+                .filter(|message| message["method"] == json!("Target.targetCreated"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                created_targets.len(),
+                1,
+                "same-turn retarget must retain one auxiliary target: {:?}",
+                ctx.sent
+            );
+            let popup_target_id = created_targets[0]["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("popup target id")
+                .to_owned();
+
+            ctx.wait_until_scheduler_state("winning initial popup navigation commit", |conn| {
+                conn.browser_context
+                    .as_ref()
+                    .and_then(|browser_context| {
+                        browser_context.background_target(&popup_target_id)
+                    })
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == winning_destination)
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 15312,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 15312)["result"]["sessionId"]
+                .as_str()
+                .expect("popup session id")
+                .to_owned();
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15313,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "JSON.stringify({title: document.title, href: location.href, length: history.length})",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 15313)["result"]["result"]["value"],
+                json!(format!(
+                    "{{\"title\":\"winning-destination\",\"href\":{winning_destination:?},\"length\":1}}"
+                ))
+            );
+
+            ctx.process_async(json!({
+                "id": 15314,
+                "sessionId": popup_session_id,
+                "method": "Page.getNavigationHistory"
+            }))
+            .await;
+            let history = take_response_by_id(&mut ctx, 15314);
+            assert_eq!(history["result"]["currentIndex"], json!(0));
+            assert_eq!(
+                history["result"]["entries"]
+                    .as_array()
+                    .expect("popup history entries")
+                    .iter()
+                    .map(|entry| entry["url"].as_str().unwrap_or_default())
+                    .collect::<Vec<_>>(),
+                vec![winning_destination]
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_popup_without_url_same_turn_location_admits_initial_navigation() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-no-url-initial",
+                "TID-popup-no-url-initial-opener",
+                "<main>popup no URL initial opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            let destination =
+                "data:text/html,%3Ctitle%3Eno-url-initial-destination%3C/title%3E";
+            ctx.process_async(json!({
+                "id": 15321,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(
+                        "(() => {{ const popup = window.open(); popup.location.href = {destination:?}; return popup !== null; }})()"
+                    ),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 15321)["result"]["result"]["value"],
+                json!(true)
+            );
+            let created_targets = ctx
+                .sent
+                .iter()
+                .filter(|message| message["method"] == json!("Target.targetCreated"))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                created_targets.len(),
+                1,
+                "same-turn no-URL navigation must retain one auxiliary target: {:?}",
+                ctx.sent
+            );
+            let popup_target_id = created_targets[0]["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("popup target id")
+                .to_owned();
+
+            ctx.wait_until_scheduler_state("no-URL initial popup navigation commit", |conn| {
+                conn.browser_context
+                    .as_ref()
+                    .and_then(|browser_context| {
+                        browser_context.background_target(&popup_target_id)
+                    })
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == destination)
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 15322,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": popup_target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 15322)["result"]["sessionId"]
+                .as_str()
+                .expect("popup session id")
+                .to_owned();
+            ctx.sent.clear();
+            ctx.wait_for_document_continuation_for_test(
+                Some(&popup_session_id),
+                "no-URL initial popup Document continuation",
+            )
+            .await;
+
+            ctx.process_async(json!({
+                "id": 15323,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "JSON.stringify({title: document.title, href: location.href, length: history.length})",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 15323)["result"]["result"]["value"],
+                json!(format!(
+                    "{{\"title\":\"no-url-initial-destination\",\"href\":{destination:?},\"length\":1}}"
+                ))
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn window_open_named_target_reuse_is_owned_by_the_renderer_page_group() {
     let mut ctx = TestContext::new();
     ctx.enable_background_navigation_scheduler_for_test();
@@ -3534,6 +3856,14 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
             }))
             .await;
             ctx.expect_result(15126, json!({}), Some(&session_id));
+            ctx.wait_for_scheduler_message(
+                "related form initial generation load completion",
+                |message| {
+                    message["method"] == json!("Page.frameStoppedLoading")
+                        && message["params"]["frameId"] == json!(target_id)
+                },
+            )
+            .await;
 
             ctx.conn
                 .browser_context_by_id_mut("BID-popup-related-form-name")

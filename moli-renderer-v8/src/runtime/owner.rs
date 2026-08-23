@@ -302,6 +302,18 @@ pub enum RendererOwnerCommand {
         command: RendererPageCommand,
         cancellation: Option<Arc<AtomicU8>>,
     },
+    /// Runs a browser-owner action against one exact stable Page residence.
+    ///
+    /// Unlike `Run*PageCommand`, this entry point does not require the caller
+    /// to own a `RendererPageHandle`. Direct-browser integrations need that
+    /// distinction when an auxiliary Page posts back to the externally owned
+    /// root Page. The renderer lane resolves the thread-affine token and fails
+    /// closed if the residence belongs to another owner or has retired.
+    RunBrowserOwnerPageCommand {
+        owner_local_host_id: RendererOwnerLocalHostId,
+        page_id: PageId,
+        command: RendererPageCommand,
+    },
     /// Renderer-side cleanup after the browser/protocol owner has already
     /// disconnected a DevTools session and closed both of its ingress lanes.
     /// This is lifecycle work, not another frontend Inspector command.
@@ -1103,6 +1115,7 @@ fn live_page_command_should_follow_pending_navigation(command: &RendererPageComm
         command,
         RendererPageCommand::EvaluateExpressionAndFollowPendingNavigation { .. }
             | RendererPageCommand::EvaluateExpressionInExecutionContextAndFollowPendingNavigation { .. }
+            | RendererPageCommand::FollowTopLevelNavigationInStandaloneAdapter { .. }
     )
 }
 
@@ -2480,6 +2493,29 @@ impl RendererOwnerHandle {
             .map_err(|_| anyhow!("render runtime reply channel closed"))?
     }
 
+    /// Dispatches one browser-owner action to an exact stable Page without
+    /// cloning or transferring that Page's lifetime/close authority.
+    pub async fn dispatch_browser_owner_page_command(
+        &self,
+        owner_local_host_id: RendererOwnerLocalHostId,
+        page_id: PageId,
+        command: RendererPageCommand,
+    ) -> Result<RendererCommandTurnOutput> {
+        match self
+            .dispatch_command(RendererOwnerCommand::RunBrowserOwnerPageCommand {
+                owner_local_host_id,
+                page_id,
+                command,
+            })
+            .await?
+        {
+            RendererOwnerReply::AsyncPageCommandRan(output) => Ok(*output),
+            _ => Err(anyhow!(
+                "renderer owner returned non-page-command reply for browser-owner Page action"
+            )),
+        }
+    }
+
     /// Enqueue a renderer command without waiting for the reply, returning the
     /// reply channel so the caller can `await` it later (or hand it off to a
     /// different code path). This enables fire-then-defer patterns where the
@@ -2730,7 +2766,8 @@ impl RendererOwnerHandle {
                 Ok(RendererOwnerReply::PreparedRendererDocumentCanceled).into()
             }
             command @ (RendererOwnerCommand::RunAsyncPageCommand { .. }
-            | RendererOwnerCommand::RunProtocolPageCommand { .. }) => {
+            | RendererOwnerCommand::RunProtocolPageCommand { .. }
+            | RendererOwnerCommand::RunBrowserOwnerPageCommand { .. }) => {
                 let (token, command, capture_policy, cancellation) = match command {
                     RendererOwnerCommand::RunAsyncPageCommand {
                         token,
@@ -2752,6 +2789,30 @@ impl RendererOwnerHandle {
                         super::RendererPageStateCapturePolicy::ProtocolTurn,
                         cancellation,
                     ),
+                    RendererOwnerCommand::RunBrowserOwnerPageCommand {
+                        owner_local_host_id,
+                        page_id,
+                        command,
+                    } => {
+                        if owner_local_host_id != self.state.owner_local_host_id {
+                            return Err(anyhow!(
+                                "browser-owner Page action belongs to renderer owner {}, not {}",
+                                owner_local_host_id.as_u64(),
+                                self.state.owner_local_host_id.as_u64()
+                            ))
+                            .into();
+                        }
+                        let owner_local_context = match self.owner_local_context() {
+                            Ok(context) => context,
+                            Err(error) => return Err(error).into(),
+                        };
+                        (
+                            renderer_page_token_for_owner_context(&owner_local_context, page_id),
+                            command,
+                            super::RendererPageStateCapturePolicy::ProtocolTurn,
+                            None,
+                        )
+                    }
                     _ => unreachable!("combined renderer page command pattern must match"),
                 };
                 if moli_trace::cdp_nav_timing_enabled()
@@ -3707,10 +3768,19 @@ impl RendererOwnerHandle {
         // turns. Earlier turns may already have settled Runtime/lifecycle
         // output, so the terminal fence must cover the complete Page stream
         // tail rather than only the optional batch settled by this turn.
+        // A failed committed phase-one bootstrap deliberately returns an empty
+        // retiring shell: the old Document has already been detached and the
+        // failed replacement was consumed. There is no Page stream tail left
+        // to fence in that state, but the shell still has to be restored so the
+        // stable slot can complete deterministic teardown.
         let output_fence = entry
-            .page_vm()
-            .renderer_output_tail_cursor()
-            .map(|cursor| entry.page_vm().declare_renderer_output_fence(cursor));
+            .active_page_vm()
+            .filter(|page_vm| page_vm.has_live_script_vm())
+            .and_then(|page_vm| {
+                page_vm
+                    .renderer_output_tail_cursor()
+                    .map(|cursor| page_vm.declare_renderer_output_fence(cursor))
+            });
         restore_entry_after_command_on_bound_owner_local_store(token, entry);
         if let Some(output) = output {
             self.publish_renderer_output(output);
@@ -7869,6 +7939,9 @@ impl RendererOwnerHandle {
             auxiliary_browsing_context_policy,
             main_document_commit.as_ref(),
         );
+        let navigation_bootstrap_entry = main_document_commit
+            .as_ref()
+            .and_then(|commit| commit.navigation_history_entry_seed.as_deref().cloned());
         let script_execution_disabled = script_execution_disabled_with_auxiliary_policy(
             script_execution_disabled,
             auxiliary_browsing_context_policy,
@@ -7930,7 +8003,7 @@ impl RendererOwnerHandle {
                     initial_top_level_browsing_context_name,
                     auxiliary_browsing_context_policy,
                     top_level_storage_key,
-                    navigation_bootstrap_entry: None,
+                    navigation_bootstrap_entry,
                     reserved_service_worker_client_id,
                 };
                 if let Some(mut page_vm) = staged_related_initial_empty_page {
@@ -8308,6 +8381,9 @@ impl RendererOwnerHandle {
         .with_content_security_policy_bypass(bypass_content_security_policy);
         let auxiliary_browsing_context_policy =
             auxiliary_browsing_context_policy_for_document(None, main_document_commit.as_ref());
+        let navigation_bootstrap_entry = main_document_commit
+            .as_ref()
+            .and_then(|commit| commit.navigation_history_entry_seed.as_deref().cloned());
         let script_execution_disabled = script_execution_disabled_with_auxiliary_policy(
             script_execution_disabled,
             auxiliary_browsing_context_policy,
@@ -8404,7 +8480,7 @@ impl RendererOwnerHandle {
                     initial_top_level_browsing_context_name: None,
                     auxiliary_browsing_context_policy,
                     top_level_storage_key: None,
-                    navigation_bootstrap_entry: None,
+                    navigation_bootstrap_entry,
                     reserved_service_worker_client_id: reserved_service_worker_client
                         .map(RendererReservedServiceWorkerClient::release),
                 };
@@ -8582,6 +8658,14 @@ impl RendererOwnerHandle {
 
     pub fn record(&self, page_id: PageId) -> Option<RendererPageRecord> {
         self.state.page_table.record(page_id)
+    }
+
+    /// Returns the active Page records currently admitted by this renderer owner.
+    ///
+    /// The snapshot is sorted by Page id so diagnostics can compare owner state
+    /// without depending on the page table's hash iteration order.
+    pub fn active_page_records(&self) -> Vec<(PageId, RendererPageRecord)> {
+        self.state.page_table.active_records()
     }
 
     pub fn len(&self) -> usize {

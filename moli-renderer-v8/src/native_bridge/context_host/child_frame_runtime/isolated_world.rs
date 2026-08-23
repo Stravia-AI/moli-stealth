@@ -138,6 +138,10 @@ impl JsContextHost {
                 stale.runtime_observable_context_token,
             );
             let stale_context = v8::Local::new(scope, &stale.context);
+            {
+                let stale_scope = &mut v8::ContextScope::new(scope, stale_context);
+                crate::native_bridge::clear_context_embedder_state_for_teardown(stale_scope, false);
+            }
             stale_context.detach_global();
         }
 

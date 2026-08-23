@@ -636,6 +636,7 @@ pub(in crate::runtime) async fn finalize_prepared_page_replacement_on_entry_via_
                         initial_runtime_realms,
                         renderer_output_predecessor,
                         document_continuation_observer: None,
+                        initial_top_level_navigation: None,
                         top_level_browsing_context_closing: entry
                             .page_vm()
                             .top_level_browsing_context_is_closed(),
