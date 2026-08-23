@@ -54,8 +54,8 @@ impl CdpScheduler {
         pending: &mut PendingDevToolsRuntimeCommandDispatch,
         response: RuntimeInspectorResponseReady,
     ) -> bool {
-        pending
-            .route_scheduler_deferred_inspector_response(&mut self.host_adapter, response)
+        self.host_adapter
+            .route_runtime_deferred_inspector_response(pending, response)
             .await
     }
 
@@ -228,9 +228,8 @@ impl CdpScheduler {
         pending: Box<PendingDevToolsRuntimeDeferredReplyExecution>,
     ) {
         let pending = *pending;
-        pending
-            .pending
-            .forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+        self.host_adapter
+            .forget_runtime_deferred_inspector_reply(pending.pending);
     }
 
     async fn continue_devtools_runtime_command_until_deferred_reply_or_complete(
@@ -463,7 +462,8 @@ impl CdpScheduler {
             match pending.take_scheduler_deferred_inspector_reply_receiver() {
                 Some(response_rx) => response_rx,
                 None => {
-                    pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+                    self.host_adapter
+                        .forget_runtime_deferred_inspector_reply(pending);
                     return Err(DevToolsError::new(
                         DevToolsErrorKind::Internal,
                         "RuntimeDeferredInspectorResponseMissing",
@@ -478,7 +478,8 @@ impl CdpScheduler {
                 .await;
             let mut command_events = ready_output.take_protocol_events_with_id(command_id);
             if !command_events.is_empty() {
-                pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+                self.host_adapter
+                    .forget_runtime_deferred_inspector_reply(pending);
                 return Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
                     "RuntimeDeferredReplyLooseProtocolResponse",
@@ -503,8 +504,9 @@ impl CdpScheduler {
                         .route_renderer_response_to_devtools_pending(&mut pending, response)
                         .await
                     {
-                        let mut completed =
-                            pending.complete_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+                        let mut completed = self
+                            .host_adapter
+                            .complete_runtime_deferred_inspector_reply(pending);
                         completed
                             .append_interleaved_protocol_events(interleaved_command_events);
                         return Ok(Some(completed));
@@ -512,7 +514,8 @@ impl CdpScheduler {
                     continue;
                 }
                 _ = wait_until_runtime_deadline(deadline) => {
-                    pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+                    self.host_adapter
+                        .forget_runtime_deferred_inspector_reply(pending);
                     return Err(runtime_command_timeout_error());
                 }
                 maybe_input = receivers.recv_interleaved_input(navigation_gate_open) => {
@@ -532,7 +535,8 @@ impl CdpScheduler {
                     };
                     let mut command_events = output.take_protocol_events_with_id(command_id);
                     if !command_events.is_empty() {
-                        pending.forget_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+                        self.host_adapter
+                            .forget_runtime_deferred_inspector_reply(pending);
                         return Err(DevToolsError::new(
                             DevToolsErrorKind::Internal,
                             "RuntimeDeferredReplyLooseProtocolResponse",
@@ -585,8 +589,9 @@ impl CdpScheduler {
             response_wait_handle,
         } = pending;
         drop(response_wait_handle);
-        let mut completed =
-            pending.complete_scheduler_deferred_inspector_reply(&mut self.host_adapter);
+        let mut completed = self
+            .host_adapter
+            .complete_runtime_deferred_inspector_reply(pending);
         completed.append_interleaved_protocol_events(interleaved_command_events);
         let step = self
             .host_adapter

@@ -617,7 +617,7 @@ impl BrowserHostTurnExecutorOwner {
         actor: &mut BrowserHostActor,
         host_adapter: &mut crate::DevToolsHostAdapter,
     ) -> Option<BrowserHostTurnDispatch> {
-        let mut execution = self.bind_turn(host_adapter);
+        let mut execution = host_adapter.bind_browser_host_turn(self);
         actor.complete_next_turn(&mut execution)
     }
 
@@ -628,7 +628,8 @@ impl BrowserHostTurnExecutorOwner {
         host_adapter: &mut crate::DevToolsHostAdapter,
         completed: CompletedBrowserHostTurn,
     ) -> BrowserHostTurnDispatch {
-        self.bind_turn(host_adapter)
+        host_adapter
+            .bind_browser_host_turn(self)
             .complete_browser_host_turn(completed)
             .await
     }

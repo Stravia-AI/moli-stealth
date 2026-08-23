@@ -1111,9 +1111,9 @@ async fn fail_runtime_deferred_reply_for_loose_protocol_response(
         "runtime deferred reply saw a loose protocol response; deferred replies must complete through the typed renderer response receiver"
     );
     let output_session_id = pending.output_session_id;
-    pending
-        .pending
-        .forget_scheduler_deferred_inspector_reply(&mut scheduler.host_adapter);
+    scheduler
+        .host_adapter
+        .forget_cdp_deferred_inspector_reply(pending.pending);
     let command_output = pending
         .dispatch
         .complete_with_turn_output(CommandTurnOutput::new(
@@ -1151,9 +1151,9 @@ async fn complete_runtime_deferred_reply_for_renderer_response(
     let mut pending = pending_runtime_deferred_replies
         .remove(index)
         .expect("pending runtime deferred reply index came from position()");
-    pending
-        .pending
-        .route_scheduler_deferred_inspector_response(&mut scheduler.host_adapter, response)
+    scheduler
+        .host_adapter
+        .route_cdp_deferred_inspector_response(&mut pending.pending, response)
         .await;
     Ok(
         complete_runtime_deferred_reply_state(scheduler, pending, renderer_output_predecessor)
@@ -1223,9 +1223,9 @@ async fn complete_runtime_deferred_reply_state(
 ) -> RuntimeDeferredReplyAdvance {
     let command_id = pending.pending.command_id();
     let session_id = pending.pending.session_id().map(str::to_owned);
-    let completed = pending
-        .pending
-        .complete_scheduler_deferred_inspector_reply(&mut scheduler.host_adapter);
+    let completed = scheduler
+        .host_adapter
+        .complete_cdp_deferred_inspector_reply(pending.pending);
     match scheduler
         .complete_pending_command_dispatch_with_context(completed, &mut pending.command_context)
         .await

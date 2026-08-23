@@ -822,8 +822,8 @@ impl CdpScheduler {
         // must use that exact id rather than infer one from the frontend CDP
         // request id.
         let runtime_output_barrier = if command.runtime_command_executes_page_javascript() {
-            self.runtime_command_output_barriers.admit(
-                &self.host_adapter,
+            self.host_adapter.admit_runtime_command_output_barrier(
+                &mut self.runtime_command_output_barriers,
                 command.request().id(),
                 command.command_output_session_id(),
             )
@@ -2152,7 +2152,9 @@ impl CdpScheduler {
             matches!(
                 residence,
                 ProtocolSchedulerResidence::ProtocolWork { work, .. }
-                    if work.observes_main_document_load_for_devtools_context(&self.host_adapter, context)
+                    if self
+                        .host_adapter
+                        .observes_main_document_load_for_devtools_context(work, context)
             )
         })
     }
@@ -2172,7 +2174,7 @@ impl CdpScheduler {
         &mut self,
         event: BackgroundProtocolEvent,
     ) -> ProtocolOutputSequence {
-        if !event.route_is_current(&self.host_adapter) {
+        if !self.host_adapter.background_event_route_is_current(&event) {
             return ProtocolOutputSequence::empty();
         }
         let has_inflight_navigation = self.has_inflight_background_navigation();
@@ -2235,7 +2237,7 @@ impl CdpScheduler {
             // beyond its projection turn. Reauthorize its frozen route at
             // the actual release boundary: the in-flight navigation may have
             // replaced the root Document or detached its session meanwhile.
-            .filter(|event| event.route_is_current(&self.host_adapter))
+            .filter(|event| self.host_adapter.background_event_route_is_current(event))
             .collect::<Vec<_>>();
         ProtocolOutputSequence::from_background_events(events)
     }
