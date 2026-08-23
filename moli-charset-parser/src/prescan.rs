@@ -165,8 +165,8 @@ impl TokenSink for MetaCharsetTokenSink {
 }
 
 fn meta_charset_from_token(tag: &Tag) -> Option<&'static Encoding> {
-    if let Some(encoding) = html_token_attr_value(tag, "charset").and_then(encoding_for_label) {
-        return Some(encoding);
+    if let Some(label) = html_token_attr_value(tag, "charset") {
+        return encoding_for_label(label);
     }
 
     let has_content_type_pragma = html_token_attr_value(tag, "http-equiv")

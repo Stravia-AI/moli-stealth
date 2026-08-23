@@ -65,6 +65,20 @@ fn content_attribute_requires_content_type_pragma() {
 }
 
 #[test]
+fn invalid_charset_attribute_blocks_content_fallback_for_the_same_meta() {
+    let invalid_meta =
+        br#"<meta charset="not-a-real-encoding" http-equiv="content-type" content="charset=gbk">"#;
+    assert_eq!(sniff_html_meta_charset(invalid_meta), None);
+
+    let mut followed_by_valid_meta = invalid_meta.to_vec();
+    followed_by_valid_meta.extend_from_slice(br#"<meta charset="windows-1251">"#);
+    assert_eq!(
+        sniff_html_meta_charset(&followed_by_valid_meta).map(Encoding::name),
+        Some("windows-1251")
+    );
+}
+
+#[test]
 fn ignores_invalid_label_and_continues_to_later_valid_meta() {
     assert_eq!(
         sniff_html_meta_charset(br#"<meta charset="x-not-real"><meta charset="windows-1251">"#)
