@@ -39,6 +39,7 @@ pub(super) struct RetainedStyleInvalidations {
     pub(super) shadow_scopes: Vec<(DomHandle, StylesheetInvalidationSet)>,
     pub(super) shadow_scope_fallbacks: Vec<DomHandle>,
     pub(super) removed_shadow_scopes: Vec<DomHandle>,
+    pub(super) viewport_size_changed: bool,
 }
 
 /// Compares an explicit full-world snapshot with the canonical retained
@@ -74,6 +75,7 @@ impl RetainedStyleInvalidations {
             shadow_scopes: Vec::new(),
             shadow_scope_fallbacks: Vec::new(),
             removed_shadow_scopes: Vec::new(),
+            viewport_size_changed: false,
         }
     }
 }
@@ -201,6 +203,7 @@ pub(super) fn update_retained_style_system(
     );
     invalidations.document = document_update.invalidations;
     invalidations.document_scope_fallback = document_update.scope_fallback;
+    invalidations.viewport_size_changed = document_update.viewport_size_changed;
 
     let shadow_reconciliation = reconcile_shadow_scopes(
         retained,
@@ -260,6 +263,7 @@ pub(super) fn update_retained_style_system_incrementally(
     );
     invalidations.document = document_update.invalidations;
     invalidations.document_scope_fallback = document_update.scope_fallback;
+    invalidations.viewport_size_changed = document_update.viewport_size_changed;
 
     let shadow_reconciliation = reconcile_dirty_shadow_scopes(
         retained,
@@ -274,15 +278,19 @@ pub(super) fn update_retained_style_system_incrementally(
     invalidations.removed_shadow_scopes = shadow_reconciliation.removed_roots;
 
     let mut dirty_source_scopes = full_source_projection_scopes.clone();
-    if document_update.device_changed {
+    if document_update
+        .device_affected_origins
+        .contains(OriginSet::ORIGIN_AUTHOR)
+    {
         dirty_source_scopes.insert(StyleScopeId::Document(document));
-        dirty_source_scopes.extend(
-            retained
-                .shadow_scopes
-                .iter()
-                .map(|scope| StyleScopeId::ShadowRoot(scope.root())),
-        );
     }
+    dirty_source_scopes.extend(
+        shadow_reconciliation
+            .device_affected_roots
+            .iter()
+            .copied()
+            .map(StyleScopeId::ShadowRoot),
+    );
     dirty_source_scopes.extend(
         invalidations
             .removed_shadow_scopes
@@ -296,6 +304,7 @@ pub(super) fn update_retained_style_system_incrementally(
         retained_source_records,
         dirty_source_ids,
         &dirty_source_scopes,
+        document_update.device_changed,
         |source| install_active_stylesheet(host, shared_lock, source, key.quirks_mode),
     );
     refresh_retained_derived_state(
@@ -311,6 +320,8 @@ struct DocumentScopeUpdate {
     invalidations: Option<StylesheetInvalidationSet>,
     scope_fallback: bool,
     device_changed: bool,
+    viewport_size_changed: bool,
+    device_affected_origins: OriginSet,
     stylesheets_changed: bool,
 }
 
@@ -353,11 +364,13 @@ fn update_document_scope(
             .force_stylesheet_origins_dirty(OriginSet::ORIGIN_AUTHOR);
     }
 
-    let device_changed = retained.key.viewport_width_bits != key.viewport_width_bits
-        || retained.key.viewport_height_bits != key.viewport_height_bits
+    let viewport_size_changed = retained.key.viewport_width_bits != key.viewport_width_bits
+        || retained.key.viewport_height_bits != key.viewport_height_bits;
+    let device_changed = viewport_size_changed
         || retained.key.screen_width_bits != key.screen_width_bits
         || retained.key.screen_height_bits != key.screen_height_bits
         || retained.key.environment != key.environment;
+    let mut device_affected_origins = OriginSet::empty();
     if device_changed {
         let device = new_style_device_with_viewport_bits(
             key.viewport_width_bits,
@@ -369,10 +382,10 @@ fn update_document_scope(
         );
         let guard = shared_lock.read();
         let guards = StylesheetGuards::same(&guard);
-        let affected_origins = retained.stylist.set_device(device, &guards);
+        device_affected_origins = retained.stylist.set_device(device, &guards);
         retained
             .stylist
-            .force_stylesheet_origins_dirty(affected_origins);
+            .force_stylesheet_origins_dirty(device_affected_origins);
     }
 
     let stylesheet_reconciliation = stylesheet_sources.and_then(|sources| {
@@ -409,7 +422,8 @@ fn update_document_scope(
     }
 
     let stylesheets_changed = stylesheet_reconciliation.is_some();
-    let must_flush = device_changed || stylesheets_changed || custom_properties_changed;
+    let must_flush =
+        !device_affected_origins.is_empty() || stylesheets_changed || custom_properties_changed;
     let invalidations = must_flush.then(|| {
         let guard = shared_lock.read();
         retained.stylist.flush(&StylesheetGuards::same(&guard))
@@ -418,6 +432,8 @@ fn update_document_scope(
         invalidations,
         scope_fallback,
         device_changed,
+        viewport_size_changed,
+        device_affected_origins,
         stylesheets_changed,
     }
 }

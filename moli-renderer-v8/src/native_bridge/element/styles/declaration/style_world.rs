@@ -3,7 +3,6 @@ use std::rc::Rc;
 use moli_web_mime::is_stylesheet_type_attribute;
 
 use crate::{
-    context_bootstrap::evaluate_match_media_query_list_with_viewport,
     document_runtime::DomHandle,
     dom::native::{DomHost, Node},
     style_engine::{
@@ -304,7 +303,6 @@ pub(super) fn active_stylesheet_handles(
                 && is_stylesheet_type_attribute(
                     runtime.dom_host().get_attribute(*handle, "type").as_deref(),
                 )
-                && stylesheet_media_matches(runtime, *handle)
         })
         .collect::<Vec<_>>();
     let preferred_title = handles
@@ -337,8 +335,13 @@ pub(super) fn stylesheet_text(runtime: &JsContextHost, handle: DomHandle) -> Str
 }
 
 fn stylesheet_source(runtime: &JsContextHost, handle: DomHandle) -> StyloStylesheetSource {
+    let media = runtime
+        .dom_host()
+        .get_attribute(handle, "media")
+        .unwrap_or_default();
     let Some(element) = runtime.dom_host().node(handle).and_then(Node::as_element) else {
-        return StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle));
+        return StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle))
+            .with_owner_media_text(&media);
     };
     if element.is_html_element("link") {
         return runtime
@@ -349,27 +352,18 @@ fn stylesheet_source(runtime: &JsContextHost, handle: DomHandle) -> StyloStylesh
             .with_source_id(StyleSourceId::linked_style_sheet(
                 runtime.dom_host(),
                 handle,
-            ));
+            ))
+            .with_owner_media_text(&media);
     }
     if element.is_inline_style_element()
         && let Some(source) = runtime.owner_style_sheet_source(handle)
     {
-        return source.with_source_id(StyleSourceId::owner_style_sheet(runtime.dom_host(), handle));
+        return source
+            .with_source_id(StyleSourceId::owner_style_sheet(runtime.dom_host(), handle))
+            .with_owner_media_text(&media);
     }
     StyloStylesheetSource::new(String::new(), style_base_url(runtime, handle))
-}
-
-fn stylesheet_media_matches(runtime: &JsContextHost, handle: DomHandle) -> bool {
-    let Some(media) = runtime.dom_host().get_attribute(handle, "media") else {
-        return true;
-    };
-    let media = media.trim();
-    media.is_empty()
-        || evaluate_match_media_query_list_with_viewport(
-            media,
-            Some(runtime.emulated_media()),
-            runtime.style_viewport(),
-        )
+        .with_owner_media_text(&media)
 }
 
 fn link_stylesheet_is_enabled(runtime: &JsContextHost, handle: DomHandle) -> bool {

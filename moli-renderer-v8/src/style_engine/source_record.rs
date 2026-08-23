@@ -122,14 +122,21 @@ impl<'a> RetainedStylesheetSourceRecord<'a> {
     }
 
     fn dependency_summary(&self) -> Arc<StyloSourceDependencySummary> {
+        self.source().source_dependency_summary()
+    }
+
+    fn source(&self) -> &StyloStylesheetSource {
         match &self.source {
-            RetainedStylesheetSourceRecordSource::OwnerStyleSheet(source) => {
-                source.source_dependency_summary()
-            }
-            RetainedStylesheetSourceRecordSource::Registered(source) => {
-                source.source_dependency_summary()
-            }
+            RetainedStylesheetSourceRecordSource::OwnerStyleSheet(source)
+            | RetainedStylesheetSourceRecordSource::Registered(source) => source,
         }
+    }
+
+    fn effective_media_text(&self, host: &DomHost, owner: DomHandle) -> String {
+        if self.source().has_authoritative_runtime_media() {
+            return self.source().media_text().to_owned();
+        }
+        host.get_attribute(owner, "media").unwrap_or_default()
     }
 
     pub(super) fn is_dependency_source_enabled(
@@ -140,12 +147,17 @@ impl<'a> RetainedStylesheetSourceRecord<'a> {
     ) -> bool {
         match self.id.kind {
             StyleSourceKind::OwnerStyleSheet { owner } => {
-                stylesheet_owner_is_stylesheet_source_enabled(host, owner, emulated_media, viewport)
+                stylesheet_owner_is_stylesheet_source_enabled(
+                    host,
+                    owner,
+                    &self.effective_media_text(host, owner),
+                    emulated_media,
+                    viewport,
+                )
             }
             StyleSourceKind::LinkedStyleSheet { owner } => {
                 linked_stylesheet_media_matches_for_stylesheet_source(
-                    host,
-                    owner,
+                    &self.effective_media_text(host, owner),
                     emulated_media,
                     viewport,
                 )

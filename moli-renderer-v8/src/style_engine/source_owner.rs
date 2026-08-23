@@ -21,13 +21,20 @@ pub(crate) fn link_rel_qualifies_as_stylesheet(rel: Option<&str>, title: Option<
 pub(super) fn stylesheet_owner_is_stylesheet_source_enabled(
     host: &DomHost,
     handle: DomHandle,
+    media_text: &str,
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
     host.node(handle).is_some_and(|node| {
         node.as_element()
             .is_some_and(|element| element.is_inline_style_element())
-            && style_element_is_stylesheet_source_enabled(host, handle, emulated_media, viewport)
+            && style_element_is_stylesheet_source_enabled(
+                host,
+                handle,
+                media_text,
+                emulated_media,
+                viewport,
+            )
     })
 }
 
@@ -46,6 +53,7 @@ pub(super) fn stylesheet_source_base_url(host: &DomHost, handle: DomHandle) -> u
 fn style_element_is_stylesheet_source_enabled(
     host: &DomHost,
     handle: DomHandle,
+    media_text: &str,
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
@@ -57,28 +65,23 @@ fn style_element_is_stylesheet_source_enabled(
         && moli_web_mime::is_stylesheet_type_attribute(
             host.get_attribute(handle, "type").as_deref(),
         )
-        && stylesheet_media_matches_for_stylesheet_source(host, handle, emulated_media, viewport)
+        && stylesheet_media_matches_for_stylesheet_source(media_text, emulated_media, viewport)
 }
 
 pub(super) fn linked_stylesheet_media_matches_for_stylesheet_source(
-    host: &DomHost,
-    handle: DomHandle,
+    media_text: &str,
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
-    stylesheet_media_matches_for_stylesheet_source(host, handle, emulated_media, viewport)
+    stylesheet_media_matches_for_stylesheet_source(media_text, emulated_media, viewport)
 }
 
 fn stylesheet_media_matches_for_stylesheet_source(
-    host: &DomHost,
-    handle: DomHandle,
+    media_text: &str,
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
-    let Some(media) = host.get_attribute(handle, "media") else {
-        return true;
-    };
-    let media = media.trim();
+    let media = media_text.trim();
     media.is_empty()
         || evaluate_match_media_query_list_with_viewport(media, Some(emulated_media), viewport)
 }

@@ -6,6 +6,7 @@ use std::{
 use moli_crypto::Sha256Context;
 use moli_selector::StyloSourceDependencySummary;
 use style::stylesheets::{CssRule, StylesheetInDocument};
+use style_traits::ToCss;
 
 use super::super::{
     source_id::{StyleScopeId, StyleSourceId, StyleSourceKind},
@@ -35,6 +36,12 @@ pub(crate) struct StyloStylesheetSource {
     cache_key: StyleSourceKey,
     source_id: Option<StyleSourceId>,
     adopted_client_id: Option<u64>,
+    /// Top-level media list attached by the stylesheet owner.
+    ///
+    /// Live stylesheets carry the same list in Stylo's `Stylesheet::media`.
+    /// Keeping the serialized value on the source also preserves it when a
+    /// live sheet is projected into an independently parsed test/query world.
+    media_text: StdArc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -93,6 +100,7 @@ impl StyloStylesheetSource {
             cache_key,
             source_id: None,
             adopted_client_id: None,
+            media_text: StdArc::from(""),
         }
     }
 
@@ -100,9 +108,14 @@ impl StyloStylesheetSource {
         stylesheet: &crate::live_stylesheet::LiveStylesheetRef,
     ) -> Self {
         let base_url = stylesheet.base_url().clone();
+        let parsed_stylesheet = stylesheet.stylesheet();
+        let media_text = {
+            let guard = parsed_stylesheet.shared_lock.read();
+            parsed_stylesheet.media.read_with(&guard).to_css_string()
+        };
         Self {
             contents: StyloStylesheetSourceContents::Live {
-                stylesheet: stylesheet.stylesheet(),
+                stylesheet: parsed_stylesheet,
                 id: stylesheet.id(),
                 contents_revision: stylesheet.contents_revision(),
                 cascade_generation: stylesheet.cascade_generation(),
@@ -119,6 +132,7 @@ impl StyloStylesheetSource {
             ),
             source_id: None,
             adopted_client_id: None,
+            media_text: StdArc::from(media_text),
         }
     }
 
@@ -139,6 +153,22 @@ impl StyloStylesheetSource {
 
     pub(crate) fn with_sheet_url(mut self, sheet_url: url::Url) -> Self {
         self.sheet_url = StdArc::new(sheet_url);
+        self
+    }
+
+    /// Installs an owner attribute media list on a text-backed source.
+    ///
+    /// A live stylesheet is already authoritative for CSSOM media mutations,
+    /// so owner projection must not overwrite the list captured from it.
+    pub(crate) fn with_owner_media_text(mut self, media_text: &str) -> Self {
+        if matches!(&self.contents, StyloStylesheetSourceContents::Text { .. }) {
+            self.media_text = StdArc::from(media_text);
+        }
+        self
+    }
+
+    fn with_media_text(mut self, media_text: StdArc<str>) -> Self {
+        self.media_text = media_text;
         self
     }
 
@@ -180,7 +210,8 @@ impl StyloStylesheetSource {
         )
         .with_source_id(self.source_id.clone())
         .with_origin_clean(self.origin_clean)
-        .with_sheet_url(self.sheet_url.as_ref().clone());
+        .with_sheet_url(self.sheet_url.as_ref().clone())
+        .with_media_text(StdArc::clone(&self.media_text));
         projection.adopted_client_id = self.adopted_client_id;
         projection
     }
@@ -365,6 +396,14 @@ impl StyloStylesheetSource {
         self.adopted_client_id
     }
 
+    pub(in crate::style_engine) fn media_text(&self) -> &str {
+        self.media_text.as_ref()
+    }
+
+    pub(in crate::style_engine) fn has_authoritative_runtime_media(&self) -> bool {
+        matches!(&self.contents, StyloStylesheetSourceContents::Live { .. })
+    }
+
     pub(in crate::style_engine) fn has_same_installation_identity(&self, other: &Self) -> bool {
         match (self.live_stylesheet_id(), other.live_stylesheet_id()) {
             (Some(left), Some(right)) => left == right,
@@ -383,6 +422,7 @@ impl StyloStylesheetSource {
             && self.sheet_url == other.sheet_url
             && self.origin_clean == other.origin_clean
             && self.cache_key == other.cache_key
+            && self.media_text == other.media_text
             && match (&self.contents, &other.contents) {
                 (
                     StyloStylesheetSourceContents::Text { shared: left },
@@ -431,6 +471,7 @@ impl PartialEq for StyloStylesheetSource {
             && self.cache_key == other.cache_key
             && self.source_id == other.source_id
             && self.adopted_client_id == other.adopted_client_id
+            && self.media_text == other.media_text
             && match (&self.contents, &other.contents) {
                 (
                     StyloStylesheetSourceContents::Text { shared: left },
@@ -455,6 +496,7 @@ impl Hash for StyloStylesheetSource {
         self.cache_key.hash(state);
         self.source_id.hash(state);
         self.adopted_client_id.hash(state);
+        self.media_text.hash(state);
         match &self.contents {
             StyloStylesheetSourceContents::Text { shared } => {
                 0_u8.hash(state);
@@ -544,6 +586,9 @@ pub(in crate::style_engine) fn stylesheet_sources_cache_key(
     hasher.update(sources.len().to_le_bytes());
     for source in sources {
         hasher.update(source.cache_key().fingerprint);
+        let media_text = source.media_text().as_bytes();
+        hasher.update(media_text.len().to_le_bytes());
+        hasher.update(media_text);
         update_style_source_identity_hash(&mut hasher, source.source_id());
         match source.adopted_client_id() {
             Some(client_id) => {

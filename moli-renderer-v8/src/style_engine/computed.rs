@@ -440,8 +440,6 @@ pub(super) fn computed_style_snapshot_from_current_observation(
             host,
             &world.document_state,
             owner_document,
-            viewport,
-            environment,
             quirks_mode,
             tree_scope_versions,
         ));

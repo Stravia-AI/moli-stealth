@@ -11,7 +11,6 @@ use style::{
     device::{Device, servo::FontMetricsProvider},
     font_face::FontFaceRule,
     font_metrics::FontMetrics,
-    media_queries::MediaList,
     properties::{ComputedValues, style_structs::Font},
     servo::media_features::PointerCapabilities,
     servo_arc::Arc as ServoArc,
@@ -36,6 +35,7 @@ use crate::{document_runtime::DomHandle, dom::native::DomHost};
 use super::{
     StyleViewport, StyloStyleEnvironment,
     active_stylesheets::{ActiveStylesheet, ActiveStylesheetCollection},
+    media_list::parse_media_query_list_with_context,
     source::store::{StyleSourceMetadata, StyloStylesheetSource},
     source_id::{StyleSourceId, StyleSourceKind},
     ua::HTML_STYLESHEET as MOLI_UA_STYLESHEET,
@@ -285,6 +285,7 @@ fn style_source_metadata_for_css_text_with_origin(
         css_text,
         origin,
         QuirksMode::NoQuirks,
+        "",
     )));
     let guard = shared_lock.read();
     let stylist = new_stylist_with_viewport_bits(
@@ -434,7 +435,7 @@ pub(super) fn append_stylesheet_to_stylist(
     origin: Origin,
     quirks_mode: QuirksMode,
 ) {
-    let stylesheet = parse_stylesheet(shared_lock, base_url, css_text, origin, quirks_mode);
+    let stylesheet = parse_stylesheet(shared_lock, base_url, css_text, origin, quirks_mode, "");
     let guard = shared_lock.read();
     stylist.append_stylesheet(DocumentStyleSheet::new(ServoArc::new(stylesheet)), &guard);
 }
@@ -458,6 +459,7 @@ fn author_stylesheet_for_source(
         css_text,
         Origin::Author,
         quirks_mode,
+        source.media_text(),
     ))
 }
 
@@ -467,8 +469,10 @@ fn parse_stylesheet(
     css_text: &str,
     origin: Origin,
     quirks_mode: QuirksMode,
+    media_text: &str,
 ) -> Stylesheet {
-    let media = ServoArc::new(shared_lock.wrap(MediaList::empty()));
+    let media = parse_media_query_list_with_context(media_text, base_url, quirks_mode);
+    let media = ServoArc::new(shared_lock.wrap(media));
     Stylesheet::from_str(
         css_text,
         UrlExtraData::from(base_url.clone()),

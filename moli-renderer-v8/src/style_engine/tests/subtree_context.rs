@@ -598,6 +598,59 @@ fn source_metadata_respects_style_element_media() {
         )
     );
 }
+
+#[test]
+fn source_metadata_uses_the_stylesheet_runtime_media_list() {
+    use style::{context::QuirksMode, stylesheets::AllowImportRules};
+
+    let mut host = test_host();
+    let style = host.create_element("style");
+    assert!(host.set_attribute(style, "media", "print"));
+    assert!(host.append_child(host.document_handle(), style));
+
+    let mut engine = MoliStyleEngine::new();
+    engine.set_owner_style_sheet_text_with_host(
+        &host,
+        style,
+        "body:has(.marker) .target { color: green; }".into(),
+    );
+    let registry = crate::live_stylesheet::LiveStylesheetRegistry::default();
+    let stylesheet = registry.create(
+        "body:has(.marker) .target { color: green; }",
+        url::Url::parse("https://example.test/runtime-media.css").unwrap(),
+        QuirksMode::NoQuirks,
+        AllowImportRules::No,
+        engine.author_shared_lock(),
+    );
+    stylesheet.set_media_text("screen");
+    assert!(engine.install_owner_live_stylesheet_with_host(&host, style, stylesheet.clone()));
+
+    let media = crate::protocol_types::EmulatedMediaOverrides::default();
+    let source_scope = StyleSourceScope::for_document(host.document_handle());
+    assert_eq!(host.get_attribute(style, "media").as_deref(), Some("print"));
+    assert!(
+        engine.test_author_sources_have_relative_selector_dependency_for_document(
+            &host,
+            host.document_handle(),
+            &source_scope,
+            &media,
+        ),
+        "CSSOM runtime media must be authoritative even when the owner attribute differs",
+    );
+
+    stylesheet.set_media_text("print");
+    assert!(engine.refresh_owner_live_stylesheet_with_host(&host, style, stylesheet.id(),));
+    assert!(
+        !engine.test_author_sources_have_relative_selector_dependency_for_document(
+            &host,
+            host.document_handle(),
+            &source_scope,
+            &media,
+        ),
+        "an inactive runtime MediaList must not participate in dependency invalidation",
+    );
+}
+
 #[test]
 fn stylo_source_dependency_summary_reads_invalidation_metadata() {
     let base_url = url::Url::parse("https://example.test/app.css").unwrap();

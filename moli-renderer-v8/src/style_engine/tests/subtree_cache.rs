@@ -5721,6 +5721,259 @@ fn one_shadow_stylesheet_change_preserves_the_other_scope_cascade_data() {
 }
 
 #[test]
+fn device_changes_keep_media_sheets_installed_and_flush_only_affected_tree_scopes() {
+    reset_source_cascade_rebuild_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let document_target = host.create_element("div");
+    assert!(host.set_attribute(document_target, "class", "document-target"));
+    assert!(host.set_attribute(document_target, "style", "width: 50vw"));
+    assert!(host.append_child(document, document_target));
+    let first_host = host.create_element("section");
+    let second_host = host.create_element("article");
+    assert!(host.append_child(document, first_host));
+    assert!(host.append_child(document, second_host));
+    let first_root = host
+        .attach_shadow_root(first_host, "open")
+        .expect("first host should accept a shadow root");
+    let second_root = host
+        .attach_shadow_root(second_host, "open")
+        .expect("second host should accept a shadow root");
+    let first_target = host.create_element("span");
+    let second_target = host.create_element("span");
+    assert!(host.set_attribute(first_target, "class", "first-target"));
+    assert!(host.set_attribute(first_target, "style", "height: 50vh"));
+    assert!(host.set_attribute(second_target, "class", "second-target"));
+    assert!(host.append_child(first_root, first_target));
+    assert!(host.append_child(second_root, second_target));
+
+    let engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/shadow-media.html").unwrap();
+    let mut inputs = FullStyleWorldSnapshot::default();
+    inputs.document_stylesheet_sources.push(
+        StyloStylesheetSource::new(
+            ".document-target { color: rgb(7, 8, 9); }".into(),
+            document_url.clone(),
+        )
+        .with_owner_media_text("(max-width: 600px)"),
+    );
+    inputs.shadow_stylesheet_sources.push((
+        first_root,
+        vec![
+            StyloStylesheetSource::new(
+                ".first-target { color: rgb(1, 2, 3); }".into(),
+                document_url.clone(),
+            )
+            .with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
+                first_root, 71,
+            )))
+            .with_owner_media_text("(max-width: 600px)"),
+        ],
+    ));
+    inputs.shadow_stylesheet_sources.push((
+        second_root,
+        vec![
+            StyloStylesheetSource::new(
+                ".second-target { color: rgb(4, 5, 6); }".into(),
+                document_url.clone(),
+            )
+            .with_source_id(Some(StyleSourceId::shadow_root_adopted_style_sheet(
+                second_root,
+                72,
+            )))
+            .with_owner_media_text("(min-width: 100px)"),
+        ],
+    ));
+
+    let viewport_800 = StyleViewport::new(Some(800.0), Some(600.0));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            document_target,
+            "color",
+            None,
+            &inputs,
+            viewport_800,
+        ),
+        Some("rgb(0, 0, 0)".into()),
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            first_target,
+            "color",
+            None,
+            &inputs,
+            viewport_800,
+        ),
+        Some("rgb(0, 0, 0)".into()),
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            second_target,
+            "color",
+            None,
+            &inputs,
+            viewport_800,
+        ),
+        Some("rgb(4, 5, 6)".into()),
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            document_target,
+            "width",
+            None,
+            &inputs,
+            viewport_800,
+        ),
+        Some("400px".into()),
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            first_target,
+            "height",
+            None,
+            &inputs,
+            viewport_800,
+        ),
+        Some("300px".into()),
+    );
+    engine.with_retained_style_system_for_document_for_test(document, |retained| {
+        assert_eq!(
+            retained.document_stylesheets.entries().len(),
+            1,
+            "a non-matching owner MediaList must not remove its sheet from the Document scope",
+        );
+        assert_eq!(retained.shadow_scopes.len(), 2);
+        assert!(
+            retained
+                .shadow_scopes
+                .iter()
+                .all(|scope| scope.active_stylesheets().entries().len() == 1),
+            "a non-matching owner MediaList must not remove its sheet from the TreeScope",
+        );
+    });
+    let document_flushes = engine.retained_stylist_flush_count_for_document_for_test(document);
+    let first_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, first_root)
+        .expect("first scope should be retained");
+    let second_flushes = engine
+        .retained_shadow_scope_flush_count_for_document_for_test(document, second_root)
+        .expect("second scope should be retained");
+    let source_rebuilds = source_cascade_rebuild_count_for_test();
+
+    let viewport_700 = StyleViewport::new(Some(700.0), Some(500.0));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            first_target,
+            "color",
+            None,
+            &inputs,
+            viewport_700,
+        ),
+        Some("rgb(0, 0, 0)".into()),
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, first_root),
+        Some(first_flushes),
+        "a viewport change that crosses no media boundary must not flush the first scope",
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, second_root),
+        Some(second_flushes),
+        "a viewport change that crosses no media boundary must not flush the second scope",
+    );
+    assert_eq!(source_cascade_rebuild_count_for_test(), source_rebuilds);
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            document_target,
+            "width",
+            None,
+            &inputs,
+            viewport_700,
+        ),
+        Some("350px".into()),
+        "viewport units must be invalidated without a Document stylesheet flush",
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            first_target,
+            "height",
+            None,
+            &inputs,
+            viewport_700,
+        ),
+        Some("250px".into()),
+        "viewport units inside ShadowRoot must be invalidated without an AuthorStyles flush",
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        document_flushes,
+        "a viewport change that crosses no media boundary must not flush the Document Stylist",
+    );
+
+    let viewport_500 = StyleViewport::new(Some(500.0), Some(600.0));
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            document_target,
+            "color",
+            None,
+            &inputs,
+            viewport_500,
+        ),
+        Some("rgb(7, 8, 9)".into()),
+    );
+    assert_eq!(
+        engine.computed_style_property_value(
+            &host,
+            &document_url,
+            first_target,
+            "color",
+            None,
+            &inputs,
+            viewport_500,
+        ),
+        Some("rgb(1, 2, 3)".into()),
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, first_root),
+        Some(first_flushes + 1),
+        "only the scope whose top-level MediaList changed must flush",
+    );
+    assert_eq!(
+        engine.retained_shadow_scope_flush_count_for_document_for_test(document, second_root),
+        Some(second_flushes),
+        "an unrelated matching MediaList must preserve its AuthorStyles",
+    );
+    assert_eq!(
+        engine.retained_stylist_flush_count_for_document_for_test(document),
+        document_flushes + 1,
+        "the Document Stylist must flush once when its installed MediaList changes match state",
+    );
+    assert_eq!(
+        source_cascade_rebuild_count_for_test(),
+        source_rebuilds + 1,
+        "only the affected scope's source-local cascade projection must rebuild",
+    );
+}
+
+#[test]
 fn style_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
     let mut host = test_host();
     let document = host.document_handle();

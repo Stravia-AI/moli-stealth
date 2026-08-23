@@ -6,8 +6,7 @@ use moli_selector::StyloDomStyleAdapter;
 use style::context::QuirksMode;
 
 use super::{
-    FullStyleWorldSnapshot, StyleTreeScopeVersions, StyleViewport, StyleWorldEnvironment,
-    StyloStyleEnvironment,
+    FullStyleWorldSnapshot, StyleTreeScopeVersions, StyleWorldEnvironment,
     cleanup::StyleCacheCleanup,
     retained::{
         RetainedStyleInvalidations, build_retained_style_system,
@@ -28,21 +27,16 @@ pub(super) fn retained_style_world_update_plan(
     host: &DomHost,
     document_state: &StyleDocumentState,
     document: DomHandle,
-    viewport: StyleViewport,
-    environment: StyloStyleEnvironment,
     quirks_mode: QuirksMode,
     tree_scope_versions: StyleTreeScopeVersions,
 ) -> StyleWorldUpdatePlan {
     let source_dirty_scope = document_state.source_dirty_scope_snapshot();
-    let Some((replace_world, device_changed, tree_scopes_changed, retained_shadow_roots)) =
-        document_state.try_with_retained_style_system(|retained| {
+    let Some((replace_world, tree_scopes_changed, retained_shadow_roots)) = document_state
+        .try_with_retained_style_system(|retained| {
             (
                 retained
                     .key
                     .requires_replacement_for_observation(quirks_mode),
-                retained
-                    .key
-                    .device_differs_from_observation(viewport, environment),
                 retained.key.tree_scope_versions != Some(tree_scope_versions),
                 retained
                     .shadow_scopes
@@ -77,22 +71,8 @@ pub(super) fn retained_style_world_update_plan(
         );
     }
 
-    // The bridge currently models <style media> and <link media> by active-list
-    // membership instead of installing their MediaList on the Stylo sheet.
-    // A device change therefore has to refresh those ordered lists. This is
-    // still scope-local and parse-free for unchanged installations.
-    if device_changed {
-        shadow_stylesheet_roots.extend(
-            connected_shadow_roots
-                .as_deref()
-                .unwrap_or(&retained_shadow_roots)
-                .iter()
-                .copied(),
-        );
-    }
-
     StyleWorldUpdatePlan::Incremental(IncrementalStyleWorldUpdatePlan::new(
-        source_dirty_scope.refreshes_document_stylesheets(document) || device_changed,
+        source_dirty_scope.refreshes_document_stylesheets(document),
         shadow_stylesheet_roots.into_iter().collect(),
         connected_shadow_roots,
         source_dirty_scope.refreshes_custom_property_registrations(document),
@@ -319,6 +299,7 @@ fn apply_retained_stylesheet_invalidations(
         shadow_scopes,
         shadow_scope_fallbacks,
         removed_shadow_scopes,
+        viewport_size_changed,
     } = invalidations;
     if let Some(invalidations) = document_invalidations {
         // HTML documents normally have one document element. The native DOM
@@ -352,6 +333,9 @@ fn apply_retained_stylesheet_invalidations(
         }
         dom_adapter.process_stylesheet_invalidations(host, &roots, &invalidations);
     }
+    if viewport_size_changed {
+        invalidate_viewport_unit_styles(host, dom_adapter, document);
+    }
     cache_cleanup.invalidate_stylesheet_dirty_subtrees(host);
     if document_scope_fallback {
         cache_cleanup.invalidate_subtrees(host, [document]);
@@ -362,4 +346,35 @@ fn apply_retained_stylesheet_invalidations(
         cache_cleanup.invalidate_subtrees(host, roots);
     }
     cache_cleanup.invalidate_subtrees(host, removed_shadow_scopes);
+}
+
+fn invalidate_viewport_unit_styles(
+    host: &DomHost,
+    dom_adapter: &StyloDomStyleAdapter,
+    document: DomHandle,
+) {
+    let mut roots = host
+        .child_handles(document)
+        .filter(|handle| {
+            host.node(*handle)
+                .is_some_and(|node| node.as_element().is_some())
+        })
+        .collect::<Vec<_>>();
+    for shadow_root in host
+        .snapshot_connected_shadow_roots()
+        .into_iter()
+        .filter(|root| host.owner_document_handle(*root) == Some(document))
+    {
+        roots.extend(host.child_handles(shadow_root).filter(|handle| {
+            host.node(*handle)
+                .is_some_and(|node| node.as_element().is_some())
+        }));
+    }
+    dom_adapter.with_bound_host(host, |binding| {
+        for root in roots {
+            if let Some(root) = binding.element(host, root) {
+                style::invalidation::viewport_units::invalidate(root);
+            }
+        }
+    });
 }

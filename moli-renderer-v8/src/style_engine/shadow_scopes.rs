@@ -83,6 +83,7 @@ pub(super) struct ShadowScopeReconciliation {
     pub(super) invalidations: Vec<(DomHandle, StylesheetInvalidationSet)>,
     pub(super) removed_roots: Vec<DomHandle>,
     pub(super) scope_fallbacks: Vec<DomHandle>,
+    pub(super) device_affected_roots: Vec<DomHandle>,
     pub(super) collections_changed: bool,
 }
 
@@ -100,6 +101,7 @@ pub(super) fn reconcile_dirty_shadow_scopes(
     let mut invalidations = Vec::new();
     let mut removed_roots = Vec::new();
     let mut scope_fallbacks = Vec::new();
+    let mut device_affected_roots = Vec::new();
     let mut collections_changed = false;
     let mut newly_built_roots = HashSet::new();
 
@@ -133,6 +135,18 @@ pub(super) fn reconcile_dirty_shadow_scopes(
         removed_roots.extend(previous_scopes.into_iter().map(|scope| scope.root()));
         collections_changed |= !removed_roots.is_empty();
         retained.shadow_scopes = next_scopes;
+    }
+
+    if device_changed {
+        let guard = shared_lock.read();
+        device_affected_roots.extend(
+            retained
+                .shadow_scopes
+                .iter()
+                .filter(|scope| !newly_built_roots.contains(&scope.root()))
+                .filter(|scope| shadow_scope_media_changed(scope, &retained.stylist, &guard))
+                .map(ShadowScopeStyles::root),
+        );
     }
 
     for (root, sources) in dirty_scopes {
@@ -170,11 +184,12 @@ pub(super) fn reconcile_dirty_shadow_scopes(
         if newly_built_roots.contains(&scope.root()) {
             continue;
         }
-        let must_flush = dirty_roots.contains(&scope.root()) || device_changed;
+        let device_affected = device_affected_roots.contains(&scope.root());
+        let must_flush = dirty_roots.contains(&scope.root()) || device_affected;
         if !must_flush {
             continue;
         }
-        if device_changed {
+        if device_affected {
             scope.author_styles_mut().stylesheets.force_dirty();
         }
         let guard = shared_lock.read();
@@ -186,6 +201,7 @@ pub(super) fn reconcile_dirty_shadow_scopes(
         invalidations,
         removed_roots,
         scope_fallbacks,
+        device_affected_roots,
         collections_changed,
     }
 }
@@ -203,13 +219,14 @@ pub(super) fn reconcile_shadow_scopes(
     let mut next_scopes = Vec::with_capacity(desired_scopes.len());
     let mut invalidations = Vec::new();
     let mut scope_fallbacks = Vec::new();
+    let mut device_affected_roots = Vec::new();
     let mut collections_changed = false;
     for (root, sources) in desired_scopes {
-        let mut scope = if let Some(index) = previous_scopes
+        let (mut scope, retained_scope) = if let Some(index) = previous_scopes
             .iter()
             .position(|scope| scope.root() == *root)
         {
-            previous_scopes.remove(index)
+            (previous_scopes.remove(index), true)
         } else {
             collections_changed = true;
             let (scope, scope_invalidations) = build_shadow_scope(
@@ -220,8 +237,16 @@ pub(super) fn reconcile_shadow_scopes(
                 &mut install,
             );
             invalidations.push((*root, scope_invalidations));
-            scope
+            (scope, false)
         };
+
+        let device_affected = device_changed && retained_scope && {
+            let guard = shared_lock.read();
+            shadow_scope_media_changed(&scope, &retained.stylist, &guard)
+        };
+        if device_affected {
+            device_affected_roots.push(*root);
+        }
 
         let reconciliation = scope
             .active_stylesheets_mut()
@@ -237,10 +262,10 @@ pub(super) fn reconcile_shadow_scopes(
                 scope_fallbacks.push(*root);
             }
         }
-        if device_changed {
+        if device_affected {
             scope.author_styles_mut().stylesheets.force_dirty();
         }
-        if reconciliation.is_some() || device_changed {
+        if reconciliation.is_some() || device_affected {
             let guard = shared_lock.read();
             invalidations.push((*root, scope.flush(&mut retained.stylist, &guard)));
         }
@@ -257,8 +282,24 @@ pub(super) fn reconcile_shadow_scopes(
         invalidations,
         removed_roots,
         scope_fallbacks,
+        device_affected_roots,
         collections_changed,
     }
+}
+
+fn shadow_scope_media_changed(
+    scope: &ShadowScopeStyles,
+    stylist: &Stylist,
+    guard: &SharedRwLockReadGuard<'_>,
+) -> bool {
+    scope.active_stylesheets().entries().iter().any(|entry| {
+        !scope.author_styles().data.media_feature_affected_matches(
+            entry.stylesheet(),
+            guard,
+            stylist.device(),
+            stylist.quirks_mode(),
+        )
+    })
 }
 
 fn build_shadow_scope(
