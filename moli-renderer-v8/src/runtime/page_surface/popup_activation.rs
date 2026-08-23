@@ -60,6 +60,51 @@ impl RendererAuxiliaryBrowsingContextPolicy {
     }
 }
 
+/// Renderer-owned terminal response sanitation result for a top-level
+/// Document navigation.
+///
+/// Chromium runs this check before enforcing COOP for the response. Keeping
+/// the result typed lets the fetch/protocol owners stop transport and expose
+/// diagnostics without either layer re-deriving sandbox or COOP semantics.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RendererMainDocumentResponseBlock {
+    CrossOriginOpenerPolicySandboxedNavigation,
+}
+
+impl RendererMainDocumentResponseBlock {
+    pub fn sanitize(
+        auxiliary_policy: Option<RendererAuxiliaryBrowsingContextPolicy>,
+        bypass_content_security_policy: bool,
+        response_url: &url::Url,
+        response_headers: &[(String, String)],
+    ) -> Option<Self> {
+        let inherited_sandbox = auxiliary_policy
+            .map(RendererAuxiliaryBrowsingContextPolicy::sandbox)
+            .unwrap_or_default();
+        let response_sandbox = if bypass_content_security_policy {
+            DocumentSandboxPolicy::default()
+        } else {
+            DocumentPolicyContainer::from_navigation_response_headers(
+                response_headers,
+                response_url,
+            )
+            .sandbox
+        };
+        let pending_sandbox =
+            inherited_sandbox.with_response_content_security_policy(response_sandbox);
+        if pending_sandbox.sandboxes_navigation
+            && crate::cross_origin_isolation::response_enforces_cross_origin_opener_policy(
+                response_url,
+                response_headers,
+            )
+        {
+            Some(Self::CrossOriginOpenerPolicySandboxedNavigation)
+        } else {
+            None
+        }
+    }
+}
+
 /// Exact already-live renderer Page selected for a popup navigation.
 ///
 /// Named browsing-context lookup is a renderer Page-group operation. Carrying
@@ -136,6 +181,20 @@ impl RendererPopupNewTargetDisposition {
 }
 
 impl RendererResolvedPopupTarget {
+    pub(crate) const fn from_wire_parts(owner_local_host_id: u64, page_id: u64) -> Option<Self> {
+        let Some(owner_local_host_id) = RendererOwnerLocalHostId::from_wire(owner_local_host_id)
+        else {
+            return None;
+        };
+        let Some(page_id) = PageId::from_wire(page_id) else {
+            return None;
+        };
+        Some(Self {
+            owner_local_host_id,
+            page_id,
+        })
+    }
+
     pub(crate) const fn from_residence(residence: RendererOutputResidenceIdentity) -> Option<Self> {
         match residence {
             RendererOutputResidenceIdentity::Page {
@@ -738,4 +797,85 @@ fn is_special_browsing_context_target(target_name: &str) -> bool {
     target_name.eq_ignore_ascii_case("_self")
         || target_name.eq_ignore_ascii_case("_parent")
         || target_name.eq_ignore_ascii_case("_top")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coop_response_is_blocked_by_response_or_inherited_sandbox_before_commit() {
+        let response_url = url::Url::parse("https://example.test/popup").expect("valid URL");
+        let coop = (
+            "Cross-Origin-Opener-Policy".to_owned(),
+            "same-origin".to_owned(),
+        );
+        let response_sandbox = (
+            "Content-Security-Policy".to_owned(),
+            "sandbox allow-popups allow-scripts allow-same-origin".to_owned(),
+        );
+        assert_eq!(
+            RendererMainDocumentResponseBlock::sanitize(
+                None,
+                false,
+                &response_url,
+                &[coop.clone(), response_sandbox],
+            ),
+            Some(RendererMainDocumentResponseBlock::CrossOriginOpenerPolicySandboxedNavigation)
+        );
+
+        let inherited =
+            RendererAuxiliaryBrowsingContextPolicy::from_sandbox(DocumentSandboxPolicy {
+                sandboxes_navigation: true,
+                ..DocumentSandboxPolicy::default()
+            });
+        assert_eq!(
+            RendererMainDocumentResponseBlock::sanitize(
+                Some(inherited),
+                false,
+                &response_url,
+                &[coop],
+            ),
+            Some(RendererMainDocumentResponseBlock::CrossOriginOpenerPolicySandboxedNavigation)
+        );
+    }
+
+    #[test]
+    fn report_only_coop_and_bypassed_response_csp_do_not_block() {
+        let response_url = url::Url::parse("https://example.test/popup").expect("valid URL");
+        let sandbox = (
+            "Content-Security-Policy".to_owned(),
+            "sandbox allow-popups allow-scripts".to_owned(),
+        );
+        assert_eq!(
+            RendererMainDocumentResponseBlock::sanitize(
+                None,
+                false,
+                &response_url,
+                &[
+                    (
+                        "Cross-Origin-Opener-Policy-Report-Only".to_owned(),
+                        "same-origin".to_owned(),
+                    ),
+                    sandbox.clone(),
+                ],
+            ),
+            None
+        );
+        assert_eq!(
+            RendererMainDocumentResponseBlock::sanitize(
+                None,
+                true,
+                &response_url,
+                &[
+                    (
+                        "Cross-Origin-Opener-Policy".to_owned(),
+                        "same-origin".to_owned(),
+                    ),
+                    sandbox,
+                ],
+            ),
+            None
+        );
+    }
 }

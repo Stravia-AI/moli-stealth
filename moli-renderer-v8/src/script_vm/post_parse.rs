@@ -330,10 +330,20 @@ impl ScriptVmContextBootstrap {
         };
         finish_context_bootstrap(scope, unsafe { &mut *host_ptr }, &secure_context_url)?;
         if matches!(mode, WindowContextBootstrapMode::MainDefault)
-            && reusable_window_proxy.is_some()
             && let Some(environment) = renderer_page_script_environment.as_ref()
         {
-            environment.restore_main_window_opener_after_navigation(scope, global);
+            if reusable_window_proxy.is_some() {
+                environment.restore_main_window_opener_after_navigation(scope, global);
+            } else {
+                let opener = unsafe { &mut *host_ptr }
+                    .restore_current_top_level_opener_projection(scope, environment)?;
+                set_private_value(
+                    scope,
+                    global,
+                    crate::context_bootstrap::WINDOW_OPENER_SLOT,
+                    opener,
+                );
+            }
             environment.restore_main_window_name_after_navigation(scope, global);
         }
         match mode {
@@ -374,8 +384,15 @@ impl ScriptVmContextBootstrap {
                     window_host::TOP_WINDOW_MESSAGE_ENDPOINT_SLOT,
                     top_window_endpoint.into(),
                 );
+                let window_proxy_endpoint = renderer_page_script_environment.as_ref().map(
+                    crate::script_vm::RendererPageScriptEnvironment::top_level_window_proxy_endpoint_id,
+                );
                 unsafe { &mut *host_ptr }
-                    .install_top_level_window_proxy_cross_origin_access_surface(scope, global);
+                    .install_top_level_window_proxy_cross_origin_access_surface(
+                        scope,
+                        global,
+                        window_proxy_endpoint,
+                    );
             }
             WindowContextBootstrapMode::Isolated {
                 child_handle: None, ..

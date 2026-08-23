@@ -24,11 +24,14 @@ use moli_core::page::RendererServiceWorkerVersionStatus;
 use moli_core::page::{
     BidiPreloadChannelHandoff, Page, RendererInspectorProtocolConfiguration,
     RendererInspectorSessionRestoreSnapshot, RendererMainDocumentCommit,
-    RendererPageCreationArtifacts, SubresourceResourceType, V8InspectorSessionAttach,
+    RendererMainDocumentResponseBlock, RendererPageCreationArtifacts, SubresourceResourceType,
+    V8InspectorSessionAttach,
 };
 use moli_core::runtime::RendererBrowserContextRuntimeOwnerAccess;
-use moli_fetch::BrowserNavigationRequestKind;
+use moli_fetch::{BrowserNavigationRequestKind, RedirectResponseFollowPolicy};
 use url::Url;
+
+const REMOTE_WINDOW_PROXY_ACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub(super) enum TargetSessionOwnerMut<'a> {
     ActiveTarget {
@@ -212,6 +215,33 @@ pub(crate) struct TargetNavigationLoadInputs {
 }
 
 impl TargetNavigationLoadInputs {
+    pub(crate) fn main_document_response_block(
+        &self,
+        response_url: &Url,
+        response_headers: &[(String, String)],
+    ) -> Option<RendererMainDocumentResponseBlock> {
+        RendererMainDocumentResponseBlock::sanitize(
+            self.auxiliary_browsing_context_policy,
+            self.bypass_content_security_policy,
+            response_url,
+            response_headers,
+        )
+    }
+
+    pub(crate) fn redirect_response_follow_policy(&self) -> RedirectResponseFollowPolicy {
+        let auxiliary_policy = self.auxiliary_browsing_context_policy;
+        let bypass_content_security_policy = self.bypass_content_security_policy;
+        RedirectResponseFollowPolicy::new(move |response_url, response_headers| {
+            RendererMainDocumentResponseBlock::sanitize(
+                auxiliary_policy,
+                bypass_content_security_policy,
+                response_url,
+                response_headers,
+            )
+            .is_none()
+        })
+    }
+
     pub(crate) fn has_main_document_commit_seed(&self) -> bool {
         self.main_document_commit_seed.is_some()
     }
@@ -241,9 +271,10 @@ impl TargetNavigationLoadInputs {
         &self,
         final_url: &Url,
         network_error_page: Option<&NetworkErrorPageNavigation>,
+        navigation_redirect_chain: Vec<moli_page_types::NavigationRedirect>,
     ) -> Option<RendererMainDocumentCommit> {
         self.main_document_commit_seed.as_ref().map(|seed| {
-            let mut commit = seed.resolve(final_url, network_error_page);
+            let mut commit = seed.resolve(final_url, network_error_page, navigation_redirect_chain);
             commit.auxiliary_browsing_context_policy = self.auxiliary_browsing_context_policy;
             commit
         })
@@ -3313,6 +3344,91 @@ impl CdpConnection {
             })
     }
 
+    /// Routes one renderer-accepted RemoteWindowProxy operation to the exact
+    /// target Page without retaining a BrowserContext/target-slot borrow while
+    /// the renderer actor produces its ACK.
+    pub(crate) async fn dispatch_renderer_remote_window_proxy_command_async(
+        &mut self,
+        command: moli_core::page::RendererRemoteWindowProxyCommand,
+    ) -> bool {
+        let Some(owner) =
+            self.target_page_residence_identity_for_renderer_popup_target(command.target_page())
+        else {
+            return false;
+        };
+        let pending = {
+            let Some(browser_context) = self.browser_context_by_id(owner.browser_context_id())
+            else {
+                return false;
+            };
+            let runtime_slot = match owner.target_id() {
+                Some(target_id) if browser_context.active_target_id() == Some(target_id) => {
+                    &browser_context.active_target.runtime_slot
+                }
+                Some(target_id) => {
+                    let Some(target) = browser_context.background_target(target_id) else {
+                        return false;
+                    };
+                    target.runtime_slot()
+                }
+                None => &browser_context.active_target.runtime_slot,
+            };
+            if runtime_slot.page_attachment_id() != Some(owner.page_attachment_id()) {
+                return false;
+            }
+            let Some(page) = runtime_slot.loaded_page() else {
+                return false;
+            };
+            match page.start_remote_window_proxy_command(command) {
+                Ok(pending) => pending,
+                Err(error) => {
+                    tracing::debug!(%error, "remote WindowProxy target Page rejected command dispatch");
+                    return false;
+                }
+            }
+        };
+        let completion = match tokio::time::timeout(REMOTE_WINDOW_PROXY_ACK_TIMEOUT, pending.wait())
+            .await
+        {
+            Ok(Ok(completion)) => completion,
+            Ok(Err(error)) => {
+                tracing::debug!(%error, "remote WindowProxy target Page command was interrupted");
+                return false;
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_ms = REMOTE_WINDOW_PROXY_ACK_TIMEOUT.as_millis(),
+                    "remote WindowProxy target Page command ACK timed out"
+                );
+                return false;
+            }
+        };
+        if !self.target_page_residence_identity_is_installed(&owner) {
+            return false;
+        }
+        let Some(browser_context) = self.browser_context_by_id_mut(owner.browser_context_id())
+        else {
+            return false;
+        };
+        let page = match owner.target_id() {
+            Some(target_id) if browser_context.active_target_id() == Some(target_id) => {
+                browser_context.active_target.runtime_slot.loaded_page_mut()
+            }
+            Some(target_id) => browser_context
+                .background_target_mut(target_id)
+                .and_then(|target| target.loaded_page_mut()),
+            None => browser_context.active_target.runtime_slot.loaded_page_mut(),
+        };
+        let Some(page) = page else {
+            return false;
+        };
+        page.finish_remote_window_proxy_command(completion)
+            .unwrap_or_else(|error| {
+                tracing::debug!(%error, "remote WindowProxy target Page returned an invalid ACK");
+                false
+            })
+    }
+
     pub(crate) fn target_page_residence_identity_is_installed(
         &self,
         expected: &TargetPageResidenceIdentity,
@@ -4856,7 +4972,9 @@ mod tests {
             security_origin: "https://nav.example".to_owned(),
             secure_context_type: "Secure".to_owned(),
             timestamp: 0.0,
+            navigation_redirect_chain: Vec::new(),
             auxiliary_browsing_context_policy: None,
+            response_block: None,
         };
         {
             let mut owner = TargetSessionOwnerMut::BackgroundTarget {

@@ -86,6 +86,10 @@ impl PageVm {
                 .vm_mut()
                 .navigate_top_level_same_document_from_browser(&url)
                 .map(RendererPageReply::Bool),
+            RendererPageCommand::DispatchRemoteWindowProxyCommand(command) => self
+                .vm_mut()
+                .dispatch_remote_window_proxy_command(command)
+                .map(RendererPageReply::Bool),
             RendererPageCommand::RequestBrowserPageClose => self
                 .vm_mut()
                 .request_browser_page_close()

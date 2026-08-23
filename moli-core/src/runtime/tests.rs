@@ -1652,6 +1652,7 @@ async fn navigation_engine_bypasses_service_worker_for_main_resource() -> Result
             None,
             Vec::new(),
             None,
+            None,
         )
         .await?;
     assert!(
@@ -1726,6 +1727,7 @@ async fn navigation_engine_service_worker_main_resource_has_no_network_transport
             &format!("{base_url}/app/controlled.html"),
             None,
             Vec::new(),
+            None,
             None,
         )
         .await?;

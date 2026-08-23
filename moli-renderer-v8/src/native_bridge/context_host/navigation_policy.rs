@@ -169,6 +169,123 @@ impl JsContextHost {
         Err(BrowsingContextNavigationDenial::UnrelatedContext)
     }
 
+    /// Source-side `CanNavigate` admission for a related top-level target
+    /// whose LocalWindow belongs to another script agent. Only replicated
+    /// group facts are consulted here; the receiving renderer repeats exact
+    /// endpoint/Page currentness before executing the accepted command.
+    pub(crate) fn can_navigate_remote_top_level_browsing_context(
+        &self,
+        source_identity: WindowExecutionContextIdentity,
+        target: &crate::script_vm::RendererRemoteTopLevelWindowProxyTarget,
+        destination_url: &Url,
+    ) -> Result<(), BrowsingContextNavigationDenial> {
+        if !self.window_execution_context_identity_is_current(source_identity) {
+            return Err(BrowsingContextNavigationDenial::StaleContext);
+        }
+        if destination_url.scheme() == "javascript" {
+            return Err(BrowsingContextNavigationDenial::JavascriptCrossOrigin);
+        }
+        let source_scope = source_identity.dispatch_scope();
+        let source_policy = self
+            .document_policy_container_snapshot_for_owner(source_scope)
+            .ok_or(BrowsingContextNavigationDenial::StaleContext)?;
+        let source_endpoint = self
+            .top_level_window_proxy_endpoint_id()
+            .ok_or(BrowsingContextNavigationDenial::StaleContext)?;
+        let source_opener = self
+            .page_script_environment
+            .as_ref()
+            .and_then(crate::script_vm::RendererPageScriptEnvironment::top_level_opener_endpoint);
+        let target_was_opened_by_source = target.opener_endpoint == Some(source_endpoint);
+        let source_was_opened_by_target = source_opener == Some(target.endpoint);
+
+        if source_policy.sandbox.sandboxes_navigation {
+            let sandbox = source_policy.sandbox;
+            if !sandbox.allows_popups_to_escape
+                && (!sandbox.allows_popups || !target_was_opened_by_source)
+            {
+                return Err(BrowsingContextNavigationDenial::SandboxedPopup);
+            }
+        }
+        if target_was_opened_by_source || source_was_opened_by_target {
+            return Ok(());
+        }
+        Err(BrowsingContextNavigationDenial::UnrelatedContext)
+    }
+
+    /// Source-side `CanNavigate` admission for a nested context whose owner
+    /// lives in another script agent. The replicated tree contains only the
+    /// policy/origin facts needed for this decision; target currentness is
+    /// checked again against the root-Document-qualified frame token when the
+    /// command reaches the owning Page.
+    pub(crate) fn can_navigate_remote_frame_browsing_context(
+        &self,
+        source_identity: WindowExecutionContextIdentity,
+        target: &crate::script_vm::RendererRemoteFrameSnapshot,
+        destination_url: &Url,
+    ) -> Result<(), BrowsingContextNavigationDenial> {
+        if !self.window_execution_context_identity_is_current(source_identity) {
+            return Err(BrowsingContextNavigationDenial::StaleContext);
+        }
+        let Some(environment) = self.page_script_environment.as_ref() else {
+            return Err(BrowsingContextNavigationDenial::StaleContext);
+        };
+        if environment.remote_frame_snapshot(target.token).as_ref() != Some(target) {
+            return Err(BrowsingContextNavigationDenial::StaleContext);
+        }
+        let can_access_target_or_ancestor = self
+            .source_can_access_remote_frame_or_ancestor(source_identity, target)
+            .unwrap_or(false);
+        if destination_url.scheme() == "javascript" && !can_access_target_or_ancestor {
+            return Err(BrowsingContextNavigationDenial::JavascriptCrossOrigin);
+        }
+        let source_policy = self
+            .document_policy_container_snapshot_for_owner(source_identity.dispatch_scope())
+            .ok_or(BrowsingContextNavigationDenial::StaleContext)?;
+        if source_policy.sandbox.sandboxes_navigation {
+            // A related Page's frame is neither a descendant of the source nor
+            // an outermost browsing context. This is Blink's sandboxed
+            // ancestor refusal before opener/top-level exceptions apply.
+            return Err(BrowsingContextNavigationDenial::SandboxedAncestor);
+        }
+        if can_access_target_or_ancestor {
+            return Ok(());
+        }
+        Err(BrowsingContextNavigationDenial::UnrelatedContext)
+    }
+
+    fn source_can_access_remote_frame_or_ancestor(
+        &self,
+        source_identity: WindowExecutionContextIdentity,
+        target: &crate::script_vm::RendererRemoteFrameSnapshot,
+    ) -> Option<bool> {
+        let source_origin =
+            self.window_access_origin_for_dispatch_scope(source_identity.dispatch_scope())?;
+        let environment = self.page_script_environment.as_ref()?;
+        let tree = environment.remote_frame_tree_snapshot(target.token.endpoint)?;
+        let mut candidate = Some(target.clone());
+        while let Some(snapshot) = candidate {
+            let target_origin = BrowsingContextAccessOrigin::from_serialized_origin(
+                snapshot.serialized_origin,
+                snapshot.document_domain,
+            )?;
+            if source_origin.can_access(&target_origin) {
+                return Some(true);
+            }
+            candidate = snapshot.parent_browsing_context_id.and_then(|parent_id| {
+                tree.iter()
+                    .find(|candidate| candidate.token.browsing_context_id == parent_id)
+                    .cloned()
+            });
+        }
+        let top = environment.remote_top_level_target_snapshot(target.token.endpoint)?;
+        let top_origin = BrowsingContextAccessOrigin::from_serialized_origin(
+            top.current_serialized_origin,
+            None,
+        )?;
+        Some(source_origin.can_access(&top_origin))
+    }
+
     pub(crate) fn navigation_api_base_url_for_identity(
         &self,
         scope: &mut v8::PinScope<'_, '_>,

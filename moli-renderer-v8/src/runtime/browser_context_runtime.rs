@@ -158,7 +158,7 @@ impl RendererProducerRegistrar {
 /// a new context.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum RendererPopupBlockerPolicy {
-    /// Preserve Lightmount's headless-automation default and Chromium's
+    /// Preserve Moli's headless-automation default and Chromium's
     /// embedder/content-setting bypass behavior.
     #[default]
     AllowWithoutTransientActivation,
@@ -972,7 +972,10 @@ mod tests {
             RendererOutputTransportMessage::PageReservationReleased {
                 owner_local_host_id,
                 page_id,
-            } if owner_local_host_id == token.local_host_id() && page_id == token.page_id()
+                reservation_id,
+            } if owner_local_host_id == token.local_host_id()
+                && page_id == token.page_id()
+                && reservation_id == token.output_owner_reservation_id()
         ));
         assert!(matches!(
             output_rx.try_recv(),

@@ -217,11 +217,13 @@ impl ScriptVm {
                 if !host.allows_inline_javascript_navigation_by_csp(scope, owner, &csp_source) {
                     return Ok(false);
                 }
+                #[cfg(test)]
                 let source = match &mut job.source {
                     FrameScriptSource::SourceText(source) => source,
-                    #[cfg(test)]
                     FrameScriptSource::FunctionConstructor(_) => return Ok(false),
                 };
+                #[cfg(not(test))]
+                let FrameScriptSource::SourceText(source) = &mut job.source;
                 let requirements = host.trusted_types_for_script_requirements(scope);
                 let Some(rewritten) =
                     crate::context_bootstrap::trusted_script_string_for_javascript_navigation(

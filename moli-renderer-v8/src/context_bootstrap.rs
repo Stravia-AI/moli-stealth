@@ -105,8 +105,9 @@ mod storage_buckets;
 pub(crate) use self::storage_access::request_storage_access_with_types;
 pub(crate) use self::window_runtime::{
     LegacyStorageQuotaCallbackOutcome, LegacyStorageQuotaCallbackTask,
-    LegacyStorageQuotaCallbackTaskEffect, dispatch_top_level_browsing_context_close_unload,
-    request_top_level_browsing_context_close, request_top_level_browsing_context_focus,
+    LegacyStorageQuotaCallbackTaskEffect, accept_remote_top_level_browsing_context_focus,
+    dispatch_top_level_browsing_context_close_unload, request_top_level_browsing_context_close,
+    request_top_level_browsing_context_focus,
 };
 
 pub use moli_storage_service::DEFAULT_ORIGIN_STORAGE_QUOTA_BYTES;
@@ -387,6 +388,8 @@ pub(crate) use self::shared::{
     structured_clone_value_with_options, structured_deserialize_value_for_message_event,
     structured_serialize_value_for_post_message,
     structured_serialize_value_for_post_message_with_source_port,
+    structured_serialize_value_for_remote_window_post_message,
+    structured_serialize_value_for_remote_window_post_message_options,
     structured_serialize_value_for_window_post_message,
     structured_serialize_value_for_window_post_message_options,
     wasm_module_message_allowed_for_target, wasm_module_message_allowed_for_target_origin,

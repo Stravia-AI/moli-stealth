@@ -76,11 +76,16 @@ impl RendererScriptAgentV8ForegroundTaskCompletion {
 #[derive(Debug)]
 struct RendererScriptAgentPageMembershipState {
     router: RendererScriptAgentV8ForegroundTaskRouter,
+    script_agent_id: ScriptAgentId,
     page_id: PageId,
     active: AtomicBool,
 }
 
 impl RendererScriptAgentPageMembership {
+    pub(crate) fn script_agent_id(&self) -> ScriptAgentId {
+        self.inner.script_agent_id
+    }
+
     pub(crate) fn page_id(&self) -> PageId {
         self.inner.page_id
     }
@@ -187,6 +192,7 @@ impl RendererScriptAgentV8ForegroundTaskRouter {
         Ok(RendererScriptAgentPageMembership {
             inner: Arc::new(RendererScriptAgentPageMembershipState {
                 router: self.clone(),
+                script_agent_id: state.script_agent_id,
                 page_id,
                 active: AtomicBool::new(true),
             }),

@@ -829,7 +829,10 @@ impl JsContextHost {
             self.indexed_db_manager(),
             self.storage_bucket_store(),
         );
-        env.cross_origin_opener_policy = self.current_top_level_cross_origin_opener_policy_value();
+        if let Some(policy) = self.current_top_level_cross_origin_opener_policy() {
+            env.cross_origin_opener_policy =
+                crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit::Inherited(policy);
+        }
         let popup_id = self.next_lightweight_popup_id;
         self.next_lightweight_popup_id = self.next_lightweight_popup_id.wrapping_add(1).max(1);
         let init = RendererRelatedInitialEmptyPageRealmInit {

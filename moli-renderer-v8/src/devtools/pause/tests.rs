@@ -26,6 +26,7 @@ fn configure_page(
             crate::runtime::RendererOwnerLocalHostId::new_for_testing(page_id.as_u64()),
             page_id,
             agent_token,
+            crate::runtime::RendererPageOutputOwnerReservationId::allocate(),
         ),
     ));
     agent_token

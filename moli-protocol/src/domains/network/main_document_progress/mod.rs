@@ -380,6 +380,9 @@ pub(crate) fn materialize_loaded_navigation_progress(
     } = navigation;
     let main_document_body = document_progress_transfer.captured_body();
     let progress_gate = match network_error_page.as_ref() {
+        Some(error_page) if error_page.response_block().is_some() => {
+            document_progress_transfer.into_progress_gate(conn, state, &final_url)
+        }
         Some(error_page) => network_error_page_progress_gate(conn, state, error_page.error_text()),
         None => document_progress_transfer.into_progress_gate(conn, state, &final_url),
     };
@@ -423,6 +426,9 @@ pub(crate) fn materialize_stable_page_navigation_progress(
     } = navigation;
     let main_document_body = document_progress_transfer.captured_body();
     let progress_gate = match network_error_page.as_ref() {
+        Some(error_page) if error_page.response_block().is_some() => {
+            document_progress_transfer.into_progress_gate(conn, state, &final_url)
+        }
         Some(error_page) => network_error_page_progress_gate(conn, state, error_page.error_text()),
         None => document_progress_transfer.into_progress_gate(conn, state, &final_url),
     };
@@ -968,6 +974,8 @@ pub(crate) struct CompletedMainDocumentNetworkEvents {
     negotiated_http_version: Option<NegotiatedHttpVersion>,
     network_observation_journal: NetworkObservationJournal,
     response_stage_metadata_already_emitted: bool,
+    failure_error_text: Option<String>,
+    response_url_override: Option<Url>,
 }
 
 impl CompletedMainDocumentNetworkEvents {
@@ -995,6 +1003,8 @@ impl CompletedMainDocumentNetworkEvents {
             negotiated_http_version: None,
             network_observation_journal: NetworkObservationJournal::default(),
             response_stage_metadata_already_emitted: false,
+            failure_error_text: None,
+            response_url_override: None,
         }
     }
 
@@ -1011,6 +1021,16 @@ impl CompletedMainDocumentNetworkEvents {
         network_observation_journal: NetworkObservationJournal,
     ) -> Self {
         self.network_observation_journal = network_observation_journal;
+        self
+    }
+
+    pub(crate) fn with_loading_failure(mut self, error_text: impl Into<String>) -> Self {
+        self.failure_error_text = Some(error_text.into());
+        self
+    }
+
+    pub(crate) fn with_response_url(mut self, response_url: Url) -> Self {
+        self.response_url_override = Some(response_url);
         self
     }
 }
@@ -1764,10 +1784,16 @@ impl CompletedMainDocumentProgressContext {
         final_url: &Url,
         encoded_data_length: usize,
     ) -> MainDocumentNavigationProgressEventBatches {
+        let body_finished = if let Some(error_text) = events.failure_error_text.as_deref() {
+            self.loading_failed_progress_events(error_text)
+        } else {
+            self.loading_finished_progress_events(encoded_data_length)
+        };
+        let response_url = events.response_url_override.as_ref().unwrap_or(final_url);
         MainDocumentNavigationProgressEventBatches::new(
             self.request_and_redirect_progress_events(events),
-            self.response_received_progress_events(events, final_url, encoded_data_length),
-            self.loading_finished_progress_events(encoded_data_length),
+            self.response_received_progress_events(events, response_url, encoded_data_length),
+            body_finished,
         )
     }
 

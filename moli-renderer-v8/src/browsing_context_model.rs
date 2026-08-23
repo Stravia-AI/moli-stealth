@@ -41,6 +41,56 @@ impl BrowsingContextGroupId {
     }
 }
 
+/// Group-qualified identity of one top-level WindowProxy routing endpoint.
+///
+/// A normal Document replacement preserves this identity. A browsing-context
+/// group switch allocates a new group and therefore a new endpoint even when
+/// the protocol Page residence is reused. The generation is allocated by the
+/// group owner and prevents a stale V8 projection from addressing a later
+/// top-level target that happens to reuse the same Page residence.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct TopLevelWindowProxyEndpointId {
+    browsing_context_group_id: BrowsingContextGroupId,
+    generation: u64,
+}
+
+impl TopLevelWindowProxyEndpointId {
+    pub(crate) const fn new(
+        browsing_context_group_id: BrowsingContextGroupId,
+        generation: u64,
+    ) -> Self {
+        assert!(
+            generation != 0,
+            "WindowProxy endpoint generation must be non-zero"
+        );
+        Self {
+            browsing_context_group_id,
+            generation,
+        }
+    }
+
+    pub(crate) const fn from_wire_parts(
+        browsing_context_group_id: u64,
+        generation: u64,
+    ) -> Option<Self> {
+        if browsing_context_group_id == 0 || generation == 0 {
+            return None;
+        }
+        Some(Self {
+            browsing_context_group_id: BrowsingContextGroupId(browsing_context_group_id),
+            generation,
+        })
+    }
+
+    pub(crate) const fn browsing_context_group_id(self) -> BrowsingContextGroupId {
+        self.browsing_context_group_id
+    }
+
+    pub(crate) const fn generation(self) -> u64 {
+        self.generation
+    }
+}
+
 /// Owner-runtime identity of one browsing context.
 ///
 /// The numeric namespace is intentionally qualified by kind so nested and

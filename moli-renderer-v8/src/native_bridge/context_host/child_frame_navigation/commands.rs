@@ -114,6 +114,7 @@ impl JsContextHost {
         &mut self,
         handle: DomHandle,
         request: ChildBrowsingContextNavigationRequest,
+        replace_current: bool,
     ) -> Option<FrameDocumentNavigationLoadBinding> {
         if !self.child_browsing_contexts.contains_key(&handle) {
             return None;
@@ -123,7 +124,7 @@ impl JsContextHost {
             "The navigation was canceled.".to_owned(),
         );
         if let Some(entry) = self.child_browsing_contexts.get_mut(&handle) {
-            entry.apply_deferred_navigation_to_entry_seed(&request.url);
+            entry.apply_deferred_navigation_to_entry_seed(&request.url, replace_current);
         }
         let navigation_load = self.set_child_browsing_context_pending_navigation(
             handle,

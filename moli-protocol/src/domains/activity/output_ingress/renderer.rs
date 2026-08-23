@@ -55,8 +55,13 @@ pub(crate) async fn ingest_renderer_output_transport_async(
         RendererOutputTransportMessage::PageReservationReleased {
             owner_local_host_id,
             page_id,
+            reservation_id,
         } => {
-            conn.release_renderer_page_output_owner_reservation(owner_local_host_id, page_id);
+            conn.release_renderer_page_output_owner_reservation(
+                owner_local_host_id,
+                page_id,
+                reservation_id,
+            );
         }
         RendererOutputTransportMessage::CursorLeaseDeclared { cursor, lease_id } => {
             conn.declare_renderer_output_cursor_lease(cursor, lease_id);

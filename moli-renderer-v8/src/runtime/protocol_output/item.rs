@@ -62,6 +62,10 @@ pub enum RendererOwnerAction {
     /// record is appended after every unload-produced output in the same Page
     /// stream, so protocol teardown needs no recursive command fence.
     TopLevelCloseUnloadAck(RendererTopLevelCloseSource),
+    /// Routes an operation accepted through a live RemoteWindowProxy to the
+    /// exact target Page. The target renderer revalidates the group-qualified
+    /// endpoint before touching its current LocalWindow.
+    RemoteWindowProxy(crate::runtime::RendererRemoteWindowProxyCommand),
     FileChooser(RendererPendingFileChooserActivation),
     Download(RendererPendingDownloadActivation),
     JavaScriptDialog(RendererPendingJavaScriptDialog),

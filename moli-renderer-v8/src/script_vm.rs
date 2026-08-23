@@ -863,6 +863,8 @@ use document_isolate::*;
 pub(crate) use document_isolate::{
     RendererDocumentIsolateBootstrap, RendererDocumentIsolateHandle,
     RendererDocumentIsolateReservationAccounting, RendererPageScriptEnvironment,
+    RendererRelatedPageTopLevelNavigationTarget, RendererRelatedTopLevelWindowProxyResolution,
+    RendererRemoteFrameSnapshot, RendererRemoteFrameToken, RendererRemoteTopLevelWindowProxyTarget,
     ScriptVmDefaultWorldBootstrap, ScriptVmPreinspectorDefaultWorldBootstrap,
     renderer_document_isolate_accounting_diagnostics,
 };
@@ -1084,11 +1086,26 @@ impl ScriptVm {
 
     pub(super) fn set_cross_origin_opener_policy(
         &mut self,
-        value: crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
+        commit: crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit,
     ) {
-        self._context_host
+        let document_referrer = self
+            .document_runtime
+            .document_policy_container()
+            .document_referrer
+            .clone();
+        let reports = self
+            ._context_host
             .borrow()
-            .commit_top_level_cross_origin_opener_policy(value);
+            .commit_top_level_cross_origin_opener_policy(commit, document_referrer);
+        if reports.is_empty() {
+            return;
+        }
+        if let Some(loader) = self.document_runtime.current_document_resource_loader() {
+            crate::cross_origin_isolation::send_cross_origin_opener_policy_reports(
+                loader.request_client(),
+                reports,
+            );
+        }
     }
 
     pub(super) fn run_v8_foreground_task(
@@ -3441,17 +3458,18 @@ impl ScriptVm {
                     "failed to park the closed top-level WindowProxy"
                 );
                 Ok(())
-            })
+            })?;
+        Ok(())
     }
 
-    pub(super) fn preflight_main_window_proxy_group_switch(&self, page_id: u64) -> Result<()> {
+    pub(super) fn preflight_main_window_proxy_agent_transition(&self, page_id: u64) -> Result<()> {
         let environment = self
             .renderer_page_script_environment
             .as_ref()
-            .ok_or_else(|| anyhow!("COOP group switch requires a Page script environment"))?;
+            .ok_or_else(|| anyhow!("Page-agent transition requires a Page script environment"))?;
         anyhow::ensure!(
             environment.page_id() == page_id,
-            "COOP group switch crossed Page script environment ownership"
+            "Page-agent transition crossed Page script environment ownership"
         );
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
         self.renderer_document_isolate
@@ -3466,10 +3484,58 @@ impl ScriptVm {
                 })?;
                 anyhow::ensure!(
                     stable_proxy_matches,
-                    "COOP group switch crossed stable main WindowProxy ownership"
+                    "Page-agent transition crossed stable main WindowProxy ownership"
                 );
                 Ok(())
             })
+    }
+
+    pub(super) fn disconnect_main_window_proxy_for_remote_agent_transition(
+        &mut self,
+    ) -> Result<()> {
+        let environment = self
+            .renderer_page_script_environment
+            .as_ref()
+            .ok_or_else(|| anyhow!("remote-agent transition requires a Page script environment"))?
+            .clone();
+        // The outgoing Document's nested ids are Document-scoped. Retained
+        // remote facades must become unroutable before the replacement agent
+        // can publish a new tree with potentially reused numeric ids.
+        environment.clear_current_remote_frame_tree();
+        let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
+        let host = self._context_host.clone();
+        self.disconnect_document_contexts_for_host_teardown();
+        self.renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let window_proxy = context.global(scope);
+                environment.capture_main_window_opener_for_navigation(scope, window_proxy);
+                let opener = environment
+                    .top_level_opener_value(scope)
+                    .unwrap_or_else(|| v8::null(scope).into());
+                anyhow::ensure!(
+                    environment.mark_current_agent_top_level_projection_remote(),
+                    "remote-agent transition could not retire its LocalWindow projection"
+                );
+                context.detach_global();
+                anyhow::ensure!(
+                    host.borrow_mut().park_remote_top_level_window_proxy(
+                        scope,
+                        window_proxy,
+                        opener
+                    ),
+                    "failed to park the old-agent top-level WindowProxy as a remote facade"
+                );
+                Ok(())
+            })?;
+        // Linearization point for the renderer binding. The logical endpoint
+        // and Page residence survive, but no command admitted against the
+        // outgoing agent may enter the replacement realm.
+        environment.rotate_remote_window_proxy_channel_for_agent_transition();
+        Ok(())
     }
 
     pub(super) fn disconnect_top_level_browsing_context_for_group_switch(&mut self) -> Result<()> {
@@ -3482,6 +3548,7 @@ impl ScriptVm {
             .as_ref()
             .ok_or_else(|| anyhow!("COOP group switch requires a Page script environment"))?
             .clone();
+        environment.clear_current_remote_frame_tree();
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
         let host = self._context_host.clone();
         self.disconnect_document_contexts_for_host_teardown();
@@ -3621,6 +3688,7 @@ impl ScriptVm {
                 "main navigation crossed page script environment ownership"
             ));
         }
+        environment.clear_current_remote_frame_tree();
         let isolate_identity_key = self.renderer_document_isolate.identity_key();
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
         self.renderer_document_isolate
@@ -5156,6 +5224,144 @@ impl ScriptVm {
         let url = url.to_owned();
         self.with_default_context_scope(|scope, _host_ptr| {
             Ok(crate::context_bootstrap::navigate_top_level_same_document_from_browser(scope, url))
+        })
+    }
+
+    pub(crate) fn dispatch_remote_window_proxy_command(
+        &mut self,
+        command: crate::runtime::RendererRemoteWindowProxyCommand,
+    ) -> Result<bool> {
+        let target_endpoint = command.target_endpoint();
+        let target_page = command.target_page();
+        let target_channel = command.target_channel();
+        let target_frame = command.target_frame();
+        let kind = match command.into_kind() {
+            Ok(kind) => kind,
+            Err(error) => {
+                tracing::warn!(%error, "rejected malformed RemoteWindowProxy wire command");
+                return Ok(false);
+            }
+        };
+        self.with_default_context_scope(move |scope, host_ptr| {
+            let host = unsafe { &mut *host_ptr };
+            if host.top_level_window_proxy_endpoint_id() != Some(target_endpoint)
+                || host.top_level_page_residence() != Some(target_page)
+                || host.remote_window_proxy_channel() != Some(target_channel)
+                || host.top_level_browsing_context_is_closed()
+            {
+                return Ok(false);
+            }
+            match kind {
+                crate::runtime::RendererRemoteWindowProxyCommandKind::Navigate {
+                    kind,
+                    url,
+                    source,
+                } => {
+                    let previous = host.replace_active_top_level_navigation_source(Some(source));
+                    let window = scope.get_current_context().global(scope);
+                    let kind = match kind {
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign => {
+                            crate::context_bootstrap::LocationNavigationKind::Assign
+                        }
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace => {
+                            crate::context_bootstrap::LocationNavigationKind::Replace
+                        }
+                    };
+                    let accepted =
+                        crate::context_bootstrap::navigate_top_level_window_location_from_cross_origin(
+                            scope, window, kind, url,
+                        );
+                    host.replace_active_top_level_navigation_source(previous);
+                    Ok(accepted)
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrame {
+                    kind,
+                    request,
+                    scheduler_id,
+                } => {
+                    let Some(token) = target_frame else {
+                        return Ok(false);
+                    };
+                    if host.root_document_lifecycle_identity() != Some(token.root_document) {
+                        return Ok(false);
+                    }
+                    let Some(handle) = host
+                        .child_browsing_context_handle_for_id(token.browsing_context_id)
+                        .filter(|handle| host.child_browsing_context_is_live(*handle))
+                    else {
+                        return Ok(false);
+                    };
+                    let replace_current = matches!(
+                        kind,
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
+                    );
+                    let Some(navigation_load) = host
+                        .queue_deferred_child_browsing_context_navigation_request(
+                            handle,
+                            *request,
+                            replace_current,
+                        )
+                    else {
+                        return Ok(false);
+                    };
+                    if let Some(scheduler_id) = scheduler_id {
+                        host.record_pending_remote_frame_navigation(
+                            scheduler_id,
+                            token,
+                            navigation_load,
+                        );
+                    }
+                    Ok(true)
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::CancelFrameNavigation {
+                    scheduler_id,
+                } => {
+                    let Some(token) = target_frame else {
+                        return Ok(false);
+                    };
+                    Ok(host.cancel_pending_remote_frame_navigation(
+                        scope,
+                        scheduler_id,
+                        token,
+                    ))
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::PostMessage(message) => {
+                    if let Some(token) = target_frame {
+                        if host.root_document_lifecycle_identity() != Some(token.root_document) {
+                            return Ok(false);
+                        }
+                        let Some(handle) = host
+                            .child_browsing_context_handle_for_id(token.browsing_context_id)
+                            .filter(|handle| host.child_browsing_context_is_live(*handle))
+                        else {
+                            return Ok(false);
+                        };
+                        Ok(host.queue_remote_frame_window_message(scope, handle, *message))
+                    } else {
+                        Ok(host.queue_remote_top_level_window_message(scope, *message))
+                    }
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::Focus => {
+                    if target_frame.is_some() {
+                        return Ok(false);
+                    }
+                    Ok(
+                        crate::context_bootstrap::accept_remote_top_level_browsing_context_focus(
+                            host_ptr,
+                        ),
+                    )
+                }
+                crate::runtime::RendererRemoteWindowProxyCommandKind::Close => {
+                    if target_frame.is_some() {
+                        return Ok(false);
+                    }
+                    Ok(crate::context_bootstrap::request_top_level_browsing_context_close(
+                        scope,
+                        host_ptr,
+                        crate::runtime::RendererTopLevelCloseSource::Window,
+                    ))
+                }
+            }
         })
     }
 
@@ -7377,6 +7583,30 @@ impl ScriptVm {
                     .renderer_page_script_environment
                     .as_ref()
                     .map(|environment| environment.browsing_context_group_id().value())
+                    .unwrap_or_default(),
+                top_level_window_proxy_endpoint_generation: self
+                    .renderer_page_script_environment
+                    .as_ref()
+                    .map(|environment| {
+                        environment
+                            .top_level_window_proxy_endpoint_id()
+                            .generation()
+                    })
+                    .unwrap_or_default(),
+                remote_window_proxy_channel_owner_local_host_id: self
+                    .renderer_page_script_environment
+                    .as_ref()
+                    .map(|environment| {
+                        environment
+                            .remote_window_proxy_channel()
+                            .owner_local_host_id()
+                            .as_u64()
+                    })
+                    .unwrap_or_default(),
+                remote_window_proxy_channel_generation: self
+                    .renderer_page_script_environment
+                    .as_ref()
+                    .map(|environment| environment.remote_window_proxy_channel().generation())
                     .unwrap_or_default(),
                 script_agent_scope: self.renderer_document_isolate.script_agent_scope().as_str(),
                 script_agent_page_count,

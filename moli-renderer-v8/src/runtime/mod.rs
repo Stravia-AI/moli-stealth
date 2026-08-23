@@ -344,7 +344,8 @@ pub use self::page_surface::{
     RendererInputDispatchOutcome, RendererInspectorProtocolConfiguration,
     RendererInspectorProtocolConfigurationCommand, RendererInspectorSessionRestoreSnapshot,
     RendererJavaScriptDialogId, RendererJavaScriptDialogSource, RendererLayoutMetrics,
-    RendererMainDocumentCommit, RendererMoliDomMemoryDiagnostics, RendererMoliMemoryDiagnostics,
+    RendererMainDocumentCommit, RendererMainDocumentResponseBlock,
+    RendererMoliDomMemoryDiagnostics, RendererMoliMemoryDiagnostics,
     RendererMoliMemoryScopeDiagnostics, RendererMoliRuntimeMemoryDiagnostics, RendererPageCommand,
     RendererPageCommandPostResponseContinuation, RendererPageCookieFacadeSnapshotReply,
     RendererPageCreationDiagnostics, RendererPageDiagnosticsSnapshot, RendererPageDumpFormat,
@@ -354,32 +355,37 @@ pub use self::page_surface::{
     RendererPendingPopupActivation, RendererPendingSameDocumentNavigation,
     RendererPendingTopLevelHistoryTraversal, RendererPendingWindowOpenEvent,
     RendererPerformanceMetricSnapshot, RendererPointerEventProperties,
-    RendererPopupActivationSource, RendererPopupDisposition, RendererResourceTextSearchOutcome,
-    RendererRuntimeCommandOutput, RendererRuntimeEvaluationResult, RendererRuntimeHeapSpaceUsage,
-    RendererRuntimeHeapUsage, RendererRuntimeInspectorAsyncCompletion,
-    RendererRuntimeInspectorMessage, RendererRuntimeInspectorMessageBatch,
-    RendererRuntimeInspectorProtocolMessage, RendererRuntimeInspectorProtocolMessageValueMut,
-    RendererRuntimeInspectorResponseChannel, RendererRuntimeInspectorResponseSender,
-    RendererRuntimeObservableSourceItem, RendererRuntimeObservableSourceSummary,
-    RendererRuntimeRealmInfo, RendererRuntimeRemoteObject, RendererRuntimeRemoteObjectResolution,
-    RendererScriptExecutionMemoryDiagnostics, RendererScriptSourceMemoryDiagnostics,
-    RendererScrollIntoViewResult, RendererServiceWorkerConsoleMessage,
-    RendererServiceWorkerExceptionMessage, RendererServiceWorkerFetchDiagnostic,
-    RendererServiceWorkerFetchDiagnosticResult, RendererServiceWorkerTargetEvent,
-    RendererServiceWorkerTargetInfo, RendererServiceWorkerVersionStatus,
-    RendererSetDocumentContentResult, RendererSharedWorkerConsoleMessage,
-    RendererSharedWorkerTargetEvent, RendererSharedWorkerTargetInfo, RendererStyleSheetHeader,
-    RendererStyleSheetInventoryUpdate, RendererStyleSheetPayload, RendererSyntheticResponseBody,
-    RendererTextSearchMatch, RendererTouchPoint, RendererWindowDocumentSource,
-    RuntimeConsoleMessageSnapshot,
-    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
-    RendererTopLevelNavigationRequest, RendererTopLevelNavigationSource,
+    RendererPopupActivationSource, RendererPopupDisposition, RendererPopupNewTargetDisposition,
+    RendererRemoteWindowProxyCommand, RendererRemoteWindowProxySource, RendererResolvedPopupTarget,
+    RendererResourceTextSearchOutcome, RendererRuntimeCommandOutput,
+    RendererRuntimeEvaluationResult, RendererRuntimeHeapSpaceUsage, RendererRuntimeHeapUsage,
+    RendererRuntimeInspectorAsyncCompletion, RendererRuntimeInspectorMessage,
+    RendererRuntimeInspectorMessageBatch, RendererRuntimeInspectorProtocolMessage,
+    RendererRuntimeInspectorProtocolMessageValueMut, RendererRuntimeInspectorResponseChannel,
+    RendererRuntimeInspectorResponseSender, RendererRuntimeObservableSourceItem,
+    RendererRuntimeObservableSourceSummary, RendererRuntimeRealmInfo, RendererRuntimeRemoteObject,
+    RendererRuntimeRemoteObjectResolution, RendererScriptExecutionMemoryDiagnostics,
+    RendererScriptSourceMemoryDiagnostics, RendererScrollIntoViewResult,
+    RendererServiceWorkerConsoleMessage, RendererServiceWorkerExceptionMessage,
+    RendererServiceWorkerFetchDiagnostic, RendererServiceWorkerFetchDiagnosticResult,
+    RendererServiceWorkerTargetEvent, RendererServiceWorkerTargetInfo,
+    RendererServiceWorkerVersionStatus, RendererSetDocumentContentResult,
+    RendererSharedWorkerConsoleMessage, RendererSharedWorkerTargetEvent,
+    RendererSharedWorkerTargetInfo, RendererStyleSheetHeader, RendererStyleSheetInventoryUpdate,
+    RendererStyleSheetPayload, RendererSyntheticResponseBody, RendererTextSearchMatch,
+    RendererTopLevelNavigationRequest, RendererTopLevelNavigationSource, RendererTouchPoint,
+    RendererWindowDocumentSource, RuntimeConsoleMessageSnapshot,
 };
 pub(crate) use self::page_surface::{
     RendererCommandTurnOutputRecorder, RendererDevToolsSessionOutputHost,
     RendererInspectorPageCommand, RendererRuntimeCommandOutputRecorder,
     RendererRuntimeCommandOutputSettlement, RendererRuntimeInspectorResponsePublication,
     RendererRuntimeInspectorSessionResponseSettlement, RendererRuntimeObservableSourceQueue,
+};
+pub(crate) use self::page_surface::{
+    RendererRemoteFrameNavigationId, RendererRemoteWindowProxyChannel,
+    RendererRemoteWindowProxyCommandKind, RendererRemoteWindowProxyMessage,
+    RendererRemoteWindowProxyNavigationKind,
 };
 pub(crate) use self::page_vm::PageVm;
 use self::page_vm::PageVmDropTracker;
@@ -418,7 +424,8 @@ pub use self::protocol_output::{
     RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
     RendererOutputTransportMessage, RendererOutputTransportReceiver,
     RendererOutputTransportSendError, RendererOutputTransportSender, RendererOwnerAction,
-    RendererProtocolObservation, RendererTopLevelCloseSource, renderer_output_transport_channel,
+    RendererPageOutputOwnerReservationId, RendererProtocolObservation, RendererTopLevelCloseSource,
+    renderer_output_transport_channel,
 };
 pub use self::service_worker_run::RendererServiceWorkerRunIdentity;
 pub use crate::devtools::command::{
@@ -513,6 +520,10 @@ impl RendererOwnerLocalHostId {
     pub fn as_u64(self) -> u64 {
         self.0
     }
+
+    pub(crate) const fn from_wire(raw: u64) -> Option<Self> {
+        if raw == 0 { None } else { Some(Self(raw)) }
+    }
 }
 
 thread_local! {
@@ -534,6 +545,10 @@ impl PageId {
 
     pub fn new_for_testing(raw: u64) -> Self {
         Self(raw)
+    }
+
+    pub(crate) const fn from_wire(raw: u64) -> Option<Self> {
+        if raw == 0 { None } else { Some(Self(raw)) }
     }
 }
 
@@ -562,6 +577,7 @@ pub(crate) enum RendererScriptAgentAdmission {
 pub struct RendererPageReservationToken {
     local_host_id: RendererOwnerLocalHostId,
     page_id: PageId,
+    output_owner_reservation_id: RendererPageOutputOwnerReservationId,
     script_agent_admission: RendererScriptAgentAdmission,
     /// Whether this top-level browsing context was created by a DOM Window
     /// operation. This is Page metadata: it survives every Document/realm
@@ -579,6 +595,7 @@ impl RendererPageReservationToken {
         Self {
             local_host_id,
             page_id,
+            output_owner_reservation_id: RendererPageOutputOwnerReservationId::allocate(),
             script_agent_admission: RendererScriptAgentAdmission::Fresh,
             opened_by_dom: false,
             initially_active: true,
@@ -590,6 +607,7 @@ impl RendererPageReservationToken {
         Self {
             local_host_id,
             page_id,
+            output_owner_reservation_id: RendererPageOutputOwnerReservationId::allocate(),
             script_agent_admission: RendererScriptAgentAdmission::Fresh,
             opened_by_dom: true,
             initially_active: false,
@@ -605,6 +623,7 @@ impl RendererPageReservationToken {
         Self {
             local_host_id,
             page_id,
+            output_owner_reservation_id: RendererPageOutputOwnerReservationId::allocate(),
             script_agent_admission: RendererScriptAgentAdmission::RelatedAuxiliaryPage {
                 opener_page_id,
             },
@@ -619,10 +638,12 @@ impl RendererPageReservationToken {
         page_id: PageId,
         expected_vm_creation_id: u64,
         reservation_nonce: u64,
+        output_owner_reservation_id: RendererPageOutputOwnerReservationId,
     ) -> Self {
         Self {
             local_host_id,
             page_id,
+            output_owner_reservation_id,
             script_agent_admission: RendererScriptAgentAdmission::ExistingPageReplacement {
                 expected_vm_creation_id,
                 reservation_nonce,
@@ -641,6 +662,10 @@ impl RendererPageReservationToken {
 
     pub fn page_id(self) -> PageId {
         self.page_id
+    }
+
+    pub fn output_owner_reservation_id(self) -> RendererPageOutputOwnerReservationId {
+        self.output_owner_reservation_id
     }
 
     pub(crate) fn script_agent_admission(self) -> RendererScriptAgentAdmission {

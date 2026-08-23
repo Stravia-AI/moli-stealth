@@ -50,6 +50,52 @@ impl JsContextHost {
         handles
     }
 
+    /// Publishes a host-pointer-free frame-tree projection to related script
+    /// agents. This is the only data those agents may use for RemoteFrame name
+    /// lookup and WindowProxy projection; the target owner revalidates the
+    /// root lifecycle and browsing-context id again when a command arrives.
+    pub(crate) fn publish_related_page_remote_frame_tree(&self) {
+        let Some(environment) = self.page_script_environment.as_ref() else {
+            return;
+        };
+        let Some(root_document) = self.root_document_lifecycle_identity() else {
+            return;
+        };
+        let endpoint = environment.top_level_window_proxy_endpoint_id();
+        let snapshots = self
+            .child_browsing_context_handles_in_document_order()
+            .into_iter()
+            .filter(|handle| {
+                self.child_browsing_context_is_live(*handle)
+                    && self
+                        .dom_host()
+                        .node(*handle)
+                        .is_some_and(|node| node.flags().in_document_tree())
+            })
+            .filter_map(|handle| {
+                let browsing_context_id = self.child_browsing_context_id_for_handle(handle)?;
+                let entry = self.child_browsing_contexts.get(&handle)?;
+                Some(crate::script_vm::RendererRemoteFrameSnapshot {
+                    revision: 0,
+                    token: crate::script_vm::RendererRemoteFrameToken {
+                        endpoint,
+                        root_document,
+                        browsing_context_id,
+                    },
+                    parent_browsing_context_id: self
+                        .child_browsing_context_parent_handle(handle)
+                        .and_then(|parent| self.child_browsing_context_id_for_handle(parent)),
+                    name: entry.window_name().to_owned(),
+                    current_url: self.child_browsing_context_current_url(handle)?.to_string(),
+                    serialized_origin: self.child_browsing_context_window_origin(handle)?,
+                    document_domain: self.child_browsing_context_document_domain_override(handle),
+                    policy_container: entry.document_policy_container_snapshot(),
+                })
+            })
+            .collect();
+        environment.replicate_current_remote_frame_tree(snapshots);
+    }
+
     pub(crate) fn live_child_browsing_context_owner_snapshots(
         &self,
     ) -> Vec<(DomHandle, ChildFrameOwnerSnapshot)> {

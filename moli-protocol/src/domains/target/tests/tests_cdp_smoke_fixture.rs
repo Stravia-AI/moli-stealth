@@ -12,7 +12,12 @@ use axum::{
     response::Response,
 };
 use serde_json::Value;
-use std::{collections::HashMap, net::SocketAddr, time::Duration};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const WORKER_SCRIPT: &str = r#"
@@ -116,10 +121,12 @@ const RESOURCE_XHR_BYTES: &[u8] = b"\x00\xffmoli-xhr";
 #[derive(Default)]
 struct SmokeFixtureState {
     profile_requests: Mutex<HashMap<String, Value>>,
+    coop_blocked_redirect_target_requests: AtomicUsize,
 }
 
 pub(super) struct SmokeFixtureServer {
     pub(super) addr: SocketAddr,
+    state: Arc<SmokeFixtureState>,
     server: tokio::task::JoinHandle<()>,
 }
 
@@ -128,22 +135,33 @@ impl SmokeFixtureServer {
         let state = Arc::new(SmokeFixtureState::default());
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
+        let server_state = state.clone();
         let server = tokio::spawn(async move {
             axum::serve(
                 listener,
                 Router::new()
                     .route("/ws-echo", get(ws_echo))
                     .fallback(any(fixture_handler))
-                    .with_state(state),
+                    .with_state(server_state),
             )
             .await
             .unwrap();
         });
-        Self { addr, server }
+        Self {
+            addr,
+            state,
+            server,
+        }
     }
 
     pub(super) fn url(&self, path: &str) -> String {
         format!("http://{}{}", self.addr, path)
+    }
+
+    pub(super) fn coop_blocked_redirect_target_requests(&self) -> usize {
+        self.state
+            .coop_blocked_redirect_target_requests
+            .load(Ordering::SeqCst)
     }
 }
 
@@ -400,9 +418,53 @@ async fn fixture_handler(
         }
         "/redirect-start" => redirect("/redirect-final", &[("cache-control", "no-store")]),
         "/redirect-final" => html("<!doctype html><main>redirect final</main>"),
+        "/coop-redirect-start" => redirect(
+            "/coop-redirect-final",
+            &[("cross-origin-opener-policy", "same-origin")],
+        ),
+        "/coop-redirect-final" => {
+            html("<!doctype html><main id='coop-marker'>COOP redirect committed popup</main>")
+        }
+        "/coop-redirect-to" => redirect(
+            query.get("url").map(String::as_str).unwrap_or("/plain"),
+            &[("cross-origin-opener-policy", "same-origin")],
+        ),
         "/coop-same-origin" => html_with_headers(
             "<!doctype html><main id='coop-marker'>COOP committed popup</main>",
             &[("cross-origin-opener-policy", "same-origin")],
+        ),
+        "/coop-csp-sandbox" => html_with_headers(
+            "<!doctype html><main id='must-not-commit'>blocked COOP sandbox body</main><script>globalThis.__blockedCoopBodyRan = true</script>",
+            &[
+                ("cross-origin-opener-policy", "same-origin"),
+                (
+                    "content-security-policy",
+                    "sandbox allow-popups allow-scripts allow-same-origin",
+                ),
+            ],
+        ),
+        "/coop-sandbox-blocked-redirect" => redirect(
+            "/coop-sandbox-blocked-redirect-target",
+            &[
+                ("cross-origin-opener-policy", "same-origin"),
+                (
+                    "content-security-policy",
+                    "sandbox allow-popups allow-scripts allow-same-origin",
+                ),
+            ],
+        ),
+        "/coop-sandbox-blocked-redirect-target" => {
+            state
+                .coop_blocked_redirect_target_requests
+                .fetch_add(1, Ordering::SeqCst);
+            html("<!doctype html><main>blocked redirect target must not load</main>")
+        }
+        "/csp-sandbox-navigate-to-coop" => html_with_headers(
+            "<!doctype html><script>location.replace('/coop-same-origin')</script>",
+            &[(
+                "content-security-policy",
+                "sandbox allow-popups allow-scripts allow-same-origin",
+            )],
         ),
         "/no-content" => response(
             StatusCode::NO_CONTENT,
@@ -744,7 +806,11 @@ async fn rust_smoke_fixture_serves_all_document_and_control_routes() {
         "/dialog",
         "/set-cookie",
         "/redirect-final",
+        "/coop-redirect-final",
         "/coop-same-origin",
+        "/coop-csp-sandbox",
+        "/coop-sandbox-blocked-redirect-target",
+        "/csp-sandbox-navigate-to-coop",
         "/history-a",
         "/history-b",
         "/document-continue",

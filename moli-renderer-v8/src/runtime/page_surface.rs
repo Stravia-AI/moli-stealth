@@ -28,16 +28,23 @@ use tokio::sync::oneshot;
 
 mod javascript_dialog;
 mod popup_activation;
+mod remote_window_proxy;
 mod window_document_source;
 pub use javascript_dialog::{
     RendererJavaScriptDialogId, RendererJavaScriptDialogSource, RendererPendingJavaScriptDialog,
 };
 pub(crate) use popup_activation::RendererPopupCreationUserActivation;
 pub use popup_activation::{
-    RendererAuxiliaryBrowsingContextPolicy, RendererPendingPopupActivation,
-    RendererPopupActivationSource, RendererPopupDisposition, RendererPopupNewTargetDisposition,
-    RendererResolvedPopupTarget,
+    RendererAuxiliaryBrowsingContextPolicy, RendererMainDocumentResponseBlock,
+    RendererPendingPopupActivation, RendererPopupActivationSource,
+    RendererPopupDisposition, RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
 };
+pub(crate) use remote_window_proxy::{
+    RendererRemoteFrameNavigationId, RendererRemoteWindowProxyChannel,
+    RendererRemoteWindowProxyCommandKind, RendererRemoteWindowProxyMessage,
+    RendererRemoteWindowProxyNavigationKind,
+};
+pub use remote_window_proxy::{RendererRemoteWindowProxyCommand, RendererRemoteWindowProxySource};
 pub use window_document_source::RendererWindowDocumentSource;
 
 #[derive(Debug, Clone)]
@@ -1006,9 +1013,22 @@ pub struct RendererMainDocumentCommit {
     pub security_origin: String,
     pub secure_context_type: String,
     pub timestamp: f64,
+    /// Complete response redirect chain frozen by the navigation owner.
+    ///
+    /// COOP admission is response-by-response: a mismatch on an intermediate
+    /// redirect requires a browsing-context-group switch even when the final
+    /// response alone would match the currently committed Document. Keeping
+    /// this on the commit fact also preserves that causal history through
+    /// Fetch response overrides and browser-owned error Documents.
+    pub navigation_redirect_chain: Vec<moli_page_types::NavigationRedirect>,
     /// Opaque renderer-owned frame policy retained by the target across
     /// auxiliary top-level Document replacements.
     pub auxiliary_browsing_context_policy: Option<RendererAuxiliaryBrowsingContextPolicy>,
+    /// A response rejected before COOP enforcement. The browser-owned error
+    /// Document still commits through this same navigation transaction, while
+    /// the renderer uses this fact to force both real and virtual group
+    /// replacement exactly once.
+    pub response_block: Option<RendererMainDocumentResponseBlock>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -2003,6 +2023,9 @@ pub struct RendererMoliDomMemoryDiagnostics {
 pub struct RendererMoliRuntimeMemoryDiagnostics {
     pub script_agent_id: u64,
     pub browsing_context_group_id: u64,
+    pub top_level_window_proxy_endpoint_generation: u64,
+    pub remote_window_proxy_channel_owner_local_host_id: u64,
+    pub remote_window_proxy_channel_generation: u64,
     pub script_agent_scope: &'static str,
     pub script_agent_page_count: usize,
     pub runtime_observable_context_count: usize,
@@ -5010,6 +5033,10 @@ pub enum RendererPageCommand {
     /// Consumes the exact target Page's already-queued `javascript:` URL task
     /// before a browser-owned ordinary navigation may commit over it.
     RunPendingJavascriptUrlTasksBeforeBrowserNavigation,
+    /// Executes one browser-routed RemoteWindowProxy operation after the
+    /// source turn has completed. The target Page revalidates the endpoint
+    /// against its current same-group LocalWindow before applying it.
+    DispatchRemoteWindowProxyCommand(RendererRemoteWindowProxyCommand),
     /// Applies browser-owned active-target and effective-focus Page state
     /// without clearing the focused frame or active element retained by the
     /// current Document. The two bits differ under focus emulation.

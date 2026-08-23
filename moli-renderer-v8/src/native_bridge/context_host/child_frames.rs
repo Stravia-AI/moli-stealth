@@ -52,6 +52,11 @@ pub(crate) enum FormSubmissionChildNavigationTarget {
         root_document: crate::runtime::RendererDocumentLifecycleIdentity,
         browsing_context_id: BrowsingContextId,
     },
+    RemotePage {
+        page: crate::RendererResolvedPopupTarget,
+        channel: crate::runtime::RendererRemoteWindowProxyChannel,
+        frame: crate::script_vm::RendererRemoteFrameToken,
+    },
 }
 
 impl FormSubmissionChildNavigationTarget {
@@ -73,6 +78,18 @@ impl FormSubmissionChildNavigationTarget {
         }
     }
 
+    pub(crate) const fn remote_page(
+        page: crate::RendererResolvedPopupTarget,
+        channel: crate::runtime::RendererRemoteWindowProxyChannel,
+        frame: crate::script_vm::RendererRemoteFrameToken,
+    ) -> Self {
+        Self::RemotePage {
+            page,
+            channel,
+            frame,
+        }
+    }
+
     pub(crate) const fn browsing_context_id(self) -> BrowsingContextId {
         match self {
             Self::CurrentPage {
@@ -82,6 +99,7 @@ impl FormSubmissionChildNavigationTarget {
                 browsing_context_id,
                 ..
             } => browsing_context_id,
+            Self::RemotePage { frame, .. } => frame.browsing_context_id,
         }
     }
 }
@@ -93,7 +111,13 @@ impl FormSubmissionChildNavigationTarget {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PendingFormSubmissionChildNavigation {
     target: FormSubmissionChildNavigationTarget,
-    navigation_load: FrameDocumentNavigationLoadBinding,
+    scheduler: PendingFormSubmissionChildNavigationScheduler,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingFormSubmissionChildNavigationScheduler {
+    Local(FrameDocumentNavigationLoadBinding),
+    Remote(crate::runtime::RendererRemoteFrameNavigationId),
 }
 
 impl PendingFormSubmissionChildNavigation {
@@ -103,7 +127,17 @@ impl PendingFormSubmissionChildNavigation {
     ) -> Self {
         Self {
             target,
-            navigation_load,
+            scheduler: PendingFormSubmissionChildNavigationScheduler::Local(navigation_load),
+        }
+    }
+
+    pub(crate) const fn remote(
+        target: FormSubmissionChildNavigationTarget,
+        scheduler_id: crate::runtime::RendererRemoteFrameNavigationId,
+    ) -> Self {
+        Self {
+            target,
+            scheduler: PendingFormSubmissionChildNavigationScheduler::Remote(scheduler_id),
         }
     }
 
@@ -111,8 +145,24 @@ impl PendingFormSubmissionChildNavigation {
         self.target
     }
 
-    pub(crate) const fn navigation_load(self) -> FrameDocumentNavigationLoadBinding {
-        self.navigation_load
+    pub(crate) const fn navigation_load(self) -> Option<FrameDocumentNavigationLoadBinding> {
+        match self.scheduler {
+            PendingFormSubmissionChildNavigationScheduler::Local(navigation_load) => {
+                Some(navigation_load)
+            }
+            PendingFormSubmissionChildNavigationScheduler::Remote(_) => None,
+        }
+    }
+
+    pub(crate) const fn remote_scheduler_id(
+        self,
+    ) -> Option<crate::runtime::RendererRemoteFrameNavigationId> {
+        match self.scheduler {
+            PendingFormSubmissionChildNavigationScheduler::Remote(scheduler_id) => {
+                Some(scheduler_id)
+            }
+            PendingFormSubmissionChildNavigationScheduler::Local(_) => None,
+        }
     }
 }
 
@@ -806,8 +856,12 @@ impl ChildBrowsingContextEntry {
         }
     }
 
-    pub(super) fn apply_deferred_navigation_to_entry_seed(&mut self, url: &Url) {
-        self.apply_navigation_to_entry_seed(url);
+    pub(super) fn apply_deferred_navigation_to_entry_seed(
+        &mut self,
+        url: &Url,
+        replace_current: bool,
+    ) {
+        self.apply_queued_navigation_to_entry_seed(url, replace_current);
         self.clear_pending_top_level_history_length_increment();
     }
 
@@ -1280,7 +1334,7 @@ impl JsContextHost {
                 pending_navigations.retain(|candidate| {
                     candidate.target()
                         != FormSubmissionChildNavigationTarget::current_page(browsing_context_id)
-                        || candidate.navigation_load() != navigation_load
+                        || candidate.navigation_load() != Some(navigation_load)
                 });
                 !pending_navigations.is_empty()
             });
@@ -1329,6 +1383,47 @@ impl JsContextHost {
         true
     }
 
+    pub(crate) fn record_pending_remote_frame_navigation(
+        &mut self,
+        scheduler_id: crate::runtime::RendererRemoteFrameNavigationId,
+        token: crate::script_vm::RendererRemoteFrameToken,
+        navigation_load: FrameDocumentNavigationLoadBinding,
+    ) {
+        self.pending_remote_frame_navigations
+            .insert(scheduler_id, (token, navigation_load));
+    }
+
+    pub(in crate::native_bridge::context_host) fn clear_pending_remote_frame_navigation_for_load(
+        &mut self,
+        navigation_load: FrameDocumentNavigationLoadBinding,
+    ) {
+        self.pending_remote_frame_navigations
+            .retain(|_, (_, pending_load)| *pending_load != navigation_load);
+    }
+
+    pub(crate) fn cancel_pending_remote_frame_navigation(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        scheduler_id: crate::runtime::RendererRemoteFrameNavigationId,
+        token: crate::script_vm::RendererRemoteFrameToken,
+    ) -> bool {
+        let Some((pending_token, navigation_load)) =
+            self.pending_remote_frame_navigations.remove(&scheduler_id)
+        else {
+            return false;
+        };
+        if pending_token != token
+            || self.root_document_lifecycle_identity() != Some(token.root_document)
+        {
+            return false;
+        }
+        self.cancel_pending_form_submission_child_navigation_if_matches(
+            scope,
+            token.browsing_context_id,
+            navigation_load,
+        )
+    }
+
     pub(crate) fn child_browsing_context_content_security_policies(
         &self,
         handle: DomHandle,
@@ -1361,6 +1456,7 @@ impl JsContextHost {
             return;
         };
         entry.set_window_name(name);
+        self.publish_related_page_remote_frame_tree();
     }
 }
 

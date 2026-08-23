@@ -787,6 +787,91 @@ pub(super) fn window_request_idle_callback<'s>(
     rv.set_uint32(timeout_id);
 }
 
+struct PreparedWindowPostMessage {
+    data: crate::structured_clone::V8StructuredClonePayload,
+    intended_target_origin: Option<String>,
+    requested_target_origin: String,
+}
+
+fn prepare_window_post_message<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    source_origin: &str,
+    remote_endpoint: bool,
+) -> Option<PreparedWindowPostMessage> {
+    let target_origin_value = args.get(1);
+    let options = (target_origin_value.is_object() && !target_origin_value.is_null_or_undefined())
+        .then(|| v8::Local::<v8::Object>::try_from(target_origin_value).ok())
+        .flatten();
+    let requested_target_origin = if let Some(options) = options {
+        options
+            .get(scope, v8str(scope, "targetOrigin").into())
+            .and_then(|value| {
+                if value.is_undefined() {
+                    None
+                } else {
+                    value
+                        .to_string(scope)
+                        .map(|s| s.to_rust_string_lossy(scope))
+                }
+            })
+            .unwrap_or_else(|| "/".to_owned())
+    } else if target_origin_value.is_undefined() {
+        "/".to_owned()
+    } else {
+        target_origin_value
+            .to_string(scope)
+            .map(|s| s.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "*".to_owned())
+    };
+    let intended_target_origin = normalized_window_post_message_target_origin(
+        scope,
+        &requested_target_origin,
+        source_origin,
+    )?;
+    let source_security =
+        crate::context_bootstrap::RuntimeMessageSourceSecurity::window(source_origin.to_owned());
+    let data = match (remote_endpoint, options.is_some()) {
+        (true, true) => {
+            crate::context_bootstrap::structured_serialize_value_for_remote_window_post_message_options(
+                scope,
+                args.get(0),
+                target_origin_value,
+                source_security,
+            )
+        }
+        (true, false) => {
+            crate::context_bootstrap::structured_serialize_value_for_remote_window_post_message(
+                scope,
+                args.get(0),
+                (args.length() > 2).then(|| args.get(2)),
+                source_security,
+            )
+        }
+        (false, true) => {
+            crate::context_bootstrap::structured_serialize_value_for_window_post_message_options(
+                scope,
+                args.get(0),
+                target_origin_value,
+                source_security,
+            )
+        }
+        (false, false) => {
+            crate::context_bootstrap::structured_serialize_value_for_window_post_message(
+                scope,
+                args.get(0),
+                (args.length() > 2).then(|| args.get(2)),
+                source_security,
+            )
+        }
+    }?;
+    Some(PreparedWindowPostMessage {
+        data,
+        intended_target_origin,
+        requested_target_origin,
+    })
+}
+
 pub(crate) fn window_post_message_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
@@ -796,8 +881,113 @@ pub(crate) fn window_post_message_callback<'s>(
         rv.set_undefined();
         return;
     };
-    let host_ptr = crate::native_bridge::cross_origin_window_target_host_ptr(scope, args.this())
-        .unwrap_or(ambient_host_ptr);
+    if args.length() == 0 {
+        throw_type_error(
+            scope,
+            "Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present.",
+        );
+        return;
+    }
+    if let Some((target_frame, frame, target_top)) =
+        crate::native_bridge::cross_origin_remote_frame_window_target(scope, args.this())
+    {
+        let source_host = unsafe { &mut *ambient_host_ptr };
+        let Some(source) = source_host.remote_window_proxy_source(scope) else {
+            rv.set_undefined();
+            return;
+        };
+        let source_origin = source.serialized_origin().to_owned();
+        let Some(prepared) = prepare_window_post_message(scope, &args, &source_origin, true) else {
+            return;
+        };
+        let command = crate::runtime::RendererRemoteWindowProxyCommand::post_message_frame(
+            target_frame,
+            target_top.residence,
+            target_top.channel,
+            source,
+            prepared.data,
+            prepared.intended_target_origin,
+        );
+        assert!(
+            source_host.append_live_turn_owner_action(
+                crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
+            ),
+            "a live remote-frame Window.postMessage source must retain its Page output journal"
+        );
+        if moli_trace::window_message_trace_enabled() {
+            tracing::info!(
+                target: "moli_window_message_trace",
+                target_frame = ?target_frame,
+                source_origin = %source_origin,
+                target_origin = %frame.serialized_origin,
+                requested_target_origin = %prepared.requested_target_origin,
+                stage = "remote_frame_post_message_forwarded",
+            );
+        }
+        rv.set_undefined();
+        return;
+    }
+    if let Some(target) =
+        crate::native_bridge::cross_origin_remote_top_window_target(scope, args.this())
+    {
+        let Some(source_host_ptr) = context_host_ptr_from_global_bridge(scope) else {
+            rv.set_undefined();
+            return;
+        };
+        let source_host = unsafe { &mut *source_host_ptr };
+        let Some(source) = source_host.remote_window_proxy_source(scope) else {
+            rv.set_undefined();
+            return;
+        };
+        let source_origin = source.serialized_origin().to_owned();
+        let Some(prepared) = prepare_window_post_message(scope, &args, &source_origin, true) else {
+            return;
+        };
+        if moli_trace::window_message_trace_enabled() {
+            tracing::info!(
+                target: "moli_window_message_trace",
+                source_endpoint = ?source.endpoint(),
+                target_endpoint = ?target.endpoint,
+                source_origin = %source_origin,
+                target_origin = %target.current_serialized_origin,
+                requested_target_origin = %prepared.requested_target_origin,
+                stage = "remote_post_message_forwarded",
+            );
+        }
+        let command = crate::runtime::RendererRemoteWindowProxyCommand::post_message(
+            target.endpoint,
+            target.residence,
+            target.channel,
+            source,
+            prepared.data,
+            prepared.intended_target_origin,
+        );
+        assert!(
+            source_host.append_live_turn_owner_action(
+                crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
+            ),
+            "a live remote Window.postMessage source must retain its Page output journal"
+        );
+        rv.set_undefined();
+        return;
+    }
+    let receiver_is_remote =
+        crate::native_bridge::is_cross_origin_related_top_window_proxy(scope, args.this())
+            || crate::native_bridge::is_cross_origin_remote_frame_window_proxy(scope, args.this());
+    let host_ptr = if receiver_is_remote {
+        let Some(host_ptr) =
+            crate::native_bridge::cross_origin_window_target_host_ptr(scope, args.this())
+        else {
+            // A COOP-disconnected or otherwise retired endpoint must never
+            // fall back to the incumbent Page and enqueue a self-message.
+            rv.set_undefined();
+            return;
+        };
+        host_ptr
+    } else {
+        crate::native_bridge::cross_origin_window_target_host_ptr(scope, args.this())
+            .unwrap_or(ambient_host_ptr)
+    };
     let host = unsafe { &mut *host_ptr };
     let Some(target_endpoint) = window_message_endpoint_from_receiver(scope, args.this()) else {
         crate::native_bridge::throw_cross_origin_type_error(
@@ -806,13 +996,6 @@ pub(crate) fn window_post_message_callback<'s>(
         );
         return;
     };
-    if args.length() == 0 {
-        throw_type_error(
-            scope,
-            "Failed to execute 'postMessage' on 'Window': 1 argument required, but only 0 present.",
-        );
-        return;
-    }
     // Blink captures the incumbent DOMWindow at API acceptance. Lightweight
     // popups still share the top-level V8 context, so their active execution
     // scope is the one necessary override; the ambient source marker is only
@@ -870,73 +1053,11 @@ pub(crate) fn window_post_message_callback<'s>(
         rv.set_undefined();
         return;
     }
-    let source_security =
-        crate::context_bootstrap::RuntimeMessageSourceSecurity::window(source_origin.clone());
-
-    let target_origin_value = args.get(1);
-    let options = (target_origin_value.is_object() && !target_origin_value.is_null_or_undefined())
-        .then(|| v8::Local::<v8::Object>::try_from(target_origin_value).ok())
-        .flatten();
-    let normalized_target_origin = if let Some(options) = options {
-        options
-            .get(scope, v8str(scope, "targetOrigin").into())
-            .and_then(|value| {
-                if value.is_undefined() {
-                    None
-                } else {
-                    value
-                        .to_string(scope)
-                        .map(|s| s.to_rust_string_lossy(scope))
-                }
-            })
-            .unwrap_or_else(|| "/".to_owned())
-    } else if target_origin_value.is_undefined() {
-        "/".to_owned()
-    } else {
-        target_origin_value
-            .to_string(scope)
-            .map(|s| s.to_rust_string_lossy(scope))
-            .unwrap_or_else(|| "*".to_owned())
-    };
-
     let Some(target_origin) = window_message_endpoint_origin(host, target_endpoint) else {
         rv.set_undefined();
         return;
     };
-    let Some(target_origin_match) = normalized_window_post_message_target_origin(
-        scope,
-        &normalized_target_origin,
-        &source_origin,
-    ) else {
-        if moli_trace::window_message_trace_enabled() {
-            tracing::info!(
-                target: "moli_window_message_trace",
-                ?source,
-                ?target,
-                source_origin = %source_origin,
-                target_origin = %target_origin,
-                requested_target_origin = %normalized_target_origin,
-                stage = "post_message_invalid_target_origin",
-            );
-        }
-        return;
-    };
-    let data = if options.is_some() {
-        crate::context_bootstrap::structured_serialize_value_for_window_post_message_options(
-            scope,
-            args.get(0),
-            target_origin_value,
-            source_security,
-        )
-    } else {
-        crate::context_bootstrap::structured_serialize_value_for_window_post_message(
-            scope,
-            args.get(0),
-            (args.length() > 2).then(|| args.get(2)),
-            source_security,
-        )
-    };
-    let Some(data) = data else {
+    let Some(prepared) = prepare_window_post_message(scope, &args, &source_origin, false) else {
         return;
     };
 
@@ -950,7 +1071,7 @@ pub(crate) fn window_post_message_callback<'s>(
             target_owner = ?target.owner(),
             source_origin = %source_origin,
             target_origin = %target_origin,
-            requested_target_origin = %normalized_target_origin,
+            requested_target_origin = %prepared.requested_target_origin,
             stage = "post_message_queued",
         );
     }
@@ -958,9 +1079,10 @@ pub(crate) fn window_post_message_callback<'s>(
         target,
         source,
         source_window_proxy,
-        data,
+        source_is_target_opener: false,
+        data: prepared.data,
         origin: source_origin,
-        intended_target_origin: target_origin_match,
+        intended_target_origin: prepared.intended_target_origin,
     });
     let sender = host.page_window_message_sender().clone();
     if sender.send(target, task_id).is_err() {
@@ -1531,6 +1653,7 @@ fn dispatch_window_message_in_current_target_context(
                 stage = "post_message_dispatch",
             );
         }
+        let source_window_proxy = pending_window_message_source_proxy(scope, &message);
         dispatch_window_message_event(
             scope,
             host_ptr,
@@ -1538,7 +1661,8 @@ fn dispatch_window_message_in_current_target_context(
             message_ctor,
             target_endpoint,
             source_endpoint,
-            message.source_window_proxy.as_ref(),
+            source_window_proxy,
+            message.source_is_target_opener,
             "messageerror",
             v8::null(scope).into(),
             &message.origin,
@@ -1580,6 +1704,7 @@ fn dispatch_window_message_in_current_target_context(
                 stage = "post_message_deserialize_failed",
             );
         }
+        let source_window_proxy = pending_window_message_source_proxy(scope, &message);
         dispatch_window_message_event(
             scope,
             host_ptr,
@@ -1587,7 +1712,8 @@ fn dispatch_window_message_in_current_target_context(
             message_ctor,
             target_endpoint,
             source_endpoint,
-            message.source_window_proxy.as_ref(),
+            source_window_proxy,
+            message.source_is_target_opener,
             "messageerror",
             v8::null(scope).into(),
             &message.origin,
@@ -1607,6 +1733,7 @@ fn dispatch_window_message_in_current_target_context(
             stage = "post_message_dispatch",
         );
     }
+    let source_window_proxy = pending_window_message_source_proxy(scope, &message);
     dispatch_window_message_event(
         scope,
         host_ptr,
@@ -1614,7 +1741,8 @@ fn dispatch_window_message_in_current_target_context(
         message_ctor,
         target_endpoint,
         source_endpoint,
-        message.source_window_proxy.as_ref(),
+        source_window_proxy,
+        message.source_is_target_opener,
         "message",
         data,
         &message.origin,
@@ -1629,7 +1757,7 @@ fn window_message_endpoint_origin(
 ) -> Option<String> {
     match endpoint {
         PendingWindowMessageEndpoint::TopWindow => {
-            Some(moli_url::origin_ascii_serialization(host.document_url()))
+            Some(host.top_level_serialized_origin().to_owned())
         }
         PendingWindowMessageEndpoint::ChildWindow(handle) => {
             host.child_browsing_context_target_origin(handle)
@@ -1669,6 +1797,16 @@ fn window_message_wasm_eval_csp_violation(
         .map(|violation| (handle, violation))
 }
 
+fn pending_window_message_source_proxy<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    message: &PendingWindowMessage,
+) -> Option<v8::Local<'s, v8::Object>> {
+    message
+        .source_window_proxy
+        .as_ref()
+        .map(|source| v8::Local::new(scope, source))
+}
+
 fn dispatch_window_message_event<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     host_ptr: *mut JsContextHost,
@@ -1676,7 +1814,8 @@ fn dispatch_window_message_event<'s>(
     message_ctor: v8::Local<'s, v8::Function>,
     target: PendingWindowMessageEndpoint,
     source_endpoint: PendingWindowMessageEndpoint,
-    source_window_proxy: Option<&v8::Global<v8::Object>>,
+    source_window_proxy: Option<v8::Local<'s, v8::Object>>,
+    source_is_target_opener: bool,
     event_type: &str,
     data: v8::Local<'s, v8::Value>,
     origin: &str,
@@ -1687,7 +1826,7 @@ fn dispatch_window_message_event<'s>(
         return;
     };
     let source: v8::Local<'_, v8::Value> = if let Some(source_window_proxy) = source_window_proxy {
-        v8::Local::new(scope, source_window_proxy).into()
+        source_window_proxy.into()
     } else {
         match source_endpoint {
             PendingWindowMessageEndpoint::TopWindow => {
@@ -1708,6 +1847,14 @@ fn dispatch_window_message_event<'s>(
     let init = WindowMessageEventInitDeclaration::new(data, origin, ports, source)
         .bind(scope)
         .expect("Window MessageEvent init declaration should bind");
+    if source_is_target_opener {
+        set_private_value(
+            scope,
+            init,
+            "__moliWindowMessageRemoteSourceIsOpener",
+            v8::Boolean::new(scope, true).into(),
+        );
+    }
     let event_name = event_type;
     let Some(event_type) = v8_string(scope, event_name) else {
         return;
@@ -2204,6 +2351,7 @@ mod tests {
             contains_wasm_module: true,
             origin_check_required: true,
             locked_to_sender_agent_cluster: true,
+            remote_agent_cluster_mismatch: false,
             sender_agent_cluster: Some(RuntimeMessageAgentCluster::WindowOrDedicatedWorker),
             sender_origin: Some("https://sender.test".to_owned()),
         };
@@ -2215,6 +2363,7 @@ mod tests {
                 crate::native_bridge::RuntimeObservableContextToken::from_raw(1),
             ),
             source_window_proxy: None,
+            source_is_target_opener: false,
             data,
             origin: "https://sender.test".to_owned(),
             intended_target_origin: None,

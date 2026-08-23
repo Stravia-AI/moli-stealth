@@ -99,6 +99,7 @@ use crate::shared_worker_runtime::{
 };
 use moli_page_types::LayoutPolicy;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU8, Ordering};
 use tokio::sync::{mpsc, oneshot};
 
 mod lifecycle_decision;
@@ -264,12 +265,15 @@ pub struct RendererCreateStreamingRawPageRequest {
     pub(super) top_level_navigation_dispatch: RendererTopLevelNavigationDispatch,
     pub(super) navigation_reply_policy: NavigationReplyPolicy,
     pub reserved_service_worker_client: Option<RendererReservedServiceWorkerClient>,
+    pub(super) top_level_cross_origin_opener_policy_commit:
+        Option<crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit>,
 }
 
 pub enum RendererOwnerCommand {
     CreateHtmlPage(RendererCreateHtmlPageRequest),
     ReserveLivePageReplacement {
         token: RendererPageToken,
+        output_owner_reservation_id: RendererPageOutputOwnerReservationId,
     },
     PrepareStreamingRawDocument {
         token: RendererPageReservationToken,
@@ -291,10 +295,12 @@ pub enum RendererOwnerCommand {
     RunAsyncPageCommand {
         token: RendererPageToken,
         command: RendererPageCommand,
+        cancellation: Option<Arc<AtomicU8>>,
     },
     RunProtocolPageCommand {
         token: RendererPageToken,
         command: RendererPageCommand,
+        cancellation: Option<Arc<AtomicU8>>,
     },
     /// Renderer-side cleanup after the browser/protocol owner has already
     /// disconnected a DevTools session and closed both of its ingress lanes.
@@ -814,6 +820,7 @@ enum RenderRuntimeTurn {
         token: RendererPageToken,
         command: RendererPageCommand,
         capture_policy: super::RendererPageStateCapturePolicy,
+        cancellation: Option<Arc<AtomicU8>>,
     },
     ContinueLivePageRuntimeCommandLifecycle {
         token: RendererPageToken,
@@ -2136,6 +2143,7 @@ impl RendererOwnerHandle {
             let _ = sender.send(RendererOutputTransportMessage::page_reservation_released(
                 reservation.local_host_id(),
                 reservation.page_id(),
+                reservation.output_owner_reservation_id(),
             ));
         }
     }
@@ -2436,6 +2444,7 @@ impl RendererOwnerHandle {
                 RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
             navigation_reply_policy: NavigationReplyPolicy::FollowBeforeReply,
             reserved_service_worker_client: None,
+            top_level_cross_origin_opener_policy_commit: None,
         }
     }
 
@@ -2603,12 +2612,13 @@ impl RendererOwnerHandle {
                 self.release_page_output_reservation(reservation);
                 outcome
             }
-            RendererOwnerCommand::ReserveLivePageReplacement { token } => {
-                owner_local_store_session(owner_local_store)
-                    .reserve_live_page_replacement(token)
-                    .map(RendererOwnerReply::LivePageReplacementReserved)
-                    .into()
-            }
+            RendererOwnerCommand::ReserveLivePageReplacement {
+                token,
+                output_owner_reservation_id,
+            } => owner_local_store_session(owner_local_store)
+                .reserve_live_page_replacement(token, output_owner_reservation_id)
+                .map(RendererOwnerReply::LivePageReplacementReserved)
+                .into(),
             RendererOwnerCommand::PrepareStreamingRawDocument { token, request } => {
                 let outcome = self
                     .prepare_renderer_document_on_owner_local_store(
@@ -2721,16 +2731,26 @@ impl RendererOwnerHandle {
             }
             command @ (RendererOwnerCommand::RunAsyncPageCommand { .. }
             | RendererOwnerCommand::RunProtocolPageCommand { .. }) => {
-                let (token, command, capture_policy) = match command {
-                    RendererOwnerCommand::RunAsyncPageCommand { token, command } => (
+                let (token, command, capture_policy, cancellation) = match command {
+                    RendererOwnerCommand::RunAsyncPageCommand {
+                        token,
+                        command,
+                        cancellation,
+                    } => (
                         token,
                         command,
                         super::RendererPageStateCapturePolicy::FullReport,
+                        cancellation,
                     ),
-                    RendererOwnerCommand::RunProtocolPageCommand { token, command } => (
+                    RendererOwnerCommand::RunProtocolPageCommand {
+                        token,
+                        command,
+                        cancellation,
+                    } => (
                         token,
                         command,
                         super::RendererPageStateCapturePolicy::ProtocolTurn,
+                        cancellation,
                     ),
                     _ => unreachable!("combined renderer page command pattern must match"),
                 };
@@ -2749,6 +2769,7 @@ impl RendererOwnerHandle {
                         token,
                         command,
                         capture_policy,
+                        cancellation,
                     },
                 ))
             }
@@ -5881,6 +5902,51 @@ impl RendererOwnerHandle {
         token: RendererPageToken,
         command: RendererPageCommand,
         capture_policy: super::RendererPageStateCapturePolicy,
+        cancellation: Option<Arc<AtomicU8>>,
+    ) -> RenderRuntimeDispatchOutcome {
+        const PENDING: u8 = 0;
+        const RUNNING: u8 = 1;
+        const FINISHED: u8 = 3;
+
+        let Some(cancellation) = cancellation else {
+            return self
+                .run_live_page_command_turn_after_cancellation_admission(
+                    token,
+                    command,
+                    capture_policy,
+                )
+                .await;
+        };
+        if !matches!(
+            command,
+            RendererPageCommand::DispatchRemoteWindowProxyCommand(_)
+        ) {
+            return Err(anyhow!(
+                "only RemoteWindowProxy Page commands may use reply-drop cancellation"
+            ))
+            .into();
+        }
+        if cancellation
+            .compare_exchange(PENDING, RUNNING, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(anyhow!(
+                "RemoteWindowProxy Page command was cancelled before renderer dispatch"
+            ))
+            .into();
+        }
+        let outcome = self
+            .run_live_page_command_turn_after_cancellation_admission(token, command, capture_policy)
+            .await;
+        cancellation.store(FINISHED, Ordering::Release);
+        outcome
+    }
+
+    async fn run_live_page_command_turn_after_cancellation_admission(
+        &self,
+        token: RendererPageToken,
+        command: RendererPageCommand,
+        capture_policy: super::RendererPageStateCapturePolicy,
     ) -> RenderRuntimeDispatchOutcome {
         match command {
             RendererPageCommand::EvaluateExpression {
@@ -6102,6 +6168,7 @@ impl RendererOwnerHandle {
                     token,
                     command,
                     capture_policy,
+                    cancellation: None,
                 }),
                 wake_token: token,
             };
@@ -7548,15 +7615,16 @@ impl RendererOwnerHandle {
                 // Crossing into the Page owner's concrete command dispatcher
                 // is the Main receiver's first-dispatch boundary.
                 let _post_dispatch_wake = first_dispatch.release_for_dispatch();
-                self.run_live_page_command_turn(token, command, capture_policy)
+                self.run_live_page_command_turn(token, command, capture_policy, None)
                     .await
             }
             RenderRuntimeTurn::RunLivePageCommand {
                 token,
                 command,
                 capture_policy,
+                cancellation,
             } => {
-                self.run_live_page_command_turn(token, command, capture_policy)
+                self.run_live_page_command_turn(token, command, capture_policy, cancellation)
                     .await
             }
             RenderRuntimeTurn::ContinueLivePageRuntimeCommandLifecycle {
@@ -7807,7 +7875,7 @@ impl RendererOwnerHandle {
             &document_policy_container.response_content_security_policies,
         );
         let cross_origin_opener_policy =
-            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
+            crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit::from_response(
                 &final_url,
                 &response_headers,
             );
@@ -7884,6 +7952,7 @@ impl RendererOwnerHandle {
                 let renderer_document_isolate_allocator = RendererDocumentIsolateAllocator::new(
                     owner_local_context,
                     page_id,
+                    page_reservation.output_owner_reservation_id(),
                     page_reservation.script_agent_admission(),
                     page_reservation.opened_by_dom(),
                     page_reservation.initially_active(),
@@ -7994,7 +8063,7 @@ impl RendererOwnerHandle {
     async fn prepare_renderer_document_on_owner_local_store(
         &self,
         token: RendererPageReservationToken,
-        request: RendererCreateStreamingRawPageRequest,
+        mut request: RendererCreateStreamingRawPageRequest,
         owner_local_store: &mut RendererOwnerLocalStore,
     ) -> RenderRuntimeDispatchOutcome {
         if token.local_host_id() != self.state.owner_local_host_id {
@@ -8006,7 +8075,7 @@ impl RendererOwnerHandle {
             .into();
         }
         let replacement_isolation =
-            match owner_local_store.prepared_document_replacement_isolation(token, &request) {
+            match owner_local_store.prepared_document_replacement_isolation(token, &mut request) {
                 Ok(isolation) => isolation,
                 Err(error) => return Err(error).into(),
             };
@@ -8021,6 +8090,7 @@ impl RendererOwnerHandle {
                 let isolate_allocator = RendererDocumentIsolateAllocator::new(
                     owner_local_context,
                     token.page_id(),
+                    token.output_owner_reservation_id(),
                     token.script_agent_admission(),
                     token.opened_by_dom(),
                     token.initially_active(),
@@ -8207,6 +8277,7 @@ impl RendererOwnerHandle {
             top_level_navigation_dispatch,
             navigation_reply_policy,
             reserved_service_worker_client,
+            top_level_cross_origin_opener_policy_commit,
         } = request;
         if lifecycle_decider.is_some()
             && (!matches!(reply_boundary, crate::RendererReplyBoundary::Stage)
@@ -8242,11 +8313,13 @@ impl RendererOwnerHandle {
             auxiliary_browsing_context_policy,
             &document_policy_container.response_content_security_policies,
         );
-        let cross_origin_opener_policy =
-            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
-                &final_url,
-                &response_headers,
-            );
+        let cross_origin_opener_policy = top_level_cross_origin_opener_policy_commit
+            .unwrap_or_else(|| {
+                crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit::from_response(
+                    &final_url,
+                    &response_headers,
+                )
+            });
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =

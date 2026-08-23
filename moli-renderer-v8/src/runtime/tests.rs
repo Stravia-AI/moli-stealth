@@ -8,7 +8,8 @@ use super::{
     RendererOwnerAction, RendererPageCommand, RendererPageHandle, RendererPageReply,
     RendererPageTestingHandle, RendererPendingPopupActivation, RendererPendingWindowOpenEvent,
     RendererPointerEventProperties, RendererPreparedDocumentCommitConfiguration,
-    RendererProtocolObservation, RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
+    RendererProtocolObservation, RendererRemoteWindowProxyCommand, RendererResolvedPopupTarget,
+    RendererRuntimeCommandOutput, RendererRuntimeInspectorMessage,
     RendererRuntimeInspectorResponseSender, RendererScriptAgentAdmission,
 };
 use crate::local_executor::{is_on_script_execution_lane_for, scope_on_scaffold_js_local_executor};
@@ -541,6 +542,23 @@ fn popup_activations_for_page(
         .filter_map(|record| match record.item() {
             RendererOutputItem::OwnerAction(RendererOwnerAction::Popup(activation)) => {
                 Some(activation.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn remote_window_proxy_commands_for_page(
+    publications: &[RendererOutputPublication],
+    page: &RendererPageHandle,
+) -> Vec<super::RendererRemoteWindowProxyCommand> {
+    publications
+        .iter()
+        .filter(|publication| publication_is_for_page(publication, page))
+        .flat_map(RendererOutputPublication::records)
+        .filter_map(|record| match record.item() {
+            RendererOutputItem::OwnerAction(RendererOwnerAction::RemoteWindowProxy(command)) => {
+                Some(command.clone())
             }
             _ => None,
         })
@@ -3078,7 +3096,10 @@ async fn canceled_prepared_document_closes_its_ordered_output_stream() {
         RendererOutputTransportMessage::PageReservationReleased {
             owner_local_host_id,
             page_id,
-        } if owner_local_host_id == token.local_host_id() && page_id == token.page_id()
+            reservation_id,
+        } if owner_local_host_id == token.local_host_id()
+            && page_id == token.page_id()
+            && reservation_id == token.output_owner_reservation_id()
     ));
 
     prepared
@@ -3127,6 +3148,7 @@ async fn canceling_prepared_live_page_replacement_preserves_page_environment_and
             RendererOutputTransportMessage::PageReservationReleased {
                 owner_local_host_id,
                 page_id,
+                ..
             } if owner_local_host_id == page.owner_local_host_id()
                 && page_id == page.renderer_page_id() =>
             {
@@ -3181,8 +3203,10 @@ async fn canceling_prepared_live_page_replacement_preserves_page_environment_and
             RendererOutputTransportMessage::PageReservationReleased {
                 owner_local_host_id,
                 page_id,
+                reservation_id,
             } if owner_local_host_id == page.owner_local_host_id()
-                && page_id == page.renderer_page_id() =>
+                && page_id == page.renderer_page_id()
+                && reservation_id == replacement.output_owner_reservation_id() =>
             {
                 break;
             }
@@ -3907,6 +3931,11 @@ async fn newer_live_page_replacement_reservation_supersedes_unconsumed_nonce() {
     assert_ne!(
         first, current,
         "same-generation reservations need distinct capabilities"
+    );
+    assert_ne!(
+        first.output_owner_reservation_id(),
+        current.output_owner_reservation_id(),
+        "overlapping same-Page preparations need distinct protocol-owner reservations"
     );
     let first_admission = first.script_agent_admission();
     let current_admission = current.script_agent_admission();
@@ -5640,6 +5669,8 @@ globalThis.__lm_related_agent_marker"#
 #[tokio::test(flavor = "multi_thread")]
 async fn coop_commit_switches_related_page_group_and_disconnects_old_window_proxy() {
     let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
     let loader =
         ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
     let opener_url = url::Url::parse("https://example.test/coop-group/opener").expect("opener URL");
@@ -5689,9 +5720,46 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
     );
     let old_script_agent_id = popup_runtime_before["scriptAgentId"].clone();
     let old_group_id = popup_runtime_before["browsingContextGroupId"].clone();
+    let old_endpoint_generation =
+        popup_runtime_before["topLevelWindowProxyEndpointGeneration"].clone();
+    let old_channel_generation = popup_runtime_before["remoteWindowProxyChannelGeneration"].clone();
+    assert_ne!(old_endpoint_generation, serde_json::json!(0));
+    assert_ne!(
+        opener_runtime_before["topLevelWindowProxyEndpointGeneration"], old_endpoint_generation,
+        "related top-level targets in one group need distinct endpoint generations"
+    );
     let old_window_proxy = popup_runtime_before["mainWindowProxyIdentityHash"].clone();
     let old_page_id = popup.renderer_page_id();
     let old_owner_id = popup.owner_local_host_id();
+    // Model a command that crossed the browser/renderer handoff before the
+    // target committed its replacement group. The Page residence remains
+    // stable, so only the group-qualified endpoint can reject this in-flight
+    // operation after the swap.
+    let old_target =
+        RendererResolvedPopupTarget::from_residence(RendererOutputResidenceIdentity::Page {
+            owner_local_host_id: old_owner_id,
+            page_id: old_page_id,
+        })
+        .expect("popup Page residence should be a routable target");
+    let stale_in_flight_command = RendererRemoteWindowProxyCommand::focus(
+        crate::browsing_context_model::TopLevelWindowProxyEndpointId::from_wire_parts(
+            old_group_id
+                .as_u64()
+                .expect("diagnostics should expose the old group id"),
+            old_endpoint_generation
+                .as_u64()
+                .expect("diagnostics should expose the old endpoint generation"),
+        )
+        .expect("old endpoint diagnostics should form a valid identity"),
+        old_target,
+        crate::runtime::RendererRemoteWindowProxyChannel::from_wire_parts(
+            old_owner_id.as_u64(),
+            old_channel_generation
+                .as_u64()
+                .expect("diagnostics should expose the old channel generation"),
+        )
+        .expect("old channel diagnostics should form a valid identity"),
+    );
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
     let coop_headers = vec![
         ("content-type".to_owned(), "text/html".to_owned()),
@@ -5734,6 +5802,11 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
     assert_eq!(
         popup_after_cancel["moli"]["runtime"]["browsingContextGroupId"],
         old_group_id
+    );
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["topLevelWindowProxyEndpointGeneration"],
+        old_endpoint_generation,
+        "canceling a provisional group must preserve the live endpoint generation"
     );
     let (old_proxy_still_live, _) = opener
         .run_async_command(RendererPageCommand::EvaluateExpression {
@@ -5786,6 +5859,9 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
         popup_runtime_after_switch["browsingContextGroupId"],
         old_group_id
     );
+    let switched_endpoint_generation =
+        popup_runtime_after_switch["topLevelWindowProxyEndpointGeneration"].clone();
+    assert_ne!(switched_endpoint_generation, serde_json::json!(0));
     assert_ne!(
         popup_runtime_after_switch["mainWindowProxyIdentityHash"], old_window_proxy,
         "COOP group switch must allocate a new group-local WindowProxy"
@@ -5794,6 +5870,16 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
         popup_runtime_after_switch["scriptAgentPageCount"],
         serde_json::json!(1)
     );
+    let (stale_in_flight_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            stale_in_flight_command,
+        ))
+        .await
+        .expect("the replacement Page should return a stale-endpoint ACK");
+    assert!(matches!(
+        stale_in_flight_ack,
+        RendererPageReply::Bool(false)
+    ));
     let (new_window_state, _) = popup
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: "JSON.stringify([window.opener === null, window.name, document.body.dataset.coop, window.closed])".to_owned(),
@@ -5815,6 +5901,81 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
     assert_eq!(
         renderer_json_value(old_window_state),
         Some(serde_json::json!("[true,false]"))
+    );
+
+    // The old object is now only a group-qualified disconnected endpoint. All
+    // routable operations must be dropped before target lookup can alias the
+    // replacement Page. In particular, postMessage must not fall back to the
+    // incumbent opener when endpoint resolution fails.
+    output_rx.drain();
+    let (stale_endpoint_state, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  const stale = globalThis.__lm_coop_popup;
+  globalThis.__lm_stale_endpoint_self_messages = 0;
+  addEventListener("message", event => {
+    if (event.data === "must-drop-stale-endpoint") {
+      globalThis.__lm_stale_endpoint_self_messages++;
+    }
+  });
+  let missingArgsTypeError;
+  try {
+    stale.postMessage();
+    missingArgsTypeError = false;
+  } catch (error) {
+    missingArgsTypeError = error instanceof TypeError;
+  }
+  stale.postMessage("must-drop-stale-endpoint", "*");
+  stale.location.href = "https://must-not-route.test/assign";
+  stale.location.replace("https://must-not-route.test/replace");
+  stale.close();
+  stale.focus();
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify({
+    closed: stale.closed,
+    openerIsNull: stale.opener === null,
+    length: stale.length,
+    missingArgsTypeError,
+    selfMessages: globalThis.__lm_stale_endpoint_self_messages
+  });
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("disconnected endpoint operations should settle in the opener realm");
+    assert_eq!(
+        renderer_json_value(stale_endpoint_state),
+        Some(serde_json::json!(
+            "{\"closed\":true,\"openerIsNull\":true,\"length\":0,\"missingArgsTypeError\":true,\"selfMessages\":0}"
+        ))
+    );
+    let (replacement_untouched, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify([location.href, window.closed, document.hasFocus()])"
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the COOP replacement Page should remain addressable by its new endpoint");
+    assert_eq!(
+        renderer_json_value(replacement_untouched),
+        Some(serde_json::json!(
+            "[\"https://example.test/coop-group/committed\",false,false]"
+        ))
+    );
+    assert!(
+        output_rx.drain().iter().all(|publication| {
+            publication.records().iter().all(|record| {
+                !matches!(
+                    record.item(),
+                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelFocus(_))
+                        | RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose(_))
+                )
+            })
+        }),
+        "a stale endpoint must not publish focus or close against any Page owner"
     );
     let opener_after_switch = runtime_heap_usage_for_test(&opener).await;
     assert_eq!(
@@ -5874,6 +6035,11 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
         popup_runtime_after_same_policy["mainWindowProxyIdentityHash"],
         switched_window_proxy
     );
+    assert_eq!(
+        popup_runtime_after_same_policy["topLevelWindowProxyEndpointGeneration"],
+        switched_endpoint_generation,
+        "same-group Document replacement must preserve the endpoint generation"
+    );
 
     popup
         .close_async()
@@ -5883,6 +6049,1250 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
         .close_async()
         .await
         .expect("COOP opener should close independently");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropped_remote_window_proxy_waiter_cancels_queued_target_dispatch() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let original_url =
+        url::Url::parse("https://remote-cancel.test/original").expect("original URL");
+    let page = create_test_html_page(
+        &runtime,
+        &loader,
+        original_url.clone(),
+        "<!doctype html><body>remote cancellation target</body>",
+    )
+    .await;
+    let diagnostics = runtime_heap_usage_for_test(&page).await;
+    let runtime_diagnostics = &diagnostics["moli"]["runtime"];
+    let target =
+        RendererResolvedPopupTarget::from_residence(RendererOutputResidenceIdentity::Page {
+            owner_local_host_id: page.owner_local_host_id(),
+            page_id: page.renderer_page_id(),
+        })
+        .expect("test Page should expose a routable residence");
+    let endpoint = crate::browsing_context_model::TopLevelWindowProxyEndpointId::from_wire_parts(
+        runtime_diagnostics["browsingContextGroupId"]
+            .as_u64()
+            .expect("diagnostics should expose the group id"),
+        runtime_diagnostics["topLevelWindowProxyEndpointGeneration"]
+            .as_u64()
+            .expect("diagnostics should expose the endpoint generation"),
+    )
+    .expect("diagnostics should form a valid endpoint");
+    let channel = crate::runtime::RendererRemoteWindowProxyChannel::from_wire_parts(
+        page.owner_local_host_id().as_u64(),
+        runtime_diagnostics["remoteWindowProxyChannelGeneration"]
+            .as_u64()
+            .expect("diagnostics should expose the channel generation"),
+    )
+    .expect("diagnostics should form a valid channel");
+    let command = RendererRemoteWindowProxyCommand::navigate(
+        endpoint,
+        target,
+        channel,
+        crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign,
+        "https://remote-cancel.test/must-not-run".to_owned(),
+        crate::runtime::RendererTopLevelNavigationSource::browser_context(
+            "https://remote-cancel.test/source".to_owned(),
+            None,
+            false,
+        ),
+    );
+
+    let (entered_rx, release_tx) = runtime.install_owner_command_dispatch_gate_for_testing();
+    let pending = page
+        .enqueue_cancellable_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            command,
+        ))
+        .expect("remote command should enqueue before its ACK waiter is dropped");
+    entered_rx
+        .recv_timeout(Duration::from_secs(3))
+        .expect("remote command should reach the deterministic dispatch barrier");
+    drop(pending);
+    release_tx
+        .send(())
+        .expect("remote command dispatch barrier should release");
+
+    let (observed, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "location.href".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("a successor Page command should fence the canceled dispatch");
+    assert_eq!(
+        renderer_json_value(observed),
+        Some(serde_json::json!(original_url.as_str())),
+        "dropping the browser-owner ACK waiter must tombstone a still-queued target command before its side effect"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cross_origin_related_page_commit_moves_local_window_to_remote_agent_and_routes_commands() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut opener = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://remote-agent-opener.test/start").expect("opener URL"),
+        "<!doctype html><body>remote-agent opener</body>",
+    )
+    .await;
+    let mut popup = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &opener,
+        &loader,
+        url::Url::parse("https://remote-agent-opener.test/popup").expect("popup URL"),
+        "<!doctype html><body>remote-agent popup before split</body>",
+    )
+    .await;
+    let opener_testing = RendererPageTestingHandle::new_for_testing(&opener);
+    let popup_testing = RendererPageTestingHandle::new_for_testing(&popup);
+    opener_testing
+        .install_related_page_window_proxy_for_experiment(&popup_testing, "__g5RemotePopup")
+        .await
+        .expect("opener should retain the popup WindowProxy");
+    let (named, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.name = 'g5-remote-target'; window.opener !== null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("popup should install its reusable name");
+    assert_eq!(renderer_json_value(named), Some(serde_json::json!(true)));
+
+    let opener_before = runtime_heap_usage_for_test(&opener).await;
+    let popup_before = runtime_heap_usage_for_test(&popup).await;
+    let opener_runtime_before = &opener_before["moli"]["runtime"];
+    let popup_runtime_before = &popup_before["moli"]["runtime"];
+    assert_eq!(
+        opener_runtime_before["scriptAgentId"], popup_runtime_before["scriptAgentId"],
+        "the fixture must begin with two LocalWindows in one script agent"
+    );
+    let old_script_agent = popup_runtime_before["scriptAgentId"].clone();
+    let old_group = popup_runtime_before["browsingContextGroupId"].clone();
+    let old_endpoint = popup_runtime_before["topLevelWindowProxyEndpointGeneration"].clone();
+    let old_channel = popup_runtime_before["remoteWindowProxyChannelGeneration"].clone();
+    let old_window_proxy = popup_runtime_before["mainWindowProxyIdentityHash"].clone();
+    let old_page_id = popup.renderer_page_id();
+    let old_owner_id = popup.owner_local_host_id();
+    let old_target =
+        RendererResolvedPopupTarget::from_residence(RendererOutputResidenceIdentity::Page {
+            owner_local_host_id: old_owner_id,
+            page_id: old_page_id,
+        })
+        .expect("popup Page residence should be routable");
+    let stale_same_group_command = RendererRemoteWindowProxyCommand::focus(
+        crate::browsing_context_model::TopLevelWindowProxyEndpointId::from_wire_parts(
+            old_group
+                .as_u64()
+                .expect("diagnostics should expose the group id"),
+            old_endpoint
+                .as_u64()
+                .expect("diagnostics should expose the endpoint generation"),
+        )
+        .expect("diagnostics should form a valid endpoint"),
+        old_target,
+        crate::runtime::RendererRemoteWindowProxyChannel::from_wire_parts(
+            old_owner_id.as_u64(),
+            old_channel
+                .as_u64()
+                .expect("diagnostics should expose the channel generation"),
+        )
+        .expect("diagnostics should form a valid channel"),
+    );
+
+    let canceled_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("remote-agent cancellation probe should reserve the popup");
+    let canceled = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        canceled_reservation,
+        &loader,
+        url::Url::parse("https://remote-agent-target.test/canceled").expect("canceled URL"),
+        Vec::new(),
+        completed_external_raw_document_body("<!doctype html><body>canceled split</body>"),
+    )
+    .await
+    .expect("cross-origin replacement should prepare a provisional remote agent");
+    canceled
+        .cancel()
+        .await
+        .expect("canceling the provisional remote agent should succeed");
+    let popup_after_cancel = runtime_heap_usage_for_test(&popup).await;
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["scriptAgentId"],
+        old_script_agent
+    );
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["browsingContextGroupId"],
+        old_group
+    );
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["topLevelWindowProxyEndpointGeneration"],
+        old_endpoint,
+        "a canceled provisional agent must not replace the live logical endpoint"
+    );
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["remoteWindowProxyChannelGeneration"], old_channel,
+        "a canceled provisional agent must not rotate the live renderer channel"
+    );
+    let (opener_after_cancel, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener !== null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("canceled provisional agent must preserve the opener edge");
+    assert_eq!(
+        renderer_json_value(opener_after_cancel),
+        Some(serde_json::json!(true)),
+        "canceled provisional agent must preserve the live opener projection"
+    );
+
+    let replacement_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("cross-origin commit should reserve the popup");
+    let prepared = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        replacement_reservation,
+        &loader,
+        url::Url::parse("https://remote-agent-target.test/committed").expect("replacement URL"),
+        Vec::new(),
+        completed_external_raw_document_body(
+            r#"<!doctype html><body data-agent="remote">
+<script>
+globalThis.__g5RemoteMessages = [];
+globalThis.__g5RemoteMessageErrors = [];
+globalThis.__g5InitialOpener = window.opener;
+addEventListener("message", event => {
+  const source = event.source;
+  __g5RemoteMessages.push({
+    data: event.data,
+    origin: event.origin,
+    sourceType: typeof source,
+    sourceIsNull: source === null,
+    sourceIsOpener: source === window.opener,
+    sourceIsInitialOpener: source === __g5InitialOpener,
+    openerIsInitialOpener: window.opener === __g5InitialOpener,
+    sourceClosed: source && source.closed
+  });
+});
+addEventListener("messageerror", event => {
+  __g5RemoteMessageErrors.push({
+    dataIsNull: event.data === null,
+    origin: event.origin,
+    sourceIsOpener: event.source === window.opener
+  });
+});
+</script></body>"#,
+        ),
+    )
+    .await
+    .expect("cross-origin replacement should prepare");
+    let permit = prepared.issue_commit_permit();
+    let replacement = prepared
+        .commit_page_replacement(permit)
+        .await
+        .expect("cross-origin replacement should commit");
+    assert_eq!(replacement.page_id(), old_page_id);
+    assert_eq!(replacement.owner_local_host_id(), old_owner_id);
+    popup
+        .adopt_page_replacement(&replacement)
+        .expect("stable popup handle should adopt the remote-agent replacement");
+    let (_, _, _, _, pending_download) = replacement.into_parts();
+    assert!(pending_download.is_none());
+
+    let opener_after = runtime_heap_usage_for_test(&opener).await;
+    let popup_after = runtime_heap_usage_for_test(&popup).await;
+    let opener_runtime_after = &opener_after["moli"]["runtime"];
+    let popup_runtime_after = &popup_after["moli"]["runtime"];
+    assert_eq!(
+        opener_runtime_after["scriptAgentId"], opener_runtime_before["scriptAgentId"],
+        "the opener must retain the original agent"
+    );
+    assert_ne!(popup_runtime_after["scriptAgentId"], old_script_agent);
+    assert_eq!(popup_runtime_after["browsingContextGroupId"], old_group);
+    assert_eq!(
+        popup_runtime_after["topLevelWindowProxyEndpointGeneration"], old_endpoint,
+        "same-group remote-agent transition must retain the logical endpoint"
+    );
+    assert_ne!(
+        popup_runtime_after["remoteWindowProxyChannelGeneration"], old_channel,
+        "committing a replacement script agent must rotate the endpoint channel"
+    );
+    let (stale_channel_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            stale_same_group_command,
+        ))
+        .await
+        .expect("stale same-group command should return a negative ACK");
+    assert!(
+        matches!(stale_channel_ack, RendererPageReply::Bool(false)),
+        "an in-flight command admitted by the outgoing agent channel must not enter the replacement realm"
+    );
+    assert_ne!(
+        popup_runtime_after["mainWindowProxyIdentityHash"],
+        old_window_proxy
+    );
+    assert_eq!(
+        opener_runtime_after["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "the target Page route must leave the opener's script agent"
+    );
+    assert_eq!(
+        popup_runtime_after["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "the target LocalWindow must own a fresh single-Page agent"
+    );
+    let (opener_after_transition, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.opener !== null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote-agent opener projection should evaluate");
+    assert_eq!(
+        renderer_json_value(opener_after_transition),
+        Some(serde_json::json!(true)),
+        "same-group agent transition must materialize the opener endpoint"
+    );
+
+    let (remote_surface, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const popup = globalThis.__g5RemotePopup;
+  return JSON.stringify([
+    popup === globalThis.__g5RemotePopup,
+    popup.closed,
+    popup.window === popup,
+    popup.opener === window
+  ]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("the old agent should retain a live restricted proxy");
+    assert_eq!(
+        renderer_json_value(remote_surface),
+        Some(serde_json::json!("[true,false,true,true]"))
+    );
+
+    output_rx.drain();
+    let (named_reuse, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const selected = window.open("", "g5-remote-target");
+  return JSON.stringify([selected === __g5RemotePopup, selected.closed]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("named lookup should reuse the remote top-level endpoint");
+    assert_eq!(
+        renderer_json_value(named_reuse),
+        Some(serde_json::json!("[true,false]"))
+    );
+    let named_publications = output_rx.drain();
+    let named_activations = popup_activations_for_page(&named_publications, &opener);
+    assert_eq!(named_activations.len(), 1);
+    let named_target = named_activations[0]
+        .resolved_target_page()
+        .expect("remote named reuse must freeze the exact target Page");
+    assert_eq!(
+        named_target.owner_local_host_id(),
+        popup.owner_local_host_id()
+    );
+    assert_eq!(named_target.page_id(), popup.renderer_page_id());
+    assert!(named_activations[0].pending_auxiliary_page().is_none());
+    assert!(named_activations[0].new_target_disposition().is_none());
+
+    output_rx.drain();
+    let (hyperlink_reuse, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const link = document.createElement("a");
+  link.href = "https://remote-agent-link-destination.test/path";
+  link.target = "g5-remote-target";
+  link.rel = "opener";
+  document.body.appendChild(link);
+  link.click();
+  return "link-dispatched";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("named hyperlink should reuse the remote top-level endpoint");
+    assert_eq!(
+        renderer_json_value(hyperlink_reuse),
+        Some(serde_json::json!("link-dispatched"))
+    );
+    let hyperlink_publications = output_rx.drain();
+    let hyperlink_activations = popup_activations_for_page(&hyperlink_publications, &opener);
+    assert_eq!(hyperlink_activations.len(), 1);
+    let hyperlink_target = hyperlink_activations[0]
+        .resolved_target_page()
+        .expect("remote named hyperlink must freeze the exact target Page");
+    assert_eq!(
+        hyperlink_target.owner_local_host_id(),
+        popup.owner_local_host_id()
+    );
+    assert_eq!(hyperlink_target.page_id(), popup.renderer_page_id());
+    assert!(hyperlink_activations[0].pending_auxiliary_page().is_none());
+
+    output_rx.drain();
+    let (form_reuse, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = "https://remote-agent-form-destination.test/submit";
+  form.target = "g5-remote-target";
+  form.rel = "opener";
+  const input = document.createElement("input");
+  input.name = "remote field";
+  input.value = "remote+value";
+  form.appendChild(input);
+  document.body.appendChild(form);
+  form.submit();
+  return "form-dispatched";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("named form should reuse the remote top-level endpoint");
+    assert_eq!(
+        renderer_json_value(form_reuse),
+        Some(serde_json::json!("form-dispatched"))
+    );
+    let form_publications = output_rx.drain();
+    let form_activations = popup_activations_for_page(&form_publications, &opener);
+    assert_eq!(form_activations.len(), 1);
+    let form_target = form_activations[0]
+        .resolved_target_page()
+        .expect("remote named form must freeze the exact target Page");
+    assert_eq!(
+        form_target.owner_local_host_id(),
+        popup.owner_local_host_id()
+    );
+    assert_eq!(form_target.page_id(), popup.renderer_page_id());
+    assert!(form_activations[0].pending_auxiliary_page().is_none());
+    assert_eq!(form_activations[0].request_method(), Some("POST"));
+    assert_eq!(
+        form_activations[0].request_body(),
+        Some(b"remote+field=remote%2Bvalue".as_slice())
+    );
+    assert_eq!(
+        form_activations[0]
+            .request_headers()
+            .expect("remote POST form must retain its request headers"),
+        &[(
+            "Content-Type".to_owned(),
+            "application/x-www-form-urlencoded".to_owned()
+        )]
+    );
+
+    let (posted, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression:
+                r#"__g5RemotePopup.postMessage({ kind: "g5", nested: [1, 2] }, "*"); "posted""#
+                    .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote postMessage should publish a typed command");
+    assert_eq!(
+        renderer_json_value(posted),
+        Some(serde_json::json!("posted"))
+    );
+    let message_publications = output_rx.drain();
+    let mut message_commands =
+        remote_window_proxy_commands_for_page(&message_publications, &opener);
+    assert_eq!(message_commands.len(), 1);
+    let (message_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            message_commands.pop().expect("one message command"),
+        ))
+        .await
+        .expect("target Page should ACK the remote message command");
+    assert!(matches!(message_ack, RendererPageReply::Bool(true)));
+    let (message_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify(__g5RemoteMessages);
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("remote message task should run in the target agent");
+    assert_eq!(
+        renderer_json_value(message_state),
+        Some(serde_json::json!(
+            r#"[{"data":{"kind":"g5","nested":[1,2]},"origin":"https://remote-agent-opener.test","sourceType":"object","sourceIsNull":false,"sourceIsOpener":true,"sourceIsInitialOpener":true,"openerIsInitialOpener":true,"sourceClosed":false}]"#
+        ))
+    );
+
+    // Chromium does not put v8::CompiledWasmModule attachments on its Mojo
+    // CloneableMessage wire. It records the exact sender agent cluster and a
+    // different target agent dispatches `messageerror`. Preserve the author's
+    // asynchronous postMessage result without smuggling the compiled module
+    // capability through the browser owner.
+    output_rx.drain();
+    let (wasm_posted, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const module = new WebAssembly.Module(
+    new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0])
+  );
+  __g5RemotePopup.postMessage({ kind: "remote-wasm", module }, "*");
+  return "wasm-posted";
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote Wasm postMessage should serialize without a synchronous exception");
+    assert_eq!(
+        renderer_json_value(wasm_posted),
+        Some(serde_json::json!("wasm-posted"))
+    );
+    let wasm_publications = output_rx.drain();
+    let mut wasm_commands = remote_window_proxy_commands_for_page(&wasm_publications, &opener);
+    assert_eq!(wasm_commands.len(), 1);
+    let wasm_command = wasm_commands.pop().expect("one remote Wasm command");
+    let crate::runtime::RendererRemoteWindowProxyCommandKind::PostMessage(wasm_message) =
+        wasm_command.kind_for_testing()
+    else {
+        panic!("remote Wasm postMessage must retain its typed command")
+    };
+    assert!(wasm_message.payload.metadata.contains_wasm_module);
+    assert!(wasm_message.payload.metadata.remote_agent_cluster_mismatch);
+    assert_eq!(
+        wasm_message.payload.metadata.sender_origin.as_deref(),
+        Some("https://remote-agent-opener.test")
+    );
+    let (wasm_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            wasm_command,
+        ))
+        .await
+        .expect("remote target should ACK the agent-locked Wasm command");
+    assert!(matches!(wasm_ack, RendererPageReply::Bool(true)));
+    let (wasm_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify({
+    messages: __g5RemoteMessages.length,
+    errors: __g5RemoteMessageErrors
+  });
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("agent-locked remote Wasm should finish as messageerror");
+    assert_eq!(
+        renderer_json_value(wasm_state),
+        Some(serde_json::json!(
+            r#"{"messages":1,"errors":[{"dataIsNull":true,"origin":"https://remote-agent-opener.test","sourceIsOpener":true}]}"#
+        ))
+    );
+
+    let (deactivated, _) = popup
+        .run_async_command(RendererPageCommand::SetTopLevelPageFocus {
+            active: false,
+            focused: false,
+        })
+        .await
+        .expect("target Page should become focus-eligible");
+    assert!(matches!(deactivated, RendererPageReply::Bool(_)));
+    output_rx.drain();
+    let (focus_requested, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__g5RemotePopup.focus(); 'focus-requested'".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote focus should publish a typed command");
+    assert_eq!(
+        renderer_json_value(focus_requested),
+        Some(serde_json::json!("focus-requested"))
+    );
+    let focus_publications = output_rx.drain();
+    let mut focus_commands = remote_window_proxy_commands_for_page(&focus_publications, &opener);
+    assert_eq!(focus_commands.len(), 1);
+    let (focus_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            focus_commands.pop().expect("one focus command"),
+        ))
+        .await
+        .expect("target Page should ACK the remote focus command");
+    assert!(matches!(focus_ack, RendererPageReply::Bool(true)));
+    assert!(output_rx.drain().iter().any(|publication| {
+        publication_is_for_page(publication, &popup)
+            && publication.records().iter().any(|record| {
+                matches!(
+                    record.item(),
+                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelFocus(target))
+                        if target.owner_local_host_id() == popup.owner_local_host_id()
+                            && target.page_id() == popup.renderer_page_id()
+                )
+            })
+    }));
+
+    output_rx.drain();
+    let (navigate_requested, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"__g5RemotePopup.location.href = "https://remote-agent-destination.test/path"; "navigate-requested""#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote Location should publish a typed command");
+    assert_eq!(
+        renderer_json_value(navigate_requested),
+        Some(serde_json::json!("navigate-requested"))
+    );
+    let navigation_publications = output_rx.drain();
+    let mut navigation_commands =
+        remote_window_proxy_commands_for_page(&navigation_publications, &opener);
+    assert_eq!(navigation_commands.len(), 1);
+    let (navigation_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            navigation_commands.pop().expect("one navigation command"),
+        ))
+        .await
+        .expect("target Page should ACK the remote navigation command");
+    assert!(matches!(navigation_ack, RendererPageReply::Bool(true)));
+    assert_eq!(
+        has_pending_location_navigation_for_test(&popup).await,
+        Some(true)
+    );
+
+    output_rx.drain();
+    let (close_before_ack, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__g5RemotePopup.close(); __g5RemotePopup.closed".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote close should publish a typed command");
+    assert_eq!(
+        renderer_json_value(close_before_ack),
+        Some(serde_json::json!(false)),
+        "the source facade must not predict target acceptance before its ACK"
+    );
+    let close_publications = output_rx.drain();
+    let mut close_commands = remote_window_proxy_commands_for_page(&close_publications, &opener);
+    assert_eq!(close_commands.len(), 1);
+    let (close_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            close_commands.pop().expect("one close command"),
+        ))
+        .await
+        .expect("target Page should ACK the remote close command");
+    assert!(matches!(close_ack, RendererPageReply::Bool(true)));
+    let (close_after_ack, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__g5RemotePopup.closed".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source facade should observe the replicated Closing state");
+    assert_eq!(
+        renderer_json_value(close_after_ack),
+        Some(serde_json::json!(true))
+    );
+
+    popup
+        .close_async()
+        .await
+        .expect("remote-agent popup should close");
+    opener
+        .close_async()
+        .await
+        .expect("remote-agent opener should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn remote_agent_replicates_child_tree_and_routes_exact_remote_frame_commands() {
+    // Keep every routed child navigation pending until a newer navigation or
+    // Page teardown cancels it. Using unresolvable example.test URLs here made
+    // the test depend on DNS negative-cache timing: a fast transport failure
+    // could retire the child Document before the next command exercised the
+    // scheduler replacement boundary.
+    let stalled_navigation_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind stalled remote-frame navigation server");
+    let stalled_navigation_address = stalled_navigation_listener
+        .local_addr()
+        .expect("stalled remote-frame navigation server address");
+    let source_origin = format!(
+        "http://a.example.test:{}",
+        stalled_navigation_address.port()
+    );
+    let target_origin = format!(
+        "http://b.example.test:{}",
+        stalled_navigation_address.port()
+    );
+    let replace_destination =
+        serde_json::to_string(&format!("{source_origin}/g6/replace-destination"))
+            .expect("serialize replace destination");
+    let hyperlink_destination =
+        serde_json::to_string(&format!("{source_origin}/g6/link-destination"))
+            .expect("serialize hyperlink destination");
+    let first_form_destination = serde_json::to_string(&format!("{source_origin}/g6/first-form"))
+        .expect("serialize first form destination");
+    let second_form_destination = serde_json::to_string(&format!("{source_origin}/g6/second-form"))
+        .expect("serialize second form destination");
+    let stale_navigation_destination =
+        serde_json::to_string(&format!("{source_origin}/g6/must-not-route"))
+            .expect("serialize stale navigation destination");
+    let source_url = url::Url::parse(&format!("{source_origin}/g6/source")).expect("G6 source URL");
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let mut fetch_config = moli_fetch::FetchConfig::default();
+    fetch_config.set_http_host_resolve(vec![format!(
+        "a.example.test:{}:127.0.0.1",
+        stalled_navigation_address.port()
+    )]);
+    let loader = ResourceRequestClient::new(&fetch_config).expect("G6 test loader");
+    let mut opener = create_test_html_page(
+        &runtime,
+        &loader,
+        source_url.clone(),
+        r#"<!doctype html><body>G6 remote-frame source
+<iframe name="g6-source-child" srcdoc="<!doctype html><body><script>
+document.domain = 'example.test';
+globalThis.__postFromG6SourceChild = () => parent.__g6FirstRemoteFrame.postMessage({kind: 'remote-source-child'}, '*');
+</script></body>"></iframe>
+</body>"#,
+    )
+    .await;
+    let mut popup = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &opener,
+        &loader,
+        url::Url::parse(&format!("{source_origin}/g6/popup")).expect("G6 initial popup URL"),
+        "<!doctype html><body>G6 popup before split</body>",
+    )
+    .await;
+    let opener_testing = RendererPageTestingHandle::new_for_testing(&opener);
+    let popup_testing = RendererPageTestingHandle::new_for_testing(&popup);
+    opener_testing
+        .install_related_page_window_proxy_for_experiment(&popup_testing, "__g6RemotePopup")
+        .await
+        .expect("source should retain the target Page WindowProxy");
+
+    let replacement_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("G6 target replacement should reserve");
+    let prepared = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        replacement_reservation,
+        &loader,
+        url::Url::parse(&format!("{target_origin}/g6/target"))
+            .expect("G6 remote target URL"),
+        Vec::new(),
+        completed_external_raw_document_body(
+            r#"<!doctype html><body>
+<script>document.domain = "example.test";</script>
+<iframe name="g6-first" srcdoc="<!doctype html><body><script>
+document.domain = 'example.test';
+globalThis.__g6Messages = [];
+addEventListener('message', event => __g6Messages.push({
+  data: event.data,
+  origin: event.origin,
+  sourceIsNull: event.source === null,
+  sourceIsTopOpener: event.source === top.opener
+}));
+</script></body>"></iframe>
+<iframe name="g6-second" srcdoc="<!doctype html><body><script>document.domain = 'example.test';</script></body>"></iframe>
+</body>"#,
+        ),
+    )
+    .await
+    .expect("G6 cross-origin replacement should prepare");
+    let permit = prepared.issue_commit_permit();
+    let replacement = prepared
+        .commit_page_replacement(permit)
+        .await
+        .expect("G6 cross-origin replacement should commit");
+    popup
+        .adopt_page_replacement(&replacement)
+        .expect("stable target handle should adopt the remote agent");
+    let (_, _, _, _, pending_download) = replacement.into_parts();
+    assert!(pending_download.is_none());
+
+    let (child_lifecycle, _) = popup
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("remote target child Documents should finish their initial lifecycle");
+    assert!(matches!(child_lifecycle, RendererPageReply::Bool(true)));
+    let (source_child_lifecycle, _) = opener
+        .run_async_command(
+            RendererPageCommand::CompleteChildFrameLifecycleWorkBestEffort {
+                timeout_ms: 2_000,
+                loader: loader.clone(),
+            },
+        )
+        .await
+        .expect("source child Document should finish before it becomes a message source");
+    assert!(matches!(
+        source_child_lifecycle,
+        RendererPageReply::Bool(true)
+    ));
+    let popup_child_context_ids = child_default_context_ids_for_test(&popup)
+        .await
+        .expect("target child execution contexts should be enumerable");
+    assert_eq!(popup_child_context_ids.len(), 2);
+    let first_popup_child_context_id = popup_child_context_ids[0];
+
+    let (source_domain, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.domain = 'example.test'; document.domain".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source should opt into the shared document.domain");
+    assert_eq!(
+        renderer_json_value(source_domain),
+        Some(serde_json::json!("example.test"))
+    );
+
+    let (remote_tree, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const top = __g6RemotePopup;
+  const first = top[0];
+  globalThis.__g6FirstRemoteFrame = first;
+  return JSON.stringify({
+    length: top.length,
+    stable: first === top[0],
+    named: first === top["g6-first"],
+    distinct: first !== top[1],
+    parent: first.parent === top,
+    top: first.top === top,
+    closed: first.closed
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source should project the complete remote child tree");
+    assert_eq!(
+        renderer_json_value(remote_tree),
+        Some(serde_json::json!(
+            "{\"length\":2,\"stable\":true,\"named\":true,\"distinct\":true,\"parent\":true,\"top\":true,\"closed\":false}"
+        ))
+    );
+
+    output_rx.drain();
+    let (posted, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression:
+                r#"__g6FirstRemoteFrame.postMessage({kind: "remote-frame"}, "*"); "posted""#
+                    .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child postMessage should publish a typed command");
+    assert_eq!(
+        renderer_json_value(posted),
+        Some(serde_json::json!("posted"))
+    );
+    let publications = output_rx.drain();
+    let mut message_commands = remote_window_proxy_commands_for_page(&publications, &opener);
+    assert_eq!(message_commands.len(), 1);
+    let first_frame = message_commands[0]
+        .target_frame()
+        .expect("remote child message must retain its exact frame token");
+    let (message_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            message_commands.pop().expect("one remote child message"),
+        ))
+        .await
+        .expect("remote child should ACK postMessage");
+    assert!(matches!(message_ack, RendererPageReply::Bool(true)));
+    let (message_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_popup_child_context_id,
+            expression: r#"(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify(globalThis.__g6Messages);
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("remote child message task should run in the target realm");
+    assert_eq!(
+        renderer_json_value(message_state),
+        Some(serde_json::json!(
+            serde_json::to_string(&serde_json::json!([{
+                "data": {"kind": "remote-frame"},
+                "origin": source_origin.as_str(),
+                "sourceIsNull": false,
+                "sourceIsTopOpener": true,
+            }]))
+            .expect("serialize expected top-source message")
+        ))
+    );
+
+    output_rx.drain();
+    let (child_posted, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "frames[0].__postFromG6SourceChild(); 'child-posted'".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("source child should publish its own remote-frame identity");
+    assert_eq!(
+        renderer_json_value(child_posted),
+        Some(serde_json::json!("child-posted"))
+    );
+    let child_source_publications = output_rx.drain();
+    let mut child_source_commands =
+        remote_window_proxy_commands_for_page(&child_source_publications, &opener);
+    assert_eq!(child_source_commands.len(), 1);
+    assert_eq!(child_source_commands[0].target_frame(), Some(first_frame));
+    let (child_source_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            child_source_commands
+                .pop()
+                .expect("one source-child remote message"),
+        ))
+        .await
+        .expect("target child should ACK a source-child postMessage");
+    assert!(matches!(child_source_ack, RendererPageReply::Bool(true)));
+    let (child_source_message_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpressionInExecutionContext {
+            execution_context_id: first_popup_child_context_id,
+            expression: r#"(async () => {
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  return JSON.stringify(globalThis.__g6Messages);
+})()"#
+                .to_owned(),
+            await_promise: true,
+        })
+        .await
+        .expect("source-child message should materialize its exact proxy in the target agent");
+    let child_source_message_payload = match child_source_message_state {
+        RendererPageReply::RuntimeEvaluationResult(result) => result.into_protocol_payload(),
+        _ => panic!("source-child message state should return a Runtime evaluation result"),
+    };
+    assert_eq!(
+        child_source_message_payload.get("value").cloned(),
+        Some(serde_json::json!(
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "data": {"kind": "remote-frame"},
+                    "origin": source_origin.as_str(),
+                    "sourceIsNull": false,
+                    "sourceIsTopOpener": true,
+                },
+                {
+                    "data": {"kind": "remote-source-child"},
+                    "origin": source_origin.as_str(),
+                    "sourceIsNull": false,
+                    "sourceIsTopOpener": false,
+                }
+            ]))
+            .expect("serialize expected child-source messages")
+        )),
+        "target must translate the source child token instead of projecting the opener top: {child_source_message_payload}"
+    );
+
+    output_rx.drain();
+    let (replaced, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                "__g6FirstRemoteFrame.location.replace({replace_destination}); \"replace-dispatched\""
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("remote child Location.replace should publish a typed request");
+    assert_eq!(
+        renderer_json_value(replaced),
+        Some(serde_json::json!("replace-dispatched"))
+    );
+    let replace_publications = output_rx.drain();
+    let mut replace_commands =
+        remote_window_proxy_commands_for_page(&replace_publications, &opener);
+    assert_eq!(replace_commands.len(), 1);
+    assert_eq!(replace_commands[0].target_frame(), Some(first_frame));
+    match replace_commands[0].kind_for_testing() {
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrame {
+            kind,
+            request,
+            scheduler_id,
+        } => {
+            assert_eq!(
+                kind,
+                crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
+            );
+            assert!(scheduler_id.is_none());
+            assert_eq!(request.method, "GET");
+            assert!(request.body.is_none());
+            assert_eq!(
+                request.request_headers,
+                vec![("Referer".to_owned(), source_url.as_str().to_owned())],
+                "Location.replace must not discard the source-side referrer carrier"
+            );
+        }
+        other => panic!("remote child replace should publish NavigateFrame, got {other:?}"),
+    }
+    let (replace_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            replace_commands.pop().expect("one remote child replace"),
+        ))
+        .await
+        .expect("remote child should ACK Location.replace");
+    assert!(matches!(replace_ack, RendererPageReply::Bool(true)));
+
+    output_rx.drain();
+    let (linked, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"(() => {{
+  const link = document.createElement("a");
+  link.href = {hyperlink_destination};
+  link.target = "g6-first";
+  document.body.appendChild(link);
+  link.click();
+  return "linked";
+}})()"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("named hyperlink should select the remote child");
+    assert_eq!(
+        renderer_json_value(linked),
+        Some(serde_json::json!("linked"))
+    );
+    let publications = output_rx.drain();
+    assert!(
+        popup_activations_for_page(&publications, &opener).is_empty(),
+        "remote child lookup must not create a duplicate auxiliary Page"
+    );
+    let mut hyperlink_commands = remote_window_proxy_commands_for_page(&publications, &opener);
+    assert_eq!(hyperlink_commands.len(), 1);
+    assert_eq!(hyperlink_commands[0].target_frame(), Some(first_frame));
+    let (hyperlink_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            hyperlink_commands
+                .pop()
+                .expect("one remote hyperlink command"),
+        ))
+        .await
+        .expect("remote child should ACK the named hyperlink navigation");
+    assert!(matches!(hyperlink_ack, RendererPageReply::Bool(true)));
+
+    output_rx.drain();
+    let (first_form, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"(() => {{
+  const form = document.createElement("form");
+  form.method = "post";
+  form.action = {first_form_destination};
+  form.target = "g6-first";
+  const input = document.createElement("input");
+  input.name = "remote field";
+  input.value = "first value";
+  const button = document.createElement("button");
+  button.type = "submit";
+  form.append(input, button);
+  document.body.appendChild(form);
+  globalThis.__g6RemoteForm = form;
+  globalThis.__g6RemoteSubmitter = button;
+  form.submit();
+  return "first-form";
+}})()"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("first remote child form should schedule");
+    assert_eq!(
+        renderer_json_value(first_form),
+        Some(serde_json::json!("first-form"))
+    );
+    let first_form_publications = output_rx.drain();
+    let mut first_form_commands =
+        remote_window_proxy_commands_for_page(&first_form_publications, &opener);
+    assert_eq!(first_form_commands.len(), 1);
+    assert_eq!(first_form_commands[0].target_frame(), Some(first_frame));
+    match first_form_commands[0].kind_for_testing() {
+        crate::runtime::RendererRemoteWindowProxyCommandKind::NavigateFrame {
+            kind,
+            request,
+            scheduler_id,
+        } => {
+            assert_eq!(
+                kind,
+                crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign
+            );
+            assert!(scheduler_id.is_some());
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.body.as_deref(),
+                Some(b"remote+field=first+value".as_slice())
+            );
+            assert_eq!(
+                request.request_headers,
+                vec![
+                    (
+                        "Content-Type".to_owned(),
+                        "application/x-www-form-urlencoded".to_owned(),
+                    ),
+                    ("Referer".to_owned(), source_url.as_str().to_owned(),),
+                ],
+                "remote child handoff must retain the exact form request and source referrer"
+            );
+        }
+        other => panic!("remote child form should publish NavigateFrame, got {other:?}"),
+    }
+    let (first_form_ack, _) = popup
+        .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+            first_form_commands.pop().expect("one first form command"),
+        ))
+        .await
+        .expect("target should bind the source-assigned scheduler id");
+    assert!(matches!(first_form_ack, RendererPageReply::Bool(true)));
+
+    output_rx.drain();
+    let (second_form, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"(() => {{
+  __g6RemoteForm.action = {second_form_destination};
+  __g6RemoteForm.target = "g6-second";
+  __g6RemoteSubmitter.click();
+  return "second-form";
+}})()"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("same form should cancel A before retargeting B");
+    assert_eq!(
+        renderer_json_value(second_form),
+        Some(serde_json::json!("second-form"))
+    );
+    let second_form_publications = output_rx.drain();
+    assert!(
+        popup_activations_for_page(&second_form_publications, &opener).is_empty(),
+        "retargeting between remote children must stay inside the existing Page"
+    );
+    let second_form_commands =
+        remote_window_proxy_commands_for_page(&second_form_publications, &opener);
+    assert_eq!(
+        second_form_commands.len(),
+        2,
+        "same-form retarget must emit exact cancel(A) before navigate(B)"
+    );
+    assert_eq!(second_form_commands[0].target_frame(), Some(first_frame));
+    let second_frame = second_form_commands[1]
+        .target_frame()
+        .expect("second remote form command needs its exact frame token");
+    assert_ne!(first_frame, second_frame);
+    for (index, command) in second_form_commands.into_iter().enumerate() {
+        let (ack, _) = popup
+            .run_async_command(RendererPageCommand::DispatchRemoteWindowProxyCommand(
+                command,
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("remote form command {index} should ACK: {error}"));
+        assert!(
+            matches!(ack, RendererPageReply::Bool(true)),
+            "remote form command {index} should retain current scheduler identity"
+        );
+    }
+
+    let stale_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("same-group root replacement should reserve");
+    let stale_replacement = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        stale_reservation,
+        &loader,
+        url::Url::parse(&format!("{target_origin}/g6/replaced")).expect("replacement URL"),
+        Vec::new(),
+        completed_external_raw_document_body(
+            "<!doctype html><body>replacement without children</body>",
+        ),
+    )
+    .await
+    .expect("same-group root replacement should prepare");
+    let permit = stale_replacement.issue_commit_permit();
+    let replacement = stale_replacement
+        .commit_page_replacement(permit)
+        .await
+        .expect("same-group root replacement should commit");
+    popup
+        .adopt_page_replacement(&replacement)
+        .expect("stable target should adopt the child-free replacement");
+    let (_, _, _, _, pending_download) = replacement.into_parts();
+    assert!(pending_download.is_none());
+
+    output_rx.drain();
+    let (stale_state, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: format!(
+                r#"(() => {{
+  const stale = __g6FirstRemoteFrame;
+  stale.location.href = {stale_navigation_destination};
+  stale.postMessage("must-not-route", "*");
+  return JSON.stringify([stale.closed, __g6RemotePopup.length]);
+}})()"#
+            ),
+            await_promise: false,
+        })
+        .await
+        .expect("retained stale frame facade should remain safely callable");
+    assert_eq!(
+        renderer_json_value(stale_state),
+        Some(serde_json::json!("[true,0]"))
+    );
+    assert!(
+        remote_window_proxy_commands_for_page(&output_rx.drain(), &opener).is_empty(),
+        "a stale root-Document-qualified frame token must not route into replacement children"
+    );
+
+    popup.close_async().await.expect("G6 target should close");
+    opener.close_async().await.expect("G6 source should close");
+    drop(stalled_navigation_listener);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -189,10 +189,12 @@ use child_documents::{ChildDocumentParserStore, PendingChildDocumentNavigation};
 use child_events::ChildWindowEventListenerEntry;
 use child_frame_runtime::ChildWindowProxyRecords;
 pub(crate) use child_frame_runtime::{
-    cross_origin_lightweight_popup_id, cross_origin_window_target_host_ptr,
+    cross_origin_lightweight_popup_id, cross_origin_remote_frame_window_target,
+    cross_origin_remote_top_window_target, cross_origin_window_target_host_ptr,
     is_cross_origin_location_proxy, is_cross_origin_related_top_window_proxy,
-    is_cross_origin_top_window_proxy, throw_cross_origin_location_security_error,
-    throw_cross_origin_type_error, top_level_window_proxy_is_finally_closed,
+    is_cross_origin_remote_frame_window_proxy, is_cross_origin_top_window_proxy,
+    throw_cross_origin_location_security_error, throw_cross_origin_type_error,
+    top_level_window_proxy_is_finally_closed,
 };
 pub(crate) use child_frame_snapshots::{
     ChildBrowsingContextDocumentSnapshot, ChildBrowsingContextFrameSnapshot,
@@ -886,6 +888,16 @@ pub(crate) struct JsContextHost {
     next_child_document_load_id: u64,
     next_child_classic_script_load_id: u64,
     pending_child_document_navigations: HashMap<u64, PendingChildDocumentNavigation>,
+    /// Target-side bindings for source-assigned remote form scheduler ids.
+    /// This lets a later command cancel the exact loader/parser generation
+    /// without transporting an owner-local frame handle back to the source.
+    pending_remote_frame_navigations: HashMap<
+        crate::runtime::RendererRemoteFrameNavigationId,
+        (
+            crate::script_vm::RendererRemoteFrameToken,
+            crate::frame_owner_model::FrameDocumentNavigationLoadBinding,
+        ),
+    >,
     document_resource_loaders: DocumentResourceLoaderRegistry,
     web_storage_store: SharedWebStorageStore,
     session_storage_store: SharedWebStorageStore,
@@ -1243,7 +1255,7 @@ impl ChildBrowsingContextNavigationRequest {
         self
     }
 
-    pub(in crate::native_bridge::context_host) fn initiator_url(&self) -> Option<&Url> {
+    pub(crate) fn initiator_url(&self) -> Option<&Url> {
         self.navigation_source
             .as_ref()
             .map(|source| &source.initiator_url)
@@ -1253,10 +1265,22 @@ impl ChildBrowsingContextNavigationRequest {
         self.navigation_source.is_some()
     }
 
-    pub(in crate::native_bridge::context_host) fn document_referrer(&self) -> Option<&str> {
+    pub(crate) fn document_referrer(&self) -> Option<&str> {
         self.navigation_source
             .as_ref()
             .map(|source| source.document_referrer.as_str())
+    }
+
+    pub(crate) fn with_wire_navigation_source(
+        mut self,
+        initiator_url: Url,
+        document_referrer: String,
+    ) -> Self {
+        self.navigation_source = Some(ChildBrowsingContextNavigationSource {
+            initiator_url,
+            document_referrer,
+        });
+        self
     }
 }
 

@@ -3,7 +3,9 @@ use super::{
     cross_origin_property_descriptor_map::realm_local_cross_origin_function,
 };
 use crate::{
-    browsing_context_model::{BrowsingContextId, BrowsingContextKind},
+    browsing_context_model::{
+        BrowsingContextId, BrowsingContextKind, TopLevelWindowProxyEndpointId,
+    },
     context_bootstrap::{
         CHILD_BROWSING_CONTEXT_HANDLE_SLOT, LocationNavigationKind, WINDOW_OPENER_SLOT,
         dispatch_cross_document_navigation_navigate_event_for_window,
@@ -468,7 +470,11 @@ const CROSS_ORIGIN_WINDOW_EXPOSED_PROPERTY_NAMES: &[&str] = &[
 ];
 const DETACHED_CROSS_ORIGIN_WINDOW_PROXY_SLOT: &str = "__moliDetachedCrossOriginWindowProxy";
 const CROSS_ORIGIN_TOP_WINDOW_PROXY_SLOT: &str = "__moliCrossOriginTopWindowProxy";
-const CROSS_ORIGIN_RELATED_TOP_WINDOW_TARGET_SLOT: &str = "__moliCrossOriginRelatedTopWindowTarget";
+const CROSS_ORIGIN_RELATED_TOP_WINDOW_GROUP_SLOT: &str = "__moliCrossOriginRelatedTopWindowGroup";
+const CROSS_ORIGIN_RELATED_TOP_WINDOW_GENERATION_SLOT: &str =
+    "__moliCrossOriginRelatedTopWindowGeneration";
+const CROSS_ORIGIN_REMOTE_FRAME_PROJECTION_SLOT: &str = "__moliCrossOriginRemoteFrameProjection";
+const CROSS_ORIGIN_LOCAL_TOP_WINDOW_SLOT: &str = "__moliCrossOriginLocalTopWindow";
 const CLOSED_TOP_LEVEL_WINDOW_ACCESS_SURFACE_SLOT: &str = "__moliClosedTopLevelWindowAccessSurface";
 const CLOSED_TOP_LEVEL_WINDOW_MARKER_SLOT: &str = "__moliClosedTopLevelWindow";
 const CROSS_ORIGIN_LIGHTWEIGHT_POPUP_ID_SLOT: &str = "__moliCrossOriginLightweightPopupId";
@@ -1261,12 +1267,208 @@ impl JsContextHost {
         &mut self,
         scope: &mut v8::PinScope<'s, '_>,
         window_proxy: v8::Local<'s, v8::Object>,
+        endpoint: Option<TopLevelWindowProxyEndpointId>,
     ) {
         let surface = new_null_prototype_object(scope);
         let opener = get_private_value(scope, window_proxy, WINDOW_OPENER_SLOT)
             .unwrap_or_else(|| v8::null(scope).into());
-        install_live_cross_origin_top_level_window_surface(scope, surface, window_proxy, opener);
+        install_live_cross_origin_top_level_window_surface(
+            scope,
+            surface,
+            window_proxy,
+            opener,
+            endpoint,
+        );
         self.top_level_cross_origin_window_access_surface = Some(v8::Global::new(scope, surface));
+    }
+
+    /// Materializes this script agent's restricted projection for a live
+    /// related top-level endpoint. The logical browsing context remains owned
+    /// by the group registry; this facade contains no target LocalWindow or
+    /// target `JsContextHost` pointer.
+    pub(crate) fn remote_top_level_window_proxy_for_endpoint<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let environment = self.page_script_environment.clone()?;
+        self.remote_top_level_window_proxy_for_endpoint_with_environment(
+            scope,
+            &environment,
+            endpoint,
+        )
+    }
+
+    fn remote_top_level_window_proxy_for_endpoint_with_environment<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        environment: &crate::script_vm::RendererPageScriptEnvironment,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        if let Some(proxy) = environment.related_page_projected_window_proxy(scope, endpoint) {
+            return Some(proxy);
+        }
+        environment.remote_top_level_target_snapshot(endpoint)?;
+
+        let (proxy, facade_context) = self.bridge.bindings.instantiate_window_proxy_shell(scope);
+        let facade_context_local = v8::Local::new(scope, &facade_context);
+        crate::util::install_context_host_pointer_slot(
+            facade_context_local,
+            self as *mut Self,
+            self.context_host_liveness_handle(),
+        );
+        let proxy_global;
+        {
+            let facade_scope = &mut v8::ContextScope::new(scope, facade_context_local);
+            let facade_proxy = facade_context_local.global(facade_scope);
+            debug_assert!(facade_proxy.strict_equals(proxy.into()));
+            set_null_prototype(facade_scope, facade_proxy);
+            let surface = new_null_prototype_object(facade_scope);
+            let null_opener = v8::null(facade_scope).into();
+            install_live_cross_origin_top_level_window_surface(
+                facade_scope,
+                surface,
+                facade_proxy,
+                null_opener,
+                Some(endpoint),
+            );
+            set_private_value(
+                facade_scope,
+                facade_proxy,
+                CLOSED_TOP_LEVEL_WINDOW_ACCESS_SURFACE_SLOT,
+                surface.into(),
+            );
+            proxy_global = v8::Global::new(facade_scope, facade_proxy);
+        }
+        if let Err(error) = environment.install_remote_top_level_window_proxy_projection(
+            endpoint,
+            proxy_global,
+            facade_context,
+        ) {
+            tracing::warn!(%error, "failed to install remote top-level WindowProxy projection");
+            return None;
+        }
+        environment.related_page_projected_window_proxy(scope, endpoint)
+    }
+
+    /// Materializes a stable restricted WindowProxy for a nested context in a
+    /// related Page hosted by another script agent. The facade stores only an
+    /// observer-local projection id; every callback resolves that id back to a
+    /// group/root-Document/frame token and consults the replicated tree.
+    pub(crate) fn remote_frame_window_proxy_for_token<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        token: crate::script_vm::RendererRemoteFrameToken,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let environment = self.page_script_environment.clone()?;
+        if let Some(proxy) = environment.projected_remote_frame_window_proxy(scope, token) {
+            return Some(proxy);
+        }
+        let snapshot = environment.remote_frame_snapshot(token)?;
+        let top = self.remote_top_level_window_proxy_for_endpoint(scope, token.endpoint)?;
+        let parent = if let Some(parent_browsing_context_id) = snapshot.parent_browsing_context_id {
+            self.remote_frame_window_proxy_for_token(
+                scope,
+                crate::script_vm::RendererRemoteFrameToken {
+                    browsing_context_id: parent_browsing_context_id,
+                    ..token
+                },
+            )?
+        } else {
+            top
+        };
+
+        let projection_id = environment.allocate_remote_frame_projection_id();
+        let (proxy, facade_context) = self.bridge.bindings.instantiate_window_proxy_shell(scope);
+        let facade_context_local = v8::Local::new(scope, &facade_context);
+        crate::util::install_context_host_pointer_slot(
+            facade_context_local,
+            self as *mut Self,
+            self.context_host_liveness_handle(),
+        );
+        let proxy_global;
+        {
+            let facade_scope = &mut v8::ContextScope::new(scope, facade_context_local);
+            let facade_proxy = facade_context_local.global(facade_scope);
+            debug_assert!(facade_proxy.strict_equals(proxy.into()));
+            set_null_prototype(facade_scope, facade_proxy);
+            let surface = new_null_prototype_object(facade_scope);
+            install_live_cross_origin_remote_frame_window_surface(
+                facade_scope,
+                surface,
+                facade_proxy,
+                projection_id,
+                parent,
+                top,
+            );
+            set_private_value(
+                facade_scope,
+                facade_proxy,
+                CLOSED_TOP_LEVEL_WINDOW_ACCESS_SURFACE_SLOT,
+                surface.into(),
+            );
+            install_remote_frame_projection_marker(facade_scope, facade_proxy, projection_id);
+            proxy_global = v8::Global::new(facade_scope, facade_proxy);
+        }
+        if let Err(error) = environment.install_remote_frame_window_proxy_projection(
+            projection_id,
+            token,
+            proxy_global,
+            facade_context,
+        ) {
+            tracing::warn!(%error, ?token, "failed to install remote-frame WindowProxy projection");
+            return None;
+        }
+        environment.projected_remote_frame_window_proxy(scope, token)
+    }
+
+    pub(crate) fn restore_current_top_level_opener_projection<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        environment: &crate::script_vm::RendererPageScriptEnvironment,
+    ) -> anyhow::Result<v8::Local<'s, v8::Value>> {
+        let opener_endpoint = environment.top_level_opener_endpoint();
+        if let Some(opener) = environment.top_level_opener_value(scope) {
+            anyhow::ensure!(
+                opener_endpoint.is_none() || !opener.is_null(),
+                "committed logical opener endpoint {opener_endpoint:?} has a null agent-local projection"
+            );
+            return Ok(opener);
+        }
+        let Some(endpoint) = opener_endpoint else {
+            return Ok(v8::null(scope).into());
+        };
+        let opener = self
+            .remote_top_level_window_proxy_for_endpoint_with_environment(
+                scope,
+                environment,
+                endpoint,
+            )
+            .map(v8::Local::<v8::Value>::from)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "failed to materialize the committed top-level opener endpoint {endpoint:?}"
+                )
+            })?;
+        environment.set_top_level_opener_edge(scope, opener);
+        Ok(opener)
+    }
+
+    pub(crate) fn related_top_level_opener_projection<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        target_endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<v8::Local<'s, v8::Value>> {
+        let environment = self.page_script_environment.clone()?;
+        let target = environment.remote_top_level_target_snapshot(target_endpoint)?;
+        let Some(opener_endpoint) = target.opener_endpoint else {
+            return Some(v8::null(scope).into());
+        };
+        Some(
+            self.remote_top_level_window_proxy_for_endpoint(scope, opener_endpoint)
+                .map(v8::Local::<v8::Value>::from)
+                .unwrap_or_else(|| v8::null(scope).into()),
+        )
     }
 
     /// Reattaches the stable top-level WindowProxy to a host-free facade after
@@ -1284,6 +1486,9 @@ impl JsContextHost {
         // Closing does not sever the auxiliary relationship. Chromium keeps
         // `closedWindow.opener` pointing at the original opener until an
         // explicit opener/group-severing policy says otherwise.
+        let endpoint = self
+            .top_level_window_proxy_endpoint_id()
+            .expect("a parked top-level WindowProxy must retain its group endpoint");
         let Some(context) = self
             .bridge
             .bindings
@@ -1299,6 +1504,7 @@ impl JsContextHost {
             surface,
             window_proxy,
             opener,
+            Some(endpoint),
         );
         let closed: v8::Local<'s, v8::Value> = v8::Boolean::new(facade_scope, true).into();
         set_private_value(
@@ -1321,6 +1527,49 @@ impl JsContextHost {
             surface.into(),
         );
         crate::util::disconnect_page_context(facade_scope);
+        true
+    }
+
+    /// Parks the old agent's stable outer proxy as a live remote facade while
+    /// the same logical browsing context commits a LocalWindow in another
+    /// script agent. Unlike final close/COOP sever this keeps the endpoint,
+    /// opener edge, and `closed === false` surface live.
+    pub(crate) fn park_remote_top_level_window_proxy<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_, ()>,
+        window_proxy: v8::Local<'s, v8::Object>,
+        opener: v8::Local<'s, v8::Value>,
+    ) -> bool {
+        let Some(environment) = self.page_script_environment.clone() else {
+            return false;
+        };
+        let endpoint = environment.top_level_window_proxy_endpoint_id();
+        let Some(context) = self
+            .bridge
+            .bindings
+            .attach_window_proxy_shell_to_facade(scope, window_proxy)
+        else {
+            return false;
+        };
+        let facade_context = v8::Global::new(scope, context);
+        let facade_scope = &mut v8::ContextScope::new(scope, context);
+        let window_proxy = context.global(facade_scope);
+        let surface = new_null_prototype_object(facade_scope);
+        install_live_cross_origin_top_level_window_surface(
+            facade_scope,
+            surface,
+            window_proxy,
+            opener,
+            Some(endpoint),
+        );
+        set_private_value(
+            facade_scope,
+            window_proxy,
+            CLOSED_TOP_LEVEL_WINDOW_ACCESS_SURFACE_SLOT,
+            surface.into(),
+        );
+        crate::util::disconnect_page_context(facade_scope);
+        environment.retain_current_agent_top_level_facade_context(facade_context);
         true
     }
 
@@ -2026,25 +2275,105 @@ fn install_live_cross_origin_child_window_surface<'s>(
     install_cross_origin_window_named_slots(scope, window, named_indices, indexed_parent, top);
 }
 
+fn install_cross_origin_related_top_window_endpoint<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    endpoint: TopLevelWindowProxyEndpointId,
+) {
+    set_private_value(
+        scope,
+        object,
+        CROSS_ORIGIN_RELATED_TOP_WINDOW_GROUP_SLOT,
+        v8::BigInt::new_from_u64(scope, endpoint.browsing_context_group_id().value()).into(),
+    );
+    set_private_value(
+        scope,
+        object,
+        CROSS_ORIGIN_RELATED_TOP_WINDOW_GENERATION_SLOT,
+        v8::BigInt::new_from_u64(scope, endpoint.generation()).into(),
+    );
+}
+
+fn install_remote_frame_projection_marker<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+    projection_id: u64,
+) {
+    set_private_value(
+        scope,
+        object,
+        CROSS_ORIGIN_REMOTE_FRAME_PROJECTION_SLOT,
+        v8::BigInt::new_from_u64(scope, projection_id).into(),
+    );
+}
+
+fn install_live_cross_origin_remote_frame_window_surface<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    surface: v8::Local<'s, v8::Object>,
+    window_proxy: v8::Local<'s, v8::Object>,
+    projection_id: u64,
+    parent: v8::Local<'s, v8::Object>,
+    top: v8::Local<'s, v8::Object>,
+) {
+    install_remote_frame_projection_marker(scope, surface, projection_id);
+    set_cross_origin_object_slot(scope, surface, "self", window_proxy.into());
+    set_cross_origin_object_slot(scope, surface, "window", window_proxy.into());
+    set_cross_origin_object_slot(scope, surface, "frames", window_proxy.into());
+    set_cross_origin_object_slot(scope, surface, "parent", parent.into());
+    set_cross_origin_object_slot(scope, surface, "top", top.into());
+    set_cross_origin_object_slot(scope, surface, "opener", v8::null(scope).into());
+    set_cross_origin_object_slot(scope, surface, "then", v8::undefined(scope).into());
+    install_cross_origin_symbol_slots(scope, surface, "Window");
+    let location = build_detached_cross_origin_location_proxy(scope);
+    let location_storage = cross_origin_proxy_storage_object(scope, location);
+    install_remote_frame_projection_marker(scope, location_storage, projection_id);
+    set_private_value(
+        scope,
+        surface,
+        CROSS_ORIGIN_WINDOW_LOCATION_SLOT,
+        location.into(),
+    );
+    set_private_value(
+        scope,
+        window_proxy,
+        CROSS_ORIGIN_WINDOW_LOCATION_SLOT,
+        location.into(),
+    );
+    CrossOriginWindowLiveAccessorsDeclaration::default()
+        .initialize(scope, surface)
+        .expect("cross-origin remote-frame Window accessors should initialize");
+    install_cross_origin_window_methods(scope, surface);
+}
+
+fn install_cross_origin_local_top_window_marker<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) {
+    set_private_value(
+        scope,
+        object,
+        CROSS_ORIGIN_LOCAL_TOP_WINDOW_SLOT,
+        v8::Boolean::new(scope, true).into(),
+    );
+}
+
 fn install_live_cross_origin_top_level_window_surface<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     surface: v8::Local<'s, v8::Object>,
     window_proxy: v8::Local<'s, v8::Object>,
     opener: v8::Local<'s, v8::Value>,
+    endpoint: Option<TopLevelWindowProxyEndpointId>,
 ) {
-    let target_marker: v8::Local<'s, v8::Value> = window_proxy.into();
-    set_private_value(
-        scope,
-        surface,
-        CROSS_ORIGIN_RELATED_TOP_WINDOW_TARGET_SLOT,
-        target_marker,
-    );
-    set_private_value(
-        scope,
-        window_proxy,
-        CROSS_ORIGIN_RELATED_TOP_WINDOW_TARGET_SLOT,
-        target_marker,
-    );
+    if let Some(endpoint) = endpoint {
+        install_cross_origin_related_top_window_endpoint(scope, surface, endpoint);
+        install_cross_origin_related_top_window_endpoint(scope, window_proxy, endpoint);
+    } else {
+        // Standalone ScriptVm owners intentionally have no Page-group
+        // identity. They still need the local cross-origin Window surface,
+        // but must never fabricate a group-qualified remote endpoint.
+        install_cross_origin_local_top_window_marker(scope, surface);
+        install_cross_origin_local_top_window_marker(scope, window_proxy);
+    }
     set_cross_origin_object_slot(scope, surface, "self", window_proxy.into());
     set_cross_origin_object_slot(scope, surface, "window", window_proxy.into());
     set_cross_origin_object_slot(scope, surface, "parent", window_proxy.into());
@@ -2057,12 +2386,11 @@ fn install_live_cross_origin_top_level_window_surface<'s>(
     install_cross_origin_symbol_slots(scope, surface, "Window");
     let location = build_detached_cross_origin_location_proxy(scope);
     let location_storage = cross_origin_proxy_storage_object(scope, location);
-    set_private_value(
-        scope,
-        location_storage,
-        CROSS_ORIGIN_RELATED_TOP_WINDOW_TARGET_SLOT,
-        window_proxy.into(),
-    );
+    if let Some(endpoint) = endpoint {
+        install_cross_origin_related_top_window_endpoint(scope, location_storage, endpoint);
+    } else {
+        install_cross_origin_local_top_window_marker(scope, location_storage);
+    }
     set_private_value(
         scope,
         surface,
@@ -2503,15 +2831,6 @@ fn child_window_cross_origin_proxy_self<'s>(
         .unwrap_or(holder)
 }
 
-fn related_top_window_registry_host_ptr<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    holder: v8::Local<'s, v8::Object>,
-) -> Option<*mut JsContextHost> {
-    let target = cross_origin_related_top_window_target(scope, holder)?;
-    let context = target.get_creation_context(scope)?;
-    context_host_ptr_from_context_slot(context)
-}
-
 /// Ephemeral observer authority resolved from the incumbent Context slot for
 /// one WindowProxy callback. It is never cached beyond that callback.
 #[derive(Clone, Copy)]
@@ -2565,74 +2884,261 @@ impl CrossOriginWindowObserver {
     fn navigation_api_base_url(self, scope: &mut v8::PinScope<'_, '_>) -> Option<url::Url> {
         unsafe { &*self.host_ptr }.navigation_api_base_url_for_identity(scope, self.identity)
     }
+
+    fn can_navigate_remote_top_level(
+        self,
+        target: &crate::script_vm::RendererRemoteTopLevelWindowProxyTarget,
+        destination_url: &url::Url,
+    ) -> Result<(), super::super::BrowsingContextNavigationDenial> {
+        unsafe { &*self.host_ptr }.can_navigate_remote_top_level_browsing_context(
+            self.identity,
+            target,
+            destination_url,
+        )
+    }
+
+    fn can_navigate_remote_frame(
+        self,
+        target: &crate::script_vm::RendererRemoteFrameSnapshot,
+        destination_url: &url::Url,
+    ) -> Result<(), super::super::BrowsingContextNavigationDenial> {
+        unsafe { &*self.host_ptr }.can_navigate_remote_frame_browsing_context(
+            self.identity,
+            target,
+            destination_url,
+        )
+    }
+
+    fn top_level_navigation_source(self) -> Option<crate::RendererTopLevelNavigationSource> {
+        unsafe { &*self.host_ptr }.renderer_top_level_navigation_source_for_dispatch_scope(
+            self.identity.dispatch_scope(),
+            false,
+        )
+    }
+
+    fn remote_frame_navigation_request(
+        self,
+        target_url: &url::Url,
+    ) -> Option<super::super::ChildBrowsingContextNavigationRequest> {
+        let source = self.top_level_navigation_source()?;
+        let source_url = url::Url::parse(source.source_url()).ok()?;
+        let navigation_referrer = if source.suppresses_referrer() {
+            String::new()
+        } else {
+            moli_fetch::referrer_header_value(
+                &source_url,
+                target_url,
+                None,
+                source.referrer_policy(),
+            )
+            .unwrap_or_default()
+        };
+        let document_referrer = if source.suppresses_referrer() {
+            String::new()
+        } else {
+            moli_fetch::navigation_referrer_value(
+                &source_url,
+                target_url,
+                None,
+                source.referrer_policy(),
+            )
+            .unwrap_or_default()
+        };
+        Some(
+            super::super::ChildBrowsingContextNavigationRequest::new(
+                target_url.clone(),
+                "GET".to_owned(),
+                None,
+                Vec::new(),
+            )
+            .with_navigation_source(source_url, navigation_referrer, document_referrer),
+        )
+    }
+
+    fn append_remote_command(
+        self,
+        command: crate::runtime::RendererRemoteWindowProxyCommand,
+    ) -> bool {
+        unsafe { &*self.host_ptr }.append_live_turn_owner_action(
+            crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
+        )
+    }
+
+    fn admits_remote_focus(
+        self,
+        target: &crate::script_vm::RendererRemoteTopLevelWindowProxyTarget,
+    ) -> bool {
+        if target.active {
+            return false;
+        }
+        let source_endpoint = unsafe { &*self.host_ptr }.top_level_window_proxy_endpoint_id();
+        let opener_exemption = source_endpoint == target.opener_endpoint;
+        let consumed_interaction =
+            unsafe { &mut *self.host_ptr }.consume_transient_user_activation_for_window_focus();
+        consumed_interaction || opener_exemption
+    }
 }
 
 /// Ephemeral target registry authority resolved for one WindowProxy callback.
 /// The observer is resolved separately because incumbent and target Contexts
 /// may belong to different related Page hosts in the same script agent.
 #[derive(Clone, Copy)]
-struct CrossOriginWindowChildRegistryOwner {
-    host_ptr: *mut JsContextHost,
-    parent: Option<DomHandle>,
-    observer: Option<CrossOriginWindowObserver>,
+enum CrossOriginWindowChildRegistryOwner {
+    Local {
+        host_ptr: *mut JsContextHost,
+        parent: Option<DomHandle>,
+        observer: Option<CrossOriginWindowObserver>,
+    },
+    Remote {
+        observer: CrossOriginWindowObserver,
+        endpoint: TopLevelWindowProxyEndpointId,
+        parent: Option<crate::script_vm::RendererRemoteFrameToken>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum CrossOriginWindowChildTarget {
+    Local(DomHandle),
+    Remote(crate::script_vm::RendererRemoteFrameToken),
 }
 
 impl CrossOriginWindowChildRegistryOwner {
     fn sync(self, scope: &mut v8::PinScope<'_, '_>) -> bool {
-        let host = unsafe { &mut *self.host_ptr };
-        let root = match self.parent {
-            Some(parent) => {
-                let Some(document) = host.child_browsing_context_document_handle(parent) else {
-                    return false;
+        match self {
+            Self::Local {
+                host_ptr, parent, ..
+            } => {
+                let host = unsafe { &mut *host_ptr };
+                let root = match parent {
+                    Some(parent) => {
+                        let Some(document) = host.child_browsing_context_document_handle(parent)
+                        else {
+                            return false;
+                        };
+                        document
+                    }
+                    None => host.document_handle(),
                 };
-                document
+                host.sync_child_browsing_context_subtree(scope, root);
+                true
             }
-            None => host.document_handle(),
-        };
-        host.sync_child_browsing_context_subtree(scope, root);
-        true
+            Self::Remote {
+                observer,
+                endpoint,
+                parent,
+            } => unsafe { &*observer.host_ptr }
+                .page_script_environment
+                .as_ref()
+                .and_then(|environment| environment.remote_frame_direct_children(endpoint, parent))
+                .is_some(),
+        }
     }
 
     fn child_count(self) -> usize {
-        let host = unsafe { &*self.host_ptr };
-        match self.parent {
-            Some(parent) => host
-                .child_browsing_context_child_frame_handles(parent)
-                .len(),
-            None => host.child_browsing_context_count(),
+        match self {
+            Self::Local {
+                host_ptr, parent, ..
+            } => {
+                let host = unsafe { &*host_ptr };
+                match parent {
+                    Some(parent) => host
+                        .child_browsing_context_child_frame_handles(parent)
+                        .len(),
+                    None => host.child_browsing_context_count(),
+                }
+            }
+            Self::Remote {
+                observer,
+                endpoint,
+                parent,
+            } => unsafe { &*observer.host_ptr }
+                .page_script_environment
+                .as_ref()
+                .and_then(|environment| environment.remote_frame_direct_children(endpoint, parent))
+                .map_or(0, |children| children.len()),
         }
     }
 
-    fn child_handle_by_index(self, index: usize) -> Option<DomHandle> {
-        let host = unsafe { &*self.host_ptr };
-        match self.parent {
-            Some(parent) => host.child_browsing_context_child_frame_handle_by_index(parent, index),
-            None => host.child_browsing_context_handle_by_index(index),
+    fn child_by_index(self, index: usize) -> Option<CrossOriginWindowChildTarget> {
+        match self {
+            Self::Local {
+                host_ptr, parent, ..
+            } => {
+                let host = unsafe { &*host_ptr };
+                match parent {
+                    Some(parent) => {
+                        host.child_browsing_context_child_frame_handle_by_index(parent, index)
+                    }
+                    None => host.child_browsing_context_handle_by_index(index),
+                }
+                .map(CrossOriginWindowChildTarget::Local)
+            }
+            Self::Remote {
+                observer,
+                endpoint,
+                parent,
+            } => unsafe { &*observer.host_ptr }
+                .page_script_environment
+                .as_ref()?
+                .remote_frame_direct_children(endpoint, parent)?
+                .get(index)
+                .map(|snapshot| CrossOriginWindowChildTarget::Remote(snapshot.token)),
         }
     }
 
-    fn named_child_handle(self, name: &str) -> Option<DomHandle> {
-        unsafe { &*self.host_ptr }.child_browsing_context_named_child_handle(self.parent, name)
+    fn named_child(self, name: &str) -> Option<CrossOriginWindowChildTarget> {
+        match self {
+            Self::Local {
+                host_ptr, parent, ..
+            } => unsafe { &*host_ptr }
+                .child_browsing_context_named_child_handle(parent, name)
+                .map(CrossOriginWindowChildTarget::Local),
+            Self::Remote {
+                observer,
+                endpoint,
+                parent,
+            } => unsafe { &*observer.host_ptr }
+                .page_script_environment
+                .as_ref()?
+                .remote_frame_direct_children(endpoint, parent)?
+                .into_iter()
+                .find(|snapshot| snapshot.name == name)
+                .map(|snapshot| CrossOriginWindowChildTarget::Remote(snapshot.token)),
+        }
     }
 
     fn child_window<'s>(
         self,
         scope: &mut v8::PinScope<'s, '_>,
-        handle: DomHandle,
+        child: CrossOriginWindowChildTarget,
     ) -> Option<v8::Local<'s, v8::Object>> {
-        let observer_can_access = self
-            .observer
-            .is_some_and(|observer| observer.can_access_child(self.host_ptr, handle));
-        let host = unsafe { &mut *self.host_ptr };
-        let window = if observer_can_access {
-            host.child_browsing_context_window_wrapper_for_authorized_observer(scope, handle)
-        } else {
-            host.child_browsing_context_window_proxy_for_top(scope, handle)
-        };
-        if window.is_some() {
-            host.mark_child_browsing_context_window_proxy_exposed(handle);
+        match (self, child) {
+            (
+                Self::Local {
+                    host_ptr, observer, ..
+                },
+                CrossOriginWindowChildTarget::Local(handle),
+            ) => {
+                let observer_can_access =
+                    observer.is_some_and(|observer| observer.can_access_child(host_ptr, handle));
+                let host = unsafe { &mut *host_ptr };
+                let window = if observer_can_access {
+                    host.child_browsing_context_window_wrapper_for_authorized_observer(
+                        scope, handle,
+                    )
+                } else {
+                    host.child_browsing_context_window_proxy_for_top(scope, handle)
+                };
+                if window.is_some() {
+                    host.mark_child_browsing_context_window_proxy_exposed(handle);
+                }
+                window
+            }
+            (Self::Remote { observer, .. }, CrossOriginWindowChildTarget::Remote(token)) => {
+                unsafe { &mut *observer.host_ptr }.remote_frame_window_proxy_for_token(scope, token)
+            }
+            _ => None,
         }
-        window
     }
 }
 
@@ -2641,12 +3147,30 @@ fn cross_origin_window_child_registry_owner<'s>(
     holder: v8::Local<'s, v8::Object>,
 ) -> Option<CrossOriginWindowChildRegistryOwner> {
     let observer = CrossOriginWindowObserver::resolve(scope);
-    if let Some(host_ptr) = related_top_window_registry_host_ptr(scope, holder) {
-        return Some(CrossOriginWindowChildRegistryOwner {
-            host_ptr,
-            parent: None,
-            observer,
+    if let Some(parent) = cross_origin_remote_frame_token(scope, holder) {
+        return Some(CrossOriginWindowChildRegistryOwner::Remote {
+            observer: observer?,
+            endpoint: parent.endpoint,
+            parent: Some(parent),
         });
+    }
+    if cross_origin_related_top_window_endpoint(scope, holder).is_some() {
+        return match resolve_cross_origin_live_top_window(scope, holder)? {
+            ResolvedCrossOriginRelatedTopWindow::Local { host_ptr, .. } => {
+                Some(CrossOriginWindowChildRegistryOwner::Local {
+                    host_ptr,
+                    parent: None,
+                    observer,
+                })
+            }
+            ResolvedCrossOriginRelatedTopWindow::Remote(target) => {
+                Some(CrossOriginWindowChildRegistryOwner::Remote {
+                    observer: observer?,
+                    endpoint: target.endpoint,
+                    parent: None,
+                })
+            }
+        };
     }
 
     let parent = child_handle_from_object(scope, holder)?;
@@ -2660,7 +3184,7 @@ fn cross_origin_window_child_registry_owner<'s>(
     {
         return None;
     }
-    Some(CrossOriginWindowChildRegistryOwner {
+    Some(CrossOriginWindowChildRegistryOwner::Local {
         host_ptr,
         parent: Some(parent),
         observer,
@@ -2676,10 +3200,10 @@ fn cross_origin_window_child_by_index<'s>(
     if !owner.sync(scope) {
         return None;
     }
-    let Some(handle) = owner.child_handle_by_index(index as usize) else {
+    let Some(child) = owner.child_by_index(index as usize) else {
         return Some(None);
     };
-    Some(owner.child_window(scope, handle))
+    Some(owner.child_window(scope, child))
 }
 
 fn cross_origin_window_child_count<'s>(
@@ -2720,7 +3244,7 @@ fn cross_origin_window_named_child<'s>(
     if !owner.sync(scope) {
         return CrossOriginWindowNamedChildLookup::Fallback;
     }
-    let Some(handle) = owner.named_child_handle(&name) else {
+    let Some(child) = owner.named_child(&name) else {
         return if name == "then" {
             CrossOriginWindowNamedChildLookup::Fallback
         } else {
@@ -2728,7 +3252,7 @@ fn cross_origin_window_named_child<'s>(
         };
     };
     owner
-        .child_window(scope, handle)
+        .child_window(scope, child)
         .map(CrossOriginWindowNamedChildLookup::Value)
         .unwrap_or(CrossOriginWindowNamedChildLookup::Missing)
 }
@@ -3573,7 +4097,8 @@ fn is_cross_origin_window_function_receiver<'s>(
     receiver: v8::Local<'s, v8::Object>,
 ) -> bool {
     child_handle_from_object(scope, receiver).is_some()
-        || cross_origin_related_top_window_target(scope, receiver).is_some()
+        || cross_origin_related_top_window_endpoint(scope, receiver).is_some()
+        || is_cross_origin_local_top_window(scope, receiver)
         || get_cross_origin_proxy_private_value(
             scope,
             receiver,
@@ -3719,16 +4244,33 @@ fn cross_origin_window_close_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if cross_origin_related_top_window_target(scope, args.this()).is_some() {
-        if let Some(context) = cross_origin_window_target_context(scope, args.this())
-            && let Some(host_ptr) = context_host_ptr_from_context_slot(context)
-        {
-            let target_scope = &mut v8::ContextScope::new(scope, context);
-            let _ = crate::context_bootstrap::request_top_level_browsing_context_close(
-                target_scope,
-                host_ptr,
-                crate::runtime::RendererTopLevelCloseSource::Window,
-            );
+    if cross_origin_related_top_window_endpoint(scope, args.this()).is_some()
+        || is_cross_origin_local_top_window(scope, args.this())
+    {
+        if let Some(target) = resolve_cross_origin_live_top_window(scope, args.this()) {
+            match target {
+                ResolvedCrossOriginRelatedTopWindow::Local {
+                    context, host_ptr, ..
+                } => {
+                    let target_scope = &mut v8::ContextScope::new(scope, context);
+                    let _ = crate::context_bootstrap::request_top_level_browsing_context_close(
+                        target_scope,
+                        host_ptr,
+                        crate::runtime::RendererTopLevelCloseSource::Window,
+                    );
+                }
+                ResolvedCrossOriginRelatedTopWindow::Remote(target) => {
+                    if let Some(observer) = CrossOriginWindowObserver::resolve(scope) {
+                        let _ = observer.append_remote_command(
+                            crate::runtime::RendererRemoteWindowProxyCommand::close(
+                                target.endpoint,
+                                target.residence,
+                                target.channel,
+                            ),
+                        );
+                    }
+                }
+            }
         }
         return;
     }
@@ -3740,15 +4282,34 @@ fn cross_origin_window_focus_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    if cross_origin_related_top_window_target(scope, args.this()).is_some() {
-        if let Some(context) = cross_origin_window_target_context(scope, args.this())
-            && let Some(host_ptr) = context_host_ptr_from_context_slot(context)
-        {
-            let target_scope = &mut v8::ContextScope::new(scope, context);
-            let _ = crate::context_bootstrap::request_top_level_browsing_context_focus(
-                target_scope,
-                host_ptr,
-            );
+    if cross_origin_related_top_window_endpoint(scope, args.this()).is_some()
+        || is_cross_origin_local_top_window(scope, args.this())
+    {
+        if let Some(target) = resolve_cross_origin_live_top_window(scope, args.this()) {
+            match target {
+                ResolvedCrossOriginRelatedTopWindow::Local {
+                    context, host_ptr, ..
+                } => {
+                    let target_scope = &mut v8::ContextScope::new(scope, context);
+                    let _ = crate::context_bootstrap::request_top_level_browsing_context_focus(
+                        target_scope,
+                        host_ptr,
+                    );
+                }
+                ResolvedCrossOriginRelatedTopWindow::Remote(target) => {
+                    if let Some(observer) = CrossOriginWindowObserver::resolve(scope)
+                        && observer.admits_remote_focus(&target)
+                    {
+                        let _ = observer.append_remote_command(
+                            crate::runtime::RendererRemoteWindowProxyCommand::focus(
+                                target.endpoint,
+                                target.residence,
+                                target.channel,
+                            ),
+                        );
+                    }
+                }
+            }
         }
         return;
     }
@@ -3760,15 +4321,26 @@ fn cross_origin_window_closed_getter_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
+    if let Some(token) = cross_origin_remote_frame_token(scope, args.this()) {
+        let live = CrossOriginWindowObserver::resolve(scope).is_some_and(|observer| {
+            unsafe { &*observer.host_ptr }
+                .page_script_environment
+                .as_ref()
+                .is_some_and(|environment| environment.remote_frame_snapshot(token).is_some())
+        });
+        rv.set_bool(!live);
+        return;
+    }
     if get_cross_origin_proxy_private_value(scope, args.this(), CLOSED_TOP_LEVEL_WINDOW_MARKER_SLOT)
         .is_some_and(|value| value.boolean_value(scope))
     {
         rv.set_bool(true);
         return;
     }
-    if cross_origin_related_top_window_target(scope, args.this()).is_some() {
-        let closed = cross_origin_window_target_host_ptr(scope, args.this())
-            .is_none_or(|host_ptr| unsafe { &*host_ptr }.top_level_browsing_context_is_closed());
+    if cross_origin_related_top_window_endpoint(scope, args.this()).is_some()
+        || is_cross_origin_local_top_window(scope, args.this())
+    {
+        let closed = resolve_cross_origin_live_top_window(scope, args.this()).is_none();
         rv.set_bool(closed);
         return;
     }
@@ -3781,7 +4353,16 @@ fn cross_origin_top_level_window_opener_getter_callback<'s>(
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     let receiver = args.this();
-    if let Some(host_ptr) = related_top_window_registry_host_ptr(scope, receiver)
+    if let Some(endpoint) = cross_origin_related_top_window_endpoint(scope, receiver)
+        && let Some(observer) = CrossOriginWindowObserver::resolve(scope)
+        && let Some(opener) =
+            unsafe { &mut *observer.host_ptr }.related_top_level_opener_projection(scope, endpoint)
+    {
+        rv.set(opener);
+        return;
+    }
+    if let Some(ResolvedCrossOriginRelatedTopWindow::Local { host_ptr, .. }) =
+        resolve_cross_origin_live_top_window(scope, receiver)
         && let Some(opener) = unsafe { &*host_ptr }.top_level_opener_value(scope)
     {
         rv.set(opener);
@@ -3805,6 +4386,12 @@ fn cross_origin_window_length_getter_callback<'s>(
 ) {
     if let Some(count) = cross_origin_window_child_count(scope, args.this()) {
         rv.set_uint32(count as u32);
+        return;
+    }
+    if cross_origin_related_top_window_endpoint(scope, args.this()).is_some() {
+        // Disconnected group endpoints have no remotely projectable child
+        // tree. They remain valid cross-origin Window receivers.
+        rv.set_uint32(0);
         return;
     }
     let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) else {
@@ -3907,21 +4494,141 @@ fn cross_origin_location_navigate_raw<'s>(
     let Some(observer) = CrossOriginWindowObserver::resolve(scope) else {
         return true;
     };
-    let related_window = cross_origin_related_top_window_target(scope, receiver)
-        .map(|window| v8::Global::new(scope, window));
+    let related_endpoint = cross_origin_related_top_window_endpoint(scope, receiver);
+    let local_top_window = is_cross_origin_local_top_window(scope, receiver);
     let child_handle = child_handle_from_object(scope, receiver);
-    if related_window.is_none() && child_handle.is_none() {
+    let remote_frame_token = cross_origin_remote_frame_token(scope, receiver);
+    let remote_frame_target = cross_origin_remote_frame_window_target(scope, receiver);
+    if related_endpoint.is_none()
+        && !local_top_window
+        && child_handle.is_none()
+        && remote_frame_token.is_none()
+    {
         throw_cross_origin_illegal_invocation(scope);
         return false;
     }
-    let Some(target_context) = cross_origin_window_target_context(scope, receiver) else {
-        return false;
+    if remote_frame_token.is_some() && remote_frame_target.is_none() {
+        // A retained facade for a removed frame or replaced root Document is
+        // still a valid Window receiver, but its qualified route is stale.
+        return true;
+    }
+    if let Some((token, frame, top)) = remote_frame_target {
+        let source_base_url = observer.navigation_api_base_url(scope);
+        let Some(target_url) = resolve_location_navigation_target_against_entered_base(
+            &frame.current_url,
+            kind,
+            Some(raw),
+            source_base_url.as_ref(),
+        ) else {
+            return false;
+        };
+        if let Err(denial) = observer.can_navigate_remote_frame(&frame, &target_url) {
+            if denial.is_sandbox_violation() {
+                throw_cross_origin_location_security_error(scope);
+                return false;
+            }
+            return true;
+        }
+        let Some(request) = observer.remote_frame_navigation_request(&target_url) else {
+            return true;
+        };
+        let kind = match kind {
+            LocationNavigationKind::Assign => {
+                crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign
+            }
+            LocationNavigationKind::Replace | LocationNavigationKind::Reload => {
+                crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
+            }
+        };
+        let _ = observer.append_remote_command(
+            crate::runtime::RendererRemoteWindowProxyCommand::navigate_frame(
+                token,
+                top.residence,
+                top.channel,
+                kind,
+                request,
+                None,
+            ),
+        );
+        return true;
+    }
+    let resolved_top_target = if related_endpoint.is_some() || local_top_window {
+        let Some(target) = resolve_cross_origin_live_top_window(scope, receiver) else {
+            // A disconnected WindowProxy endpoint remains safely callable but
+            // cannot route into a replacement browsing-context group.
+            return true;
+        };
+        match target {
+            ResolvedCrossOriginRelatedTopWindow::Remote(target) => {
+                let source_base_url = observer.navigation_api_base_url(scope);
+                let Some(target_url) = resolve_location_navigation_target_against_entered_base(
+                    &target.current_url,
+                    kind,
+                    Some(raw.clone()),
+                    source_base_url.as_ref(),
+                ) else {
+                    return false;
+                };
+                if let Err(denial) = observer.can_navigate_remote_top_level(&target, &target_url) {
+                    if denial.is_sandbox_violation() {
+                        throw_cross_origin_location_security_error(scope);
+                        return false;
+                    }
+                    return true;
+                }
+                let Some(source) = observer.top_level_navigation_source() else {
+                    return true;
+                };
+                let kind = match kind {
+                    LocationNavigationKind::Assign => {
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign
+                    }
+                    LocationNavigationKind::Replace | LocationNavigationKind::Reload => {
+                        crate::runtime::RendererRemoteWindowProxyNavigationKind::Replace
+                    }
+                };
+                let _ = observer.append_remote_command(
+                    crate::runtime::RendererRemoteWindowProxyCommand::navigate(
+                        target.endpoint,
+                        target.residence,
+                        target.channel,
+                        kind,
+                        target_url.to_string(),
+                        source,
+                    ),
+                );
+                return true;
+            }
+            local @ ResolvedCrossOriginRelatedTopWindow::Local { .. } => Some(local),
+        }
+    } else {
+        None
     };
-    let target_context = v8::Global::new(scope, target_context);
+    let (related_window, target_context, host_ptr) =
+        if related_endpoint.is_some() || local_top_window {
+            let Some(ResolvedCrossOriginRelatedTopWindow::Local {
+                window_proxy,
+                context,
+                host_ptr,
+            }) = resolved_top_target
+            else {
+                unreachable!("remote top-level navigation returned before local routing")
+            };
+            (
+                Some(v8::Global::new(scope, window_proxy)),
+                v8::Global::new(scope, context),
+                host_ptr,
+            )
+        } else {
+            let Some(context) = receiver.get_creation_context(scope) else {
+                return false;
+            };
+            let Some(host_ptr) = context_host_ptr_from_context_slot(context) else {
+                return false;
+            };
+            (None, v8::Global::new(scope, context), host_ptr)
+        };
     let target_context = v8::Local::new(scope, &target_context);
-    let Some(host_ptr) = context_host_ptr_from_context_slot(target_context) else {
-        return false;
-    };
     let navigation_target_scope = child_handle.map_or(
         super::super::OwnerDispatchScope::Top,
         super::super::OwnerDispatchScope::Child,
@@ -4046,28 +4753,122 @@ fn child_handle_from_object<'s>(
         .map(|value| DomHandle::new(value as usize))
 }
 
-fn cross_origin_related_top_window_target<'s>(
+fn private_bigint_u64<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Object>> {
-    get_cross_origin_proxy_private_value(scope, object, CROSS_ORIGIN_RELATED_TOP_WINDOW_TARGET_SLOT)
-        .and_then(|value| v8::Local::<v8::Object>::try_from(value).ok())
+    slot: &'static str,
+) -> Option<u64> {
+    let value = get_cross_origin_proxy_private_value(scope, object, slot)?;
+    let value = v8::Local::<v8::BigInt>::try_from(value).ok()?;
+    let (value, lossless) = value.u64_value();
+    lossless.then_some(value)
+}
+
+fn cross_origin_related_top_window_endpoint<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<TopLevelWindowProxyEndpointId> {
+    TopLevelWindowProxyEndpointId::from_wire_parts(
+        private_bigint_u64(scope, object, CROSS_ORIGIN_RELATED_TOP_WINDOW_GROUP_SLOT)?,
+        private_bigint_u64(
+            scope,
+            object,
+            CROSS_ORIGIN_RELATED_TOP_WINDOW_GENERATION_SLOT,
+        )?,
+    )
+}
+
+fn cross_origin_remote_frame_token<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<crate::script_vm::RendererRemoteFrameToken> {
+    let projection_id =
+        private_bigint_u64(scope, object, CROSS_ORIGIN_REMOTE_FRAME_PROJECTION_SLOT)?;
+    let observer = CrossOriginWindowObserver::resolve(scope)?;
+    unsafe { &*observer.host_ptr }
+        .page_script_environment
+        .as_ref()?
+        .remote_frame_token_for_projection_id(projection_id)
+}
+
+fn is_cross_origin_local_top_window<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> bool {
+    get_cross_origin_proxy_private_value(scope, object, CROSS_ORIGIN_LOCAL_TOP_WINDOW_SLOT)
+        .is_some_and(|value| value.boolean_value(scope))
+}
+
+enum ResolvedCrossOriginRelatedTopWindow<'s> {
+    Local {
+        window_proxy: v8::Local<'s, v8::Object>,
+        context: v8::Local<'s, v8::Context>,
+        host_ptr: *mut JsContextHost,
+    },
+    Remote(crate::script_vm::RendererRemoteTopLevelWindowProxyTarget),
+}
+
+fn resolve_cross_origin_related_top_window<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<ResolvedCrossOriginRelatedTopWindow<'s>> {
+    let endpoint = cross_origin_related_top_window_endpoint(scope, object)?;
+    let observer = CrossOriginWindowObserver::resolve(scope)?;
+    match unsafe { &*observer.host_ptr }
+        .related_page_target_for_window_proxy_endpoint(scope, endpoint)?
+    {
+        crate::script_vm::RendererRelatedTopLevelWindowProxyResolution::Local {
+            window_proxy,
+            context,
+            ..
+        } => {
+            let host_ptr = context_host_ptr_from_context_slot(context)?;
+            Some(ResolvedCrossOriginRelatedTopWindow::Local {
+                window_proxy,
+                context,
+                host_ptr,
+            })
+        }
+        crate::script_vm::RendererRelatedTopLevelWindowProxyResolution::Remote(target) => {
+            Some(ResolvedCrossOriginRelatedTopWindow::Remote(target))
+        }
+    }
+}
+
+fn resolve_cross_origin_live_top_window<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<ResolvedCrossOriginRelatedTopWindow<'s>> {
+    if cross_origin_related_top_window_endpoint(scope, object).is_some() {
+        // Never fall back through an endpoint that became stale. In
+        // particular, a disconnected COOP proxy cannot resolve against the
+        // incumbent Page's creation Context.
+        return resolve_cross_origin_related_top_window(scope, object);
+    }
+    if !is_cross_origin_local_top_window(scope, object) {
+        return None;
+    }
+    let context = object.get_creation_context(scope)?;
+    let host_ptr = context_host_ptr_from_context_slot(context)?;
+    Some(ResolvedCrossOriginRelatedTopWindow::Local {
+        window_proxy: context.global(scope),
+        context,
+        host_ptr,
+    })
 }
 
 pub(crate) fn is_cross_origin_related_top_window_proxy<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
 ) -> bool {
-    cross_origin_related_top_window_target(scope, object).is_some()
+    cross_origin_related_top_window_endpoint(scope, object).is_some()
 }
 
-fn cross_origin_window_target_context<'s>(
+pub(crate) fn is_cross_origin_remote_frame_window_proxy<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     object: v8::Local<'s, v8::Object>,
-) -> Option<v8::Local<'s, v8::Context>> {
-    cross_origin_related_top_window_target(scope, object)
-        .unwrap_or(object)
-        .get_creation_context(scope)
+) -> bool {
+    cross_origin_remote_frame_token(scope, object).is_some()
 }
 
 pub(crate) fn cross_origin_window_target_host_ptr<'s>(
@@ -4076,8 +4877,45 @@ pub(crate) fn cross_origin_window_target_host_ptr<'s>(
 ) -> Option<*mut JsContextHost> {
     // This non-owning pointer is callback-scoped. The Context slot performs
     // the shared liveness check; callers must never cache the returned value.
-    let context = cross_origin_window_target_context(scope, object)?;
+    if cross_origin_related_top_window_endpoint(scope, object).is_some() {
+        return match resolve_cross_origin_related_top_window(scope, object)? {
+            ResolvedCrossOriginRelatedTopWindow::Local { host_ptr, .. } => Some(host_ptr),
+            ResolvedCrossOriginRelatedTopWindow::Remote(_) => None,
+        };
+    }
+    if cross_origin_remote_frame_token(scope, object).is_some() {
+        return None;
+    }
+    let context = object.get_creation_context(scope)?;
     context_host_ptr_from_context_slot(context)
+}
+
+pub(crate) fn cross_origin_remote_top_window_target<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<crate::script_vm::RendererRemoteTopLevelWindowProxyTarget> {
+    match resolve_cross_origin_related_top_window(scope, object)? {
+        ResolvedCrossOriginRelatedTopWindow::Remote(target) => Some(target),
+        ResolvedCrossOriginRelatedTopWindow::Local { .. } => None,
+    }
+}
+
+pub(crate) fn cross_origin_remote_frame_window_target<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    object: v8::Local<'s, v8::Object>,
+) -> Option<(
+    crate::script_vm::RendererRemoteFrameToken,
+    crate::script_vm::RendererRemoteFrameSnapshot,
+    crate::script_vm::RendererRemoteTopLevelWindowProxyTarget,
+)> {
+    let token = cross_origin_remote_frame_token(scope, object)?;
+    let observer = CrossOriginWindowObserver::resolve(scope)?;
+    let environment = unsafe { &*observer.host_ptr }
+        .page_script_environment
+        .as_ref()?;
+    let frame = environment.remote_frame_snapshot(token)?;
+    let top = environment.remote_top_level_target_snapshot(token.endpoint)?;
+    Some((token, frame, top))
 }
 
 pub(crate) fn throw_cross_origin_type_error(scope: &mut v8::PinScope<'_, '_>, message: &str) {

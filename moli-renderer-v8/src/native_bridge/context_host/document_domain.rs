@@ -122,6 +122,7 @@ impl JsContextHost {
                 entry.set_document_domain_override(domain);
             }
         }
+        self.publish_related_page_remote_frame_tree();
         true
     }
 

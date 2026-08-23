@@ -9,7 +9,7 @@ pub use fence::RendererOutputFence;
 pub use identity::{
     RendererOutputCursor, RendererOutputFenceLeaseId, RendererOutputResidenceIdentity,
     RendererOutputStreamCloseReason, RendererOutputStreamControl, RendererOutputStreamEpoch,
-    RendererOutputStreamIdentity,
+    RendererOutputStreamIdentity, RendererPageOutputOwnerReservationId,
 };
 pub(crate) use item::PendingRendererOutputRecord;
 pub use item::{

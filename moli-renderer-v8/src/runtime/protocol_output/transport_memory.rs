@@ -110,6 +110,7 @@ fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
         | RendererOwnerAction::TopLevelClose(_)
         | RendererOwnerAction::TopLevelCloseNetworkDrained(_)
         | RendererOwnerAction::TopLevelCloseUnloadAck(_) => 0,
+        RendererOwnerAction::RemoteWindowProxy(command) => command.transport_charge_bytes(),
         RendererOwnerAction::FileChooser(event) => {
             event.source_frame_id().map(string_charge).unwrap_or(0)
         }

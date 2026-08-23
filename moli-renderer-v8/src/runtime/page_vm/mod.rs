@@ -1079,7 +1079,7 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) extra_http_headers: Vec<(String, String)>,
     pub(crate) document_policy_container: crate::document_runtime::DocumentPolicyContainer,
     pub(crate) cross_origin_opener_policy:
-        crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
+        crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit,
     pub(crate) document_default_language: Option<String>,
     pub(crate) document_last_modified: Option<f64>,
     pub(crate) locale_override: Option<String>,
@@ -1128,7 +1128,7 @@ impl PageVmEnvConfig {
         self.document_last_modified =
             crate::document_last_modified::document_last_modified_from_headers(headers);
         self.cross_origin_opener_policy =
-            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
+            crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit::from_response(
                 final_url, headers,
             );
     }
@@ -1155,8 +1155,7 @@ impl PageVmEnvConfig {
             permission_overrides: Vec::new(),
             extra_http_headers: Vec::new(),
             document_policy_container: policy.clone(),
-            cross_origin_opener_policy:
-                crate::cross_origin_isolation::CrossOriginOpenerPolicyValue::UnsafeNone,
+            cross_origin_opener_policy: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,
@@ -1247,12 +1246,12 @@ enum PageVmDocumentLifecycleInstall {
 enum PageVmOutputJournalBinding {
     #[default]
     PreserveStream,
-    CrossOriginOpenerPolicyAgentTransition,
+    PageAgentTransition,
 }
 
 impl PageVmOutputJournalBinding {
     fn allows_page_agent_transition(self) -> bool {
-        self == Self::CrossOriginOpenerPolicyAgentTransition
+        self == Self::PageAgentTransition
     }
 }
 
@@ -1462,11 +1461,10 @@ impl PageVmRuntimeHooks {
             .renderer_page_script_environment
             .as_ref()
             .is_some_and(|current| {
-                current.browsing_context_group_id() != environment.browsing_context_group_id()
+                current.isolate_identity_key() != environment.isolate_identity_key()
             })
         {
-            self.output_journal_binding =
-                PageVmOutputJournalBinding::CrossOriginOpenerPolicyAgentTransition;
+            self.output_journal_binding = PageVmOutputJournalBinding::PageAgentTransition;
         }
         self.renderer_page_script_environment = Some(environment);
         self.renderer_document_isolate_reservation = Some(reservation);
@@ -2214,10 +2212,11 @@ impl PageVm {
                 })?;
         let switches_browsing_context_group = replacement_environment.browsing_context_group_id()
             != environment.browsing_context_group_id();
+        let switches_script_agent =
+            replacement_environment.isolate_identity_key() != environment.isolate_identity_key();
         if switches_browsing_context_group {
             ensure!(
-                replacement_environment.isolate_identity_key()
-                    != environment.isolate_identity_key(),
+                switches_script_agent,
                 "browsing-context group switch must also replace the script agent isolate"
             );
         }
@@ -2228,6 +2227,8 @@ impl PageVm {
             .with_prepared_renderer_document_isolate(bootstrap, reservation)?;
         if switches_browsing_context_group {
             self.commit_main_window_proxy_group_switch()?;
+        } else if switches_script_agent {
+            self.commit_main_window_proxy_remote_agent_transition()?;
         } else {
             self.commit_main_window_proxy_navigation()?;
         }
@@ -2412,13 +2413,31 @@ impl PageVm {
                 "COOP group switch attempted to commit an already retired PageVm"
             ));
         };
-        vm.preflight_main_window_proxy_group_switch(self.page_id.as_u64())?;
+        vm.preflight_main_window_proxy_agent_transition(self.page_id.as_u64())?;
         vm.detach_default_inspector_context_for_context_teardown();
         vm.disconnect_top_level_browsing_context_for_group_switch()?;
         vm.close_page_context_resources_for_context_teardown();
         tracing::debug!(
             page_id = self.page_id.as_u64(),
             "committed COOP browsing-context group switch before replacement realm bootstrap"
+        );
+        drop(vm);
+        Ok(())
+    }
+
+    fn commit_main_window_proxy_remote_agent_transition(&mut self) -> Result<()> {
+        let Some(mut vm) = self.vm.take() else {
+            return Err(anyhow::anyhow!(
+                "remote-agent transition attempted to commit an already retired PageVm"
+            ));
+        };
+        vm.preflight_main_window_proxy_agent_transition(self.page_id.as_u64())?;
+        vm.detach_default_inspector_context_for_context_teardown();
+        vm.disconnect_main_window_proxy_for_remote_agent_transition()?;
+        vm.close_page_context_resources_for_context_teardown();
+        tracing::debug!(
+            page_id = self.page_id.as_u64(),
+            "committed same-group script-agent transition before replacement realm bootstrap"
         );
         drop(vm);
         Ok(())
@@ -4776,7 +4795,7 @@ impl PageVm {
                     .apply_auxiliary_browsing_context_policy(policy);
             }
             self.vm_mut()
-                .set_cross_origin_opener_policy(env.cross_origin_opener_policy);
+                .set_cross_origin_opener_policy(env.cross_origin_opener_policy.clone());
             self.vm_mut()
                 .document_runtime
                 .set_document_default_language(env.document_default_language.clone());

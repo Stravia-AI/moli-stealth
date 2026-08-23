@@ -431,6 +431,7 @@ impl JsContextHost {
             ChildDocumentNavigationInitiator::BrowsingContext,
         );
         self.sync_existing_child_browsing_context_window_state(scope, handle);
+        self.publish_related_page_remote_frame_tree();
         if increment_top_level_history_length
             && let Some(window) = self.child_browsing_context_window_wrapper(scope, handle)
         {

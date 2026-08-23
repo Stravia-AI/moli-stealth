@@ -341,22 +341,35 @@ pub(crate) fn window_open_callback<'s>(
             }
             return;
         }
-        if let Some(request) = javascript_navigation_request.clone()
-            && !queue_renderer_owned_top_level_javascript_url_navigation_for_window(
-                scope,
-                target.window(),
-                request,
-            )
-        {
-            tracing::warn!(
-                ?resolved_target_page,
-                "selected related javascript URL target lost its renderer Page owner"
-            );
-        } else if !is_javascript_url {
-            cancel_pending_renderer_owned_javascript_url_navigation_for_window(
-                scope,
-                target.window(),
-            );
+        if target.related_local_top_level_context().is_some() {
+            if let Some(request) = javascript_navigation_request.clone()
+                && !queue_renderer_owned_top_level_javascript_url_navigation_for_window(
+                    scope,
+                    target.window(),
+                    request,
+                )
+            {
+                tracing::warn!(
+                    ?resolved_target_page,
+                    "selected related javascript URL target lost its renderer Page owner"
+                );
+            } else if !is_javascript_url {
+                cancel_pending_renderer_owned_javascript_url_navigation_for_window(
+                    scope,
+                    target.window(),
+                );
+            }
+        } else if is_javascript_url {
+            // Current remote targets are cross-origin script-agent splits;
+            // their source-side CanNavigate check rejects javascript: before
+            // this branch. Do not accidentally queue the URL on the facade's
+            // observing Page if a stale caller reaches here.
+            if suppress_opener {
+                rv.set(v8::null(scope).into());
+            } else {
+                rv.set(target.window().into());
+            }
+            return;
         }
         let activation = popup_activation_for_javascript_url(
             RendererPendingPopupActivation::window(

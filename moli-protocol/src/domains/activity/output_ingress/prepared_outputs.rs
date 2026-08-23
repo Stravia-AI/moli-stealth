@@ -242,6 +242,11 @@ impl PreparedProtocolOutputs {
                 )
                 .append_to_top_level_close_output_sink(&mut prepared);
             }
+            RendererOwnerAction::RemoteWindowProxy(command) => {
+                let _ = conn
+                    .dispatch_renderer_remote_window_proxy_command_async(command)
+                    .await;
+            }
             RendererOwnerAction::FileChooser(activation) => {
                 crate::domains::input::InputPreparedOutputs::from_renderer_file_chooser_activation(
                     conn, session_id, activation,

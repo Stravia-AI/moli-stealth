@@ -87,14 +87,39 @@ impl CdpConnection {
         );
     }
 
+    pub(crate) fn bind_renderer_page_output_owner_reservation(
+        &mut self,
+        renderer_page: super::RendererPageResidenceIdentity,
+        reservation_id: moli_core::RendererPageOutputOwnerReservationId,
+        page_owner: super::TargetPageResidenceIdentity,
+    ) {
+        let owner = crate::domains::activity::RendererPublicationOwner::PageTarget {
+            browser_context_id: page_owner.browser_context_id().to_owned(),
+            target_id: page_owner.target_id().map(str::to_owned),
+            renderer_page,
+            page_owner,
+        };
+        self.scheduler_state
+            .renderer_output_ingress
+            .bind_page_owner_reservation(
+                moli_core::RendererOutputResidenceIdentity::Page {
+                    owner_local_host_id: renderer_page.owner_local_host_id(),
+                    page_id: renderer_page.page_id(),
+                },
+                reservation_id,
+                owner,
+            );
+    }
+
     pub(crate) fn release_renderer_page_output_owner_reservation(
         &mut self,
         owner_local_host_id: moli_core::RendererOwnerLocalHostId,
         page_id: moli_core::PageId,
+        reservation_id: moli_core::RendererPageOutputOwnerReservationId,
     ) {
         self.scheduler_state
             .renderer_output_ingress
-            .release_page_owner_reservation(owner_local_host_id, page_id);
+            .release_page_owner_reservation(owner_local_host_id, page_id, reservation_id);
     }
 
     pub(crate) fn declare_renderer_output_cursor_lease(

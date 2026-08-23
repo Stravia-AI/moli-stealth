@@ -9,7 +9,9 @@ use super::{
     },
 };
 use crate::{
-    browsing_context_model::{BrowsingContextGroupId, ScriptAgentId},
+    browsing_context_model::{
+        BrowsingContextGroupId, BrowsingContextId, ScriptAgentId, TopLevelWindowProxyEndpointId,
+    },
     context_bootstrap::{ContextBootstrapAssets, WINDOW_OPENER_SLOT},
     document_runtime::DocumentRuntime,
     exception_reporting::v8_message_listener,
@@ -42,7 +44,10 @@ use std::{
     cell::{Cell, OnceCell, RefCell},
     collections::HashMap,
     rc::{Rc, Weak},
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 static DOCUMENT_ISOLATE_CREATED_COUNT: AtomicU64 = AtomicU64::new(0);
@@ -193,6 +198,10 @@ struct RendererRelatedPageGroup {
     /// live related Page's complete frame tree before consulting the next Page,
     /// so a name-indexed top-level map cannot represent this authority alone.
     top_level_targets: Rc<RefCell<Vec<Weak<RendererRelatedPageTopLevelTargetState>>>>,
+    /// WindowProxy routing identity belongs to the browsing-context group,
+    /// not to a replaceable LocalWindow or protocol Page projection.
+    next_window_proxy_endpoint_generation: Rc<Cell<u64>>,
+    window_proxy_endpoints: Rc<RefCell<HashMap<u64, Weak<RendererRelatedPageTopLevelTargetState>>>>,
 }
 
 impl Default for RendererRelatedPageGroup {
@@ -201,15 +210,53 @@ impl Default for RendererRelatedPageGroup {
             id: BrowsingContextGroupId::allocate(),
             named_targets: Rc::new(RefCell::new(HashMap::new())),
             top_level_targets: Rc::new(RefCell::new(Vec::new())),
+            next_window_proxy_endpoint_generation: Rc::new(Cell::new(1)),
+            window_proxy_endpoints: Rc::new(RefCell::new(HashMap::new())),
         }
     }
 }
 
 impl RendererRelatedPageGroup {
+    fn allocate_window_proxy_endpoint(&self) -> TopLevelWindowProxyEndpointId {
+        let generation = self.next_window_proxy_endpoint_generation.get();
+        self.next_window_proxy_endpoint_generation.set(
+            generation
+                .checked_add(1)
+                .expect("top-level WindowProxy endpoint generation overflow"),
+        );
+        TopLevelWindowProxyEndpointId::new(self.id, generation)
+    }
+
     fn register_target(&self, target: &Rc<RendererRelatedPageTopLevelTargetState>) {
+        let previous = self.window_proxy_endpoints.borrow_mut().insert(
+            target.window_proxy_endpoint.generation(),
+            Rc::downgrade(target),
+        );
+        assert!(
+            previous.is_none(),
+            "top-level WindowProxy endpoint generation must be unique within its group"
+        );
         self.top_level_targets
             .borrow_mut()
             .push(Rc::downgrade(target));
+    }
+
+    fn target_for_window_proxy_endpoint(
+        &self,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<Rc<RendererRelatedPageTopLevelTargetState>> {
+        if endpoint.browsing_context_group_id() != self.id {
+            return None;
+        }
+        let mut endpoints = self.window_proxy_endpoints.borrow_mut();
+        let Some(target) = endpoints
+            .get(&endpoint.generation())
+            .and_then(Weak::upgrade)
+        else {
+            endpoints.remove(&endpoint.generation());
+            return None;
+        };
+        (target.window_proxy_endpoint == endpoint).then_some(target)
     }
 
     fn live_targets_in_page_order(&self) -> Vec<Rc<RendererRelatedPageTopLevelTargetState>> {
@@ -315,26 +362,538 @@ impl RendererRelatedPageGroup {
 
 struct RendererRelatedPageTopLevelTargetState {
     residence: crate::RendererResolvedPopupTarget,
+    window_proxy_endpoint: TopLevelWindowProxyEndpointId,
+    /// Current renderer execution binding for this stable logical endpoint.
+    /// It rotates only when a committed Page transition replaces the script
+    /// agent/channel, never for an ordinary same-agent Document replacement.
+    remote_window_proxy_channel: Cell<crate::runtime::RendererRemoteWindowProxyChannel>,
     opened_by_dom: bool,
-    global_proxy: OnceCell<v8::Global<v8::Object>>,
-    current_default_context: RefCell<Option<v8::Global<v8::Context>>>,
-    // Page-scoped opener edge. The value belongs to the stable top-level
-    // browsing context rather than to one replaceable LocalWindow realm.
-    opener_edge: RefCell<Option<v8::Global<v8::Value>>>,
+    /// One logical browsing context can have a LocalWindow projection in one
+    /// script agent and RemoteWindowProxy projections in its related peers.
+    /// V8 handles never cross isolates: every entry is keyed by the exact
+    /// agent whose isolate owns those handles.
+    projections: RefCell<HashMap<ScriptAgentId, Weak<RendererRelatedPageTopLevelTargetProjection>>>,
+    /// A committed LocalWindow -> RemoteWindowProxy transition transfers the
+    /// old agent projection here. The group keeps it strongly only while the
+    /// logical target is live, preserving `window.open(name) === savedProxy`
+    /// without letting canceled provisional agents pin an isolate.
+    parked_remote_projections:
+        RefCell<HashMap<ScriptAgentId, Rc<RendererRelatedPageTopLevelTargetProjection>>>,
+    /// Replicated opener relationship. The concrete WindowProxy value lives
+    /// in each agent projection; this endpoint is the cross-agent authority.
+    opener_endpoint: RefCell<Option<TopLevelWindowProxyEndpointId>>,
     lifecycle: Cell<RendererTopLevelBrowsingContextLifecycle>,
     active: Cell<bool>,
     focused: Cell<bool>,
     name: RefCell<String>,
+    current_url: RefCell<String>,
+    current_serialized_origin: RefCell<String>,
     current_cross_origin_opener_policy:
         RefCell<Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy>>,
+    /// Agent-neutral projection of the current root Document's nested frame
+    /// tree. Local owner handles and V8 values must never enter this carrier:
+    /// observers address frames through a root-Document-qualified token and
+    /// materialize their own WindowProxy facade.
+    remote_frame_tree: RefCell<Vec<RendererRemoteFrameWireSnapshot>>,
+    remote_frame_tree_revision: Cell<u64>,
+}
+
+struct RendererRelatedPageTopLevelTargetProjection {
+    global_proxy: OnceCell<v8::Global<v8::Object>>,
+    current_default_context: RefCell<Option<v8::Global<v8::Context>>>,
+    // Agent-local projection of the Page-scoped opener edge. A remote agent
+    // materializes this value from `opener_endpoint` on demand.
+    opener_edge: RefCell<Option<v8::Global<v8::Value>>>,
+    facade_context: RefCell<Option<v8::Global<v8::Context>>>,
+}
+
+impl Default for RendererRelatedPageTopLevelTargetProjection {
+    fn default() -> Self {
+        Self {
+            global_proxy: OnceCell::new(),
+            current_default_context: RefCell::new(None),
+            opener_edge: RefCell::new(None),
+            facade_context: RefCell::new(None),
+        }
+    }
 }
 
 impl RendererRelatedPageTopLevelTargetState {
     fn is_live(&self) -> bool {
         self.lifecycle.get() == RendererTopLevelBrowsingContextLifecycle::Active
-            && self.global_proxy.get().is_some()
-            && self.current_default_context.borrow().is_some()
     }
+
+    fn projection(
+        &self,
+        script_agent_id: ScriptAgentId,
+    ) -> Option<Rc<RendererRelatedPageTopLevelTargetProjection>> {
+        self.projections
+            .borrow()
+            .get(&script_agent_id)
+            .and_then(Weak::upgrade)
+            .or_else(|| {
+                self.parked_remote_projections
+                    .borrow()
+                    .get(&script_agent_id)
+                    .cloned()
+            })
+    }
+
+    fn register_projection(
+        &self,
+        script_agent_id: ScriptAgentId,
+        projection: &Rc<RendererRelatedPageTopLevelTargetProjection>,
+    ) {
+        let previous = self
+            .projections
+            .borrow_mut()
+            .insert(script_agent_id, Rc::downgrade(projection));
+        assert!(
+            previous
+                .and_then(|projection| projection.upgrade())
+                .is_none()
+                && !self
+                    .parked_remote_projections
+                    .borrow()
+                    .contains_key(&script_agent_id),
+            "one top-level target cannot have two live projections in one script agent"
+        );
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererRemoteTopLevelWindowProxyTarget {
+    pub(crate) residence: crate::RendererResolvedPopupTarget,
+    pub(crate) endpoint: TopLevelWindowProxyEndpointId,
+    pub(crate) channel: crate::runtime::RendererRemoteWindowProxyChannel,
+    pub(crate) opened_by_dom: bool,
+    pub(crate) active: bool,
+    pub(crate) focused: bool,
+    pub(crate) current_url: String,
+    pub(crate) current_serialized_origin: String,
+    pub(crate) opener_endpoint: Option<TopLevelWindowProxyEndpointId>,
+}
+
+/// Stable remote-frame route within one committed top-level Document.
+///
+/// Nested browsing-context ids are allocated by a Document host today and can
+/// be reused after a root navigation. Qualifying the id with the exact root
+/// lifecycle prevents an in-flight command or retained facade from addressing
+/// a same-numbered frame in the replacement Document.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct RendererRemoteFrameToken {
+    pub(crate) endpoint: TopLevelWindowProxyEndpointId,
+    pub(crate) root_document: crate::runtime::RendererDocumentLifecycleIdentity,
+    pub(crate) browsing_context_id: BrowsingContextId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererRemoteFrameSnapshot {
+    /// Monotonic browser-context-state revision assigned when this complete
+    /// frame tree is published. Builders use zero before publication.
+    pub(crate) revision: u64,
+    pub(crate) token: RendererRemoteFrameToken,
+    pub(crate) parent_browsing_context_id: Option<BrowsingContextId>,
+    pub(crate) name: String,
+    pub(crate) current_url: String,
+    pub(crate) serialized_origin: String,
+    pub(crate) document_domain: Option<String>,
+    pub(crate) policy_container: crate::document_runtime::DocumentPolicyContainer,
+}
+
+const REMOTE_FRAME_SNAPSHOT_WIRE_VERSION: u16 = 1;
+const MAX_REMOTE_FRAME_SNAPSHOT_WIRE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_REMOTE_FRAME_TREE_WIRE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_REMOTE_FRAME_TREE_SNAPSHOTS: usize = 4_096;
+const MAX_REMOTE_FRAME_SNAPSHOT_STRING_BYTES: usize = 16 * 1024;
+const MAX_REMOTE_FRAME_SNAPSHOT_URL_BYTES: usize = 2 * 1024 * 1024;
+const MAX_REMOTE_FRAME_SNAPSHOT_POLICIES: usize = 256;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RendererRemoteFrameWireSnapshot {
+    bytes: Arc<[u8]>,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RendererRemoteFrameSnapshotWire {
+    version: u16,
+    revision: u64,
+    endpoint_group_id: u64,
+    endpoint_generation: u64,
+    root_frame_page_id: u64,
+    root_document_page_id: u64,
+    root_document_generation: u64,
+    root_document_epoch: u64,
+    browsing_context_id: u64,
+    parent_browsing_context_id: Option<u64>,
+    name: String,
+    current_url: String,
+    serialized_origin: String,
+    document_domain: Option<String>,
+    policy_container: RendererRemoteDocumentPolicyWire,
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct RendererRemoteDocumentPolicyWire {
+    document_referrer: String,
+    referrer_policy: Option<String>,
+    cross_origin_embedder_policy: crate::cross_origin_isolation::CrossOriginEmbedderPolicy,
+    document_isolation_policy: crate::cross_origin_isolation::DocumentIsolationPolicy,
+    cross_origin_isolated: bool,
+    document_content_security_policies: Vec<String>,
+    response_content_security_policies: Vec<String>,
+    response_content_security_report_only_policies: Vec<String>,
+    content_security_reporting_endpoints:
+        crate::content_security_policy::ContentSecurityPolicyReportingEndpoints,
+    credentialless: bool,
+    credentialless_storage_nonce: Option<u64>,
+    top_navigation_without_user_gesture_is_restricted: bool,
+    sandbox: crate::document_runtime::DocumentSandboxPolicy,
+}
+
+impl From<crate::document_runtime::DocumentPolicyContainer> for RendererRemoteDocumentPolicyWire {
+    fn from(policy: crate::document_runtime::DocumentPolicyContainer) -> Self {
+        Self {
+            document_referrer: policy.document_referrer,
+            referrer_policy: policy.referrer_policy,
+            cross_origin_embedder_policy: policy.cross_origin_embedder_policy,
+            document_isolation_policy: policy.document_isolation_policy,
+            cross_origin_isolated: policy.cross_origin_isolated,
+            document_content_security_policies: policy.document_content_security_policies,
+            response_content_security_policies: policy.response_content_security_policies,
+            response_content_security_report_only_policies: policy
+                .response_content_security_report_only_policies,
+            content_security_reporting_endpoints: policy.content_security_reporting_endpoints,
+            credentialless: policy.credentialless,
+            credentialless_storage_nonce: policy
+                .credentialless_storage_nonce
+                .map(moli_storage_key::OpaqueOriginNonce::get),
+            top_navigation_without_user_gesture_is_restricted: policy
+                .top_navigation_without_user_gesture_is_restricted,
+            sandbox: policy.sandbox,
+        }
+    }
+}
+
+impl TryFrom<RendererRemoteDocumentPolicyWire>
+    for crate::document_runtime::DocumentPolicyContainer
+{
+    type Error = anyhow::Error;
+
+    fn try_from(policy: RendererRemoteDocumentPolicyWire) -> Result<Self> {
+        validate_remote_frame_string(&policy.document_referrer, "document referrer")?;
+        if let Some(referrer_policy) = policy.referrer_policy.as_deref() {
+            validate_remote_frame_string(referrer_policy, "referrer policy")?;
+        }
+        for (label, policies) in [
+            ("document CSP", &policy.document_content_security_policies),
+            ("response CSP", &policy.response_content_security_policies),
+            (
+                "report-only CSP",
+                &policy.response_content_security_report_only_policies,
+            ),
+        ] {
+            anyhow::ensure!(
+                policies.len() <= MAX_REMOTE_FRAME_SNAPSHOT_POLICIES,
+                "remote frame {label} list exceeds the wire limit"
+            );
+            for value in policies {
+                validate_remote_frame_string(value, label)?;
+            }
+        }
+        Ok(Self {
+            document_referrer: policy.document_referrer,
+            referrer_policy: policy.referrer_policy,
+            cross_origin_embedder_policy: policy.cross_origin_embedder_policy,
+            document_isolation_policy: policy.document_isolation_policy,
+            cross_origin_isolated: policy.cross_origin_isolated,
+            document_content_security_policies: policy.document_content_security_policies,
+            response_content_security_policies: policy.response_content_security_policies,
+            response_content_security_report_only_policies: policy
+                .response_content_security_report_only_policies,
+            content_security_reporting_endpoints: policy.content_security_reporting_endpoints,
+            credentialless: policy.credentialless,
+            credentialless_storage_nonce: policy
+                .credentialless_storage_nonce
+                .map(|nonce| {
+                    anyhow::ensure!(
+                        nonce != 0,
+                        "remote frame credentialless storage nonce is zero"
+                    );
+                    Ok(moli_storage_key::OpaqueOriginNonce::new(nonce))
+                })
+                .transpose()?,
+            top_navigation_without_user_gesture_is_restricted: policy
+                .top_navigation_without_user_gesture_is_restricted,
+            sandbox: policy.sandbox,
+        })
+    }
+}
+
+impl RendererRemoteFrameWireSnapshot {
+    fn encode(snapshot: RendererRemoteFrameSnapshot) -> Result<Self> {
+        anyhow::ensure!(
+            snapshot.revision != 0,
+            "remote frame snapshot revision must be assigned before publication"
+        );
+        let wire = RendererRemoteFrameSnapshotWire {
+            version: REMOTE_FRAME_SNAPSHOT_WIRE_VERSION,
+            revision: snapshot.revision,
+            endpoint_group_id: snapshot.token.endpoint.browsing_context_group_id().value(),
+            endpoint_generation: snapshot.token.endpoint.generation(),
+            root_frame_page_id: snapshot.token.root_document.frame.page_id.as_u64(),
+            root_document_page_id: snapshot.token.root_document.document.page_id.as_u64(),
+            root_document_generation: snapshot
+                .token
+                .root_document
+                .document
+                .lifecycle_document_id_for_wire(),
+            root_document_epoch: snapshot.token.root_document.epoch.0,
+            browsing_context_id: snapshot.token.browsing_context_id.value(),
+            parent_browsing_context_id: snapshot
+                .parent_browsing_context_id
+                .map(crate::browsing_context_model::BrowsingContextId::value),
+            name: snapshot.name,
+            current_url: snapshot.current_url,
+            serialized_origin: snapshot.serialized_origin,
+            document_domain: snapshot.document_domain,
+            policy_container: snapshot.policy_container.into(),
+        };
+        // Decode the source-built value once before it enters replicated
+        // group state. This makes source and future IPC ingress share exactly
+        // the same validation contract.
+        let decoded = wire.clone().into_snapshot()?;
+        debug_assert_eq!(decoded.revision, wire.revision);
+        let bytes = serde_json::to_vec(&wire)
+            .map_err(|error| anyhow!("failed to encode remote frame snapshot: {error}"))?;
+        anyhow::ensure!(
+            bytes.len() <= MAX_REMOTE_FRAME_SNAPSHOT_WIRE_BYTES,
+            "remote frame snapshot exceeds the wire byte limit"
+        );
+        Ok(Self {
+            bytes: Arc::from(bytes),
+        })
+    }
+
+    fn decode(&self) -> Result<RendererRemoteFrameSnapshot> {
+        anyhow::ensure!(
+            self.bytes.len() <= MAX_REMOTE_FRAME_SNAPSHOT_WIRE_BYTES,
+            "remote frame snapshot exceeds the wire byte limit"
+        );
+        serde_json::from_slice::<RendererRemoteFrameSnapshotWire>(&self.bytes)
+            .map_err(|error| anyhow!("invalid remote frame snapshot wire schema: {error}"))?
+            .into_snapshot()
+    }
+}
+
+impl RendererRemoteFrameSnapshotWire {
+    fn into_snapshot(self) -> Result<RendererRemoteFrameSnapshot> {
+        anyhow::ensure!(
+            self.version == REMOTE_FRAME_SNAPSHOT_WIRE_VERSION,
+            "unsupported remote frame snapshot wire version {}",
+            self.version
+        );
+        anyhow::ensure!(self.revision != 0, "remote frame snapshot revision is zero");
+        let endpoint = TopLevelWindowProxyEndpointId::from_wire_parts(
+            self.endpoint_group_id,
+            self.endpoint_generation,
+        )
+        .ok_or_else(|| anyhow!("remote frame snapshot endpoint is invalid"))?;
+        let frame_page_id = crate::runtime::PageId::from_wire(self.root_frame_page_id)
+            .ok_or_else(|| anyhow!("remote frame root Page id is zero"))?;
+        let document_page_id = crate::runtime::PageId::from_wire(self.root_document_page_id)
+            .ok_or_else(|| anyhow!("remote frame Document Page id is zero"))?;
+        anyhow::ensure!(
+            frame_page_id == document_page_id,
+            "remote frame lifecycle crosses Page identities"
+        );
+        anyhow::ensure!(
+            self.root_document_generation != 0
+                && self.root_document_epoch != 0
+                && self.browsing_context_id != 0,
+            "remote frame snapshot contains a zero generation"
+        );
+        if let Some(parent) = self.parent_browsing_context_id {
+            anyhow::ensure!(
+                parent != 0 && parent != self.browsing_context_id,
+                "remote frame snapshot contains an invalid parent identity"
+            );
+        }
+        validate_remote_frame_string(&self.name, "name")?;
+        validate_remote_frame_url(&self.current_url)?;
+        validate_remote_frame_origin(&self.serialized_origin)?;
+        if let Some(domain) = self.document_domain.as_deref() {
+            validate_remote_frame_string(domain, "document.domain")?;
+        }
+        Ok(RendererRemoteFrameSnapshot {
+            revision: self.revision,
+            token: RendererRemoteFrameToken {
+                endpoint,
+                root_document: crate::runtime::RendererDocumentLifecycleIdentity {
+                    frame: crate::runtime::RendererFrameToken {
+                        page_id: frame_page_id,
+                    },
+                    document: crate::runtime::RendererDocumentToken::from_wire_parts(
+                        document_page_id,
+                        self.root_document_generation,
+                    )
+                    .ok_or_else(|| anyhow!("remote frame Document identity is zero"))?,
+                    epoch: crate::runtime::RendererLifecycleEpoch(self.root_document_epoch),
+                },
+                browsing_context_id: BrowsingContextId::nested(self.browsing_context_id),
+            },
+            parent_browsing_context_id: self
+                .parent_browsing_context_id
+                .map(BrowsingContextId::nested),
+            name: self.name,
+            current_url: self.current_url,
+            serialized_origin: self.serialized_origin,
+            document_domain: self.document_domain,
+            policy_container: self.policy_container.try_into()?,
+        })
+    }
+}
+
+fn validate_remote_frame_string(value: &str, label: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() <= MAX_REMOTE_FRAME_SNAPSHOT_STRING_BYTES && !value.contains('\0'),
+        "remote frame snapshot {label} is invalid"
+    );
+    Ok(())
+}
+
+fn validate_remote_frame_url(value: &str) -> Result<()> {
+    anyhow::ensure!(
+        value.len() <= MAX_REMOTE_FRAME_SNAPSHOT_URL_BYTES && !value.contains('\0'),
+        "remote frame snapshot URL exceeds the wire limit"
+    );
+    url::Url::parse(value)
+        .map(|_| ())
+        .map_err(|error| anyhow!("remote frame snapshot URL is invalid: {error}"))
+}
+
+fn validate_remote_frame_origin(value: &str) -> Result<()> {
+    validate_remote_frame_string(value, "serialized origin")?;
+    if value == "null" {
+        return Ok(());
+    }
+    let url = url::Url::parse(value)
+        .map_err(|error| anyhow!("remote frame serialized origin is invalid: {error}"))?;
+    anyhow::ensure!(
+        moli_url::origin_ascii_serialization(&url) == value,
+        "remote frame serialized origin is not canonical"
+    );
+    Ok(())
+}
+
+fn encode_remote_frame_tree_for_publication(
+    mut tree: Vec<RendererRemoteFrameSnapshot>,
+    endpoint: TopLevelWindowProxyEndpointId,
+    page_id: crate::runtime::PageId,
+    revision: u64,
+) -> Result<Vec<RendererRemoteFrameWireSnapshot>> {
+    anyhow::ensure!(revision != 0, "remote frame tree revision is zero");
+    anyhow::ensure!(
+        tree.len() <= MAX_REMOTE_FRAME_TREE_SNAPSHOTS,
+        "remote frame tree exceeds the snapshot count limit"
+    );
+    for snapshot in &mut tree {
+        snapshot.revision = revision;
+    }
+    validate_remote_frame_tree(&tree, endpoint, page_id, revision)?;
+    let encoded = tree
+        .into_iter()
+        .map(RendererRemoteFrameWireSnapshot::encode)
+        .collect::<Result<Vec<_>>>()?;
+    let encoded_bytes = encoded.iter().try_fold(0usize, |total, snapshot| {
+        total.checked_add(snapshot.bytes.len())
+    });
+    anyhow::ensure!(
+        encoded_bytes.is_some_and(|bytes| bytes <= MAX_REMOTE_FRAME_TREE_WIRE_BYTES),
+        "remote frame tree exceeds the aggregate wire byte limit"
+    );
+    Ok(encoded)
+}
+
+fn validate_remote_frame_tree(
+    tree: &[RendererRemoteFrameSnapshot],
+    endpoint: TopLevelWindowProxyEndpointId,
+    page_id: crate::runtime::PageId,
+    revision: u64,
+) -> Result<()> {
+    anyhow::ensure!(
+        tree.len() <= MAX_REMOTE_FRAME_TREE_SNAPSHOTS,
+        "remote frame tree exceeds the snapshot count limit"
+    );
+    if tree.is_empty() {
+        return Ok(());
+    }
+    anyhow::ensure!(revision != 0, "non-empty remote frame tree has no revision");
+    let root_document = tree[0].token.root_document;
+    let mut parents = HashMap::with_capacity(tree.len());
+    for snapshot in tree {
+        anyhow::ensure!(
+            snapshot.revision == revision
+                && snapshot.token.endpoint == endpoint
+                && snapshot.token.root_document == root_document
+                && snapshot.token.root_document.frame.page_id == page_id
+                && snapshot.token.root_document.document.page_id == page_id,
+            "remote frame tree mixes revisions, endpoints, or root Documents"
+        );
+        anyhow::ensure!(
+            parents
+                .insert(
+                    snapshot.token.browsing_context_id,
+                    snapshot.parent_browsing_context_id,
+                )
+                .is_none(),
+            "remote frame tree repeats a browsing-context identity"
+        );
+    }
+    for parent in parents.values().flatten() {
+        anyhow::ensure!(
+            parents.contains_key(parent),
+            "remote frame tree references a missing parent"
+        );
+    }
+    for start in parents.keys().copied() {
+        let mut current = Some(start);
+        for _ in 0..tree.len() {
+            current = current.and_then(|id| parents.get(&id).copied().flatten());
+            if current.is_none() {
+                break;
+            }
+        }
+        anyhow::ensure!(
+            current.is_none(),
+            "remote frame tree contains a parent cycle"
+        );
+    }
+    Ok(())
+}
+
+struct RendererRemoteFrameWindowProxyProjection {
+    token: RendererRemoteFrameToken,
+    global_proxy: v8::Global<v8::Object>,
+    _facade_context: v8::Global<v8::Context>,
+}
+
+pub(crate) enum RendererRelatedTopLevelWindowProxyResolution<'s> {
+    Local {
+        window_proxy: v8::Local<'s, v8::Object>,
+        context: v8::Local<'s, v8::Context>,
+    },
+    Remote(RendererRemoteTopLevelWindowProxyTarget),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RendererRelatedPageTopLevelNavigationTarget {
+    pub(crate) endpoint: TopLevelWindowProxyEndpointId,
+    pub(crate) residence: crate::RendererResolvedPopupTarget,
+    pub(crate) name: String,
+    pub(crate) is_source: bool,
 }
 
 fn reusable_top_level_browsing_context_name(name: &str) -> bool {
@@ -348,6 +907,10 @@ fn reusable_top_level_browsing_context_name(name: &str) -> bool {
 #[derive(Clone)]
 pub(crate) struct RendererPageScriptEnvironment {
     page_id: u64,
+    /// Immutable identity copied at admission so WindowProxy callbacks never
+    /// re-borrow the already-entered isolate holder merely to select an
+    /// agent-local projection.
+    script_agent_id: ScriptAgentId,
     auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
     renderer_document_isolate: RendererDocumentIsolateHandle,
     inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
@@ -356,6 +919,23 @@ pub(crate) struct RendererPageScriptEnvironment {
     output_journal: crate::runtime::RendererTurnOutputJournal,
     related_page_group: RendererRelatedPageGroup,
     top_level_target: Rc<RendererRelatedPageTopLevelTargetState>,
+    /// Strong owner for this Page's LocalWindow projection. The group registry
+    /// keeps only weak entries so a canceled provisional agent cannot pin V8
+    /// handles or its isolate for the lifetime of the logical target.
+    top_level_projection: Rc<RendererRelatedPageTopLevelTargetProjection>,
+    /// Remote facades materialized in this Page's script agent. They are
+    /// observer-agent projections and disappear with the observing Page.
+    remote_top_level_projections: Rc<
+        RefCell<
+            HashMap<TopLevelWindowProxyEndpointId, Rc<RendererRelatedPageTopLevelTargetProjection>>,
+        >,
+    >,
+    /// Stable, observer-agent-local projections of remote nested contexts.
+    /// Projection ids are private V8 markers resolved only through this map;
+    /// the target-side route remains the group/document/frame token above.
+    remote_frame_projections: Rc<RefCell<HashMap<u64, RendererRemoteFrameWindowProxyProjection>>>,
+    remote_frame_projection_ids: Rc<RefCell<HashMap<RendererRemoteFrameToken, u64>>>,
+    next_remote_frame_projection_id: Rc<Cell<u64>>,
     initial_global_proxy_facade_context: Rc<RefCell<Option<v8::Global<v8::Context>>>>,
     initial_global_proxy_security_token: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
 }
@@ -391,11 +971,19 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
             .field("output_stream", &self.output_journal.stream())
             .field(
                 "has_global_proxy",
-                &self.top_level_target.global_proxy.get().is_some(),
+                &self
+                    .current_agent_top_level_projection()
+                    .global_proxy
+                    .get()
+                    .is_some(),
             )
             .field(
                 "has_top_level_opener_edge",
-                &self.top_level_target.opener_edge.borrow().is_some(),
+                &self
+                    .current_agent_top_level_projection()
+                    .opener_edge
+                    .borrow()
+                    .is_some(),
             )
             .field(
                 "top_level_browsing_context_lifecycle",
@@ -456,7 +1044,7 @@ impl RendererPageScriptEnvironment {
         output_journal: crate::runtime::RendererTurnOutputJournal,
         source_environment: &Self,
     ) -> Result<Self> {
-        Self::new_in_related_page_group(
+        let environment = Self::new_in_related_page_group(
             page_id,
             opened_by_dom,
             initially_active,
@@ -468,7 +1056,10 @@ impl RendererPageScriptEnvironment {
             page_runtime_task_source,
             output_journal,
             source_environment.related_page_group.clone(),
-        )
+        )?;
+        *environment.top_level_target.opener_endpoint.borrow_mut() =
+            Some(source_environment.top_level_window_proxy_endpoint_id());
+        Ok(environment)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -494,21 +1085,35 @@ impl RendererPageScriptEnvironment {
                 .ok_or_else(|| {
                     anyhow!("Page script environment has a non-Page output residence")
                 })?;
+        let script_agent_id = script_agent_page_membership.script_agent_id();
+        let window_proxy_endpoint = related_page_group.allocate_window_proxy_endpoint();
+        let projection = Rc::new(RendererRelatedPageTopLevelTargetProjection::default());
+        let mut projections = HashMap::new();
+        projections.insert(script_agent_id, Rc::downgrade(&projection));
         let top_level_target = Rc::new(RendererRelatedPageTopLevelTargetState {
             residence,
+            window_proxy_endpoint,
+            remote_window_proxy_channel: Cell::new(
+                crate::runtime::RendererRemoteWindowProxyChannel::allocate(residence),
+            ),
             opened_by_dom,
-            global_proxy: OnceCell::new(),
-            current_default_context: RefCell::new(None),
-            opener_edge: RefCell::new(None),
+            projections: RefCell::new(projections),
+            parked_remote_projections: RefCell::new(HashMap::new()),
+            opener_endpoint: RefCell::new(None),
             lifecycle: Cell::new(RendererTopLevelBrowsingContextLifecycle::Active),
             active: Cell::new(initially_active),
             focused: Cell::new(initially_focused),
             name: RefCell::new(String::new()),
+            current_url: RefCell::new(String::new()),
+            current_serialized_origin: RefCell::new(String::new()),
             current_cross_origin_opener_policy: RefCell::new(None),
+            remote_frame_tree: RefCell::new(Vec::new()),
+            remote_frame_tree_revision: Cell::new(0),
         });
         related_page_group.register_target(&top_level_target);
         Ok(Self {
             page_id,
+            script_agent_id,
             auxiliary_page_reservation_allocator,
             renderer_document_isolate,
             inspector_isolate_backend,
@@ -517,6 +1122,64 @@ impl RendererPageScriptEnvironment {
             output_journal,
             related_page_group,
             top_level_target,
+            top_level_projection: projection,
+            remote_top_level_projections: Rc::new(RefCell::new(HashMap::new())),
+            remote_frame_projections: Rc::new(RefCell::new(HashMap::new())),
+            remote_frame_projection_ids: Rc::new(RefCell::new(HashMap::new())),
+            next_remote_frame_projection_id: Rc::new(Cell::new(1)),
+            initial_global_proxy_facade_context: Rc::new(RefCell::new(None)),
+            initial_global_proxy_security_token: Rc::new(RefCell::new(None)),
+        })
+    }
+
+    /// Creates the LocalWindow projection for a same-group script-agent
+    /// replacement. The logical target, endpoint generation, name, opener,
+    /// lifecycle and replicated policy remain owned by the existing browsing
+    /// context group; only the V8 projection and inspector agent are fresh.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_same_group_remote_agent_replacement(
+        auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
+        renderer_document_isolate: RendererDocumentIsolateHandle,
+        inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
+        script_agent_page_membership: RendererScriptAgentPageMembership,
+        page_runtime_task_source: PageRuntimeTaskSource,
+        output_journal: crate::runtime::RendererTurnOutputJournal,
+        previous: &Self,
+    ) -> Result<Self> {
+        let script_agent_id = script_agent_page_membership.script_agent_id();
+        anyhow::ensure!(
+            script_agent_id != previous.script_agent_id(),
+            "remote-agent replacement must allocate a fresh script agent"
+        );
+        anyhow::ensure!(
+            script_agent_page_membership.page_id().as_u64() == previous.page_id,
+            "remote-agent replacement membership belongs to a different Page"
+        );
+        anyhow::ensure!(
+            crate::RendererResolvedPopupTarget::from_residence(output_journal.stream().residence())
+                == Some(previous.top_level_target.residence),
+            "remote-agent replacement output stream belongs to a different Page"
+        );
+        let projection = Rc::new(RendererRelatedPageTopLevelTargetProjection::default());
+        previous
+            .top_level_target
+            .register_projection(script_agent_id, &projection);
+        Ok(Self {
+            page_id: previous.page_id,
+            script_agent_id,
+            auxiliary_page_reservation_allocator,
+            renderer_document_isolate,
+            inspector_isolate_backend,
+            script_agent_page_membership,
+            page_runtime_task_source,
+            output_journal,
+            related_page_group: previous.related_page_group.clone(),
+            top_level_target: previous.top_level_target.clone(),
+            top_level_projection: projection,
+            remote_top_level_projections: Rc::new(RefCell::new(HashMap::new())),
+            remote_frame_projections: Rc::new(RefCell::new(HashMap::new())),
+            remote_frame_projection_ids: Rc::new(RefCell::new(HashMap::new())),
+            next_remote_frame_projection_id: Rc::new(Cell::new(1)),
             initial_global_proxy_facade_context: Rc::new(RefCell::new(None)),
             initial_global_proxy_security_token: Rc::new(RefCell::new(None)),
         })
@@ -532,6 +1195,49 @@ impl RendererPageScriptEnvironment {
 
     pub(crate) fn browsing_context_group_id(&self) -> BrowsingContextGroupId {
         self.related_page_group.id
+    }
+
+    pub(crate) fn top_level_window_proxy_endpoint_id(&self) -> TopLevelWindowProxyEndpointId {
+        self.top_level_target.window_proxy_endpoint
+    }
+
+    pub(crate) fn remote_window_proxy_channel(
+        &self,
+    ) -> crate::runtime::RendererRemoteWindowProxyChannel {
+        self.top_level_target.remote_window_proxy_channel.get()
+    }
+
+    pub(crate) fn rotate_remote_window_proxy_channel_for_agent_transition(&self) {
+        self.top_level_target.remote_window_proxy_channel.set(
+            crate::runtime::RendererRemoteWindowProxyChannel::allocate(
+                self.top_level_target.residence,
+            ),
+        );
+    }
+
+    fn current_agent_top_level_projection(
+        &self,
+    ) -> Rc<RendererRelatedPageTopLevelTargetProjection> {
+        self.top_level_projection.clone()
+    }
+
+    fn current_agent_projection_for_target(
+        &self,
+        target: &RendererRelatedPageTopLevelTargetState,
+    ) -> Option<Rc<RendererRelatedPageTopLevelTargetProjection>> {
+        if std::ptr::eq(target, self.top_level_target.as_ref()) {
+            return Some(self.top_level_projection.clone());
+        }
+        target.projection(self.script_agent_id()).or_else(|| {
+            self.remote_top_level_projections
+                .borrow()
+                .get(&target.window_proxy_endpoint)
+                .cloned()
+        })
+    }
+
+    pub(crate) fn has_other_live_top_level_target(&self) -> bool {
+        self.related_page_group.live_targets_in_page_order().len() > 1
     }
 
     pub(crate) fn current_top_level_cross_origin_opener_policy(
@@ -677,7 +1383,7 @@ impl RendererPageScriptEnvironment {
     }
 
     pub(crate) fn script_agent_id(&self) -> ScriptAgentId {
-        self.renderer_document_isolate.script_agent_id()
+        self.script_agent_id
     }
 
     pub(crate) fn is_related_page_peer(&self, other: &Self) -> bool {
@@ -770,7 +1476,7 @@ impl RendererPageScriptEnvironment {
         &self,
         global_proxy: v8::Global<v8::Object>,
     ) -> Result<()> {
-        self.top_level_target
+        self.current_agent_top_level_projection()
             .global_proxy
             .set(global_proxy)
             .map_err(|_| anyhow!("page script environment already retains its main WindowProxy"))
@@ -817,7 +1523,8 @@ impl RendererPageScriptEnvironment {
         &self,
         op: impl FnOnce(&v8::Global<v8::Object>) -> T,
     ) -> Result<T> {
-        let global_proxy = self.top_level_target.global_proxy.get().ok_or_else(|| {
+        let projection = self.current_agent_top_level_projection();
+        let global_proxy = projection.global_proxy.get().ok_or_else(|| {
             anyhow!("replacement context is missing its page-owned main WindowProxy")
         })?;
         Ok(op(global_proxy))
@@ -841,40 +1548,31 @@ impl RendererPageScriptEnvironment {
         let target = self
             .related_page_group
             .find_named_target(&self.top_level_target, name)?;
+        let projection = self.current_agent_projection_for_target(&target)?;
         if let Some(opener) = replacement_opener {
             let opener: v8::Local<'s, v8::Value> = opener.into();
-            *target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+            *target.opener_endpoint.borrow_mut() = Some(self.top_level_window_proxy_endpoint_id());
+            *projection.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
         }
-        let window_proxy = v8::Local::new(scope, target.global_proxy.get()?);
-        let context = v8::Local::new(scope, target.current_default_context.borrow().as_ref()?);
+        let window_proxy = v8::Local::new(scope, projection.global_proxy.get()?);
+        let context = v8::Local::new(scope, projection.current_default_context.borrow().as_ref()?);
         Some((window_proxy, context, target.residence))
     }
 
-    pub(crate) fn related_page_top_level_targets_for_navigation<'s>(
+    pub(crate) fn related_page_top_level_targets_for_navigation(
         &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Vec<(
-        v8::Local<'s, v8::Object>,
-        v8::Local<'s, v8::Context>,
-        crate::RendererResolvedPopupTarget,
-        String,
-        bool,
-    )> {
+    ) -> Vec<RendererRelatedPageTopLevelNavigationTarget> {
         self.related_page_group
             .live_targets_in_page_order()
             .into_iter()
-            .filter_map(|target| {
-                let window = v8::Local::new(scope, target.global_proxy.get()?);
-                let context =
-                    v8::Local::new(scope, target.current_default_context.borrow().as_ref()?);
+            .map(|target| {
                 let name = target.name.borrow().clone();
-                Some((
-                    window,
-                    context,
-                    target.residence,
+                RendererRelatedPageTopLevelNavigationTarget {
+                    endpoint: target.window_proxy_endpoint,
+                    residence: target.residence,
                     name,
-                    Rc::ptr_eq(&target, &self.top_level_target),
-                ))
+                    is_source: Rc::ptr_eq(&target, &self.top_level_target),
+                }
             })
             .collect()
     }
@@ -889,14 +1587,377 @@ impl RendererPageScriptEnvironment {
             .live_targets_in_page_order()
             .into_iter()
             .find(|target| target.residence == residence)?;
+        let projection = self.current_agent_projection_for_target(&target)?;
         Some(v8::Local::new(
             scope,
-            target.current_default_context.borrow().as_ref()?,
+            projection.current_default_context.borrow().as_ref()?,
+        ))
+    }
+
+    /// Resolves a group-qualified WindowProxy endpoint only while its exact
+    /// target state remains the active owner. Normal Document replacement
+    /// updates the state in place; close and COOP disconnection make every
+    /// previously projected endpoint stale before any replacement can route.
+    pub(crate) fn related_page_target_for_window_proxy_endpoint<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<RendererRelatedTopLevelWindowProxyResolution<'s>> {
+        let target = self
+            .related_page_group
+            .target_for_window_proxy_endpoint(endpoint)?;
+        if !target.is_live() {
+            return None;
+        }
+        if let Some(projection) = self.current_agent_projection_for_target(&target)
+            && let Some(context) = projection.current_default_context.borrow().as_ref()
+        {
+            let window_proxy = v8::Local::new(scope, projection.global_proxy.get()?);
+            let context = v8::Local::new(scope, context);
+            return Some(RendererRelatedTopLevelWindowProxyResolution::Local {
+                window_proxy,
+                context,
+            });
+        }
+        Some(RendererRelatedTopLevelWindowProxyResolution::Remote(
+            RendererRemoteTopLevelWindowProxyTarget {
+                residence: target.residence,
+                endpoint: target.window_proxy_endpoint,
+                channel: target.remote_window_proxy_channel.get(),
+                opened_by_dom: target.opened_by_dom,
+                active: target.active.get(),
+                focused: target.focused.get(),
+                current_url: target.current_url.borrow().clone(),
+                current_serialized_origin: target.current_serialized_origin.borrow().clone(),
+                opener_endpoint: *target.opener_endpoint.borrow(),
+            },
         ))
     }
 
     pub(crate) fn bind_current_main_default_context(&self, context: v8::Global<v8::Context>) {
-        *self.top_level_target.current_default_context.borrow_mut() = Some(context);
+        let projection = self.current_agent_top_level_projection();
+        *projection.current_default_context.borrow_mut() = Some(context);
+    }
+
+    pub(crate) fn replicate_current_top_level_document(
+        &self,
+        url: &url::Url,
+        serialized_origin: &str,
+    ) {
+        *self.top_level_target.current_url.borrow_mut() = url.to_string();
+        *self.top_level_target.current_serialized_origin.borrow_mut() =
+            serialized_origin.to_owned();
+    }
+
+    pub(crate) fn replicate_current_remote_frame_tree(
+        &self,
+        snapshots: Vec<RendererRemoteFrameSnapshot>,
+    ) {
+        let Some(revision) = self
+            .top_level_target
+            .remote_frame_tree_revision
+            .get()
+            .checked_add(1)
+        else {
+            tracing::warn!(
+                "remote frame tree revision overflowed; disconnecting the replicated tree"
+            );
+            self.top_level_target.remote_frame_tree.borrow_mut().clear();
+            return;
+        };
+        let snapshots = match encode_remote_frame_tree_for_publication(
+            snapshots,
+            self.top_level_window_proxy_endpoint_id(),
+            self.top_level_target.residence.page_id(),
+            revision,
+        ) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                // Names, URLs, policies and frame counts are web-controlled.
+                // A value that cannot cross the remote boundary must retire
+                // the previous revision instead of crashing the renderer or
+                // leaving a stale tree routable.
+                tracing::warn!(%error, revision, "rejected remote frame tree publication");
+                self.top_level_target
+                    .remote_frame_tree_revision
+                    .set(revision);
+                self.top_level_target.remote_frame_tree.borrow_mut().clear();
+                return;
+            }
+        };
+        self.top_level_target
+            .remote_frame_tree_revision
+            .set(revision);
+        *self.top_level_target.remote_frame_tree.borrow_mut() = snapshots;
+    }
+
+    pub(crate) fn clear_current_remote_frame_tree(&self) {
+        let Some(revision) = self
+            .top_level_target
+            .remote_frame_tree_revision
+            .get()
+            .checked_add(1)
+        else {
+            tracing::warn!(
+                "remote frame tree revision overflowed while disconnecting the replicated tree"
+            );
+            self.top_level_target.remote_frame_tree.borrow_mut().clear();
+            return;
+        };
+        self.top_level_target
+            .remote_frame_tree_revision
+            .set(revision);
+        self.top_level_target.remote_frame_tree.borrow_mut().clear();
+    }
+
+    pub(crate) fn remote_frame_tree_snapshot(
+        &self,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<Vec<RendererRemoteFrameSnapshot>> {
+        let target = self
+            .related_page_group
+            .target_for_window_proxy_endpoint(endpoint)?;
+        if !target.is_live() {
+            return None;
+        }
+        let revision = target.remote_frame_tree_revision.get();
+        let wire_tree = target.remote_frame_tree.borrow();
+        if wire_tree.len() > MAX_REMOTE_FRAME_TREE_SNAPSHOTS
+            || wire_tree
+                .iter()
+                .try_fold(0usize, |total, snapshot| {
+                    total.checked_add(snapshot.bytes.len())
+                })
+                .is_none_or(|bytes| bytes > MAX_REMOTE_FRAME_TREE_WIRE_BYTES)
+        {
+            return None;
+        }
+        let tree = wire_tree
+            .iter()
+            .map(RendererRemoteFrameWireSnapshot::decode)
+            .collect::<Result<Vec<_>>>()
+            .ok()?;
+        validate_remote_frame_tree(&tree, endpoint, target.residence.page_id(), revision).ok()?;
+        Some(tree)
+    }
+
+    pub(crate) fn remote_frame_snapshot(
+        &self,
+        token: RendererRemoteFrameToken,
+    ) -> Option<RendererRemoteFrameSnapshot> {
+        self.remote_frame_tree_snapshot(token.endpoint)?
+            .into_iter()
+            .find(|snapshot| snapshot.token == token)
+    }
+
+    pub(crate) fn remote_frame_direct_children(
+        &self,
+        endpoint: TopLevelWindowProxyEndpointId,
+        parent: Option<RendererRemoteFrameToken>,
+    ) -> Option<Vec<RendererRemoteFrameSnapshot>> {
+        if parent.is_some_and(|parent| parent.endpoint != endpoint) {
+            return None;
+        }
+        let parent_id = parent.map(|parent| parent.browsing_context_id);
+        let tree = self.remote_frame_tree_snapshot(endpoint)?;
+        if let Some(parent) = parent
+            && !tree.iter().any(|snapshot| snapshot.token == parent)
+        {
+            return None;
+        }
+        Some(
+            tree.into_iter()
+                .filter(|snapshot| snapshot.parent_browsing_context_id == parent_id)
+                .collect(),
+        )
+    }
+
+    pub(crate) fn allocate_remote_frame_projection_id(&self) -> u64 {
+        let id = self.next_remote_frame_projection_id.get();
+        self.next_remote_frame_projection_id.set(
+            id.checked_add(1)
+                .expect("remote-frame WindowProxy projection id overflow"),
+        );
+        id
+    }
+
+    pub(crate) fn install_remote_frame_window_proxy_projection(
+        &self,
+        id: u64,
+        token: RendererRemoteFrameToken,
+        global_proxy: v8::Global<v8::Object>,
+        facade_context: v8::Global<v8::Context>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            self.remote_frame_snapshot(token).is_some(),
+            "remote-frame WindowProxy target is no longer current"
+        );
+        anyhow::ensure!(
+            !self
+                .remote_frame_projection_ids
+                .borrow()
+                .contains_key(&token),
+            "remote-frame WindowProxy projection is already installed"
+        );
+        let previous = self.remote_frame_projections.borrow_mut().insert(
+            id,
+            RendererRemoteFrameWindowProxyProjection {
+                token,
+                global_proxy,
+                _facade_context: facade_context,
+            },
+        );
+        anyhow::ensure!(
+            previous.is_none(),
+            "remote-frame WindowProxy projection id is already installed"
+        );
+        self.remote_frame_projection_ids
+            .borrow_mut()
+            .insert(token, id);
+        Ok(())
+    }
+
+    pub(crate) fn projected_remote_frame_window_proxy<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        token: RendererRemoteFrameToken,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let id = *self.remote_frame_projection_ids.borrow().get(&token)?;
+        let projections = self.remote_frame_projections.borrow();
+        let projection = projections.get(&id)?;
+        Some(v8::Local::new(scope, &projection.global_proxy))
+    }
+
+    pub(crate) fn remote_frame_token_for_projection_id(
+        &self,
+        id: u64,
+    ) -> Option<RendererRemoteFrameToken> {
+        self.remote_frame_projections
+            .borrow()
+            .get(&id)
+            .map(|projection| projection.token)
+    }
+
+    pub(crate) fn top_level_opener_endpoint(&self) -> Option<TopLevelWindowProxyEndpointId> {
+        *self.top_level_target.opener_endpoint.borrow()
+    }
+
+    pub(crate) fn remote_top_level_target_snapshot(
+        &self,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<RendererRemoteTopLevelWindowProxyTarget> {
+        let target = self
+            .related_page_group
+            .target_for_window_proxy_endpoint(endpoint)?;
+        target
+            .is_live()
+            .then(|| RendererRemoteTopLevelWindowProxyTarget {
+                residence: target.residence,
+                endpoint: target.window_proxy_endpoint,
+                channel: target.remote_window_proxy_channel.get(),
+                opened_by_dom: target.opened_by_dom,
+                active: target.active.get(),
+                focused: target.focused.get(),
+                current_url: target.current_url.borrow().clone(),
+                current_serialized_origin: target.current_serialized_origin.borrow().clone(),
+                opener_endpoint: *target.opener_endpoint.borrow(),
+            })
+    }
+
+    pub(crate) fn install_remote_top_level_window_proxy_projection(
+        &self,
+        endpoint: TopLevelWindowProxyEndpointId,
+        window_proxy: v8::Global<v8::Object>,
+        facade_context: v8::Global<v8::Context>,
+    ) -> Result<()> {
+        let target = self
+            .related_page_group
+            .target_for_window_proxy_endpoint(endpoint)
+            .ok_or_else(|| anyhow!("remote WindowProxy endpoint is outside this Page group"))?;
+        anyhow::ensure!(
+            target.is_live(),
+            "remote WindowProxy endpoint is no longer active"
+        );
+        anyhow::ensure!(
+            self.current_agent_projection_for_target(&target).is_none(),
+            "remote WindowProxy projection is already installed"
+        );
+        let projection = Rc::new(RendererRelatedPageTopLevelTargetProjection::default());
+        projection
+            .global_proxy
+            .set(window_proxy)
+            .map_err(|_| anyhow!("remote WindowProxy projection is already installed"))?;
+        *projection.facade_context.borrow_mut() = Some(facade_context);
+        target.register_projection(self.script_agent_id(), &projection);
+        let previous = self
+            .remote_top_level_projections
+            .borrow_mut()
+            .insert(endpoint, projection);
+        debug_assert!(previous.is_none());
+        Ok(())
+    }
+
+    pub(crate) fn related_page_projected_window_proxy<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        endpoint: TopLevelWindowProxyEndpointId,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let target = self
+            .related_page_group
+            .target_for_window_proxy_endpoint(endpoint)?;
+        let projection = self.current_agent_projection_for_target(&target)?;
+        Some(v8::Local::new(scope, projection.global_proxy.get()?))
+    }
+
+    /// Converts the current agent's LocalWindow projection into a live remote
+    /// facade while preserving the logical target and group endpoint.
+    pub(crate) fn mark_current_agent_top_level_projection_remote(&self) -> bool {
+        if self.top_level_target.lifecycle.get() != RendererTopLevelBrowsingContextLifecycle::Active
+        {
+            return false;
+        }
+        let projection = self.current_agent_top_level_projection();
+        projection.current_default_context.borrow_mut().take();
+        let previous = self
+            .top_level_target
+            .parked_remote_projections
+            .borrow_mut()
+            .insert(self.script_agent_id, projection);
+        debug_assert!(previous.is_none());
+        true
+    }
+
+    pub(crate) fn retain_current_agent_top_level_facade_context(
+        &self,
+        context: v8::Global<v8::Context>,
+    ) {
+        *self
+            .current_agent_top_level_projection()
+            .facade_context
+            .borrow_mut() = Some(context);
+    }
+
+    pub(crate) fn has_other_live_top_level_target_in_current_agent(&self) -> bool {
+        self.related_page_group
+            .live_targets_in_page_order()
+            .into_iter()
+            .filter(|target| !Rc::ptr_eq(target, &self.top_level_target))
+            .any(|target| {
+                target
+                    .projection(self.script_agent_id())
+                    .is_some_and(|projection| projection.current_default_context.borrow().is_some())
+            })
+    }
+
+    pub(crate) fn should_switch_script_agent_for_navigation(&self, final_url: &url::Url) -> bool {
+        if !self.has_other_live_top_level_target_in_current_agent()
+            || !matches!(final_url.scheme(), "http" | "https")
+        {
+            return false;
+        }
+        let current_origin = self.top_level_target.current_serialized_origin.borrow();
+        !current_origin.is_empty()
+            && current_origin.as_str() != moli_url::origin_ascii_serialization(final_url)
     }
 
     pub(crate) fn replace_related_page_top_level_opener<'s>(
@@ -913,8 +1974,12 @@ impl RendererPageScriptEnvironment {
         else {
             return false;
         };
+        let Some(projection) = self.current_agent_projection_for_target(&target) else {
+            return false;
+        };
+        *target.opener_endpoint.borrow_mut() = Some(self.top_level_window_proxy_endpoint_id());
         let opener: v8::Local<'s, v8::Value> = opener.into();
-        *target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+        *projection.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
         true
     }
 
@@ -945,10 +2010,11 @@ impl RendererPageScriptEnvironment {
         // Once bound, the Page edge is authoritative. In particular, an
         // explicit `window.opener = null` must not be reconnected from a stale
         // realm-private slot during the next Document replacement.
-        if self.top_level_target.opener_edge.borrow().is_some() {
+        let projection = self.current_agent_top_level_projection();
+        if projection.opener_edge.borrow().is_some() {
             return;
         }
-        *self.top_level_target.opener_edge.borrow_mut() =
+        *projection.opener_edge.borrow_mut() =
             get_private_value(scope, window_proxy, WINDOW_OPENER_SLOT)
                 .map(|opener| v8::Global::new(scope, opener));
     }
@@ -958,7 +2024,11 @@ impl RendererPageScriptEnvironment {
         scope: &mut v8::PinScope<'s, '_>,
         opener: v8::Local<'s, v8::Value>,
     ) {
-        *self.top_level_target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+        if opener.is_null() {
+            *self.top_level_target.opener_endpoint.borrow_mut() = None;
+        }
+        let projection = self.current_agent_top_level_projection();
+        *projection.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
     }
 
     pub(crate) fn sever_top_level_opener_edge(&self, scope: &mut v8::PinScope<'_, '_>) {
@@ -970,8 +2040,9 @@ impl RendererPageScriptEnvironment {
         &self,
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Option<v8::Local<'s, v8::Value>> {
+        let projection = self.current_agent_top_level_projection();
         let opener = {
-            let edge = self.top_level_target.opener_edge.borrow();
+            let edge = projection.opener_edge.borrow();
             edge.as_ref().map(|opener| v8::Local::new(scope, opener))?
         };
         if let Ok(opener_window) = v8::Local::<v8::Object>::try_from(opener)
@@ -1533,6 +2604,7 @@ impl IsolateBootstrapCache {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use std::{cell::Cell, rc::Rc};
 
     struct ContextSlotDropCounter(Rc<Cell<usize>>);
@@ -1595,5 +2667,79 @@ mod tests {
             .expect("snapshot creator should produce a blob");
         assert!(!startup_data.is_empty());
         assert_eq!(dropped_slots.get(), 1);
+    }
+
+    #[test]
+    fn remote_frame_replication_snapshot_uses_strict_versioned_wire() {
+        let page_id = crate::runtime::PageId::new_for_testing(31);
+        let snapshot = RendererRemoteFrameSnapshot {
+            revision: 7,
+            token: RendererRemoteFrameToken {
+                endpoint: TopLevelWindowProxyEndpointId::from_wire_parts(37, 41)
+                    .expect("test endpoint"),
+                root_document: crate::runtime::RendererDocumentLifecycleIdentity {
+                    frame: crate::runtime::RendererFrameToken { page_id },
+                    document: crate::runtime::RendererDocumentToken::new_for_testing(page_id, 43),
+                    epoch: crate::runtime::RendererLifecycleEpoch(47),
+                },
+                browsing_context_id: BrowsingContextId::nested(53),
+            },
+            parent_browsing_context_id: None,
+            name: "wire-child".to_owned(),
+            current_url: "https://frame.test/current".to_owned(),
+            serialized_origin: "https://frame.test".to_owned(),
+            document_domain: None,
+            policy_container: crate::document_runtime::DocumentPolicyContainer::default(),
+        };
+        let encoded = RendererRemoteFrameWireSnapshot::encode(snapshot.clone())
+            .expect("valid snapshot should encode");
+        assert_eq!(
+            encoded.decode().expect("valid snapshot should decode"),
+            snapshot
+        );
+
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&encoded.bytes).expect("snapshot wire JSON");
+        value["version"] = serde_json::json!(REMOTE_FRAME_SNAPSHOT_WIRE_VERSION + 1);
+        let unsupported = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(serde_json::to_vec(&value).expect("mutated wire JSON")),
+        };
+        assert!(unsupported.decode().is_err());
+
+        value["version"] = serde_json::json!(REMOTE_FRAME_SNAPSHOT_WIRE_VERSION);
+        value["rendererCapability"] = serde_json::json!("must-not-cross");
+        let unknown = RendererRemoteFrameWireSnapshot {
+            bytes: Arc::from(serde_json::to_vec(&value).expect("mutated wire JSON")),
+        };
+        assert!(unknown.decode().is_err());
+
+        let mut first = snapshot.clone();
+        let mut second = snapshot.clone();
+        second.token.browsing_context_id = BrowsingContextId::nested(59);
+        first.parent_browsing_context_id = Some(second.token.browsing_context_id);
+        second.parent_browsing_context_id = Some(first.token.browsing_context_id);
+        assert!(
+            validate_remote_frame_tree(
+                &[first, second],
+                snapshot.token.endpoint,
+                page_id,
+                snapshot.revision,
+            )
+            .is_err(),
+            "strict remote frame ingress must reject a parent cycle"
+        );
+
+        let mut oversized = snapshot.clone();
+        oversized.name = "x".repeat(MAX_REMOTE_FRAME_SNAPSHOT_STRING_BYTES + 1);
+        assert!(
+            encode_remote_frame_tree_for_publication(
+                vec![oversized],
+                snapshot.token.endpoint,
+                page_id,
+                snapshot.revision + 1,
+            )
+            .is_err(),
+            "web-controlled snapshot values that exceed the wire contract must fail closed"
+        );
     }
 }

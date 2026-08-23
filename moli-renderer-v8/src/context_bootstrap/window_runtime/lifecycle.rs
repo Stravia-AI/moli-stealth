@@ -81,6 +81,27 @@ pub(crate) fn request_top_level_browsing_context_focus(
     )
 }
 
+/// Applies a focus request whose source-side activation/opener admission was
+/// completed before crossing a RemoteWindowProxy transport boundary. The
+/// target renderer still rechecks Page liveness and publishes the exact Page
+/// residence; it must not try to rediscover the remote incumbent V8 context.
+pub(crate) fn accept_remote_top_level_browsing_context_focus(
+    target_host_ptr: *mut crate::native_bridge::JsContextHost,
+) -> bool {
+    if unsafe { &*target_host_ptr }.top_level_browsing_context_is_closed() {
+        return false;
+    }
+    if unsafe { &*target_host_ptr }.top_level_page_is_active() {
+        return true;
+    }
+    let Some(target_page) = (unsafe { &*target_host_ptr }).top_level_page_residence() else {
+        return false;
+    };
+    unsafe { &*target_host_ptr }.append_live_turn_owner_action(
+        crate::runtime::RendererOwnerAction::TopLevelFocus(target_page),
+    )
+}
+
 pub(in crate::context_bootstrap) fn window_close_callback<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,

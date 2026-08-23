@@ -564,8 +564,11 @@ impl JsContextHost {
         scope: &mut v8::PinScope<'_, '_>,
         root: DomHandle,
     ) -> Vec<FrameDocumentClassicScriptSchedulerWork> {
-        self.child_browsing_context_subtree_ready_work(scope, root)
-            .1
+        let ready_work = self
+            .child_browsing_context_subtree_ready_work(scope, root)
+            .1;
+        self.publish_related_page_remote_frame_tree();
+        ready_work
     }
 
     pub(crate) fn sync_child_browsing_context_subtree(
@@ -577,6 +580,7 @@ impl JsContextHost {
         for work in ready_work {
             self.push_child_document_script_ready_input(work);
         }
+        self.publish_related_page_remote_frame_tree();
         had_handles
     }
 
@@ -652,6 +656,7 @@ impl JsContextHost {
             self.disconnect_shared_worker_clients_for_child_context(handle);
             self.child_web_storage_opaque_context_nonces.remove(&handle);
         }
+        self.publish_related_page_remote_frame_tree();
     }
 
     pub(crate) fn drop_child_browsing_contexts_moved_into_own_document_subtree(

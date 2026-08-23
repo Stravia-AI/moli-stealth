@@ -26,6 +26,7 @@ pub(crate) use dialogs::{
     window_const_false_callback, window_noop_callback, window_open_callback, window_stop_callback,
 };
 pub(crate) use lifecycle::{
+    accept_remote_top_level_browsing_context_focus,
     dispatch_top_level_browsing_context_close_unload, request_top_level_browsing_context_close,
     request_top_level_browsing_context_focus,
 };

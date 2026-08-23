@@ -1,4 +1,11 @@
-use std::{marker::PhantomData, rc::Rc, sync::Arc};
+use std::{
+    marker::PhantomData,
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicU8, Ordering},
+    },
+};
 
 use super::owner_local_store::{
     RendererPageToken, has_current_render_runtime_owner_local_store,
@@ -103,14 +110,18 @@ pub struct RendererPageHandle {
 }
 
 pub struct RendererPageCommandPending {
-    dispatch: RendererPageCommandPendingDispatch,
+    dispatch: Option<RendererPageCommandPendingDispatch>,
     javascript_dialog_watch: Option<RendererJavaScriptDialogWatch>,
+    cancellation: Option<Arc<AtomicU8>>,
 }
 
 enum RendererPageCommandPendingDispatch {
     Owner(oneshot::Receiver<anyhow::Result<RendererOwnerReply>>),
     InspectorMain(Box<RendererRuntimeInspectorMainCommandRoute>),
 }
+
+const PAGE_COMMAND_CANCELLATION_PENDING: u8 = 0;
+const PAGE_COMMAND_CANCELLATION_CANCELLED: u8 = 2;
 
 /// A non-owning request for reserving the next Document in one exact live
 /// renderer Page.
@@ -121,14 +132,22 @@ enum RendererPageCommandPendingDispatch {
 pub struct RendererPageReplacementReservationPending {
     render_runtime: RenderRuntimeHandle,
     token: RendererPageToken,
+    output_owner_reservation_id: RendererPageOutputOwnerReservationId,
     _not_send: PhantomData<Rc<()>>,
 }
 
 impl RendererPageReplacementReservationPending {
+    pub fn output_owner_reservation_id(&self) -> RendererPageOutputOwnerReservationId {
+        self.output_owner_reservation_id
+    }
+
     pub async fn await_ready(self) -> Result<RendererPageReservationToken> {
         match self
             .render_runtime
-            .dispatch(RendererOwnerCommand::ReserveLivePageReplacement { token: self.token })
+            .dispatch(RendererOwnerCommand::ReserveLivePageReplacement {
+                token: self.token,
+                output_owner_reservation_id: self.output_owner_reservation_id,
+            })
             .await?
         {
             RendererOwnerReply::LivePageReplacementReserved(reservation) => Ok(reservation),
@@ -248,6 +267,7 @@ impl RendererPageHandle {
         RendererPageReplacementReservationPending {
             render_runtime: self.render_runtime.clone(),
             token: self.token(),
+            output_owner_reservation_id: RendererPageOutputOwnerReservationId::allocate(),
             _not_send: PhantomData,
         }
     }
@@ -430,6 +450,7 @@ impl RendererPageHandle {
             RendererPageStateCapturePolicy::FullReport,
             false,
             None,
+            false,
         )
     }
 
@@ -449,6 +470,7 @@ impl RendererPageHandle {
             RendererPageStateCapturePolicy::ProtocolTurn,
             false,
             None,
+            false,
         )
     }
 
@@ -463,6 +485,35 @@ impl RendererPageHandle {
             RendererPageStateCapturePolicy::ProtocolTurn,
             true,
             inspector_session_id,
+            false,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_cancellable_async_command(
+        &self,
+        command: RendererPageCommand,
+    ) -> anyhow::Result<RendererPageCommandPending> {
+        self.enqueue_async_command_with_capture_policy(
+            command,
+            RendererPageStateCapturePolicy::FullReport,
+            false,
+            None,
+            true,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn enqueue_cancellable_protocol_command(
+        &self,
+        command: RendererPageCommand,
+    ) -> anyhow::Result<RendererPageCommandPending> {
+        self.enqueue_async_command_with_capture_policy(
+            command,
+            RendererPageStateCapturePolicy::ProtocolTurn,
+            false,
+            None,
+            true,
         )
     }
 
@@ -472,6 +523,7 @@ impl RendererPageHandle {
         capture_policy: RendererPageStateCapturePolicy,
         route_protocol_main_receiver: bool,
         inspector_session_id: Option<String>,
+        cancellable: bool,
     ) -> anyhow::Result<RendererPageCommandPending> {
         let javascript_dialog_watch = command
             .interruptible_by_javascript_dialog()
@@ -498,8 +550,11 @@ impl RendererPageHandle {
                     capture_policy,
                 );
             return Ok(RendererPageCommandPending {
-                dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::new(route)),
+                dispatch: Some(RendererPageCommandPendingDispatch::InspectorMain(Box::new(
+                    route,
+                ))),
                 javascript_dialog_watch,
+                cancellation: None,
             });
         }
         let command = match command {
@@ -511,30 +566,38 @@ impl RendererPageHandle {
                     capture_policy,
                 );
                 return Ok(RendererPageCommandPending {
-                    dispatch: RendererPageCommandPendingDispatch::InspectorMain(Box::new(route)),
+                    dispatch: Some(RendererPageCommandPendingDispatch::InspectorMain(Box::new(
+                        route,
+                    ))),
                     javascript_dialog_watch,
+                    cancellation: None,
                 });
             }
             command => command,
         };
+        let cancellation =
+            cancellable.then(|| Arc::new(AtomicU8::new(PAGE_COMMAND_CANCELLATION_PENDING)));
         let owner_command = match capture_policy {
             RendererPageStateCapturePolicy::FullReport => {
                 RendererOwnerCommand::RunAsyncPageCommand {
                     token: self.token(),
                     command,
+                    cancellation: cancellation.clone(),
                 }
             }
             RendererPageStateCapturePolicy::ProtocolTurn => {
                 RendererOwnerCommand::RunProtocolPageCommand {
                     token: self.token(),
                     command,
+                    cancellation: cancellation.clone(),
                 }
             }
         };
         let reply_rx = self.render_runtime.enqueue(owner_command)?;
         Ok(RendererPageCommandPending {
-            dispatch: RendererPageCommandPendingDispatch::Owner(reply_rx),
+            dispatch: Some(RendererPageCommandPendingDispatch::Owner(reply_rx)),
             javascript_dialog_watch,
+            cancellation,
         })
     }
 
@@ -641,11 +704,11 @@ impl RendererPageHandle {
 }
 
 impl RendererPageCommandPending {
-    pub async fn wait(self) -> Result<RendererCommandTurnOutput> {
-        let RendererPageCommandPending {
-            dispatch,
-            javascript_dialog_watch,
-        } = self;
+    pub async fn wait(mut self) -> Result<RendererCommandTurnOutput> {
+        let dispatch = self
+            .dispatch
+            .take()
+            .expect("renderer Page command pending dispatch can be consumed only once");
         let wait_for_dispatch = async move {
             match dispatch {
                 RendererPageCommandPendingDispatch::Owner(reply_rx) => {
@@ -685,10 +748,10 @@ impl RendererPageCommandPending {
             }
         };
         tokio::pin!(wait_for_dispatch);
-        let reply = if let Some(javascript_dialog_watch) = javascript_dialog_watch {
+        let result = if let Some(javascript_dialog_watch) = self.javascript_dialog_watch.take() {
             tokio::select! {
                 biased;
-                reply = &mut wait_for_dispatch => reply?,
+                reply = &mut wait_for_dispatch => reply,
                 predecessor = javascript_dialog_watch.wait_until_open() => {
                     return Err(super::RendererPageCommandInterruptedByJavaScriptDialog::new(
                         predecessor,
@@ -696,9 +759,27 @@ impl RendererPageCommandPending {
                 }
             }
         } else {
-            wait_for_dispatch.await?
+            wait_for_dispatch.await
         };
-        Ok(reply)
+        // The owner has either completed the command or returned a terminal
+        // error. Disarm Drop so only an actually abandoned wait can cancel a
+        // command that is still queued behind the renderer lane.
+        self.cancellation.take();
+        result
+    }
+}
+
+impl Drop for RendererPageCommandPending {
+    fn drop(&mut self) {
+        let Some(cancellation) = self.cancellation.take() else {
+            return;
+        };
+        let _ = cancellation.compare_exchange(
+            PAGE_COMMAND_CANCELLATION_PENDING,
+            PAGE_COMMAND_CANCELLATION_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
     }
 }
 

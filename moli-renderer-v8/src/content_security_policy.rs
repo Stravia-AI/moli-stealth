@@ -155,7 +155,8 @@ pub(crate) struct ContentSecurityPolicyUrlViolation {
     pub(crate) column_number: i32,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct ContentSecurityPolicyReportingEndpoints {
     endpoints: BTreeMap<String, String>,
 }

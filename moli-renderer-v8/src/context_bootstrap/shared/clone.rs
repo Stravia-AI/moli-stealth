@@ -8,9 +8,9 @@ use crate::{
     },
     structured_clone::{
         RuntimeMessageAgentCluster, V8StructuredClonePayload, deserialize_from_wire,
-        deserialize_message_event_from_wire, serialize_for_wire_for_runtime,
-        serialize_for_wire_for_runtime_message, serialize_for_wire_for_runtime_with_transfers,
-        serialize_for_wire_for_storage,
+        deserialize_message_event_from_wire, serialize_for_wire_for_remote_runtime_message,
+        serialize_for_wire_for_runtime, serialize_for_wire_for_runtime_message,
+        serialize_for_wire_for_runtime_with_transfers, serialize_for_wire_for_storage,
     },
     types::MessagePortId,
     util::{context_host_ptr_from_global_bridge, get_private_value, v8_string, v8str},
@@ -167,6 +167,23 @@ pub(crate) fn structured_serialize_value_for_window_post_message<'s>(
         value,
         transfers,
         source_security,
+        WindowPostMessageTransport::InProcess,
+    )
+}
+
+pub(crate) fn structured_serialize_value_for_remote_window_post_message<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    transfer_arg: Option<v8::Local<'s, v8::Value>>,
+    source_security: RuntimeMessageSourceSecurity,
+) -> Option<V8StructuredClonePayload> {
+    let transfers = parse_window_post_message_transfer_list(scope, transfer_arg)?;
+    structured_serialize_value_for_window_post_message_transfers(
+        scope,
+        value,
+        transfers,
+        source_security,
+        WindowPostMessageTransport::RemoteEndpoint,
     )
 }
 
@@ -182,7 +199,30 @@ pub(crate) fn structured_serialize_value_for_window_post_message_options<'s>(
         value,
         transfers,
         source_security,
+        WindowPostMessageTransport::InProcess,
     )
+}
+
+pub(crate) fn structured_serialize_value_for_remote_window_post_message_options<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    value: v8::Local<'s, v8::Value>,
+    options_arg: v8::Local<'s, v8::Value>,
+    source_security: RuntimeMessageSourceSecurity,
+) -> Option<V8StructuredClonePayload> {
+    let transfers = parse_window_post_message_options_transfer_list(scope, options_arg)?;
+    structured_serialize_value_for_window_post_message_transfers(
+        scope,
+        value,
+        transfers,
+        source_security,
+        WindowPostMessageTransport::RemoteEndpoint,
+    )
+}
+
+#[derive(Clone, Copy)]
+enum WindowPostMessageTransport {
+    InProcess,
+    RemoteEndpoint,
 }
 
 fn structured_serialize_value_for_window_post_message_transfers<'s>(
@@ -190,6 +230,7 @@ fn structured_serialize_value_for_window_post_message_transfers<'s>(
     value: v8::Local<'s, v8::Value>,
     transfers: PostMessageTransferList<'s>,
     source_security: RuntimeMessageSourceSecurity,
+    transport: WindowPostMessageTransport,
 ) -> Option<V8StructuredClonePayload> {
     if is_uncloneable_web_platform_object(scope, value)
         && !transfer_list_contains_stream_value(value, &transfers)
@@ -201,15 +242,28 @@ fn structured_serialize_value_for_window_post_message_transfers<'s>(
         );
         return None;
     }
-    let mut payload = serialize_for_wire_for_runtime_message(
-        scope,
-        value,
-        &transfers.array_buffers,
-        &transfers.message_ports,
-        &transfers.readable_streams,
-        &transfers.writable_streams,
-        &transfers.transform_streams,
-    )?;
+    let mut payload = match transport {
+        WindowPostMessageTransport::InProcess => serialize_for_wire_for_runtime_message(
+            scope,
+            value,
+            &transfers.array_buffers,
+            &transfers.message_ports,
+            &transfers.readable_streams,
+            &transfers.writable_streams,
+            &transfers.transform_streams,
+        ),
+        WindowPostMessageTransport::RemoteEndpoint => {
+            serialize_for_wire_for_remote_runtime_message(
+                scope,
+                value,
+                &transfers.array_buffers,
+                &transfers.message_ports,
+                &transfers.readable_streams,
+                &transfers.writable_streams,
+                &transfers.transform_streams,
+            )
+        }
+    }?;
     attach_runtime_message_source(&mut payload, source_security);
     Some(payload)
 }
@@ -290,6 +344,9 @@ pub(crate) fn wasm_module_message_allowed_for_target(
 ) -> bool {
     if !payload.metadata.contains_wasm_module || !payload.metadata.origin_check_required {
         return true;
+    }
+    if payload.metadata.remote_agent_cluster_mismatch {
+        return false;
     }
     if payload.metadata.locked_to_sender_agent_cluster
         && payload.metadata.sender_agent_cluster != Some(target_agent_cluster)
@@ -686,6 +743,7 @@ mod tests {
             contains_wasm_module: true,
             origin_check_required: true,
             locked_to_sender_agent_cluster: true,
+            remote_agent_cluster_mismatch: false,
             sender_agent_cluster: Some(RuntimeMessageAgentCluster::WindowOrDedicatedWorker),
             sender_origin: Some(sender_origin.to_owned()),
         };
@@ -737,5 +795,16 @@ mod tests {
                 target_agent_cluster,
             ));
         }
+    }
+
+    #[test]
+    fn remote_wasm_message_is_rejected_before_missing_attachment_deserialization() {
+        let mut payload = wasm_message("https://example.test");
+        payload.metadata.remote_agent_cluster_mismatch = true;
+
+        assert!(!wasm_module_message_allowed_for_target_origin(
+            &payload,
+            Some("https://example.test"),
+        ));
     }
 }

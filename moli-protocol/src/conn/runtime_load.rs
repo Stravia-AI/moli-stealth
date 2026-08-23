@@ -30,7 +30,112 @@ use crate::domains::network::{
 
 const BLOCKED_BY_CLIENT_ERROR_TEXT: &str = "net::ERR_BLOCKED_BY_CLIENT";
 const HTTP_RESPONSE_CODE_FAILURE_ERROR_TEXT: &str = "net::ERR_HTTP_RESPONSE_CODE_FAILURE";
+const BLOCKED_BY_RESPONSE_ERROR_TEXT: &str = "net::ERR_BLOCKED_BY_RESPONSE";
 const CAPTURED_RAW_REPLAY_CHUNK_SIZE: usize = 64 * 1024;
+
+#[derive(Clone, Debug)]
+struct BlockedMainDocumentResponse {
+    response_block: moli_core::page::RendererMainDocumentResponseBlock,
+    response_url: Url,
+    status: u16,
+    headers: Vec<(String, String)>,
+    request_cookie_report: Option<moli_cookie_jar::StoredCookieQueryReport>,
+    cookie_set_reports: Vec<moli_cookie_jar::StoredCookieSetReport>,
+    redirect_chain: Vec<moli_fetch::RedirectInfo>,
+    from_cache: bool,
+    negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
+}
+
+impl BlockedMainDocumentResponse {
+    fn sanitize(
+        load_inputs: &TargetNavigationLoadInputs,
+        redirect_chain: &[moli_fetch::RedirectInfo],
+        final_url: &Url,
+        final_status: u16,
+        final_headers: &[(String, String)],
+        final_request_cookie_report: Option<&moli_cookie_jar::StoredCookieQueryReport>,
+        final_cookie_set_reports: &[moli_cookie_jar::StoredCookieSetReport],
+        final_from_cache: bool,
+        final_negotiated_http_version: Option<moli_fetch::NegotiatedHttpVersion>,
+    ) -> Option<Self> {
+        for (index, redirect) in redirect_chain.iter().enumerate() {
+            if let Some(response_block) =
+                load_inputs.main_document_response_block(&redirect.from_url, &redirect.headers)
+            {
+                return Some(Self {
+                    response_block,
+                    response_url: redirect.from_url.clone(),
+                    status: redirect.status,
+                    headers: redirect.headers.clone(),
+                    request_cookie_report: redirect.request_cookie_report.clone(),
+                    cookie_set_reports: redirect.cookie_set_reports.clone(),
+                    redirect_chain: redirect_chain[..index].to_vec(),
+                    from_cache: redirect.from_cache,
+                    negotiated_http_version: redirect.negotiated_http_version,
+                });
+            }
+        }
+        load_inputs
+            .main_document_response_block(final_url, final_headers)
+            .map(|response_block| Self {
+                response_block,
+                response_url: final_url.clone(),
+                status: final_status,
+                headers: final_headers.to_vec(),
+                request_cookie_report: final_request_cookie_report.cloned(),
+                cookie_set_reports: final_cookie_set_reports.to_vec(),
+                redirect_chain: redirect_chain.to_vec(),
+                from_cache: final_from_cache,
+                negotiated_http_version: final_negotiated_http_version,
+            })
+    }
+
+    fn network_progress(
+        &self,
+        request_method: &str,
+        request_headers: &[(String, String)],
+        network_observation_journal: &NetworkObservationJournal,
+        body_progress_source: &MainDocumentBodyProgressSource,
+    ) -> MainDocumentBodyNetworkProgress {
+        let network_extra_info_available = !network_observation_journal.is_empty();
+        body_progress_source.emit_response_metadata(
+            request_method,
+            request_headers,
+            self.request_cookie_report.as_ref(),
+            &self.redirect_chain,
+            &self.response_url,
+            self.status,
+            &self.headers,
+            &self.cookie_set_reports,
+            network_observation_journal,
+            network_extra_info_available,
+            self.from_cache,
+            self.negotiated_http_version,
+        );
+        body_progress_source.emit_body_failed(BLOCKED_BY_RESPONSE_ERROR_TEXT);
+        body_progress_source.body_network_progress_for_completed_events(
+            CompletedMainDocumentNetworkEvents::new(
+                request_method.to_owned(),
+                request_headers.to_vec(),
+                self.request_cookie_report.clone(),
+                self.status,
+                self.headers.clone(),
+                self.cookie_set_reports.clone(),
+                self.redirect_chain
+                    .clone()
+                    .into_iter()
+                    .map(Into::into)
+                    .collect(),
+                network_extra_info_available,
+                self.from_cache,
+            )
+            .with_negotiated_http_version(self.negotiated_http_version)
+            .with_network_observation_journal(network_observation_journal.clone())
+            .with_response_url(self.response_url.clone())
+            .with_loading_failure(BLOCKED_BY_RESPONSE_ERROR_TEXT),
+        )
+    }
+}
 
 fn apply_navigation_request_load_policy(
     load_inputs: TargetNavigationLoadInputs,
@@ -91,13 +196,25 @@ async fn prepare_browser_owned_error_page_navigation_with_engine_async(
     unreachable_url: Url,
     request_method: String,
     request_headers: Vec<(String, String)>,
+    redirect_chain: Vec<moli_fetch::RedirectInfo>,
     error_text: String,
+    response_block: Option<moli_core::page::RendererMainDocumentResponseBlock>,
     body: CapturedBody,
+    body_progress_source: MainDocumentBodyProgressSource,
+    body_network_progress_override: Option<MainDocumentBodyNetworkProgress>,
     reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let error_page_url = Url::parse(NETWORK_ERROR_PAGE_URL)
         .expect("the browser-owned network error page URL must be valid");
-    let error_page = NetworkErrorPageNavigation::new(error_text, unreachable_url.clone());
+    let error_page = if let Some(response_block) = response_block {
+        NetworkErrorPageNavigation::blocked_by_response(
+            error_text.clone(),
+            unreachable_url.clone(),
+            response_block,
+        )
+    } else {
+        NetworkErrorPageNavigation::new(error_text.clone(), unreachable_url.clone())
+    };
     let head = ResponseHead {
         final_url: error_page_url,
         status: 200,
@@ -107,11 +224,28 @@ async fn prepare_browser_owned_error_page_navigation_with_engine_async(
         )],
         request_cookie_report: None,
         cookie_set_reports: Vec::new(),
-        redirected: false,
-        redirect_chain: Vec::new(),
+        redirected: !redirect_chain.is_empty(),
+        redirect_chain,
         from_cache: false,
         negotiated_http_version: None,
     };
+    let network_observation_journal = NetworkObservationJournal::default();
+    if body_network_progress_override.is_none() {
+        body_progress_source.emit_response_metadata(
+            &request_method,
+            &request_headers,
+            head.request_cookie_report.as_ref(),
+            &head.redirect_chain,
+            &head.final_url,
+            head.status,
+            &head.headers,
+            &head.cookie_set_reports,
+            &network_observation_journal,
+            false,
+            head.from_cache,
+            head.negotiated_http_version,
+        );
+    }
     prepare_captured_document_response_with_engine_async(
         engine,
         page_reservation,
@@ -122,8 +256,9 @@ async fn prepare_browser_owned_error_page_navigation_with_engine_async(
         request_headers,
         head,
         body,
-        MainDocumentBodyProgressSource::default(),
-        NetworkObservationJournal::default(),
+        body_progress_source,
+        body_network_progress_override,
+        network_observation_journal,
         Some(error_page),
         true,
         reply_boundary,
@@ -140,7 +275,11 @@ async fn prepare_network_error_page_navigation_with_engine_async(
     unreachable_url: Url,
     request_method: String,
     request_headers: Vec<(String, String)>,
+    redirect_chain: Vec<moli_fetch::RedirectInfo>,
     error_text: String,
+    response_block: Option<moli_core::page::RendererMainDocumentResponseBlock>,
+    body_progress_source: MainDocumentBodyProgressSource,
+    body_network_progress_override: Option<MainDocumentBodyNetworkProgress>,
     reply_boundary: RendererReplyBoundary,
 ) -> Result<NavigationLoadOutcome, String> {
     let body = CapturedBody::from_string(network_error_page_html(&unreachable_url, &error_text));
@@ -152,8 +291,12 @@ async fn prepare_network_error_page_navigation_with_engine_async(
         unreachable_url,
         request_method,
         request_headers,
+        redirect_chain,
         error_text,
+        response_block,
         body,
+        body_progress_source,
+        body_network_progress_override,
         reply_boundary,
     )
     .await
@@ -661,8 +804,15 @@ impl ResponseCommitReady {
                     self.requested_url
                 )
             })?;
-            self.body_progress_source
-                .emit_body_finished(captured_body.len());
+            if self
+                .network_error_page
+                .as_ref()
+                .and_then(NetworkErrorPageNavigation::response_block)
+                .is_none()
+            {
+                self.body_progress_source
+                    .emit_body_finished(captured_body.len());
+            }
             CompletedDocumentProgressTransfer::new_captured(
                 captured_body,
                 self.synthetic_body,
@@ -1151,6 +1301,7 @@ impl BackgroundNavigationLoadJob {
                     self.body,
                     self.request_headers.clone(),
                     None,
+                    Some(self.load_inputs.redirect_response_follow_policy()),
                     self.cancellation.clone(),
                 )
                 .await;
@@ -1162,6 +1313,10 @@ impl BackgroundNavigationLoadJob {
                             .request_context()
                             .map(|request_context| request_context.current_url().clone())
                             .unwrap_or_else(|| requested_url.clone());
+                        let redirect_chain = failure
+                            .request_context()
+                            .map(|request_context| request_context.redirect_chain().to_vec())
+                            .unwrap_or_default();
                         if let Some(request_context) = failure.request_context() {
                             self.body_progress_source.emit_failed_request_progress(
                                 request_context.request_method(),
@@ -1192,7 +1347,11 @@ impl BackgroundNavigationLoadJob {
                             unreachable_url,
                             self.method,
                             self.request_headers,
+                            redirect_chain,
                             failure.network_error_text().to_owned(),
+                            None,
+                            MainDocumentBodyProgressSource::default(),
+                            None,
                             RendererReplyBoundary::DocumentCommit,
                         )
                         .await;
@@ -1444,6 +1603,7 @@ async fn load_inline_html_navigation_with_engine_async(
                 head,
                 CapturedBody::from_string(html),
                 MainDocumentBodyProgressSource::default(),
+                None,
                 NetworkObservationJournal::default(),
                 None,
                 true,
@@ -1486,6 +1646,7 @@ async fn load_data_url_navigation_with_engine_async(
                 head,
                 body,
                 MainDocumentBodyProgressSource::default(),
+                None,
                 NetworkObservationJournal::default(),
                 None,
                 false,
@@ -1541,6 +1702,41 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
         .into_iter()
         .map(Into::into)
         .collect::<Vec<_>>();
+    if let Some(blocked_response) = BlockedMainDocumentResponse::sanitize(
+        load_inputs,
+        &response.redirect_chain,
+        &final_url,
+        response_status,
+        &response_headers,
+        initial_request_cookie_report.as_ref(),
+        &response_cookie_reports,
+        response_from_cache,
+        negotiated_http_version,
+    ) {
+        let body_network_progress = blocked_response.network_progress(
+            &request_method,
+            &request_headers,
+            &network_observation_journal,
+            &body_progress_source,
+        );
+        drop(response);
+        return prepare_network_error_page_navigation_with_engine_async(
+            engine,
+            page_reservation,
+            stable_page_target,
+            load_inputs,
+            blocked_response.response_url.clone(),
+            request_method,
+            request_headers,
+            blocked_response.redirect_chain,
+            BLOCKED_BY_RESPONSE_ERROR_TEXT.to_owned(),
+            Some(blocked_response.response_block),
+            body_progress_source,
+            Some(body_network_progress),
+            reply_boundary,
+        )
+        .await;
+    }
     let network_events = CompletedMainDocumentNetworkEvents::new(
         request_method.clone(),
         request_headers.clone(),
@@ -1628,8 +1824,12 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
                     final_url,
                     request_method,
                     request_headers,
+                    response.redirect_chain.clone(),
                     HTTP_RESPONSE_CODE_FAILURE_ERROR_TEXT.to_owned(),
+                    None,
                     body,
+                    body_progress_source_for_body_finish,
+                    Some(body_network_progress_state),
                     reply_boundary,
                 )
                 .await
@@ -1666,7 +1866,7 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
             .map_err(|error| format!("failed to materialize XML page body: {error}"))?;
         let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
-            .main_document_commit_for_final_url(&final_url, None)
+            .main_document_commit_for_final_url(&final_url, None, redirect_chain.clone())
             .map(Arc::new);
         let prepared_page = engine
             .prepare_document_page_from_response_with_storage_and_inspector_session_restores_async(
@@ -1740,7 +1940,7 @@ async fn build_navigation_from_streaming_raw_response_with_engine_async(
     let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(body_rx, completion_rx);
     let page_storage = load_inputs.page_storage_handles();
     let main_document_commit = load_inputs
-        .main_document_commit_for_final_url(&final_url, None)
+        .main_document_commit_for_final_url(&final_url, None, redirect_chain.clone())
         .map(Arc::new);
     let prepared_future = engine
         .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(
@@ -1954,6 +2154,22 @@ impl CdpConnection {
         network_observation_journal: &NetworkObservationJournal,
         body_progress_source: MainDocumentBodyProgressSource,
     ) -> Result<Option<PausedResponsePreparedDocument>, String> {
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        if BlockedMainDocumentResponse::sanitize(
+            &load_inputs,
+            &response.redirect_chain,
+            &response.final_url,
+            response.status,
+            &response.headers,
+            response.request_cookie_report.as_ref(),
+            &response.cookie_set_reports,
+            response.from_cache,
+            response.negotiated_http_version,
+        )
+        .is_some()
+        {
+            return Ok(None);
+        }
         if response_status_prevents_document_commit(response.status)
             || super::downloads::response_headers_indicate_download(&response.headers)
             || response_headers_indicate_xml_document(&response.headers)
@@ -1961,7 +2177,6 @@ impl CdpConnection {
         {
             return Ok(None);
         }
-        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         if load_inputs.browser_context_id.is_none() {
             return Ok(None);
         }
@@ -2017,7 +2232,7 @@ impl CdpConnection {
             load_inputs.fetch_subresource_interception;
         let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
-            .main_document_commit_for_final_url(&final_url, None)
+            .main_document_commit_for_final_url(&final_url, None, redirect_chain.clone())
             .map(Arc::new);
         let page_reservation = self
             .start_navigation_renderer_page_reservation_for_session_owner(
@@ -2303,7 +2518,11 @@ impl CdpConnection {
         let page_owner = self
             .pending_target_page_residence_identity_for_session(session_id)
             .ok_or_else(|| "initial document Page reservation lost its target owner".to_owned())?;
-        self.bind_renderer_page_output_owner(renderer_page, page_owner);
+        self.bind_renderer_page_output_owner_reservation(
+            renderer_page,
+            page_reservation.output_owner_reservation_id(),
+            page_owner,
+        );
         let pending = engine
             .start_build_html_page_from_response_with_storage_and_inspector_session_restores(
                 page_reservation,
@@ -2912,7 +3131,11 @@ impl CdpConnection {
                 };
                 *engine = replacement_engine;
             }
-            self.bind_renderer_page_output_owner(renderer_page, target_page.clone());
+            self.bind_renderer_page_output_owner_reservation(
+                renderer_page,
+                pending.output_owner_reservation_id(),
+                target_page.clone(),
+            );
             return NavigationRendererPageReservation::StableReplacement {
                 pending,
                 target: StablePageNavigationCommitTarget {
@@ -2961,7 +3184,11 @@ impl CdpConnection {
             let page_owner = self
                 .reserve_target_page_residence_identity_for_session(session_id, renderer_page)
                 .expect("navigation Page reservation must retain its target owner");
-            self.bind_renderer_page_output_owner(renderer_page, page_owner);
+            self.bind_renderer_page_output_owner_reservation(
+                renderer_page,
+                page_reservation.output_owner_reservation_id(),
+                page_owner,
+            );
         }
     }
 
@@ -3281,6 +3508,7 @@ impl CdpConnection {
                 request_headers,
                 response_status,
                 response_headers,
+                Vec::new(),
                 CapturedBody::from_string(response_body),
                 initial_request_cookie_report,
                 NetworkObservationJournal::default(),
@@ -3348,6 +3576,7 @@ impl CdpConnection {
         final_url: Url,
         response_status: u16,
         response_headers: Vec<(String, String)>,
+        redirect_chain: Vec<moli_fetch::RedirectInfo>,
         response_body: CapturedBody,
         initial_request_cookie_report: Option<StoredCookieQueryReport>,
         network_observation_journal: NetworkObservationJournal,
@@ -3363,6 +3592,7 @@ impl CdpConnection {
             navigation.request_headers.clone(),
             response_status,
             response_headers,
+            redirect_chain,
             response_body,
             initial_request_cookie_report,
             network_observation_journal,
@@ -3382,6 +3612,7 @@ impl CdpConnection {
         request_headers: Vec<(String, String)>,
         response_status: u16,
         response_headers: Vec<(String, String)>,
+        redirect_chain: Vec<moli_fetch::RedirectInfo>,
         response_body: CapturedBody,
         initial_request_cookie_report: Option<StoredCookieQueryReport>,
         network_observation_journal: NetworkObservationJournal,
@@ -3395,8 +3626,8 @@ impl CdpConnection {
             headers: response_headers,
             request_cookie_report: initial_request_cookie_report,
             cookie_set_reports: response_cookie_reports,
-            redirected: false,
-            redirect_chain: Vec::new(),
+            redirected: !redirect_chain.is_empty(),
+            redirect_chain,
             from_cache: false,
             negotiated_http_version: None,
         };
@@ -3432,7 +3663,7 @@ impl CdpConnection {
             load_inputs.fetch_subresource_interception;
         let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
-            .main_document_commit_for_final_url(&requested_url, None)
+            .main_document_commit_for_final_url(&requested_url, None, Vec::new())
             .map(Arc::new);
         let built = self
             .engine
@@ -3548,6 +3779,7 @@ impl CdpConnection {
                 body,
                 request_headers,
                 auth,
+                Some(load_inputs.redirect_response_follow_policy()),
             )
             .await
             .map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
@@ -3584,6 +3816,8 @@ impl CdpConnection {
             request = request
                 .with_referrer_policies(None, load_inputs.navigation_referrer_policy.clone());
         }
+        request = request
+            .with_redirect_response_follow_policy(load_inputs.redirect_response_follow_policy());
         request.set_auth(Some(auth.into()));
 
         let loader = self
@@ -3660,6 +3894,8 @@ impl CdpConnection {
             request = request
                 .with_referrer_policies(None, load_inputs.navigation_referrer_policy.clone());
         }
+        request = request
+            .with_redirect_response_follow_policy(load_inputs.redirect_response_follow_policy());
         request.set_auth(auth.map(Into::into));
 
         let loader = self
@@ -3720,7 +3956,7 @@ impl CdpConnection {
             .collect();
         let page_storage = load_inputs.page_storage_handles();
         let main_document_commit = load_inputs
-            .main_document_commit_for_final_url(&final_url, None)
+            .main_document_commit_for_final_url(&final_url, None, redirect_chain.clone())
             .map(Arc::new);
         let built = self
             .engine
@@ -3880,19 +4116,6 @@ impl CdpConnection {
     ) -> Result<NavigationLoadOutcome, String> {
         let (response, network_observation_journal) =
             response.into_parts_with_observation_journal();
-        if !response_status_prevents_document_commit(response.status)
-            && super::downloads::response_headers_indicate_download(&response.headers)
-        {
-            return Ok(NavigationLoadOutcome::download(
-                self.build_download_from_raw_response(
-                    request_method,
-                    request_headers,
-                    response,
-                    network_observation_journal,
-                ),
-            ));
-        }
-
         let head = response.head();
         let body = CapturedBody::from_bytes(response.clone_body_bytes());
         self.build_navigation_from_captured_raw_response_with_load_inputs_async(
@@ -3945,6 +4168,78 @@ impl CdpConnection {
         network_observation_journal: NetworkObservationJournal,
         body_progress_source: MainDocumentBodyProgressSource,
     ) -> Result<NavigationLoadOutcome, String> {
+        if let Some(blocked_response) = BlockedMainDocumentResponse::sanitize(
+            load_inputs,
+            &head.redirect_chain,
+            &head.final_url,
+            head.status,
+            &head.headers,
+            head.request_cookie_report.as_ref(),
+            &head.cookie_set_reports,
+            head.from_cache,
+            head.negotiated_http_version,
+        ) {
+            let body_network_progress = blocked_response.network_progress(
+                &request_method,
+                &request_headers,
+                &network_observation_journal,
+                &body_progress_source,
+            );
+            if load_inputs.browser_context_id.is_none() {
+                let page_reservation = self.engine.reserve_page_for_creation();
+                return prepare_network_error_page_navigation_with_engine_async(
+                    &mut self.engine,
+                    page_reservation,
+                    None,
+                    load_inputs,
+                    blocked_response.response_url.clone(),
+                    request_method,
+                    request_headers,
+                    blocked_response.redirect_chain,
+                    BLOCKED_BY_RESPONSE_ERROR_TEXT.to_owned(),
+                    Some(blocked_response.response_block),
+                    body_progress_source,
+                    Some(body_network_progress),
+                    RendererReplyBoundary::Stage,
+                )
+                .await;
+            }
+
+            let mut engine = self.background_navigation_engine_for_load_inputs(load_inputs);
+            let page_reservation = self
+                .start_navigation_renderer_page_reservation_for_session_owner(
+                    session_id,
+                    load_inputs,
+                    &mut engine,
+                )
+                .resolve()
+                .await?;
+            let navigation = prepare_network_error_page_navigation_with_engine_async(
+                &mut engine,
+                page_reservation.token,
+                page_reservation.stable_replacement,
+                load_inputs,
+                blocked_response.response_url.clone(),
+                request_method,
+                request_headers,
+                blocked_response.redirect_chain,
+                BLOCKED_BY_RESPONSE_ERROR_TEXT.to_owned(),
+                Some(blocked_response.response_block),
+                body_progress_source,
+                Some(body_network_progress),
+                RendererReplyBoundary::Stage,
+            )
+            .await?;
+            return Ok(match navigation {
+                NavigationLoadOutcome::ResponseCommitReady(navigation) => {
+                    NavigationLoadOutcome::response_commit_ready(
+                        navigation.with_navigation_engine(engine),
+                    )
+                }
+                navigation => navigation,
+            });
+        }
+
         if response_status_prevents_document_commit(head.status) {
             let network_extra_info_available = !network_observation_journal.is_empty();
             body_progress_source.emit_response_metadata(
@@ -4009,6 +4304,7 @@ impl CdpConnection {
                 head,
                 body,
                 body_progress_source,
+                None,
                 network_observation_journal,
                 None,
                 false,
@@ -4038,6 +4334,7 @@ impl CdpConnection {
             head,
             body,
             body_progress_source,
+            None,
             network_observation_journal,
             None,
             false,
@@ -4282,16 +4579,14 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
     head: ResponseHead,
     body: CapturedBody,
     body_progress_source: MainDocumentBodyProgressSource,
+    body_network_progress_override: Option<MainDocumentBodyNetworkProgress>,
     network_observation_journal: NetworkObservationJournal,
     network_error_page: Option<NetworkErrorPageNavigation>,
     synthetic_body: bool,
     reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let network_extra_info_available = !network_observation_journal.is_empty();
-    if network_error_page.is_none()
-        && response_status_may_use_http_error_page(head.status)
-        && body.len() == 0
-    {
+    if body_network_progress_override.is_none() {
         body_progress_source.emit_response_metadata(
             &request_method,
             &request_headers,
@@ -4306,8 +4601,30 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
             head.from_cache,
             head.negotiated_http_version,
         );
+    }
+    if network_error_page.is_none()
+        && response_status_may_use_http_error_page(head.status)
+        && body.len() == 0
+    {
         let status = head.status;
-        let unreachable_url = head.final_url;
+        let unreachable_url = head.final_url.clone();
+        let redirect_chain = head.redirect_chain.clone();
+        let body_network_progress = body_progress_source
+            .body_network_progress_for_completed_events(
+                CompletedMainDocumentNetworkEvents::new(
+                    request_method.clone(),
+                    request_headers.clone(),
+                    head.request_cookie_report.clone(),
+                    head.status,
+                    head.headers.clone(),
+                    head.cookie_set_reports.clone(),
+                    redirect_chain.clone().into_iter().map(Into::into).collect(),
+                    network_extra_info_available,
+                    head.from_cache,
+                )
+                .with_negotiated_http_version(head.negotiated_http_version)
+                .with_network_observation_journal(network_observation_journal.clone()),
+            );
         let body = CapturedBody::from_string(http_error_page_html(&unreachable_url, status));
         return prepare_browser_owned_error_page_navigation_with_engine_async(
             engine,
@@ -4317,8 +4634,12 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
             unreachable_url,
             request_method,
             request_headers,
+            redirect_chain,
             HTTP_RESPONSE_CODE_FAILURE_ERROR_TEXT.to_owned(),
+            None,
             body,
+            body_progress_source,
+            Some(body_network_progress),
             reply_boundary,
         )
         .await;
@@ -4334,6 +4655,7 @@ async fn prepare_navigation_from_captured_raw_response_with_engine_async(
         head,
         body,
         body_progress_source,
+        body_network_progress_override,
         network_observation_journal,
         network_error_page,
         synthetic_body,
@@ -4354,26 +4676,13 @@ async fn prepare_captured_document_response_with_engine_async(
     head: ResponseHead,
     body: CapturedBody,
     body_progress_source: MainDocumentBodyProgressSource,
+    body_network_progress_override: Option<MainDocumentBodyNetworkProgress>,
     network_observation_journal: NetworkObservationJournal,
     network_error_page: Option<NetworkErrorPageNavigation>,
     synthetic_body: bool,
     reply_boundary: RendererReplyBoundary,
 ) -> Result<ResponseCommitReady, String> {
     let network_extra_info_available = !network_observation_journal.is_empty();
-    body_progress_source.emit_response_metadata(
-        &request_method,
-        &request_headers,
-        head.request_cookie_report.as_ref(),
-        &head.redirect_chain,
-        &head.final_url,
-        head.status,
-        &head.headers,
-        &head.cookie_set_reports,
-        &network_observation_journal,
-        network_extra_info_available,
-        head.from_cache,
-        head.negotiated_http_version,
-    );
     let (fetch_subresource_interception_enabled, fetch_subresource_interception_resource_type) =
         load_inputs.fetch_subresource_interception;
     let response_from_cache = head.from_cache;
@@ -4389,8 +4698,8 @@ async fn prepare_captured_document_response_with_engine_async(
         .into_iter()
         .map(Into::into)
         .collect::<Vec<_>>();
-    let body_network_progress_state = body_progress_source
-        .body_network_progress_for_completed_events(
+    let body_network_progress_state = body_network_progress_override.unwrap_or_else(|| {
+        body_progress_source.body_network_progress_for_completed_events(
             CompletedMainDocumentNetworkEvents::new(
                 request_method.clone(),
                 request_headers.clone(),
@@ -4404,14 +4713,19 @@ async fn prepare_captured_document_response_with_engine_async(
             )
             .with_negotiated_http_version(negotiated_http_version)
             .with_network_observation_journal(network_observation_journal),
-        );
+        )
+    });
 
     let (body_tx, body_rx) = mpsc::channel(EXTERNAL_RAW_BODY_CHANNEL_CAPACITY);
     let (completion_tx, completion_rx) = oneshot::channel();
     let raw_body = moli_core::runtime::ExternalRawDocumentBodyStream::new(body_rx, completion_rx);
     let page_storage = load_inputs.page_storage_handles();
     let main_document_commit = load_inputs
-        .main_document_commit_for_final_url(&final_url, network_error_page.as_ref())
+        .main_document_commit_for_final_url(
+            &final_url,
+            network_error_page.as_ref(),
+            redirect_chain.clone(),
+        )
         .map(Arc::new);
     let prepared_future = engine
         .prepare_streaming_raw_page_from_external_body_with_storage_and_inspector_session_restores_async(

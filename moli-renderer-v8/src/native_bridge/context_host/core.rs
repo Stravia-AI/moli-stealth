@@ -90,6 +90,10 @@ impl JsContextHost {
         self.top_level_page_active = environment.top_level_page_is_active();
         self.dom_host()
             .set_page_focused(environment.top_level_page_is_focused());
+        environment.replicate_current_top_level_document(
+            self.document_url(),
+            &self.main_document_serialized_origin,
+        );
         self.page_script_environment = Some(environment);
     }
 
@@ -111,6 +115,59 @@ impl JsContextHost {
         self.page_script_environment
             .as_ref()
             .map(crate::script_vm::RendererPageScriptEnvironment::top_level_page_residence)
+    }
+
+    pub(crate) fn top_level_window_proxy_endpoint_id(
+        &self,
+    ) -> Option<crate::browsing_context_model::TopLevelWindowProxyEndpointId> {
+        self.page_script_environment.as_ref().map(
+            crate::script_vm::RendererPageScriptEnvironment::top_level_window_proxy_endpoint_id,
+        )
+    }
+
+    pub(crate) fn remote_window_proxy_channel(
+        &self,
+    ) -> Option<crate::runtime::RendererRemoteWindowProxyChannel> {
+        self.page_script_environment
+            .as_ref()
+            .map(crate::script_vm::RendererPageScriptEnvironment::remote_window_proxy_channel)
+    }
+
+    pub(crate) fn related_page_remote_frame_tree_snapshot(
+        &self,
+        endpoint: crate::browsing_context_model::TopLevelWindowProxyEndpointId,
+    ) -> Option<Vec<crate::script_vm::RendererRemoteFrameSnapshot>> {
+        self.page_script_environment
+            .as_ref()?
+            .remote_frame_tree_snapshot(endpoint)
+    }
+
+    pub(crate) fn remote_window_proxy_source(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+    ) -> Option<crate::runtime::RendererRemoteWindowProxySource> {
+        let source = crate::runtime::RendererRemoteWindowProxySource::new(
+            self.top_level_window_proxy_endpoint_id()?,
+            self.top_level_page_residence()?,
+            self.main_document_serialized_origin.clone(),
+        );
+        let source_scope = self
+            .current_runtime_window_execution_context_identity(scope)
+            .map(WindowExecutionContextIdentity::dispatch_scope)
+            .unwrap_or(OwnerDispatchScope::Top);
+        let OwnerDispatchScope::Child(handle) = source_scope else {
+            return Some(source);
+        };
+        let frame = crate::script_vm::RendererRemoteFrameToken {
+            endpoint: self.top_level_window_proxy_endpoint_id()?,
+            root_document: self.root_document_lifecycle_identity()?,
+            browsing_context_id: self.child_browsing_context_id_for_handle(handle)?,
+        };
+        Some(source.with_frame(frame, self.child_browsing_context_window_origin(handle)?))
+    }
+
+    pub(crate) fn top_level_serialized_origin(&self) -> &str {
+        &self.main_document_serialized_origin
     }
 
     pub(crate) fn set_top_level_page_activation(
@@ -178,19 +235,12 @@ impl JsContextHost {
             .related_page_named_target_for_navigation(scope, name, replacement_opener)
     }
 
-    pub(crate) fn related_page_top_level_targets_for_navigation<'s>(
+    pub(crate) fn related_page_top_level_targets_for_navigation(
         &self,
-        scope: &mut v8::PinScope<'s, '_>,
-    ) -> Vec<(
-        v8::Local<'s, v8::Object>,
-        v8::Local<'s, v8::Context>,
-        crate::RendererResolvedPopupTarget,
-        String,
-        bool,
-    )> {
+    ) -> Vec<crate::script_vm::RendererRelatedPageTopLevelNavigationTarget> {
         self.page_script_environment
             .as_ref()
-            .map(|environment| environment.related_page_top_level_targets_for_navigation(scope))
+            .map(|environment| environment.related_page_top_level_targets_for_navigation())
             .unwrap_or_default()
     }
 
@@ -202,6 +252,16 @@ impl JsContextHost {
         self.page_script_environment
             .as_ref()?
             .related_page_current_context_for_residence(scope, residence)
+    }
+
+    pub(crate) fn related_page_target_for_window_proxy_endpoint<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        endpoint: crate::browsing_context_model::TopLevelWindowProxyEndpointId,
+    ) -> Option<crate::script_vm::RendererRelatedTopLevelWindowProxyResolution<'s>> {
+        self.page_script_environment
+            .as_ref()?
+            .related_page_target_for_window_proxy_endpoint(scope, endpoint)
     }
 
     pub(crate) fn replace_related_page_top_level_opener<'s>(
@@ -231,14 +291,12 @@ impl JsContextHost {
             .is_some_and(crate::script_vm::RendererPageScriptEnvironment::opened_by_dom)
     }
 
-    pub(crate) fn current_top_level_cross_origin_opener_policy_value(
+    pub(crate) fn current_top_level_cross_origin_opener_policy(
         &self,
-    ) -> crate::cross_origin_isolation::CrossOriginOpenerPolicyValue {
+    ) -> Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy> {
         self.page_script_environment
             .as_ref()
             .and_then(|environment| environment.current_top_level_cross_origin_opener_policy())
-            .map(|policy| policy.value())
-            .unwrap_or_default()
     }
 
     pub(crate) fn allow_scripts_to_close_windows(&self) -> bool {
@@ -605,6 +663,7 @@ impl JsContextHost {
             next_child_document_load_id: 0,
             next_child_classic_script_load_id: 0,
             pending_child_document_navigations: HashMap::new(),
+            pending_remote_frame_navigations: HashMap::new(),
             document_resource_loaders: DocumentResourceLoaderRegistry::default(),
             web_storage_store: new_shared_web_storage_store(),
             session_storage_store: new_shared_web_storage_store(),
@@ -853,17 +912,20 @@ impl JsContextHost {
 
     pub(crate) fn commit_top_level_cross_origin_opener_policy(
         &self,
-        value: crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
-    ) {
+        commit: crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit,
+        document_referrer: String,
+    ) -> Vec<moli_fetch::Request> {
         if let Some(environment) = self.page_script_environment.as_ref() {
-            environment.commit_top_level_cross_origin_opener_policy(
-                crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy::new(
-                    value,
-                    self.main_document_serialized_origin.clone(),
-                    self.root_document_is_initial_empty,
-                ),
+            let (state, reports) = commit.resolve_for_document(
+                self.document_url(),
+                self.main_document_serialized_origin.clone(),
+                document_referrer,
+                self.root_document_is_initial_empty,
             );
+            environment.commit_top_level_cross_origin_opener_policy(state);
+            return reports;
         }
+        Vec::new()
     }
 
     fn refresh_top_level_cross_origin_opener_policy_initial_state(&self) {
@@ -873,7 +935,11 @@ impl JsContextHost {
         let Some(current) = environment.current_top_level_cross_origin_opener_policy() else {
             return;
         };
-        self.commit_top_level_cross_origin_opener_policy(current.value());
+        let document_referrer = current.document_referrer().to_owned();
+        let _ = self.commit_top_level_cross_origin_opener_policy(
+            crate::cross_origin_isolation::CrossOriginOpenerPolicyCommit::Inherited(current),
+            document_referrer,
+        );
     }
 
     /// Returns the exact root Document that owns Page-scoped protocol

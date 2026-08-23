@@ -2435,7 +2435,9 @@ async fn stale_initial_document_page_build_does_not_overwrite_committed_page() {
         security_origin: "null".to_owned(),
         secure_context_type: "InsecureScheme".to_owned(),
         timestamp: 0.0,
+        navigation_redirect_chain: Vec::new(),
         auxiliary_browsing_context_policy: None,
+        response_block: None,
     };
     conn.commit_loaded_navigation_target_identity_for_session_owner(
         None,

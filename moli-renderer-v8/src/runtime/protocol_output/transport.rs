@@ -10,6 +10,7 @@ use super::{
     RendererOutputCursor, RendererOutputFenceLeaseId, RendererOutputPublication,
     RendererOutputResidenceIdentity, RendererOutputStreamControl, RendererOutputStreamIdentity,
 };
+use crate::runtime::RendererPageOutputOwnerReservationId;
 use crate::runtime::{PageId, RendererOwnerLocalHostId};
 
 const DEFAULT_MAX_PENDING_MESSAGES: usize = 2_048;
@@ -36,6 +37,7 @@ pub enum RendererOutputTransportMessage {
     PageReservationReleased {
         owner_local_host_id: RendererOwnerLocalHostId,
         page_id: PageId,
+        reservation_id: RendererPageOutputOwnerReservationId,
     },
     /// Declares that a cursor is leaving the concrete transport on an
     /// independent command/navigation completion channel.
@@ -55,10 +57,12 @@ impl RendererOutputTransportMessage {
     pub(crate) fn page_reservation_released(
         owner_local_host_id: RendererOwnerLocalHostId,
         page_id: PageId,
+        reservation_id: RendererPageOutputOwnerReservationId,
     ) -> Self {
         Self::PageReservationReleased {
             owner_local_host_id,
             page_id,
+            reservation_id,
         }
     }
 
@@ -71,6 +75,7 @@ impl RendererOutputTransportMessage {
             Self::PageReservationReleased {
                 owner_local_host_id,
                 page_id,
+                ..
             } => RendererOutputResidenceIdentity::Page {
                 owner_local_host_id: *owner_local_host_id,
                 page_id: *page_id,

@@ -3611,7 +3611,7 @@ async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_reques
                     && message["params"]["frameId"] == json!(target_id)
             })
             .await;
-            ctx.process_async(json!({
+            ctx.process_and_wait_for_response_async(json!({
                 "id": 15125,
                 "sessionId": session_id,
                 "method": "Runtime.evaluate",

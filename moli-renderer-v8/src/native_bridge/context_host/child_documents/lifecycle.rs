@@ -423,6 +423,7 @@ impl JsContextHost {
             document_load_delay_token = ?expected.document_load_delay_token(),
             "settled child navigation without load dispatch"
         );
+        self.clear_pending_remote_frame_navigation_for_load(expected);
         self.note_lightweight_popup_child_frame_load_finished(child_handle);
         let released_parent = self
             .frame_owner_store
@@ -468,6 +469,7 @@ impl JsContextHost {
             );
             return false;
         };
+        self.clear_pending_remote_frame_navigation_for_load(expected);
         if queue_document_complete {
             let _ = self
                 .queue_child_document_complete_lifecycle_if_ready_for_owner(child_handle, owner);

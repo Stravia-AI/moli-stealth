@@ -16,8 +16,8 @@ use crate::{
 use anyhow::{Context, Result, anyhow};
 use moli_cookie_jar::{SharedBrowserCookieStore, new_shared_browser_cookie_store};
 use moli_fetch::{
-    BrowserNavigationRequestKind, FetchCancelHandle, FetchConfig, NetworkFetchResult, Request,
-    StreamingRawResponse, ensure_http_status_success,
+    BrowserNavigationRequestKind, FetchCancelHandle, FetchConfig, NetworkFetchResult,
+    RedirectResponseFollowPolicy, Request, StreamingRawResponse, ensure_http_status_success,
 };
 use moli_page_types::{LayoutPolicy, OptionalResourceFetchMask};
 use moli_renderer_v8::{
@@ -964,6 +964,7 @@ impl NavigationEngine {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        redirect_response_follow_policy: Option<RedirectResponseFollowPolicy>,
     ) -> Result<NetworkFetchResult<NavigationResponse>> {
         let mut request = Request::new_bytes(method, raw_url, body, request_headers)
             .map(|request| {
@@ -979,6 +980,9 @@ impl NavigationEngine {
                 }
             })
             .context("failed to build request")?;
+        if let Some(policy) = redirect_response_follow_policy {
+            request = request.with_redirect_response_follow_policy(policy);
+        }
         request.set_auth(auth.map(Into::into));
         let navigation_loader = self.navigation_resource_loader(
             cookie_store,
@@ -1002,6 +1006,7 @@ impl NavigationEngine {
         body: Option<String>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        redirect_response_follow_policy: Option<RedirectResponseFollowPolicy>,
     ) -> Result<NetworkFetchResult<NavigationResponse>> {
         let cookie_store = storage.into_cookie_store();
         self.fetch_navigation_response_async(
@@ -1014,6 +1019,7 @@ impl NavigationEngine {
             body.map(String::into_bytes),
             request_headers,
             auth,
+            redirect_response_follow_policy,
         )
         .await
     }
@@ -1030,6 +1036,7 @@ impl NavigationEngine {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        redirect_response_follow_policy: Option<RedirectResponseFollowPolicy>,
         cancel_handle: FetchCancelHandle,
     ) -> Result<NavigationStreamingRawResponse> {
         let mut request = Request::new_bytes(method, raw_url, body, request_headers)
@@ -1050,6 +1057,9 @@ impl NavigationEngine {
                 }
             })
             .context("failed to build request")?;
+        if let Some(policy) = redirect_response_follow_policy {
+            request = request.with_redirect_response_follow_policy(policy);
+        }
         request.set_auth(auth.map(Into::into));
         let navigation_loader =
             self.navigation_resource_loader(cookie_store, request.url.clone(), cancel_handle)?;
@@ -1095,6 +1105,7 @@ impl NavigationEngine {
         body: Option<String>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        redirect_response_follow_policy: Option<RedirectResponseFollowPolicy>,
     ) -> Result<NavigationStreamingRawResponse> {
         let cookie_store = storage.into_cookie_store();
         self.fetch_navigation_streaming_raw_response_async(
@@ -1108,6 +1119,7 @@ impl NavigationEngine {
             body.map(String::into_bytes),
             request_headers,
             auth,
+            redirect_response_follow_policy,
             FetchCancelHandle::new(),
         )
         .await
@@ -1126,6 +1138,7 @@ impl NavigationEngine {
         body: Option<Vec<u8>>,
         request_headers: Vec<(String, String)>,
         auth: Option<SubresourceAuthCredentials>,
+        redirect_response_follow_policy: Option<RedirectResponseFollowPolicy>,
         cancel_handle: FetchCancelHandle,
     ) -> Result<NavigationStreamingRawResponse> {
         let cookie_store = storage.into_cookie_store();
@@ -1140,6 +1153,7 @@ impl NavigationEngine {
             body,
             request_headers,
             auth,
+            redirect_response_follow_policy,
             cancel_handle,
         )
         .await

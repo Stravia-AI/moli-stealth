@@ -1209,6 +1209,7 @@ pub(super) async fn complete_fulfill_request_command_async(
                     navigation_state.requested_url.clone(),
                     response_code,
                     response_headers,
+                    Vec::new(),
                     body,
                     pending.request_cookie_report,
                     Default::default(),

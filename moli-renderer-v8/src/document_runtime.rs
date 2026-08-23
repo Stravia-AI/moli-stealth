@@ -694,7 +694,8 @@ pub(crate) struct DocumentPolicyContainer {
     pub(crate) sandbox: DocumentSandboxPolicy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub(crate) struct DocumentSandboxPolicy {
     pub(crate) sandboxes_navigation: bool,
     pub(crate) forces_opaque_origin: bool,

@@ -116,6 +116,132 @@ async fn open_popup_from_runtime(ctx: &mut TestContext, id: u64, expression: &st
     ctx.take_all()
 }
 
+async fn enable_popup_document_response_stage(
+    ctx: &mut TestContext,
+    session_id: &str,
+    id: u64,
+    url_pattern: &str,
+) {
+    ctx.process_async(json!({
+        "id": id,
+        "method": "Fetch.enable",
+        "sessionId": session_id,
+        "params": {
+            "patterns": [{
+                "urlPattern": url_pattern,
+                "resourceType": "Document",
+                "requestStage": "Response"
+            }]
+        }
+    }))
+    .await;
+    ctx.expect_result(id, json!({}), Some(session_id));
+    ctx.take_all();
+}
+
+async fn fulfill_popup_document_response_stage(
+    ctx: &mut TestContext,
+    session_id: &str,
+    final_url: &str,
+    id: u64,
+    body: &str,
+) {
+    crate::testing::wait_until_scheduler_message(
+        ctx,
+        "COOP redirect final response-stage pause",
+        |message| {
+            message["method"] == json!("Fetch.requestPaused")
+                && message["sessionId"] == json!(session_id)
+                && message["params"]["request"]["url"] == json!(final_url)
+                && message["params"]["responseStatusCode"] == json!(200)
+        },
+    )
+    .await;
+    let paused_request_id = ctx
+        .sent
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Fetch.requestPaused")
+                && message["sessionId"] == json!(session_id)
+                && message["params"]["request"]["url"] == json!(final_url)
+        })
+        .and_then(|message| message["params"]["requestId"].as_str())
+        .expect("COOP redirect response-stage request id")
+        .to_owned();
+    ctx.process_async(json!({
+        "id": id,
+        "method": "Fetch.fulfillRequest",
+        "sessionId": session_id,
+        "params": {
+            "requestId": paused_request_id,
+            "responseCode": 200,
+            "responseHeaders": [{
+                "name": "content-type",
+                "value": "text/html; charset=utf-8"
+            }],
+            "body": body
+        }
+    }))
+    .await;
+    ctx.expect_result(id, json!({}), Some(session_id));
+}
+
+async fn enable_popup_page_runtime_network(ctx: &mut TestContext, session_id: &str, first_id: u64) {
+    for (offset, method) in ["Page.enable", "Runtime.enable", "Network.enable"]
+        .into_iter()
+        .enumerate()
+    {
+        let id = first_id + offset as u64;
+        ctx.process_async(json!({
+            "id": id,
+            "method": method,
+            "sessionId": session_id,
+            "params": {}
+        }))
+        .await;
+        ctx.expect_result(id, json!({}), Some(session_id));
+    }
+    ctx.take_all();
+}
+
+async fn wait_for_coop_sandbox_blocked_error_document(
+    ctx: &mut TestContext,
+    browser_context_id: &str,
+    popup_target_id: &str,
+    popup_session_id: &str,
+    description: &str,
+) {
+    crate::testing::wait_until_scheduler_message(ctx, description, |message| {
+        message["method"] == json!("Network.loadingFailed")
+            && message["sessionId"] == json!(popup_session_id)
+            && message["params"]["errorText"] == json!("net::ERR_BLOCKED_BY_RESPONSE")
+            && message["params"]["blockedReason"]
+                == json!("CoopSandboxedIframeCannotNavigateToCoopPage")
+    })
+    .await;
+    crate::testing::wait_until_scheduler_message(ctx, description, |message| {
+        message["method"] == json!("Page.frameNavigated")
+            && message["sessionId"] == json!(popup_session_id)
+            && message["params"]["frame"]["id"] == json!(popup_target_id)
+            && message["params"]["frame"]["url"] == json!(NETWORK_ERROR_PAGE_URL)
+    })
+    .await;
+    crate::testing::wait_until_scheduler_message(ctx, description, |message| {
+        message["method"] == json!("Page.loadEventFired")
+            && message["sessionId"] == json!(popup_session_id)
+    })
+    .await;
+    ctx.wait_until_scheduler_state(description, |conn| {
+        !conn.has_pending_document_navigation_for_session_owner(Some(popup_session_id))
+            && conn
+                .browser_context_by_id(browser_context_id)
+                .and_then(|browser_context| browser_context.background_target(popup_target_id))
+                .and_then(|target| target.loaded_page())
+                .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
+    })
+    .await;
+}
+
 // Chromium source:
 // third_party/blink/web_tests/http/tests/inspector-protocol/target/target-setAutoAttach-new-page.js
 #[tokio::test(flavor = "multi_thread")]
@@ -676,7 +802,14 @@ async fn rust_cdp_chromium_target_window_open_blank_creates_popup_target() {
 // content/browser/renderer_host/browsing_context_group_swap.cc
 // third_party/blink/web_tests/external/wpt/html/cross-origin-opener-policy/
 #[tokio::test(flavor = "multi_thread")]
-async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
+async fn popup_coop_redirect_survives_fetch_response_override_and_severs_old_group_proxy() {
+    target_8mb_stack("popup-coop-redirect-fetch-override", || async {
+        run_popup_coop_redirect_fetch_response_override_regression().await;
+    })
+    .await;
+}
+
+async fn run_popup_coop_redirect_fetch_response_override_regression() {
     let fixture = SmokeFixtureServer::start().await;
     let mut ctx = TestContext::new_with_target_discovery(false);
     ctx.enable_background_navigation_scheduler_for_test();
@@ -692,12 +825,13 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
             set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_700).await;
             ctx.take_all();
 
-            let coop_url = fixture.url("/coop-same-origin");
+            let requested_url = fixture.url("/coop-redirect-start");
+            let coop_url = fixture.url("/coop-redirect-final");
             let messages = open_popup_from_runtime(
                 &mut ctx,
                 2_602_701,
                 &format!(
-                    "(() => {{ const popup = window.open({coop_url:?}, 'coop-protocol-target'); globalThis.__lmCoopPopup = popup; return popup !== null && popup.closed === false; }})()"
+                    "(() => {{ const popup = window.open({requested_url:?}, 'coop-protocol-target'); globalThis.__lmCoopPopup = popup; return popup !== null && popup.closed === false; }})()"
                 ),
             )
             .await;
@@ -727,6 +861,13 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
                 ctx.expect_result(id, json!({}), Some(&popup_session_id));
             }
             ctx.take_all();
+            Box::pin(enable_popup_document_response_stage(
+                &mut ctx,
+                &popup_session_id,
+                2_602_790,
+                "*coop-redirect-final*",
+            ))
+            .await;
             ctx.process_async(json!({
                 "id": 2_602_704,
                 "method": "Runtime.runIfWaitingForDebugger",
@@ -734,6 +875,14 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
             }))
             .await;
             take_response_by_id(&mut ctx, 2_602_704);
+            Box::pin(fulfill_popup_document_response_stage(
+                &mut ctx,
+                &popup_session_id,
+                &coop_url,
+                2_602_791,
+                "PCFkb2N0eXBlIGh0bWw+PG1haW4gaWQ9J2Nvb3AtbWFya2VyJz5DT09QIHJlZGlyZWN0IEZldGNoIG92ZXJyaWRlIHBvcHVwPC9tYWluPg==",
+            ))
+            .await;
             crate::testing::wait_until_scheduler_message(
                 &mut ctx,
                 "COOP popup frame commit",
@@ -810,7 +959,7 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
                     "openerSevered": true,
                     "nameCleared": true,
                     "closed": false,
-                    "text": "COOP committed popup"
+                    "text": "COOP redirect Fetch override popup"
                 }),
                 "unexpected COOP replacement realm evaluation: {new_realm_evaluation:?}"
             );
@@ -831,10 +980,94 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
 
             ctx.process_async(json!({
                 "id": 2_602_707,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": r#"(() => {
+  const stale = globalThis.__lmCoopPopup;
+  globalThis.__lmStaleEndpointSelfMessages = 0;
+  addEventListener("message", event => {
+    if (event.data === "must-drop-stale-endpoint") {
+      globalThis.__lmStaleEndpointSelfMessages++;
+    }
+  });
+  let missingArgsTypeError;
+  try {
+    stale.postMessage();
+    missingArgsTypeError = false;
+  } catch (error) {
+    missingArgsTypeError = error instanceof TypeError;
+  }
+  stale.postMessage("must-drop-stale-endpoint", "*");
+  stale.location.href = "https://must-not-route.test/assign";
+  stale.location.replace("https://must-not-route.test/replace");
+  stale.close();
+  stale.focus();
+  return {
+    closed: stale.closed,
+    openerIsNull: stale.opener === null,
+    length: stale.length,
+    missingArgsTypeError,
+    selfMessages: globalThis.__lmStaleEndpointSelfMessages
+  };
+})()"#,
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_707)["result"]["result"]["value"],
+                json!({
+                    "closed": true,
+                    "openerIsNull": true,
+                    "length": 0,
+                    "missingArgsTypeError": true,
+                    "selfMessages": 0
+                }),
+                "the disconnected endpoint must drop every routed operation"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_708,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ href: location.href, closed, openerSevered: opener === null, text: document.querySelector('#coop-marker').textContent })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_708)["result"]["result"]["value"],
+                json!({
+                    "href": coop_url,
+                    "closed": false,
+                    "openerSevered": true,
+                    "text": "COOP redirect Fetch override popup"
+                }),
+                "stale operations must not mutate the replacement Page"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_709,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "globalThis.__lmStaleEndpointSelfMessages",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_709)["result"]["result"]["value"],
+                json!(0),
+                "stale postMessage must not be rerouted to the opener"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_710,
                 "method": "Target.getTargets"
             }))
             .await;
-            let targets = take_response_by_id(&mut ctx, 2_602_707);
+            let targets = take_response_by_id(&mut ctx, 2_602_710);
             let matching_targets = targets["result"]["targetInfos"]
                 .as_array()
                 .expect("targetInfos")
@@ -846,6 +1079,435 @@ async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
             assert_eq!(matching_targets[0]["attached"], json!(true));
         })
         .await;
+}
+
+// Chromium/WPT sources:
+// content/browser/security/coop/cross_origin_opener_policy_status.cc::SanitizeResponse
+// third_party/blink/web_tests/external/wpt/html/cross-origin-opener-policy/
+// coop-csp-sandbox.https.html
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_sandboxed_coop_redirect_is_blocked_before_follow_and_commits_one_error_document() {
+    target_8mb_stack("popup-sandboxed-coop-redirect", || async {
+        let fixture = SmokeFixtureServer::start().await;
+        let mut ctx = TestContext::new_with_target_discovery(false);
+        ctx.enable_background_navigation_scheduler_for_test();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                load_bc_with_titled_page_async(
+                    &mut ctx,
+                    "BID-popup-coop-sandbox",
+                    "TID-popup-coop-sandbox-opener",
+                    "<main>COOP sandbox opener</main>",
+                )
+                .await;
+                set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_900).await;
+                ctx.take_all();
+
+                let blocked_url = fixture.url("/coop-sandbox-blocked-redirect");
+                let messages = open_popup_from_runtime(
+                    &mut ctx,
+                    2_602_901,
+                    &format!(
+                        "(() => {{ const popup = window.open({blocked_url:?}, 'coop-sandbox-target'); globalThis.__lmBlockedCoopPopup = popup; return popup !== null && popup.closed === false; }})()"
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    response(&messages, 2_602_901)["result"]["result"]["value"],
+                    true
+                );
+                let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                    ["targetInfo"]["targetId"]
+                    .as_str()
+                    .expect("blocked popup target id")
+                    .to_owned();
+                let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                    ["sessionId"]
+                    .as_str()
+                    .expect("blocked popup session id")
+                    .to_owned();
+
+                enable_popup_page_runtime_network(&mut ctx, &popup_session_id, 2_602_902).await;
+                ctx.process_async(json!({
+                    "id": 2_602_905,
+                    "method": "Runtime.runIfWaitingForDebugger",
+                    "sessionId": popup_session_id
+                }))
+                .await;
+                take_response_by_id(&mut ctx, 2_602_905);
+                wait_for_coop_sandbox_blocked_error_document(
+                    &mut ctx,
+                    "BID-popup-coop-sandbox",
+                    &popup_target_id,
+                    &popup_session_id,
+                    "sandboxed COOP redirect error commit",
+                )
+                .await;
+                let commit_messages = ctx.take_all();
+                let loading_failed = commit_messages
+                    .iter()
+                    .find(|message| {
+                        message["method"] == json!("Network.loadingFailed")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["errorText"]
+                                == json!("net::ERR_BLOCKED_BY_RESPONSE")
+                    })
+                    .expect("blocked response Network.loadingFailed");
+                let blocked_request_id = loading_failed["params"]["requestId"].clone();
+                assert!(
+                    commit_messages.iter().any(|message| {
+                        message["method"] == json!("Network.responseReceived")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["requestId"] == blocked_request_id
+                            && message["params"]["response"]["url"] == json!(blocked_url)
+                            && message["params"]["response"]["status"] == json!(302)
+                    }),
+                    "the original blocked redirect must remain the Network response surface: {commit_messages:?}"
+                );
+                assert!(
+                    !commit_messages.iter().any(|message| {
+                        message["method"] == json!("Network.loadingFinished")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["requestId"] == blocked_request_id
+                    }),
+                    "the internal error Document body must not finish the blocked network request: {commit_messages:?}"
+                );
+                assert_eq!(
+                    fixture.coop_blocked_redirect_target_requests(),
+                    0,
+                    "response sanitation must stop the redirect before the target request"
+                );
+                assert!(
+                    !commit_messages.iter().any(|message| {
+                        matches!(
+                            message["method"].as_str(),
+                            Some("Target.targetCreated" | "Target.targetDestroyed")
+                        )
+                    }),
+                    "blocked response must preserve the exact target/session: {commit_messages:?}"
+                );
+
+                ctx.process_async(json!({
+                    "id": 2_602_906,
+                    "method": "Runtime.evaluate",
+                    "sessionId": popup_session_id,
+                    "params": {
+                        "expression": "({ openerSevered: opener === null, href: location.href, blockedBodyAbsent: !document.querySelector('#must-not-commit'), scriptAbsent: globalThis.__blockedCoopBodyRan === undefined, closed })",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, 2_602_906)["result"]["result"]["value"],
+                    json!({
+                        "openerSevered": true,
+                        "href": NETWORK_ERROR_PAGE_URL,
+                        "blockedBodyAbsent": true,
+                        "scriptAbsent": true,
+                        "closed": false
+                    })
+                );
+                ctx.process_async(json!({
+                    "id": 2_602_907,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "({ popupClosed: __lmBlockedCoopPopup.closed, openerClosed: closed })",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, 2_602_907)["result"]["result"]["value"],
+                    json!({ "popupClosed": true, "openerClosed": false })
+                );
+            })
+            .await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_fetch_effective_sandboxed_coop_response_uses_the_same_blocked_terminal() {
+    target_8mb_stack("popup-fetch-sandboxed-coop", || async {
+        let fixture = SmokeFixtureServer::start().await;
+        let mut ctx = TestContext::new_with_target_discovery(false);
+        ctx.enable_background_navigation_scheduler_for_test();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                load_bc_with_titled_page_async(
+                    &mut ctx,
+                    "BID-popup-fetch-coop-sandbox",
+                    "TID-popup-fetch-coop-sandbox-opener",
+                    "<main>Fetch COOP sandbox opener</main>",
+                )
+                .await;
+                set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_920).await;
+                ctx.take_all();
+
+                let requested_url = fixture.url("/plain?coop-fetch-sandbox");
+                let messages = open_popup_from_runtime(
+                    &mut ctx,
+                    2_602_921,
+                    &format!(
+                        "(() => {{ const popup = window.open({requested_url:?}, '_blank'); globalThis.__lmFetchBlockedCoopPopup = popup; return popup !== null; }})()"
+                    ),
+                )
+                .await;
+                let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                    ["targetInfo"]["targetId"]
+                    .as_str()
+                    .expect("Fetch-blocked popup target id")
+                    .to_owned();
+                let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                    ["sessionId"]
+                    .as_str()
+                    .expect("Fetch-blocked popup session id")
+                    .to_owned();
+                enable_popup_page_runtime_network(&mut ctx, &popup_session_id, 2_602_922).await;
+                enable_popup_document_response_stage(
+                    &mut ctx,
+                    &popup_session_id,
+                    2_602_925,
+                    "*plain*",
+                )
+                .await;
+                ctx.process_async(json!({
+                    "id": 2_602_926,
+                    "method": "Runtime.runIfWaitingForDebugger",
+                    "sessionId": popup_session_id
+                }))
+                .await;
+                take_response_by_id(&mut ctx, 2_602_926);
+                crate::testing::wait_until_scheduler_message(
+                    &mut ctx,
+                    "Fetch effective COOP sandbox response pause",
+                    |message| {
+                        message["method"] == json!("Fetch.requestPaused")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["request"]["url"] == json!(requested_url)
+                            && message["params"]["responseStatusCode"] == json!(200)
+                    },
+                )
+                .await;
+                let paused_request_id = ctx
+                    .sent
+                    .iter()
+                    .find(|message| {
+                        message["method"] == json!("Fetch.requestPaused")
+                            && message["sessionId"] == json!(popup_session_id)
+                    })
+                    .and_then(|message| message["params"]["requestId"].as_str())
+                    .expect("Fetch effective response request id")
+                    .to_owned();
+                ctx.process_async(json!({
+                    "id": 2_602_927,
+                    "method": "Fetch.fulfillRequest",
+                    "sessionId": popup_session_id,
+                    "params": {
+                        "requestId": paused_request_id,
+                        "responseCode": 200,
+                        "responseHeaders": [
+                            { "name": "content-type", "value": "text/html; charset=utf-8" },
+                            { "name": "cross-origin-opener-policy", "value": "same-origin" },
+                            { "name": "content-security-policy", "value": "sandbox allow-popups allow-scripts allow-same-origin" }
+                        ],
+                        "body": "PCFkb2N0eXBlIGh0bWw+PG1haW4gaWQ9J211c3Qtbm90LWNvbW1pdCc+RmV0Y2ggYmxvY2tlZCBib2R5PC9tYWluPjxzY3JpcHQ+Z2xvYmFsVGhpcy5fX2Jsb2NrZWRDb29wQm9keVJhbiA9IHRydWU8L3NjcmlwdD4="
+                    }
+                }))
+                .await;
+                ctx.expect_result(2_602_927, json!({}), Some(&popup_session_id));
+                wait_for_coop_sandbox_blocked_error_document(
+                    &mut ctx,
+                    "BID-popup-fetch-coop-sandbox",
+                    &popup_target_id,
+                    &popup_session_id,
+                    "Fetch effective sandboxed COOP error commit",
+                )
+                .await;
+
+                ctx.process_async(json!({
+                    "id": 2_602_928,
+                    "method": "Runtime.evaluate",
+                    "sessionId": popup_session_id,
+                    "params": {
+                        "expression": "({ href: location.href, blockedBodyAbsent: !document.querySelector('#must-not-commit'), scriptAbsent: globalThis.__blockedCoopBodyRan === undefined, openerSevered: opener === null })",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, 2_602_928)["result"]["result"]["value"],
+                    json!({
+                        "href": NETWORK_ERROR_PAGE_URL,
+                        "blockedBodyAbsent": true,
+                        "scriptAbsent": true,
+                        "openerSevered": true
+                    })
+                );
+            })
+            .await;
+    })
+    .await;
+}
+
+// WPT negative control: response CSP sandbox belongs to the Document that
+// received it; it must not be persisted as inherited popup frame policy for a
+// later navigation whose own response carries COOP without CSP sandbox.
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_response_csp_sandbox_does_not_block_later_unsandboxed_coop_navigation() {
+    target_8mb_stack("popup-response-csp-then-coop", || async {
+        let fixture = SmokeFixtureServer::start().await;
+        let mut ctx = TestContext::new_with_target_discovery(false);
+        ctx.enable_background_navigation_scheduler_for_test();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                load_bc_with_titled_page_async(
+                    &mut ctx,
+                    "BID-popup-response-csp",
+                    "TID-popup-response-csp-opener",
+                    "<main>response CSP opener</main>",
+                )
+                .await;
+                set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_940).await;
+                ctx.take_all();
+
+                let initial_url = fixture.url("/csp-sandbox-navigate-to-coop");
+                let final_url = fixture.url("/coop-same-origin");
+                let messages = open_popup_from_runtime(
+                    &mut ctx,
+                    2_602_941,
+                    &format!(
+                        "(() => {{ const popup = window.open({initial_url:?}, 'response-csp-target'); globalThis.__lmResponseCspPopup = popup; return popup !== null; }})()"
+                    ),
+                )
+                .await;
+                let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                    ["targetInfo"]["targetId"]
+                    .as_str()
+                    .expect("response-CSP popup target id")
+                    .to_owned();
+                let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                    ["sessionId"]
+                    .as_str()
+                    .expect("response-CSP popup session id")
+                    .to_owned();
+                enable_popup_page_runtime_network(&mut ctx, &popup_session_id, 2_602_942).await;
+                ctx.process_async(json!({
+                    "id": 2_602_945,
+                    "method": "Runtime.runIfWaitingForDebugger",
+                    "sessionId": popup_session_id
+                }))
+                .await;
+                take_response_by_id(&mut ctx, 2_602_945);
+                crate::testing::wait_until_scheduler_message(
+                    &mut ctx,
+                    "response CSP popup later COOP frame commit",
+                    |message| {
+                        message["method"] == json!("Page.frameNavigated")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["frame"]["id"] == json!(popup_target_id)
+                            && message["params"]["frame"]["url"] == json!(final_url)
+                    },
+                )
+                .await;
+                assert!(
+                    !ctx.sent.iter().any(|message| {
+                        message["method"] == json!("Network.loadingFailed")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["errorText"]
+                                == json!("net::ERR_BLOCKED_BY_RESPONSE")
+                    }),
+                    "the previous response's CSP sandbox must not poison the later COOP response: {:?}",
+                    ctx.sent
+                );
+                let final_frame_position = ctx
+                    .sent
+                    .iter()
+                    .rposition(|message| {
+                        message["method"] == json!("Page.frameNavigated")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["frame"]["url"] == json!(final_url)
+                    })
+                    .expect("later COOP frame commit position");
+                ctx.sent.drain(..=final_frame_position);
+                crate::testing::wait_until_scheduler_message(
+                    &mut ctx,
+                    "response CSP popup later COOP realm",
+                    |message| {
+                        message["method"] == json!("Runtime.executionContextCreated")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["context"]["auxData"]["isDefault"]
+                                == json!(true)
+                    },
+                )
+                .await;
+                crate::testing::wait_until_scheduler_message(
+                    &mut ctx,
+                    "response CSP popup later COOP load",
+                    |message| {
+                        message["method"] == json!("Page.loadEventFired")
+                            && message["sessionId"] == json!(popup_session_id)
+                    },
+                )
+                .await;
+                ctx.wait_until_scheduler_state("response CSP popup later COOP completion", |conn| {
+                    !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                        && conn
+                            .browser_context_by_id("BID-popup-response-csp")
+                            .and_then(|browser_context| {
+                                browser_context.background_target(&popup_target_id)
+                            })
+                            .and_then(|target| target.loaded_page())
+                            .is_some_and(|page| page.final_url().as_str() == final_url)
+                })
+                .await;
+                assert!(
+                    !ctx.sent.iter().any(|message| {
+                        message["method"] == json!("Network.loadingFailed")
+                            && message["sessionId"] == json!(popup_session_id)
+                            && message["params"]["errorText"]
+                                == json!("net::ERR_BLOCKED_BY_RESPONSE")
+                    }),
+                    "the previous response's CSP sandbox must not poison the later COOP response: {:?}",
+                    ctx.sent
+                );
+
+                ctx.process_async(json!({
+                    "id": 2_602_946,
+                    "method": "Runtime.evaluate",
+                    "sessionId": popup_session_id,
+                    "params": {
+                        "expression": "({ href: location.href, openerSevered: opener === null, nameCleared: name === '', marker: document.querySelector('#coop-marker').textContent })",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, 2_602_946)["result"]["result"]["value"],
+                    json!({
+                        "href": final_url,
+                        "openerSevered": true,
+                        "nameCleared": true,
+                        "marker": "COOP committed popup"
+                    })
+                );
+                ctx.process_async(json!({
+                    "id": 2_602_947,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "__lmResponseCspPopup.closed",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                assert_eq!(
+                    take_response_by_id(&mut ctx, 2_602_947)["result"]["result"]["value"],
+                    true
+                );
+            })
+            .await;
+    })
+    .await;
 }
 
 // Chromium sources:
@@ -2038,6 +2700,132 @@ async fn popup_transport_failure_commits_error_document_in_stable_auxiliary_page
                 post_navigation_opener_probe["result"]["result"]["value"],
                 true,
                 "opener should retain the same cross-origin WindowProxy after location navigation: {post_navigation_opener_probe:?}"
+            );
+        })
+        .await;
+    failing_server.abort();
+}
+
+// Chromium source:
+// content/browser/security/coop/cross_origin_opener_policy_status.cc
+// A COOP mismatch observed on a redirect remains authoritative when the next
+// transport fails and Chromium commits its browser-owned error Document.
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_coop_redirect_then_transport_error_still_severs_old_group_proxy() {
+    let fixture = SmokeFixtureServer::start().await;
+    let (failing_addr, failing_server) = spawn_connection_drop_server().await;
+    let mut redirect_url =
+        url::Url::parse(&fixture.url("/coop-redirect-to")).expect("valid redirect fixture URL");
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("url", &format!("http://{failing_addr}/after-coop-redirect"));
+    let redirect_url = redirect_url.to_string();
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-coop-error",
+                "TID-popup-coop-error-opener",
+                "<main>COOP error opener</main>",
+            )
+            .await;
+            set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_800).await;
+            ctx.take_all();
+
+            let messages = open_popup_from_runtime(
+                &mut ctx,
+                2_602_801,
+                &format!(
+                    "(() => {{ const popup = window.open({redirect_url:?}, '_blank'); globalThis.__lmCoopErrorPopup = popup; return popup !== null && popup.closed === false; }})()"
+                ),
+            )
+            .await;
+            assert_eq!(
+                response(&messages, 2_602_801)["result"]["result"]["value"],
+                true
+            );
+            let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                ["targetInfo"]["targetId"]
+                .as_str()
+                .expect("COOP error popup target id")
+                .to_owned();
+            let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                ["sessionId"]
+                .as_str()
+                .expect("COOP error popup session id")
+                .to_owned();
+
+            for (id, method) in [(2_602_802, "Page.enable"), (2_602_803, "Runtime.enable")] {
+                ctx.process_async(json!({
+                    "id": id,
+                    "method": method,
+                    "sessionId": popup_session_id,
+                    "params": {}
+                }))
+                .await;
+                ctx.expect_result(id, json!({}), Some(&popup_session_id));
+            }
+            ctx.take_all();
+            ctx.process_async(json!({
+                "id": 2_602_804,
+                "method": "Runtime.runIfWaitingForDebugger",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            take_response_by_id(&mut ctx, 2_602_804);
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "COOP redirect transport-error load",
+                |message| {
+                    message["method"] == json!("Page.loadEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("COOP redirect error commit", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                    && conn
+                        .browser_context_by_id("BID-popup-coop-error")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == NETWORK_ERROR_PAGE_URL)
+            })
+            .await;
+
+            ctx.process_async(json!({
+                "id": 2_602_805,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ openerSevered: opener === null, href: location.href, closed })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_805)["result"]["result"]["value"],
+                json!({
+                    "openerSevered": true,
+                    "href": NETWORK_ERROR_PAGE_URL,
+                    "closed": false
+                })
+            );
+            ctx.process_async(json!({
+                "id": 2_602_806,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "({ popupClosed: __lmCoopErrorPopup.closed, openerClosed: closed })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_806)["result"]["result"]["value"],
+                json!({ "popupClosed": true, "openerClosed": false })
             );
         })
         .await;

@@ -1,6 +1,7 @@
 use moli_core::page::{
-    Page, RendererMainDocumentCommit, RendererPageCreationArtifacts,
-    RendererPendingDownloadActivation, RendererRuntimeRealmInfo, RendererTopLevelNavigationSource,
+    Page, RendererMainDocumentCommit, RendererMainDocumentResponseBlock,
+    RendererPageCreationArtifacts, RendererPendingDownloadActivation, RendererRuntimeRealmInfo,
+    RendererTopLevelNavigationSource,
 };
 use moli_core::runtime::NavigationEngine;
 use moli_fetch::StreamingRawResponse;
@@ -24,6 +25,7 @@ pub(crate) const NETWORK_ERROR_PAGE_URL: &str = "chrome-error://chromewebdata/";
 pub(crate) struct NetworkErrorPageNavigation {
     error_text: String,
     unreachable_url: Url,
+    response_block: Option<RendererMainDocumentResponseBlock>,
 }
 
 impl NetworkErrorPageNavigation {
@@ -31,6 +33,19 @@ impl NetworkErrorPageNavigation {
         Self {
             error_text,
             unreachable_url,
+            response_block: None,
+        }
+    }
+
+    pub(crate) fn blocked_by_response(
+        error_text: String,
+        unreachable_url: Url,
+        response_block: RendererMainDocumentResponseBlock,
+    ) -> Self {
+        Self {
+            error_text,
+            unreachable_url,
+            response_block: Some(response_block),
         }
     }
 
@@ -40,6 +55,10 @@ impl NetworkErrorPageNavigation {
 
     pub(crate) fn unreachable_url(&self) -> &Url {
         &self.unreachable_url
+    }
+
+    pub(crate) const fn response_block(&self) -> Option<RendererMainDocumentResponseBlock> {
+        self.response_block
     }
 }
 
@@ -197,6 +216,7 @@ impl RendererMainDocumentCommitSeed {
         &self,
         final_url: &Url,
         network_error_page: Option<&NetworkErrorPageNavigation>,
+        navigation_redirect_chain: Vec<moli_page_types::NavigationRedirect>,
     ) -> RendererMainDocumentCommit {
         let referrer_destination = network_error_page
             .map(NetworkErrorPageNavigation::unreachable_url)
@@ -247,7 +267,9 @@ impl RendererMainDocumentCommitSeed {
             security_origin,
             secure_context_type,
             timestamp: self.timestamp,
+            navigation_redirect_chain,
             auxiliary_browsing_context_policy: None,
+            response_block: network_error_page.and_then(NetworkErrorPageNavigation::response_block),
         }
     }
 }
