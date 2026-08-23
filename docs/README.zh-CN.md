@@ -207,9 +207,7 @@ Moli 是一个独立的浏览器内核，而不是对 Chromium 的封装。它�
 - Taffy + Parley——盒模型与文本布局
 - AnyRender/Vello CPU、`usvg` 以及 Rust 图像生态——软件渲染
 
-文档和样式只有一个事实来源：原生 DOM 与 Stylo 的集成。每个 connected `Document` 持有一套持久的 Stylo 样式世界，其中包括原地增量更新的 `Stylist`、有序的 active stylesheet 集合、每个 `ShadowRoot`（包括空作用域）的 author state，以及 Stylo 元素数据中的规范 computed values。DOM/CSSOM mutation 只把受影响的 scope、元素或子树标脏；下一次样式 observation 才 flush 这些变化，并按需重算被读取的元素。可以精确表达的 live CSSOM rule mutation 会通过 journal 转发到 Stylo 的 rule-change API；stylesheet 资源依赖则来自 typed manifest，不再由布局阶段序列化 CSS 后重新扫描。这些是持久的语义样式状态，不是持久的布局树或绘制树。
-
-每次真正的刷新，都会据此构建临时工作布局树，按需生成并消费一份新的绘制快照，把最终的盒与文字分片几何冻结成紧凑的 `FrozenLayoutTree`，随后丢弃工作树、临时样式借用、布局缓存、诊断和绘制状态。屏幕串流 token 只包含 generation 元数据，不包含布局或绘制数据。来源查询表和命中测试候选仍在查询时从冻结树派生。整个系统没有增量维护的布局树、损伤区域图、保留式显示列表、GPU 合成器或持久化窗口。
+文档和样式只有一个事实来源：原生 DOM 与 Stylo 的集成。每次真正的刷新，都会据此构建临时工作树，按需生成并消费一份新的绘制快照，把最终的盒与文字分片几何冻结成紧凑的 `FrozenLayoutTree`，随后丢弃工作树、样式借用、布局缓存、诊断和绘制状态。屏幕串流 token 只包含 generation 元数据，不包含布局或绘制数据。来源查询表和命中测试候选仍在查询时从冻结树派生。整个系统没有增量维护的布局树、损伤区域图、保留式显示列表、GPU 合成器或持久化窗口。
 
 ## 测试数据
 

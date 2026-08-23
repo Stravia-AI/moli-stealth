@@ -261,25 +261,14 @@ Rust, has its own ownership and lifecycle rules, and relies on:
 - AnyRender/Vello CPU, `usvg`, and the Rust image ecosystem — software rendering
 
 Document and style have a single source of truth: the native DOM and its Stylo
-integration. Each connected `Document` owns one persistent Stylo style world:
-an incrementally updated `Stylist`, an ordered active-sheet collection,
-per-`ShadowRoot` author state (including empty scopes), and canonical computed
-values in Stylo's per-element data. DOM and CSSOM mutations only mark affected
-scopes, elements, or subtrees dirty; the next style observation flushes those
-changes and recomputes demanded elements. This retained semantic style state is
-not a retained layout or paint tree. Live CSSOM rule edits are journaled and
-forwarded through Stylo's rule-change API when representable; stylesheet
-resource dependencies are published from a typed manifest rather than found by
-serializing CSS during layout.
-
-Every real refresh builds a temporary working layout tree from that source,
-optionally produces and consumes one fresh paint snapshot, freezes the
+integration. Every real refresh builds a temporary working tree from that
+source, optionally produces and consumes one fresh paint snapshot, freezes the
 canonical box/fragment geometry into a compact `FrozenLayoutTree`, and discards
-the working tree, temporary style borrows, layout caches, diagnostics, and
-paint state. Screencast tokens contain generation metadata, never layout or
-paint data. Source lookup and hit-test candidates are derived from the frozen
-tree when queried. The system has no incrementally maintained layout tree,
-damage graph, retained display list, GPU compositor, or persistent window.
+the working tree, style borrows, layout caches, diagnostics, and paint state.
+Screencast tokens contain generation metadata, never layout or paint data.
+Source lookup and hit-test candidates are derived from the frozen tree when
+queried. The system has no incrementally maintained layout tree, damage graph,
+retained display list, GPU compositor, or persistent window.
 
 ## Benchmark
 
