@@ -220,7 +220,6 @@ async fn browser_host_renderer_page_lifetime_outlives_protocol_adapter_state() {
         .prepare_target_termination(request)
         .expect("retained Browser Target should still prepare termination");
     let mut termination = browser_host_state
-        .navigation_owner_mut()
         .commit_target_termination(permit)
         .expect("retained Browser Target should still commit termination");
     let retired_owner = termination

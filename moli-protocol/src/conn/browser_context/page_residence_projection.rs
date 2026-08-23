@@ -75,14 +75,13 @@ impl CdpConnection {
             });
         }
 
-        let transition = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.commit_initial_document_page_materialization(
+        let transition = self
+            .browser_host_state
+            .commit_initial_document_page_materialization(
                 permit,
                 &mut renderer_page_owner,
                 &mut page_runtime_owner,
-            )
-        };
+            );
         let mut transition = match transition {
             Ok(transition) => transition,
             Err(error) => {
@@ -152,10 +151,9 @@ impl CdpConnection {
             return Ok(None);
         };
         let staged = self.stage_physical_page_residence_projection(&permit, false)?;
-        let transition = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.commit_failed_navigation_page_discard(permit)
-        };
+        let transition = self
+            .browser_host_state
+            .commit_failed_navigation_page_discard(permit);
         let mut transition = match transition {
             Ok(transition) => transition,
             Err(error) => {

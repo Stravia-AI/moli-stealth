@@ -30,15 +30,15 @@ impl CdpConnection {
             .browser_context
             .as_ref()
             .is_some_and(|bc| bc.network_policy.bypass_service_worker());
-        self.browser_host_state
-            .navigation_owner_mut()
-            .configure_active_fetch(moli_core::browser_host::BrowserPageFetchConfiguration {
+        self.browser_host_state.configure_active_fetch(
+            moli_core::browser_host::BrowserPageFetchConfiguration {
                 browser_identity,
                 http_proxy,
                 http_no_proxy,
                 tls_verify_host,
                 bypass_service_worker,
-            });
+            },
+        );
     }
 
     pub async fn set_tls_verify_host_async(&mut self, enabled: bool) {

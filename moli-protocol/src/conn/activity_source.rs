@@ -117,7 +117,6 @@ impl CdpConnection {
             return Err("NoDocumentLoaded".to_owned());
         };
         let pending = browser_host_state
-            .navigation_owner_mut()
             .start_active_page_child_frame_lifecycle_work(
                 storage.into_navigation_storage(),
                 &page,
@@ -143,7 +142,6 @@ impl CdpConnection {
             return Err("NoDocumentLoaded".to_owned());
         };
         let completed = browser_host_state
-            .navigation_owner_mut()
             .complete_active_page_child_frame_lifecycle_work(&mut page, pending.completion)
             .map_err(|error| error.to_string())?;
         let _ = slot.ingest_owner_page_observable_output_updates();

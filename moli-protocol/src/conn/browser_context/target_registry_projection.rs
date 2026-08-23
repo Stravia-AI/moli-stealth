@@ -74,15 +74,14 @@ impl CdpConnection {
         let mut staged =
             self.take_physical_browser_context_for_target_projection(browser_context_id)?;
         let topology = Self::browser_target_topology_projection(&staged.browser_context);
-        let registration = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.register_background_target_with_creation_metadata(
+        let registration = self
+            .browser_host_state
+            .register_background_target_with_creation_metadata(
                 browser_context_id,
                 target_id,
                 creation_metadata,
                 topology,
-            )
-        };
+            );
         let registration = match registration {
             Ok(registration) => registration,
             Err(error) => {
@@ -151,17 +150,16 @@ impl CdpConnection {
         let replacement_inputs = BrowserEngineReplacementInputs::capture(self);
         let mut staged =
             self.take_physical_browser_context_for_target_projection(&browser_context_id)?;
-        let registration = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.register_active_target_with_creation_metadata(
+        let registration = self
+            .browser_host_state
+            .register_active_target_with_creation_metadata(
                 &browser_context_id,
                 target_id,
                 creation_metadata,
                 topology,
                 selection,
                 || replacement_inputs.create_engine(renderer_runtime),
-            )
-        };
+            );
         let registration = match registration {
             Ok(registration) => registration,
             Err(error) => {
@@ -233,9 +231,9 @@ impl CdpConnection {
         let replacement_inputs = BrowserEngineReplacementInputs::capture(self);
         let mut staged =
             self.take_physical_browser_context_for_target_projection(&browser_context_id)?;
-        let registration = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.replace_active_target_with_creation_metadata(
+        let registration = self
+            .browser_host_state
+            .replace_active_target_with_creation_metadata(
                 &browser_context_id,
                 expected_target_id,
                 replacement_target_id,
@@ -243,8 +241,7 @@ impl CdpConnection {
                 topology,
                 selection,
                 || replacement_inputs.create_engine(renderer_runtime),
-            )
-        };
+            );
         let registration = match registration {
             Ok(registration) => registration,
             Err(error) => {
@@ -327,16 +324,13 @@ impl CdpConnection {
             Some(staged_target)
         };
 
-        let activation = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.activate_target(
-                &browser_context_id,
-                target_id,
-                topology,
-                selection,
-                || replacement_inputs.create_engine(renderer_runtime),
-            )
-        };
+        let activation = self.browser_host_state.activate_target(
+            &browser_context_id,
+            target_id,
+            topology,
+            selection,
+            || replacement_inputs.create_engine(renderer_runtime),
+        );
         let activation = match activation {
             Ok(activation) => activation,
             Err(error) => {
@@ -395,10 +389,9 @@ impl CdpConnection {
             });
         };
         let target = staged.browser_context.background_targets.remove(index);
-        let retired_renderer_page_owners = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.rollback_staged_background_target(browser_context_id, target_id, topology)
-        };
+        let retired_renderer_page_owners = self
+            .browser_host_state
+            .rollback_staged_background_target(browser_context_id, target_id, topology);
         let retired_renderer_page_owners = match retired_renderer_page_owners {
             Ok(owners) => owners,
             Err(error) => {

@@ -115,7 +115,6 @@ mod tests {
             .expect("current navigation should prepare replacement");
         let replacement = conn
             .browser_host_state
-            .navigation_owner_mut()
             .commit_loaded_page_replacement_without_renderer_owner_for_testing(
                 permit,
                 BrowserNavigationHistoryPageSnapshot::new(url, title),

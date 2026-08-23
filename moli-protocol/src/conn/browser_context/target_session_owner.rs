@@ -2037,7 +2037,6 @@ impl CdpConnection {
             .page_owner()
             .clone();
         self.browser_host_state
-            .navigation_owner_mut()
             .update_current_document_title(&page_owner, change.title.clone());
         let physical_changed = self
             .with_target_owner_state_for_session_mut(session_id, |owner_state| {

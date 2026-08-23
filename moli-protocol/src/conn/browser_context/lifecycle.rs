@@ -42,7 +42,6 @@ impl CdpConnection {
         browser_context_handle: &BrowserContextHandle,
     ) -> Result<BrowserContextDisposalReservation, BrowserContextRegistryError> {
         self.browser_host_state
-            .navigation_owner_mut()
             .begin_browser_context_disposal(browser_context_handle)
     }
 
@@ -51,7 +50,6 @@ impl CdpConnection {
         reservation: BrowserContextDisposalReservation,
     ) -> bool {
         self.browser_host_state
-            .navigation_owner_mut()
             .rollback_browser_context_disposal(reservation)
     }
 

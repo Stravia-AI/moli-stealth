@@ -1110,7 +1110,6 @@ impl CdpConnection {
         };
         let published = match self
             .browser_host_state
-            .navigation_owner_mut()
             .record_document_lifecycle_facts(page, events)
         {
             Ok(published) => {

@@ -158,7 +158,6 @@ impl CdpConnection {
         let seed = self.navigation_history_query_seed_for_session_owner(session_id);
         Some(
             self.browser_host_state
-                .navigation_owner_mut()
                 .navigation_history_snapshot(&owner, seed),
         )
     }
@@ -173,7 +172,6 @@ impl CdpConnection {
         let seed = self.navigation_history_query_seed_for_session_owner(session_id);
         Some(
             self.browser_host_state
-                .navigation_owner_mut()
                 .resolve_navigation_history_traversal(&owner, seed, destination),
         )
     }
@@ -187,7 +185,6 @@ impl CdpConnection {
     {
         let seed = self.navigation_history_query_seed_for_session_owner(session_id);
         self.browser_host_state
-            .navigation_owner_mut()
             .resolve_exact_navigation_history_traversal(expected_page, seed, destination)
     }
 
@@ -199,7 +196,6 @@ impl CdpConnection {
         let seed = self.navigation_history_query_seed_for_session_owner(session_id);
         Some(
             self.browser_host_state
-                .navigation_owner_mut()
                 .reset_navigation_history(&owner, seed),
         )
     }
@@ -212,7 +208,6 @@ impl CdpConnection {
         let seed = self.navigation_history_query_seed_for_session_owner(session_id);
         Some(
             self.browser_host_state
-                .navigation_owner_mut()
                 .can_reset_navigation_history(&owner, seed),
         )
     }
@@ -223,7 +218,6 @@ impl CdpConnection {
     ) -> Option<()> {
         let owner = self.navigation_history_owner_for_session(session_id)?;
         self.browser_host_state
-            .navigation_owner_mut()
             .mark_next_navigation_history_replace_current(&owner);
         Some(())
     }
@@ -233,7 +227,6 @@ impl CdpConnection {
         owner: &BrowserPageOwnerKey,
     ) {
         self.browser_host_state
-            .navigation_owner_mut()
             .mark_next_navigation_history_replace_initial_empty_document(owner);
     }
 
@@ -244,7 +237,6 @@ impl CdpConnection {
     ) -> Option<()> {
         let owner = self.navigation_history_owner_for_session(session_id)?;
         self.browser_host_state
-            .navigation_owner_mut()
             .mark_next_navigation_history_traverse_to_entry(&owner, entry_id);
         Some(())
     }
@@ -255,7 +247,6 @@ impl CdpConnection {
     ) -> Option<()> {
         let owner = self.navigation_history_owner_for_session(session_id)?;
         self.browser_host_state
-            .navigation_owner_mut()
             .clear_pending_navigation_history_update(&owner);
         Some(())
     }
@@ -328,15 +319,13 @@ impl CdpConnection {
             PhysicalSameDocumentTargetIdentityProjection::Background(target)
         };
 
-        browser_host_state
-            .navigation_owner_mut()
-            .commit_same_document_navigation_history(
-                expected_page,
-                seed,
-                url.to_string(),
-                title,
-                history_update,
-            )?;
+        browser_host_state.commit_same_document_navigation_history(
+            expected_page,
+            seed,
+            url.to_string(),
+            title,
+            history_update,
+        )?;
         physical_target.commit(url);
         Ok(target_id)
     }
@@ -453,7 +442,6 @@ mod tests {
             .target_session_owner_navigation_history_snapshot(None)
             .expect("seed initial history");
         conn.browser_host_state
-            .navigation_owner_mut()
             .record_loaded_page_navigation_history(
                 &key,
                 BrowserNavigationHistoryPageSnapshot::new("https://old.example/", "old"),
@@ -463,7 +451,6 @@ mod tests {
         conn.clear_pending_navigation_history_update_for_session_owner(None)
             .expect("clear pending replace");
         conn.browser_host_state
-            .navigation_owner_mut()
             .record_loaded_page_navigation_history(
                 &key,
                 BrowserNavigationHistoryPageSnapshot::new("https://new.example/", "new"),

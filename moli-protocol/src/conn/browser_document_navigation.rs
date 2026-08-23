@@ -319,7 +319,6 @@ impl CdpConnection {
         self.runtime_session_owner_slot(session_id).ok()?;
         let token = self
             .browser_host_state
-            .navigation_owner_mut()
             .try_start_document_navigation_with_trace(&owner, loader_id, trace)?;
         self.runtime_session_owner_slot_mut(session_id)
             .expect("validated target runtime slot")
@@ -339,7 +338,6 @@ impl CdpConnection {
         if owner.target_id() == token.target_id() {
             let _ = self
                 .browser_host_state
-                .navigation_owner_mut()
                 .commit_document_navigation_if_matches(&owner, token);
         }
     }
@@ -354,10 +352,11 @@ impl CdpConnection {
             return false;
         };
         if owner.target_id() != token.target_id()
-            || !self
-                .browser_host_state
-                .navigation_owner_mut()
-                .fail_document_navigation_if_matches(&owner, token, failure.clone())
+            || !self.browser_host_state.fail_document_navigation_if_matches(
+                &owner,
+                token,
+                failure.clone(),
+            )
         {
             return false;
         }
@@ -386,7 +385,6 @@ impl CdpConnection {
         if owner.target_id() != token.target_id()
             || !self
                 .browser_host_state
-                .navigation_owner_mut()
                 .convert_document_navigation_to_download_if_matches(&owner, token)
         {
             return false;

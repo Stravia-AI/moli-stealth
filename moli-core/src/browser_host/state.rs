@@ -100,7 +100,7 @@ impl BrowserHostState {
 
     /// Mutably borrows the authoritative Browser state for one short
     /// synchronous owner operation.
-    pub fn navigation_owner_mut(&self) -> RefMut<'_, BrowserNavigationOwner> {
+    pub(crate) fn navigation_owner_mut(&self) -> RefMut<'_, BrowserNavigationOwner> {
         RefMut::map(self.inner.navigation_owner.borrow_mut(), |owner| {
             owner
                 .as_mut()

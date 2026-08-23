@@ -16,6 +16,7 @@ mod handle;
 mod identity;
 mod identity_allocator;
 mod initial_target_navigation;
+mod navigation_access;
 mod navigation_owner;
 mod network_artifacts;
 mod network_body;

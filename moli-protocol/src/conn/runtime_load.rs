@@ -3061,7 +3061,6 @@ impl CdpConnection {
         }
         let resource_storage = load_inputs.resource_storage_handles();
         self.browser_host_state
-            .navigation_owner_mut()
             .ensure_active_resource_runtime_ready(resource_storage.into_navigation_storage())
             .ok()?;
         self.browser_host_state

@@ -1430,7 +1430,6 @@ fn commit_initial_document_materialization_without_projection_for_invariant_test
         .prepare_initial_document_page_materialization(owner)
         .expect("current initial Document should prepare materialization");
     conn.browser_host_state
-        .navigation_owner_mut()
         .commit_page_residence_transition_without_renderer_owner_for_testing(permit)
         .expect("exact test transition should commit");
 }

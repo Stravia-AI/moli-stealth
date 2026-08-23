@@ -378,7 +378,6 @@ impl CdpConnection {
             let replacement_inputs = BrowserEngineReplacementInputs::capture(self);
             let activation = self
                 .browser_host_state
-                .navigation_owner_mut()
                 .activate_browser_context(browser_context_id, projection, || {
                     replacement_inputs.create_engine(renderer_runtime)
                 })
@@ -419,12 +418,11 @@ impl CdpConnection {
                 previous_browser_context_id,
             ));
         };
-        let activation = {
-            let mut browser_owner = self.browser_host_state.navigation_owner_mut();
-            browser_owner.activate_browser_context(browser_context_id, projection, || {
-                replacement_inputs.create_engine(renderer_runtime)
-            })
-        };
+        let activation = self.browser_host_state.activate_browser_context(
+            browser_context_id,
+            projection,
+            || replacement_inputs.create_engine(renderer_runtime),
+        );
         let activation = match activation {
             Ok(activation) => activation,
             Err(error) => {

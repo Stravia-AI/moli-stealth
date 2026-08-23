@@ -11,7 +11,6 @@ use super::{
 impl CdpConnection {
     pub(crate) fn invalidate_resource_runtime(&mut self) {
         self.browser_host_state
-            .navigation_owner_mut()
             .reset_active_resource_runtime_without_loaded_page();
     }
 
@@ -28,7 +27,6 @@ impl CdpConnection {
         self.apply_active_engine_fetch_overrides();
         let storage = self.resource_storage_handles();
         self.browser_host_state
-            .navigation_owner_mut()
             .ensure_active_resource_runtime_ready(storage.into_navigation_storage())
             .map_err(|error| format!("failed to initialize resource runtime: {error}"))?;
         self.browser_host_state
@@ -63,7 +61,6 @@ impl CdpConnection {
         self.apply_navigation_load_input_engine_fetch_overrides(load_inputs);
         let storage = load_inputs.resource_storage_handles();
         self.browser_host_state
-            .navigation_owner_mut()
             .ensure_active_resource_runtime_ready(storage.into_navigation_storage())
             .map_err(|error| format!("failed to initialize resource runtime: {error}"))?;
         self.browser_host_state
@@ -113,15 +110,15 @@ impl CdpConnection {
         let tls_verify_host = load_inputs
             .tls_verify_host_override
             .unwrap_or(policy.base_tls_verify_host());
-        self.browser_host_state
-            .navigation_owner_mut()
-            .configure_active_fetch(moli_core::browser_host::BrowserPageFetchConfiguration {
+        self.browser_host_state.configure_active_fetch(
+            moli_core::browser_host::BrowserPageFetchConfiguration {
                 browser_identity,
                 http_proxy,
                 http_no_proxy,
                 tls_verify_host,
                 bypass_service_worker: load_inputs.bypass_service_worker,
-            });
+            },
+        );
     }
 
     pub(crate) fn build_registered_browser_resource_runtime_for_navigation_load_inputs(
@@ -170,7 +167,6 @@ impl CdpConnection {
         self.apply_active_engine_fetch_overrides();
         let storage = self.resource_storage_handles();
         self.browser_host_state
-            .navigation_owner_mut()
             .ensure_active_cookie_store(storage.into_navigation_storage())
             .map_err(|error| format!("failed to initialize loader: {error}"))
     }
@@ -238,7 +234,6 @@ impl CdpConnection {
         let request_client = if self.navigation_load_inputs_use_primary_engine(&load_inputs) {
             self.apply_navigation_load_input_engine_fetch_overrides(&load_inputs);
             self.browser_host_state
-                .navigation_owner_mut()
                 .rebuild_active_resource_request_client(storage.into_navigation_storage())
                 .map_err(|error| format!("failed to rebuild resource runtime: {error}"))?
         } else {

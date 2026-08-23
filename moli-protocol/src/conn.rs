@@ -1552,7 +1552,6 @@ impl CdpConnection {
         sender: moli_core::RendererOutputTransportSender,
     ) {
         self.browser_host_state
-            .navigation_owner_mut()
             .set_renderer_output_transport_sender(sender);
     }
 

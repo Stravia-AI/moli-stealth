@@ -629,11 +629,7 @@ impl CdpConnection {
 
         // There is deliberately no await, frontend flush, or callback between
         // this authoritative commit and the matching physical projection.
-        let mut termination = match conn
-            .browser_host_state
-            .navigation_owner_mut()
-            .commit_target_termination(permit)
-        {
+        let mut termination = match conn.browser_host_state.commit_target_termination(permit) {
             Ok(termination) => termination,
             Err(error) => {
                 tracing::warn!(

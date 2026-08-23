@@ -157,7 +157,6 @@ impl CdpConnection {
     ) -> Result<Option<BrowserTargetEngineResidence>, BrowserTargetEngineAdoptionError> {
         let projected_owner = self.selected_target_engine_owner_key();
         self.browser_host_state
-            .navigation_owner_mut()
             .adopt_selected_target_engine_or_unbound(projected_owner, engine)
     }
 
@@ -216,7 +215,6 @@ impl CdpConnection {
             ));
         }
         self.browser_host_state
-            .navigation_owner_mut()
             .adopt_target_engine(
                 BrowserPageOwnerKey::new(browser_context_id, target_id),
                 BrowserTargetEngineResidence::Retained,
@@ -233,7 +231,6 @@ impl CdpConnection {
         engine: NavigationEngine,
     ) -> Result<BrowserTargetEngineResidence, BrowserTargetEngineAdoptionError> {
         self.browser_host_state
-            .navigation_owner_mut()
             .adopt_registered_target_engine(owner, engine)
     }
 
@@ -671,7 +668,6 @@ mod tests {
             .active_renderer_owner_id_for_diagnostics();
         let error = conn
             .browser_host_state
-            .navigation_owner_mut()
             .adopt_target_engine(
                 divergent.clone(),
                 BrowserTargetEngineResidence::Selected,

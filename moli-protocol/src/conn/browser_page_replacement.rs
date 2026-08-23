@@ -172,15 +172,12 @@ impl CdpConnection {
         // no await or external callback. The connection actor therefore cannot
         // expose a core successor while protocol storage still names the old
         // Page.
-        let mut replacement = match self
-            .browser_host_state
-            .navigation_owner_mut()
-            .commit_loaded_page_replacement(
-                permit,
-                history_page,
-                &mut renderer_page_owner,
-                &mut page_runtime_owner,
-            ) {
+        let mut replacement = match self.browser_host_state.commit_loaded_page_replacement(
+            permit,
+            history_page,
+            &mut renderer_page_owner,
+            &mut page_runtime_owner,
+        ) {
             Ok(replacement) => replacement,
             Err(error) => {
                 tracing::debug!(

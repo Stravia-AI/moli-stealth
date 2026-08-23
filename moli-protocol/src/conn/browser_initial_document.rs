@@ -19,7 +19,6 @@ impl CdpConnection {
         seed: BrowserInitialEmptyDocumentSeed,
     ) -> Result<(), BrowserTargetRegistryError> {
         self.browser_host_state
-            .navigation_owner_mut()
             .register_target_initial_empty_document(owner, seed)
     }
 
@@ -51,7 +50,6 @@ impl CdpConnection {
             return false;
         };
         self.browser_host_state
-            .navigation_owner_mut()
             .mark_target_initial_empty_document_exited(&owner);
         true
     }
