@@ -61,6 +61,10 @@ pub struct FetchArgs {
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
 
+    /// Write final unpartitioned cookies to a Netscape cookie file.
+    #[arg(long, value_name = "PATH")]
+    pub cookie_jar: Option<String>,
+
     #[arg(long)]
     pub noscript: bool,
 

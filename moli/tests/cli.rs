@@ -76,6 +76,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
             dump: Some(DumpFormat::SemanticTree),
             method: "GET".to_owned(),
             body: None,
+            cookie_jar: None,
             headers: vec![
                 RequestHeaderArg {
                     name: "X-Test".to_owned(),
@@ -416,6 +417,7 @@ fn infers_fetch_mode_from_bare_url() {
             dump: None,
             method: "GET".to_owned(),
             body: None,
+            cookie_jar: None,
             headers: vec![],
             noscript: false,
             with_base: false,
@@ -458,6 +460,7 @@ fn parses_bare_dump_with_explicit_fetch_command_and_defaults_to_html() {
             dump: Some(DumpFormat::Html),
             method: "GET".to_owned(),
             body: None,
+            cookie_jar: None,
             headers: vec![],
             noscript: false,
             with_base: false,
@@ -501,6 +504,7 @@ fn parses_header_flag_with_explicit_fetch_command() {
             dump: None,
             method: "GET".to_owned(),
             body: None,
+            cookie_jar: None,
             headers: vec![RequestHeaderArg {
                 name: "X-Test".to_owned(),
                 value: "one".to_owned(),
@@ -1187,6 +1191,8 @@ fn parses_fetch_network_policy_flags() {
         "/tmp/browser-cookies.txt",
         "--cookie-file",
         "/tmp/extra-cookies.txt",
+        "--cookie-jar",
+        "/tmp/final-cookies.txt",
         "--block-private-networks",
         "--block-cidrs",
         "198.18.0.0/15,203.0.113.0/24",
@@ -1220,6 +1226,7 @@ fn parses_fetch_network_policy_flags() {
             "/tmp/extra-cookies.txt".to_owned()
         ]
     );
+    assert_eq!(args.cookie_jar.as_deref(), Some("/tmp/final-cookies.txt"));
     assert!(args.common.block_private_networks);
     assert_eq!(
         args.common.block_cidrs.as_deref(),
