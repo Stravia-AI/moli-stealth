@@ -214,10 +214,10 @@ impl CdpConnection {
                     .await
             }
             ReadyProtocolSchedulerWork::PageTargetCloseRequestOwnerAction(action) => {
-                return crate::domains::page::complete_page_target_close_request_owner_action_async(
+                crate::domains::page::complete_page_target_close_request_owner_action_async(
                     self, action,
                 )
-                .await;
+                .await
             }
             ReadyProtocolSchedulerWork::PageTargetTerminationOwnerAction(action) => {
                 crate::domains::page::complete_page_target_termination_owner_action_async(

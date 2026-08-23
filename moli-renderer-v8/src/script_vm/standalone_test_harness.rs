@@ -398,6 +398,9 @@ mod tests {
             .expect("source Page bootstrap should retain its script-agent membership");
         let source_environment = RendererPageScriptEnvironment::new(
             source_page_id.as_u64(),
+            false,
+            true,
+            true,
             RendererAuxiliaryPageReservationAllocator::new_for_test(
                 RendererOwnerLocalHostId::new_for_testing(1),
                 source_page_id,

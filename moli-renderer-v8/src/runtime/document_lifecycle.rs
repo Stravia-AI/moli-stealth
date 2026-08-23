@@ -326,14 +326,25 @@ impl RendererDocumentLifecycleJournalHandle {
         self.0.borrow().current_snapshot.into()
     }
 
-    pub(crate) fn bind_output_journal(&self, output_journal: super::RendererTurnOutputJournal) {
+    pub(crate) fn bind_output_journal(
+        &self,
+        output_journal: super::RendererTurnOutputJournal,
+        allow_page_agent_transition: bool,
+    ) {
         let mut journal = self.0.borrow_mut();
         if let Some(existing) = &journal.output_journal {
-            assert_eq!(
-                existing.stream(),
-                output_journal.stream(),
-                "one lifecycle journal cannot change renderer output streams"
-            );
+            if existing.stream() != output_journal.stream() {
+                assert!(
+                    allow_page_agent_transition,
+                    "one lifecycle journal cannot change renderer output streams outside a typed Page agent transition"
+                );
+                assert_eq!(
+                    existing.stream().residence(),
+                    output_journal.stream().residence(),
+                    "a lifecycle journal Page agent transition cannot change Page residence"
+                );
+                journal.output_journal = Some(output_journal);
+            }
             return;
         }
         journal.output_journal = Some(output_journal);

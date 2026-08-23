@@ -30,8 +30,9 @@ auxiliary Page owner 导航一次，opener host 不再启动 mirrored loader。P
 destination 提升为携带 exact `TargetPageResidenceIdentity` 的 typed claim，并在 target-local
 slot 中建立 `Held → Published → Consumed` authority；旧 admission 因 Page generation 变化而失效
 后，不能导航 replacement Page，也不能被 `Page.enable` 等入口从 target URL 重建。Phase 3-4 的
-single-owner/navigation 主干现已完成；Phase 5 的 local/Fresh creation policy 已在 E3 exit，lifecycle、
-group/remote、identity/lifetime 与最终双栈删除仍未整体完成。Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
+single-owner/navigation 主干现已完成；Phase 5 的 local/Fresh creation policy 已在 E3 exit，
+script-closable、beforeunload/unload 与 renderer close ACK/timeout 已在 L1 exit；local focus/active
+Page/focused-frame authority 又已在 L2 exit；group/remote、identity/lifetime 与最终双栈删除仍未整体完成。Phase 4 第三纵切已经把 HTTP 204/205 收敛为不提交 Document 的独立 terminal，
 并覆盖 initial realm/history 保留和后续 redirect replacement。第四纵切又把 replacement
 Document 的 commit/attachment publication 与其精确 DCL continuation 分开：protocol 可以在
 parser 仍阻塞时控制已经提交的 realm，renderer owner 则用独立 typed terminal 交付同一 turn 的
@@ -61,8 +62,9 @@ related top-level cross-origin WindowProxy 的 index/name 不再复制到静态 
 child registry 动态解析到既有 stable child WindowProxy；插入、移除、重命名、`then` / `open` named
 shadow 和 ownKeys 排除 named child 均有回归。opener 则由 Page-scoped edge 跨 realm 保存；显式
 `window.opener = null`、opener 最终 discard 和后续 navigation 使用同一 sever 结果，关闭 popup 自身仍
-按 Chromium 保留尚存活的 opener。script-closable policy、beforeunload/unload、focus transaction、
-Phase 5D 第一纵切 D1 也已收敛 restricted Location internal methods：ownKeys 只保留
+按 Chromium 保留尚存活的 opener。Phase 5B 当时有意保留的 script-closable policy、
+beforeunload/unload 与 renderer ACK/timeout 已由 Phase 5L1 收口；browser-context active Page、focused
+frame/element 与 `focus()` transaction 又由 Phase 5L2 收口。Phase 5D 第一纵切 D1 也已收敛 restricted Location internal methods：ownKeys 只保留
 `href` / `replace` / `then` 和 3 个 fallback symbol，unknown get/has/descriptor/set/delete/define、
 prototype mutation 与 preventExtensions 均按 WPT 形状处理。第二纵切 D2 进一步完成 restricted
 Window internal methods：denied/unknown name 和 out-of-range index 不再以伪 own accessor 或
@@ -160,8 +162,19 @@ background commit 保持 move-only authority，只在 exact committed/current/ex
 WindowClient 上返回对象，其余已打开但不可观察或未提交路径返回 `null`。同一 source turn 的 ordinary target
 navigation 与后继 `javascript:` target task 即使分裂为多个 renderer publication，也会在普通导航 start 后、
 commit 前经过 exact target Page owner lane；fast response 不再抢先替换执行该 task 的 Document。至此本地
-DOM 与非 DOM production creation producer 都以真实 Page 为权威 owner；COOP/remote/fenced group model、
-unload/focus lifetime 和 Phase 6 compatibility 双栈删除仍是独立的大阶段。
+DOM 与非 DOM production creation producer 都以真实 Page 为权威 owner。Phase 5L1 随后把 `OpenedByDOM`、
+history/浏览器设置 script-close gate、root→local descendants `beforeunload`、一次 confirmation、
+`pagehide`/`unload`、network-drained barrier、renderer unload ACK/timeout 和最终 target teardown 收进同一个
+exact Page transaction。Phase 5L2 随后建立跨 Document 保留的 Page focus state、focused-frame ancestry、
+native `document.hasFocus()`、CSS/event transition，并让 `Window.focus()`、`Target.activateTarget`、
+`Page.bringToFront`、focus emulation、window state、activated target creation 与 close promotion 共用 exact
+Page activation transaction；active-target 与 effective-focus 是两个独立 Page 位，因此 parked Page 即使被
+focus emulation 投影为 focused，`window.focus()` 仍会请求真正 promotion。Phase 5G1 又完成本地
+committed-response COOP group sever：目标 Page/Target/session 和 Page scheduler identity 保持，命中 Chromium
+swap matrix 时则在 commit 前预留新 browsing-context group、script agent、isolate、realm/WindowProxy 与
+renderer output stream；取消 preparation 不伤旧 group，成功 commit 才 sever opener/name/old membership，并把
+旧 group 持有的 WindowProxy 停驻为 disconnected/closed facade。redirect/report-only、真正 remote endpoint、
+RemoteFrame/fenced/embedder、identity/lifetime 和 Phase 6 compatibility 双栈删除仍是独立的大阶段。
 
 代码基线：
 
@@ -418,11 +431,11 @@ owners”。这不是原始评估时的推测，而是 Phase 4 第一纵切之�
 | top-level initiator / referrer | E2H 已让 current-top `window.open()`、hyperlink/form 与 related target request 保存 exact source Window/Document 和 policy；E2N 的 target-local `javascript:` task 也保留这份 source carrier；preflight、transport redirect/Fetch URL override、最终 `document.referrer` 不再从 target root 反推 | redirect response 自身更新 policy、完整 Fetch response-stage override 仍需独立收口 |
 | realm | related 非命名/普通 named 路径（含 full-creator form 与 E2N `javascript:`）使用真实独立 target realm；Fresh noopener 以及 SW/notification Fresh Page 不暴露伪 opener realm；legacy facade 仍可能共享 opener `Context` | compatibility handle 仍可能与 CDP execution context 无关 |
 | synchronous access | 已迁移 related path 直接访问 target 的真实 Document；E2N 同步返回 stable target WindowProxy、异步执行 target task；legacy facade 仍模拟部分 `w.document` | 未迁移入口的写入不会自然出现在 target DOM |
-| cross-origin WindowProxy | 有局部 restriction/facade | 不是完整 outer/inner 或 local/remote proxy 模型 |
-| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 related auxiliary Page（包括 E2N primary `javascript:` target）已在 Phase 5B 统一；Fresh noopener 不向 opener 暴露 close handle | compatibility fallback 仍可能让 `closed`、targetDestroyed、资源回收不一致 |
-| focus/blur | top-level Window 上仍有 no-op surface | named-target focus 和事件不完整 |
-| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；E2M.1 已让 current/related local candidate 统一经过 renderer `CanNavigate` authority；protocol map 仅为 projection/legacy fallback | RemoteFrame/fenced/COOP group switch 后查找仍未建模；legacy compatibility helper 待 Phase 6 删除 |
-| opener / COOP | 有 opener suppression 字段和局部 policy | 没有完整 browsing-context-group split / opener sever |
+| cross-origin WindowProxy | related local Page 已复用 stable outer proxy 与 per-Realm restricted surface；G1 在 COOP swap 后为新 group 建立新 proxy，并把旧 group proxy 停驻为 disconnected/closed facade | 还不是真正 cross-process remote proxy endpoint；RemoteFrame/fenced 与 disconnected operation 全矩阵仍缺失 |
+| `window.close()` | 未迁移 lightweight 路径仍与 target 分裂；真实 auxiliary Page 已由 Phase 5B/L1 统一 script-closable、subtree beforeunload、network drain、pagehide/unload、renderer ACK/timeout 和最终 teardown；Fresh noopener 不向 opener 暴露 close handle | compatibility fallback 与 remote frame unload 仍可能让 `closed`、lifecycle、资源回收不一致 |
+| focus/blur | Phase 5L2 已建立彼此独立的 browser-context active-target/effective-focus Page 位与 renderer focused-frame authority；`Window.focus()` 保留 transient-activation/opener admission，跨 Page owner action 冻结 exact renderer Page，target activation、focus emulation、window minimize/restore、activated creation 与 close promotion 都更新 native `document.hasFocus()`、CSS `:focus` / `:focus-within` 和 Chromium event order；modal prompt 阻塞 owner lane 时，browser activation 不等待旧 Window，exact Page focus/surface command 留在 owner FIFO；top-level `blur()` 保持 metric-only no-op；G1 的 local agent switch 保留同一 Page active/focused state | RemoteFrame/COOP 的 cross-process focus endpoint 与 embedder activation 尚未建模 |
+| named target | E2A-E2D 已统一 `window.open()`、full-creator hyperlink/form 的 related lookup、Fresh group split 和 exact Page handoff；E2E 已补 child-source、related nested local frame-tree order；E2F/E2G 已让 form 消费 typed target，并跨 Page 保存 cancellable scheduler generation；E2M.1 已让 current/related local candidate 统一经过 renderer `CanNavigate` authority；G1 在 COOP commit 时从旧 related registry 注销 target，并让新 group 从空 name 开始；protocol map 仅为 projection/legacy fallback | RemoteFrame/fenced 的跨 endpoint 查找仍未建模；legacy compatibility helper 待 Phase 6 删除 |
+| opener / COOP | G1 已持久化 typed browsing-context-group/committed COOP state，按 Chromium enforced-policy matrix 在 replacement admission 时选择 preserve/switch；switch 使用新 agent/isolate/realm，commit 时 sever JS opener、清空新 group name、断开旧 proxy，同时保持同一 Page/CDP Target/session | report-only/Reporting API、redirect-hop virtual group、真正 remote/disconnected endpoint、protocol opener/group projection 和跨进程隔离仍未完成 |
 | popup blocker / user activation | E2K 已建立 renderer-owned 5s transient + sticky ledger、exact generation consume、existing-target bypass、sandbox-before-blocker order、pre-consumption `Page.windowOpen` observation 和 browser-context allow/require policy；E2M.1 已把 transient/sticky 状态接入 local top-navigation decision；DevTools gesture 与 trusted mouse/key/touch 共用 owner | 尚无 content-setting/CDP 配置面与 blocked console/UI diagnostic；RemoteFrame replication、per-frame visibility 和 history activation 长尾未完成 |
 | sandbox | E2I 已统一 attribute/response-CSP `allow-popups` 新建准入，并区分 escape 只控制继承；E2J 又让 Fresh/no-local-proxy target Page 跨 initial 与后续 Document 持有 renderer-frozen policy；E2L/L.1 已补 source `allow-forms` 和 creation-only side effect；E2M.1 已提交并冻结 navigation/top-navigation flags、frame-owner token provenance 与 Chromium `can_navigate_top_without_user_gesture` 等价 guard，并用于 local target selection/navigation | security console diagnostic、RemoteFrame/fenced/embedder 与 file-local 特例仍缺失 |
 | initial empty Document | 已迁移 related 路径由 target 采纳同一份；Fresh noopener 只由目标 Page 创建；legacy 双栈仍各有一份 | 未迁移入口的同步 mutation 与 target attach 无法指向同一对象 |
@@ -2759,6 +2772,11 @@ closure 和 renderer Page discard 已经共用同一责任边界。`WindowClose`
 Page 允许脚本发起 close；证据只支持“请求一旦被接受，transaction、取消、target 事件与断开语义
 一致”，不能解读成 Chromium 的所有“是否允许关闭”条件已经完成。
 
+> 2026-08-06 状态更新：本小节记录的是 Phase 5B 当时的明确非目标。Phase 5L1 已补齐本地真实 Page 的
+> `OpenedByDOM` / history / browser-setting script-closable gate、subtree `beforeunload`、dialog、
+> `pagehide`/`unload`、renderer ACK/timeout 与 close/navigation currentness。COOP/RemoteFrame、focus 以及
+> detached-realm lifetime 仍按后续大阶段处理；不能把 L1 外推为完整 group/remote close。
+
 ##### 聚焦证据
 
 renderer 回归覆盖：跨 Page 两次 `close()` 只发布一个 target-owned action，target 自身与 opener
@@ -2838,9 +2856,10 @@ popup 不会错误 sever 其仍存活的 opener，closed facade 继续投影原 
 - 不显式 sever 时，关闭 popup 自身仍保留 opener；关闭 opener Page 时，存活 popup 在最终 discard 后
   看到 `null`，导航后保持 sever。
 
-本纵切仍没有实现 COOP/`noopener` 的 browsing-context-group switch 或 remote endpoint；Page-scoped
-edge 是当前 related same-agent group 的唯一投影 owner，也是后续 group policy transaction 的接入点，
-不能把“JS setter/本地 opener discard 已 live”解读为完整 COOP policy 已完成。
+本纵切当时没有实现 COOP/`noopener` 的 browsing-context-group switch 或 remote endpoint；Page-scoped
+edge 成为后续 group policy transaction 的接入点。local committed-response COOP switch 现已由 G1 接入该
+边界，但真正 remote endpoint、redirect/report-only 和跨进程 group 仍不能从“JS setter/本地 opener discard
+已 live”外推。
 
 #### Phase 5D1：restricted Location internal methods
 
@@ -3105,8 +3124,9 @@ accessing Realm
   owner，避免 target realm 泄漏转换异常；
 - `postMessage` 仍由既有 endpoint resolver 决定 top/child/popup endpoint，但排队 host 从 receiver 的 target
   Context 取得，`event.source` 继续是 stable source WindowProxy；
-- related popup `close()` 只请求 target Page 的唯一 close transaction；`focus()` / `blur()` 当前仍是通过
-  receiver brand 检查的 no-op，与尚未完成的 focus transaction 边界一致；
+- related popup `close()` 只请求 target Page 的唯一 close transaction；本小节实施时 `focus()` / `blur()`
+  仍是 receiver-brand no-op，后续 Phase 5L2 已让 `focus()` 进入 exact target Page transaction，并按 Chromium
+  保留 top-level `blur()` no-op；
 - attribute getter 先校验 receiver，再在 target access-surface Context 读取 live relation/scalar；
   `window/self/frames` 直接返回 exact receiver，避免创建等价但不相等的 identity；
 - Chromium 依赖 V8 interface signature 拒绝错误 Location receiver；当前 Lightmount 的 minimal
@@ -3455,7 +3475,8 @@ entered Window.open(url, name, features)
    返回 `null`，不会误建 popup。
 
 E2A 本身仍不是完整 browsing-context-group 实现。多个 related Page/嵌套 frame 同名时的完整 Chromium
-frame-tree ordering、`CanNavigate`、focus、跨 agent/remote endpoint 与 COOP group switch 仍需后续纵切；
+frame-tree ordering、`CanNavigate`、focus 后来分别由 E2E/M.1/L2 收口；local committed-response COOP group
+switch 又由 G1 收口，跨 agent 的真正 remote endpoint 仍需后续纵切；
 E2A 当时保留的新建 named noopener/noreferrer fresh-group policy 由下一节 E2B 接手。当前 related registry
 仍只覆盖 related same-agent top-level contexts。
 
@@ -5512,8 +5533,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 - `javascript:` form/popup 必须同步完成最终 target 选择/创建，再在该 target Document 的 networking task 中
   异步执行并使用其 CSP/origin/currentness，不能套用本节 HTTP(S)/`about:blank` destination carrier；该
   full-creator 路径现已由 E2N 独立实现；
-- `NoDestination` 是 target-local typed tombstone，不是通用 navigation cancellation API；RemoteFrame scheduler、
-  COOP group sever 与 disconnected WindowProxy endpoint 仍按各自 owner 继续推进。
+- `NoDestination` 是 target-local typed tombstone，不是通用 navigation cancellation API；G1 已完成 local
+  committed-response COOP group sever 与 disconnected facade，RemoteFrame scheduler 和真正 remote
+  WindowProxy endpoint 仍按各自 owner 继续推进。
 
 #### Phase 5E2M.1：renderer-owned local `CanNavigate` authority
 
@@ -5684,8 +5706,8 @@ standalone lightweight callback 已执行 final teardown。fixture 因此改为�
   target-Document 异步 task execution、CSP/origin/currentness 仍走 legacy，现已由 E2N 完成；
 - `navigate_named_iframe_target_from_document()` 只剩 current-host compatibility wrapper，生产
   window.open/hyperlink/form resolver 已不依赖其权限判断；Phase 6 删除双栈时一并移除，不能继续扩展；
-- COOP browsing-context-group sever、disconnected/remote WindowProxy endpoint、focus/unload transaction 仍按后续
-  owner 阶段推进。
+- COOP browsing-context-group sever、disconnected/remote WindowProxy endpoint 仍按后续 owner 阶段推进；
+  本地真实 Page 的 close/unload transaction 已由 Phase 5L1 完成，local focus transaction 已由 Phase 5L2 完成。
 
 #### Phase 5E2N：`javascript:` final-target Page task / realm
 
@@ -5841,12 +5863,12 @@ TMPDIR=<repo>/tmp/e2n-build cargo nextest run -p lightmount-protocol \
   没有伪装成 root Window 的 source Document；
 - already-published ordinary destination 后同一 source turn 又排队 JS URL 的 renderer/protocol causal ordering
   已由 E3 的真实 protocol apply/commit integration 回归补齐；
-- RemoteFrame/fenced target、COOP group sever、isolated world、disconnected endpoint 与 cross-process scheduler
-  不在本地 Page queue 能表达的范围；
+- G1 后 local committed-response COOP group sever 已进入 Page replacement owner；RemoteFrame/fenced target、
+  isolated world、真正 remote endpoint 与 cross-process scheduler 仍不在本地 Page queue 能表达的范围；
 - legacy lightweight JS executor 仍服务 standalone fixture/compatibility fallback。E2N 的结论是 primary owner 已
-  迁移，不是 Phase 6 已可直接删除；E3 后当前宽口径 surface 仍为 110 个 Rust 文件、1365 处命中；
-- E2O 后规划的非 DOM creation producer 与 focused protocol evidence 已由 E3 完成。后续按 lifecycle、
-  group/remote、identity/lifetime 三个完整 milestone 收口后，才进入 Phase 6 删除双栈。
+  迁移，不是 Phase 6 已可直接删除；当前宽口径 surface 仍为 111 个 Rust 文件、1388 处命中；
+- E2O 后规划的非 DOM creation producer 与 focused protocol evidence 已由 E3 完成，local close/unload 又由 L1
+  完成。后续按 focus、group/remote、identity/lifetime 收口后，才进入 Phase 6 删除双栈。
 
 #### Phase 5E2O：target Trusted Types、`form-action` 与 source-selection ordering
 
@@ -6098,32 +6120,34 @@ Rust 回归写成 WPT pass。
 ##### Phase 5E local exit 后的边界
 
 - production SW/notification caller 已没有 `open_lightweight_popup_window()`；当前该符号只剩 DOM compatibility
-  facade 与 lightweight record 内部 reopen。全仓更宽的 lightweight 静态扫描仍为 110 个 Rust 文件、1365 处
+  facade 与 lightweight record 内部 reopen。全仓更宽的 lightweight 静态扫描仍为 111 个 Rust 文件、1388 处
   命中（包含测试、注释和兼容投影），所以 E3 不是 Phase 6 删除完成证明；
-- script-closable、beforeunload/unload、renderer close ACK/timeout 与 focus/blur 仍缺少 Page/browser-context
-  transaction，应作为下一个完整 lifecycle milestone 一次推进；
-- COOP browsing-context-group switch、opener sever、RemoteFrame/fenced/embedder `CanNavigate`、remote/disconnected
-  WindowProxy 是后续最高风险 group/remote milestone；
+- Phase 5L1 已把 script-closable、local subtree beforeunload/unload、renderer close ACK/timeout 收进真实 Page
+  transaction；Phase 5L2 又完成本地 `focus()` 与 browser-context active/focused Page 事务。Chromium top-level
+  `blur()` 保持指标-only no-op，没有伪造对称失焦事务；
+- Phase 5G1 已完成本地 committed-response COOP browsing-context-group/script-agent split、JS opener/name sever、
+  old-group disconnected facade 与同一 Page/CDP target/session continuity；redirect/report-only、
+  RemoteFrame/fenced/embedder `CanNavigate` 和真正 remote/disconnected endpoint 仍是后续最高风险
+  group/remote milestone；
 - group-safe opaque-origin nonce、被 JS 强引用的 detached Document/Node/realm lifetime 属于 identity/lifetime
   milestone；redirect-time browser-process `form-action`、isolated-world bypass、file-local/diagnostic 和 focused WPT
   仍是明确长尾。
 
 ##### 距离最终架构的剩余工作量（2026-08-06）
 
-这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。常用 DOM popup 路径约完成
-85-90%；以“能删除 lightweight 双栈并具备 Chromium-shaped group/lifetime owner”为终态，约完成 65-70%。
-剩余 30-35% 集中了风险最高的工作，不能按当前测试数量线性外推：
+这里的百分比是按 ownership/lifetime 风险加权的工程估计，不是测试通过率。Phase 5G1 后，常用 DOM popup
+路径约完成 94-96%；以“能删除 lightweight 双栈并具备 Chromium-shaped group/lifetime owner”为终态，约完成
+80-84%。剩余 16-20% 仍集中在风险最高的 remote、lifetime 与最终删除工作，不能按当前测试数量线性外推：
 
 | 大里程碑 | 必须形成的 exit condition | 规模/风险判断 |
 | --- | --- | --- |
-| lifecycle closure | script-closable gate；beforeunload/unload；renderer close ACK/timeout；focus/blur 与 active Page 事务；close/navigation/worker teardown 共用 currentness | 大；3-5 个内聚提交 |
-| group/remote model | COOP browsing-context-group/script-agent split；opener sever；remote/disconnected WindowProxy；RemoteFrame/fenced/embedder `CanNavigate` | 最大且风险最高；5-8 个提交 |
+| group/remote model | G1 已完成 local committed-response COOP group/agent split、opener/name sever、old proxy disconnect 与 target/session continuity；exit 还需 redirect/report-only、remote endpoint、RemoteFrame/fenced/embedder `CanNavigate` | 仍是最高风险；3-6 个提交 |
 | identity/lifetime closure | group-safe opaque-origin nonce；JS 强引用 detached Document/Node/realm 可存活；remote scheduler 与 GC/owner 协同 | 大；3-5 个提交 |
 | Phase 6 removal | 删除 record、realm alias、`with(window)` wrapper、mirrored parser/loader/lifecycle、protocol 第二 Page/navigation 与所有 fallback；用静态扫描 + WPT/CDP 证明无 production 回退 | 大且机械面广；4-7 个提交 |
 
-合计仍应按约 15-25 个内聚提交、四个阶段验收来规划。最不合理的下一步仍是直接删除 record：当前
-110 个 Rust 文件、1365 处宽口径 lightweight 命中说明 compatibility projection/test 和真实旧 owner 尚未完成
-解耦。下一阶段应一次完成 lifecycle closure，而不是继续拆成只改一个 gate 的小补丁。
+合计仍应按约 10-18 个内聚提交和三个大阶段验收来规划。最不合理的下一步仍是直接删除
+record：当前 111 个 Rust 文件、1388 处宽口径 lightweight 命中说明 compatibility projection/test 和真实旧
+owner 尚未完成解耦。下一阶段应继续完成 group/remote G2，而不是重新退回逐 API 修补。
 
 ##### E1-E2O/E3 完成后的 Phase 5E 范围
 
@@ -6170,8 +6194,9 @@ E3 是 local/Fresh creation-policy exit，不是 COOP/remote group model 或 Pha
 - E2I 已让 `allow-popups` / escape-sandbox 的 **new-context admission** 使用 typed policy；E2J 已补 Fresh
   no-local-proxy sandbox handoff；E2K 已补 transient/sticky activation 和 browser-context popup-blocker
   decision；E2L 已补 attribute/CSP/inherited `allow-forms` 和 source gate；E2L.1 已补 direct-submit
-  creation-only side effect；E2M.1 已补 local sandbox/top-level navigation decision。COOP group switch、remote 或
-  disconnected WindowProxy endpoint 仍没有完整统一；
+  creation-only side effect；E2M.1 已补 local sandbox/top-level navigation decision；G1 已补 local
+  committed-response COOP group switch 和 old-proxy disconnected facade。redirect/report-only 与真正 remote
+  endpoint 仍没有统一；
 - E2H 已覆盖同源 direct、跨 origin redirect hop、Fetch request-stage URL override、默认 downgrade policy
   与最终 `document.referrer`；redirect response policy mutation、Fetch response-stage override 和
   explicit header/document-referrer 的完整 Chromium 矩阵仍需单独 WPT/最小探针。
@@ -6183,17 +6208,19 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
 
 | 未完成项 | 当前事实 | 下一责任方 |
 | --- | --- | --- |
-| close policy / unload | accepted close transaction、动态 `closed`、task/fetch cancellation、target teardown 和 closed facade 已统一；script-closable、beforeunload/unload/ACK 尚未实现 | popup creation/group policy + 通用 Page unload lifecycle owner |
-| focus / blur | descriptor 和调用许可已存在，没有 Page focus authority/事件事务 | browser-context active/focus owner |
+| close/unload remote 与 compatibility 长尾 | Phase 5L1 已统一真实 local Page 的 script-closable、subtree beforeunload、一次 dialog、network drain、pagehide/unload、renderer ACK/timeout 与 target teardown；compatibility lightweight 和 RemoteFrame 仍未进入该事务 | group/remote owner + Phase 6 compatibility removal |
+| focus / active Page remote 长尾 | Phase 5L2 已完成 local Page/focused-frame authority、native `document.hasFocus()`、events/CSS、target activation/focus emulation/window-state/create/close promotion；top-level `blur()` 保持 Chromium no-op | group/remote owner 负责 RemoteFrame、COOP split 与 embedder activation endpoint |
 | retained detached Document values | Document host retirement 后旧 function/DOM wrapper 当前安全抛 `TypeError`；Chromium 中被 JS 强引用的 detached Node/realm 仍可继续存活和读取 | 为 DocumentRuntime、realm 和 wrappers 建立 GC/owner 协同 lifetime，避免用 raw host pointer 决定对象寿命 |
-| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification browser-context creation、exact worker terminal 与 ordinary→JS apply/commit ordering。COOP、RemoteFrame/fenced/file-local、activation replication、diagnostic 和 disconnected endpoint 仍未统一 | browsing-context group / remote navigation policy owner |
+| policy/group sever | E1-E2O 已统一 DOM local/Fresh creation、name/target/request/policy/activation/JavaScript URL；E3 又统一 SW/notification browser-context creation、exact worker terminal 与 ordinary→JS apply/commit ordering；G1 已完成 local committed-response enforced COOP swap、新 group/agent/isolate、opener/name sever、old proxy disconnect 和 stable Target/session | group/remote owner 继续负责 redirect/report-only、Reporting、RemoteFrame/fenced/file-local、activation replication、diagnostic 与真正 remote endpoint |
 
 下一批按以下顺序推进，避免把动态状态继续塞进静态 surface：
 
-1. **Phase 5B：close transaction（本纵切已完成 accepted-close 闭环）。** 已建立唯一
+1. **Phase 5B/L1：close/unload transaction（已完成本地真实 Page 闭环）。** 已建立唯一
    browsing-context liveness authority；`window.close()`、`Target.closeTarget`、opener-side `.closed`、
    task cancellation、targetDestroyed 和 Page teardown 使用同一 typed transaction，并覆盖重复 close、
-   target currentness 与早期 admission。script-closable/unload policy 按上节边界继续补齐。
+   target currentness 与早期 admission。L1 又补齐 `OpenedByDOM`/history/browser setting gate、root→descendant
+   `beforeunload`、sticky activation/一次 dialog、network-drained barrier、pagehide/unload、renderer ACK/timeout
+   和 command response causal fence；RemoteFrame/COOP 不在本地闭环中。
 2. **Phase 5C：live relation/child projection（本纵切已完成）。** Page-scoped opener edge 与 top-level
    child/name registry 已取代静态 surface snapshot，覆盖动态 frames、named child、`then` / `open`
    shadow、opener setter/discard sever 与 navigation persistence；COOP/remote group sever 留给独立 group/remote
@@ -6230,10 +6257,11 @@ Phase 5C 已把 related top-level 的动态 child/opener 投影接回 owner，�
    target-Document FIFO task、source/target CSP、currentness/string replacement 和 protocol `NoDestination`
    收进同一真实 Page；E2O 再补 target Trusted Types、stable child realm、form-action 与 existing/new source
    policy 分岔；E3 最后把 Service Worker/notification browser-context producer、exact Page/worker continuation
-   terminal 与 ordinary→JS owner ordering 统一到真实 Page。下一步不再按小纵切追加 Phase 5E，而是按四个完整
-   milestone 推进：lifecycle closure（script-closable/unload/focus）、group/remote model（COOP/RemoteFrame/
-   disconnected endpoint）、identity/lifetime closure（opaque-origin nonce/detached realm），最后执行 Phase 6
-   lightweight 双栈删除。focused WPT、diagnostics/file-local 随对应 milestone 提供证据。
+   terminal 与 ordinary→JS owner ordering 统一到真实 Page。Phase 5L1 已完成 close/unload closure，Phase 5L2
+   已完成 local focus/active Page closure，Phase 5G1 已完成 local committed-response COOP group/agent sever 与
+   stable Target/session continuity。下一步继续推进 group/remote G2
+   （redirect/report-only、RemoteFrame/fenced 与真正 remote endpoint），随后是 identity/lifetime closure（opaque-origin nonce/detached
+   realm），最后执行 Phase 6 lightweight 双栈删除。focused WPT、diagnostics/file-local 随对应 milestone 提供证据。
 
 Phase 5A 聚焦验证：
 
@@ -7307,20 +7335,390 @@ TMPDIR=<repo>/tmp/phase5e cargo nextest run -p lightmount \
 
 随后两次默认并发 full run 均为 16151 passed、18 skipped；最后一次就是上面的提交门禁。现有证据只能说明它
 依赖 workspace 全局调度竞争，不能证明 parser-network backlog 与 DCL publication 的 owner 不变量已经稳定；也
-没有据此加入 sleep、retry、降低默认并发或放宽顺序断言。这项风险应在下一完整 lifecycle closure 中连同
-beforeunload/unload、close ACK 和通用 protocol publication fence 一起定位，不能把 focused 100/100 写成根因修复。
+没有据此加入 sleep、retry、降低默认并发或放宽顺序断言。Phase 5L1 已为 dialog、network terminal、unload ACK 和
+command response 建立 exact publication fence，并通过 pending Fetch/XHR close 回归；但本轮没有把上述 WebSocket
+用例写成根因修复，也没有用 focused 100/100 掩盖剩余 parser-network 风险。
+
+#### Phase 5L1：script-closable、beforeunload/unload 与 renderer ACK closure
+
+这一纵切不是只给 `window.close()` 再加一个条件，而是把“是否接受关闭”和“接受后何时可以销毁 target”做成
+完整 Page/browser transaction。它复用 Phase 5B 已有 stable Page liveness、WindowProxy closed facade 和
+target teardown，不给 lightweight record 增加第二套 unload owner。
+
+##### 固定 Chromium 对照
+
+对照仍固定在 `/home/donoughliu/chromium/src@a03603fe9af6`：
+
+- `third_party/blink/renderer/core/frame/dom_window.cc:617-677` 先检查 outermost main frame、incumbent
+  `CanNavigate`，再以 `OpenedByDOM` / browser setting / history length 决定 script-closable；
+  `ShouldClose()` 接受后才 `CloseSoon()` 并同步设置 closing；
+- `third_party/blink/renderer/core/loader/frame_loader.cc:1624-1707` 先 root、再 local descendants 执行
+  `beforeunload`，任一拒绝即取消；全部接受后才推进 will-unload 状态；
+- `third_party/blink/renderer/core/dom/document.cc:4450-4567` 阻止 reentrant `beforeunload`，按
+  `returnValue` / `preventDefault()`、sticky activation 和“一次 navigation 最多一个 confirmation”决定是否
+  打开 dialog；`document.cc:4569` 以后与 `frame_loader.cc:377-420` 执行非可取消 unload lifecycle；
+- `third_party/blink/renderer/core/frame/local_frame_mojo_handler.cc:1236-1264` 在 renderer 运行 unload 后才
+  调用 completion callback；`content/browser/renderer_host/render_frame_host_impl.cc:7510-7574` 与
+  `render_frame_host_impl.h:4771-4789` 把 browser close 保持在 running-unload 状态，等待 ACK 或 timeout 后才
+  最终关闭；
+- `dom_window.cc:680-777` 说明 `focus()` 还涉及 activation、opener、Page focus controller 和 embedder；
+  `dom_window.cc:779-782` 的 top-level `blur()` 只记录 access metric。因此本轮没有实现一个错误的对称
+  blur transaction；该 active Page milestone 后续已由 Phase 5L2 完成。
+
+##### Lightmount owner 与不变量
+
+1. `RendererPageReservationToken` 和跨 Document 保留的 `RendererPageScriptEnvironment` 现在携带
+   `opened_by_dom`。DOM auxiliary 为 true，普通 browser/SW/notification Page 为 false；browser-context
+   `allow_scripts_to_close_windows` 默认 false。`window.close()` 只有在 DOM-opened、browser override 或当前
+   history length 不大于 1 时才能继续，browser-created multi-entry Page 会保持 live。
+2. same-origin、cross-origin related `Window.close()` 都进入最终 target V8 Context。root 先于当前 local
+   descendants、descendants 按 document order 接收 browser-created `BeforeUnloadEvent`；无 sticky activation
+   时仍发事件但忽略 prompt 请求，一次 close 最多接受一个 confirmation。任一 dialog 拒绝时 Page 不进入
+   `Closing`；handler 内 reentrant close 也不会递归取得第二份事务 authority。
+3. close 被接受后，protocol 先取消该 target 的 navigation、Fetch/XHR、auth/response-stage 与 inspector await，
+   让 terminal output 获得精确 renderer predecessor；随后 renderer 依次执行 root `pagehide`/`unload` 和各 local
+   descendant lifecycle，且每个 Document 最多一次。`TopLevelCloseNetworkDrained` 与
+   `TopLevelCloseUnloadAck` 是 typed owner action，不靠 sleep、drain loop 或猜测队列为空。
+4. `window.close()`、`Page.close`、`Target.closeTarget` 最终仍进入同一个 target termination owner，但保留触发
+   来源：renderer Window close 绑定 exact Page residence，晚到记录不能关闭 replacement Page；browser
+   Page/Target close 对 target 保持 authority，页面不能靠 navigation 逃避 browser close。renderer unload ACK
+   丢失、Page 消失或超过当前 1 秒有界 timeout 时才走 browser force-close fallback。
+5. `Page.close` 的 beforeunload dialog 会先发布 exact output prefix，命令 continuation 绑定该 fence；直接
+   DevTools `Target.closeTarget` 也把 renderer predecessor 带回统一 ingress。accepted `Page.close` 自身已经
+   执行 network drain/unload，而其 stream 中仍有一条 `TopLevelClose(Page)` 记录；protocol 用 exact
+   `TargetPageResidenceIdentity` 只抑制这一条重复 owner action，并在 Page replacement/target finalization 时
+   清理标记，不能误吞旧 Page 或后续独立 close。
+6. renderer publication 不再把 attached `sessionId` 当成 owner identity。可读 session id 会在多个仍存活的
+   BrowserContext 中复用；Page stream 因此同时冻结 exact `CdpSessionRoute`，ingress 在该 route 下准备输出，
+   `CommandOwnerScope` 再把它带过异步 scheduler turn。`TargetClose` finalizer 也按这个 scope 关闭 inactive
+   BrowserContext 的 active/background target；只有当前 BrowserContext 才执行 active navigation-engine handoff
+   和 loader refresh。这样旧 context 的 unload ACK 不会命中新 context，也不会把旧 preload/binding registry
+   留给 replacement target。
+7. HTTP `/json/close` 经 frontend-control actor 执行 `Target.closeTarget` 时，renderer unload 会产生真实
+   predecessor。frontend control 现在把该 fence 交给统一 publication flush，并沿用现有 deferred Runtime reply
+   与 adapter scheduler 路由，不再断言 frontend command 不可能携带 renderer work。
+
+`Page.close` 会运行 `beforeunload` 并等待决定；`Target.closeTarget` 共用 network drain、unload ACK、timeout 和
+最终 teardown，但不伪装成 `Page.close` 的 beforeunload preflight。这个来源差异是显式 contract，不是调用点分叉。
+
+##### Phase 5L1 聚焦证据
+
+新增/加强的边界回归包括：browser-created multi-entry script-close refusal；DOM-opened multi-entry related
+popup close；beforeunload 拒绝后再次接受且 unload 恰好一次；无 sticky activation 时不允许 prompt veto；
+root/child pagehide/unload 顺序；dialog prefix；三条 pending Fetch/XHR/auth response-stage close terminal；
+direct DevTools 与 legacy target close 都等待 unload ACK cursor。
+
+```bash
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run \
+  -E 'test(close) or test(beforeunload) or test(unload) or \
+      test(session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route) or \
+      test(command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope) or \
+      test(http_cdp_target_management_preserves_browser_discovery_events) or \
+      test(http_cdp_target_management_uses_live_agent_host_directory)' \
+  --no-fail-fast
+# run 00a70b7c-3ac4-43b9-895d-190c968bd8bd：400 passed、15774 skipped；覆盖 workspace
+# close/beforeunload/unload、HTTP frontend fence 和 exact attached-session owner scope。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+  -E 'test(close_aborts_paused_runtime_fetch_subresource) | test(close_aborts_paused_response_stage_runtime_xhr_subresource) | test(close_aborts_paused_runtime_xhr_auth_subresource) | test(devtools_command_executes_target_pending_activate_and_close) | test(devtools_target_legacy_close_drains_runtime_ready_events_without_serializing_them)' \
+  --no-fail-fast
+# run 81c1b29d-69a6-4f63-ad50-b9f2bd086839：5 passed。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+  -E 'test(session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route) or \
+      test(command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope) or \
+      test(patchright_over_cdp_auto_attach_sweep_replacement_targets_keep_thin_handle_cleanup_isolated_per_browser_context_without_runtime_enable) or \
+      test(patchright_over_cdp_auto_attach_sweep_replacement_targets_keep_thin_name_cleanup_isolated_per_browser_context_without_runtime_enable) or \
+      test(patchright_over_cdp_auto_attach_sweep_replacement_targets_keep_thin_mixed_cleanup_isolated_per_browser_context_without_runtime_enable) or \
+      test(patchright_over_cdp_auto_attach_sweep_crpage_replacement_targets_keep_cleanup_isolated_per_browser_context_without_runtime_enable) or \
+      test(patchright_over_cdp_auto_attach_sweep_replacement_targets_keep_thin_crpage_cleanup_isolated_per_browser_context_without_runtime_enable)' \
+  --no-fail-fast
+# owner/Patchright 聚焦 run d3b022eb-8e3d-4f62-90ce-3e3fe3d10604：7 passed、3353 skipped；证明两个 BrowserContext
+# 同时保留 Page/session 时，先关闭 inactive owner 不会遗留 target，replacement 仍恢复各自 preload/binding。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run -p lightmount-protocol \
+  -E 'test(session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route) | \
+      test(command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope) | \
+      test(close_background_target_emits_detached_events_and_clears_attached_sessions) | \
+      test(close_target_removes_background_target_without_disturbing_active_target)'
+# 最终 Rust 代码 run 4667deff-b4dd-4210-831c-6b88f0a8ea58：4 passed、3356 skipped；证明 attached
+# session 与 sessionless route 都保留 exact owner，后台 target close 不扰动当前 active target。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo nextest run --no-fail-fast
+# 最终 Rust 代码 run 719c05f3-61ec-4380-a006-edc5a4ebc5b8：16156 passed、18 skipped；
+# 执行阶段 98.029s。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/tmp/popup-lifecycle cargo clippy --workspace --all-targets -- -D warnings
+# passed；最终 Rust 代码下 45.93s。
+
+git diff --check
+# passed。
+```
+
+这两组是本地 renderer/protocol owner 回归，不是外部 WPT 结果。L1 当时明确不包含的 browser-context
+`focus()` 已由下述 L2 完成；COOP/RemoteFrame beforeunload、lightweight compatibility unload 或 JS-retained
+detached realm lifetime 仍不会因为 local Page close 已闭环而自动成立。
+
+#### Phase 5L2：browser-context active Page 与 focus transaction closure
+
+这一纵切把 focus 从静态 `document.hasFocus = () => ...` surface override 提升为稳定 Page 的真实状态。它不是
+单独补一个 `Window.focus()` callback：initial Page admission、frame focus、target promotion、window state、
+emulation、activated creation 和 close 后自动提升必须观察同一个 owner，否则后台 target 仍会同时声称自己
+focused，或者 active element identity 会在切换时被错误清空。
+
+##### 固定 Chromium 对照
+
+对照仍固定在 `/home/donoughliu/chromium/src@a03603fe9af6`：
+
+- `third_party/blink/renderer/core/frame/dom_window.cc:680-782`：`focus()` 先检查 live Page/frame，消费
+  incumbent Window 的 transient interaction；无 interaction 时只保留 opener exemption。top-level target 交给
+  `LocalFrame::FocusPage()` / embedder，top-level `blur()` 本身只记录指标；
+- `third_party/blink/renderer/core/dom/document.cc` 的 `Document::hasFocus()` 直接委托 Page
+  `FocusController::IsDocumentFocused()`，不是从 JS `activeElement` 属性链猜测；
+- `third_party/blink/renderer/core/page/focus_controller.cc` 把 Page active/focused、focused frame 与其 ancestor
+  Documents 组合成 `hasFocus()`。Page 失焦保留 active element/focused frame identity，但使 `:focus` /
+  `:focus-within` 失效；恢复时复用同一 identity；
+- FocusController 的 Page transition 顺序是失焦时 element `blur` / `focusout` 后 Window `blur`，恢复时
+  Window `focus` 后 element `focus` / `focusin`。本实现只对 local frame tree 固化该顺序；RemoteFrame/embedder
+  分支留给下一阶段。
+
+##### Lightmount owner 与不变量
+
+1. `RendererPageReservationToken` 分别冻结 initial active-target 与 effective-focus，protocol 在 parser/author
+   script 可观察前按 exact target slot 覆盖：active Page 通常为 active+focused，background/auxiliary Page
+   通常为 inactive+unfocused。稳定 `RendererPageScriptEnvironment` 跨 Document replacement 保存这两个位，
+   不从新 realm 重新推导；focus emulation 只允许 inactive+focused，不会伪造 active target。
+2. `DomHost` 保存 Page-focused query state；native selector owner 因而统一控制 `:focus` / `:focus-within`。
+   `JsContextHost` 另保存 focused Document，并通过 frame-owner ancestry 计算 root、focused child 与 sibling 的
+   `Document.hasFocus()`；protocol 不再以生成脚本覆盖该方法。
+3. browser-owned Page transition 保留 `document.activeElement` 与 focused-frame identity，只切换有效 focus 状态并
+   触发上述 Chromium 顺序。关闭 active Page 时先执行一次幂等 Page blur，再进入既有 L1
+   pagehide/unload/ACK transaction；后台 Page 本来 unfocused 时没有伪事件。
+4. same-origin/cross-origin `Window.focus()` 都解析 receiver 的真实 target Context。admission 使用 incumbent
+   transient activation 或 target opener edge；跨 Page action 写入 incumbent command/ordinary turn 的唯一 FIFO，
+   但 payload 冻结 `RendererOwnerLocalHostId + PageId`。protocol 将它解析成 exact
+   `TargetPageResidenceIdentity`，因此正常 source Runtime response 会等待 focus side effect，晚到 action 又不能激活
+   同 target id 的 replacement Page。renderer owner 正同步阻塞在 modal prompt 时是明确例外：browser target
+   activation 先完成，exact focus/surface command 仍保留在 owner FIFO，prompt settle 后按 Page identity 执行。
+5. `Target.activateTarget`、`Page.bringToFront`、renderer `Window.focus()` 和 target close 后的自动 promotion
+   共用 `promote_background_target_to_active_for_connection_async()`：旧 active Page 先在自己的 residence 中
+   blur，navigation engine/slot 再交换，demoted visibility surface 随后更新，新 Page 最后 focus 并恢复 loader。
+   对已 active target 的重复请求只同步 desired native state，不制造第二次 event transition。若共享 renderer
+   owner lane 被任一 Page 的 modal prompt 阻塞，旧/新 Page 的 focus 与 visibility 命令均以 non-interruptible
+   detached reply 形式排队，WebDriver switch 不会被原 Window prompt 卡死，也不会丢失最终状态变更。
+6. `Emulation.setFocusEmulationEnabled` 与 window minimize/restore 不再只修改 JS getter；它们同时更新 surface
+   override 和 native Page focus，并等待 Page command completion。显式 focus emulation 是允许 parked Page
+   保持 focused/visible 的唯一本地例外；active 位仍为 false，所以带 user gesture/opener exemption 的
+   `window.focus()` 会继续进入 promotion transaction。
+7. protocol-neutral `CreateTarget { activate: true }` 在交换 slot 前启动带旧 Page generation 的 focus handoff，
+   response 前完成旧 Page blur 和 parked visibility，再 materialize 新 active initial Page。这样 WebDriver/BiDi
+   creation 不会绕过 CDP activation 的唯一事务；同步 immediate executor 仍只是测试用 staging primitive。
+
+##### Phase 5L2 聚焦证据
+
+新增回归分别锁住 native Page/frame 状态、cross-Page causal owner、三种 activation producer、emulation 与
+modal-prompt owner barrier：
+
+```bash
+TMPDIR=<repo>/.tmp cargo nextest run \
+  -p lightmount -p lightmount-protocol -p lightmount-renderer-v8 \
+  -E 'test(top_level_page_focus_preserves_active_element_and_restores_effective_focus) | \
+      test(related_cross_origin_window_focus_publishes_target_page_owner_action) | \
+      test(document_has_focus_projects_the_page_focused_frame_ancestry) | \
+      test(target_activation_moves_native_page_focus_and_preserves_active_element_identity) | \
+      test(activated_target_creation_awaits_previous_page_focus_and_visibility_handoff) | \
+      test(opener_window_handle_projects_the_renderer_owned_auxiliary_realm) | \
+      test(pure_state_emulation_commands_complete_through_command_dispatch) | \
+      test(focus_emulation_override_applies_to_document_start_surface) | \
+      test(same_context_background_session_can_clear_its_own_touch_and_focus_before_promotion) | \
+      test(webdriver_classic_switch_window_keeps_user_prompt_on_original_context)' \
+  --no-fail-fast
+# 最终 Rust 表示层收口后 run a70f44d8-0cd9-4522-838a-4e50c0343abb：
+# 10 passed、11105 skipped。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# 首轮 run 9b51a24a-5e84-4518-bf1c-c7dbe293a497：16160 passed、1 failed、18 skipped；
+# 唯一 failure 是既有 parser/network backlog fixture 在全 workspace contention 下的一次调度失败。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount \
+  -E 'test(websocket_cdp_parser_script_network_backlog_flushes_before_domcontentloaded)' \
+  --stress-count 100 --flaky-result fail --test-threads 8 --no-fail-fast \
+  --status-level fail --final-status-level fail
+# run e55cb10f-e73e-41a1-bd0d-8796d510c452：100/100 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# 最终代码 run 9a709f2c-6d48-4874-9a2c-f4db6167d931：16161 passed、18 skipped；99.024s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/.tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed；最终代码下 1m 31s。
+
+git diff --check
+# passed。
+```
+
+其中 `opener_window_handle...` 同时证明 same-origin opener retained WindowProxy 的 action 在 source command
+response 前完成、却激活 target Page；`related_cross_origin...` 证明 restricted Window callback 保留同一规则；
+activated creation 回归同时检查旧 Page 的 `hasFocus/hidden/visibilityState`、active-element identity、CSS 和
+event order，以及新 Page 的 focused/visible 初始状态。activation 回归还覆盖 parked Page 处于 focus-emulated
+focused 状态时，`window.focus()` 仍必须把它提升为 active target；WebDriver 回归锁住 modal prompt 所在旧
+Window 不得阻塞 switch，同时 prompt identity 继续留在原 target。
+
+L2 的 exit condition 是 local Page/focused-frame authority 已唯一化，不是“所有浏览器 focus 都完成”。COOP
+group switch、RemoteFrame focus endpoint、fenced/embedder activation 和跨进程 focus replication 仍属于下一
+个 group/remote milestone；外部 focused WPT 本轮也尚未运行，不能把 Rust integration 回归写成 WPT pass。
+
+#### Phase 5G1：local committed-response COOP browsing-context-group sever
+
+G1 处理的是 group/remote 阶段的第一条完整纵切：renderer-owned top-level Page 收到最终 response、准备
+replacement Document 时，若 enforced `Cross-Origin-Opener-Policy` 要求 BrowsingInstance swap，就在旧 realm
+仍完整可用时预留一个新 group/agent/isolate，并在 commit 边界原子切断旧 group。它不是把 `opener` getter
+改成 `null`，也不创建第二个 protocol Page；同一个 `PageId`、owner residence、CDP target/session 和 Page
+scheduler 继续承载导航后的 Document。
+
+##### 固定 Chromium 对照与本轮范围
+
+对照仍固定在 `/home/donoughliu/chromium/src@a03603fe9af6`：
+
+- `content/browser/security/coop/cross_origin_opener_policy_status.cc:32-88` 的
+  `ShouldSwapBrowsingInstanceForCrossOriginOpenerPolicy()` 固定了五种 enforced policy 的完整决策：
+  `unsafe-none`、`same-origin-allow-popups`、`same-origin`、`same-origin-plus-coep` 和
+  `noopener-allow-popups`；它同时区分 initiator 是否仍是 initial empty Document；
+- `content/browser/renderer_host/browsing_context_group_swap.cc:49-72` 明确只有 COOP swap 会在 commit 时
+  clear proxies 和 `window.name`。security/proactive swap 虽然也可换 BrowsingInstance，却不能直接套用这两项
+  side effect；
+- Chromium 的 `CrossOriginOpenerPolicyStatus` 会沿 redirect hop 更新 enforced/report-only policy、reporter 和
+  virtual browsing-context group。本纵切只实现**最终可提交 response 的 enforced policy**，不伪装成已经实现
+  report-only/Reporting API 或 redirect-hop virtual group。
+
+本轮只对 potentially trustworthy URL 接受 COOP；`same-origin + COEP` 提升为独立
+`SameOriginPlusCoep` policy。opaque origin 暂时 fail closed：serialized origin 为 `null` 时不把两个 Document
+判成同源，等待 identity/lifetime 阶段的 group-safe opaque-origin nonce。
+
+##### Lightmount owner、不变量与 commit 顺序
+
+1. `BrowsingContextGroupId` 是 renderer owner 分配的 typed identity，与 `ScriptAgentId` 分离。普通 related
+   auxiliary Page 同时加入 opener 的 related group 与 script agent；本轮也修正了旧 admission 只共享 isolate、
+   却错误新建 related-group registry 的边界漂移。
+2. 稳定 `RendererPageScriptEnvironment` 保存当前 top-level Document 的 enforced COOP value、serialized
+   origin 与 initial-empty 位。initial `about:blank` 在 realm 标记后刷新该位，`document.open()` 退出 initial
+   状态时再次刷新；related popup 的 initial Document 继承 opener policy，而不是无条件重置为
+   `unsafe-none`。
+3. response 已知但 replacement 尚未构造时，owner 用当前状态与 prospective final URL/headers 执行 Chromium
+   matrix，产出 typed `PreserveBrowsingContextGroup` 或 `CrossOriginOpenerPolicyGroupSwitch`。204/205 等没有
+   Document commit 的 terminal 不会仅凭 header 提前切 group。
+4. preserve 路径继续借用现有 isolate、stable WindowProxy 和 output stream。switch 路径预留新
+   `RendererDocumentIsolateHandle`、script-agent membership、related group、inspector agent、realm/WindowProxy
+   和 renderer output stream，但继续使用稳定 Page 的 `PageRuntimeTaskSource` 与 consumer routes。这样 agent
+   可以变，navigation handoff/generation 不能从 1 重新开始。
+5. preparation cancel/supersession 只回收 provisional isolate/membership/output stream；旧 group、opener、name、
+   proxy 和 Page scheduler 不发生变化。只有 replacement 通过 currentness/commit permit 后，旧 default inspector
+   Context 才先 detach，旧 related registry 再注销 target、sever opener、断开 Document hosts，并把旧 global
+   停驻为 `closed=true`、`opener=null` 的 disconnected facade。
+6. 新环境从空 name、无 opener 的 fresh group 开始；旧 group 中已有 JS handle 的 proxy identity 不复活，也不能
+   进入新 realm。旧 script-agent membership 和 output stream 只有在新 environment pin 安装到同一 Page slot
+   后才退役，失败恢复不能留下“两个 active group”。
+7. lifecycle journal 允许 output stream 改变的唯一例外是 typed Page-agent transition，并要求 old/new stream 的
+   `RendererPageResidenceIdentity` 完全相同。旧 Document termination 仍从旧 agent stream 发出，新 Document
+   lifecycle 从新 agent stream 继续；普通 replacement/adoption 仍禁止偷偷换 stream。
+8. protocol 继续观察同一个 target/session：旧 Runtime contexts 被清除，新 default Context 与
+   `Page.frameNavigated` 在原 session 发布，不产生第二次 `Target.targetCreated` 或
+   `Target.targetDestroyed`。runtime memory diagnostic 新增 `browsingContextGroupId`，使 agent/group 是否同时
+   按预期切换可直接断言。
+
+实现过程中三个真实失败也固定了责任边界：related admission 的 group id 最初不相等，说明“共享 isolate”不等于
+“同一 browsing-context group”；lifecycle journal 最初拒绝新 inspector stream，说明 stream rollover 必须由
+typed same-Page transition 授权；第二次 same-policy navigation 最初复用了新 agent 却重建 Page scheduler，导致
+handoff id 回退并被 currentness 拒绝。最终实现分别收回 related-group constructor、lifecycle binding owner 与
+稳定 Page task source，而没有在测试或 protocol 调用点绕过断言。
+
+##### G1 聚焦证据与明确保留项
+
+```bash
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+  cross_origin_isolation --no-fail-fast
+# 8 passed；覆盖 header/trustworthiness/COEP 派生与 Chromium swap matrix。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+  coop_commit_switches_related_page_group_and_disconnects_old_window_proxy \
+  --no-fail-fast
+# 1 passed；覆盖 provisional cancel、group/agent/isolate/proxy switch、旧 proxy disconnect、
+# 同 Page/owner、旧 membership 退役，以及第二次 same-policy navigation 保持 group/scheduler。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+  prepared_live_page_replacement --no-fail-fast
+# 5 passed；普通 replacement/cancel 仍保持原 isolate、WindowProxy 与 output ownership。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-renderer-v8 \
+  related_page_script_agent_experiment_shares_isolate_and_survives_source_close \
+  --no-fail-fast
+# 1 passed；修正 related group constructor 后，source close 的既有 agent lifetime 不回归。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+  popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
+  --no-fail-fast
+# 1 passed；覆盖真实 HTTP COOP response、auto-attach waiting target、同 session context rollover、
+# 无 target create/destroy、new opener/name 与 opener-held old proxy closed。
+
+TMPDIR=<repo>/.tmp cargo nextest run -p lightmount-protocol \
+  popup_coop_commit_keeps_target_session_and_severs_old_group_proxy \
+  --stress-count 500 --test-threads 8 --flaky-result fail --max-fail 1
+# run ecbca0b8-d8b6-41d7-ab95-45c87b2a7b61：500/500 passed。
+
+TMPDIR=<repo>/.tmp cargo nextest run --no-fail-fast \
+  --status-level fail --final-status-level fail
+# 最终 run a19b990c-789d-4077-974a-fa812af654d7：16165 passed、18 skipped；97.806s。
+
+cargo fmt --all --check
+# passed。
+
+TMPDIR=<repo>/.tmp cargo clippy --workspace --all-targets -- -D warnings
+# passed；1m 28s。
+
+git diff --check
+# passed。
+```
+
+第一次全仓 run 714b3a40-26f8-4ff8-910f-4caef693a79d 暴露了新 protocol 回归自己的等待条件错误：它在
+`Runtime.executionContextCreated`/target `loaded_page` 后立即读取 body，但 parser 尚未到
+`Page.loadEventFired`，因此约 1-2% 的重复运行会在新 realm 中读不到 `#coop-marker`。这不是通过 sleep 修复；
+回归改为等待其实际断言所需的 load lifecycle，随后完成上述 500/500 和全仓通过。第二次全仓 run
+47e1ef83-a827-44c3-b4e8-37f99dfdddb0 的唯一失败是未修改的
+`add_script_run_immediately_creates_top_level_world_even_when_child_world_name_matches` 在 contention 下失败；
+聚焦 run 190c814e-3403-489c-9e67-111dd1798e02 为 500/500，最终全仓复跑通过，未把无关 isolated-world
+修复混入 G1。
+
+这些是 renderer/protocol integration evidence，不是 upstream WPT 结果。G1 的 exit condition 是“本地真实 Page
+在最终 response commit 时有唯一 group/agent sever transaction”，不是完整 COOP/remote 结束。G2 至少仍需：
+
+- redirect-hop enforced/report-only matrix、virtual group、Reporting endpoints 与 report dispatch；
+- 对 navigation error Document、Fetch response-stage override、sandbox/COOP interaction 的 Chromium 最小探针；
+- 不把 disconnected facade 等同于真正 remote WindowProxy endpoint，补 remote message/location/close/focus
+  routing 与 endpoint generation；
+- RemoteFrame/fenced/embedder `CanNavigate`、跨进程 activation/focus/unload replication；
+- protocol opener/group projection 是否随 sever 更新的明确契约；
+- group-safe opaque-origin nonce、JS-retained detached DOM/realm lifetime，之后才能进入 Phase 6 删除。
 
 ### Phase 6：删除 lightweight 专用模型
 
-E3 已达到“所有已迁移 production creation producer 都创建真实 auxiliary Page”，但还没有达到安全删除条件：
-lifecycle/group/remote/identity 长尾仍可能调用 compatibility endpoint，测试和 standalone adapter 也仍把旧类型
-当作行为夹具。2026-08-06 的宽口径扫描为 110 个 Rust 文件、1365 处
+E3 已达到“所有已迁移 production creation producer 都创建真实 auxiliary Page”，Phase 5L2 完成 local
+focus/active Page closure，Phase 5G1 又完成 local committed-response COOP group sever，但还没有达到安全删除
+条件：remote/identity 长尾仍可能调用 compatibility endpoint，测试和 standalone adapter 也仍把旧类型
+当作行为夹具。2026-08-06 按 `rg -l/-o 'lightweight_popup|LightweightPopup|lightweight popup' -g '*.rs'`
+得到的宽口径扫描为 111 个 Rust 文件、1388 处
 `lightweight_popup|LightweightPopup|lightweight popup` 命中；直接 creation symbol 只剩
 `native_bridge/element/activation/targets.rs`、`context_bootstrap/window_runtime/dialogs.rs` 与
 `native_bridge/context_host/popups.rs` 的 DOM compatibility/reopen 路径。这个数字包含测试、注释和投影，不能按
 命中数机械删除，但也足以否定“一次清理提交即可完成”。
 
-当 lifecycle/group/identity 前置条件满足后，按 owner dependency 顺序删除：
+当 group/identity 前置条件满足后，按 owner dependency 顺序删除：
 
 - `LightweightPopupBrowsingContextRecord`；
 - popup shared-context alias registration；
@@ -7463,7 +7861,9 @@ journal、queued command 和 frontend session 必须按 renderer agent/Page 路�
 
 V8 object 不能跨 isolate 搬迁。若初始 popup 与 opener 共享 isolate，COOP 导航后的
 group/agent split 必须新建 realm并把旧 WindowProxy 切到 disconnected/remote endpoint，
-不能尝试移动 context。
+不能尝试移动 context。G1 已用 provisional fresh isolate + commit-time old-proxy disconnect 完成 local
+路径，并证明同一 Page scheduler/Target/session 可以跨 agent 保持；剩余风险是把当前 closed facade 演化为
+带 endpoint generation 的真正 remote proxy，以及 redirect/report-only/跨进程 owner 不能绕过该事务。
 
 ### 明确停止扩大修改
 
@@ -7493,6 +7893,9 @@ group/agent split 必须新建 realm并把旧 WindowProxy 切到 disconnected/re
    新建的 auxiliary context 打开 production relationship admission。fresh Page 与
    `noopener` 仍隔离，不恢复 renderer-owner-wide sharing，也不先做大范围 popup 迁移。
 8. 最终删除 lightweight popup 专用 loader/parser/script/realm alias，避免长期双栈。
+9. COOP swap 在 response preparation 时选择并预留新 group/agent，只有 Document commit 才 sever old group；
+   Page scheduler、PageId 与 protocol Target/session 稳定，realm/WindowProxy/inspector output stream 按 agent
+   更换。取消或 supersede 不能修改旧 group。
 
 ## 相关文档
 

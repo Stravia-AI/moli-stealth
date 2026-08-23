@@ -87,7 +87,50 @@ impl JsContextHost {
         self.bind_auxiliary_page_reservation_allocator(
             environment.auxiliary_page_reservation_allocator(),
         );
+        self.top_level_page_active = environment.top_level_page_is_active();
+        self.dom_host()
+            .set_page_focused(environment.top_level_page_is_focused());
         self.page_script_environment = Some(environment);
+    }
+
+    pub(crate) fn top_level_page_is_active(&self) -> bool {
+        self.page_script_environment.as_ref().map_or(
+            self.top_level_page_active,
+            crate::script_vm::RendererPageScriptEnvironment::top_level_page_is_active,
+        )
+    }
+
+    pub(crate) fn top_level_page_is_focused(&self) -> bool {
+        self.page_script_environment.as_ref().map_or_else(
+            || self.dom_host().page_focused(),
+            |environment| environment.top_level_page_is_focused(),
+        )
+    }
+
+    pub(crate) fn top_level_page_residence(&self) -> Option<crate::RendererResolvedPopupTarget> {
+        self.page_script_environment
+            .as_ref()
+            .map(crate::script_vm::RendererPageScriptEnvironment::top_level_page_residence)
+    }
+
+    pub(crate) fn set_top_level_page_activation(
+        &mut self,
+        active: bool,
+        focused: bool,
+    ) -> (bool, bool) {
+        let changed = self
+            .page_script_environment
+            .as_ref()
+            .map(|environment| environment.set_top_level_page_activation(active, focused))
+            .unwrap_or_else(|| {
+                (
+                    self.top_level_page_active != active,
+                    self.dom_host().page_focused() != focused,
+                )
+            });
+        self.top_level_page_active = active;
+        self.dom_host().set_page_focused(focused);
+        changed
     }
 
     pub(crate) fn shares_related_page_script_agent_with(&self, other: &Self) -> bool {
@@ -182,9 +225,57 @@ impl JsContextHost {
         true
     }
 
-    /// Starts one Page-scoped close transaction and appends its browser-owner
-    /// action to this Page's exact output stream.
-    pub(crate) fn request_top_level_browsing_context_close(&self) -> bool {
+    pub(crate) fn top_level_browsing_context_opened_by_dom(&self) -> bool {
+        self.page_script_environment
+            .as_ref()
+            .is_some_and(crate::script_vm::RendererPageScriptEnvironment::opened_by_dom)
+    }
+
+    pub(crate) fn current_top_level_cross_origin_opener_policy_value(
+        &self,
+    ) -> crate::cross_origin_isolation::CrossOriginOpenerPolicyValue {
+        self.page_script_environment
+            .as_ref()
+            .and_then(|environment| environment.current_top_level_cross_origin_opener_policy())
+            .map(|policy| policy.value())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn allow_scripts_to_close_windows(&self) -> bool {
+        self.browser_context_runtime
+            .allow_scripts_to_close_windows()
+    }
+
+    pub(crate) fn begin_top_level_beforeunload_dispatch(&mut self) -> bool {
+        if self.top_level_beforeunload_in_progress {
+            return false;
+        }
+        self.top_level_beforeunload_in_progress = true;
+        true
+    }
+
+    pub(crate) fn finish_top_level_beforeunload_dispatch(&mut self) {
+        assert!(
+            self.top_level_beforeunload_in_progress,
+            "top-level beforeunload completion requires an active dispatch"
+        );
+        self.top_level_beforeunload_in_progress = false;
+    }
+
+    pub(crate) fn begin_top_level_unload_dispatch(&mut self) -> bool {
+        if self.top_level_unload_dispatched {
+            return false;
+        }
+        self.top_level_unload_dispatched = true;
+        true
+    }
+
+    /// Commits one already-authorized Page-scoped close and appends its typed
+    /// browser-owner action to this Page's exact output stream.
+    pub(crate) fn accept_top_level_browsing_context_close(
+        &mut self,
+        source: crate::runtime::RendererTopLevelCloseSource,
+    ) -> bool {
         let Some(environment) = self.page_script_environment.clone() else {
             return false;
         };
@@ -192,11 +283,31 @@ impl JsContextHost {
             return true;
         }
         assert!(
-            self.append_live_turn_owner_action(crate::runtime::RendererOwnerAction::TopLevelClose),
-            "a live Page window.close() must retain its renderer output journal"
+            self.append_live_turn_owner_action(crate::runtime::RendererOwnerAction::TopLevelClose(
+                source
+            ),),
+            "a live Page close must retain its renderer output journal"
         );
         environment.signal_top_level_close_output_handoff();
         true
+    }
+
+    pub(crate) fn acknowledge_top_level_browsing_context_close_unload(
+        &mut self,
+        source: crate::runtime::RendererTopLevelCloseSource,
+    ) -> bool {
+        self.append_live_turn_owner_action(
+            crate::runtime::RendererOwnerAction::TopLevelCloseUnloadAck(source),
+        )
+    }
+
+    pub(crate) fn acknowledge_top_level_browsing_context_close_network_drained(
+        &mut self,
+        source: crate::runtime::RendererTopLevelCloseSource,
+    ) -> bool {
+        self.append_live_turn_owner_action(
+            crate::runtime::RendererOwnerAction::TopLevelCloseNetworkDrained(source),
+        )
     }
 
     pub(crate) fn bind_auxiliary_page_reservation_allocator(
@@ -217,7 +328,19 @@ impl JsContextHost {
     ) -> Option<RendererPendingAuxiliaryPage> {
         self.auxiliary_page_reservation_allocator
             .as_ref()
-            .map(|allocator| allocator.reserve(exposes_opener))
+            .map(|allocator| allocator.reserve(exposes_opener, true))
+    }
+
+    /// Reserves a browser-context-created auxiliary Page. Unlike Window.open,
+    /// hyperlink, and form producers, ServiceWorker/notification producers do
+    /// not make the resulting top-level context script-closable after its
+    /// session history grows.
+    pub(crate) fn reserve_pending_browser_context_auxiliary_page(
+        &self,
+    ) -> Option<RendererPendingAuxiliaryPage> {
+        self.auxiliary_page_reservation_allocator
+            .as_ref()
+            .map(|allocator| allocator.reserve(false, false))
     }
 
     pub(crate) fn stage_pending_auxiliary_window_proxy(
@@ -309,6 +432,33 @@ impl JsContextHost {
     pub(crate) fn mark_focus_changed(&mut self) {
         self.focus_change_epoch = self.focus_change_epoch.wrapping_add(1);
     }
+
+    pub(crate) fn focused_document_handle(&self) -> DomHandle {
+        let focused = self.focused_document_handle;
+        if focused == self.document_handle()
+            || self
+                .child_browsing_context_host_for_document_handle(focused)
+                .is_some()
+        {
+            focused
+        } else {
+            self.document_handle()
+        }
+    }
+
+    pub(crate) fn set_focused_document_from_target(&mut self, target: DomHandle) {
+        let document = if self.dom_host().is_html_element_named(target, "iframe")
+            || self.dom_host().is_html_element_named(target, "frame")
+        {
+            self.child_browsing_context_document_handle(target)
+                .or_else(|| self.dom_host().owner_document_handle(target))
+        } else {
+            self.dom_host().owner_document_handle(target)
+        };
+        if let Some(document) = document {
+            self.focused_document_handle = document;
+        }
+    }
 }
 
 impl JsContextHost {
@@ -338,6 +488,7 @@ impl JsContextHost {
         let main_document_snapshot = frame_owner_store
             .current_main_owner_snapshot()
             .expect("main frame owner must exist before client projection");
+        let document_handle = main_document_snapshot.document_handle;
         let main_document_serialized_origin = main_document_snapshot.settings.origin.clone();
         if let Some(initial_document_origin) = initial_document_origin {
             assert_eq!(
@@ -405,7 +556,10 @@ impl JsContextHost {
             output_journal: None,
             auxiliary_page_reservation_allocator: None,
             page_script_environment: None,
+            top_level_page_active: true,
             page_context_resources_closed: false,
+            top_level_beforeunload_in_progress: false,
+            top_level_unload_dispatched: false,
             context_host_liveness: Rc::new(Cell::new(true)),
             page_default_context: None,
             v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry::default(),
@@ -622,6 +776,7 @@ impl JsContextHost {
             javascript_dialog_handler_enabled,
             pending_network_output: Vec::new(),
             focus_change_epoch: 0,
+            focused_document_handle: document_handle,
             next_subresource_network_request_handle: 1,
             subresource_activity_epoch: 0,
             subresource_last_activity_at: std::time::Instant::now(),
@@ -689,10 +844,36 @@ impl JsContextHost {
             "only an about:blank root Document can be marked initial empty"
         );
         self.root_document_is_initial_empty = true;
+        self.refresh_top_level_cross_origin_opener_policy_initial_state();
     }
 
     pub(crate) fn root_document_is_initial_empty(&self) -> bool {
         self.root_document_is_initial_empty
+    }
+
+    pub(crate) fn commit_top_level_cross_origin_opener_policy(
+        &self,
+        value: crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
+    ) {
+        if let Some(environment) = self.page_script_environment.as_ref() {
+            environment.commit_top_level_cross_origin_opener_policy(
+                crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy::new(
+                    value,
+                    self.main_document_serialized_origin.clone(),
+                    self.root_document_is_initial_empty,
+                ),
+            );
+        }
+    }
+
+    fn refresh_top_level_cross_origin_opener_policy_initial_state(&self) {
+        let Some(environment) = self.page_script_environment.as_ref() else {
+            return;
+        };
+        let Some(current) = environment.current_top_level_cross_origin_opener_policy() else {
+            return;
+        };
+        self.commit_top_level_cross_origin_opener_policy(current.value());
     }
 
     /// Returns the exact root Document that owns Page-scoped protocol
@@ -715,6 +896,7 @@ impl JsContextHost {
         // than inferring it from the current URL, which same-document
         // navigation is allowed to change.
         self.root_document_is_initial_empty = false;
+        self.refresh_top_level_cross_origin_opener_policy_initial_state();
         let descendant_count_before = self.child_browsing_contexts.len();
         for child_handle in self.top_level_child_browsing_context_handles_in_document_order() {
             self.drop_child_browsing_context_subtree_with_window_realm(scope, child_handle);

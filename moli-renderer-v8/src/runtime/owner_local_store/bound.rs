@@ -130,6 +130,10 @@ pub(super) fn reserve_renderer_document_isolate_on_bound_owner_local_store(
     owner_local: &RendererOwnerLocalContext,
     page_id: PageId,
     script_agent_admission: RendererScriptAgentAdmission,
+    opened_by_dom: bool,
+    initially_active: bool,
+    initially_focused: bool,
+    replacement_isolation: RendererExistingPageReplacementIsolation,
     page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
 ) -> Result<(
     RendererDocumentIsolateBootstrap,
@@ -140,6 +144,10 @@ pub(super) fn reserve_renderer_document_isolate_on_bound_owner_local_store(
             owner_local,
             page_id,
             script_agent_admission,
+            opened_by_dom,
+            initially_active,
+            initially_focused,
+            replacement_isolation,
             page_runtime_task_source,
         )
     })

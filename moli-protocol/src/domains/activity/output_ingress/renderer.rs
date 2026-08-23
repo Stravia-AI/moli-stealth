@@ -121,10 +121,18 @@ async fn ingest_renderer_output_publication(
     match route {
         RendererPublicationRoute::AttachedSession {
             session_id,
+            owner_route,
             projection,
         } => {
+            // Session ids are frontend-local readable identifiers and can be
+            // reused by another live browser context. Keep protocol delivery
+            // attached to the original session while all owner/currentness
+            // lookups execute against the exact route frozen by the renderer
+            // Page stream.
+            let mut route_scope =
+                conn.scoped_session_owner_route_override(session_id.clone(), owner_route);
             project_renderer_output_records_for_route(
-                conn,
+                route_scope.conn_mut(),
                 Some(&session_id),
                 records,
                 cursor,

@@ -513,7 +513,7 @@ fn cross_origin_window_method_function<'s>(
             CROSS_ORIGIN_REALM_WINDOW_FOCUS_SLOT,
             "focus",
             0,
-            cross_origin_window_noop_callback,
+            cross_origin_window_focus_callback,
         ),
         "blur" => realm_local_cross_origin_function(
             scope,
@@ -839,7 +839,7 @@ struct CrossOriginWindowMethodsDeclaration {
     blur: (),
     #[webapi(method, callback = cross_origin_window_close_callback, readonly)]
     close: (),
-    #[webapi(method, callback = cross_origin_window_noop_callback, readonly)]
+    #[webapi(method, callback = cross_origin_window_focus_callback, readonly)]
     focus: (),
 }
 
@@ -3720,8 +3720,35 @@ fn cross_origin_window_close_callback<'s>(
     rv: v8::ReturnValue<'_, v8::Value>,
 ) {
     if cross_origin_related_top_window_target(scope, args.this()).is_some() {
-        if let Some(host_ptr) = cross_origin_window_target_host_ptr(scope, args.this()) {
-            let _ = unsafe { &*host_ptr }.request_top_level_browsing_context_close();
+        if let Some(context) = cross_origin_window_target_context(scope, args.this())
+            && let Some(host_ptr) = context_host_ptr_from_context_slot(context)
+        {
+            let target_scope = &mut v8::ContextScope::new(scope, context);
+            let _ = crate::context_bootstrap::request_top_level_browsing_context_close(
+                target_scope,
+                host_ptr,
+                crate::runtime::RendererTopLevelCloseSource::Window,
+            );
+        }
+        return;
+    }
+    cross_origin_window_noop_callback(scope, args, rv);
+}
+
+fn cross_origin_window_focus_callback<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    if cross_origin_related_top_window_target(scope, args.this()).is_some() {
+        if let Some(context) = cross_origin_window_target_context(scope, args.this())
+            && let Some(host_ptr) = context_host_ptr_from_context_slot(context)
+        {
+            let target_scope = &mut v8::ContextScope::new(scope, context);
+            let _ = crate::context_bootstrap::request_top_level_browsing_context_focus(
+                target_scope,
+                host_ptr,
+            );
         }
         return;
     }

@@ -2561,6 +2561,101 @@ async fn opener_window_handle_projects_the_renderer_owned_auxiliary_realm() {
         take_response_by_id(&mut ctx, 1255)["result"]["result"]["value"],
         json!("same-proxy")
     );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1256,
+        "sessionId": popup_session_id,
+        "method": "Runtime.evaluate",
+        "params": { "expression": "document.hasFocus()", "returnByValue": true }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 1256)["result"]["result"]["value"],
+        json!(false),
+        "a renderer-owned auxiliary Page must remain unfocused while its target is parked"
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1257,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": "__lmPopupWindow.focus(); 'focus-requested'",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 1257)["result"]["result"]["value"],
+        json!("focus-requested")
+    );
+    assert_eq!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .and_then(|bc| bc.active_target_id()),
+        Some(popup_target_id.as_str()),
+        "the before-response Page focus owner action must promote the exact popup target"
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1258,
+        "sessionId": popup_session_id,
+        "method": "Runtime.evaluate",
+        "params": { "expression": "document.hasFocus()", "returnByValue": true }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 1258)["result"]["result"]["value"],
+        json!(true)
+    );
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1259,
+        "method": "Target.attachToTarget",
+        "params": { "targetId": "TID-opener-window-proxy" }
+    }))
+    .await;
+    let opener_session_id = take_response_by_id(&mut ctx, 1259)["result"]["sessionId"]
+        .as_str()
+        .expect("background opener session id")
+        .to_owned();
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 1260,
+        "sessionId": opener_session_id,
+        "method": "Page.bringToFront"
+    }))
+    .await;
+    ctx.expect_result(1260, json!({}), Some(&opener_session_id));
+    assert_eq!(
+        ctx.conn
+            .browser_context
+            .as_ref()
+            .and_then(|bc| bc.active_target_id()),
+        Some("TID-opener-window-proxy")
+    );
+
+    for (id, session_id, expected) in [
+        (1261, opener_session_id.as_str(), true),
+        (1262, popup_session_id.as_str(), false),
+    ] {
+        ctx.process_async(json!({
+            "id": id,
+            "sessionId": session_id,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "document.hasFocus()", "returnByValue": true }
+        }))
+        .await;
+        assert_eq!(
+            take_response_by_id(&mut ctx, id)["result"]["result"]["value"],
+            json!(expected)
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -829,7 +829,15 @@ pub(crate) struct JsContextHost {
     output_journal: Option<crate::runtime::RendererTurnOutputJournal>,
     auxiliary_page_reservation_allocator: Option<RendererAuxiliaryPageReservationAllocator>,
     page_script_environment: Option<crate::script_vm::RendererPageScriptEnvironment>,
+    /// Browser-owned active-target state. This remains separate from effective
+    /// focus because DevTools focus emulation can keep a parked Page focused.
+    top_level_page_active: bool,
     page_context_resources_closed: bool,
+    /// Document-scoped guards for the prompt/unload algorithms. A replacement
+    /// Document receives a fresh host while the surrounding Page identity stays
+    /// stable.
+    top_level_beforeunload_in_progress: bool,
+    top_level_unload_dispatched: bool,
     context_host_liveness: Rc<Cell<bool>>,
     page_default_context: Option<v8::Weak<v8::Context>>,
     pub(crate) v8_finalizers: crate::v8_finalizer::V8FinalizerRegistry,
@@ -1072,6 +1080,10 @@ pub(crate) struct JsContextHost {
     javascript_dialog_handler_enabled: bool,
     pending_network_output: Vec<ScriptNetworkOutputItem>,
     focus_change_epoch: u64,
+    /// Current focused local frame Document. The active element can be absent
+    /// while focus remains inside that frame, so this identity is tracked
+    /// independently and falls back to the root Document after detach.
+    focused_document_handle: DomHandle,
     next_subresource_network_request_handle: u64,
     subresource_activity_epoch: u64,
     subresource_last_activity_at: std::time::Instant,

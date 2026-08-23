@@ -69,7 +69,7 @@ struct WindowEarlyTemplateMethodsDeclaration {
     #[webapi(method, length = 0, callback = window_close_callback)]
     close: (),
 
-    #[webapi(method, length = 0, callback = window_noop_callback)]
+    #[webapi(method, length = 0, callback = window_focus_callback)]
     focus: (),
 
     #[webapi(method, length = 0, callback = window_noop_callback)]

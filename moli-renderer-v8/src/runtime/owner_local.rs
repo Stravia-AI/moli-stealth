@@ -256,6 +256,10 @@ impl RendererPageHandle {
         self.javascript_dialog_broker.take_pending()
     }
 
+    pub fn has_open_modal_javascript_dialog(&self) -> bool {
+        self.javascript_dialog_broker.has_open_dialog()
+    }
+
     pub fn enqueue_runtime_inspector_io_command(
         &self,
         envelope: RendererInspectorCommandEnvelope,
@@ -685,10 +689,10 @@ impl RendererPageCommandPending {
             tokio::select! {
                 biased;
                 reply = &mut wait_for_dispatch => reply?,
-                () = javascript_dialog_watch.wait_until_open() => {
-                    return Err(anyhow!(
-                        "renderer page observation interrupted by an open JavaScript dialog"
-                    ));
+                predecessor = javascript_dialog_watch.wait_until_open() => {
+                    return Err(super::RendererPageCommandInterruptedByJavaScriptDialog::new(
+                        predecessor,
+                    ).into());
                 }
             }
         } else {

@@ -390,7 +390,11 @@ fn invoke_event_handler_property<'s>(
     }
     if let Some(returned) = returned {
         let returned = v8::Local::new(scope, returned);
-        if returned.is_boolean() && !returned.boolean_value(scope) {
+        if event_type == "beforeunload" && !returned.is_null_or_undefined() {
+            if let Some(returned) = returned.to_string(scope) {
+                let _ = event.set(scope, v8str(scope, "returnValue").into(), returned.into());
+            }
+        } else if returned.is_boolean() && !returned.boolean_value(scope) {
             let _ = event.set(
                 scope,
                 v8str(scope, "defaultPrevented").into(),

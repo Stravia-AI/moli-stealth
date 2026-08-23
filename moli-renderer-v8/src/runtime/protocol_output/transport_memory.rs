@@ -106,7 +106,10 @@ fn observation_transport_charge_bytes(observation: &RendererProtocolObservation)
 
 fn owner_action_transport_charge_bytes(action: &RendererOwnerAction) -> usize {
     match action {
-        RendererOwnerAction::TopLevelClose => 0,
+        RendererOwnerAction::TopLevelFocus(_)
+        | RendererOwnerAction::TopLevelClose(_)
+        | RendererOwnerAction::TopLevelCloseNetworkDrained(_)
+        | RendererOwnerAction::TopLevelCloseUnloadAck(_) => 0,
         RendererOwnerAction::FileChooser(event) => {
             event.source_frame_id().map(string_charge).unwrap_or(0)
         }

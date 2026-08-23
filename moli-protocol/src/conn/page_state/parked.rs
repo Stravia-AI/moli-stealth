@@ -754,14 +754,6 @@ impl BrowserContext {
             .await
     }
 
-    pub(crate) async fn promote_last_background_target_to_active_async(
-        &mut self,
-    ) -> Option<BackgroundTarget> {
-        let promoted = self.last_promotable_background_target_id()?;
-        self.promote_selected_background_target_to_active_async(promoted)
-            .await
-    }
-
     pub(crate) fn last_promotable_background_target_id(&self) -> Option<String> {
         self.background_targets
             .iter()
@@ -774,6 +766,7 @@ impl BrowserContext {
             })
     }
 
+    #[cfg(test)]
     async fn promote_selected_background_target_to_active_async(
         &mut self,
         promoted: String,

@@ -1467,7 +1467,7 @@ async fn devtools_command_preserves_remove_browser_context_detached_typed_sideca
 
 #[tokio::test]
 async fn devtools_command_executes_target_pending_activate_and_close() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new_with_target_discovery(false);
     let context = DevToolsCommandContext {
         protocol: DevToolsProtocol::WebDriverBidi,
         session_id: Some(DevToolsSessionId::from("bidi-session-1")),
@@ -1475,39 +1475,40 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
         browser_context_id: None,
     };
     for _ in 0..2 {
-        let (result, _) = conn
-            .execute_devtools_command(DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
+        let result = execute_direct_devtools_command_through_renderer_fence_for_test(
+            &mut ctx,
+            DevToolsCommand::CreateTarget(DevToolsCreateTargetCommand {
                 context: context.clone(),
                 url: "about:blank".to_owned(),
                 browser_context_id: None,
                 activate: false,
-            }))
-            .await
-            .into_parts();
+            }),
+        )
+        .await;
         result.expect("create target should succeed");
     }
 
-    let (activate_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::ActivateTarget(
-            DevToolsActivateTargetCommand {
-                context: context.clone(),
-                target_id: DevToolsTargetId::from("TID-2"),
-            },
-        ))
-        .await
-        .into_parts();
+    let activate_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::ActivateTarget(DevToolsActivateTargetCommand {
+            context: context.clone(),
+            target_id: DevToolsTargetId::from("TID-2"),
+        }),
+    )
+    .await;
     assert_eq!(
         activate_result.expect("activate should succeed"),
         DevToolsCommandResult::Empty
     );
 
-    let (close_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::CloseTarget(DevToolsCloseTargetCommand {
+    let close_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::CloseTarget(DevToolsCloseTargetCommand {
             context: context.clone(),
             target_id: DevToolsTargetId::from("TID-2"),
-        }))
-        .await
-        .into_parts();
+        }),
+    )
+    .await;
     let DevToolsCommandResult::CloseTarget(close_result) =
         close_result.expect("close should succeed")
     else {
@@ -1515,15 +1516,16 @@ async fn devtools_command_executes_target_pending_activate_and_close() {
     };
     assert!(close_result.success);
 
-    let (remaining_result, _) = conn
-        .execute_devtools_command(DevToolsCommand::GetTargets(DevToolsGetTargetsCommand {
+    let remaining_result = execute_direct_devtools_command_through_renderer_fence_for_test(
+        &mut ctx,
+        DevToolsCommand::GetTargets(DevToolsGetTargetsCommand {
             context,
             root: Some(DevToolsTargetId::from("TID-2")),
             max_depth: None,
             filter: None,
-        }))
-        .await
-        .into_parts();
+        }),
+    )
+    .await;
     let DevToolsCommandResult::GetTargets(remaining_result) =
         remaining_result.expect("get targets should succeed")
     else {

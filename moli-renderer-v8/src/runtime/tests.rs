@@ -29,6 +29,112 @@ use tokio::sync::{mpsc, oneshot};
 
 mod open_streaming;
 
+#[tokio::test(flavor = "multi_thread")]
+async fn top_level_page_focus_preserves_active_element_and_restores_effective_focus() {
+    let runtime = JsRuntime::initialize();
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
+        .expect("default resource request client");
+    let url = url::Url::parse("https://page-focus.test/").expect("test URL");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        url,
+        "<!doctype html><body><input id='target'></body>",
+    )
+    .await;
+
+    let (setup, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const input = document.getElementById('target');
+  globalThis.__pageFocusEvents = [];
+  input.addEventListener('blur', () => __pageFocusEvents.push('input-blur'));
+  input.addEventListener('focusout', () => __pageFocusEvents.push('input-focusout'));
+  input.addEventListener('focus', () => __pageFocusEvents.push('input-focus'));
+  input.addEventListener('focusin', () => __pageFocusEvents.push('input-focusin'));
+  window.addEventListener('blur', () => __pageFocusEvents.push('window-blur'));
+  window.addEventListener('focus', () => __pageFocusEvents.push('window-focus'));
+  input.focus();
+  __pageFocusEvents.length = 0;
+  return JSON.stringify([document.hasFocus(), document.activeElement === input, input.matches(':focus')]);
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("focus setup should evaluate");
+    assert_eq!(
+        renderer_json_value(setup),
+        Some(serde_json::json!("[true,true,true]"))
+    );
+
+    let (blurred, _) = page
+        .run_async_command(RendererPageCommand::SetTopLevelPageFocus {
+            active: false,
+            focused: false,
+        })
+        .await
+        .expect("Page deactivation should complete");
+    assert!(matches!(blurred, RendererPageReply::Bool(true)));
+    let (background, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const input = document.getElementById('target');
+  return JSON.stringify({
+    focused: document.hasFocus(),
+    activeIdentity: document.activeElement === input,
+    cssFocus: input.matches(':focus'),
+    events: __pageFocusEvents.slice()
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("background focus state should evaluate");
+    assert_eq!(
+        renderer_json_value(background),
+        Some(serde_json::json!(
+            r#"{"focused":false,"activeIdentity":true,"cssFocus":false,"events":["input-blur","input-focusout","window-blur"]}"#
+        ))
+    );
+
+    let (focused, _) = page
+        .run_async_command(RendererPageCommand::SetTopLevelPageFocus {
+            active: true,
+            focused: true,
+        })
+        .await
+        .expect("Page activation should complete");
+    assert!(matches!(focused, RendererPageReply::Bool(true)));
+    let (foreground, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const input = document.getElementById('target');
+  return JSON.stringify({
+    focused: document.hasFocus(),
+    activeIdentity: document.activeElement === input,
+    cssFocus: input.matches(':focus'),
+    events: __pageFocusEvents.slice()
+  });
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("foreground focus state should evaluate");
+    assert_eq!(
+        renderer_json_value(foreground),
+        Some(serde_json::json!(
+            r#"{"focused":true,"activeIdentity":true,"cssFocus":true,"events":["input-blur","input-focusout","window-blur","window-focus","input-focus","input-focusin"]}"#
+        ))
+    );
+
+    page.close_async()
+        .await
+        .expect("focus lifecycle Page should close");
+}
+
 async fn prepare_test_external_raw_document(
     runtime: &JsRuntime,
     loader: &ResourceRequestClient,
@@ -62,6 +168,57 @@ async fn prepare_test_external_raw_document_with_reservation(
         RendererReplyBoundary::Stage,
     )
     .await
+}
+
+async fn prepare_test_external_raw_document_with_reservation_and_headers(
+    runtime: &JsRuntime,
+    reservation: super::RendererPageReservationToken,
+    loader: &ResourceRequestClient,
+    url: url::Url,
+    response_headers: Vec<(String, String)>,
+    raw_body: ExternalRawDocumentBodyStream,
+) -> anyhow::Result<PreparedRendererDocument> {
+    runtime
+        .prepare_streaming_raw_document_from_external_body_with_inspector_session_restores(
+            reservation,
+            url.clone(),
+            url,
+            None,
+            false,
+            0,
+            200,
+            response_headers,
+            loader,
+            crate::RendererWebStorageHandles::ephemeral(),
+            raw_body,
+            None,
+            None,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+            false,
+            false,
+            1.0,
+            Default::default(),
+            None,
+            false,
+            Vec::new(),
+            false,
+            None,
+            Vec::new(),
+            false,
+            PageVmInitStage::Load,
+            RendererReplyBoundary::Stage,
+            RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter,
+            RendererNavigationReplyPolicy::FollowBeforeReply,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
 }
 
 async fn prepare_test_external_raw_document_with_reservation_and_boundary(
@@ -5481,6 +5638,254 @@ globalThis.__lm_related_agent_marker"#
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn coop_commit_switches_related_page_group_and_disconnects_old_window_proxy() {
+    let runtime = JsRuntime::initialize();
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let opener_url = url::Url::parse("https://example.test/coop-group/opener").expect("opener URL");
+    let popup_url = url::Url::parse("https://example.test/coop-group/popup").expect("popup URL");
+    let mut opener = create_test_html_page(
+        &runtime,
+        &loader,
+        opener_url,
+        "<!doctype html><body>COOP opener</body>",
+    )
+    .await;
+    let mut popup = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &opener,
+        &loader,
+        popup_url,
+        "<!doctype html><body>COOP popup before switch</body>",
+    )
+    .await;
+    let opener_testing = RendererPageTestingHandle::new_for_testing(&opener);
+    let popup_testing = RendererPageTestingHandle::new_for_testing(&popup);
+    opener_testing
+        .install_related_page_window_proxy_for_experiment(&popup_testing, "__lm_coop_popup")
+        .await
+        .expect("opener should retain the popup WindowProxy and opener edge");
+    let (named, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "window.name = 'coop-reusable-target'; window.opener !== null".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup should expose its initial opener and name");
+    assert_eq!(renderer_json_value(named), Some(serde_json::json!(true)));
+
+    let opener_before = runtime_heap_usage_for_test(&opener).await;
+    let popup_before = runtime_heap_usage_for_test(&popup).await;
+    let opener_runtime_before = &opener_before["moli"]["runtime"];
+    let popup_runtime_before = &popup_before["moli"]["runtime"];
+    assert_eq!(
+        opener_runtime_before["scriptAgentId"], popup_runtime_before["scriptAgentId"],
+        "the fixture must begin in one related script agent"
+    );
+    assert_eq!(
+        opener_runtime_before["browsingContextGroupId"],
+        popup_runtime_before["browsingContextGroupId"],
+        "the fixture must begin in one browsing-context group"
+    );
+    let old_script_agent_id = popup_runtime_before["scriptAgentId"].clone();
+    let old_group_id = popup_runtime_before["browsingContextGroupId"].clone();
+    let old_window_proxy = popup_runtime_before["mainWindowProxyIdentityHash"].clone();
+    let old_page_id = popup.renderer_page_id();
+    let old_owner_id = popup.owner_local_host_id();
+    let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    let coop_headers = vec![
+        ("content-type".to_owned(), "text/html".to_owned()),
+        (
+            "cross-origin-opener-policy".to_owned(),
+            "same-origin".to_owned(),
+        ),
+    ];
+
+    let canceled_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("COOP cancellation probe should reserve the popup");
+    let canceled = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        canceled_reservation,
+        &loader,
+        url::Url::parse("https://example.test/coop-group/canceled").expect("canceled URL"),
+        coop_headers.clone(),
+        completed_external_raw_document_body("<!doctype html><body>canceled COOP</body>"),
+    )
+    .await
+    .expect("COOP replacement should prepare a provisional fresh group");
+    let prepared_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(prepared_isolates.created, baseline_isolates.created + 1);
+    assert_eq!(prepared_isolates.live, baseline_isolates.live + 1);
+    assert_eq!(prepared_isolates.reserved, baseline_isolates.reserved + 1);
+    canceled
+        .cancel()
+        .await
+        .expect("canceling the provisional COOP group should succeed");
+    let canceled_isolates = runtime.document_isolate_accounting_for_diagnostics();
+    assert_eq!(canceled_isolates.live, baseline_isolates.live);
+    assert_eq!(canceled_isolates.reserved, baseline_isolates.reserved);
+    let popup_after_cancel = runtime_heap_usage_for_test(&popup).await;
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["scriptAgentId"],
+        old_script_agent_id
+    );
+    assert_eq!(
+        popup_after_cancel["moli"]["runtime"]["browsingContextGroupId"],
+        old_group_id
+    );
+    let (old_proxy_still_live, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__lm_coop_popup.closed === false".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("canceled COOP replacement must preserve the old proxy");
+    assert_eq!(
+        renderer_json_value(old_proxy_still_live),
+        Some(serde_json::json!(true))
+    );
+
+    let replacement_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("COOP commit should reserve the current popup generation");
+    let prepared = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        replacement_reservation,
+        &loader,
+        url::Url::parse("https://example.test/coop-group/committed").expect("commit URL"),
+        coop_headers.clone(),
+        completed_external_raw_document_body(
+            "<!doctype html><body data-coop='committed'>COOP switched popup</body>",
+        ),
+    )
+    .await
+    .expect("COOP replacement should prepare");
+    let permit = prepared.issue_commit_permit();
+    let replacement = prepared
+        .commit_page_replacement(permit)
+        .await
+        .expect("COOP replacement should commit");
+    assert_eq!(replacement.page_id(), old_page_id);
+    assert_eq!(replacement.owner_local_host_id(), old_owner_id);
+    popup
+        .adopt_page_replacement(&replacement)
+        .expect("the stable popup handle should adopt the COOP replacement agent");
+    let (_, _, _, _, pending_download) = replacement.into_parts();
+    assert!(pending_download.is_none());
+
+    let popup_after_switch = runtime_heap_usage_for_test(&popup).await;
+    let popup_runtime_after_switch = &popup_after_switch["moli"]["runtime"];
+    assert_ne!(
+        popup_runtime_after_switch["scriptAgentId"],
+        old_script_agent_id
+    );
+    assert_ne!(
+        popup_runtime_after_switch["browsingContextGroupId"],
+        old_group_id
+    );
+    assert_ne!(
+        popup_runtime_after_switch["mainWindowProxyIdentityHash"], old_window_proxy,
+        "COOP group switch must allocate a new group-local WindowProxy"
+    );
+    assert_eq!(
+        popup_runtime_after_switch["scriptAgentPageCount"],
+        serde_json::json!(1)
+    );
+    let (new_window_state, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify([window.opener === null, window.name, document.body.dataset.coop, window.closed])".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("new COOP realm should expose its severed group state");
+    assert_eq!(
+        renderer_json_value(new_window_state),
+        Some(serde_json::json!("[true,\"\",\"committed\",false]"))
+    );
+    let (old_window_state, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "JSON.stringify([__lm_coop_popup.closed, window.closed])".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("old-group proxy should become disconnected without closing the opener");
+    assert_eq!(
+        renderer_json_value(old_window_state),
+        Some(serde_json::json!("[true,false]"))
+    );
+    let opener_after_switch = runtime_heap_usage_for_test(&opener).await;
+    assert_eq!(
+        opener_after_switch["moli"]["runtime"]["scriptAgentId"],
+        opener_runtime_before["scriptAgentId"]
+    );
+    assert_eq!(
+        opener_after_switch["moli"]["runtime"]["browsingContextGroupId"],
+        opener_runtime_before["browsingContextGroupId"]
+    );
+    assert_eq!(
+        opener_after_switch["moli"]["runtime"]["scriptAgentPageCount"],
+        serde_json::json!(1),
+        "the severed popup membership must leave exactly the opener in the old agent"
+    );
+
+    let switched_script_agent_id = popup_runtime_after_switch["scriptAgentId"].clone();
+    let switched_group_id = popup_runtime_after_switch["browsingContextGroupId"].clone();
+    let switched_window_proxy = popup_runtime_after_switch["mainWindowProxyIdentityHash"].clone();
+    let same_policy_reservation = popup
+        .reserve_replacement_document_for_navigation()
+        .await
+        .expect("same-policy follow-up should reserve");
+    let same_policy = prepare_test_external_raw_document_with_reservation_and_headers(
+        &runtime,
+        same_policy_reservation,
+        &loader,
+        url::Url::parse("https://example.test/coop-group/same-policy").expect("same-policy URL"),
+        coop_headers,
+        completed_external_raw_document_body(
+            "<!doctype html><body data-coop='same-policy'>same group</body>",
+        ),
+    )
+    .await
+    .expect("same-origin same-COOP replacement should prepare");
+    let permit = same_policy.issue_commit_permit();
+    let same_policy_replacement = same_policy
+        .commit_page_replacement(permit)
+        .await
+        .expect("same-origin same-COOP replacement should commit");
+    popup
+        .adopt_page_replacement(&same_policy_replacement)
+        .expect("stable popup handle should adopt the same-group replacement agent");
+    let (_, _, _, _, pending_download) = same_policy_replacement.into_parts();
+    assert!(pending_download.is_none());
+    let popup_after_same_policy = runtime_heap_usage_for_test(&popup).await;
+    let popup_runtime_after_same_policy = &popup_after_same_policy["moli"]["runtime"];
+    assert_eq!(
+        popup_runtime_after_same_policy["scriptAgentId"],
+        switched_script_agent_id
+    );
+    assert_eq!(
+        popup_runtime_after_same_policy["browsingContextGroupId"],
+        switched_group_id
+    );
+    assert_eq!(
+        popup_runtime_after_same_policy["mainWindowProxyIdentityHash"],
+        switched_window_proxy
+    );
+
+    popup
+        .close_async()
+        .await
+        .expect("COOP-switched popup should close");
+    opener
+        .close_async()
+        .await
+        .expect("COOP opener should close independently");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn related_page_script_agent_keeps_async_work_and_rejections_page_local() {
     let runtime = JsRuntime::initialize();
     let loader =
@@ -6324,6 +6729,160 @@ async fn related_page_script_agent_exposes_chromium_cross_origin_window_proxy_su
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn browser_created_multi_entry_page_is_not_script_closable() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut page = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://example.test/browser-created-close").unwrap(),
+        "<!doctype html><body>browser-created close</body>",
+    )
+    .await;
+    output_rx.drain();
+
+    let (result, _) = page
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r##"(() => {
+  history.pushState({ step: 1 }, "", "#one");
+  history.pushState({ step: 2 }, "", "#two");
+  window.close();
+  return JSON.stringify([history.length, window.closed]);
+})()"##
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("script-closable rejection should complete synchronously");
+    assert_eq!(
+        renderer_json_value(result),
+        Some(serde_json::json!("[3,false]"))
+    );
+    assert!(
+        output_rx.drain().iter().all(|publication| {
+            publication.records().iter().all(|record| {
+                !matches!(
+                    record.item(),
+                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose(_))
+                )
+            })
+        }),
+        "a browser-created multi-entry Page must not publish a window.close transaction"
+    );
+
+    page.close_async()
+        .await
+        .expect("browser-created Page should complete test teardown");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn related_cross_origin_window_focus_publishes_target_page_owner_action() {
+    let runtime = JsRuntime::initialize();
+    let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
+    runtime.set_renderer_output_transport_sender(output_tx);
+    let loader =
+        ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("default loader");
+    let mut opener = create_test_html_page(
+        &runtime,
+        &loader,
+        url::Url::parse("https://focus-opener.test/").unwrap(),
+        "<!doctype html><body>focus opener</body>",
+    )
+    .await;
+    let mut popup = create_related_test_html_page_for_script_agent_experiment(
+        &runtime,
+        &opener,
+        &loader,
+        url::Url::parse("https://focus-popup.test/").unwrap(),
+        "<!doctype html><body>focus popup</body>",
+    )
+    .await;
+    let opener_testing = RendererPageTestingHandle::new_for_testing(&opener);
+    let popup_testing = RendererPageTestingHandle::new_for_testing(&popup);
+    opener_testing
+        .install_related_page_window_proxy_for_experiment(&popup_testing, "__focusPopup")
+        .await
+        .expect("opener should receive the related popup WindowProxy");
+    output_rx.drain();
+
+    let (initial, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.hasFocus()".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("related popup initial focus should evaluate");
+    assert_eq!(renderer_json_value(initial), Some(serde_json::json!(false)));
+
+    let (request, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "__focusPopup.focus(); 'requested'".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("cross-origin popup focus should evaluate in its opener");
+    assert_eq!(
+        renderer_json_value(request),
+        Some(serde_json::json!("requested"))
+    );
+
+    let mut focus_action_count = 0;
+    loop {
+        let publication = tokio::time::timeout(Duration::from_secs(1), output_rx.recv())
+            .await
+            .expect("target focus output should settle before the test deadline")
+            .expect("renderer output transport should remain open");
+        if publication_is_for_page(&publication, &opener) {
+            focus_action_count += publication
+                .records()
+                .iter()
+                .filter(|record| {
+                    matches!(
+                        record.item(),
+                        RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelFocus(target))
+                            if target.owner_local_host_id() == popup.owner_local_host_id()
+                                && target.page_id() == popup.renderer_page_id()
+                    )
+                })
+                .count();
+        }
+        if focus_action_count != 0 {
+            break;
+        }
+    }
+    assert_eq!(focus_action_count, 1);
+
+    let (focused, _) = popup
+        .run_async_command(RendererPageCommand::SetTopLevelPageFocus {
+            active: true,
+            focused: true,
+        })
+        .await
+        .expect("browser owner should focus the requested popup Page");
+    assert!(matches!(focused, RendererPageReply::Bool(true)));
+    let (observed, _) = popup
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: "document.hasFocus()".to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("focused popup state should evaluate");
+    assert_eq!(renderer_json_value(observed), Some(serde_json::json!(true)));
+
+    popup
+        .close_async()
+        .await
+        .expect("related focus popup should close");
+    opener
+        .close_async()
+        .await
+        .expect("related focus opener should close");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_final_realm() {
     let runtime = JsRuntime::initialize();
     let (output_tx, mut output_rx) = renderer_external_activity_test_channel();
@@ -6350,7 +6909,10 @@ async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_fin
 
     let (prepared, _) = second_page
         .run_async_command(RendererPageCommand::EvaluateExpression {
-            expression: r##"globalThis.__lm_peer_function = () => document.querySelector("#peer-node").textContent; "prepared""##
+            expression: r##"history.pushState({ step: 1 }, "", "#one");
+history.pushState({ step: 2 }, "", "#two");
+globalThis.__lm_peer_function = () => document.querySelector("#peer-node").textContent;
+JSON.stringify(["prepared", history.length])"##
                 .to_owned(),
             await_promise: false,
         })
@@ -6358,7 +6920,7 @@ async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_fin
         .expect("related popup should prepare retained realm values");
     assert_eq!(
         renderer_json_value(prepared),
-        Some(serde_json::json!("prepared"))
+        Some(serde_json::json!("[\"prepared\",3]"))
     );
 
     let first_testing = RendererPageTestingHandle::new_for_testing(&first_page);
@@ -6426,7 +6988,9 @@ async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_fin
             .filter(|record| {
                 matches!(
                     record.item(),
-                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose)
+                    RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose(
+                        crate::RendererTopLevelCloseSource::Window
+                    ))
                 )
             })
             .count();
@@ -6442,7 +7006,9 @@ async fn related_page_window_close_is_synchronous_idempotent_and_disconnects_fin
         .filter(|record| {
             matches!(
                 record.item(),
-                RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose)
+                RendererOutputItem::OwnerAction(RendererOwnerAction::TopLevelClose(
+                    crate::RendererTopLevelCloseSource::Window
+                ))
             )
         })
         .count();

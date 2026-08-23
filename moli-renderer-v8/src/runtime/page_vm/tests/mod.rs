@@ -1800,6 +1800,7 @@ fn test_page_vm_with_loader_dom_host_hooks_and_response_referrer_policy(
                 referrer_policy: response_referrer_policy,
                 ..Default::default()
             },
+            cross_origin_opener_policy: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,
@@ -3126,6 +3127,7 @@ fn default_runtime_hooks_reject_direct_no_owner_page_vm_construction() {
             permission_overrides: vec![],
             extra_http_headers: Vec::new(),
             document_policy_container: Default::default(),
+            cross_origin_opener_policy: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,

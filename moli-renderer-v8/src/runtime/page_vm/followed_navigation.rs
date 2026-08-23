@@ -357,6 +357,7 @@ fn page_vm_env_for_navigation_bootstrap(
     env.document_policy_container.cross_origin_embedder_policy = Default::default();
     env.document_policy_container.cross_origin_isolated = false;
     env.document_policy_container.sandbox = Default::default();
+    env.cross_origin_opener_policy = Default::default();
     env.top_level_storage_key = None;
     env.navigation_bootstrap_entry = navigation_bootstrap_entry;
     env.reserved_service_worker_client_id = reserved_service_worker_client_id;
@@ -1277,6 +1278,7 @@ impl PageVm {
                 document_content_security_policies: self.vm().document_content_security_policies(),
                 ..Default::default()
             },
+            cross_origin_opener_policy: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: self.locale_override.clone(),

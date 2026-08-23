@@ -9,7 +9,7 @@ use super::{
     },
 };
 use crate::{
-    browsing_context_model::ScriptAgentId,
+    browsing_context_model::{BrowsingContextGroupId, ScriptAgentId},
     context_bootstrap::{ContextBootstrapAssets, WINDOW_OPENER_SLOT},
     document_runtime::DocumentRuntime,
     exception_reporting::v8_message_listener,
@@ -185,13 +185,24 @@ impl RendererDocumentIsolateBootstrap {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct RendererRelatedPageGroup {
+    id: BrowsingContextGroupId,
     named_targets: Rc<RefCell<HashMap<String, Vec<Weak<RendererRelatedPageTopLevelTargetState>>>>>,
     /// Related Page order is part of named-frame lookup. Chromium walks every
     /// live related Page's complete frame tree before consulting the next Page,
     /// so a name-indexed top-level map cannot represent this authority alone.
     top_level_targets: Rc<RefCell<Vec<Weak<RendererRelatedPageTopLevelTargetState>>>>,
+}
+
+impl Default for RendererRelatedPageGroup {
+    fn default() -> Self {
+        Self {
+            id: BrowsingContextGroupId::allocate(),
+            named_targets: Rc::new(RefCell::new(HashMap::new())),
+            top_level_targets: Rc::new(RefCell::new(Vec::new())),
+        }
+    }
 }
 
 impl RendererRelatedPageGroup {
@@ -304,13 +315,18 @@ impl RendererRelatedPageGroup {
 
 struct RendererRelatedPageTopLevelTargetState {
     residence: crate::RendererResolvedPopupTarget,
+    opened_by_dom: bool,
     global_proxy: OnceCell<v8::Global<v8::Object>>,
     current_default_context: RefCell<Option<v8::Global<v8::Context>>>,
     // Page-scoped opener edge. The value belongs to the stable top-level
     // browsing context rather than to one replaceable LocalWindow realm.
     opener_edge: RefCell<Option<v8::Global<v8::Value>>>,
     lifecycle: Cell<RendererTopLevelBrowsingContextLifecycle>,
+    active: Cell<bool>,
+    focused: Cell<bool>,
     name: RefCell<String>,
+    current_cross_origin_opener_policy:
+        RefCell<Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy>>,
 }
 
 impl RendererRelatedPageTopLevelTargetState {
@@ -349,6 +365,10 @@ enum RendererTopLevelBrowsingContextLifecycle {
     Active,
     Closing,
     Closed,
+    /// A COOP commit replaced this group-visible browsing context with a new
+    /// group endpoint. Old-group WindowProxy references stay safely callable
+    /// but expose closed/disconnected behavior.
+    Disconnected,
 }
 
 impl std::fmt::Debug for RendererPageScriptEnvironment {
@@ -360,6 +380,10 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
                 &self.renderer_document_isolate.identity_key(),
             )
             .field("script_agent_id", &self.script_agent_id())
+            .field(
+                "browsing_context_group_id",
+                &self.browsing_context_group_id(),
+            )
             .field(
                 "runtime_task_source_identity_key",
                 &self.page_runtime_task_source.identity_key(),
@@ -377,6 +401,11 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
                 "top_level_browsing_context_lifecycle",
                 &self.top_level_target.lifecycle.get(),
             )
+            .field("top_level_page_active", &self.top_level_target.active.get())
+            .field(
+                "top_level_page_focused",
+                &self.top_level_target.focused.get(),
+            )
             .field(
                 "top_level_browsing_context_name",
                 &self.top_level_target.name,
@@ -388,6 +417,9 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
 impl RendererPageScriptEnvironment {
     pub(crate) fn new(
         page_id: u64,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
         auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
         renderer_document_isolate: RendererDocumentIsolateHandle,
         inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
@@ -397,6 +429,9 @@ impl RendererPageScriptEnvironment {
     ) -> Result<Self> {
         Self::new_in_related_page_group(
             page_id,
+            opened_by_dom,
+            initially_active,
+            initially_focused,
             auxiliary_page_reservation_allocator,
             renderer_document_isolate,
             inspector_isolate_backend,
@@ -410,6 +445,9 @@ impl RendererPageScriptEnvironment {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_related(
         page_id: u64,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
         auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
         renderer_document_isolate: RendererDocumentIsolateHandle,
         inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
@@ -420,6 +458,9 @@ impl RendererPageScriptEnvironment {
     ) -> Result<Self> {
         Self::new_in_related_page_group(
             page_id,
+            opened_by_dom,
+            initially_active,
+            initially_focused,
             auxiliary_page_reservation_allocator,
             renderer_document_isolate,
             inspector_isolate_backend,
@@ -433,6 +474,9 @@ impl RendererPageScriptEnvironment {
     #[allow(clippy::too_many_arguments)]
     fn new_in_related_page_group(
         page_id: u64,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
         auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
         renderer_document_isolate: RendererDocumentIsolateHandle,
         inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
@@ -452,11 +496,15 @@ impl RendererPageScriptEnvironment {
                 })?;
         let top_level_target = Rc::new(RendererRelatedPageTopLevelTargetState {
             residence,
+            opened_by_dom,
             global_proxy: OnceCell::new(),
             current_default_context: RefCell::new(None),
             opener_edge: RefCell::new(None),
             lifecycle: Cell::new(RendererTopLevelBrowsingContextLifecycle::Active),
+            active: Cell::new(initially_active),
+            focused: Cell::new(initially_focused),
             name: RefCell::new(String::new()),
+            current_cross_origin_opener_policy: RefCell::new(None),
         });
         related_page_group.register_target(&top_level_target);
         Ok(Self {
@@ -476,6 +524,56 @@ impl RendererPageScriptEnvironment {
 
     pub(crate) fn page_id(&self) -> u64 {
         self.page_id
+    }
+
+    pub(crate) fn opened_by_dom(&self) -> bool {
+        self.top_level_target.opened_by_dom
+    }
+
+    pub(crate) fn browsing_context_group_id(&self) -> BrowsingContextGroupId {
+        self.related_page_group.id
+    }
+
+    pub(crate) fn current_top_level_cross_origin_opener_policy(
+        &self,
+    ) -> Option<crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy> {
+        self.top_level_target
+            .current_cross_origin_opener_policy
+            .borrow()
+            .clone()
+    }
+
+    pub(crate) fn commit_top_level_cross_origin_opener_policy(
+        &self,
+        state: crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy,
+    ) {
+        *self
+            .top_level_target
+            .current_cross_origin_opener_policy
+            .borrow_mut() = Some(state);
+    }
+
+    pub(crate) fn top_level_page_is_focused(&self) -> bool {
+        self.top_level_target.focused.get()
+    }
+
+    pub(crate) fn top_level_page_is_active(&self) -> bool {
+        self.top_level_target.active.get()
+    }
+
+    pub(crate) fn top_level_page_residence(&self) -> crate::RendererResolvedPopupTarget {
+        self.top_level_target.residence
+    }
+
+    pub(crate) fn set_top_level_page_activation(
+        &self,
+        active: bool,
+        focused: bool,
+    ) -> (bool, bool) {
+        (
+            self.top_level_target.active.replace(active) != active,
+            self.top_level_target.focused.replace(focused) != focused,
+        )
     }
 
     pub(crate) fn auxiliary_page_reservation_allocator(
@@ -516,6 +614,23 @@ impl RendererPageScriptEnvironment {
         self.top_level_target
             .lifecycle
             .set(RendererTopLevelBrowsingContextLifecycle::Closed);
+    }
+
+    pub(crate) fn disconnect_top_level_browsing_context_for_group_switch(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+    ) -> bool {
+        if self.top_level_target.lifecycle.get() != RendererTopLevelBrowsingContextLifecycle::Active
+        {
+            return false;
+        }
+        self.related_page_group
+            .unregister_target(&self.top_level_target);
+        self.top_level_target
+            .lifecycle
+            .set(RendererTopLevelBrowsingContextLifecycle::Disconnected);
+        self.sever_top_level_opener_edge(scope);
+        true
     }
 
     pub(crate) fn top_level_browsing_context_is_closed(&self) -> bool {

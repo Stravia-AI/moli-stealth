@@ -77,7 +77,7 @@ pub(crate) use browser_context::{
     SessionOwnerRuntimeFrontendEnableResult, TargetEmulationSessionStateMut,
     TargetNavigationLoadInputs,
 };
-pub(crate) use command_owner_scope::CommandOwnerScope;
+pub(crate) use command_owner_scope::{CommandOwnerRouteOverrideScope, CommandOwnerScope};
 pub use command_view::Cmd;
 pub(crate) use cookie_manager_surface::BrowserContextCookieManagerSurfaceSnapshot;
 #[cfg(test)]
@@ -1124,9 +1124,17 @@ pub struct CdpConnection {
     next_internal_runtime_command_id: u64,
     network_request_id_allocator: ConnectionNetworkRequestIdAllocator,
     none_session_owner_route_override: Option<CdpSessionRoute>,
+    session_owner_route_override: Option<(String, CdpSessionRoute)>,
     pending_runtime_await_jobs: HashMap<PendingRendererCommandKey, RuntimeAwaitJob>,
     claimed_pending_inspector_await_owners:
         HashMap<PendingRendererCommandKey, ClaimedPendingInspectorAwaitOwner>,
+    /// Exact accepted `Page.close` records whose browser command already owns
+    /// network cancellation, unload dispatch, and the response fence.
+    ///
+    /// The renderer still publishes its ordinary `TopLevelClose(Page)` record.
+    /// Ordered ingress consumes the matching identity instead of starting a
+    /// second close transaction before the command-owned network terminal.
+    command_bound_page_close_records: Vec<TargetPageResidenceIdentity>,
 
     // Browser profile, permissions, download and global IO state.
     pub window_bounds: BrowserWindowBounds,
@@ -1168,6 +1176,76 @@ pub struct CdpConnection {
     // page is parked in the background or in an inactive browser context, and
     // swap them back into `engine` when that owner becomes active.
     retained_background_navigation_engines: HashMap<(String, String), NavigationEngine>,
+}
+
+async fn set_runtime_slot_top_level_page_focus_async(
+    slot: &mut TargetRuntimeSlot,
+    active: bool,
+    focused: bool,
+    defer_for_modal_owner: bool,
+) -> Result<bool, String> {
+    let Some(page) = slot.loaded_page_mut() else {
+        return Ok(false);
+    };
+    if defer_for_modal_owner || page.has_open_modal_javascript_dialog() {
+        // The renderer owner is synchronously parked inside the modal call.
+        // Queue the exact Page transition without awaiting that owner lane so
+        // browser target activation remains independent of the old Page's
+        // user prompt. This command is deliberately non-interruptible: once
+        // the prompt settles, owner FIFO applies the deferred state before any
+        // later command for this Page. Dropping only abandons the reply.
+        drop(
+            page.start_set_top_level_page_focus(active, focused)
+                .map_err(|error| {
+                    format!("failed to defer top-level Page focus behind modal dialog: {error}")
+                })?,
+        );
+        return Ok(true);
+    }
+    let (changed, turn_output) = page
+        .set_top_level_page_focus_async(active, focused)
+        .await
+        .map_err(|error| error.to_string())?;
+    drop(turn_output);
+    let _ = slot.ingest_owner_page_observable_output_updates();
+    Ok(changed)
+}
+
+impl CdpConnection {
+    pub(crate) fn finish_target_page_focus_handoff(
+        &mut self,
+        page_owner: &TargetPageResidenceIdentity,
+        completion: Result<moli_core::page::CompletedPageCommand, String>,
+    ) -> Result<(), String> {
+        let browser_context = self
+            .browser_context_by_id_mut(page_owner.browser_context_id())
+            .ok_or_else(|| "BrowserContextNotLoaded".to_owned())?;
+        let runtime_slot = match page_owner.target_id() {
+            Some(target_id) if browser_context.active_target_id() == Some(target_id) => {
+                &mut browser_context.active_target.runtime_slot
+            }
+            Some(target_id) => {
+                &mut browser_context
+                    .background_target_mut(target_id)
+                    .ok_or_else(|| "TargetNotLoaded".to_owned())?
+                    .runtime_slot
+            }
+            None => &mut browser_context.active_target.runtime_slot,
+        };
+        if runtime_slot.page_attachment_id() != Some(page_owner.page_attachment_id()) {
+            return Err("TargetPageResidenceRetired".to_owned());
+        }
+        let completion = completion?;
+        let page = runtime_slot
+            .loaded_page_mut()
+            .ok_or_else(|| "NoDocumentLoaded".to_owned())?;
+        let (_, output) = page
+            .finish_set_top_level_page_focus(completion)
+            .map_err(|error| error.to_string())?;
+        drop(output);
+        let _ = runtime_slot.ingest_owner_page_observable_output_updates();
+        Ok(())
+    }
 }
 
 impl Default for CdpConnection {
@@ -1368,6 +1446,7 @@ impl CdpConnection {
             network_request_id_allocator: ConnectionNetworkRequestIdAllocator::default(),
             pending_runtime_await_jobs: HashMap::new(),
             claimed_pending_inspector_await_owners: HashMap::new(),
+            command_bound_page_close_records: Vec::new(),
             base_browser_identity,
             global_extra_headers: Vec::new(),
             global_browser_identity_override: None,
@@ -1386,6 +1465,7 @@ impl CdpConnection {
             target_host_lifecycle_observer: None,
             scheduler_state: CdpConnectionSchedulerState::default(),
             none_session_owner_route_override: None,
+            session_owner_route_override: None,
             engine: NavigationEngineOwnerSlot::new(NavigationEngine::new_with_runtime_config(
                 navigation_runtime_config,
             )),
@@ -2666,7 +2746,6 @@ impl CdpConnection {
         )
         .expect("page owner must retain its exact BrowserContext engine");
     }
-
     pub(crate) fn enqueue_deferred_main_document_load_completion(
         &mut self,
         admission: crate::domains::activity::DeferredMainDocumentLoadCompletionAdmission,
@@ -2793,6 +2872,43 @@ impl CdpConnection {
             );
         self.scheduler_state
             .push_scheduler_event(CdpSchedulerEvent::ProtocolWorkPublished { work });
+    }
+
+    pub(crate) fn register_command_bound_page_close_record(
+        &mut self,
+        page_owner: TargetPageResidenceIdentity,
+    ) {
+        let target_id = page_owner.target_id().map(str::to_owned);
+        self.command_bound_page_close_records.retain(|registered| {
+            registered == &page_owner || registered.target_id() != target_id.as_deref()
+        });
+        if !self
+            .command_bound_page_close_records
+            .iter()
+            .any(|registered| registered == &page_owner)
+        {
+            self.command_bound_page_close_records.push(page_owner);
+        }
+    }
+
+    pub(crate) fn consume_command_bound_page_close_record(
+        &mut self,
+        page_owner: &TargetPageResidenceIdentity,
+    ) -> bool {
+        let Some(index) = self
+            .command_bound_page_close_records
+            .iter()
+            .position(|registered| registered == page_owner)
+        else {
+            return false;
+        };
+        self.command_bound_page_close_records.swap_remove(index);
+        true
+    }
+
+    pub(crate) fn discard_command_bound_page_close_records_for_target(&mut self, target_id: &str) {
+        self.command_bound_page_close_records
+            .retain(|registered| registered.target_id() != Some(target_id));
     }
 
     pub async fn complete_deferred_main_document_load_completion_for_scheduler(
@@ -3004,6 +3120,28 @@ impl CdpConnection {
         route: Option<CdpSessionRoute>,
     ) -> NoneSessionOwnerRouteOverrideScope<'_> {
         NoneSessionOwnerRouteOverrideScope::enter(self, route)
+    }
+
+    pub(crate) fn session_owner_route_override(&self, session_id: &str) -> Option<CdpSessionRoute> {
+        self.session_owner_route_override
+            .as_ref()
+            .filter(|(overridden_session_id, _)| overridden_session_id == session_id)
+            .map(|(_, route)| route.clone())
+    }
+
+    pub(crate) fn replace_session_owner_route_override(
+        &mut self,
+        route: Option<(String, CdpSessionRoute)>,
+    ) -> Option<(String, CdpSessionRoute)> {
+        std::mem::replace(&mut self.session_owner_route_override, route)
+    }
+
+    pub(crate) fn scoped_session_owner_route_override(
+        &mut self,
+        session_id: String,
+        route: CdpSessionRoute,
+    ) -> SessionOwnerRouteOverrideScope<'_> {
+        SessionOwnerRouteOverrideScope::enter(self, Some((session_id, route)))
     }
 
     pub(crate) fn response_body_materialize_limit(&self) -> usize {
@@ -4014,6 +4152,38 @@ impl CdpConnection {
 pub(crate) struct NoneSessionOwnerRouteOverrideScope<'a> {
     conn: &'a mut CdpConnection,
     previous_route: Option<Option<CdpSessionRoute>>,
+}
+
+pub(crate) struct SessionOwnerRouteOverrideScope<'a> {
+    conn: &'a mut CdpConnection,
+    previous_route: Option<Option<(String, CdpSessionRoute)>>,
+}
+
+impl<'a> SessionOwnerRouteOverrideScope<'a> {
+    fn enter(conn: &'a mut CdpConnection, target_route: Option<(String, CdpSessionRoute)>) -> Self {
+        let previous_route = conn.replace_session_owner_route_override(target_route);
+        Self {
+            conn,
+            previous_route: Some(previous_route),
+        }
+    }
+
+    pub(crate) fn conn_mut(&mut self) -> &mut CdpConnection {
+        self.conn
+    }
+
+    pub(crate) fn restore(&mut self) {
+        if let Some(previous_route) = self.previous_route.take() {
+            self.conn
+                .replace_session_owner_route_override(previous_route);
+        }
+    }
+}
+
+impl Drop for SessionOwnerRouteOverrideScope<'_> {
+    fn drop(&mut self) {
+        self.restore();
+    }
 }
 
 impl<'a> NoneSessionOwnerRouteOverrideScope<'a> {

@@ -400,6 +400,10 @@ async fn fixture_handler(
         }
         "/redirect-start" => redirect("/redirect-final", &[("cache-control", "no-store")]),
         "/redirect-final" => html("<!doctype html><main>redirect final</main>"),
+        "/coop-same-origin" => html_with_headers(
+            "<!doctype html><main id='coop-marker'>COOP committed popup</main>",
+            &[("cross-origin-opener-policy", "same-origin")],
+        ),
         "/no-content" => response(
             StatusCode::NO_CONTENT,
             "text/plain; charset=utf-8",
@@ -740,6 +744,7 @@ async fn rust_smoke_fixture_serves_all_document_and_control_routes() {
         "/dialog",
         "/set-cookie",
         "/redirect-final",
+        "/coop-same-origin",
         "/history-a",
         "/history-b",
         "/document-continue",

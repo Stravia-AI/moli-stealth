@@ -789,6 +789,8 @@ mod page_resource_completion_task_completion;
 mod text_search;
 mod text_track_default_mode;
 mod text_track_load;
+mod top_level_close;
+mod top_level_focus;
 mod user_interaction;
 mod view_transition_update;
 pub(crate) mod web_fonts;
@@ -1078,6 +1080,15 @@ impl ScriptVm {
         self._context_host
             .borrow_mut()
             .mark_root_document_initial_empty();
+    }
+
+    pub(super) fn set_cross_origin_opener_policy(
+        &mut self,
+        value: crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
+    ) {
+        self._context_host
+            .borrow()
+            .commit_top_level_cross_origin_opener_policy(value);
     }
 
     pub(super) fn run_v8_foreground_task(
@@ -3429,6 +3440,72 @@ impl ScriptVm {
                     ),
                     "failed to park the closed top-level WindowProxy"
                 );
+                Ok(())
+            })
+    }
+
+    pub(super) fn preflight_main_window_proxy_group_switch(&self, page_id: u64) -> Result<()> {
+        let environment = self
+            .renderer_page_script_environment
+            .as_ref()
+            .ok_or_else(|| anyhow!("COOP group switch requires a Page script environment"))?;
+        anyhow::ensure!(
+            environment.page_id() == page_id,
+            "COOP group switch crossed Page script environment ownership"
+        );
+        let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
+        self.renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let window_proxy = context.global(scope);
+                let stable_proxy_matches = environment.with_main_window_proxy(|stable_proxy| {
+                    v8::Local::new(scope, stable_proxy).strict_equals(window_proxy.into())
+                })?;
+                anyhow::ensure!(
+                    stable_proxy_matches,
+                    "COOP group switch crossed stable main WindowProxy ownership"
+                );
+                Ok(())
+            })
+    }
+
+    pub(super) fn disconnect_top_level_browsing_context_for_group_switch(&mut self) -> Result<()> {
+        if self.top_level_browsing_context_disconnected {
+            return Ok(());
+        }
+        self.top_level_browsing_context_disconnected = true;
+        let environment = self
+            .renderer_page_script_environment
+            .as_ref()
+            .ok_or_else(|| anyhow!("COOP group switch requires a Page script environment"))?
+            .clone();
+        let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
+        let host = self._context_host.clone();
+        self.disconnect_document_contexts_for_host_teardown();
+        self.renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                let context = unsafe { v8::Local::new(scope, &*context_ptr) };
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let window_proxy = context.global(scope);
+                debug_assert!(environment.disconnect_top_level_browsing_context_for_group_switch(
+                    scope
+                ));
+                context.detach_global();
+                let null_opener = v8::null(scope).into();
+                if !host.borrow_mut().park_closed_top_level_window_proxy(
+                    scope,
+                    window_proxy,
+                    null_opener,
+                ) {
+                    tracing::error!(
+                        "failed to park the disconnected top-level WindowProxy after COOP group switch"
+                    );
+                }
                 Ok(())
             })
     }
@@ -7296,6 +7373,11 @@ impl ScriptVm {
             dom,
             runtime: RendererMoliRuntimeMemoryDiagnostics {
                 script_agent_id: self.renderer_document_isolate.script_agent_id().value(),
+                browsing_context_group_id: self
+                    .renderer_page_script_environment
+                    .as_ref()
+                    .map(|environment| environment.browsing_context_group_id().value())
+                    .unwrap_or_default(),
                 script_agent_scope: self.renderer_document_isolate.script_agent_scope().as_str(),
                 script_agent_page_count,
                 runtime_observable_context_count: self.page_runtime_observable_contexts().len(),

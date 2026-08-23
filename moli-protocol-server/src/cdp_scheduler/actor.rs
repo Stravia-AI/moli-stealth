@@ -96,6 +96,67 @@ struct SchedulerInputReceivers {
     ready_background_inputs_before_runtime_response: VecDeque<SchedulerInput>,
 }
 
+/// Gives the synchronous frontend-control lane access to the same exact
+/// renderer-cursor projection used by ordinary frontend commands.
+///
+/// HTTP target management runs inside this actor, so it cannot enqueue a CDP
+/// command back to the actor and wait for itself. A target close can still run
+/// renderer unload work, however. Keeping these actor-owned queues bundled
+/// here lets that narrow control lane project the cursor without bypassing
+/// deferred Runtime replies or protocol adapters.
+pub(super) struct FrontendControlRendererFence<'a> {
+    scheduler_input_rx: &'a mut SchedulerInputReceivers,
+    pending_runtime_deferred_replies: &'a mut VecDeque<PendingRuntimeDeferredReplyState>,
+    adapter_scheduler: &'a mut ProtocolAdapterScheduler<CommandDispatchState>,
+}
+
+impl<'a> FrontendControlRendererFence<'a> {
+    fn new(
+        scheduler_input_rx: &'a mut SchedulerInputReceivers,
+        pending_runtime_deferred_replies: &'a mut VecDeque<PendingRuntimeDeferredReplyState>,
+        adapter_scheduler: &'a mut ProtocolAdapterScheduler<CommandDispatchState>,
+    ) -> Self {
+        Self {
+            scheduler_input_rx,
+            pending_runtime_deferred_replies,
+            adapter_scheduler,
+        }
+    }
+
+    pub(super) async fn flush_predecessor(
+        &mut self,
+        frontend_router: &CdpFrontendRouter,
+        scheduler: &mut CdpScheduler,
+        predecessor: Option<&RendererOutputFence>,
+    ) -> bool {
+        if !flush_renderer_publication_predecessor(
+            frontend_router,
+            scheduler,
+            self.scheduler_input_rx,
+            self.pending_runtime_deferred_replies,
+            self.adapter_scheduler,
+            predecessor,
+        )
+        .await
+        {
+            return false;
+        }
+        let Some(predecessor) = predecessor else {
+            return true;
+        };
+        let output = scheduler
+            .complete_renderer_output_predecessor_before_runtime_response(predecessor)
+            .await;
+        flush_protocol_output_with_runtime_deferred_reply_routing(
+            frontend_router,
+            scheduler,
+            self.pending_runtime_deferred_replies,
+            output,
+        )
+        .await
+    }
+}
+
 impl SchedulerInputReceivers {
     fn new(receivers: CdpSchedulerEventReceivers) -> Self {
         Self {
@@ -363,10 +424,16 @@ async fn run_cdp_scheduler_actor(
                 let Some(request) = maybe_request else {
                     break;
                 };
+                let mut renderer_fence = FrontendControlRendererFence::new(
+                    &mut scheduler_input_rx,
+                    &mut pending_runtime_deferred_replies,
+                    &mut adapter_scheduler,
+                );
                 if !frontend_control.handle_request(
                     request,
                     &frontend_router,
                     &mut scheduler,
+                    &mut renderer_fence,
                     owner_lifecycle.as_ref(),
                 )
                 .await

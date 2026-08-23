@@ -173,6 +173,10 @@ impl TargetNavigationStorageHandles {
 #[derive(Clone)]
 pub(crate) struct TargetNavigationLoadInputs {
     pub(crate) browser_context_id: Option<String>,
+    pub(crate) page_active: bool,
+    /// Browser-owned focus state captured for a freshly constructed renderer
+    /// Page. Stable Document replacement keeps the resident Page state.
+    pub(crate) page_focused: bool,
     storage_handles: TargetNavigationStorageHandles,
     pub(crate) root_frame_id: Option<String>,
     pub(crate) renderer_runtime: RendererBrowserContextRuntimeOwnerAccess,
@@ -287,6 +291,8 @@ impl TargetNavigationLoadInputs {
     fn from_browser_context_active_target(browser_context: &BrowserContext) -> Self {
         Self {
             browser_context_id: Some(browser_context.id.clone()),
+            page_active: true,
+            page_focused: browser_context.document_has_focus(),
             storage_handles: TargetNavigationStorageHandles::from_page_handles(
                 browser_context.page_storage_handles(),
             ),
@@ -361,6 +367,8 @@ impl TargetNavigationLoadInputs {
     ) -> Self {
         Self {
             browser_context_id: None,
+            page_active: true,
+            page_focused: true,
             storage_handles: TargetNavigationStorageHandles::from_page_handles(page_handles),
             root_frame_id: None,
             renderer_runtime,
@@ -897,6 +905,8 @@ impl<'a> TargetSessionOwnerRef<'a> {
 
                 TargetNavigationLoadInputs {
                     browser_context_id: Some(browser_context.id.clone()),
+                    page_active: false,
+                    page_focused: page_state.focus_emulation_enabled,
                     storage_handles: TargetNavigationStorageHandles::from_page_handles(
                         browser_context
                             .page_storage_handles_for_target(target_id)
@@ -2805,15 +2815,13 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
     ) -> Option<ClosedPageTarget> {
-        let target_id = self
-            .target_owner_identity_for_session(session_id)
-            .and_then(|(_, target_id)| target_id);
+        let (browser_context_id, target_id) = self.target_owner_identity_for_session(session_id)?;
         let mut collected_network_data_artifacts = self
             .target_session_owner_ref(session_id)?
             .runtime_slot()?
             .collected_network_data_artifacts();
         if let Some(target_id) = target_id.as_deref()
-            && let Some(browser_context) = self.browser_context.as_mut()
+            && let Some(browser_context) = self.browser_context_by_id_mut(&browser_context_id)
         {
             collected_network_data_artifacts.extend(
                 browser_context
@@ -2830,8 +2838,58 @@ impl CdpConnection {
         Some(closed)
     }
 
+    pub(crate) async fn close_page_target_for_target_close_session_owner_async(
+        &mut self,
+        session_id: Option<&str>,
+        out: &mut Vec<BackgroundProtocolEvent>,
+        reason: &'static str,
+    ) -> Option<ClosedPageTarget> {
+        match self.target_session_owner(session_id)? {
+            TargetSessionOwner::ActiveTarget {
+                browser_context_id, ..
+            } => {
+                self.close_active_page_target_for_target_close_in_browser_context_async(
+                    &browser_context_id,
+                    out,
+                )
+                .await
+            }
+            TargetSessionOwner::BackgroundTarget {
+                browser_context_id,
+                target_id,
+                ..
+            } => {
+                self.close_background_page_target_for_target_close_in_browser_context_async(
+                    &browser_context_id,
+                    &target_id,
+                    out,
+                    reason,
+                )
+                .await
+            }
+            TargetSessionOwner::NoLoadedBrowserContext => None,
+        }
+    }
+
     pub(crate) async fn close_background_page_target_for_target_close_async(
         &mut self,
+        target_id: &str,
+        out: &mut Vec<BackgroundProtocolEvent>,
+        reason: &'static str,
+    ) -> Option<ClosedPageTarget> {
+        let browser_context_id = self.browser_context.as_ref()?.id.clone();
+        self.close_background_page_target_for_target_close_in_browser_context_async(
+            &browser_context_id,
+            target_id,
+            out,
+            reason,
+        )
+        .await
+    }
+
+    async fn close_background_page_target_for_target_close_in_browser_context_async(
+        &mut self,
+        browser_context_id: &str,
         target_id: &str,
         out: &mut Vec<BackgroundProtocolEvent>,
         reason: &'static str,
@@ -2843,7 +2901,7 @@ impl CdpConnection {
             auxiliary_session_ids,
             collected_network_data_artifacts,
         ) = {
-            let browser_context = self.browser_context.as_mut()?;
+            let browser_context = self.browser_context_by_id_mut(browser_context_id)?;
             let mut target = browser_context.remove_background_target(target_id)?;
             let mut collected_network_data_artifacts =
                 target.runtime_slot().collected_network_data_artifacts();
@@ -2897,6 +2955,23 @@ impl CdpConnection {
         &mut self,
         out: &mut Vec<BackgroundProtocolEvent>,
     ) -> Option<ClosedPageTarget> {
+        let browser_context_id = self.browser_context.as_ref()?.id.clone();
+        self.close_active_page_target_for_target_close_in_browser_context_async(
+            &browser_context_id,
+            out,
+        )
+        .await
+    }
+
+    async fn close_active_page_target_for_target_close_in_browser_context_async(
+        &mut self,
+        browser_context_id: &str,
+        out: &mut Vec<BackgroundProtocolEvent>,
+    ) -> Option<ClosedPageTarget> {
+        let is_current_active_browser_context = self
+            .browser_context
+            .as_ref()
+            .is_some_and(|browser_context| browser_context.id == browser_context_id);
         let (
             target_id,
             primary_session_id,
@@ -2904,7 +2979,7 @@ impl CdpConnection {
             next_active_target_id,
             collected_network_data_artifacts,
         ) = {
-            let browser_context = self.browser_context.as_mut()?;
+            let browser_context = self.browser_context_by_id_mut(browser_context_id)?;
             let target_id = browser_context.active_target_id_owned()?;
             let primary_session_id = browser_context.active_session_id_owned();
             let auxiliary_session_ids =
@@ -2927,30 +3002,40 @@ impl CdpConnection {
             )
         };
         self.record_collected_network_data_artifacts(collected_network_data_artifacts);
+        self.forget_retained_navigation_engine_for_target(&target_id);
         if let Some(next_active_target_id) = next_active_target_id.as_deref() {
-            self.handoff_navigation_engine_for_target_activation(next_active_target_id);
-        }
-        let promoted_target_id = if let Some(browser_context) = self.browser_context.as_mut() {
-            browser_context
-                .promote_last_background_target_to_active_async()
+            let restore_browser_context_id = self.browser_context.as_ref().map(|bc| bc.id.clone());
+            if self
+                .activate_browser_context_by_id_async(browser_context_id)
                 .await
-                .map(|target| target.target_id().to_owned())
-        } else {
-            None
-        };
-        self.refresh_active_browser_context_loader_async().await;
-        if let Some(promoted_target_id) = promoted_target_id {
-            self.notify_target_host_activated(&promoted_target_id);
-            out.extend(
-                self.page_screencast_session_ids_for_target(&promoted_target_id)
-                    .into_iter()
-                    .map(|session_id| {
-                        BackgroundProtocolEvent::page_screencast_visibility_changed(
-                            session_id.as_deref(),
-                            true,
-                        )
-                    }),
-            );
+            {
+                match self
+                    .promote_background_target_to_active_for_connection_async(
+                        next_active_target_id,
+                    )
+                    .await
+                {
+                    Ok(Some(activation)) => out.extend(activation.into_protocol_events()),
+                    Ok(None) => {}
+                    Err(message) => {
+                        tracing::warn!(
+                            %message,
+                            target_id = next_active_target_id,
+                            "failed to promote replacement target after active target close"
+                        );
+                    }
+                }
+            }
+            if let Some(restore_browser_context_id) = restore_browser_context_id
+                && restore_browser_context_id != browser_context_id
+                && self.has_browser_context_id(&restore_browser_context_id)
+            {
+                let _ = self
+                    .activate_browser_context_by_id_async(&restore_browser_context_id)
+                    .await;
+            }
+        } else if is_current_active_browser_context {
+            self.refresh_active_browser_context_loader_async().await;
         }
 
         Some(ClosedPageTarget {
@@ -3194,6 +3279,62 @@ impl CdpConnection {
             target_id,
             page_attachment_id,
         ))
+    }
+
+    /// Resolves a renderer-selected related Page without consulting the
+    /// mutable protocol session route that happened to carry the action.
+    pub(crate) fn target_page_residence_identity_for_renderer_popup_target(
+        &self,
+        resolved_target: moli_core::page::RendererResolvedPopupTarget,
+    ) -> Option<TargetPageResidenceIdentity> {
+        self.browser_context
+            .iter()
+            .chain(self.inactive_browser_contexts.iter())
+            .find_map(|browser_context| {
+                let target_id =
+                    browser_context.target_id_for_renderer_popup_target(resolved_target)?;
+                let page_attachment_id =
+                    if browser_context.active_target_id() == Some(target_id.as_str()) {
+                        browser_context
+                            .active_target
+                            .runtime_slot
+                            .page_attachment_id()?
+                    } else {
+                        browser_context
+                            .background_target(&target_id)?
+                            .runtime_slot()
+                            .page_attachment_id()?
+                    };
+                Some(TargetPageResidenceIdentity::new(
+                    browser_context.id.clone(),
+                    Some(target_id),
+                    page_attachment_id,
+                ))
+            })
+    }
+
+    pub(crate) fn target_page_residence_identity_is_installed(
+        &self,
+        expected: &TargetPageResidenceIdentity,
+    ) -> bool {
+        let Some(browser_context) = self.browser_context_by_id(expected.browser_context_id())
+        else {
+            return false;
+        };
+        let runtime_slot = match expected.target_id() {
+            Some(target_id) if browser_context.active_target_id() == Some(target_id) => {
+                &browser_context.active_target.runtime_slot
+            }
+            Some(target_id) => {
+                let Some(target) = browser_context.background_target(target_id) else {
+                    return false;
+                };
+                target.runtime_slot()
+            }
+            None => &browser_context.active_target.runtime_slot,
+        };
+        runtime_slot.page_attachment_id() == Some(expected.page_attachment_id())
+            && runtime_slot.has_loaded_page()
     }
 
     /// Captures the reserved residence of the Page currently being built for

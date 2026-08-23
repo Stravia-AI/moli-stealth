@@ -819,7 +819,7 @@ impl JsContextHost {
             document_handle,
             Some(initial_base_url.clone()),
         );
-        let env = PageVmEnvConfig::related_initial_empty(
+        let mut env = PageVmEnvConfig::related_initial_empty(
             crate::RendererWebStorageHandles::new(
                 self.web_storage_store(),
                 session_storage_store.clone(),
@@ -829,6 +829,7 @@ impl JsContextHost {
             self.indexed_db_manager(),
             self.storage_bucket_store(),
         );
+        env.cross_origin_opener_policy = self.current_top_level_cross_origin_opener_policy_value();
         let popup_id = self.next_lightweight_popup_id;
         self.next_lightweight_popup_id = self.next_lightweight_popup_id.wrapping_add(1).max(1);
         let init = RendererRelatedInitialEmptyPageRealmInit {

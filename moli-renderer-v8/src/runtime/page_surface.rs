@@ -2002,6 +2002,7 @@ pub struct RendererMoliDomMemoryDiagnostics {
 #[serde(rename_all = "camelCase")]
 pub struct RendererMoliRuntimeMemoryDiagnostics {
     pub script_agent_id: u64,
+    pub browsing_context_group_id: u64,
     pub script_agent_scope: &'static str,
     pub script_agent_page_count: usize,
     pub runtime_observable_context_count: usize,
@@ -4996,9 +4997,26 @@ pub enum RendererPageCommand {
         url: String,
     },
     RefreshFullPageState,
+    /// Runs the renderer-owned Page.close preflight. A successful result has
+    /// already committed Closing and published the typed browser-owner close
+    /// action; `false` means beforeunload canceled the request.
+    RequestBrowserPageClose,
+    /// Appends a Page-stream barrier after browser-owned close cancellation
+    /// has settled every pending renderer network terminal.
+    AcknowledgeBrowserPageCloseNetworkDrained(RendererTopLevelCloseSource),
+    /// Dispatches pagehide/unload for one accepted top-level close. The bool
+    /// is true only for the first dispatch and serves as the renderer ACK.
+    DispatchPageCloseUnload(RendererTopLevelCloseSource),
     /// Consumes the exact target Page's already-queued `javascript:` URL task
     /// before a browser-owned ordinary navigation may commit over it.
     RunPendingJavascriptUrlTasksBeforeBrowserNavigation,
+    /// Applies browser-owned active-target and effective-focus Page state
+    /// without clearing the focused frame or active element retained by the
+    /// current Document. The two bits differ under focus emulation.
+    SetTopLevelPageFocus {
+        active: bool,
+        focused: bool,
+    },
     PageDiagnosticsSnapshot,
     HasPendingLocationNavigation,
     DispatchMouseEventAtPoint {
@@ -5796,7 +5814,8 @@ impl RendererPageCommand {
         }
         matches!(
             self,
-            Self::PageDiagnosticsSnapshot
+            Self::RequestBrowserPageClose
+                | Self::PageDiagnosticsSnapshot
                 | Self::HasPendingLocationNavigation
                 | Self::LiveChildDefaultRuntimeRealmInventory
                 | Self::RuntimeConsoleMessagesWithContext

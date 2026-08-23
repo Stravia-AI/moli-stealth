@@ -105,7 +105,8 @@ mod storage_buckets;
 pub(crate) use self::storage_access::request_storage_access_with_types;
 pub(crate) use self::window_runtime::{
     LegacyStorageQuotaCallbackOutcome, LegacyStorageQuotaCallbackTask,
-    LegacyStorageQuotaCallbackTaskEffect,
+    LegacyStorageQuotaCallbackTaskEffect, dispatch_top_level_browsing_context_close_unload,
+    request_top_level_browsing_context_close, request_top_level_browsing_context_focus,
 };
 
 pub use moli_storage_service::DEFAULT_ORIGIN_STORAGE_QUOTA_BYTES;

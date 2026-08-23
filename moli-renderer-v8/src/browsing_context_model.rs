@@ -6,11 +6,39 @@
 //! stable WindowProxy, replaceable LocalWindow/Document generations, and realm
 //! materialization state.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_BROWSING_CONTEXT_GROUP_ID: AtomicU64 = AtomicU64::new(1);
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum BrowsingContextKind {
     PrimaryTopLevel,
     AuxiliaryTopLevel,
     Nested,
+}
+
+/// Renderer owner identity for one browsing-context group.
+///
+/// This is deliberately distinct from a script-agent id: related Pages may
+/// share an agent today, while a future remote group can contain multiple
+/// agents. A COOP commit allocates a new group before its replacement realm is
+/// made observable.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct BrowsingContextGroupId(u64);
+
+impl BrowsingContextGroupId {
+    pub(crate) fn allocate() -> Self {
+        let value = NEXT_BROWSING_CONTEXT_GROUP_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+                value.checked_add(1)
+            })
+            .expect("browsing-context-group id allocator overflow");
+        Self(value)
+    }
+
+    pub(crate) const fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Owner-runtime identity of one browsing context.

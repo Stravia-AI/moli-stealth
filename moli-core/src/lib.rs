@@ -29,7 +29,8 @@ pub use moli_renderer_v8::{
     RendererOutputTransportMessage, RendererOutputTransportReceiver,
     RendererOutputTransportSendError, RendererOutputTransportSender, RendererOwnerAction,
     RendererOwnerLocalHostId, RendererOwnerResourceActivitySource,
-    RendererOwnerRuntimeActivitySource, RendererProtocolObservation,
-    RendererRuntimeCommandCausalIdentity, RendererRuntimeInspectorAsyncCompletion,
-    RendererRuntimeInspectorResponseChannel, RendererRuntimeInspectorResponseSender,
+    RendererOwnerRuntimeActivitySource, RendererPageCommandInterruptedByJavaScriptDialog,
+    RendererProtocolObservation, RendererRuntimeCommandCausalIdentity,
+    RendererRuntimeInspectorAsyncCompletion, RendererRuntimeInspectorResponseChannel,
+    RendererRuntimeInspectorResponseSender, RendererTopLevelCloseSource,
 };

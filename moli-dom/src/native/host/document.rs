@@ -71,6 +71,7 @@ impl DomHost {
             shadow_disabled_custom_element_definitions: RefCell::new(HashSet::new()),
             active_element: Cell::new(None),
             hovered_elements: RefCell::new(IndexSet::new()),
+            page_focused: Cell::new(true),
             mutation_observer_records_enabled: Cell::new(false),
             devtools_mutation_records_enabled: Cell::new(false),
         };
@@ -525,7 +526,21 @@ impl DomHost {
         self.record_mutation(MutationScope::QueryState);
     }
 
+    pub fn page_focused(&self) -> bool {
+        self.page_focused.get()
+    }
+
+    pub fn set_page_focused(&self, focused: bool) {
+        if self.page_focused.replace(focused) == focused {
+            return;
+        }
+        self.record_mutation(MutationScope::QueryState);
+    }
+
     pub fn element_matches_focus(&self, handle: DomHandle) -> bool {
+        if !self.page_focused() {
+            return false;
+        }
         let Some(active) = self.active_element_handle() else {
             return false;
         };
@@ -546,6 +561,9 @@ impl DomHost {
     }
 
     pub fn element_matches_focus_within(&self, handle: DomHandle) -> bool {
+        if !self.page_focused() {
+            return false;
+        }
         let Some(active) = self.active_element_handle() else {
             return false;
         };

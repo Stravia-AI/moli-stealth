@@ -48,7 +48,8 @@ impl ScriptVm {
                     .expect("browser-context auxiliary creation is not document-sandboxed");
                 let auxiliary_browsing_context_policy =
                     creation_policy.renderer_auxiliary_browsing_context_policy();
-                let Some(pending_auxiliary_page) = host.reserve_pending_auxiliary_page(false)
+                let Some(pending_auxiliary_page) =
+                    host.reserve_pending_browser_context_auxiliary_page()
                 else {
                     return false;
                 };

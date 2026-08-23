@@ -2274,8 +2274,9 @@ impl CdpConnection {
         };
         self.runtime_session_owner_slot_mut(session_id)?
             .start_initial_document_page_build();
-        let page_reservation =
-            staged_page_reservation.unwrap_or_else(|| engine.reserve_page_for_creation());
+        let page_reservation = staged_page_reservation
+            .unwrap_or_else(|| engine.reserve_page_for_creation())
+            .with_initial_page_activation(load_inputs.page_active, load_inputs.page_focused);
         let renderer_page = RendererPageResidenceIdentity::from_parts(
             page_reservation.local_host_id(),
             page_reservation.page_id(),
@@ -2921,7 +2922,9 @@ impl CdpConnection {
             };
         }
 
-        let page_reservation = engine.reserve_page_for_creation();
+        let page_reservation = engine
+            .reserve_page_for_creation()
+            .with_initial_page_activation(load_inputs.page_active, load_inputs.page_focused);
         self.bind_renderer_page_reservation_for_session_owner(
             session_id,
             load_inputs,

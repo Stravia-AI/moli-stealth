@@ -155,14 +155,15 @@ impl JsContextHost {
     /// so its prefix must be settled early. Draining the recorder, appending it
     /// to the same journal and allocating one stream sequence preserves the
     /// exact order of console/Inspector output that preceded the dialog.
-    pub(crate) fn publish_live_turn_output_prefix(&self) -> bool {
-        let Some(output_journal) = self.output_journal.as_ref() else {
-            return false;
-        };
+    pub(crate) fn publish_live_turn_output_prefix(
+        &self,
+    ) -> Option<crate::runtime::RendererOutputFence> {
+        let output_journal = self.output_journal.as_ref()?;
         if let Some(recorder) = self.command_turn_output.as_ref() {
             output_journal.append_records(recorder.drain_records());
         }
-        output_journal.publish_pending().is_some()
+        let cursor = output_journal.publish_pending()?;
+        Some(output_journal.declare_fence(cursor))
     }
 
     pub(crate) fn begin_command_turn_output(

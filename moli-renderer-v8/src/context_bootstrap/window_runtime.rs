@@ -25,7 +25,11 @@ pub(super) use dialogs::{window_alert_callback, window_confirm_callback, window_
 pub(crate) use dialogs::{
     window_const_false_callback, window_noop_callback, window_open_callback, window_stop_callback,
 };
-pub(super) use lifecycle::{window_close_callback, window_closed_getter};
+pub(crate) use lifecycle::{
+    dispatch_top_level_browsing_context_close_unload, request_top_level_browsing_context_close,
+    request_top_level_browsing_context_focus,
+};
+pub(super) use lifecycle::{window_close_callback, window_closed_getter, window_focus_callback};
 pub(crate) use navigator::{
     LegacyStorageQuotaCallbackOutcome, LegacyStorageQuotaCallbackTask,
     LegacyStorageQuotaCallbackTaskEffect,

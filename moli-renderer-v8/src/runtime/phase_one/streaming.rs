@@ -958,6 +958,7 @@ mod tests {
             permission_overrides: vec![],
             extra_http_headers: vec![],
             document_policy_container: Default::default(),
+            cross_origin_opener_policy: Default::default(),
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,

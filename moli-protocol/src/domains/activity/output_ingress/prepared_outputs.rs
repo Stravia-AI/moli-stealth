@@ -217,9 +217,28 @@ impl PreparedProtocolOutputs {
     ) -> Self {
         let mut prepared = Self::empty();
         match action {
-            RendererOwnerAction::TopLevelClose => {
+            RendererOwnerAction::TopLevelFocus(target_page) => {
+                crate::domains::page::PagePreparedOutputs::from_renderer_top_level_focus(
+                    conn,
+                    target_page,
+                )
+                .append_to_top_level_focus_output_sink(&mut prepared);
+            }
+            RendererOwnerAction::TopLevelClose(source) => {
                 crate::domains::page::PagePreparedOutputs::from_renderer_top_level_close(
-                    conn, session_id,
+                    conn, session_id, source,
+                )
+                .append_to_top_level_close_output_sink(&mut prepared);
+            }
+            RendererOwnerAction::TopLevelCloseUnloadAck(source) => {
+                crate::domains::page::PagePreparedOutputs::from_renderer_top_level_close_unload_ack(
+                    conn, session_id, source,
+                )
+                .append_to_top_level_close_output_sink(&mut prepared);
+            }
+            RendererOwnerAction::TopLevelCloseNetworkDrained(source) => {
+                crate::domains::page::PagePreparedOutputs::from_renderer_top_level_close_network_drained(
+                    conn, session_id, source,
                 )
                 .append_to_top_level_close_output_sink(&mut prepared);
             }

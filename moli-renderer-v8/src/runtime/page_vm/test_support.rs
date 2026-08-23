@@ -675,6 +675,7 @@ fn minimal_test_page_vm_env_config() -> PageVmEnvConfig {
         permission_overrides: Vec::new(),
         extra_http_headers: Vec::new(),
         document_policy_container: Default::default(),
+        cross_origin_opener_policy: Default::default(),
         document_default_language: None,
         document_last_modified: None,
         locale_override: None,

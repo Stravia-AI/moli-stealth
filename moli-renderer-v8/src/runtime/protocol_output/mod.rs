@@ -14,7 +14,7 @@ pub use identity::{
 pub(crate) use item::PendingRendererOutputRecord;
 pub use item::{
     RendererDocumentTitleChanged, RendererOutputItem, RendererOutputRecord, RendererOwnerAction,
-    RendererProtocolObservation,
+    RendererProtocolObservation, RendererTopLevelCloseSource,
 };
 pub use transport::{
     RendererOutputTransportDiagnostics, RendererOutputTransportMessage,

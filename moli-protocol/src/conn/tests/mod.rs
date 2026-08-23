@@ -8,9 +8,9 @@ use super::{
     BrowserContextSiteDataManagerOwnerState, BrowserContextStructuredCookieCommandVerdict,
     BrowserContextStructuredCookieWriteBackendStatus,
     BrowserContextStructuredCookieWriteReadinessStatus, CdpConnection, CdpSessionRoute,
-    CommandDispatchContext, CommandResponseFlushContext, NavigationBackgroundEvent,
-    NavigationDispatchState, NavigationResultProjection, ServiceWorkerTargetState,
-    SharedWorkerTargetState, build_event,
+    CommandDispatchContext, CommandOwnerScope, CommandResponseFlushContext,
+    NavigationBackgroundEvent, NavigationDispatchState, NavigationResultProjection,
+    ServiceWorkerTargetState, SharedWorkerTargetState, build_event,
 };
 use crate::devtools_runtime::{
     AutomationEvent, DevToolsFrameId, DevToolsLoaderId, DevToolsTargetFilterEntry,
@@ -331,6 +331,63 @@ fn none_session_owner_route_override_scope_restores_previous_route_on_drop() {
     assert_eq!(
         conn.none_session_owner_route_override(),
         Some(previous_route)
+    );
+}
+
+#[test]
+fn session_owner_route_override_scope_selects_exact_owner_and_restores_previous_route() {
+    let mut conn = CdpConnection::new();
+    let previous_route = CdpSessionRoute::ActiveTarget {
+        browser_context_id: "BID-current".to_owned(),
+        target_id: Some("TID-current".to_owned()),
+    };
+    let scoped_route = CdpSessionRoute::ActiveTarget {
+        browser_context_id: "BID-publication-owner".to_owned(),
+        target_id: Some("TID-publication-owner".to_owned()),
+    };
+
+    conn.replace_session_owner_route_override(Some((
+        "SID-collision".to_owned(),
+        previous_route.clone(),
+    )));
+    {
+        let mut scope = conn
+            .scoped_session_owner_route_override("SID-collision".to_owned(), scoped_route.clone());
+        assert_eq!(
+            scope.conn_mut().session_route(Some("SID-collision")),
+            Some(scoped_route)
+        );
+    }
+
+    assert_eq!(
+        conn.session_owner_route_override("SID-collision"),
+        Some(previous_route)
+    );
+}
+
+#[test]
+fn command_owner_scope_retains_an_attached_sessions_exact_route_after_ingress_scope() {
+    let mut conn = CdpConnection::new();
+    let publication_route = CdpSessionRoute::ActiveTarget {
+        browser_context_id: "BID-publication-owner".to_owned(),
+        target_id: Some("TID-publication-owner".to_owned()),
+    };
+
+    let owner_scope = {
+        let mut ingress_scope = conn.scoped_session_owner_route_override(
+            "SID-collision".to_owned(),
+            publication_route.clone(),
+        );
+        CommandOwnerScope::capture(ingress_scope.conn_mut(), Some("SID-collision"))
+    };
+    assert_eq!(conn.session_route(Some("SID-collision")), None);
+
+    let mut restored_scope = owner_scope.enter(&mut conn);
+    assert_eq!(
+        restored_scope
+            .conn_mut()
+            .session_route(Some("SID-collision")),
+        Some(publication_route)
     );
 }
 

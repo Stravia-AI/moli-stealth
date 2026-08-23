@@ -30,6 +30,7 @@ pub(in crate::domains) enum ProtocolOutputResponseOrder {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(in crate::domains) enum ProtocolOutputSlot {
     PendingSubresourceContinueEvents,
+    TopLevelFocus,
     TopLevelClose,
     TopLevelLocationNavigation,
     TopLevelHistoryTraversal,
@@ -64,6 +65,7 @@ impl ProtocolOutputSlot {
     pub(in crate::domains::activity) const fn delivery(self) -> ProtocolOutputDelivery {
         match self {
             Self::PendingSubresourceContinueEvents
+            | Self::TopLevelFocus
             | Self::TopLevelClose
             | Self::FileChooser
             | Self::Download
@@ -115,6 +117,7 @@ impl ProtocolOutputSlot {
             // document.open(), but Chromium still flushes the chooser event
             // before the invoking Runtime.evaluate response.
             | Self::FileChooser
+            | Self::TopLevelFocus
             | Self::JavascriptDialog
             | Self::WindowOpen
             | Self::Popup
@@ -224,6 +227,7 @@ impl ProtocolOutputSlot {
                     .await;
                 }
                 Self::Download
+                | Self::TopLevelFocus
                 | Self::TopLevelClose
                 | Self::FileChooser
                 | Self::JavascriptDialog
@@ -276,6 +280,7 @@ mod tests {
                 BeforeResponse,
             ),
             (TopLevelClose, OwnerAction, AfterResponse),
+            (TopLevelFocus, OwnerAction, BeforeResponse),
             (TopLevelLocationNavigation, OwnerAction, AfterResponse),
             (TopLevelHistoryTraversal, OwnerAction, AfterResponse),
             (FileChooser, OwnerAction, BeforeResponse),

@@ -420,6 +420,9 @@ fn update_focus_from_previous_with_previous_focus_within(
     }
     let next_value = wrap_handle_value(scope, runtime_ptr, next);
     let runtime = unsafe { &mut *runtime_ptr };
+    if let Some(next) = next {
+        runtime.set_focused_document_from_target(next);
+    }
     runtime.set_active_element_handle(next);
     runtime.mark_focus_changed();
     if let Some(previous_focus_within) = previous_focus_within {
@@ -464,6 +467,63 @@ fn update_focus_from_previous_with_previous_focus_within(
     if let Some((_, next_window)) = window_focus_transition {
         dispatch_window_focus_event(scope, runtime_ptr, next_window, "focus");
     }
+}
+
+/// Applies one browser-owned top-level Page focus transition.
+///
+/// Unlike element focus movement, Page deactivation preserves both the active
+/// element and focused-frame identity. It only removes their effective focus
+/// state, dispatching the corresponding events in Blink's element-before-
+/// Window order on blur and Window-before-element order on refocus.
+pub(crate) fn update_top_level_page_focus(
+    scope: &mut v8::PinScope<'_, '_>,
+    runtime_ptr: *mut JsContextHost,
+    active: bool,
+    focused: bool,
+) -> bool {
+    let (active_changed, focused_changed) =
+        unsafe { &mut *runtime_ptr }.set_top_level_page_activation(active, focused);
+    if !focused_changed {
+        return active_changed;
+    }
+
+    let (active_element, focused_window) = {
+        let runtime = unsafe { &mut *runtime_ptr };
+        runtime.mark_focus_changed();
+        (
+            runtime.active_element_handle(),
+            runtime.focused_window_endpoint(),
+        )
+    };
+
+    if !focused {
+        if let Some(active_element) = active_element {
+            dispatch_pending_text_control_change_if_needed(scope, runtime_ptr, active_element);
+            if let Some(event) = construct_focus_event(scope, "blur", None, false) {
+                let _ = dispatch_public_event(scope, runtime_ptr, active_element, event);
+            }
+            if unsafe { &*runtime_ptr }.active_element_handle() == Some(active_element)
+                && let Some(event) = construct_focus_event(scope, "focusout", None, true)
+            {
+                let _ = dispatch_public_event(scope, runtime_ptr, active_element, event);
+            }
+        }
+        dispatch_window_focus_event(scope, runtime_ptr, focused_window, "blur");
+        return true;
+    }
+
+    dispatch_window_focus_event(scope, runtime_ptr, focused_window, "focus");
+    if let Some(active_element) = active_element {
+        if let Some(event) = construct_focus_event(scope, "focus", None, false) {
+            let _ = dispatch_public_event(scope, runtime_ptr, active_element, event);
+        }
+        if unsafe { &*runtime_ptr }.active_element_handle() == Some(active_element)
+            && let Some(event) = construct_focus_event(scope, "focusin", None, true)
+        {
+            let _ = dispatch_public_event(scope, runtime_ptr, active_element, event);
+        }
+    }
+    true
 }
 
 fn window_focus_transition_for_handles(

@@ -11,10 +11,11 @@ use super::owner_local_store::{
     LivePagePendingNavigationCompletion, LivePagePendingNavigationPhaseOneAdvance,
     NavigationReplyPolicy, PendingPhaseOneEntryAdvance, PreparedReplacementDocumentMetadata,
     RendererDisplacedOrdinaryTurn, RendererDocumentIsolateAllocator,
-    RendererDocumentIsolateReservation, RendererOwnerLocalContext, RendererOwnerLocalStore,
-    RendererPageCommandDispatch, RendererPageCreationResolution, RendererPageScheduledTurn,
-    RendererPageToken, RendererPageTurnAdmission, RendererPageTurnCheckoutError,
-    RendererPendingPageCreation, RendererPreparedDocumentResidence, RetiringPageEntry,
+    RendererDocumentIsolateReservation, RendererExistingPageReplacementIsolation,
+    RendererOwnerLocalContext, RendererOwnerLocalStore, RendererPageCommandDispatch,
+    RendererPageCreationResolution, RendererPageScheduledTurn, RendererPageToken,
+    RendererPageTurnAdmission, RendererPageTurnCheckoutError, RendererPendingPageCreation,
+    RendererPreparedDocumentResidence, RetiringPageEntry,
     advance_document_lifecycle_one_page_turn_via_local_task,
     advance_dom_stable_wait_turn_on_entry_via_local_task,
     advance_network_idle_wait_turn_on_entry_via_local_task,
@@ -5454,6 +5455,31 @@ impl RendererOwnerHandle {
         .await;
         match result {
             Ok((mut replacement, renderer_output)) => {
+                // A same-Page replacement normally reuses the isolate's
+                // DevTools target. A COOP browsing-context-group switch owns a
+                // fresh isolate and therefore a fresh Main/IO ingress. Bind
+                // that ingress to the stable Page owner before the Page
+                // handle adopts it; otherwise the retained protocol session
+                // can enqueue its next command onto a receiver that has no
+                // owner wake route.
+                let devtools_target = entry.page_vm().devtools_target();
+                devtools_target.pause_ref().configure_page_route(
+                    entry
+                        .page_vm()
+                        .renderer_page_script_environment()
+                        .expect("a replacement Page must own a renderer script environment")
+                        .output_journal(),
+                );
+                devtools_target.main_ref().configure_owner_wake(
+                    self.state
+                        .render_runtime_admission
+                        .get()
+                        .cloned()
+                        .expect("render runtime admission must precede Page replacement"),
+                );
+                devtools_target
+                    .io_ref()
+                    .configure_owner_wake(self.state.inspector_io_wake_tx.clone());
                 replacement.pending_download = pending_download;
                 replacement
                     .creation_diagnostics
@@ -7780,6 +7806,11 @@ impl RendererOwnerHandle {
             auxiliary_browsing_context_policy,
             &document_policy_container.response_content_security_policies,
         );
+        let cross_origin_opener_policy =
+            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
+                &final_url,
+                &response_headers,
+            );
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -7806,6 +7837,7 @@ impl RendererOwnerHandle {
                     permission_overrides,
                     extra_http_headers,
                     document_policy_container,
+                    cross_origin_opener_policy,
                     document_default_language,
                     document_last_modified,
                     locale_override,
@@ -7853,6 +7885,10 @@ impl RendererOwnerHandle {
                     owner_local_context,
                     page_id,
                     page_reservation.script_agent_admission(),
+                    page_reservation.opened_by_dom(),
+                    page_reservation.initially_active(),
+                    page_reservation.initially_focused(),
+                    RendererExistingPageReplacementIsolation::PreserveBrowsingContextGroup,
                 );
                 let runtime_hooks = PageVmRuntimeHooks::with_owner_wake(
                     owner_wake,
@@ -7969,6 +8005,11 @@ impl RendererOwnerHandle {
             ))
             .into();
         }
+        let replacement_isolation =
+            match owner_local_store.prepared_document_replacement_isolation(token, &request) {
+                Ok(isolation) => isolation,
+                Err(error) => return Err(error).into(),
+            };
         let owner = self.clone();
         let residence = self
             .run_owner_lane_local_task(async move {
@@ -7981,6 +8022,10 @@ impl RendererOwnerHandle {
                     owner_local_context,
                     token.page_id(),
                     token.script_agent_admission(),
+                    token.opened_by_dom(),
+                    token.initially_active(),
+                    token.initially_focused(),
+                    replacement_isolation,
                 );
                 let (isolate_bootstrap, isolate_reservation) = isolate_allocator
                     .reserve_renderer_document_isolate(page_runtime_task_source)?;
@@ -8197,6 +8242,11 @@ impl RendererOwnerHandle {
             auxiliary_browsing_context_policy,
             &document_policy_container.response_content_security_policies,
         );
+        let cross_origin_opener_policy =
+            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
+                &final_url,
+                &response_headers,
+            );
         let document_default_language =
             crate::document_language::document_default_language_from_headers(&response_headers);
         let document_last_modified =
@@ -8256,6 +8306,7 @@ impl RendererOwnerHandle {
                     permission_overrides,
                     extra_http_headers,
                     document_policy_container,
+                    cross_origin_opener_policy,
                     document_default_language,
                     document_last_modified,
                     locale_override,

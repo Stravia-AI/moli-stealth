@@ -536,6 +536,16 @@ pub(super) struct RendererPreparedDocumentResidence {
     pub(super) isolate_reservation: RendererDocumentIsolateReservation,
 }
 
+impl RendererCreateStreamingRawPageRequest {
+    fn top_level_cross_origin_opener_policy(
+        &self,
+    ) -> crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy {
+        crate::cross_origin_isolation::TopLevelDocumentCrossOriginOpenerPolicy::from_response(
+            &self.final_url,
+            &self.response_headers,
+        )
+    }
+}
 pub(super) struct RendererOwnerLocalStoreSession<'a> {
     store: &'a mut RendererOwnerLocalStore,
 }
@@ -734,11 +744,22 @@ struct RendererLivePageReplacementReservation {
     reservation_nonce: u64,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum RendererExistingPageReplacementIsolation {
+    #[default]
+    PreserveBrowsingContextGroup,
+    CrossOriginOpenerPolicyGroupSwitch,
+}
+
 #[derive(Clone)]
 pub(crate) struct RendererDocumentIsolateAllocator {
     owner: RendererOwnerLocalContext,
     page_id: PageId,
     script_agent_admission: RendererScriptAgentAdmission,
+    opened_by_dom: bool,
+    initially_active: bool,
+    initially_focused: bool,
+    replacement_isolation: RendererExistingPageReplacementIsolation,
 }
 
 #[derive(Clone)]
@@ -757,11 +778,19 @@ impl RendererDocumentIsolateAllocator {
         owner: RendererOwnerLocalContext,
         page_id: PageId,
         script_agent_admission: RendererScriptAgentAdmission,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
+        replacement_isolation: RendererExistingPageReplacementIsolation,
     ) -> Self {
         Self {
             owner,
             page_id,
             script_agent_admission,
+            opened_by_dom,
+            initially_active,
+            initially_focused,
+            replacement_isolation,
         }
     }
 
@@ -776,6 +805,10 @@ impl RendererDocumentIsolateAllocator {
             &self.owner,
             self.page_id,
             self.script_agent_admission,
+            self.opened_by_dom,
+            self.initially_active,
+            self.initially_focused,
+            self.replacement_isolation,
             page_runtime_task_source,
         )
     }
@@ -839,6 +872,10 @@ impl RendererOwnerLocalStoreSession<'_> {
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
         script_agent_admission: RendererScriptAgentAdmission,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
+        replacement_isolation: RendererExistingPageReplacementIsolation,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
@@ -848,6 +885,10 @@ impl RendererOwnerLocalStoreSession<'_> {
             owner,
             page_id,
             script_agent_admission,
+            opened_by_dom,
+            initially_active,
+            initially_focused,
+            replacement_isolation,
             page_runtime_task_source,
         )
     }
@@ -1101,6 +1142,9 @@ impl RendererOwnerLocalStore {
             RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
         let page_script_environment = RendererPageScriptEnvironment::new_related(
             page_id.as_u64(),
+            reservation.opened_by_dom(),
+            reservation.initially_active(),
+            reservation.initially_focused(),
             auxiliary_page_reservation_allocator,
             host_handle.clone(),
             inspector_isolate_backend,
@@ -1211,6 +1255,48 @@ impl RendererOwnerLocalStore {
                 token.page_id().as_u64()
             )),
         }
+    }
+
+    pub(super) fn prepared_document_replacement_isolation(
+        &self,
+        token: RendererPageReservationToken,
+        request: &RendererCreateStreamingRawPageRequest,
+    ) -> Result<RendererExistingPageReplacementIsolation> {
+        let RendererScriptAgentAdmission::ExistingPageReplacement { .. } =
+            token.script_agent_admission()
+        else {
+            return Ok(RendererExistingPageReplacementIsolation::PreserveBrowsingContextGroup);
+        };
+        let environment = self
+            .page_hosts
+            .get(&token.local_host_id())
+            .and_then(|host| host.pages.get(&token.page_id()))
+            .map(|slot| &slot.script_environment_pin.environment)
+            .ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} is no longer live while selecting its replacement browsing-context group",
+                    token.page_id().as_u64()
+                )
+            })?;
+        let current = environment
+            .current_top_level_cross_origin_opener_policy()
+            .ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} has no committed COOP state at replacement admission",
+                    token.page_id().as_u64()
+                )
+            })?;
+        let destination = request.top_level_cross_origin_opener_policy();
+        Ok(
+            if crate::cross_origin_isolation::should_swap_browsing_context_group_for_cross_origin_opener_policy(
+                &current,
+                &destination,
+            ) {
+                RendererExistingPageReplacementIsolation::CrossOriginOpenerPolicyGroupSwitch
+            } else {
+                RendererExistingPageReplacementIsolation::PreserveBrowsingContextGroup
+            },
+        )
     }
 
     pub(super) fn take_prepared_document(
@@ -1548,6 +1634,7 @@ impl RendererOwnerLocalStore {
         page_id: PageId,
         expected_vm_creation_id: u64,
         reservation_nonce: u64,
+        replacement_isolation: RendererExistingPageReplacementIsolation,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
         RendererDocumentIsolateReservation,
@@ -1615,6 +1702,16 @@ impl RendererOwnerLocalStore {
             );
             page_slot.script_environment_pin.environment.clone()
         };
+        if replacement_isolation
+            == RendererExistingPageReplacementIsolation::CrossOriginOpenerPolicyGroupSwitch
+        {
+            return self
+                .reserve_cross_origin_opener_policy_group_switch_document_isolate_for_owner(
+                    owner,
+                    page_id,
+                    &page_script_environment,
+                );
+        }
         let bootstrap = page_script_environment.bootstrap_replacement_document_isolate()?;
         let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
         let output_journal = page_script_environment.output_journal();
@@ -1648,11 +1745,123 @@ impl RendererOwnerLocalStore {
         ))
     }
 
+    fn reserve_cross_origin_opener_policy_group_switch_document_isolate_for_owner(
+        &mut self,
+        owner: &RendererOwnerLocalContext,
+        page_id: PageId,
+        previous_environment: &RendererPageScriptEnvironment,
+    ) -> Result<(
+        RendererDocumentIsolateBootstrap,
+        RendererDocumentIsolateReservation,
+    )> {
+        let stable_task_sources = &self
+            .page_hosts
+            .get(&owner.local_host_id)
+            .and_then(|host| host.pages.get(&page_id))
+            .map(|page_slot| &page_slot.task_sources)
+            .ok_or_else(|| {
+                anyhow!(
+                    "renderer Page {} lost its stable task sources before COOP group switch",
+                    page_id.as_u64()
+                )
+            })?;
+        let page_runtime_task_source = previous_environment.page_runtime_task_source();
+        ensure!(
+            page_runtime_task_source.page_task_producer_routes_match(stable_task_sources),
+            "COOP group switch lost its stable Page scheduler identity"
+        );
+        let v8_foreground_task_sender = page_runtime_task_source
+            .v8_foreground_task_sender()
+            .ok_or_else(|| anyhow!("COOP group switch is missing its V8 foreground source"))?;
+        let bootstrap =
+            RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?;
+        let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
+        let inspector_isolate_backend = bootstrap.inspector_isolate_backend_handle();
+        let page_inspector = DocumentInspectorBinding::new(inspector_isolate_backend.clone());
+        let output_stream = RendererOutputStreamIdentity::new_page(
+            owner.local_host_id,
+            page_id,
+            page_inspector.agent_token(),
+        );
+        let output_journal = match owner
+            .owner_state
+            .browser_context_runtime
+            .renderer_output_transport_sender()
+        {
+            Some(transport) => {
+                RendererTurnOutputJournal::new_with_transport(output_stream, transport)
+            }
+            None => RendererTurnOutputJournal::new(output_stream),
+        };
+        let page_inspector = page_inspector.with_output_journal(output_journal.clone());
+        let script_agent_page_membership =
+            bootstrap.script_agent_page_membership().ok_or_else(|| {
+                anyhow!("COOP group switch bootstrap is missing its script-agent membership")
+            })?;
+        let auxiliary_page_reservation_allocator =
+            RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
+        let page_script_environment = RendererPageScriptEnvironment::new(
+            page_id.as_u64(),
+            previous_environment.opened_by_dom(),
+            previous_environment.top_level_page_is_active(),
+            previous_environment.top_level_page_is_focused(),
+            auxiliary_page_reservation_allocator,
+            host_handle.clone(),
+            inspector_isolate_backend,
+            script_agent_page_membership,
+            page_runtime_task_source,
+            output_journal.clone(),
+        )?;
+        ensure!(
+            page_script_environment.browsing_context_group_id()
+                != previous_environment.browsing_context_group_id(),
+            "COOP group switch must allocate a fresh browsing-context group"
+        );
+        ensure!(
+            page_script_environment.script_agent_id() != previous_environment.script_agent_id(),
+            "COOP group switch must allocate a fresh script agent"
+        );
+        let reservation_id = self.next_renderer_document_isolate_reservation_id;
+        self.next_renderer_document_isolate_reservation_id = self
+            .next_renderer_document_isolate_reservation_id
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("renderer document isolate reservation id exhausted"))?;
+        let token = renderer_page_token_for_owner_context(owner, page_id);
+        self.host_for_id(owner.local_host_id)
+            .reserved_renderer_document_isolates
+            .entry(page_id)
+            .or_default()
+            .push(RendererDocumentIsolateReservationEntry {
+                id: reservation_id,
+                handle: host_handle,
+                output_journal,
+                retire_output_journal_on_drop: true,
+                initial_task_sources: None,
+                _accounting: RendererDocumentIsolateReservationAccounting::new(),
+            });
+        Ok((
+            bootstrap
+                .with_page_inspector(page_inspector)
+                .with_renderer_page_script_environment(page_script_environment),
+            RendererDocumentIsolateReservation {
+                inner: Rc::new(RendererDocumentIsolateReservationState {
+                    token,
+                    reservation_id,
+                    active: std::cell::Cell::new(true),
+                }),
+            },
+        ))
+    }
+
     fn reserve_renderer_document_isolate_for_owner(
         &mut self,
         owner: &RendererOwnerLocalContext,
         page_id: PageId,
         script_agent_admission: RendererScriptAgentAdmission,
+        opened_by_dom: bool,
+        initially_active: bool,
+        initially_focused: bool,
+        replacement_isolation: RendererExistingPageReplacementIsolation,
         page_runtime_task_source: crate::page_task_queue::PageRuntimeTaskSource,
     ) -> Result<(
         RendererDocumentIsolateBootstrap,
@@ -1675,6 +1884,7 @@ impl RendererOwnerLocalStore {
                 page_id,
                 expected_vm_creation_id,
                 reservation_nonce,
+                replacement_isolation,
             );
         }
         let existing_page_routes = self
@@ -1697,17 +1907,21 @@ impl RendererOwnerLocalStore {
         let v8_foreground_task_sender = page_runtime_task_source
             .v8_foreground_task_sender()
             .ok_or_else(|| anyhow!("owner-reserved Page is missing its V8 foreground source"))?;
-        let (bootstrap, staged_window_proxy) = match script_agent_admission {
-            RendererScriptAgentAdmission::Fresh => (
-                RendererDocumentIsolateHandle::new_owner_reserved_page(v8_foreground_task_sender)?,
-                None,
-            ),
-            RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id } => {
-                ensure!(
-                    opener_page_id != page_id,
-                    "a Page cannot use itself as its related script-agent source"
-                );
-                let source_environment = self
+        let (bootstrap, staged_window_proxy, related_source_environment) =
+            match script_agent_admission {
+                RendererScriptAgentAdmission::Fresh => (
+                    RendererDocumentIsolateHandle::new_owner_reserved_page(
+                        v8_foreground_task_sender,
+                    )?,
+                    None,
+                    None,
+                ),
+                RendererScriptAgentAdmission::RelatedAuxiliaryPage { opener_page_id } => {
+                    ensure!(
+                        opener_page_id != page_id,
+                        "a Page cannot use itself as its related script-agent source"
+                    );
+                    let source_environment = self
                     .page_hosts
                     .get(&owner.local_host_id)
                     .and_then(|host| host.pages.get(&opener_page_id))
@@ -1719,19 +1933,17 @@ impl RendererOwnerLocalStore {
                             owner.local_host_id.as_u64()
                         )
                     })?;
-                let staged_window_proxy = source_environment
-                    .auxiliary_page_reservation_allocator()
-                    .take_related_window_proxy(page_id);
-                (
-                    source_environment
-                        .bootstrap_related_page_document_isolate(v8_foreground_task_sender)?,
-                    staged_window_proxy,
-                )
-            }
-            RendererScriptAgentAdmission::ExistingPageReplacement { .. } => {
-                unreachable!("live Page replacement admission returns before fresh allocation")
-            }
-        };
+                    let staged_window_proxy = source_environment
+                        .auxiliary_page_reservation_allocator()
+                        .take_related_window_proxy(page_id);
+                    let bootstrap = source_environment
+                        .bootstrap_related_page_document_isolate(v8_foreground_task_sender)?;
+                    (bootstrap, staged_window_proxy, Some(source_environment))
+                }
+                RendererScriptAgentAdmission::ExistingPageReplacement { .. } => {
+                    unreachable!("live Page replacement admission returns before fresh allocation")
+                }
+            };
         let host_handle = bootstrap.clone_renderer_document_isolate_handle_for_owner_retention();
         let reservation_id = self.next_renderer_document_isolate_reservation_id;
         self.next_renderer_document_isolate_reservation_id = self
@@ -1762,15 +1974,33 @@ impl RendererOwnerLocalStore {
             })?;
         let auxiliary_page_reservation_allocator =
             RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
-        let page_script_environment = RendererPageScriptEnvironment::new(
-            page_id.as_u64(),
-            auxiliary_page_reservation_allocator,
-            host_handle.clone(),
-            inspector_isolate_backend,
-            script_agent_page_membership,
-            page_runtime_task_source,
-            output_journal.clone(),
-        )?;
+        let page_script_environment = match related_source_environment {
+            Some(source_environment) => RendererPageScriptEnvironment::new_related(
+                page_id.as_u64(),
+                opened_by_dom,
+                initially_active,
+                initially_focused,
+                auxiliary_page_reservation_allocator,
+                host_handle.clone(),
+                inspector_isolate_backend,
+                script_agent_page_membership,
+                page_runtime_task_source,
+                output_journal.clone(),
+                &source_environment,
+            )?,
+            None => RendererPageScriptEnvironment::new(
+                page_id.as_u64(),
+                opened_by_dom,
+                initially_active,
+                initially_focused,
+                auxiliary_page_reservation_allocator,
+                host_handle.clone(),
+                inspector_isolate_backend,
+                script_agent_page_membership,
+                page_runtime_task_source,
+                output_journal.clone(),
+            )?,
+        };
         let bootstrap = if let Some(staged_window_proxy) = staged_window_proxy {
             page_script_environment
                 .install_staged_initial_main_window_proxy(staged_window_proxy)?;
@@ -3132,6 +3362,25 @@ impl RendererOwnerLocalStore {
                 .page_task_producer_routes_match(page_task_sources),
             "restored page producer routes do not match its stable Page sources"
         );
+        let current_environment = &host
+            .pages
+            .get(&token.page_id)
+            .expect("restored page must retain its stable Page slot")
+            .script_environment_pin
+            .environment;
+        let switches_browsing_context_group = current_environment.browsing_context_group_id()
+            != page_script_environment.browsing_context_group_id();
+        ensure!(
+            reserved_isolate.retire_output_journal_on_drop == switches_browsing_context_group,
+            "replacement renderer isolate output ownership does not match its browsing-context group transition"
+        );
+        if switches_browsing_context_group {
+            ensure!(
+                current_environment.isolate_identity_key()
+                    != page_script_environment.isolate_identity_key(),
+                "browsing-context group switch reused its previous script agent isolate"
+            );
+        }
         let reserved_isolate = Self::take_reserved_renderer_document_isolate_on_host(
             host,
             token.page_id,
@@ -3147,9 +3396,9 @@ impl RendererOwnerLocalStore {
             _accounting: _,
         } = reserved_isolate;
         debug_assert!(initial_task_sources.is_none());
-        debug_assert!(
-            !retire_output_journal_on_drop,
-            "replacement renderer isolate reservation must borrow its stable Page output stream"
+        debug_assert_eq!(
+            retire_output_journal_on_drop,
+            switches_browsing_context_group
         );
         reservation.disarm_for_attach();
         Ok(Some(RendererPageScriptEnvironmentPin::new(
@@ -3513,6 +3762,19 @@ impl RendererOwnerLocalStore {
                         &mut page_slot.script_environment_pin,
                         replacement_environment_pin,
                     );
+                    if previous_environment_pin
+                        .environment
+                        .browsing_context_group_id()
+                        != page_slot
+                            .script_environment_pin
+                            .environment
+                            .browsing_context_group_id()
+                    {
+                        previous_environment_pin
+                            .environment
+                            .retire_script_agent_page_membership();
+                        previous_environment_pin.environment.retire_output_stream();
+                    }
                     // A restored entry may represent a same-PageId
                     // cross-document navigation. Release the old host clone
                     // only after the replacement environment is installed.

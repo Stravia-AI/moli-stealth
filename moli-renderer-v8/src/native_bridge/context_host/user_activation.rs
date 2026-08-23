@@ -76,6 +76,14 @@ impl JsContextHost {
         self.transient_user_activation.has_been_active()
     }
 
+    /// Blink's `DOMWindow::focus()` consumes the incumbent window interaction
+    /// before consulting the target's opener exception.
+    pub(crate) fn consume_transient_user_activation_for_window_focus(&mut self) -> bool {
+        self.transient_user_activation
+            .consume_at(Instant::now())
+            .is_some()
+    }
+
     /// Admits and freezes one *new* auxiliary context transaction. Callers
     /// must resolve existing targets first because navigation to an existing
     /// context neither consults the popup blocker nor consumes activation.

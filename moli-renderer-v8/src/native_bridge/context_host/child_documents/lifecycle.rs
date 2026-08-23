@@ -829,6 +829,23 @@ impl JsContextHost {
         scope: &mut v8::PinScope<'_, '_>,
         handle: DomHandle,
     ) -> bool {
+        self.dispatch_child_browsing_context_unload_lifecycle(scope, handle, true)
+    }
+
+    pub(crate) fn dispatch_child_browsing_context_close_unload_lifecycle_if_needed(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        handle: DomHandle,
+    ) -> bool {
+        self.dispatch_child_browsing_context_unload_lifecycle(scope, handle, false)
+    }
+
+    fn dispatch_child_browsing_context_unload_lifecycle(
+        &mut self,
+        scope: &mut v8::PinScope<'_, '_>,
+        handle: DomHandle,
+        include_beforeunload: bool,
+    ) -> bool {
         let Some(window) = self.existing_child_browsing_context_window_wrapper(scope, handle)
         else {
             return false;
@@ -850,7 +867,9 @@ impl JsContextHost {
         let execution_context_owner = crate::native_bridge::WindowExecutionContextOwner::Frame(
             action.owner().local_window_id,
         );
-        dispatch_beforeunload_for_runtime_owner(scope, window);
+        if include_beforeunload {
+            let _ = dispatch_beforeunload_for_runtime_owner(scope, window);
+        }
         dispatch_pagehide_for_runtime_owner(scope, window);
         dispatch_unload_for_runtime_owner(scope, window);
         let finished = self

@@ -1078,6 +1078,8 @@ pub(crate) struct PageVmEnvConfig {
     pub(crate) permission_overrides: Vec<crate::protocol_types::PermissionOverrideRegistration>,
     pub(crate) extra_http_headers: Vec<(String, String)>,
     pub(crate) document_policy_container: crate::document_runtime::DocumentPolicyContainer,
+    pub(crate) cross_origin_opener_policy:
+        crate::cross_origin_isolation::CrossOriginOpenerPolicyValue,
     pub(crate) document_default_language: Option<String>,
     pub(crate) document_last_modified: Option<f64>,
     pub(crate) locale_override: Option<String>,
@@ -1125,6 +1127,10 @@ impl PageVmEnvConfig {
             crate::document_language::document_default_language_from_headers(headers);
         self.document_last_modified =
             crate::document_last_modified::document_last_modified_from_headers(headers);
+        self.cross_origin_opener_policy =
+            crate::cross_origin_isolation::cross_origin_opener_policy_value_from_headers(
+                final_url, headers,
+            );
     }
 
     pub(crate) fn related_initial_empty(
@@ -1149,6 +1155,8 @@ impl PageVmEnvConfig {
             permission_overrides: Vec::new(),
             extra_http_headers: Vec::new(),
             document_policy_container: policy.clone(),
+            cross_origin_opener_policy:
+                crate::cross_origin_isolation::CrossOriginOpenerPolicyValue::UnsafeNone,
             document_default_language: None,
             document_last_modified: None,
             locale_override: None,
@@ -1207,6 +1215,7 @@ pub(crate) struct PageVmRuntimeHooks {
     pub(crate) browser_context_runtime: super::RendererBrowserContextRuntime,
     document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,
     document_lifecycle_install: PageVmDocumentLifecycleInstall,
+    output_journal_binding: PageVmOutputJournalBinding,
     renderer_document_isolate_allocator: Option<RendererDocumentIsolateAllocator>,
     renderer_page_script_environment: Option<crate::script_vm::RendererPageScriptEnvironment>,
     renderer_document_isolate_reservation: Option<RendererDocumentIsolateReservation>,
@@ -1232,6 +1241,19 @@ enum PageVmDocumentLifecycleInstall {
     #[default]
     ReuseOrCreateInitial,
     CrossDocumentCommit,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum PageVmOutputJournalBinding {
+    #[default]
+    PreserveStream,
+    CrossOriginOpenerPolicyAgentTransition,
+}
+
+impl PageVmOutputJournalBinding {
+    fn allows_page_agent_transition(self) -> bool {
+        self == Self::CrossOriginOpenerPolicyAgentTransition
+    }
 }
 
 #[derive(Clone, Default)]
@@ -1269,6 +1291,7 @@ impl PageVmRuntimeHooks {
             browser_context_runtime,
             document_lifecycle: None,
             document_lifecycle_install: PageVmDocumentLifecycleInstall::default(),
+            output_journal_binding: PageVmOutputJournalBinding::default(),
             renderer_document_isolate_allocator: None,
             renderer_page_script_environment: None,
             renderer_document_isolate_reservation: None,
@@ -1344,6 +1367,7 @@ impl PageVmRuntimeHooks {
                 },
             document_lifecycle: None,
             document_lifecycle_install: PageVmDocumentLifecycleInstall::default(),
+            output_journal_binding: PageVmOutputJournalBinding::default(),
             renderer_document_isolate_allocator: None,
             renderer_page_script_environment: None,
             renderer_document_isolate_reservation: None,
@@ -1382,6 +1406,7 @@ impl PageVmRuntimeHooks {
             browser_context_runtime,
             document_lifecycle: None,
             document_lifecycle_install: PageVmDocumentLifecycleInstall::ReuseOrCreateInitial,
+            output_journal_binding: PageVmOutputJournalBinding::default(),
             renderer_document_isolate_allocator: None,
             renderer_page_script_environment: None,
             renderer_document_isolate_reservation: None,
@@ -1433,6 +1458,16 @@ impl PageVmRuntimeHooks {
                     "prepared renderer document isolate is missing its Page environment"
                 )
             })?;
+        if self
+            .renderer_page_script_environment
+            .as_ref()
+            .is_some_and(|current| {
+                current.browsing_context_group_id() != environment.browsing_context_group_id()
+            })
+        {
+            self.output_journal_binding =
+                PageVmOutputJournalBinding::CrossOriginOpenerPolicyAgentTransition;
+        }
         self.renderer_page_script_environment = Some(environment);
         self.renderer_document_isolate_reservation = Some(reservation);
         self.prepared_renderer_document_isolate_bootstrap =
@@ -2171,12 +2206,31 @@ impl PageVm {
         let navigation_handoff = environment
             .page_runtime_task_source()
             .next_top_level_navigation_handoff();
+        let replacement_environment =
+            bootstrap
+                .renderer_page_script_environment()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("prepared replacement is missing its Page script environment")
+                })?;
+        let switches_browsing_context_group = replacement_environment.browsing_context_group_id()
+            != environment.browsing_context_group_id();
+        if switches_browsing_context_group {
+            ensure!(
+                replacement_environment.isolate_identity_key()
+                    != environment.isolate_identity_key(),
+                "browsing-context group switch must also replace the script agent isolate"
+            );
+        }
         let runtime_hooks = self
             .runtime_hooks
             .clone()
             .for_cross_document_commit()
             .with_prepared_renderer_document_isolate(bootstrap, reservation)?;
-        self.commit_main_window_proxy_navigation()?;
+        if switches_browsing_context_group {
+            self.commit_main_window_proxy_group_switch()?;
+        } else {
+            self.commit_main_window_proxy_navigation()?;
+        }
         let termination = self.document_lifecycle.request_termination(
             self.document_lifecycle.identity(),
             RendererDocumentTerminationReason::SupersededByCrossDocumentNavigation,
@@ -2350,6 +2404,24 @@ impl PageVm {
                 Err(error)
             }
         }
+    }
+
+    fn commit_main_window_proxy_group_switch(&mut self) -> Result<()> {
+        let Some(mut vm) = self.vm.take() else {
+            return Err(anyhow::anyhow!(
+                "COOP group switch attempted to commit an already retired PageVm"
+            ));
+        };
+        vm.preflight_main_window_proxy_group_switch(self.page_id.as_u64())?;
+        vm.detach_default_inspector_context_for_context_teardown();
+        vm.disconnect_top_level_browsing_context_for_group_switch()?;
+        vm.close_page_context_resources_for_context_teardown();
+        tracing::debug!(
+            page_id = self.page_id.as_u64(),
+            "committed COOP browsing-context group switch before replacement realm bootstrap"
+        );
+        drop(vm);
+        Ok(())
     }
 
     // Fresh PageVm bootstrap is a special V8-entry boundary.
@@ -4343,7 +4415,12 @@ impl PageVm {
         // prepared replacements and leave newly created Pages on the legacy
         // in-memory lifecycle queue.
         if let Some(environment) = runtime_hooks.renderer_page_script_environment.as_ref() {
-            document_lifecycle.bind_output_journal(environment.output_journal());
+            document_lifecycle.bind_output_journal(
+                environment.output_journal(),
+                runtime_hooks
+                    .output_journal_binding
+                    .allows_page_agent_transition(),
+            );
         }
         // Initial Page creation binds the stable owner-local producer routes
         // while reserving the document isolate above. Resolve every typed
@@ -4699,6 +4776,8 @@ impl PageVm {
                     .apply_auxiliary_browsing_context_policy(policy);
             }
             self.vm_mut()
+                .set_cross_origin_opener_policy(env.cross_origin_opener_policy);
+            self.vm_mut()
                 .document_runtime
                 .set_document_default_language(env.document_default_language.clone());
             self.vm_mut()
@@ -4796,7 +4875,7 @@ impl PageVm {
                 anyhow::anyhow!("staged auxiliary Page lost its script environment before adoption")
             })?;
         self.document_lifecycle
-            .bind_output_journal(environment.output_journal());
+            .bind_output_journal(environment.output_journal(), false);
         self.vm_mut()
             .materialize_staged_initial_default_inspector_context(
                 env.root_frame_id.clone(),

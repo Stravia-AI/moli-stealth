@@ -51,6 +51,7 @@ use crate::domains::command_output::CommandOutputPlan;
 
 mod app_manifest;
 mod child_frame_activity;
+mod focus;
 mod javascript_dialog;
 mod lifecycle;
 mod main_document_commit;
@@ -86,6 +87,7 @@ use child_frame_activity::PagePreparedChildFrameDocumentActivity;
 pub(crate) use child_frame_activity::{
     PagePreparedChildFrameActivity, PagePreparedChildFrameTreeEvent,
 };
+use focus::PageTargetFocusRequestOwnerAction;
 pub(crate) use lifecycle::{
     emit_bound_renderer_document_lifecycle_background_events,
     emit_navigation_frame_commit_background_events,
@@ -113,6 +115,7 @@ pub(crate) use termination::{
     PageTargetCloseRequestOwnerAction, PageTargetTerminationKind, PageTargetTerminationOwnerAction,
     complete_page_target_close_request_owner_action_async,
     complete_page_target_termination_owner_action_async,
+    dispatch_browser_owned_close_unload_before_command_response,
     fail_pending_fetch_state_background_events_async, take_pending_fetch_state,
 };
 
@@ -199,8 +202,16 @@ enum PendingPageCommandKind {
     ),
     StopLoading,
     Crash,
-    Close,
+    Close {
+        pending: Option<PendingPageCommand>,
+    },
     CreateIsolatedWorld(preload::PendingCreateIsolatedWorldCommand),
+}
+
+pub(super) enum CompletedPageCloseRequest {
+    Completed(Box<CompletedPageCommand>),
+    Interrupted(moli_core::RendererOutputFence),
+    Failed(String),
 }
 
 pub(crate) struct CompletedPageCommandDispatch {
@@ -267,7 +278,9 @@ enum CompletedPageCommandKind {
     ),
     StopLoading,
     Crash,
-    Close,
+    Close {
+        completed: Option<Box<CompletedPageCloseRequest>>,
+    },
     CreateIsolatedWorld(Box<preload::CompletedCreateIsolatedWorldCommand>),
 }
 
@@ -304,11 +317,19 @@ impl CompletedPageCommandKind {
             | Self::ContinueNavigationWithoutRequestPause(_)
             | Self::StopLoading
             | Self::Crash
-            | Self::Close
             // createIsolatedWorld may restart on a replacement renderer attachment. Its
             // completion handler records the fence only after rejecting a stale completion,
             // so an abandoned stream cannot become the predecessor of the final response.
             | Self::CreateIsolatedWorld(_) => None,
+            Self::Close { completed } => match completed.as_deref() {
+                Some(CompletedPageCloseRequest::Completed(completed)) => {
+                    completed.renderer_output_predecessor()
+                }
+                Some(CompletedPageCloseRequest::Interrupted(predecessor)) => {
+                    Some(predecessor.clone())
+                }
+                Some(CompletedPageCloseRequest::Failed(_)) | None => None,
+            },
         }
     }
 }
@@ -430,7 +451,28 @@ impl PendingPageCommandDispatch {
             }
             PendingPageCommandKind::StopLoading => CompletedPageCommandKind::StopLoading,
             PendingPageCommandKind::Crash => CompletedPageCommandKind::Crash,
-            PendingPageCommandKind::Close => CompletedPageCommandKind::Close,
+            PendingPageCommandKind::Close { pending } => CompletedPageCommandKind::Close {
+                completed: match pending {
+                    Some(pending) => Some(Box::new(match pending.wait().await {
+                        Ok(completed) => {
+                            CompletedPageCloseRequest::Completed(Box::new(completed))
+                        }
+                        Err(error) => error
+                            .downcast_ref::<
+                                moli_core::RendererPageCommandInterruptedByJavaScriptDialog,
+                            >()
+                            .map(|interruption| {
+                                CompletedPageCloseRequest::Interrupted(
+                                    interruption.renderer_output_predecessor(),
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                CompletedPageCloseRequest::Failed(error.to_string())
+                            }),
+                    })),
+                    None => None,
+                },
+            },
             PendingPageCommandKind::CreateIsolatedWorld(pending) => {
                 CompletedPageCommandKind::CreateIsolatedWorld(Box::new(pending.wait().await))
             }
@@ -471,6 +513,7 @@ pub(crate) fn command_output_plan(conn: &mut CdpConnection, cmd: &Cmd<'_>) -> Co
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum PageOutputProjectionStep {
+    TopLevelFocus,
     TopLevelClose,
     Download,
     FileChooser,
@@ -487,6 +530,10 @@ enum PageOutputProjectionStep {
 
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct PagePreparedOutputs {
+    /// Cross-Page focus carries a complete exact residence identity and is a
+    /// rare owner action. Keep it indirect so ordinary Page output batches do
+    /// not inherit that payload's stack footprint.
+    top_level_focus: Option<Box<PageTargetFocusRequestOwnerAction>>,
     top_level_close: Option<PageTargetCloseRequestOwnerAction>,
     javascript_dialogs: Vec<javascript_dialog::PreparedJavaScriptDialog>,
     window_open_events: Vec<popup::PagePreparedWindowOpenEvent>,
@@ -505,13 +552,43 @@ pub(crate) struct PagePreparedOutputSlot {
 }
 
 impl PagePreparedOutputs {
-    pub(crate) fn from_renderer_top_level_close(
+    pub(crate) fn from_renderer_top_level_focus(
         conn: &CdpConnection,
+        target_page: moli_core::page::RendererResolvedPopupTarget,
+    ) -> Self {
+        let Some(page_owner) =
+            conn.target_page_residence_identity_for_renderer_popup_target(target_page)
+        else {
+            return Self::default();
+        };
+        let Some(target_id) = page_owner.target_id().map(str::to_owned) else {
+            return Self::default();
+        };
+        Self {
+            top_level_focus: Some(Box::new(PageTargetFocusRequestOwnerAction::new(
+                page_owner, target_id,
+            ))),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn from_renderer_top_level_close(
+        conn: &mut CdpConnection,
         session_id: Option<&str>,
+        source: moli_core::RendererTopLevelCloseSource,
     ) -> Self {
         let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
             return Self::default();
         };
+        if source == moli_core::RendererTopLevelCloseSource::Page
+            && conn.consume_command_bound_page_close_record(&page_owner)
+        {
+            // The accepted Page.close command retained this exact Page and
+            // already owns network cancellation, unload dispatch, and its
+            // response fence. The renderer record remains part of the stream,
+            // but must not start the same close transaction a second time.
+            return Self::default();
+        }
         let Some(target_id) = page_owner.target_id().map(str::to_owned) else {
             return Self::default();
         };
@@ -520,6 +597,79 @@ impl PagePreparedOutputs {
                 CommandOwnerScope::capture(conn, session_id),
                 page_owner,
                 target_id,
+                match source {
+                    moli_core::RendererTopLevelCloseSource::Window => {
+                        PageTargetTerminationKind::WindowClose
+                    }
+                    moli_core::RendererTopLevelCloseSource::Page => {
+                        PageTargetTerminationKind::PageClose
+                    }
+                    moli_core::RendererTopLevelCloseSource::Target => {
+                        PageTargetTerminationKind::TargetClose
+                    }
+                },
+            )),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn from_renderer_top_level_close_unload_ack(
+        conn: &CdpConnection,
+        session_id: Option<&str>,
+        source: moli_core::RendererTopLevelCloseSource,
+    ) -> Self {
+        let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
+            return Self::default();
+        };
+        let Some(target_id) = page_owner.target_id().map(str::to_owned) else {
+            return Self::default();
+        };
+        let kind = match source {
+            moli_core::RendererTopLevelCloseSource::Window => {
+                PageTargetTerminationKind::WindowClose
+            }
+            moli_core::RendererTopLevelCloseSource::Page => PageTargetTerminationKind::PageClose,
+            moli_core::RendererTopLevelCloseSource::Target => {
+                PageTargetTerminationKind::TargetClose
+            }
+        };
+        Self {
+            top_level_close: Some(PageTargetCloseRequestOwnerAction::new_unload_ack(
+                CommandOwnerScope::capture(conn, session_id),
+                page_owner,
+                target_id,
+                kind,
+            )),
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn from_renderer_top_level_close_network_drained(
+        conn: &CdpConnection,
+        session_id: Option<&str>,
+        source: moli_core::RendererTopLevelCloseSource,
+    ) -> Self {
+        let Some(page_owner) = conn.target_page_residence_identity_for_session(session_id) else {
+            return Self::default();
+        };
+        let Some(target_id) = page_owner.target_id().map(str::to_owned) else {
+            return Self::default();
+        };
+        let kind = match source {
+            moli_core::RendererTopLevelCloseSource::Window => {
+                PageTargetTerminationKind::WindowClose
+            }
+            moli_core::RendererTopLevelCloseSource::Page => PageTargetTerminationKind::PageClose,
+            moli_core::RendererTopLevelCloseSource::Target => {
+                PageTargetTerminationKind::TargetClose
+            }
+        };
+        Self {
+            top_level_close: Some(PageTargetCloseRequestOwnerAction::new_network_drained(
+                CommandOwnerScope::capture(conn, session_id),
+                page_owner,
+                target_id,
+                kind,
             )),
             ..Self::default()
         }
@@ -810,6 +960,9 @@ impl PagePreparedOutputs {
     }
 
     pub(crate) fn extend(&mut self, other: Self) {
+        if self.top_level_focus.is_none() {
+            self.top_level_focus = other.top_level_focus;
+        }
         if self.top_level_close.is_none() {
             self.top_level_close = other.top_level_close;
         }
@@ -839,6 +992,16 @@ impl PagePreparedOutputs {
     ) {
         if self.top_level_close.is_some() {
             sink.push_produced_slot(SLOT_TOP_LEVEL_CLOSE);
+            sink.push_prepared_payload(PagePreparedOutputSlot::from_outputs(self).into());
+        }
+    }
+
+    pub(in crate::domains) fn append_to_top_level_focus_output_sink(
+        self,
+        sink: &mut (impl ProtocolOutputSink + ?Sized),
+    ) {
+        if self.top_level_focus.is_some() {
+            sink.push_produced_slot(SLOT_TOP_LEVEL_FOCUS);
             sink.push_prepared_payload(PagePreparedOutputSlot::from_outputs(self).into());
         }
     }
@@ -954,6 +1117,7 @@ impl PagePreparedOutputs {
                     )
                 })
                 .collect(),
+            top_level_focus: None,
             top_level_close: None,
             window_open_events: Vec::new(),
             popup_activations: Vec::new(),
@@ -972,6 +1136,7 @@ impl PagePreparedOutputs {
         activations: Vec<moli_core::page::RendererPendingPopupActivation>,
     ) -> Self {
         Self {
+            top_level_focus: None,
             top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
@@ -1028,6 +1193,7 @@ impl PagePreparedOutputs {
             Self::child_frame_document_activity_for_test(),
         );
         Self {
+            top_level_focus: None,
             top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
@@ -1047,6 +1213,7 @@ impl PagePreparedOutputs {
         navigations: Vec<RendererDocumentSourcedSameDocumentNavigation>,
     ) -> Self {
         Self {
+            top_level_focus: None,
             top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
@@ -1071,6 +1238,7 @@ impl PagePreparedOutputs {
         navigation: Option<RendererDocumentSourcedTopLevelLocationNavigation>,
     ) -> Self {
         Self {
+            top_level_focus: None,
             top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
@@ -1152,6 +1320,10 @@ impl PagePreparedOutputSlot {
         self.outputs.top_level_close.take()
     }
 
+    fn take_top_level_focus(&mut self) -> Option<PageTargetFocusRequestOwnerAction> {
+        self.outputs.top_level_focus.take().map(|action| *action)
+    }
+
     pub(in crate::domains) fn top_level_location_navigation_runtime_command_cause(
         &self,
     ) -> Option<&RendererRuntimeCommandCausalIdentity> {
@@ -1185,6 +1357,8 @@ impl PagePreparedOutputSlot {
 }
 
 pub(in crate::domains) const SLOT_DOWNLOAD: ProtocolOutputSlot = ProtocolOutputSlot::Download;
+pub(in crate::domains) const SLOT_TOP_LEVEL_FOCUS: ProtocolOutputSlot =
+    ProtocolOutputSlot::TopLevelFocus;
 pub(in crate::domains) const SLOT_TOP_LEVEL_CLOSE: ProtocolOutputSlot =
     ProtocolOutputSlot::TopLevelClose;
 pub(in crate::domains) const SLOT_FILE_CHOOSER: ProtocolOutputSlot =
@@ -1226,6 +1400,17 @@ impl PageOutputProjectionStep {
         prepared_outputs: Option<&mut ProtocolOutputPayloads>,
     ) {
         match self {
+            PageOutputProjectionStep::TopLevelFocus => {
+                if let Some(action) = prepared_outputs
+                    .and_then(ProtocolOutputPayloads::page_mut)
+                    .and_then(PagePreparedOutputSlot::take_top_level_focus)
+                {
+                    let events =
+                        focus::complete_page_target_focus_request_owner_action_async(conn, action)
+                            .await;
+                    context.command.protocol_events_mut().extend(events);
+                }
+            }
             PageOutputProjectionStep::TopLevelClose => {
                 if let Some(action) = prepared_outputs
                     .and_then(ProtocolOutputPayloads::page_mut)
@@ -1391,6 +1576,7 @@ pub(in crate::domains) async fn project_page_output_async(
     prepared_outputs: Option<&mut ProtocolOutputPayloads>,
 ) {
     let step = match output {
+        ProtocolOutputSlot::TopLevelFocus => PageOutputProjectionStep::TopLevelFocus,
         ProtocolOutputSlot::TopLevelClose => PageOutputProjectionStep::TopLevelClose,
         ProtocolOutputSlot::Download => PageOutputProjectionStep::Download,
         ProtocolOutputSlot::FileChooser => PageOutputProjectionStep::FileChooser,
@@ -4514,6 +4700,7 @@ mod producer_tests {
             "Secure".to_owned(),
         );
         let outputs = super::PagePreparedOutputs {
+            top_level_focus: None,
             top_level_close: None,
             javascript_dialogs: Vec::new(),
             window_open_events: Vec::new(),
@@ -8286,11 +8473,12 @@ async fn complete_pending_page_command_inner(
             )
             .await;
         }
-        CompletedPageCommandKind::Close => {
+        CompletedPageCommandKind::Close { completed } => {
             return termination::complete_close_command_dispatch(
                 conn,
                 command_id,
                 session_id.as_deref(),
+                completed.map(|completed| *completed),
                 command_context,
             )
             .await;

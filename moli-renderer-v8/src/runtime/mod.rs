@@ -278,6 +278,7 @@ pub(crate) use self::javascript_dialog::{
 };
 pub use self::javascript_dialog::{
     RendererJavaScriptDialogCompletion, RendererJavaScriptDialogResult,
+    RendererPageCommandInterruptedByJavaScriptDialog,
 };
 pub use self::lifecycle_decision::{
     RendererLifecycleDecider, RendererLifecycleDecision, RendererLifecycleSnapshot,
@@ -417,7 +418,7 @@ pub use self::protocol_output::{
     RendererOutputStreamIdentity, RendererOutputTransportDiagnostics,
     RendererOutputTransportMessage, RendererOutputTransportReceiver,
     RendererOutputTransportSendError, RendererOutputTransportSender, RendererOwnerAction,
-    RendererProtocolObservation, renderer_output_transport_channel,
+    RendererProtocolObservation, RendererTopLevelCloseSource, renderer_output_transport_channel,
 };
 pub use self::service_worker_run::RendererServiceWorkerRunIdentity;
 pub use crate::devtools::command::{
@@ -562,6 +563,15 @@ pub struct RendererPageReservationToken {
     local_host_id: RendererOwnerLocalHostId,
     page_id: PageId,
     script_agent_admission: RendererScriptAgentAdmission,
+    /// Whether this top-level browsing context was created by a DOM Window
+    /// operation. This is Page metadata: it survives every Document/realm
+    /// replacement and is consumed by the script-closable check.
+    opened_by_dom: bool,
+    /// Initial browser-owned Page focus at the instant this reservation is
+    /// admitted. Existing-Page replacement ignores this snapshot and keeps
+    /// the stable Page environment's current focus state.
+    initially_active: bool,
+    initially_focused: bool,
 }
 
 impl RendererPageReservationToken {
@@ -570,6 +580,20 @@ impl RendererPageReservationToken {
             local_host_id,
             page_id,
             script_agent_admission: RendererScriptAgentAdmission::Fresh,
+            opened_by_dom: false,
+            initially_active: true,
+            initially_focused: true,
+        }
+    }
+
+    fn new_dom_auxiliary_page(local_host_id: RendererOwnerLocalHostId, page_id: PageId) -> Self {
+        Self {
+            local_host_id,
+            page_id,
+            script_agent_admission: RendererScriptAgentAdmission::Fresh,
+            opened_by_dom: true,
+            initially_active: false,
+            initially_focused: false,
         }
     }
 
@@ -584,6 +608,9 @@ impl RendererPageReservationToken {
             script_agent_admission: RendererScriptAgentAdmission::RelatedAuxiliaryPage {
                 opener_page_id,
             },
+            opened_by_dom: true,
+            initially_active: false,
+            initially_focused: false,
         }
     }
 
@@ -600,6 +627,11 @@ impl RendererPageReservationToken {
                 expected_vm_creation_id,
                 reservation_nonce,
             },
+            // Replacement consumes the already-resident Page environment. The
+            // value is intentionally not re-derived from the navigation source.
+            opened_by_dom: false,
+            initially_active: true,
+            initially_focused: true,
         }
     }
 
@@ -613,6 +645,27 @@ impl RendererPageReservationToken {
 
     pub(crate) fn script_agent_admission(self) -> RendererScriptAgentAdmission {
         self.script_agent_admission
+    }
+
+    pub(crate) fn opened_by_dom(self) -> bool {
+        self.opened_by_dom
+    }
+
+    /// Rebinds initial focus before parser or author script can observe the
+    /// reserved Page. Protocol uses this when an ordinary fresh reservation
+    /// is assigned to an active or background target slot.
+    pub fn with_initial_page_activation(mut self, active: bool, focused: bool) -> Self {
+        self.initially_active = active;
+        self.initially_focused = focused;
+        self
+    }
+
+    pub(crate) fn initially_active(self) -> bool {
+        self.initially_active
+    }
+
+    pub(crate) fn initially_focused(self) -> bool {
+        self.initially_focused
     }
 }
 
@@ -759,14 +812,24 @@ impl RendererAuxiliaryPageReservationAllocator {
         }
     }
 
-    pub(crate) fn reserve(&self, exposes_opener: bool) -> RendererPendingAuxiliaryPage {
+    pub(crate) fn reserve(
+        &self,
+        exposes_opener: bool,
+        opened_by_dom: bool,
+    ) -> RendererPendingAuxiliaryPage {
         let page_id = PageId::new(self.next_page_id.fetch_add(1, Ordering::Relaxed));
         let page_reservation = if exposes_opener {
+            debug_assert!(
+                opened_by_dom,
+                "only a DOM-created auxiliary Page may expose an opener"
+            );
             RendererPageReservationToken::new_related_auxiliary_page(
                 self.local_host_id,
                 page_id,
                 self.opener_page_id,
             )
+        } else if opened_by_dom {
+            RendererPageReservationToken::new_dom_auxiliary_page(self.local_host_id, page_id)
         } else {
             RendererPageReservationToken::new(self.local_host_id, page_id)
         };

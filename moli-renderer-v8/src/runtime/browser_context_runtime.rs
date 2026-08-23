@@ -204,6 +204,7 @@ struct RendererBrowserContextRuntimeInner {
     dedicated_worker_pause_on_start_for_devtools: AtomicBool,
     javascript_dialog_handler_enabled: AtomicBool,
     popup_blocker_requires_transient_activation: AtomicBool,
+    allow_scripts_to_close_windows: AtomicBool,
     renderer_output_transport_tx: RendererOutputTransportSenderSlot,
 }
 
@@ -544,6 +545,7 @@ impl RendererBrowserContextRuntime {
                 dedicated_worker_pause_on_start_for_devtools: AtomicBool::new(false),
                 javascript_dialog_handler_enabled: AtomicBool::new(false),
                 popup_blocker_requires_transient_activation: AtomicBool::new(false),
+                allow_scripts_to_close_windows: AtomicBool::new(false),
                 renderer_output_transport_tx,
             }),
         }
@@ -738,6 +740,23 @@ impl RendererBrowserContextRuntime {
         } else {
             RendererPopupBlockerPolicy::AllowWithoutTransientActivation
         }
+    }
+
+    /// Browser/embedder override for the HTML script-closable check.
+    ///
+    /// The default is Chromium's ordinary browser behavior. Automation
+    /// embedders may opt into allowing script to close non-DOM-created Pages
+    /// even after their session history grows.
+    pub fn set_allow_scripts_to_close_windows(&self, allow: bool) {
+        self.inner
+            .allow_scripts_to_close_windows
+            .store(allow, Ordering::Relaxed);
+    }
+
+    pub fn allow_scripts_to_close_windows(&self) -> bool {
+        self.inner
+            .allow_scripts_to_close_windows
+            .load(Ordering::Relaxed)
     }
 }
 

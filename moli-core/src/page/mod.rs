@@ -28,6 +28,8 @@ mod same_document_navigation_support;
 mod settings_support;
 mod subresource_support;
 mod testing_support;
+mod top_level_close_support;
+mod top_level_focus_support;
 mod wait_support;
 
 use std::fmt;

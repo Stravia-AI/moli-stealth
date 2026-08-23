@@ -672,6 +672,183 @@ async fn rust_cdp_chromium_target_window_open_blank_creates_popup_target() {
 }
 
 // Chromium sources:
+// content/browser/security/coop/cross_origin_opener_policy_status.cc
+// content/browser/renderer_host/browsing_context_group_swap.cc
+// third_party/blink/web_tests/external/wpt/html/cross-origin-opener-policy/
+#[tokio::test(flavor = "multi_thread")]
+async fn popup_coop_commit_keeps_target_session_and_severs_old_group_proxy() {
+    let fixture = SmokeFixtureServer::start().await;
+    let mut ctx = TestContext::new_with_target_discovery(false);
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-coop",
+                "TID-popup-coop-opener",
+                "<main>COOP opener</main>",
+            )
+            .await;
+            set_auto_attach_waiting_for_debugger(&mut ctx, 2_602_700).await;
+            ctx.take_all();
+
+            let coop_url = fixture.url("/coop-same-origin");
+            let messages = open_popup_from_runtime(
+                &mut ctx,
+                2_602_701,
+                &format!(
+                    "(() => {{ const popup = window.open({coop_url:?}, 'coop-protocol-target'); globalThis.__lmCoopPopup = popup; return popup !== null && popup.closed === false; }})()"
+                ),
+            )
+            .await;
+            assert_eq!(
+                response(&messages, 2_602_701)["result"]["result"]["value"],
+                true
+            );
+            let popup_target_id = event(&messages, "Target.targetCreated")["params"]
+                ["targetInfo"]["targetId"]
+                .as_str()
+                .expect("COOP popup target id")
+                .to_owned();
+            let popup_session_id = event(&messages, "Target.attachedToTarget")["params"]
+                ["sessionId"]
+                .as_str()
+                .expect("COOP popup session id")
+                .to_owned();
+
+            for (id, method) in [(2_602_702, "Page.enable"), (2_602_703, "Runtime.enable")] {
+                ctx.process_async(json!({
+                    "id": id,
+                    "method": method,
+                    "sessionId": popup_session_id,
+                    "params": {}
+                }))
+                .await;
+                ctx.expect_result(id, json!({}), Some(&popup_session_id));
+            }
+            ctx.take_all();
+            ctx.process_async(json!({
+                "id": 2_602_704,
+                "method": "Runtime.runIfWaitingForDebugger",
+                "sessionId": popup_session_id
+            }))
+            .await;
+            take_response_by_id(&mut ctx, 2_602_704);
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "COOP popup frame commit",
+                |message| {
+                    message["method"] == json!("Page.frameNavigated")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["frame"]["id"] == json!(popup_target_id)
+                        && message["params"]["frame"]["url"] == json!(coop_url)
+                },
+            )
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "COOP replacement Runtime context",
+                |message| {
+                    message["method"] == json!("Runtime.executionContextCreated")
+                        && message["sessionId"] == json!(popup_session_id)
+                        && message["params"]["context"]["auxData"]["isDefault"] == json!(true)
+                },
+            )
+            .await;
+            crate::testing::wait_until_scheduler_message(
+                &mut ctx,
+                "COOP replacement load",
+                |message| {
+                    message["method"] == json!("Page.loadEventFired")
+                        && message["sessionId"] == json!(popup_session_id)
+                },
+            )
+            .await;
+            ctx.wait_until_scheduler_state("COOP popup navigation completion", |conn| {
+                !conn.has_pending_document_navigation_for_session_owner(Some(&popup_session_id))
+                    && conn
+                        .browser_context_by_id("BID-popup-coop")
+                        .and_then(|browser_context| {
+                            browser_context.background_target(&popup_target_id)
+                        })
+                        .and_then(|target| target.loaded_page())
+                        .is_some_and(|page| page.final_url().as_str() == coop_url)
+            })
+            .await;
+            let commit_messages = ctx.take_all();
+            assert!(
+                commit_messages.iter().any(|message| {
+                    message["method"] == json!("Runtime.executionContextsCleared")
+                        && message["sessionId"] == json!(popup_session_id)
+                }),
+                "COOP agent replacement must clear the old session contexts: {commit_messages:?}"
+            );
+            assert!(
+                !commit_messages.iter().any(|message| {
+                    matches!(
+                        message["method"].as_str(),
+                        Some("Target.targetCreated" | "Target.targetDestroyed")
+                    )
+                }),
+                "COOP group switch must not replace the protocol target: {commit_messages:?}"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_705,
+                "method": "Runtime.evaluate",
+                "sessionId": popup_session_id,
+                "params": {
+                    "expression": "({ openerSevered: opener === null, nameCleared: name === '', closed, text: document.querySelector('#coop-marker').textContent })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            let new_realm_evaluation = take_response_by_id(&mut ctx, 2_602_705);
+            assert_eq!(
+                new_realm_evaluation["result"]["result"]["value"],
+                json!({
+                    "openerSevered": true,
+                    "nameCleared": true,
+                    "closed": false,
+                    "text": "COOP committed popup"
+                }),
+                "unexpected COOP replacement realm evaluation: {new_realm_evaluation:?}"
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_706,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "({ oldProxyClosed: __lmCoopPopup.closed, openerClosed: closed })",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            assert_eq!(
+                take_response_by_id(&mut ctx, 2_602_706)["result"]["result"]["value"],
+                json!({ "oldProxyClosed": true, "openerClosed": false })
+            );
+
+            ctx.process_async(json!({
+                "id": 2_602_707,
+                "method": "Target.getTargets"
+            }))
+            .await;
+            let targets = take_response_by_id(&mut ctx, 2_602_707);
+            let matching_targets = targets["result"]["targetInfos"]
+                .as_array()
+                .expect("targetInfos")
+                .iter()
+                .filter(|target| target["targetId"] == json!(popup_target_id))
+                .collect::<Vec<_>>();
+            assert_eq!(matching_targets.len(), 1);
+            assert_eq!(matching_targets[0]["url"], json!(coop_url));
+            assert_eq!(matching_targets[0]["attached"], json!(true));
+        })
+        .await;
+}
+
+// Chromium sources:
 // third_party/blink/renderer/core/frame/local_dom_window.cc::close
 // third_party/blink/renderer/core/frame/dom_window.cc::closed
 // content/browser/web_contents/web_contents_impl.cc::ClosePage

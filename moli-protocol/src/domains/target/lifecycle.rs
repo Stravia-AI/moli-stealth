@@ -18,6 +18,48 @@ use super::*;
 pub(super) struct DevToolsCreateTargetExecution {
     pub(super) result: DevToolsCreateTargetResult,
     pub(super) protocol_events: CreatedTargetProtocolEvents,
+    pub(super) focus_handoff: Option<PendingCreatedTargetFocusHandoff>,
+}
+
+pub(super) struct PendingCreatedTargetFocusHandoff {
+    page_owner: crate::conn::TargetPageResidenceIdentity,
+    pending: moli_core::page::PendingPageCommand,
+}
+
+pub(super) struct CompletedCreatedTargetFocusHandoff {
+    page_owner: crate::conn::TargetPageResidenceIdentity,
+    completed: Result<moli_core::page::CompletedPageCommand, String>,
+}
+
+impl PendingCreatedTargetFocusHandoff {
+    pub(super) async fn wait(self) -> CompletedCreatedTargetFocusHandoff {
+        CompletedCreatedTargetFocusHandoff {
+            page_owner: self.page_owner,
+            completed: self.pending.wait().await.map_err(|error| error.to_string()),
+        }
+    }
+}
+
+pub(super) async fn finish_created_target_focus_handoff_async(
+    conn: &mut CdpConnection,
+    handoff: CompletedCreatedTargetFocusHandoff,
+) {
+    let browser_context_id = handoff.page_owner.browser_context_id().to_owned();
+    let target_id = handoff.page_owner.target_id().map(str::to_owned);
+    if let Err(message) =
+        conn.finish_target_page_focus_handoff(&handoff.page_owner, handoff.completed)
+    {
+        tracing::warn!(%message, page_owner = ?handoff.page_owner, "failed to complete create-target Page focus handoff");
+        return;
+    }
+    if let Some(target_id) = target_id
+        && let Some(browser_context) = conn.browser_context_by_id_mut(&browser_context_id)
+        && let Err(message) = browser_context
+            .apply_surface_overrides_to_parked_target_loaded_page_async(&target_id)
+            .await
+    {
+        tracing::warn!(%message, %target_id, "failed to synchronize create-target demoted Page surface");
+    }
 }
 
 pub(super) struct CreatedTargetProtocolEvents {
@@ -168,13 +210,17 @@ pub(super) fn start_devtools_create_target_command(
 ) -> TargetCommandTaskStep {
     let mut plan = CommandOutputPlan::default();
     let execution = execute_devtools_create_target_command(conn, command);
-    let (created_target_id, created_target_protocol_events) = match execution {
+    let (created_target_id, created_target_protocol_events, focus_handoff) = match execution {
         Ok(execution) => {
             let target_id = execution.result.target_id.clone();
             plan.extend(CommandOutputPlan::from_devtools_result(
                 DevToolsCommandResult::CreateTarget(execution.result),
             ));
-            (target_id, execution.protocol_events)
+            (
+                target_id,
+                execution.protocol_events,
+                execution.focus_handoff,
+            )
         }
         Err(error) => {
             plan.extend(CommandOutputPlan::from_devtools_error(error));
@@ -191,20 +237,23 @@ pub(super) fn start_devtools_create_target_command(
     } else {
         Ok(None)
     };
-    match pending_initial_document {
-        Ok(Some(initial_document)) => {
+    match (pending_initial_document, focus_handoff) {
+        (Ok(initial_document), focus_handoff)
+            if initial_document.is_some() || focus_handoff.is_some() =>
+        {
             TargetCommandTaskStep::Pending(PendingTargetCommandDispatch {
                 command_id,
                 session_id: command_session_id.map(str::to_owned),
                 kind: Box::new(PendingTargetCommandKind::CreateTarget {
                     response_plan: plan,
                     protocol_events: created_target_protocol_events,
+                    focus_handoff,
                     initial_document_route,
-                    initial_document: Some(Box::new(initial_document)),
+                    initial_document: initial_document.map(Box::new),
                 }),
             })
         }
-        Ok(None) => {
+        (Ok(None), None) => {
             let mut output_plan = CommandOutputPlan::default();
             let mut protocol_events = Vec::new();
             if let Err(error) = emit_created_target_protocol_events(
@@ -222,7 +271,12 @@ pub(super) fn start_devtools_create_target_command(
             output_plan.extend(plan);
             TargetCommandTaskStep::Complete(output_plan)
         }
-        Err(message) => TargetCommandTaskStep::Complete(CommandOutputPlan::error(-32000, message)),
+        (Err(message), _) => {
+            TargetCommandTaskStep::Complete(CommandOutputPlan::error(-32000, message))
+        }
+        (Ok(Some(_)), _) | (Ok(None), Some(_)) => {
+            unreachable!("pending create-target work must enter pending branch")
+        }
     }
 }
 
@@ -268,6 +322,11 @@ pub(super) fn execute_devtools_create_target_command(
     };
     let activating_created_target = has_active_target && command.activate;
     let initial_empty_document_url = create_target_initial_empty_document_url(&command.url);
+    let focus_handoff = if activating_created_target {
+        start_created_target_focus_handoff(conn)?
+    } else {
+        None
+    };
     if activating_created_target {
         conn.handoff_navigation_engine_for_active_target_demotion();
     }
@@ -367,7 +426,48 @@ pub(super) fn execute_devtools_create_target_command(
             attached_tab_sessions,
             attached_sessions,
         },
+        focus_handoff,
     })
+}
+
+fn start_created_target_focus_handoff(
+    conn: &mut CdpConnection,
+) -> Result<Option<PendingCreatedTargetFocusHandoff>, DevToolsError> {
+    let browser_context = conn
+        .browser_context
+        .as_mut()
+        .expect("create-target focus handoff requires an active BrowserContext");
+    let Some(target_id) = browser_context.active_target_id_owned() else {
+        return Ok(None);
+    };
+    let Some(page_attachment_id) = browser_context
+        .active_target
+        .runtime_slot
+        .page_attachment_id()
+    else {
+        return Ok(None);
+    };
+    let page_owner = crate::conn::TargetPageResidenceIdentity::new(
+        browser_context.id.clone(),
+        Some(target_id),
+        page_attachment_id,
+    );
+    let focused = browser_context.focus_emulation_enabled;
+    let Some(page) = browser_context.active_target.runtime_slot.loaded_page_mut() else {
+        return Ok(None);
+    };
+    let pending = page
+        .start_set_top_level_page_focus(false, focused)
+        .map_err(|error| {
+            DevToolsError::new(
+                DevToolsErrorKind::Internal,
+                format!("failed to start create-target Page focus handoff: {error}"),
+            )
+        })?;
+    Ok(Some(PendingCreatedTargetFocusHandoff {
+        page_owner,
+        pending,
+    }))
 }
 
 fn create_target_initial_empty_document_url(target_url: &str) -> String {
@@ -1405,7 +1505,7 @@ async fn close_target_inner_async(
             .and_then(|target| target.session_id().map(str::to_owned));
         let owner_scope = crate::conn::CommandOwnerScope::from_session_and_owner_route(
             session_id.as_deref(),
-            session_id.is_none().then_some(target_route),
+            Some(target_route),
         );
         let renderer_output_predecessor =
             events::fail_pending_fetch_state_for_target_background_events_async(
@@ -1480,15 +1580,13 @@ async fn close_target_inner_async(
     Ok(DevToolsCloseTargetResult { success: true })
 }
 
-/// Preserves the final renderer publication without changing the ordinary
+/// Preserves final renderer publications without changing the ordinary
 /// `Target.closeTarget` transaction boundary.
 ///
-/// Most target closes produce no renderer output. Those closes still complete
-/// synchronously and return their detach/destroy side effects with the command,
-/// matching Chromium's target-domain behavior. A paused request can first
-/// produce a terminal renderer record, however. Only that case must defer
-/// target retirement until the command's exact cursor has crossed ordered
-/// ingress; otherwise retiring the route would discard that final record.
+/// A loaded target appends pagehide/unload and a typed ACK; paused network work
+/// can append terminal records before that ACK. Target retirement therefore
+/// waits for the command's exact latest cursor to cross ordered ingress, or it
+/// could discard output produced by the Page being closed.
 async fn settle_target_close_after_pending_fetches_async(
     conn: &mut CdpConnection,
     out: &mut events::TargetProtocolSideEffects,
@@ -1497,17 +1595,31 @@ async fn settle_target_close_after_pending_fetches_async(
     owner_scope: crate::conn::CommandOwnerScope,
     target_id: String,
 ) {
+    if let Some(predecessor) = renderer_output_predecessor {
+        command_context.set_renderer_output_predecessor(predecessor);
+    }
+
+    // Browser-owned Target.closeTarget must not resolve while its target is
+    // merely waiting for a later unload publication. The Page command appends
+    // pagehide/unload and a typed ACK after any network terminals already in
+    // this stream; retaining that latest cursor on the command lets ingress
+    // perform teardown before the DevTools result is exposed.
+    if crate::domains::page::dispatch_browser_owned_close_unload_before_command_response(
+        conn,
+        &owner_scope,
+        moli_core::RendererTopLevelCloseSource::Target,
+        command_context,
+    )
+    .await
+    {
+        return;
+    }
+
     let action = crate::domains::page::PageTargetTerminationOwnerAction::new(
         owner_scope,
         target_id,
         crate::domains::page::PageTargetTerminationKind::TargetClose,
     );
-    if let Some(predecessor) = renderer_output_predecessor {
-        command_context.set_renderer_output_predecessor(predecessor);
-        conn.publish_page_target_termination_owner_action(action);
-        return;
-    }
-
     let outcome =
         crate::domains::page::complete_page_target_termination_owner_action_async(conn, action)
             .await;
@@ -3096,26 +3208,11 @@ pub(super) async fn execute_devtools_activate_target_command_async(
         Some((ref active_target_id, _)) if active_target_id == &target_id
     ) && bc.background_target(&target_id).is_some()
     {
-        conn.handoff_navigation_engine_for_target_activation(&target_id);
-        let promoted = match conn.browser_context.as_mut() {
-            Some(browser_context) => {
-                browser_context
-                    .promote_background_target_to_active_slot_async(&target_id)
-                    .await
-            }
-            None => {
-                restore_previously_active_browser_context(
-                    conn,
-                    previously_active_browser_context_id.as_deref(),
-                );
-                return Err(DevToolsError::new(
-                    DevToolsErrorKind::NoSuchTarget,
-                    "BrowserContextNotLoaded",
-                ));
-            }
-        };
+        let promoted = conn
+            .promote_background_target_to_active_for_connection_async(&target_id)
+            .await;
         match promoted {
-            Ok(true) => conn.refresh_active_browser_context_loader_async().await,
+            Ok(true) => {}
             Ok(false) => {
                 restore_previously_active_browser_context(
                     conn,
