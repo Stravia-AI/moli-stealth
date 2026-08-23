@@ -195,6 +195,10 @@ impl RawDocument {
         &self.response.headers
     }
 
+    pub fn navigation_redirect_chain(&self) -> &[moli_fetch::RedirectInfo] {
+        &self.response.redirect_chain
+    }
+
     pub fn body_bytes(&self) -> &[u8] {
         self.response.body_bytes()
     }
@@ -1200,6 +1204,12 @@ impl Browser {
         let response_headers = response.headers.clone();
         let redirected = response.redirected;
         let redirect_count = response.redirect_chain.len();
+        let navigation_redirect_chain = response
+            .redirect_chain
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect();
         let raw_body =
             external_raw_document_body_from_streaming_response_with_page_creation_progress(
                 response,
@@ -1233,6 +1243,7 @@ impl Browser {
                 None,
                 redirected,
                 redirect_count,
+                navigation_redirect_chain,
                 response_status,
                 response_headers,
                 &page_loader,

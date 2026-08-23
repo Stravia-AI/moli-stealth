@@ -653,7 +653,7 @@ impl PageVmPendingPhaseOneNavigation {
 
 #[derive(Default)]
 pub(in crate::runtime) struct PageVmFollowedNavigationMetadata {
-    pub(super) followed_navigation_response: Option<(Url, u16, Vec<(String, String)>)>,
+    pub(super) committed_navigation_response: Option<PageVmNavigationResponse>,
     pub(super) service_worker_client_navigate:
         Option<crate::types::ServiceWorkerClientNavigateContinuation>,
     pub(super) abort_reserved_service_worker_client_id: Option<ServiceWorkerClientId>,
@@ -662,8 +662,8 @@ pub(in crate::runtime) struct PageVmFollowedNavigationMetadata {
 
 impl PageVmFollowedNavigationMetadata {
     fn attach_committed_response(&mut self, page_vm: &mut PageVm) {
-        if let Some((url, status, headers)) = self.followed_navigation_response.take() {
-            page_vm::attach_navigation_response_to_page_vm(page_vm, url, status, headers);
+        if let Some(response) = self.committed_navigation_response.take() {
+            page_vm::attach_navigation_response_to_page_vm(page_vm, response);
         }
     }
 

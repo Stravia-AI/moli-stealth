@@ -50,6 +50,10 @@ impl PageStateCache {
         self.state().navigation_redirect_count
     }
 
+    pub(super) fn navigation_redirect_chain(&self) -> &[crate::page::NavigationRedirect] {
+        &self.state().navigation_redirect_chain
+    }
+
     pub(super) fn headers(&self) -> &[(String, String)] {
         &self.state().headers
     }

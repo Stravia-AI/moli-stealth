@@ -72,8 +72,21 @@ pub fn render_raw_document_dump(
         DumpFormat::Html => Ok(raw.body_bytes().to_vec()),
         DumpFormat::Json => {
             let html = String::from_utf8_lossy(raw.body_bytes());
-            let payload =
-                dom::render_json_payload(raw.final_url().as_str(), raw.status(), &html, None)?;
+            let redirect_chain = raw
+                .navigation_redirect_chain()
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect::<Vec<_>>();
+            let payload = dom::render_json_payload(
+                raw.final_url().as_str(),
+                raw.status(),
+                None,
+                raw.headers(),
+                &redirect_chain,
+                &html,
+                None,
+            )?;
             Ok(payload.into_bytes())
         }
         DumpFormat::Markdown

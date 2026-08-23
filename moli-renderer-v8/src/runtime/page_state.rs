@@ -13,6 +13,7 @@ pub struct RendererPageState {
     pub navigation_initiator_url: Option<Url>,
     pub navigation_redirected: bool,
     pub navigation_redirect_count: usize,
+    pub navigation_redirect_chain: Vec<crate::protocol_types::NavigationRedirect>,
     pub final_url: Url,
     pub document_title: String,
     pub status: u16,
@@ -28,14 +29,18 @@ impl RendererPageState {
     pub(crate) fn from_vm_state_capture(
         mut requested_url: Url,
         navigation_initiator_url: Option<Url>,
-        navigation_redirected: bool,
-        navigation_redirect_count: usize,
+        mut navigation_redirected: bool,
+        mut navigation_redirect_count: usize,
         mut status: u16,
         mut headers: Vec<(String, String)>,
         state_capture: PageVmStateCapture,
     ) -> Arc<Self> {
+        let mut navigation_redirect_chain = Vec::new();
         if let Some(navigation) = state_capture.navigation_response.as_ref() {
             requested_url = navigation.requested_url.clone();
+            navigation_redirected = navigation.redirected;
+            navigation_redirect_count = navigation.redirect_count;
+            navigation_redirect_chain = navigation.redirect_chain.clone();
             status = navigation.status;
             headers = navigation.headers.clone();
         }
@@ -45,6 +50,7 @@ impl RendererPageState {
             navigation_initiator_url,
             navigation_redirected,
             navigation_redirect_count,
+            navigation_redirect_chain,
             final_url: state_capture.final_url,
             document_title: state_capture.document_title,
             status,

@@ -187,6 +187,7 @@ pub struct RendererCreateStreamingRawPageRequest {
     pub navigation_initiator_url: Option<Url>,
     pub navigation_redirected: bool,
     pub navigation_redirect_count: usize,
+    pub navigation_redirect_chain: Vec<crate::protocol_types::NavigationRedirect>,
     pub response_status: u16,
     pub response_headers: Vec<(String, String)>,
     pub loader: ResourceRequestClient,
@@ -2093,6 +2094,7 @@ impl RendererOwnerHandle {
         navigation_initiator_url: Option<Url>,
         navigation_redirected: bool,
         navigation_redirect_count: usize,
+        navigation_redirect_chain: Vec<crate::protocol_types::NavigationRedirect>,
         response_status: u16,
         response_headers: Vec<(String, String)>,
         loader: &ResourceRequestClient,
@@ -2123,6 +2125,7 @@ impl RendererOwnerHandle {
             navigation_initiator_url,
             navigation_redirected,
             navigation_redirect_count,
+            navigation_redirect_chain,
             response_status,
             response_headers,
             loader: loader.clone(),
@@ -6872,6 +6875,7 @@ impl RendererOwnerHandle {
             navigation_initiator_url,
             navigation_redirected,
             navigation_redirect_count,
+            navigation_redirect_chain,
             response_status,
             response_headers,
             loader,
@@ -7061,6 +7065,14 @@ impl RendererOwnerHandle {
                 } = *result;
                 match outcome {
                     ParseTimePageVmCreationOutcome::PendingPhaseOne(residence) => {
+                        let committed_navigation_response = Some(PageVmNavigationResponse {
+                            requested_url: requested_url.clone(),
+                            redirected: navigation_redirected,
+                            redirect_count: navigation_redirect_count,
+                            redirect_chain: navigation_redirect_chain.clone(),
+                            status: response_status,
+                            headers: response_headers.clone(),
+                        });
                         self.continue_pending_phase_one_page_creation(
                             requested_url,
                             navigation_initiator_url,
@@ -7070,7 +7082,10 @@ impl RendererOwnerHandle {
                             response_headers,
                             PageVmPendingPhaseOneNavigation::new(
                                 residence,
-                                PageVmFollowedNavigationMetadata::default(),
+                                PageVmFollowedNavigationMetadata {
+                                    committed_navigation_response,
+                                    ..Default::default()
+                                },
                             ),
                             stage,
                             reply_boundary,
@@ -7080,7 +7095,21 @@ impl RendererOwnerHandle {
                         )
                         .await
                     }
-                    ParseTimePageVmCreationOutcome::TriggeredNavigation { page_vm, stage } => {
+                    ParseTimePageVmCreationOutcome::TriggeredNavigation {
+                        mut page_vm,
+                        stage,
+                    } => {
+                        page_vm::attach_navigation_response_to_page_vm(
+                            &mut page_vm,
+                            PageVmNavigationResponse {
+                                requested_url: requested_url.clone(),
+                                redirected: navigation_redirected,
+                                redirect_count: navigation_redirect_count,
+                                redirect_chain: navigation_redirect_chain.clone(),
+                                status: response_status,
+                                headers: response_headers.clone(),
+                            },
+                        );
                         self.continue_page_creation_with_pending_navigation(
                             requested_url,
                             navigation_initiator_url,
@@ -7098,28 +7127,41 @@ impl RendererOwnerHandle {
                         .await
                     }
                     ParseTimePageVmCreationOutcome::ContinuePhaseTwo {
-                        page_vm,
+                        mut page_vm,
                         page_tasks,
                         stage,
                         started,
-                    } => RenderRuntimeDispatchOutcome::ContinueNextTurn(Box::new(
-                        RenderRuntimeTurn::FinishHtmlCreatePage {
-                            requested_url,
-                            navigation_initiator_url,
-                            navigation_redirected,
-                            navigation_redirect_count,
-                            response_status,
-                            response_headers,
-                            page_vm: Box::new(page_vm),
-                            page_tasks,
-                            stage,
-                            started,
-                            reply_boundary,
-                            lifecycle_decider,
-                            top_level_navigation_dispatch,
-                            navigation_reply_policy,
-                        },
-                    )),
+                    } => {
+                        page_vm::attach_navigation_response_to_page_vm(
+                            &mut page_vm,
+                            PageVmNavigationResponse {
+                                requested_url: requested_url.clone(),
+                                redirected: navigation_redirected,
+                                redirect_count: navigation_redirect_count,
+                                redirect_chain: navigation_redirect_chain,
+                                status: response_status,
+                                headers: response_headers.clone(),
+                            },
+                        );
+                        RenderRuntimeDispatchOutcome::ContinueNextTurn(Box::new(
+                            RenderRuntimeTurn::FinishHtmlCreatePage {
+                                requested_url,
+                                navigation_initiator_url,
+                                navigation_redirected,
+                                navigation_redirect_count,
+                                response_status,
+                                response_headers,
+                                page_vm: Box::new(page_vm),
+                                page_tasks,
+                                stage,
+                                started,
+                                reply_boundary,
+                                lifecycle_decider,
+                                top_level_navigation_dispatch,
+                                navigation_reply_policy,
+                            },
+                        ))
+                    }
                 }
             }
             Err(error) => Err(error).into(),

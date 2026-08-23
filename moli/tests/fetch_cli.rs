@@ -216,9 +216,25 @@ fn assert_json_dump_shape(payload: &Value, expected_url: &str, expected_status: 
 
     let mut keys = object.keys().cloned().collect::<Vec<_>>();
     keys.sort();
-    assert_eq!(keys, vec!["final_url", "html", "status"]);
+    assert_eq!(
+        keys,
+        vec![
+            "final_url",
+            "headers",
+            "html",
+            "redirect_chain",
+            "status",
+            "title",
+        ]
+    );
     assert_eq!(payload["final_url"], expected_url);
     assert_eq!(payload["status"], expected_status);
+    assert!(
+        payload["title"].is_string() || payload["title"].is_null(),
+        "payload={payload}"
+    );
+    assert!(payload["headers"].is_array(), "payload={payload}");
+    assert!(payload["redirect_chain"].is_array(), "payload={payload}");
     assert!(payload["html"].is_string(), "payload={payload}");
 }
 
@@ -2195,6 +2211,35 @@ fn cli_dump_json_reports_redirected_final_url() -> Result<()> {
 }
 
 #[test]
+fn cli_dump_json_reports_redirect_chain_after_script_navigation() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/location-nav/http-redirect-source");
+    let redirect_url = server.url("/redirect");
+    let final_url = server.url("/static");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &final_url, 200);
+    let redirects = payload["redirect_chain"]
+        .as_array()
+        .expect("redirect_chain must be an array");
+    assert_eq!(redirects.len(), 1, "stdout={stdout}");
+    assert_eq!(redirects[0]["from_url"], redirect_url);
+    assert_eq!(redirects[0]["to_url"], final_url);
+    assert_eq!(redirects[0]["status"], 307);
+    Ok(())
+}
+
+#[test]
 fn cli_domstable_waits_for_late_content() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
     let server = runtime.block_on(FixtureServer::spawn())?;
@@ -2728,6 +2773,61 @@ fn cli_http_redirect_with_location_does_not_consume_redirect_wait() -> Result<()
     let stdout = clean_output(&output.stdout);
     let payload: Value = serde_json::from_str(&stdout)?;
     assert_json_dump_shape(&payload, &final_url, 200);
+    Ok(())
+}
+
+#[test]
+fn cli_dump_json_includes_title_headers_and_redirect_chain() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server = runtime.block_on(FixtureServer::spawn())?;
+    let url = server.url("/redirect-cookie-chain/start");
+    let middle_url = server.url("/redirect-cookie-chain/middle");
+    let final_url = server.url("/redirect-cookie-chain/final");
+    let output = run_fetch_cli_with_dump_and_args(&url, "json", &[])?;
+    runtime.block_on(server.shutdown());
+
+    assert!(
+        output.status.success(),
+        "moli fetch failed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = clean_output(&output.stdout);
+    let payload: Value = serde_json::from_str(&stdout)?;
+    assert_json_dump_shape(&payload, &final_url, 200);
+    assert_eq!(payload["title"], "Cookie chain final");
+    assert!(
+        payload["headers"].as_array().is_some_and(|headers| {
+            headers.iter().any(|header| {
+                header["name"]
+                    .as_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case("content-type"))
+            })
+        }),
+        "stdout={stdout}"
+    );
+
+    let redirects = payload["redirect_chain"]
+        .as_array()
+        .expect("redirect_chain must be an array");
+    assert_eq!(redirects.len(), 2, "stdout={stdout}");
+    assert_eq!(redirects[0]["from_url"], url);
+    assert_eq!(redirects[0]["to_url"], middle_url);
+    assert_eq!(redirects[0]["status"], 307);
+    assert_eq!(redirects[1]["from_url"], middle_url);
+    assert_eq!(redirects[1]["to_url"], final_url);
+    assert_eq!(redirects[1]["status"], 307);
+    let first_hop_set_cookies = redirects[0]["headers"]
+        .as_array()
+        .expect("redirect headers must be an array")
+        .iter()
+        .filter(|header| {
+            header["name"]
+                .as_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("set-cookie"))
+        })
+        .count();
+    assert_eq!(first_hop_set_cookies, 2, "stdout={stdout}");
     Ok(())
 }
 

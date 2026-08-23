@@ -506,6 +506,10 @@ pub(super) async fn location_nav_assign_source_page() -> Html<&'static str> {
     Html(LOCATION_NAV_ASSIGN_SOURCE_HTML)
 }
 
+pub(super) async fn location_nav_http_redirect_source_page() -> Html<&'static str> {
+    Html("<!doctype html><html><body><script>location.assign('/redirect')</script></body></html>")
+}
+
 pub(super) async fn location_nav_href_source_page() -> Html<&'static str> {
     Html(LOCATION_NAV_HREF_SOURCE_HTML)
 }

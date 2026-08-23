@@ -37,24 +37,65 @@ pub(super) async fn render_json(
     } else {
         None
     };
-    render_json_payload(page.final_url().as_str(), page.status(), &html, network)
+    let title = page.document_title();
+    render_json_payload(
+        page.final_url().as_str(),
+        page.status(),
+        Some(&title),
+        page.headers(),
+        page.navigation_redirect_chain(),
+        &html,
+        network,
+    )
 }
 
 pub(super) fn render_json_payload(
     final_url: &str,
     status: u16,
+    title: Option<&str>,
+    headers: &[(String, String)],
+    redirect_chain: &[moli_core::page::NavigationRedirect],
     html: &str,
     network: Option<Value>,
 ) -> Result<String> {
-    // Keep --dump json as a small stable machine interface for scrapling-style callers.
+    // Keep --dump json as a stable machine interface for scrapling-style callers.
     let mut payload = Map::new();
     payload.insert("final_url".to_owned(), json!(final_url));
     payload.insert("status".to_owned(), json!(status));
+    payload.insert("title".to_owned(), json!(title));
+    payload.insert("headers".to_owned(), render_headers(headers));
+    payload.insert(
+        "redirect_chain".to_owned(),
+        Value::Array(
+            redirect_chain
+                .iter()
+                .map(render_navigation_redirect)
+                .collect(),
+        ),
+    );
     payload.insert("html".to_owned(), json!(html));
     if let Some(network) = network {
         payload.insert("network".to_owned(), network);
     }
     Ok(serde_json::to_string_pretty(&Value::Object(payload))?)
+}
+
+fn render_headers(headers: &[(String, String)]) -> Value {
+    Value::Array(
+        headers
+            .iter()
+            .map(|(name, value)| json!({ "name": name, "value": value }))
+            .collect(),
+    )
+}
+
+fn render_navigation_redirect(redirect: &moli_core::page::NavigationRedirect) -> Value {
+    json!({
+        "from_url": redirect.from_url.as_str(),
+        "to_url": redirect.to_url.as_str(),
+        "status": redirect.status,
+        "headers": render_headers(&redirect.headers),
+    })
 }
 
 pub(super) async fn render_html(

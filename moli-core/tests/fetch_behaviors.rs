@@ -2140,6 +2140,15 @@ async fn carries_and_replaces_cookies_across_multi_hop_redirect_chain() -> Resul
 
     assert_eq!(page.status(), 200);
     assert_eq!(page.final_url().path(), "/redirect-cookie-chain/final");
+    assert_eq!(page.navigation_redirect_chain().len(), 2);
+    assert_eq!(
+        page.navigation_redirect_chain()[0].from_url.path(),
+        "/redirect-cookie-chain/start"
+    );
+    assert_eq!(
+        page.navigation_redirect_chain()[1].to_url.path(),
+        "/redirect-cookie-chain/final"
+    );
     assert!(
         page.serialize_html_async()
             .await

@@ -689,6 +689,7 @@ mod tests {
             navigation_initiator_url: None,
             navigation_redirected: false,
             navigation_redirect_count: 0,
+            navigation_redirect_chain: Vec::new(),
             final_url: url,
             document_title: String::new(),
             status: 200,

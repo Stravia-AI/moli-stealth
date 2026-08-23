@@ -81,8 +81,9 @@ structure-first; enable layout only when the result needs pixels or pagination.
 - Use `markdown` for prose, documentation, articles, and direct model reading.
 - Use `semantic_tree_text` when navigation-heavy markup makes Markdown noisy or
   when roles and accessible names matter.
-- Use `json` for automation that needs `final_url`, HTTP `status`, serialized
-  `html`, or network trace data.
+- Use `json` for automation that needs `final_url`, HTTP `status`, `title`,
+  duplicate-safe response `headers`, the main-navigation `redirect_chain`,
+  serialized `html`, or network trace data.
 - Use `html` to diagnose DOM serialization or preserve exact markup.
 - Use `screenshot` for a viewport PNG when appearance is evidence. It requires
   `--layout`.
