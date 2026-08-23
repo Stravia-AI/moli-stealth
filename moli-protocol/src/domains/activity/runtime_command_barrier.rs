@@ -739,7 +739,6 @@ mod tests {
             super::super::output_ingress::PreparedProtocolOutputs::from_renderer_observation(
                 &mut conn,
                 Some(SESSION_ID),
-                agent_token,
                 &observation,
             )
             .await;

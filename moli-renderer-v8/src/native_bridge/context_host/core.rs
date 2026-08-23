@@ -114,6 +114,66 @@ impl JsContextHost {
             .and_then(|environment| environment.top_level_opener_value(scope))
     }
 
+    pub(crate) fn set_top_level_browsing_context_name(&self, name: String) {
+        if let Some(environment) = self.page_script_environment.as_ref() {
+            environment.set_top_level_browsing_context_name(name);
+        }
+    }
+
+    pub(crate) fn related_page_named_target_for_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        name: &str,
+        replacement_opener: Option<v8::Local<'s, v8::Object>>,
+    ) -> Option<(
+        v8::Local<'s, v8::Object>,
+        v8::Local<'s, v8::Context>,
+        crate::RendererResolvedPopupTarget,
+    )> {
+        self.page_script_environment
+            .as_ref()?
+            .related_page_named_target_for_navigation(scope, name, replacement_opener)
+    }
+
+    pub(crate) fn related_page_top_level_targets_for_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Vec<(
+        v8::Local<'s, v8::Object>,
+        v8::Local<'s, v8::Context>,
+        crate::RendererResolvedPopupTarget,
+        String,
+        bool,
+    )> {
+        self.page_script_environment
+            .as_ref()
+            .map(|environment| environment.related_page_top_level_targets_for_navigation(scope))
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn related_page_current_context_for_residence<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        residence: crate::RendererResolvedPopupTarget,
+    ) -> Option<v8::Local<'s, v8::Context>> {
+        self.page_script_environment
+            .as_ref()?
+            .related_page_current_context_for_residence(scope, residence)
+    }
+
+    pub(crate) fn replace_related_page_top_level_opener<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        residence: crate::RendererResolvedPopupTarget,
+        opener: v8::Local<'s, v8::Object>,
+    ) -> bool {
+        self.page_script_environment
+            .as_ref()
+            .is_some_and(|environment| {
+                environment.replace_related_page_top_level_opener(scope, residence, opener)
+            })
+    }
+
     pub(crate) fn sever_top_level_opener(&self, scope: &mut v8::PinScope<'_, '_>) -> bool {
         let Some(environment) = self.page_script_environment.as_ref() else {
             return false;
@@ -266,6 +326,7 @@ impl JsContextHost {
         page_context_cancel_rx: RendererPageContextCancelReceiver,
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         reserved_service_worker_client_id: Option<ServiceWorkerClientId>,
+        initial_document_origin: Option<String>,
     ) -> Self {
         let message_port_registry = browser_context_runtime.message_port_registry();
         let broadcast_channel_registry = browser_context_runtime.broadcast_channel_registry();
@@ -274,9 +335,19 @@ impl JsContextHost {
         let javascript_dialog_handler_enabled =
             browser_context_runtime.javascript_dialog_handler_enabled();
         let document_url = runtime.document_url().clone();
+        let main_document_snapshot = frame_owner_store
+            .current_main_owner_snapshot()
+            .expect("main frame owner must exist before client projection");
+        let main_document_serialized_origin = main_document_snapshot.settings.origin.clone();
+        if let Some(initial_document_origin) = initial_document_origin {
+            assert_eq!(
+                main_document_serialized_origin, initial_document_origin,
+                "FrameOwnerStore must retain the creator-frozen main Document origin"
+            );
+        }
         let main_document_owner = frame_owner_store
             .current_main_document_task_owner()
-            .expect("main frame owner must exist before client projection");
+            .expect("main frame owner must expose a task owner before client projection");
         assert_eq!(
             runtime.main_frame_document_task_owner(),
             Some(main_document_owner),
@@ -374,6 +445,7 @@ impl JsContextHost {
             #[cfg(test)]
             force_child_default_context_preflight_failure: false,
             child_browsing_context_document_handles: HashMap::new(),
+            main_document_serialized_origin,
             document_domain_override: None,
             next_child_browsing_context_id: 1,
             next_child_document_load_id: 0,
@@ -514,6 +586,7 @@ impl JsContextHost {
             current_inline_script_stack: Vec::new(),
             compiled_string_provenance: Vec::new(),
             active_runtime_command_cause: None,
+            active_top_level_navigation_source: None,
             active_inspector_dispatch: false,
             pending_top_level_navigation: None,
             ordinary_page_turn_navigation_handoff_active: false,

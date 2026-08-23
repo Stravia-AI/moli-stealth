@@ -142,6 +142,11 @@ pub struct RendererCreateHtmlPageRequest {
     /// observation. It is used for an auxiliary initial empty Document whose
     /// requested URL may remain `about:blank` without a replacement commit.
     pub initial_document_referrer: Option<String>,
+    /// Creator-frozen name for a fresh auxiliary Page's first top-level realm.
+    ///
+    /// This must be installed before document-start scripts. Related staged
+    /// Pages already own their live name and leave this unset during adoption.
+    pub initial_top_level_browsing_context_name: Option<String>,
     pub top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
     pub requested_url: Url,
     pub navigation_initiator_url: Option<Url>,
@@ -2284,6 +2289,7 @@ impl RendererOwnerHandle {
             root_frame_id: None,
             main_document_commit: None,
             initial_document_referrer: None,
+            initial_top_level_browsing_context_name: None,
             top_level_storage_key: None,
             requested_url,
             navigation_initiator_url,
@@ -7603,6 +7609,7 @@ impl RendererOwnerHandle {
             root_frame_id,
             main_document_commit,
             initial_document_referrer,
+            initial_top_level_browsing_context_name,
             top_level_storage_key,
             requested_url,
             navigation_initiator_url,
@@ -7739,6 +7746,7 @@ impl RendererOwnerHandle {
                     root_frame_id,
                     main_document_commit,
                     initial_document_referrer,
+                    initial_top_level_browsing_context_name,
                     top_level_storage_key,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id,
@@ -8180,6 +8188,7 @@ impl RendererOwnerHandle {
                     root_frame_id,
                     main_document_commit,
                     initial_document_referrer: None,
+                    initial_top_level_browsing_context_name: None,
                     top_level_storage_key: None,
                     navigation_bootstrap_entry: None,
                     reserved_service_worker_client_id: reserved_service_worker_client

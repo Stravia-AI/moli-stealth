@@ -8749,21 +8749,60 @@ async fn websocket_cdp_parser_script_network_backlog_flushes_before_domcontentlo
         json!({ "url": page_url }),
     )
     .await;
-    messages.extend(
-        recv_until_match(&mut socket, |message| {
+    // Page.domContentEventFired has no loader id. Under full-suite load the
+    // initial about:blank DCL can arrive after Page.enable, so only a DCL after
+    // the requested frame commit is a valid sampling boundary for this test.
+    let requested_frame_index = messages.iter().position(|message| {
+        message["sessionId"] == json!(target.session_id)
+            && message["method"] == json!("Page.frameNavigated")
+            && message["params"]["frame"]["url"] == json!(page_url)
+    });
+    let requested_dcl_already_received = requested_frame_index.is_some_and(|frame_index| {
+        messages.iter().skip(frame_index + 1).any(|message| {
             message["sessionId"] == json!(target.session_id)
                 && message["method"] == json!("Page.domContentEventFired")
         })
-        .await,
-    );
+    });
+    if !requested_dcl_already_received {
+        let mut saw_requested_frame = requested_frame_index.is_some();
+        messages.extend(
+            recv_until_match(&mut socket, |message| {
+                if message["sessionId"] == json!(target.session_id)
+                    && message["method"] == json!("Page.frameNavigated")
+                    && message["params"]["frame"]["url"] == json!(page_url)
+                {
+                    saw_requested_frame = true;
+                }
+                saw_requested_frame
+                    && message["sessionId"] == json!(target.session_id)
+                    && message["method"] == json!("Page.domContentEventFired")
+            })
+            .await,
+        );
+    }
 
-    let dcl_index = messages
+    let requested_frame_index = messages
         .iter()
         .position(|message| {
             message["sessionId"] == json!(target.session_id)
-                && message["method"] == json!("Page.domContentEventFired")
+                && message["method"] == json!("Page.frameNavigated")
+                && message["params"]["frame"]["url"] == json!(page_url)
         })
-        .expect("Page.domContentEventFired should be emitted");
+        .unwrap_or_else(|| {
+            panic!("requested Page.frameNavigated should be emitted: {messages:#?}")
+        });
+    let dcl_index = messages
+        .iter()
+        .enumerate()
+        .skip(requested_frame_index + 1)
+        .find_map(|(index, message)| {
+            (message["sessionId"] == json!(target.session_id)
+                && message["method"] == json!("Page.domContentEventFired"))
+            .then_some(index)
+        })
+        .unwrap_or_else(|| {
+            panic!("requested Page.domContentEventFired should be emitted: {messages:#?}")
+        });
     let script_request = messages
         .iter()
         .position(|message| {

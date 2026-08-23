@@ -244,6 +244,13 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
         }
     };
     let exact_same_href = current_href == resolved.as_str();
+    let navigation_source = context_host_ptr_from_global_bridge(scope).and_then(|host_ptr| {
+        let host = unsafe { &*host_ptr };
+        host.renderer_top_level_navigation_source_for_dispatch_scope(
+            host.entered_owner_dispatch_scope(scope),
+            false,
+        )
+    });
     if !matches!(kind, LocationNavigationKind::Reload)
         && exact_same_href
         && source_element.is_none()
@@ -643,15 +650,23 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
     } else {
         history_entry_seed_for_cross_document_location(scope, owner, &resolved, kind)
     };
-    unsafe { &mut *host_ptr }.record_pending_location_navigation_with_kind(
-        resolved,
-        entry_seed,
-        if matches!(kind, LocationNavigationKind::Reload) {
-            moli_fetch::BrowserNavigationRequestKind::Reload
-        } else {
-            moli_fetch::BrowserNavigationRequestKind::Navigate
-        },
+    let browser_navigation_kind = if matches!(kind, LocationNavigationKind::Reload) {
+        moli_fetch::BrowserNavigationRequestKind::Reload
+    } else {
+        moli_fetch::BrowserNavigationRequestKind::Navigate
+    };
+    let mut request = crate::RendererTopLevelNavigationRequest::new(
+        resolved.to_string(),
+        "GET".to_owned(),
+        None,
+        Vec::new(),
+        browser_navigation_kind,
     );
+    if let Some(source) = navigation_source {
+        request = request.with_source(source);
+    }
+    unsafe { &mut *host_ptr }
+        .record_pending_renderer_top_level_navigation_request(request, entry_seed);
 }
 
 fn sandbox_blocks_ancestor_or_top_location_navigation<'s>(

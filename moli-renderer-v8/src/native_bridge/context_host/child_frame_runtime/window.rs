@@ -1551,6 +1551,23 @@ impl JsContextHost {
         wrapper
     }
 
+    pub(crate) fn child_browsing_context_window_for_navigation_observer<'s>(
+        &mut self,
+        scope: &mut v8::PinScope<'s, '_>,
+        handle: DomHandle,
+        observer_can_access: bool,
+    ) -> Option<v8::Local<'s, v8::Object>> {
+        let window = if observer_can_access {
+            self.child_browsing_context_window_wrapper_for_authorized_observer(scope, handle)
+        } else {
+            self.child_browsing_context_window_proxy_for_top(scope, handle)
+        };
+        if window.is_some() {
+            self.mark_child_browsing_context_window_proxy_exposed(handle);
+        }
+        window
+    }
+
     pub(crate) fn existing_child_browsing_context_window_wrapper<'s>(
         &self,
         scope: &mut v8::PinScope<'s, '_>,

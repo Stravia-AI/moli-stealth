@@ -40,7 +40,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use std::{
     cell::{Cell, OnceCell, RefCell},
-    rc::Rc,
+    collections::HashMap,
+    rc::{Rc, Weak},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -184,6 +185,150 @@ impl RendererDocumentIsolateBootstrap {
     }
 }
 
+#[derive(Clone, Default)]
+struct RendererRelatedPageGroup {
+    named_targets: Rc<RefCell<HashMap<String, Vec<Weak<RendererRelatedPageTopLevelTargetState>>>>>,
+    /// Related Page order is part of named-frame lookup. Chromium walks every
+    /// live related Page's complete frame tree before consulting the next Page,
+    /// so a name-indexed top-level map cannot represent this authority alone.
+    top_level_targets: Rc<RefCell<Vec<Weak<RendererRelatedPageTopLevelTargetState>>>>,
+}
+
+impl RendererRelatedPageGroup {
+    fn register_target(&self, target: &Rc<RendererRelatedPageTopLevelTargetState>) {
+        self.top_level_targets
+            .borrow_mut()
+            .push(Rc::downgrade(target));
+    }
+
+    fn live_targets_in_page_order(&self) -> Vec<Rc<RendererRelatedPageTopLevelTargetState>> {
+        let mut live = Vec::new();
+        self.top_level_targets.borrow_mut().retain(|candidate| {
+            let Some(candidate) = candidate.upgrade() else {
+                return false;
+            };
+            if candidate.lifecycle.get() != RendererTopLevelBrowsingContextLifecycle::Active {
+                return false;
+            }
+            if candidate.is_live() {
+                live.push(candidate);
+            }
+            true
+        });
+        live
+    }
+
+    fn set_target_name(
+        &self,
+        target: &Rc<RendererRelatedPageTopLevelTargetState>,
+        next_name: String,
+    ) {
+        let previous_name = target.name.replace(next_name.clone());
+        if previous_name == next_name {
+            return;
+        }
+        self.unregister_target_name(target, &previous_name);
+        if reusable_top_level_browsing_context_name(&next_name)
+            && target.lifecycle.get() == RendererTopLevelBrowsingContextLifecycle::Active
+        {
+            self.named_targets
+                .borrow_mut()
+                .entry(next_name)
+                .or_default()
+                .push(Rc::downgrade(target));
+        }
+    }
+
+    fn unregister_target(&self, target: &Rc<RendererRelatedPageTopLevelTargetState>) {
+        let name = target.name.borrow().clone();
+        self.unregister_target_name(target, &name);
+    }
+
+    fn unregister_target_name(
+        &self,
+        target: &Rc<RendererRelatedPageTopLevelTargetState>,
+        name: &str,
+    ) {
+        if !reusable_top_level_browsing_context_name(name) {
+            return;
+        }
+        let mut named_targets = self.named_targets.borrow_mut();
+        let remove_entry = named_targets.get_mut(name).is_some_and(|targets| {
+            targets.retain(|candidate| {
+                candidate
+                    .upgrade()
+                    .is_some_and(|candidate| !Rc::ptr_eq(&candidate, target))
+            });
+            targets.is_empty()
+        });
+        if remove_entry {
+            named_targets.remove(name);
+        }
+    }
+
+    fn find_named_target(
+        &self,
+        source: &Rc<RendererRelatedPageTopLevelTargetState>,
+        name: &str,
+    ) -> Option<Rc<RendererRelatedPageTopLevelTargetState>> {
+        if !reusable_top_level_browsing_context_name(name) {
+            return None;
+        }
+        if source.name.borrow().as_str() == name && source.is_live() {
+            return Some(source.clone());
+        }
+
+        let mut named_targets = self.named_targets.borrow_mut();
+        let mut found = None;
+        let remove_entry = named_targets.get_mut(name).is_some_and(|targets| {
+            targets.retain(|candidate| {
+                let Some(candidate) = candidate.upgrade() else {
+                    return false;
+                };
+                if !candidate.is_live() {
+                    return false;
+                }
+                if found.is_none() {
+                    found = Some(candidate);
+                }
+                true
+            });
+            targets.is_empty()
+        });
+        if remove_entry {
+            named_targets.remove(name);
+        }
+        found
+    }
+}
+
+struct RendererRelatedPageTopLevelTargetState {
+    residence: crate::RendererResolvedPopupTarget,
+    global_proxy: OnceCell<v8::Global<v8::Object>>,
+    current_default_context: RefCell<Option<v8::Global<v8::Context>>>,
+    // Page-scoped opener edge. The value belongs to the stable top-level
+    // browsing context rather than to one replaceable LocalWindow realm.
+    opener_edge: RefCell<Option<v8::Global<v8::Value>>>,
+    lifecycle: Cell<RendererTopLevelBrowsingContextLifecycle>,
+    name: RefCell<String>,
+}
+
+impl RendererRelatedPageTopLevelTargetState {
+    fn is_live(&self) -> bool {
+        self.lifecycle.get() == RendererTopLevelBrowsingContextLifecycle::Active
+            && self.global_proxy.get().is_some()
+            && self.current_default_context.borrow().is_some()
+    }
+}
+
+fn reusable_top_level_browsing_context_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.eq_ignore_ascii_case("_self")
+        && !name.eq_ignore_ascii_case("_parent")
+        && !name.eq_ignore_ascii_case("_top")
+        && !name.eq_ignore_ascii_case("_blank")
+}
+
 #[derive(Clone)]
 pub(crate) struct RendererPageScriptEnvironment {
     page_id: u64,
@@ -193,13 +338,10 @@ pub(crate) struct RendererPageScriptEnvironment {
     script_agent_page_membership: RendererScriptAgentPageMembership,
     page_runtime_task_source: PageRuntimeTaskSource,
     output_journal: crate::runtime::RendererTurnOutputJournal,
-    global_proxy: Rc<OnceCell<v8::Global<v8::Object>>>,
+    related_page_group: RendererRelatedPageGroup,
+    top_level_target: Rc<RendererRelatedPageTopLevelTargetState>,
     initial_global_proxy_facade_context: Rc<RefCell<Option<v8::Global<v8::Context>>>>,
     initial_global_proxy_security_token: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
-    // Page-scoped opener edge. The value belongs to the stable top-level
-    // browsing context rather than to one replaceable LocalWindow realm.
-    top_level_opener_edge: Rc<RefCell<Option<v8::Global<v8::Value>>>>,
-    top_level_browsing_context_lifecycle: Rc<Cell<RendererTopLevelBrowsingContextLifecycle>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -223,14 +365,21 @@ impl std::fmt::Debug for RendererPageScriptEnvironment {
                 &self.page_runtime_task_source.identity_key(),
             )
             .field("output_stream", &self.output_journal.stream())
-            .field("has_global_proxy", &self.global_proxy.get().is_some())
+            .field(
+                "has_global_proxy",
+                &self.top_level_target.global_proxy.get().is_some(),
+            )
             .field(
                 "has_top_level_opener_edge",
-                &self.top_level_opener_edge.borrow().is_some(),
+                &self.top_level_target.opener_edge.borrow().is_some(),
             )
             .field(
                 "top_level_browsing_context_lifecycle",
-                &self.top_level_browsing_context_lifecycle.get(),
+                &self.top_level_target.lifecycle.get(),
+            )
+            .field(
+                "top_level_browsing_context_name",
+                &self.top_level_target.name,
             )
             .finish()
     }
@@ -246,10 +395,70 @@ impl RendererPageScriptEnvironment {
         page_runtime_task_source: PageRuntimeTaskSource,
         output_journal: crate::runtime::RendererTurnOutputJournal,
     ) -> Result<Self> {
+        Self::new_in_related_page_group(
+            page_id,
+            auxiliary_page_reservation_allocator,
+            renderer_document_isolate,
+            inspector_isolate_backend,
+            script_agent_page_membership,
+            page_runtime_task_source,
+            output_journal,
+            RendererRelatedPageGroup::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_related(
+        page_id: u64,
+        auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
+        renderer_document_isolate: RendererDocumentIsolateHandle,
+        inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
+        script_agent_page_membership: RendererScriptAgentPageMembership,
+        page_runtime_task_source: PageRuntimeTaskSource,
+        output_journal: crate::runtime::RendererTurnOutputJournal,
+        source_environment: &Self,
+    ) -> Result<Self> {
+        Self::new_in_related_page_group(
+            page_id,
+            auxiliary_page_reservation_allocator,
+            renderer_document_isolate,
+            inspector_isolate_backend,
+            script_agent_page_membership,
+            page_runtime_task_source,
+            output_journal,
+            source_environment.related_page_group.clone(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_in_related_page_group(
+        page_id: u64,
+        auxiliary_page_reservation_allocator: RendererAuxiliaryPageReservationAllocator,
+        renderer_document_isolate: RendererDocumentIsolateHandle,
+        inspector_isolate_backend: RendererInspectorIsolateBackendHandle,
+        script_agent_page_membership: RendererScriptAgentPageMembership,
+        page_runtime_task_source: PageRuntimeTaskSource,
+        output_journal: crate::runtime::RendererTurnOutputJournal,
+        related_page_group: RendererRelatedPageGroup,
+    ) -> Result<Self> {
         anyhow::ensure!(
             script_agent_page_membership.page_id().as_u64() == page_id,
             "Page script environment membership belongs to a different Page"
         );
+        let residence =
+            crate::RendererResolvedPopupTarget::from_residence(output_journal.stream().residence())
+                .ok_or_else(|| {
+                    anyhow!("Page script environment has a non-Page output residence")
+                })?;
+        let top_level_target = Rc::new(RendererRelatedPageTopLevelTargetState {
+            residence,
+            global_proxy: OnceCell::new(),
+            current_default_context: RefCell::new(None),
+            opener_edge: RefCell::new(None),
+            lifecycle: Cell::new(RendererTopLevelBrowsingContextLifecycle::Active),
+            name: RefCell::new(String::new()),
+        });
+        related_page_group.register_target(&top_level_target);
         Ok(Self {
             page_id,
             auxiliary_page_reservation_allocator,
@@ -258,13 +467,10 @@ impl RendererPageScriptEnvironment {
             script_agent_page_membership,
             page_runtime_task_source,
             output_journal,
-            global_proxy: Rc::new(OnceCell::new()),
+            related_page_group,
+            top_level_target,
             initial_global_proxy_facade_context: Rc::new(RefCell::new(None)),
             initial_global_proxy_security_token: Rc::new(RefCell::new(None)),
-            top_level_opener_edge: Rc::new(RefCell::new(None)),
-            top_level_browsing_context_lifecycle: Rc::new(Cell::new(
-                RendererTopLevelBrowsingContextLifecycle::Active,
-            )),
         })
     }
 
@@ -292,24 +498,28 @@ impl RendererPageScriptEnvironment {
     /// before the browser owner has retired the target. The Page-owned output
     /// record produced by the caller is what later performs that retirement.
     pub(crate) fn begin_top_level_browsing_context_close(&self) -> bool {
-        if self.top_level_browsing_context_lifecycle.get()
-            != RendererTopLevelBrowsingContextLifecycle::Active
+        if self.top_level_target.lifecycle.get() != RendererTopLevelBrowsingContextLifecycle::Active
         {
             return false;
         }
-        self.top_level_browsing_context_lifecycle
+        self.related_page_group
+            .unregister_target(&self.top_level_target);
+        self.top_level_target
+            .lifecycle
             .set(RendererTopLevelBrowsingContextLifecycle::Closing);
         true
     }
 
     pub(crate) fn mark_top_level_browsing_context_closed(&self) {
-        self.top_level_browsing_context_lifecycle
+        self.related_page_group
+            .unregister_target(&self.top_level_target);
+        self.top_level_target
+            .lifecycle
             .set(RendererTopLevelBrowsingContextLifecycle::Closed);
     }
 
     pub(crate) fn top_level_browsing_context_is_closed(&self) -> bool {
-        self.top_level_browsing_context_lifecycle.get()
-            != RendererTopLevelBrowsingContextLifecycle::Active
+        self.top_level_target.lifecycle.get() != RendererTopLevelBrowsingContextLifecycle::Active
     }
 
     pub(crate) fn signal_top_level_close_output_handoff(&self) {
@@ -445,7 +655,8 @@ impl RendererPageScriptEnvironment {
         &self,
         global_proxy: v8::Global<v8::Object>,
     ) -> Result<()> {
-        self.global_proxy
+        self.top_level_target
+            .global_proxy
             .set(global_proxy)
             .map_err(|_| anyhow!("page script environment already retains its main WindowProxy"))
     }
@@ -491,10 +702,124 @@ impl RendererPageScriptEnvironment {
         &self,
         op: impl FnOnce(&v8::Global<v8::Object>) -> T,
     ) -> Result<T> {
-        let global_proxy = self.global_proxy.get().ok_or_else(|| {
+        let global_proxy = self.top_level_target.global_proxy.get().ok_or_else(|| {
             anyhow!("replacement context is missing its page-owned main WindowProxy")
         })?;
         Ok(op(global_proxy))
+    }
+
+    pub(crate) fn set_top_level_browsing_context_name(&self, name: String) {
+        self.related_page_group
+            .set_target_name(&self.top_level_target, name);
+    }
+
+    pub(crate) fn related_page_named_target_for_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        name: &str,
+        replacement_opener: Option<v8::Local<'s, v8::Object>>,
+    ) -> Option<(
+        v8::Local<'s, v8::Object>,
+        v8::Local<'s, v8::Context>,
+        crate::RendererResolvedPopupTarget,
+    )> {
+        let target = self
+            .related_page_group
+            .find_named_target(&self.top_level_target, name)?;
+        if let Some(opener) = replacement_opener {
+            let opener: v8::Local<'s, v8::Value> = opener.into();
+            *target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+        }
+        let window_proxy = v8::Local::new(scope, target.global_proxy.get()?);
+        let context = v8::Local::new(scope, target.current_default_context.borrow().as_ref()?);
+        Some((window_proxy, context, target.residence))
+    }
+
+    pub(crate) fn related_page_top_level_targets_for_navigation<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+    ) -> Vec<(
+        v8::Local<'s, v8::Object>,
+        v8::Local<'s, v8::Context>,
+        crate::RendererResolvedPopupTarget,
+        String,
+        bool,
+    )> {
+        self.related_page_group
+            .live_targets_in_page_order()
+            .into_iter()
+            .filter_map(|target| {
+                let window = v8::Local::new(scope, target.global_proxy.get()?);
+                let context =
+                    v8::Local::new(scope, target.current_default_context.borrow().as_ref()?);
+                let name = target.name.borrow().clone();
+                Some((
+                    window,
+                    context,
+                    target.residence,
+                    name,
+                    Rc::ptr_eq(&target, &self.top_level_target),
+                ))
+            })
+            .collect()
+    }
+
+    pub(crate) fn related_page_current_context_for_residence<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        residence: crate::RendererResolvedPopupTarget,
+    ) -> Option<v8::Local<'s, v8::Context>> {
+        let target = self
+            .related_page_group
+            .live_targets_in_page_order()
+            .into_iter()
+            .find(|target| target.residence == residence)?;
+        Some(v8::Local::new(
+            scope,
+            target.current_default_context.borrow().as_ref()?,
+        ))
+    }
+
+    pub(crate) fn bind_current_main_default_context(&self, context: v8::Global<v8::Context>) {
+        *self.top_level_target.current_default_context.borrow_mut() = Some(context);
+    }
+
+    pub(crate) fn replace_related_page_top_level_opener<'s>(
+        &self,
+        scope: &mut v8::PinScope<'s, '_>,
+        residence: crate::RendererResolvedPopupTarget,
+        opener: v8::Local<'s, v8::Object>,
+    ) -> bool {
+        let Some(target) = self
+            .related_page_group
+            .live_targets_in_page_order()
+            .into_iter()
+            .find(|target| target.residence == residence)
+        else {
+            return false;
+        };
+        let opener: v8::Local<'s, v8::Value> = opener.into();
+        *target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+        true
+    }
+
+    pub(super) fn restore_main_window_name_after_navigation(
+        &self,
+        scope: &mut v8::PinScope<'_, '_>,
+        window_proxy: v8::Local<'_, v8::Object>,
+    ) {
+        let name = self.top_level_target.name.borrow();
+        let Some(name_value) = crate::util::v8_string(scope, name.as_str()) else {
+            return;
+        };
+        let _ = window_proxy.define_own_property(
+            scope,
+            crate::util::v8_string(scope, crate::context_bootstrap::WINDOW_NAME_SLOT)
+                .expect("static Window name slot should fit V8")
+                .into(),
+            name_value.into(),
+            v8::PropertyAttribute::DONT_ENUM,
+        );
     }
 
     pub(super) fn capture_main_window_opener_for_navigation<'s>(
@@ -505,10 +830,10 @@ impl RendererPageScriptEnvironment {
         // Once bound, the Page edge is authoritative. In particular, an
         // explicit `window.opener = null` must not be reconnected from a stale
         // realm-private slot during the next Document replacement.
-        if self.top_level_opener_edge.borrow().is_some() {
+        if self.top_level_target.opener_edge.borrow().is_some() {
             return;
         }
-        *self.top_level_opener_edge.borrow_mut() =
+        *self.top_level_target.opener_edge.borrow_mut() =
             get_private_value(scope, window_proxy, WINDOW_OPENER_SLOT)
                 .map(|opener| v8::Global::new(scope, opener));
     }
@@ -518,7 +843,7 @@ impl RendererPageScriptEnvironment {
         scope: &mut v8::PinScope<'s, '_>,
         opener: v8::Local<'s, v8::Value>,
     ) {
-        *self.top_level_opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
+        *self.top_level_target.opener_edge.borrow_mut() = Some(v8::Global::new(scope, opener));
     }
 
     pub(crate) fn sever_top_level_opener_edge(&self, scope: &mut v8::PinScope<'_, '_>) {
@@ -531,7 +856,7 @@ impl RendererPageScriptEnvironment {
         scope: &mut v8::PinScope<'s, '_>,
     ) -> Option<v8::Local<'s, v8::Value>> {
         let opener = {
-            let edge = self.top_level_opener_edge.borrow();
+            let edge = self.top_level_target.opener_edge.borrow();
             edge.as_ref().map(|opener| v8::Local::new(scope, opener))?
         };
         if let Ok(opener_window) = v8::Local::<v8::Object>::try_from(opener)

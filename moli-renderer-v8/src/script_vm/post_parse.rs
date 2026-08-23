@@ -293,6 +293,11 @@ impl ScriptVmContextBootstrap {
         install_host_bindings(scope, unsafe { &mut *host_ptr })?;
         let global = scope.get_current_context().global(scope);
         let bridge_ref = JsContextHost::install_into_bridge(&context_host, scope, global)?;
+        if matches!(mode, WindowContextBootstrapMode::MainDefault)
+            && let Some(environment) = renderer_page_script_environment.as_ref()
+        {
+            environment.bind_current_main_default_context(v8::Global::new(scope, local_context));
+        }
         let runtime_observable_context_token =
             unsafe { &mut *host_ptr }.allocate_runtime_observable_context_token();
         install_runtime_observable_context_token_for_context(
@@ -329,6 +334,7 @@ impl ScriptVmContextBootstrap {
             && let Some(environment) = renderer_page_script_environment.as_ref()
         {
             environment.restore_main_window_opener_after_navigation(scope, global);
+            environment.restore_main_window_name_after_navigation(scope, global);
         }
         match mode {
             WindowContextBootstrapMode::Isolated {

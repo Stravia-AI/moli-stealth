@@ -23383,6 +23383,84 @@ fn window_open_existing_context_special_targets_never_enter_the_popup_carrier() 
 }
 
 #[test]
+fn child_window_open_top_carries_exact_source_and_noreferrer_policy() {
+    let mut vm = new_storage_test_vm("https://child-window-open-top.test/root/page.html");
+    vm.eval(
+        r#"
+(() => {
+  const iframe = document.createElement("iframe");
+  (document.body || document.documentElement || document).appendChild(iframe);
+})()
+"#,
+    )
+    .expect("child window.open top setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    let child = {
+        let host = vm._context_host.borrow();
+        let handle = host
+            .child_browsing_context_handle_by_index(0)
+            .expect("test iframe should have a child browsing context");
+        host.frame_owner_current_child_snapshot(handle)
+            .expect("test iframe should expose its current child owner")
+    };
+    assert_eq!(
+        vm.eval(
+            r#"String(document.querySelector("iframe").contentWindow.eval(
+  "window.open('/next', '_top', 'noreferrer')"
+))"#,
+        )
+        .expect("child window.open top should evaluate"),
+        "[object Window]"
+    );
+
+    let pending = vm
+        .take_pending_location_navigation_with_seed()
+        .expect("child window.open top should queue a Page-owned navigation");
+    assert_eq!(
+        pending.url.as_str(),
+        "https://child-window-open-top.test/next"
+    );
+    let source = pending
+        .navigation_source
+        .expect("child window.open top should retain its initiating Window/Document");
+    assert!(source.suppresses_referrer());
+    assert_eq!(
+        source.window(),
+        &crate::RendererWindowDocumentSource::ChildFrame {
+            frame_id: child.frame_id.0,
+            local_window_id: child.local_window_id.0,
+            document_id: child.document_id.0,
+        }
+    );
+}
+
+#[test]
+fn window_open_noopener_navigates_existing_named_iframe_and_returns_null() {
+    let mut vm = new_storage_test_vm("https://example.com/source");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement("iframe");
+  frame.name = "existingChild";
+  (document.body || document.documentElement || document).appendChild(frame);
+  const child = frame.contentWindow;
+  const opened = window.open("about:blank#named-child", "existingChild", "noopener");
+  return [opened === null, child === frame.contentWindow, child.location.href].join("|");
+})()
+"#,
+        )
+        .expect("noopener existing named iframe probe should evaluate");
+
+    assert_eq!(result, "true|true|about:blank#named-child");
+    assert!(
+        vm.take_pending_popup_activations().is_empty(),
+        "an existing named iframe remains an existing-context navigation under noopener"
+    );
+}
+
+#[test]
 fn window_open_special_target_parsing_is_case_insensitive_but_does_not_trim() {
     let mut blank_vm = new_storage_test_vm("https://example.com/source");
     assert_eq!(

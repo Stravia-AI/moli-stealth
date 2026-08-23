@@ -11,7 +11,7 @@ pub(crate) struct PopupTargetNavigationClaimIdentity {
     page_owner: TargetPageResidenceIdentity,
     browser_context_id: String,
     target_id: String,
-    url: String,
+    request: Box<moli_core::page::RendererTopLevelNavigationRequest>,
     referrer: Option<String>,
     document_referrer: Option<String>,
     kind: PopupTargetNavigationKind,
@@ -31,7 +31,11 @@ impl PopupTargetNavigationClaimIdentity {
     }
 
     pub(crate) fn url(&self) -> &str {
-        &self.url
+        self.request.url()
+    }
+
+    pub(crate) fn request(&self) -> &moli_core::page::RendererTopLevelNavigationRequest {
+        &self.request
     }
 
     pub(crate) fn referrer(&self) -> Option<&str> {
@@ -97,7 +101,7 @@ impl PopupTargetNavigationOwnerAction {
         conn: &mut CdpConnection,
         browser_context_id: &str,
         target_id: &str,
-        url: String,
+        request: moli_core::page::RendererTopLevelNavigationRequest,
         referrer: Option<String>,
         document_referrer: Option<String>,
         kind: PopupTargetNavigationKind,
@@ -125,7 +129,7 @@ impl PopupTargetNavigationOwnerAction {
                 page_owner,
                 browser_context_id: browser_context_id.to_owned(),
                 target_id: target_id.to_owned(),
-                url,
+                request: Box::new(request),
                 referrer,
                 document_referrer,
                 kind,

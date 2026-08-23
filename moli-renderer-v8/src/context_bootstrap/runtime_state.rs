@@ -883,10 +883,12 @@ fn window_name_runtime_setter<'s>(
         .to_string(scope)
         .map(|value| value.to_rust_string_lossy(scope))
         .unwrap_or_default();
-    if let Some(handle) = child_context_handle_from_owner(scope, receiver)
-        && let Some(host_ptr) = context_host_ptr_from_global_bridge(scope)
-    {
-        unsafe { &mut *host_ptr }.set_child_browsing_context_name(handle, next.clone());
+    if let Some(host_ptr) = context_host_ptr_from_global_bridge(scope) {
+        if let Some(handle) = child_context_handle_from_owner(scope, receiver) {
+            unsafe { &mut *host_ptr }.set_child_browsing_context_name(handle, next.clone());
+        } else if native_bridge::lightweight_popup_id_from_window(scope, receiver).is_none() {
+            unsafe { &*host_ptr }.set_top_level_browsing_context_name(next.clone());
+        }
     }
     define_non_enumerable_string_property(scope, receiver, WINDOW_NAME_SLOT, &next);
 }

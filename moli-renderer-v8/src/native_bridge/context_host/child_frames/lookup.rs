@@ -221,6 +221,22 @@ impl JsContextHost {
             })
     }
 
+    pub(crate) fn child_browsing_context_matches_name_for_navigation(
+        &self,
+        handle: DomHandle,
+        key: &str,
+    ) -> bool {
+        self.child_browsing_context_host_is_active(handle)
+            && self
+                .dom_host()
+                .node(handle)
+                .is_some_and(|node| node.flags().in_document_tree())
+            && self
+                .child_browsing_contexts
+                .get(&handle)
+                .is_some_and(|entry| entry.matches_browsing_context_name(key))
+    }
+
     pub(crate) fn child_browsing_context_named_child_handle(
         &self,
         parent: Option<DomHandle>,

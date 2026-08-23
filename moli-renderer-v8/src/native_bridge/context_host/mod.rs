@@ -88,6 +88,9 @@ pub(crate) use child_frame_runtime::{
 };
 mod child_frame_snapshots;
 mod child_frames;
+pub(crate) use child_frames::{
+    FormSubmissionChildNavigationTarget, PendingFormSubmissionChildNavigation,
+};
 mod core;
 mod dialogs;
 mod directory_reader_callbacks;
@@ -863,6 +866,9 @@ pub(crate) struct JsContextHost {
     #[cfg(test)]
     force_child_default_context_preflight_failure: bool,
     child_browsing_context_document_handles: HashMap<DomHandle, DomHandle>,
+    /// Effective origin of this top-level Document. This can differ from the
+    /// URL-derived origin for an inherited initial `about:blank` Document.
+    main_document_serialized_origin: String,
     document_domain_override: Option<String>,
     next_child_browsing_context_id: u64,
     next_child_document_load_id: u64,
@@ -1004,7 +1010,8 @@ pub(crate) struct JsContextHost {
     button_element_targets: HashMap<(DomHandle, String), DomHandle>,
     constructing_form_data_forms: Vec<DomHandle>,
     active_form_submission_forms: Vec<DomHandle>,
-    pending_form_submission_child_targets: HashMap<DomHandle, Vec<DomHandle>>,
+    pending_form_submission_child_targets:
+        HashMap<DomHandle, Vec<PendingFormSubmissionChildNavigation>>,
     active_image_submitter_coordinate: Option<(DomHandle, u32, u32)>,
     current_inline_script_stack: Vec<DomHandle>,
     compiled_string_provenance: Vec<CompiledStringProvenance>,
@@ -1012,6 +1019,11 @@ pub(crate) struct JsContextHost {
     /// entering V8. Only effects created synchronously inside that dispatch
     /// may copy this value; it is never inferred from later Page work.
     active_runtime_command_cause: Option<crate::runtime::RendererRuntimeCommandCausalIdentity>,
+    /// Source-side navigation facts temporarily installed while an element
+    /// target invokes another Window's synchronous Location setter. The
+    /// target host consumes a clone into its pending request before this
+    /// callback returns; the scope is always restored by the caller.
+    active_top_level_navigation_source: Option<crate::runtime::RendererTopLevelNavigationSource>,
     /// True only while V8 Inspector is synchronously dispatching a protocol
     /// command. DebugEvaluate can expose StackFrame objects whose location
     /// accessors are invalid, so callbacks use this scope to avoid probing them.
@@ -1166,6 +1178,72 @@ pub(crate) struct ChildBrowsingContextNavigationRequest {
     pub(crate) method: String,
     pub(crate) body: Option<Vec<u8>>,
     pub(crate) request_headers: Vec<(String, String)>,
+    navigation_source: Option<ChildBrowsingContextNavigationSource>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChildBrowsingContextNavigationSource {
+    initiator_url: Url,
+    document_referrer: String,
+}
+
+impl ChildBrowsingContextNavigationRequest {
+    pub(crate) fn new(
+        url: Url,
+        method: String,
+        body: Option<Vec<u8>>,
+        request_headers: Vec<(String, String)>,
+    ) -> Self {
+        Self {
+            url,
+            method,
+            body,
+            request_headers,
+            navigation_source: None,
+        }
+    }
+
+    /// Freezes the source-side navigation metadata before a named target can
+    /// hand the request to a child Frame owned by another related Page.
+    ///
+    /// The explicit Referer is already policy-filtered by the source
+    /// Document. The target loader must therefore retain the source initiator
+    /// for cookie/Sec-Fetch classification while disabling its usual
+    /// target-parent referrer inference.
+    pub(crate) fn with_navigation_source(
+        mut self,
+        initiator_url: Url,
+        navigation_referrer: String,
+        document_referrer: String,
+    ) -> Self {
+        self.request_headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("referer"));
+        if !navigation_referrer.is_empty() {
+            self.request_headers
+                .push(("Referer".to_owned(), navigation_referrer));
+        }
+        self.navigation_source = Some(ChildBrowsingContextNavigationSource {
+            initiator_url,
+            document_referrer,
+        });
+        self
+    }
+
+    pub(in crate::native_bridge::context_host) fn initiator_url(&self) -> Option<&Url> {
+        self.navigation_source
+            .as_ref()
+            .map(|source| &source.initiator_url)
+    }
+
+    pub(in crate::native_bridge::context_host) fn has_explicit_navigation_source(&self) -> bool {
+        self.navigation_source.is_some()
+    }
+
+    pub(in crate::native_bridge::context_host) fn document_referrer(&self) -> Option<&str> {
+        self.navigation_source
+            .as_ref()
+            .map(|source| source.document_referrer.as_str())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

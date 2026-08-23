@@ -1929,12 +1929,17 @@ impl ScriptVmPageRealmBootstrap {
         let document_base_url = dom_host
             .document_base_url_for_handle(document_handle)
             .unwrap_or_else(|| document_url.clone());
+        let initial_document_origin = initial_document_environment
+            .as_ref()
+            .map(|environment| environment.origin.clone());
         let mut frame_owner_store = FrameOwnerStore::default();
         frame_owner_store.ensure_main_frame(
             document_handle,
             document_url.clone(),
             document_base_url,
-            moli_url::origin_ascii_serialization(&document_url),
+            initial_document_origin
+                .clone()
+                .unwrap_or_else(|| moli_url::origin_ascii_serialization(&document_url)),
             crate::document_runtime::DocumentPolicyContainer::default(),
             crate::types::SubresourcePolicyContext::default(),
             None,
@@ -1958,9 +1963,6 @@ impl ScriptVmPageRealmBootstrap {
             main_parser_continuation_sender,
         ));
         document_runtime.set_bypass_content_security_policy(bypass_content_security_policy);
-        let initial_document_origin = initial_document_environment
-            .as_ref()
-            .map(|environment| environment.origin.clone());
         if let Some(environment) = initial_document_environment {
             document_runtime.set_initial_document_policy_container(environment.policy_container);
         }
@@ -2022,6 +2024,7 @@ impl ScriptVmPageRealmBootstrap {
             page_context_cancel_rx,
             top_level_storage_key,
             reserved_service_worker_client_id,
+            initial_document_origin.clone(),
         )));
         let main_document_owner = context_host
             .borrow()
@@ -2238,6 +2241,29 @@ impl ScriptVmPageRealmBootstrap {
 }
 
 impl ScriptVmDefaultWorldBootstrap {
+    /// Installs a fresh auxiliary Page's creator-frozen browsing-context name
+    /// before document-start scripts can observe the default Window realm.
+    pub(super) fn initialize_initial_top_level_browsing_context_name(&self, name: &str) {
+        let context = &self.page_default_context;
+        let environment = self.renderer_page_script_environment.clone();
+        self.renderer_document_isolate
+            .with_entered_renderer_document_isolate(|isolate| {
+                let scope = pin!(v8::HandleScope::new(isolate));
+                let scope = &mut scope.init();
+                let context = v8::Local::new(scope, context);
+                let scope = &mut v8::ContextScope::new(scope, context);
+                let global = context.global(scope);
+                let name_value = crate::util::v8_string(scope, name)
+                    .expect("V8 must allocate the initial auxiliary window.name");
+                set_object_slot(scope, global, WINDOW_NAME_SLOT, name_value.into());
+                if let Some(environment) = environment {
+                    environment.set_top_level_browsing_context_name(name.to_owned());
+                }
+                Ok(())
+            })
+            .expect("initial auxiliary window.name setup must enter its document isolate");
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) fn prebootstrap_from_dom_host_in_scope(
         scope: &mut v8::PinScope<'_, '_>,
@@ -2583,6 +2609,7 @@ impl ScriptVmPreinspectorDefaultWorldBootstrap {
         set_private_value(scope, global, WINDOW_OPENER_SLOT, opener);
         if let Some(environment) = self.inner.renderer_page_script_environment.as_ref() {
             environment.set_top_level_opener_edge(scope, opener);
+            environment.set_top_level_browsing_context_name(name.to_owned());
         }
         if let Some(name) = crate::util::v8_string(scope, name) {
             set_object_slot(scope, global, WINDOW_NAME_SLOT, name.into());
@@ -6055,15 +6082,21 @@ impl ScriptVm {
             )
         })?;
         let runtime_command_cause = pending.runtime_command_cause;
+        let mut request = crate::runtime::RendererTopLevelNavigationRequest::new(
+            pending.url.to_string(),
+            pending.request_method,
+            pending.request_body,
+            pending.request_headers,
+            pending.browser_navigation_kind,
+        );
+        if let Some(source) = pending.navigation_source {
+            request = request.with_source(source);
+        }
         let action = crate::runtime::RendererOwnerAction::TopLevelLocationNavigation(
             crate::runtime::RendererDocumentSourcedTopLevelLocationNavigation::
-                new_with_request_and_runtime_command_cause(
+                new_with_request_and_runtime_command_cause_from_request(
                     source_document,
-                    pending.url.to_string(),
-                    pending.request_method,
-                    pending.request_body,
-                    pending.request_headers,
-                    pending.browser_navigation_kind,
+                    request,
                     runtime_command_cause.clone(),
                 ),
         );

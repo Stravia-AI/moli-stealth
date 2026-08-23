@@ -1,7 +1,80 @@
 use std::sync::Arc;
 
-use super::{RendererDocumentLifecycleIdentity, RendererWindowDocumentSource};
-use crate::{SharedWebStorageStore, runtime::RendererPendingAuxiliaryPage};
+use super::{
+    RendererDocumentLifecycleIdentity, RendererTopLevelNavigationRequest,
+    RendererWindowDocumentSource,
+};
+use crate::{
+    SharedWebStorageStore,
+    runtime::{
+        PageId, RendererOutputResidenceIdentity, RendererOwnerLocalHostId,
+        RendererPendingAuxiliaryPage, RendererScriptAgentAdmission,
+    },
+};
+
+/// Exact already-live renderer Page selected for a popup navigation.
+///
+/// Named browsing-context lookup is a renderer Page-group operation. Carrying
+/// both residence coordinates prevents the protocol layer from repeating
+/// that lookup through its eventually-consistent target-name projection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct RendererResolvedPopupTarget {
+    owner_local_host_id: RendererOwnerLocalHostId,
+    page_id: PageId,
+}
+
+/// Renderer-decided browsing-context-group policy for one newly created
+/// auxiliary Page.
+///
+/// This is decided beside named-target lookup. The protocol layer may adopt
+/// the reserved Page and expose a DevTools target, but must not infer whether
+/// that Page can participate in the creator's related-name lookup from a
+/// later target-name projection.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum RendererPopupNewTargetDisposition {
+    /// The new Page remains in the creator's related Page group.
+    Related,
+    /// Opener suppression created a fresh group without a browsing-context
+    /// name (`""` or `_blank`).
+    FreshUnnamed,
+    /// Opener suppression created a fresh group whose first realm must retain
+    /// the requested ordinary browsing-context name.
+    FreshNamed,
+}
+
+impl RendererPopupNewTargetDisposition {
+    pub const fn is_fresh(self) -> bool {
+        matches!(self, Self::FreshUnnamed | Self::FreshNamed)
+    }
+
+    pub const fn carries_initial_name(self) -> bool {
+        matches!(self, Self::FreshNamed)
+    }
+}
+
+impl RendererResolvedPopupTarget {
+    pub(crate) const fn from_residence(residence: RendererOutputResidenceIdentity) -> Option<Self> {
+        match residence {
+            RendererOutputResidenceIdentity::Page {
+                owner_local_host_id,
+                page_id,
+            } => Some(Self {
+                owner_local_host_id,
+                page_id,
+            }),
+            RendererOutputResidenceIdentity::SharedWorker { .. }
+            | RendererOutputResidenceIdentity::ServiceWorker { .. } => None,
+        }
+    }
+
+    pub const fn owner_local_host_id(self) -> RendererOwnerLocalHostId {
+        self.owner_local_host_id
+    }
+
+    pub const fn page_id(self) -> PageId {
+        self.page_id
+    }
+}
 
 /// Exact renderer-side initiator of one auxiliary browsing-context action.
 ///
@@ -47,12 +120,14 @@ pub struct RendererPendingPopupActivation {
     source: RendererPopupActivationSource,
     disposition: RendererPopupDisposition,
     popup_id: Option<u64>,
-    url: String,
+    request: Box<RendererTopLevelNavigationRequest>,
     target_name: String,
     /// Heap-owned so adding popup policy facts does not inflate every
     /// `RendererOwnerAction` variant and its async orchestration frames.
     referrers: Option<Box<RendererPopupNavigationReferrers>>,
     pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
+    resolved_target_page: Option<RendererResolvedPopupTarget>,
+    new_target_disposition: Option<RendererPopupNewTargetDisposition>,
     session_storage_store: Option<SharedWebStorageStore>,
     initial_empty_document_storage_key: Option<moli_storage_key::MoliStorageKey>,
 }
@@ -101,10 +176,12 @@ impl RendererPendingPopupActivation {
             },
             disposition,
             popup_id,
-            url,
+            request: Box::new(RendererTopLevelNavigationRequest::get(url)),
             target_name,
             referrers: None,
             pending_auxiliary_page: None,
+            resolved_target_page: None,
+            new_target_disposition: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -124,10 +201,12 @@ impl RendererPendingPopupActivation {
             source: RendererPopupActivationSource::BrowserContext,
             disposition,
             popup_id,
-            url,
+            request: Box::new(RendererTopLevelNavigationRequest::get(url)),
             target_name,
             referrers: None,
             pending_auxiliary_page: None,
+            resolved_target_page: None,
+            new_target_disposition: None,
             session_storage_store: None,
             initial_empty_document_storage_key: None,
         }
@@ -152,13 +231,98 @@ impl RendererPendingPopupActivation {
         self
     }
 
+    /// Replaces the default GET navigation with the exact request selected by
+    /// the renderer producer.
+    ///
+    /// The URL must remain the one used for synchronous target creation and
+    /// `Page.windowOpen`; only the request metadata is enriched. Keeping this
+    /// request whole is required for auxiliary form POSTs.
+    pub fn with_navigation_request(mut self, request: RendererTopLevelNavigationRequest) -> Self {
+        assert_eq!(
+            self.request.url(),
+            request.url(),
+            "popup target selection and navigation request must carry one URL"
+        );
+        self.request = Box::new(request);
+        self
+    }
+
     /// Binds the renderer-owned browsing-context and Page identities reserved
     /// when this action synchronously created a new auxiliary context.
     pub fn with_pending_auxiliary_page(
         mut self,
         pending_auxiliary_page: Option<RendererPendingAuxiliaryPage>,
     ) -> Self {
+        assert!(
+            pending_auxiliary_page.is_none() || self.resolved_target_page.is_none(),
+            "a popup action cannot create and reuse a renderer Page"
+        );
         self.pending_auxiliary_page = pending_auxiliary_page;
+        self
+    }
+
+    /// Binds the exact already-live renderer Page selected by related-page
+    /// named browsing-context lookup.
+    pub fn with_resolved_target_page(
+        mut self,
+        resolved_target_page: RendererResolvedPopupTarget,
+    ) -> Self {
+        assert!(
+            self.pending_auxiliary_page.is_none(),
+            "a popup action cannot reuse and create a renderer Page"
+        );
+        self.resolved_target_page = Some(resolved_target_page);
+        self
+    }
+
+    /// Records that the renderer completed target lookup and deliberately
+    /// selected the attached new Page reservation.
+    ///
+    /// Unmigrated producers may still reserve a Page before the protocol's
+    /// legacy name projection chooses between new and existing targets. They
+    /// must not set this fact.
+    pub fn with_new_target_disposition(
+        mut self,
+        disposition: RendererPopupNewTargetDisposition,
+    ) -> Self {
+        assert!(
+            self.pending_auxiliary_page.is_some(),
+            "a renderer-selected new popup target requires its Page reservation"
+        );
+        assert!(
+            self.resolved_target_page.is_none(),
+            "an existing popup target cannot also be selected as new"
+        );
+        assert!(
+            !disposition.carries_initial_name()
+                || (!self.target_name.is_empty()
+                    && !is_special_browsing_context_target(&self.target_name)),
+            "a fresh named popup requires an ordinary browsing-context name"
+        );
+        let admission = self
+            .pending_auxiliary_page
+            .expect("new popup target reservation")
+            .page_reservation()
+            .script_agent_admission();
+        assert!(
+            matches!(
+                (disposition, admission),
+                (
+                    RendererPopupNewTargetDisposition::Related,
+                    RendererScriptAgentAdmission::RelatedAuxiliaryPage { .. }
+                ) | (
+                    RendererPopupNewTargetDisposition::FreshUnnamed
+                        | RendererPopupNewTargetDisposition::FreshNamed,
+                    RendererScriptAgentAdmission::Fresh
+                )
+            ),
+            "popup group disposition must match its Page reservation admission"
+        );
+        assert!(
+            !disposition.is_fresh() || self.popup_id.is_none(),
+            "a Fresh popup Page cannot retain an opener-local lightweight owner"
+        );
+        self.new_target_disposition = Some(disposition);
         self
     }
 
@@ -191,7 +355,23 @@ impl RendererPendingPopupActivation {
     }
 
     pub fn url(&self) -> &str {
-        &self.url
+        self.request.url()
+    }
+
+    pub fn request_method(&self) -> &str {
+        self.request.request_method()
+    }
+
+    pub fn request_body(&self) -> Option<&[u8]> {
+        self.request.request_body()
+    }
+
+    pub fn request_headers(&self) -> &[(String, String)] {
+        self.request.request_headers()
+    }
+
+    pub fn browser_navigation_kind(&self) -> moli_fetch::BrowserNavigationRequestKind {
+        self.request.browser_navigation_kind()
     }
 
     pub fn target_name(&self) -> &str {
@@ -220,6 +400,14 @@ impl RendererPendingPopupActivation {
         self.pending_auxiliary_page
     }
 
+    pub fn resolved_target_page(&self) -> Option<RendererResolvedPopupTarget> {
+        self.resolved_target_page
+    }
+
+    pub fn new_target_disposition(&self) -> Option<RendererPopupNewTargetDisposition> {
+        self.new_target_disposition
+    }
+
     #[allow(clippy::type_complexity)]
     pub fn into_parts(
         self,
@@ -227,12 +415,14 @@ impl RendererPendingPopupActivation {
         RendererPopupActivationSource,
         RendererPopupDisposition,
         Option<u64>,
-        String,
+        RendererTopLevelNavigationRequest,
         String,
         Option<String>,
         Option<String>,
         Option<String>,
         Option<RendererPendingAuxiliaryPage>,
+        Option<RendererResolvedPopupTarget>,
+        Option<RendererPopupNewTargetDisposition>,
         Option<SharedWebStorageStore>,
         Option<moli_storage_key::MoliStorageKey>,
     ) {
@@ -250,12 +440,14 @@ impl RendererPendingPopupActivation {
             self.source,
             self.disposition,
             self.popup_id,
-            self.url,
+            *self.request,
             self.target_name,
             navigation_referrer,
             initial_document_referrer,
             document_referrer,
             self.pending_auxiliary_page,
+            self.resolved_target_page,
+            self.new_target_disposition,
             self.session_storage_store,
             self.initial_empty_document_storage_key,
         )
@@ -267,10 +459,12 @@ impl PartialEq for RendererPendingPopupActivation {
         self.source == other.source
             && self.disposition == other.disposition
             && self.popup_id == other.popup_id
-            && self.url == other.url
+            && self.request == other.request
             && self.target_name == other.target_name
             && self.referrers == other.referrers
             && self.pending_auxiliary_page == other.pending_auxiliary_page
+            && self.resolved_target_page == other.resolved_target_page
+            && self.new_target_disposition == other.new_target_disposition
             && match (&self.session_storage_store, &other.session_storage_store) {
                 (None, None) => true,
                 (Some(left), Some(right)) => Arc::ptr_eq(left, right),

@@ -1099,7 +1099,7 @@ impl RendererOwnerLocalStore {
             .ok_or_else(|| anyhow!("related auxiliary bootstrap lost its agent membership"))?;
         let auxiliary_page_reservation_allocator =
             RendererAuxiliaryPageReservationAllocator::new_for_owner(owner.clone(), page_id);
-        let page_script_environment = RendererPageScriptEnvironment::new(
+        let page_script_environment = RendererPageScriptEnvironment::new_related(
             page_id.as_u64(),
             auxiliary_page_reservation_allocator,
             host_handle.clone(),
@@ -1107,6 +1107,7 @@ impl RendererOwnerLocalStore {
             script_agent_page_membership,
             page_runtime_task_source,
             output_journal.clone(),
+            source_environment,
         )?;
         page_script_environment.install_staged_initial_main_window_proxy(staged_window_proxy)?;
         let bootstrap = bootstrap

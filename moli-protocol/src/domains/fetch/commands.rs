@@ -374,6 +374,9 @@ fn start_devtools_continue_intercepted_request_command(
         }
         if let Some(headers) = command.headers.clone() {
             pending.navigation.request_headers = headers;
+            pending
+                .navigation
+                .mark_request_headers_explicitly_overridden();
         }
         pending.request_cookie_report = page::navigation_cookie_access_report(
             conn,

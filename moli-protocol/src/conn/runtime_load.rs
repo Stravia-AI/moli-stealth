@@ -1145,6 +1145,7 @@ impl BackgroundNavigationLoadJob {
                     self.load_inputs.navigation_initiator_url.as_ref(),
                     self.load_inputs.browser_navigation_kind,
                     self.load_inputs.infer_navigation_referrer,
+                    self.load_inputs.navigation_referrer_policy.as_deref(),
                     &self.method,
                     &self.raw_url,
                     self.body,
@@ -1874,13 +1875,26 @@ impl CdpConnection {
         &self,
         navigation: &NavigationDispatchState,
     ) -> TargetNavigationLoadInputs {
-        apply_navigation_request_load_policy(
+        let mut load_inputs = apply_navigation_request_load_policy(
             self.navigation_load_inputs_for_session_owner(
                 navigation.navigate_session_id.as_deref(),
             ),
             navigation.request_load_policy,
-        )
-        .with_main_document_commit_seed(RendererMainDocumentCommitSeed::from_navigation(navigation))
+        );
+        if let Some(source) = navigation
+            .source_document_security
+            .renderer_navigation_source()
+        {
+            load_inputs = load_inputs.with_renderer_navigation_source(
+                source,
+                navigation
+                    .source_document_security
+                    .infers_renderer_navigation_referrer(),
+            );
+        }
+        load_inputs.with_main_document_commit_seed(RendererMainDocumentCommitSeed::from_navigation(
+            navigation,
+        ))
     }
 
     pub(crate) fn prepared_document_commit_configuration_for_session_owner(
@@ -2102,6 +2116,21 @@ impl CdpConnection {
         session_id: Option<&str>,
         initial_document_referrer: Option<&str>,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
+        self.start_initial_document_page_ensure_with_environment_for_session_owner(
+            session_id,
+            initial_document_referrer,
+            None,
+        )
+    }
+
+    /// Starts a fresh initial empty-Document build with creator-frozen realm
+    /// state installed before document-start scripts can observe the Window.
+    pub(crate) fn start_initial_document_page_ensure_with_environment_for_session_owner(
+        &mut self,
+        session_id: Option<&str>,
+        initial_document_referrer: Option<&str>,
+        initial_top_level_browsing_context_name: Option<&str>,
+    ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
         let runtime_slot = match self.runtime_session_owner_slot(session_id) {
             Ok(slot) => slot,
             Err(_) => return Ok(None),
@@ -2127,6 +2156,7 @@ impl CdpConnection {
         self.start_initial_empty_document_page_build_for_session_owner(
             session_id,
             initial_document_referrer,
+            initial_top_level_browsing_context_name,
         )
     }
 
@@ -2204,6 +2234,7 @@ impl CdpConnection {
         &mut self,
         session_id: Option<&str>,
         initial_document_referrer: Option<&str>,
+        initial_top_level_browsing_context_name: Option<&str>,
     ) -> Result<Option<PendingInitialDocumentPageBuild>, String> {
         let runtime_slot = match self.runtime_session_owner_slot(session_id) {
             Ok(slot) => slot,
@@ -2307,6 +2338,7 @@ impl CdpConnection {
                 top_level_storage_key,
                 None,
                 initial_document_referrer.map(str::to_owned),
+                initial_top_level_browsing_context_name.map(str::to_owned),
             )
             .map_err(|error| {
                 let message = format!("failed to start initial document page build: {error}");
@@ -2634,7 +2666,7 @@ impl CdpConnection {
             &navigation.request_method,
             navigation.requested_url.as_str(),
             navigation.clone_request_body_bytes(),
-            navigation.request_headers.clone(),
+            navigation.transport_request_headers(),
             body_progress_source,
         )
         .await
@@ -2782,7 +2814,7 @@ impl CdpConnection {
             method: navigation.request_method.clone(),
             raw_url: navigation.requested_url.as_str().to_owned(),
             body: navigation.clone_request_body_bytes(),
-            request_headers: navigation.request_headers.clone(),
+            request_headers: navigation.transport_request_headers(),
             body_progress_source,
             shared_resource_runtime,
         })
@@ -3519,34 +3551,36 @@ impl CdpConnection {
             .map_err(|error| format!("failed to fetch page `{raw_url}`: {error}"))
     }
 
-    pub(crate) async fn fetch_navigation_auth_raw_response_for_session_owner_async(
+    pub(crate) async fn fetch_navigation_auth_raw_response_for_navigation_async(
         &mut self,
-        session_id: Option<&str>,
-        request_load_policy: NavigationRequestLoadPolicy,
-        method: &str,
-        raw_url: &str,
-        body: Option<Vec<u8>>,
-        request_headers: Vec<(String, String)>,
+        navigation: &NavigationDispatchState,
         auth: SubresourceAuthCredentials,
     ) -> Result<NetworkFetchResult<RawResponse>, String> {
-        let load_inputs = apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(session_id),
-            request_load_policy,
-        );
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
+        let raw_url = navigation.requested_url.as_str();
         ensure_url_not_blocked_for_load_inputs(&load_inputs, raw_url)?;
         if load_inputs.network_offline {
             return Err("Network emulation offline".to_owned());
         }
 
-        let mut request = Request::new_bytes(method, raw_url, body, request_headers)
-            .map_err(|error| format!("failed to build request for `{raw_url}`: {error}"))?
-            .with_top_level_navigation_cookie_context()
-            .with_browser_navigation_kind(load_inputs.browser_navigation_kind);
+        let mut request = Request::new_bytes(
+            &navigation.request_method,
+            raw_url,
+            navigation.clone_request_body_bytes(),
+            navigation.transport_request_headers(),
+        )
+        .map_err(|error| format!("failed to build request for `{raw_url}`: {error}"))?
+        .with_top_level_navigation_cookie_context()
+        .with_browser_navigation_kind(load_inputs.browser_navigation_kind);
         if !load_inputs.infer_navigation_referrer {
             request = request.without_inferred_referrer();
         }
         if let Some(initiator_url) = load_inputs.navigation_initiator_url.as_ref() {
             request = request.with_initiator_url(initiator_url);
+        }
+        if load_inputs.navigation_referrer_policy.is_some() {
+            request = request
+                .with_referrer_policies(None, load_inputs.navigation_referrer_policy.clone());
         }
         request.set_auth(Some(auth.into()));
 
@@ -3579,26 +3613,18 @@ impl CdpConnection {
         .await
     }
 
-    pub(crate) async fn fetch_navigation_streaming_raw_response_for_session_owner_async(
+    pub(crate) async fn fetch_navigation_streaming_raw_response_for_navigation_async(
         &mut self,
-        session_id: Option<&str>,
-        request_load_policy: NavigationRequestLoadPolicy,
-        method: &str,
-        raw_url: &str,
-        body: Option<Vec<u8>>,
-        request_headers: Vec<(String, String)>,
+        navigation: &NavigationDispatchState,
         auth: Option<SubresourceAuthCredentials>,
     ) -> Result<NetworkFetchResult<StreamingRawResponse>, String> {
-        let load_inputs = apply_navigation_request_load_policy(
-            self.navigation_load_inputs_for_session_owner(session_id),
-            request_load_policy,
-        );
+        let load_inputs = self.navigation_load_inputs_for_navigation(navigation);
         self.fetch_navigation_streaming_raw_response_with_load_inputs_async(
             &load_inputs,
-            method,
-            raw_url,
-            body,
-            request_headers,
+            &navigation.request_method,
+            navigation.requested_url.as_str(),
+            navigation.clone_request_body_bytes(),
+            navigation.transport_request_headers(),
             auth,
         )
         .await
@@ -3627,6 +3653,10 @@ impl CdpConnection {
         }
         if let Some(initiator_url) = load_inputs.navigation_initiator_url.as_ref() {
             request = request.with_initiator_url(initiator_url);
+        }
+        if load_inputs.navigation_referrer_policy.is_some() {
+            request = request
+                .with_referrer_policies(None, load_inputs.navigation_referrer_policy.clone());
         }
         request.set_auth(auth.map(Into::into));
 

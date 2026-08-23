@@ -368,6 +368,8 @@ pub use self::page_surface::{
     RendererStyleSheetInventoryUpdate, RendererStyleSheetPayload, RendererSyntheticResponseBody,
     RendererTextSearchMatch, RendererTouchPoint, RendererWindowDocumentSource,
     RuntimeConsoleMessageSnapshot,
+    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
+    RendererTopLevelNavigationRequest, RendererTopLevelNavigationSource,
 };
 pub(crate) use self::page_surface::{
     RendererCommandTurnOutputRecorder, RendererDevToolsSessionOutputHost,

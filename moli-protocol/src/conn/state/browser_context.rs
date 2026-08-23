@@ -756,6 +756,25 @@ impl BrowserContext {
         })
     }
 
+    pub(crate) fn target_id_for_renderer_popup_target(
+        &self,
+        resolved_target: moli_core::page::RendererResolvedPopupTarget,
+    ) -> Option<String> {
+        let matches = |page: &moli_core::page::Page| {
+            page.renderer_owner_local_host_id() == resolved_target.owner_local_host_id()
+                && page.renderer_page_id() == resolved_target.page_id()
+        };
+        if self.loaded_page().is_some_and(matches) {
+            return self.target_id.clone();
+        }
+        self.background_targets.iter().find_map(|target| {
+            target
+                .loaded_page()
+                .is_some_and(matches)
+                .then(|| target.target_id().to_owned())
+        })
+    }
+
     pub(crate) fn moli_memory_diagnostics(&self) -> Value {
         let target_infos = self.devtools_target_infos();
         let loaded_document_page_count = self.loaded_document_page_count();

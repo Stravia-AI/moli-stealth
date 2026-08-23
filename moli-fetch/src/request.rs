@@ -510,6 +510,23 @@ impl Request {
         self
     }
 
+    /// Attaches the referrer-policy inputs consumed by the shared network
+    /// request path. Navigation requests use this without pretending that the
+    /// request is a subresource; the metadata container is shared because
+    /// redirects need one policy calculation regardless of resource kind.
+    pub fn with_referrer_policies(
+        mut self,
+        referrer_policy: Option<String>,
+        document_referrer_policy: Option<String>,
+    ) -> Self {
+        let metadata = self
+            .subresource_request_metadata
+            .get_or_insert_with(SubresourceRequestMetadata::default);
+        metadata.referrer_policy = referrer_policy;
+        metadata.document_referrer_policy = document_referrer_policy;
+        self
+    }
+
     pub fn with_resource_type(mut self, resource_type: RequestResourceType) -> Self {
         self.resource_type = resource_type;
         self

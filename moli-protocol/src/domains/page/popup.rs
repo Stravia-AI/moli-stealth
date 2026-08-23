@@ -91,12 +91,14 @@ pub(super) async fn emit_prepared(
             source,
             disposition,
             popup_id,
-            url,
+            request,
             target_name,
             navigation_referrer,
             initial_document_referrer,
             document_referrer,
             pending_auxiliary_page,
+            resolved_target_page,
+            new_target_disposition,
             session_storage_store,
             initial_empty_document_storage_key,
         ) = activation.into_parts();
@@ -111,7 +113,7 @@ pub(super) async fn emit_prepared(
         let creation = PopupTargetCreation::new(
             page_owner.browser_context_id().to_owned(),
             popup_id,
-            url,
+            request,
             target_name,
             opener,
             can_access_opener,
@@ -120,6 +122,8 @@ pub(super) async fn emit_prepared(
             initial_document_referrer,
             document_referrer,
             pending_auxiliary_page,
+            resolved_target_page,
+            new_target_disposition,
             session_storage_store,
             initial_empty_document_storage_key,
         );

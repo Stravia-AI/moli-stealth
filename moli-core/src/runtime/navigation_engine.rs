@@ -1024,6 +1024,7 @@ impl NavigationEngine {
         initiator_url: Option<&Url>,
         browser_navigation_kind: BrowserNavigationRequestKind,
         infer_referrer_from_initiator: bool,
+        document_referrer_policy: Option<&str>,
         method: &str,
         raw_url: &str,
         body: Option<Vec<u8>>,
@@ -1037,6 +1038,10 @@ impl NavigationEngine {
                 let mut request = request.with_browser_navigation_kind(browser_navigation_kind);
                 if !infer_referrer_from_initiator {
                     request = request.without_inferred_referrer();
+                }
+                if document_referrer_policy.is_some() {
+                    request = request
+                        .with_referrer_policies(None, document_referrer_policy.map(str::to_owned));
                 }
                 if let Some(initiator_url) = initiator_url {
                     request.with_initiator_url(initiator_url)
@@ -1084,6 +1089,7 @@ impl NavigationEngine {
         initiator_url: Option<&Url>,
         browser_navigation_kind: BrowserNavigationRequestKind,
         infer_referrer_from_initiator: bool,
+        document_referrer_policy: Option<&str>,
         method: &str,
         raw_url: &str,
         body: Option<String>,
@@ -1096,6 +1102,7 @@ impl NavigationEngine {
             initiator_url,
             browser_navigation_kind,
             infer_referrer_from_initiator,
+            document_referrer_policy,
             method,
             raw_url,
             body.map(String::into_bytes),
@@ -1113,6 +1120,7 @@ impl NavigationEngine {
         initiator_url: Option<&Url>,
         browser_navigation_kind: BrowserNavigationRequestKind,
         infer_referrer_from_initiator: bool,
+        document_referrer_policy: Option<&str>,
         method: &str,
         raw_url: &str,
         body: Option<Vec<u8>>,
@@ -1126,6 +1134,7 @@ impl NavigationEngine {
             initiator_url,
             browser_navigation_kind,
             infer_referrer_from_initiator,
+            document_referrer_policy,
             method,
             raw_url,
             body,
@@ -1551,6 +1560,7 @@ impl NavigationEngine {
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         main_document_commit: Option<RendererMainDocumentCommit>,
         initial_document_referrer: Option<String>,
+        initial_top_level_browsing_context_name: Option<String>,
     ) -> Result<PendingBuiltDocumentPage> {
         let loader = self.ensure_resource_request_client(cookie_store)?;
         loader.set_extra_http_headers(&extra_http_headers);
@@ -1592,6 +1602,7 @@ impl NavigationEngine {
                 moli_renderer_v8::RendererTopLevelNavigationDispatch::DelegateToBrowser,
                 main_document_commit,
                 initial_document_referrer,
+                initial_top_level_browsing_context_name,
             )?;
         Ok(PendingBuiltDocumentPage { pending })
     }
@@ -1653,6 +1664,7 @@ impl NavigationEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -1688,6 +1700,7 @@ impl NavigationEngine {
         top_level_storage_key: Option<moli_storage_key::MoliStorageKey>,
         main_document_commit: Option<RendererMainDocumentCommit>,
         initial_document_referrer: Option<String>,
+        initial_top_level_browsing_context_name: Option<String>,
     ) -> Result<PendingBuiltDocumentPage> {
         let (cookie_store, web_storage, indexed_db_manager, storage_bucket_store) =
             storage.into_parts();
@@ -1724,6 +1737,7 @@ impl NavigationEngine {
             top_level_storage_key,
             main_document_commit,
             initial_document_referrer,
+            initial_top_level_browsing_context_name,
         )
     }
 

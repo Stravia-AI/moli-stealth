@@ -34,6 +34,7 @@ pub use javascript_dialog::{
 };
 pub use popup_activation::{
     RendererPendingPopupActivation, RendererPopupActivationSource, RendererPopupDisposition,
+    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
 };
 pub use window_document_source::RendererWindowDocumentSource;
 
@@ -310,13 +311,135 @@ pub struct RendererDocumentSourcedTopLevelLocationNavigation {
     runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
 }
 
+/// Exact initiating Window/Document facts captured before top-level target
+/// selection hands the request to a possibly different Page owner.
+///
+/// The target Page remains the scheduler and loader authority. This value is
+/// causal input only: it prevents a child-initiated `_top` navigation from
+/// rediscovering the target root Document as its initiator after the handoff.
+/// Keeping the source URL and referrer policy (instead of one precomputed
+/// header) also lets redirects and DevTools URL overrides recompute referrer
+/// policy against their actual destination.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RendererTopLevelNavigationRequest {
+pub struct RendererTopLevelNavigationSource {
+    root_document: RendererDocumentLifecycleIdentity,
+    window: RendererWindowDocumentSource,
+    source_url: String,
+    referrer_policy: Option<String>,
+    suppress_referrer: bool,
+}
+
+impl RendererTopLevelNavigationSource {
+    pub fn new(
+        root_document: RendererDocumentLifecycleIdentity,
+        window: RendererWindowDocumentSource,
+        source_url: String,
+        referrer_policy: Option<String>,
+        suppress_referrer: bool,
+    ) -> Self {
+        Self {
+            root_document,
+            window,
+            source_url,
+            referrer_policy,
+            suppress_referrer,
+        }
+    }
+
+    pub fn root_document(&self) -> RendererDocumentLifecycleIdentity {
+        self.root_document
+    }
+
+    pub fn window(&self) -> &RendererWindowDocumentSource {
+        &self.window
+    }
+
+    pub fn source_url(&self) -> &str {
+        &self.source_url
+    }
+
+    pub fn referrer_policy(&self) -> Option<&str> {
+        self.referrer_policy.as_deref()
+    }
+
+    pub fn suppresses_referrer(&self) -> bool {
+        self.suppress_referrer
+    }
+}
+
+/// Exact request retained across renderer-to-browser top-level navigation
+/// handoff.
+///
+/// Auxiliary form targets and same-context form submissions use the same
+/// carrier. This prevents target selection from reducing a POST to its URL
+/// while method, body, Content-Type, and reload policy remain behind on the
+/// source Document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RendererTopLevelNavigationRequest {
     url: String,
     request_method: String,
     request_body: Option<Vec<u8>>,
     request_headers: Vec<(String, String)>,
     browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    source: Option<Box<RendererTopLevelNavigationSource>>,
+}
+
+impl RendererTopLevelNavigationRequest {
+    pub fn get(url: String) -> Self {
+        Self::new(
+            url,
+            "GET".to_owned(),
+            None,
+            Vec::new(),
+            moli_fetch::BrowserNavigationRequestKind::Navigate,
+        )
+    }
+
+    pub fn new(
+        url: String,
+        request_method: String,
+        request_body: Option<Vec<u8>>,
+        request_headers: Vec<(String, String)>,
+        browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
+    ) -> Self {
+        Self {
+            url,
+            request_method,
+            request_body,
+            request_headers,
+            browser_navigation_kind,
+            source: None,
+        }
+    }
+
+    pub fn with_source(mut self, source: RendererTopLevelNavigationSource) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    pub fn request_method(&self) -> &str {
+        &self.request_method
+    }
+
+    pub fn request_body(&self) -> Option<&[u8]> {
+        self.request_body.as_deref()
+    }
+
+    pub fn request_headers(&self) -> &[(String, String)] {
+        &self.request_headers
+    }
+
+    pub fn browser_navigation_kind(&self) -> moli_fetch::BrowserNavigationRequestKind {
+        self.browser_navigation_kind
+    }
+
+    pub fn source(&self) -> Option<&RendererTopLevelNavigationSource> {
+        self.source.as_deref()
+    }
 }
 
 impl RendererDocumentSourcedTopLevelLocationNavigation {
@@ -329,15 +452,11 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         url: String,
         runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
     ) -> Self {
-        Self::new_with_request_and_runtime_command_cause(
+        Self {
             source_document,
-            url,
-            "GET".to_owned(),
-            None,
-            Vec::new(),
-            moli_fetch::BrowserNavigationRequestKind::Navigate,
+            request: Box::new(RendererTopLevelNavigationRequest::get(url)),
             runtime_command_cause,
-        )
+        }
     }
 
     pub fn new_with_request_and_runtime_command_cause(
@@ -349,15 +468,34 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
         browser_navigation_kind: moli_fetch::BrowserNavigationRequestKind,
         runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
     ) -> Self {
-        Self {
+        Self::new_with_request_and_runtime_command_cause_from_request(
             source_document,
-            request: Box::new(RendererTopLevelNavigationRequest {
+            RendererTopLevelNavigationRequest::new(
                 url,
                 request_method,
                 request_body,
                 request_headers,
                 browser_navigation_kind,
-            }),
+            ),
+            runtime_command_cause,
+        )
+    }
+
+    pub fn new_with_request_and_runtime_command_cause_from_request(
+        source_document: RendererDocumentLifecycleIdentity,
+        request: RendererTopLevelNavigationRequest,
+        runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
+    ) -> Self {
+        if let Some(source) = request.source() {
+            assert_eq!(
+                source.root_document(),
+                source_document,
+                "top-level navigation request source must match its causal root Document"
+            );
+        }
+        Self {
+            source_document,
+            request: Box::new(request),
             runtime_command_cause,
         }
     }
@@ -384,6 +522,14 @@ impl RendererDocumentSourcedTopLevelLocationNavigation {
 
     pub fn browser_navigation_kind(&self) -> moli_fetch::BrowserNavigationRequestKind {
         self.request.browser_navigation_kind
+    }
+
+    pub fn request(&self) -> &RendererTopLevelNavigationRequest {
+        &self.request
+    }
+
+    pub fn source(&self) -> Option<&RendererTopLevelNavigationSource> {
+        self.request.source()
     }
 
     pub fn runtime_command_cause(&self) -> Option<&RendererRuntimeCommandCausalIdentity> {
@@ -1276,14 +1422,22 @@ impl RendererRuntimeInspectorMessageBatch {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RendererDomMutationEventBatch {
+    /// The producing Document's agent. A Page-scoped output stream can survive
+    /// Document replacement, so its original agent cannot identify this batch.
+    pub agent_token: RendererDevToolsAgentToken,
     pub session: DevToolsSessionKey,
     pub events: Vec<RendererDomMutationEvent>,
     renderer_agent_attachment_id: Option<RendererAgentAttachmentId>,
 }
 
 impl RendererDomMutationEventBatch {
-    pub fn new(session: DevToolsSessionKey, events: Vec<RendererDomMutationEvent>) -> Self {
+    pub fn new(
+        agent_token: RendererDevToolsAgentToken,
+        session: DevToolsSessionKey,
+        events: Vec<RendererDomMutationEvent>,
+    ) -> Self {
         Self {
+            agent_token,
             session,
             events,
             renderer_agent_attachment_id: None,

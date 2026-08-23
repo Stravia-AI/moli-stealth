@@ -120,7 +120,7 @@ use super::document::{
 use activation::navigate_form_target_browsing_context;
 pub(crate) use activation::{
     SpecialBrowsingContextTarget, navigate_existing_browsing_context_target,
-    navigate_named_iframe_target,
+    resolve_named_browsing_context_target_for_navigation,
 };
 pub(crate) use activation::{
     activate_handle_via_click, activate_handle_via_click_with_detail_and_modifiers,
@@ -131,10 +131,6 @@ pub(crate) use activation::{
     scroll_to_url_fragment_or_top, select_contenteditable_contents,
 };
 pub(super) use activation::{input_show_picker_callback, node_click_callback};
-use activation::{
-    queue_deferred_named_iframe_target_navigation_from_document,
-    queue_deferred_named_iframe_target_request,
-};
 pub(super) use anchors::{
     anchor_text_getter_function, anchor_text_setter_function, anchor_to_string_callback,
     area_to_string_callback,

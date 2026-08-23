@@ -2379,6 +2379,7 @@ pub(crate) async fn navigate_page_owned_top_level_location_background_events_asy
         out,
         session_id,
         navigation.url(),
+        navigation.source(),
         None,
         None,
         navigation.request_method(),
@@ -2402,6 +2403,7 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
         url,
         None,
         None,
+        None,
         "GET",
         None,
         &[],
@@ -2410,34 +2412,12 @@ pub(crate) async fn navigate_session_owner_from_renderer_background_events_async
     .await;
 }
 
-pub(crate) async fn navigate_session_owner_from_renderer_with_referrers_background_events_async(
+pub(crate) async fn navigate_session_owner_from_renderer_request_background_events_async(
     conn: &mut CdpConnection,
     out: &mut Vec<BackgroundProtocolEvent>,
     session_id: Option<&str>,
     url: &str,
-    referrer: Option<&str>,
-    document_referrer: Option<&str>,
-) {
-    navigate_session_owner_from_renderer_request_background_events_async(
-        conn,
-        out,
-        session_id,
-        url,
-        referrer,
-        document_referrer,
-        "GET",
-        None,
-        &[],
-        moli_fetch::BrowserNavigationRequestKind::Navigate,
-    )
-    .await;
-}
-
-async fn navigate_session_owner_from_renderer_request_background_events_async(
-    conn: &mut CdpConnection,
-    out: &mut Vec<BackgroundProtocolEvent>,
-    session_id: Option<&str>,
-    url: &str,
+    source: Option<&moli_core::page::RendererTopLevelNavigationSource>,
     referrer: Option<&str>,
     document_referrer: Option<&str>,
     request_method: &str,
@@ -2449,6 +2429,7 @@ async fn navigate_session_owner_from_renderer_request_background_events_async(
         conn,
         session_id,
         url,
+        source,
         referrer,
         document_referrer,
         request_method,

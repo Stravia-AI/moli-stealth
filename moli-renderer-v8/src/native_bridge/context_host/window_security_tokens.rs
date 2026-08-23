@@ -288,14 +288,13 @@ impl JsContextHost {
     }
 
     fn main_window_access_origin(&self) -> Option<WindowAccessOrigin> {
-        let serialized_origin = moli_url::origin_ascii_serialization(self.document_url());
-        if serialized_origin == "null" {
+        if self.main_document_serialized_origin == "null" {
             return Some(WindowAccessOrigin::opaque(
                 self.current_window_execution_context_owner(OwnerDispatchScope::Top)?,
             ));
         }
         WindowAccessOrigin::from_serialized_origin(
-            serialized_origin,
+            self.main_document_serialized_origin.clone(),
             self.document_domain_override.clone(),
         )
     }

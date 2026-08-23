@@ -69,7 +69,6 @@ impl PreparedProtocolOutputs {
     pub(in crate::domains::activity) async fn from_renderer_observation(
         conn: &mut CdpConnection,
         session_id: Option<&str>,
-        source_renderer_agent: moli_core::page::RendererDevToolsAgentToken,
         observation: &RendererProtocolObservation,
     ) -> Self {
         let mut prepared = Self::empty();
@@ -101,14 +100,12 @@ impl PreparedProtocolOutputs {
                 .append_to_output_sink(&mut prepared);
             }
             RendererProtocolObservation::DomMutations(batch) => {
-                crate::domains::dom::DomPreparedOutputs::
-                    from_renderer_dom_mutation_event_batches_for_stream(
-                        conn,
-                        session_id,
-                        source_renderer_agent,
-                        std::slice::from_ref(batch),
-                    )
-                    .append_to_output_sink(&mut prepared);
+                crate::domains::dom::DomPreparedOutputs::from_renderer_dom_mutation_event_batches(
+                    conn,
+                    session_id,
+                    std::slice::from_ref(batch),
+                )
+                .append_to_output_sink(&mut prepared);
             }
             RendererProtocolObservation::RuntimeInspector(batch) => {
                 let mut batches = conn.route_current_renderer_inspector_output_for_session_owner(

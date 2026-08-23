@@ -2285,6 +2285,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
     conn: &mut CdpConnection,
     session_id: Option<&str>,
     url: &str,
+    source: Option<&moli_core::page::RendererTopLevelNavigationSource>,
     referrer: Option<&str>,
     document_referrer: Option<&str>,
     request_method: &str,
@@ -2315,6 +2316,7 @@ pub(super) fn start_session_owner_navigation_from_renderer(
             None,
             session_id,
             url,
+            source,
             referrer,
             document_referrer,
             result_projection,
@@ -2910,6 +2912,7 @@ fn start_navigate_to_url_command_with_background_policy(
         command_id,
         command_session_id,
         url,
+        None,
         referrer,
         referrer,
         result_projection,
@@ -2938,6 +2941,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
     command_id: Option<u64>,
     command_session_id: Option<&str>,
     url: &str,
+    source: Option<&moli_core::page::RendererTopLevelNavigationSource>,
     referrer: Option<&str>,
     document_referrer: Option<&str>,
     result_projection: NavigationResultProjection,
@@ -2963,10 +2967,13 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
             error.to_string(),
         ));
     }
+    let request_has_explicit_referrer = request_headers
+        .iter()
+        .any(|(name, _)| name.eq_ignore_ascii_case("referer"));
     let mut navigation_preflight = conn.prepare_navigation_request_for_session_owner(
         command_session_id,
         &requested_url,
-        referrer,
+        if source.is_none() { referrer } else { None },
         url.starts_with("data:"),
     );
     let frame_id = navigation_preflight
@@ -2996,6 +3003,19 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         .as_ref()
         .map(|preflight| preflight.inherited_secure_context_type.clone())
         .unwrap_or_else(|| "Secure".to_owned());
+    let source_document_security = NavigationSourceDocumentSecurityContext::new(
+        inherited_security_origin,
+        inherited_secure_context_type,
+        document_referrer
+            .or(referrer)
+            .unwrap_or_default()
+            .to_owned(),
+    );
+    let source_document_security = match source {
+        Some(source) => source_document_security
+            .with_renderer_navigation_source(source.clone(), request_has_explicit_referrer),
+        None => source_document_security,
+    };
     let mut navigation_state = NavigationDispatchState {
         navigate_id: command_id,
         navigate_session_id: command_session_id.map(str::to_owned),
@@ -3014,14 +3034,7 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
         request_headers,
         request_load_policy,
         timestamp,
-        source_document_security: Box::new(NavigationSourceDocumentSecurityContext::new(
-            inherited_security_origin,
-            inherited_secure_context_type,
-            document_referrer
-                .or(referrer)
-                .unwrap_or_default()
-                .to_owned(),
-        )),
+        source_document_security: Box::new(source_document_security),
     };
     let mut pending_fetch_navigation = None;
 
@@ -3073,6 +3086,22 @@ fn start_navigate_to_url_command_with_background_policy_and_request(
                     .document_auth_required_blocked_intercepts
                     .clone(),
             });
+        }
+    }
+    if source.is_some() && !request_has_explicit_referrer {
+        navigation_state
+            .request_headers
+            .retain(|(name, _)| !name.eq_ignore_ascii_case("referer"));
+        if let Some(referrer) = navigation_state
+            .source_document_security
+            .source_policy_referrer_for(&requested_url)
+        {
+            navigation_state
+                .request_headers
+                .push(("Referer".to_owned(), referrer));
+        }
+        if let Some(pending) = pending_fetch_navigation.as_mut() {
+            pending.navigation = navigation_state.clone();
         }
     }
 

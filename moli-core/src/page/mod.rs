@@ -116,6 +116,7 @@ pub use moli_renderer_v8::{
     RendererPendingSameDocumentNavigation, RendererPendingTopLevelHistoryTraversal,
     RendererPendingWindowOpenEvent, RendererPerformanceMetricSnapshot,
     RendererPointerEventProperties, RendererPopupActivationSource, RendererPopupDisposition,
+    RendererPopupNewTargetDisposition, RendererResolvedPopupTarget,
     RendererResourceTextSearchOutcome, RendererRuntimeCommandOutput, RendererRuntimeHeapUsage,
     RendererRuntimeInspectorIoCommandClaim, RendererRuntimeInspectorIoCommandRoute,
     RendererRuntimeInspectorMainCommandCompletion, RendererRuntimeInspectorMainCommandRoute,
@@ -130,8 +131,9 @@ pub use moli_renderer_v8::{
     RendererServiceWorkerTargetInfo, RendererServiceWorkerVersionStatus,
     RendererSetDocumentContentResult, RendererSharedWorkerConsoleMessage,
     RendererSharedWorkerTargetEvent, RendererSharedWorkerTargetInfo, RendererSyntheticResponseBody,
-    RendererTextSearchMatch, RendererTouchPoint, RendererVisualStateToken,
-    RendererWindowDocumentSource, RuntimeConsoleMessageSnapshot,
+    RendererTextSearchMatch, RendererTopLevelNavigationRequest, RendererTopLevelNavigationSource,
+    RendererTouchPoint, RendererVisualStateToken, RendererWindowDocumentSource,
+    RuntimeConsoleMessageSnapshot,
 };
 pub use moli_renderer_v8::{
     RendererAppManifest, RendererAppManifestDisplayMode, RendererAppManifestError,

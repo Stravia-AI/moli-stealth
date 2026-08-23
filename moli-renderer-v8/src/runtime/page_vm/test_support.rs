@@ -647,6 +647,7 @@ fn minimal_test_page_vm_env_config() -> PageVmEnvConfig {
         root_frame_id: None,
         main_document_commit: None,
         initial_document_referrer: None,
+        initial_top_level_browsing_context_name: None,
         top_level_storage_key: None,
         document_start_scripts: Vec::new(),
         runtime_bindings: Vec::new(),

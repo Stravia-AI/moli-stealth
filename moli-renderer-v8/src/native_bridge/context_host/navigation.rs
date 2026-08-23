@@ -3,7 +3,8 @@ use crate::page_task_queue::RendererTopLevelNavigationHandoff;
 use crate::runtime::{
     RendererBrowserContextRuntime, RendererDocumentLifecycleIdentity,
     RendererDocumentLifecycleJournalHandle, RendererPendingTopLevelHistoryTraversal,
-    RendererRuntimeCommandCausalIdentity,
+    RendererRuntimeCommandCausalIdentity, RendererTopLevelNavigationRequest,
+    RendererTopLevelNavigationSource,
 };
 use crate::service_worker_runtime::{ServiceWorkerClientId, ServiceWorkerClientNavigateError};
 use moli_fetch::BrowserNavigationRequestKind;
@@ -53,6 +54,10 @@ pub(crate) struct PendingLocationNavigation {
     /// than guessing an origin after the fact. Protocol apply authorization is
     /// established separately by the target-local Page residence.
     pub(crate) source_document: Option<RendererDocumentLifecycleIdentity>,
+    /// Exact initiating Window/Document and its referrer-policy inputs. The
+    /// target Page owns this pending slot, but must not substitute its root
+    /// Document for these source-side facts.
+    pub(crate) navigation_source: Option<RendererTopLevelNavigationSource>,
     /// Exact Runtime command whose synchronous V8 dispatch requested this
     /// navigation. Later tasks on the same Page do not inherit the identity.
     pub(crate) runtime_command_cause: Option<RendererRuntimeCommandCausalIdentity>,
@@ -87,6 +92,13 @@ impl JsContextHost {
         cause: Option<RendererRuntimeCommandCausalIdentity>,
     ) -> Option<RendererRuntimeCommandCausalIdentity> {
         std::mem::replace(&mut self.active_runtime_command_cause, cause)
+    }
+
+    pub(crate) fn replace_active_top_level_navigation_source(
+        &mut self,
+        source: Option<RendererTopLevelNavigationSource>,
+    ) -> Option<RendererTopLevelNavigationSource> {
+        std::mem::replace(&mut self.active_top_level_navigation_source, source)
     }
 
     pub(crate) fn replace_active_inspector_dispatch(&mut self, active: bool) -> bool {
@@ -130,23 +142,51 @@ impl JsContextHost {
         entry_seed: Option<NavigationHistoryEntrySeed>,
         browser_navigation_kind: BrowserNavigationRequestKind,
     ) {
+        let request = RendererTopLevelNavigationRequest::new(
+            url.to_string(),
+            request_method,
+            request_body,
+            request_headers,
+            browser_navigation_kind,
+        );
+        self.record_pending_renderer_top_level_navigation_request(request, entry_seed);
+    }
+
+    pub(crate) fn record_pending_renderer_top_level_navigation_request(
+        &mut self,
+        mut request: RendererTopLevelNavigationRequest,
+        entry_seed: Option<NavigationHistoryEntrySeed>,
+    ) {
+        if let Some(source) = self.active_top_level_navigation_source.clone() {
+            request = request.with_source(source);
+        }
+        let Ok(url) = Url::parse(request.url()) else {
+            return;
+        };
         self.clear_pending_top_level_navigation();
         let handoff = self.top_level_navigation_handoff_tx.next_handoff();
         let reserved_service_worker_client =
             self.pending_reserved_service_worker_top_level_client_for_navigation(&url);
+        let navigation_source = request.source().cloned();
+        let source_document = navigation_source
+            .as_ref()
+            .map(RendererTopLevelNavigationSource::root_document)
+            .or_else(|| {
+                self.root_document_lifecycle
+                    .as_ref()
+                    .map(RendererDocumentLifecycleJournalHandle::identity)
+            });
         self.pending_top_level_navigation = Some(PendingTopLevelNavigation::Location(Box::new(
             PendingLocationNavigation {
                 handoff,
-                source_document: self
-                    .root_document_lifecycle
-                    .as_ref()
-                    .map(RendererDocumentLifecycleJournalHandle::identity),
+                source_document,
+                navigation_source,
                 runtime_command_cause: self.active_runtime_command_cause.clone(),
                 url,
-                request_method,
-                request_body,
-                request_headers,
-                browser_navigation_kind,
+                request_method: request.request_method().to_owned(),
+                request_body: request.request_body().map(ToOwned::to_owned),
+                request_headers: request.request_headers().to_vec(),
+                browser_navigation_kind: request.browser_navigation_kind(),
                 entry_seed,
                 reserved_service_worker_client,
                 service_worker_client_navigate: None,
@@ -171,6 +211,7 @@ impl JsContextHost {
                     .root_document_lifecycle
                     .as_ref()
                     .map(RendererDocumentLifecycleJournalHandle::identity),
+                navigation_source: None,
                 runtime_command_cause: None,
                 url,
                 request_method: "GET".to_owned(),

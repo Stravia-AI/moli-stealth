@@ -181,6 +181,7 @@ pub(crate) struct TargetNavigationLoadInputs {
     pub(crate) http_no_proxy_override: Option<String>,
     pub(crate) tls_verify_host_override: Option<bool>,
     pub(crate) navigation_initiator_url: Option<Url>,
+    pub(crate) navigation_referrer_policy: Option<String>,
     pub(crate) browser_navigation_kind: BrowserNavigationRequestKind,
     pub(crate) infer_navigation_referrer: bool,
     pub(crate) document_start_scripts: Vec<DocumentStartScript>,
@@ -214,6 +215,19 @@ impl TargetNavigationLoadInputs {
         seed: RendererMainDocumentCommitSeed,
     ) -> Self {
         self.main_document_commit_seed = Some(seed);
+        self
+    }
+
+    pub(crate) fn with_renderer_navigation_source(
+        mut self,
+        source: &moli_core::page::RendererTopLevelNavigationSource,
+        infer_referrer: bool,
+    ) -> Self {
+        if let Ok(source_url) = Url::parse(source.source_url()) {
+            self.navigation_initiator_url = Some(source_url);
+        }
+        self.navigation_referrer_policy = source.referrer_policy().map(str::to_owned);
+        self.infer_navigation_referrer = infer_referrer;
         self
     }
 
@@ -283,6 +297,7 @@ impl TargetNavigationLoadInputs {
                 browser_context.target_url(),
                 browser_context.loaded_page(),
             ),
+            navigation_referrer_policy: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
             infer_navigation_referrer: true,
             document_start_scripts: browser_context.document_start_script_descriptors(),
@@ -346,6 +361,7 @@ impl TargetNavigationLoadInputs {
             http_no_proxy_override: None,
             tls_verify_host_override: None,
             navigation_initiator_url: None,
+            navigation_referrer_policy: None,
             browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
             infer_navigation_referrer: true,
             document_start_scripts: Vec::new(),
@@ -890,6 +906,7 @@ impl<'a> TargetSessionOwnerRef<'a> {
                         target.target_url(),
                         target.loaded_page(),
                     ),
+                    navigation_referrer_policy: None,
                     browser_navigation_kind: BrowserNavigationRequestKind::Navigate,
                     infer_navigation_referrer: true,
                     document_start_scripts,

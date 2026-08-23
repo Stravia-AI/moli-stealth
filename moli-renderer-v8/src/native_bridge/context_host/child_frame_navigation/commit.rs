@@ -422,7 +422,7 @@ impl JsContextHost {
             .get_mut(&handle)
             .is_some_and(|entry| entry.take_pending_top_level_history_length_increment());
         self.clear_child_browsing_context_pending_navigation(handle);
-        self.clear_pending_form_submission_child_target(handle);
+        self.clear_pending_form_submission_child_target(handle, navigation_load);
         let commit_result = self.commit_child_document_bootstrap_or_start_load(
             scope,
             handle,
@@ -511,7 +511,7 @@ impl JsContextHost {
         entry.clear_pending_navigation();
         entry.clear_pending_top_level_history_length_increment();
         entry.restore_navigation_entry_seed_from_committed();
-        self.clear_pending_form_submission_child_target(handle);
+        self.clear_pending_form_submission_child_target(handle, navigation_load);
         self.reject_replaced_service_worker_child_client_navigation(
             handle,
             "Cannot navigate to URL.".to_owned(),

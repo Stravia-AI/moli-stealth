@@ -1170,6 +1170,7 @@ impl PageVm {
         PageVmEnvConfig {
             main_document_commit: None,
             initial_document_referrer: None,
+            initial_top_level_browsing_context_name: None,
             web_storage: self.vm().web_storage_handles(),
             document_start_scripts: self.document_start_scripts.clone(),
             runtime_bindings: self.runtime_bindings.clone(),

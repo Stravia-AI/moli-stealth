@@ -2291,9 +2291,14 @@ async fn parser_tail_dom_mutations_precede_the_dcl_binding_refresh() {
     let handler_release = release_script.clone();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    // Make the held request originate from an already executed parser script.
+    // A directly discoverable external script can be requested before its
+    // element has reached the live tree, so observing that request alone is
+    // not a deterministic parser-position gate under a loaded nextest run.
     let page_html = format!(
-        "<!doctype html><html><head><script src='http://{addr}/held.js'></script></head>\
-         <body id='late-body'><main>ready</main></body></html>"
+        r#"<!doctype html><html><head><script>
+        document.write('<script src="http://{addr}/held.js"><\/script>');
+        </script></head><body id="late-body"><main>ready</main></body></html>"#
     );
     let server = tokio::spawn(async move {
         let page = page_html.clone();
@@ -2388,6 +2393,11 @@ async fn parser_tail_dom_mutations_precede_the_dcl_binding_refresh() {
                 "the held parser must expose the same incomplete pre-BODY snapshot as Chromium: \
                  {early_root:?}"
             );
+            assert!(
+                find_cdp_node_by_local_name(&early_root, "head").is_some(),
+                "the held request must prove the parser reached the document.write script: \
+                 {early_root:?}"
+            );
             let early_root_node_id = early_root["nodeId"]
                 .as_u64()
                 .expect("early document frontend node id");
@@ -2431,7 +2441,12 @@ async fn parser_tail_dom_mutations_precede_the_dcl_binding_refresh() {
                     message["method"] == json!("DOM.childNodeInserted")
                         && message["params"]["node"]["localName"] == json!("body")
                 })
-                .unwrap_or_else(|| panic!("missing parser-tail BODY insertion: {completed:?}"));
+                .unwrap_or_else(|| {
+                    panic!(
+                        "missing parser-tail BODY insertion: early_root={early_root:?}; \
+                         completed={completed:?}"
+                    )
+                });
             let document_updated_indices = completed
                 .iter()
                 .enumerate()
@@ -2861,6 +2876,415 @@ async fn renderer_top_level_form_post_preserves_request_through_document_commit(
     );
 
     server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn child_form_top_navigation_keeps_source_referrer_across_redirect() {
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let final_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let final_addr = final_listener.local_addr().unwrap();
+    let final_tx = request_tx.clone();
+    let final_server = tokio::spawn(async move {
+        axum::serve(
+            final_listener,
+            axum::Router::new().route(
+                "/final",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let final_tx = final_tx.clone();
+                    async move {
+                        let referer = headers
+                            .get(axum::http::header::REFERER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        final_tx.send(("final", referer)).unwrap();
+                        (
+                            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                            "<!doctype html><title>final</title><main>redirected</main>",
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = source_listener.local_addr().unwrap();
+    let child_url = format!("http://{source_addr}/frames/initiator?token=child");
+    let final_url = format!("http://{final_addr}/final");
+    let redirect_tx = request_tx.clone();
+    let redirect_destination = final_url.clone();
+    let source_server = tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route(
+                "/source",
+                axum::routing::get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                        "<!doctype html><iframe id=initiator src='/frames/initiator?token=child'></iframe>",
+                    )
+                }),
+            )
+            .route(
+                "/frames/initiator",
+                axum::routing::get(|| async {
+                    (
+                        [
+                            (axum::http::header::CONTENT_TYPE.as_str(), "text/html"),
+                            ("referrer-policy", "unsafe-url"),
+                        ],
+                        "<!doctype html><title>child initiator</title><body></body>",
+                    )
+                }),
+            )
+            .route(
+                "/redirect",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let redirect_tx = redirect_tx.clone();
+                    let redirect_destination = redirect_destination.clone();
+                    async move {
+                        let referer = headers
+                            .get(axum::http::header::REFERER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        redirect_tx.send(("redirect", referer)).unwrap();
+                        (
+                            axum::http::StatusCode::FOUND,
+                            [(axum::http::header::LOCATION.as_str(), redirect_destination)],
+                            "redirect",
+                        )
+                    }
+                }),
+            );
+        axum::serve(source_listener, app).await.unwrap();
+    });
+
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-CHILD-TOP-REFERRER",
+        "TID-CHILD-TOP-REFERRER",
+        "SID-CHILD-TOP-REFERRER",
+        "about:blank",
+    );
+    ctx.process_and_wait_for_response_async(json!({
+        "id": 20_210,
+        "method": "Page.navigate",
+        "sessionId": "SID-CHILD-TOP-REFERRER",
+        "params": { "url": format!("http://{source_addr}/source") }
+    }))
+    .await;
+    let source_navigation = take_response_by_id(&mut ctx, 20_210);
+    let source_loader_id = source_navigation["result"]["loaderId"]
+        .as_str()
+        .expect("source navigation should return a loader id")
+        .to_owned();
+    wait_until_renderer_document_load(
+        &mut ctx,
+        Some("SID-CHILD-TOP-REFERRER"),
+        "TID-CHILD-TOP-REFERRER",
+        &source_loader_id,
+    )
+    .await;
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 20_211,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-CHILD-TOP-REFERRER",
+        "params": {
+            "expression": r#"
+(() => {
+  const child = document.getElementById('initiator').contentWindow;
+  return child.eval(`
+    (() => {
+      const form = document.createElement('form');
+      form.action = '/redirect';
+      form.target = '_top';
+      document.body.appendChild(form);
+      form.submit();
+      return location.href;
+    })()
+  `);
+})()
+"#,
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 20_211)["result"]["result"]["value"],
+        json!(child_url)
+    );
+
+    let redirect_referer =
+        tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
+            .await
+            .expect("child-source top navigation should reach the redirect endpoint")
+            .expect("redirect request observation channel should remain open");
+    let final_referer = tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
+        .await
+        .expect("redirected child-source navigation should reach its final endpoint")
+        .expect("final request observation channel should remain open");
+    assert_eq!(redirect_referer, ("redirect", child_url.clone()));
+    assert_eq!(final_referer, ("final", child_url.clone()));
+
+    wait_until_messages(
+        &mut ctx,
+        Some("SID-CHILD-TOP-REFERRER"),
+        "redirected child-source top-level Document load",
+        |messages| {
+            let committed = messages.iter().any(|message| {
+                message["method"] == json!("Page.frameNavigated")
+                    && message["params"]["frame"]["url"] == json!(final_url)
+            });
+            committed
+                && messages
+                    .iter()
+                    .any(|message| message["method"] == json!("Page.loadEventFired"))
+        },
+    )
+    .await;
+    ctx.process_async(json!({
+        "id": 20_212,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-CHILD-TOP-REFERRER",
+        "params": {
+            "expression": "document.referrer",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 20_212)["result"]["result"]["value"],
+        json!(child_url)
+    );
+
+    source_server.abort();
+    final_server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn child_form_top_navigation_recomputes_source_referrer_after_fetch_url_override() {
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let override_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let override_addr = override_listener.local_addr().unwrap();
+    let override_server = tokio::spawn(async move {
+        axum::serve(
+            override_listener,
+            axum::Router::new().route(
+                "/override",
+                axum::routing::get(move |headers: axum::http::HeaderMap| {
+                    let request_tx = request_tx.clone();
+                    async move {
+                        let referer = headers
+                            .get(axum::http::header::REFERER)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_owned();
+                        request_tx.send(referer).unwrap();
+                        (
+                            [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                            "<!doctype html><title>override</title><main>overridden</main>",
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let source_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let source_addr = source_listener.local_addr().unwrap();
+    let child_url = format!("http://{source_addr}/frames/initiator?token=fetch-child");
+    let source_server = tokio::spawn(async move {
+        let app = axum::Router::new()
+            .route(
+                "/source",
+                axum::routing::get(|| async {
+                    (
+                        [(axum::http::header::CONTENT_TYPE.as_str(), "text/html")],
+                        "<!doctype html><iframe id=initiator src='/frames/initiator?token=fetch-child'></iframe>",
+                    )
+                }),
+            )
+            .route(
+                "/frames/initiator",
+                axum::routing::get(|| async {
+                    (
+                        [
+                            (axum::http::header::CONTENT_TYPE.as_str(), "text/html"),
+                            ("referrer-policy", "unsafe-url"),
+                        ],
+                        "<!doctype html><title>fetch child initiator</title><body></body>",
+                    )
+                }),
+            )
+            .route(
+                "/original",
+                axum::routing::get(|| async {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        "Fetch URL override was not applied",
+                    )
+                }),
+            );
+        axum::serve(source_listener, app).await.unwrap();
+    });
+
+    let mut ctx = TestContext::new();
+    load_bc_with_session(
+        &mut ctx,
+        "BID-CHILD-TOP-FETCH-REFERRER",
+        "TID-CHILD-TOP-FETCH-REFERRER",
+        "SID-CHILD-TOP-FETCH-REFERRER",
+        "about:blank",
+    );
+    ctx.process_and_wait_for_response_async(json!({
+        "id": 20_220,
+        "method": "Page.navigate",
+        "sessionId": "SID-CHILD-TOP-FETCH-REFERRER",
+        "params": { "url": format!("http://{source_addr}/source") }
+    }))
+    .await;
+    let source_navigation = take_response_by_id(&mut ctx, 20_220);
+    let source_loader_id = source_navigation["result"]["loaderId"]
+        .as_str()
+        .expect("source navigation should return a loader id")
+        .to_owned();
+    wait_until_renderer_document_load(
+        &mut ctx,
+        Some("SID-CHILD-TOP-FETCH-REFERRER"),
+        "TID-CHILD-TOP-FETCH-REFERRER",
+        &source_loader_id,
+    )
+    .await;
+
+    ctx.process_async(json!({
+        "id": 20_221,
+        "method": "Fetch.enable",
+        "sessionId": "SID-CHILD-TOP-FETCH-REFERRER",
+        "params": {
+            "patterns": [{
+                "urlPattern": "*",
+                "resourceType": "Document",
+                "requestStage": "Request"
+            }]
+        }
+    }))
+    .await;
+    take_response_by_id(&mut ctx, 20_221);
+    ctx.sent.clear();
+
+    ctx.process_async(json!({
+        "id": 20_222,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-CHILD-TOP-FETCH-REFERRER",
+        "params": {
+            "expression": r#"
+(() => {
+  const child = document.getElementById('initiator').contentWindow;
+  return child.eval(`
+    (() => {
+      const form = document.createElement('form');
+      form.action = '/original';
+      form.target = '_top';
+      document.body.appendChild(form);
+      form.submit();
+      return location.href;
+    })()
+  `);
+})()
+"#,
+            "returnByValue": true
+        }
+    }))
+    .await;
+    assert_eq!(
+        take_response_by_id(&mut ctx, 20_222)["result"]["result"]["value"],
+        json!(child_url)
+    );
+    wait_until_message(
+        &mut ctx,
+        Some("SID-CHILD-TOP-FETCH-REFERRER"),
+        "child-source top-level Fetch request pause",
+        |message| message["method"] == json!("Fetch.requestPaused"),
+    )
+    .await;
+    let paused_index = ctx
+        .sent
+        .iter()
+        .position(|message| message["method"] == json!("Fetch.requestPaused"))
+        .expect("renderer navigation should pause at the Fetch request stage");
+    let paused = ctx.sent.remove(paused_index);
+    let paused_referrer = paused["params"]["request"]["headers"]["Referer"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let request_id = paused["params"]["requestId"]
+        .as_str()
+        .expect("Fetch pause should expose a request id")
+        .to_owned();
+
+    let override_url = format!("http://{override_addr}/override");
+    ctx.process_async(json!({
+        "id": 20_223,
+        "method": "Fetch.continueRequest",
+        "sessionId": "SID-CHILD-TOP-FETCH-REFERRER",
+        "params": {
+            "requestId": request_id,
+            "url": override_url
+        }
+    }))
+    .await;
+    take_response_by_id(&mut ctx, 20_223);
+
+    let transport_referrer =
+        tokio::time::timeout(std::time::Duration::from_secs(5), request_rx.recv())
+            .await
+            .expect("Fetch-overridden child-source navigation should reach the server")
+            .expect("override request observation channel should remain open");
+    wait_until_messages(
+        &mut ctx,
+        Some("SID-CHILD-TOP-FETCH-REFERRER"),
+        "Fetch-overridden child-source top-level Document load",
+        |messages| {
+            let committed = messages.iter().any(|message| {
+                message["method"] == json!("Page.frameNavigated")
+                    && message["params"]["frame"]["url"] == json!(override_url)
+            });
+            committed
+                && messages
+                    .iter()
+                    .any(|message| message["method"] == json!("Page.loadEventFired"))
+        },
+    )
+    .await;
+    ctx.process_async(json!({
+        "id": 20_224,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-CHILD-TOP-FETCH-REFERRER",
+        "params": {
+            "expression": "document.referrer",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let committed_referrer = take_response_by_id(&mut ctx, 20_224)["result"]["result"]["value"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+
+    assert_eq!(paused_referrer, child_url);
+    assert_eq!(transport_referrer, child_url);
+    assert_eq!(committed_referrer, child_url);
+
+    source_server.abort();
+    override_server.abort();
 }
 
 #[tokio::test(flavor = "multi_thread")]

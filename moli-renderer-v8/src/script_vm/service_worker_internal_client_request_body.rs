@@ -254,6 +254,7 @@ impl ScriptVm {
                     "_blank",
                     &url,
                     None,
+                    false,
                     creator_base_url.clone(),
                     crate::document_runtime::DocumentPolicyContainer::default(),
                 )
@@ -337,6 +338,7 @@ impl ScriptVm {
                     "_blank",
                     &url,
                     None,
+                    false,
                     creator_base_url.clone(),
                     crate::document_runtime::DocumentPolicyContainer::default(),
                 )

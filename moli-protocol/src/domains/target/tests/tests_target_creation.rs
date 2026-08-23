@@ -2307,6 +2307,975 @@ async fn window_open_named_target_reuses_existing_popup_target() {
                 browser_context.target_url(),
                 "data:text/html,second-popup"
             );
+
+            ctx.process_async(json!({
+                "id": 151,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 151)["result"]["sessionId"]
+                .as_str()
+                .expect("reused named popup session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 152,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${window.name}|${window.opener !== null}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                152,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "reportWindow|true"
+                    }
+                }),
+                Some(&popup_session_id),
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn window_open_named_target_reuse_is_owned_by_the_renderer_page_group() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-group-name",
+                "TID-opener-group-name",
+                "<main>popup group opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15001,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { const popup = window.open('about:blank', 'reportWindow'); popup.document.body.dataset.owner = 'renderer-page'; globalThis.__namedPopup = popup; return `${popup.name}|${popup.document.body.dataset.owner}`; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15001,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "reportWindow|renderer-page"
+                    }
+                }),
+                None,
+            );
+            let first_messages = ctx.take_all();
+            let target_id = first_messages
+                .iter()
+                .find(|message| message["method"] == json!("Target.targetCreated"))
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .expect("first named popup target")
+                .to_owned();
+
+            ctx.process_async(json!({
+                "id": 15002,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id }
+            }))
+            .await;
+            let popup_session_id = take_response_by_id(&mut ctx, 15002)["result"]["sessionId"]
+                .as_str()
+                .expect("named popup session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 15003,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${document.body.dataset.owner}|${window.name}|${window.opener !== null}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15003,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "renderer-page|reportWindow|true"
+                    }
+                }),
+                Some(&popup_session_id),
+            );
+
+            ctx.process_async(json!({
+                "id": 150031,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "window.name = 'renamedReportWindow'",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                150031,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "renamedReportWindow"
+                    }
+                }),
+                Some(&popup_session_id),
+            );
+
+            // The browser-side map is only a protocol projection. Renderer
+            // target selection and dynamic window.name updates must carry the
+            // exact already-live Page and remain correct if that projection is
+            // stale or absent.
+            ctx.conn
+                .browser_context
+                .as_mut()
+                .expect("browser context")
+                .target_window_names
+                .clear();
+            ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 15004,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "window.open('about:blank#renderer-group-reuse', 'renamedReportWindow', 'noopener') === null",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15004,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let reuse_messages = ctx.take_all();
+            assert!(
+                !reuse_messages
+                    .iter()
+                    .any(|message| message["method"] == json!("Target.targetCreated")),
+                "renderer-resolved named reuse must not depend on the protocol name projection: {reuse_messages:?}"
+            );
+            ctx.wait_until_scheduler_state("renderer-group named target reuse", |conn| {
+                conn.browser_context_by_id("BID-popup-group-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .is_some_and(|target| target.target_url() == "about:blank#renderer-group-reuse")
+            })
+            .await;
+
+            ctx.process_async(json!({
+                "id": 15005,
+                "sessionId": popup_session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${document.body.dataset.owner}|${window.opener !== null}|${window.name}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15005,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "renderer-page|true|renamedReportWindow"
+                    }
+                }),
+                Some(&popup_session_id),
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_suppress_opener_window_open_creates_distinct_fresh_groups_with_live_names() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-fresh-group-name",
+                "TID-opener-fresh-group-name",
+                "<main>fresh group opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15011,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => [window.open('about:blank#fresh-one', 'isolatedPopupName', 'noopener') === null, window.open('about:blank#fresh-two', 'isolatedPopupName', 'noreferrer') === null].join('|'))()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15011,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "true|true"
+                    }
+                }),
+                None,
+            );
+            let creation_messages = ctx.take_all();
+            let target_ids = creation_messages
+                .iter()
+                .filter(|message| message["method"] == json!("Target.targetCreated"))
+                .filter_map(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                target_ids.len(),
+                2,
+                "same-name suppress-opener calls must create two fresh targets: {creation_messages:?}"
+            );
+            assert_ne!(target_ids[0], target_ids[1]);
+            assert_eq!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-fresh-group-name")
+                    .and_then(|browser_context| {
+                        browser_context.target_id_for_window_name("isolatedPopupName")
+                    }),
+                None,
+                "a browser-context-wide name projection must not expose a fresh-group target"
+            );
+
+            let mut sessions = Vec::new();
+            for (index, target_id) in target_ids.iter().enumerate() {
+                let attach_id = 15012 + index as u64;
+                ctx.process_async(json!({
+                    "id": attach_id,
+                    "method": "Target.attachToTarget",
+                    "params": { "targetId": target_id }
+                }))
+                .await;
+                let session_id = take_response_by_id(&mut ctx, attach_id)["result"]["sessionId"]
+                    .as_str()
+                    .expect("fresh named popup session id")
+                    .to_owned();
+                let evaluate_id = 15014 + index as u64;
+                ctx.process_async(json!({
+                    "id": evaluate_id,
+                    "sessionId": session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "`${window.name}|${window.opener === null}`",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    evaluate_id,
+                    json!({
+                        "result": {
+                            "type": "string",
+                            "value": "isolatedPopupName|true"
+                        }
+                    }),
+                    Some(&session_id),
+                );
+                sessions.push(session_id);
+            }
+
+            ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 15016,
+                "sessionId": sessions[0],
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "window.open('about:blank#fresh-self', 'isolatedPopupName') === window",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15016,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                Some(&sessions[0]),
+            );
+            let self_reuse_messages = ctx.take_all();
+            assert!(
+                !self_reuse_messages
+                    .iter()
+                    .any(|message| message["method"] == json!("Target.targetCreated")),
+                "a fresh target must resolve its own live name inside its private group: {self_reuse_messages:?}"
+            );
+            ctx.wait_until_scheduler_state("fresh-group source-name self reuse", |conn| {
+                conn.browser_context_by_id("BID-popup-fresh-group-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_ids[0]))
+                    .is_some_and(|target| target.target_url() == "about:blank#fresh-self")
+            })
+            .await;
+            assert!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-fresh-group-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_ids[1]))
+                    .is_some_and(|target| target.target_url() == "about:blank#fresh-two"),
+                "the same-named Page in another fresh group must remain independent"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_opener_hyperlink_creation_and_reuse_are_owned_by_renderer_group() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-related-hyperlink-name",
+                "TID-opener-related-hyperlink-name",
+                "<main>related hyperlink opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15101,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { const click = hash => { const a = document.createElement('a'); a.href = `about:blank#${hash}`; a.target = 'relatedLinkName'; a.rel = 'opener'; document.body.append(a); a.click(); }; click('related-one'); click('related-two'); return true; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15101,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let creation_messages = ctx.take_all();
+            let target_ids = creation_messages
+                .iter()
+                .filter(|message| message["method"] == json!("Target.targetCreated"))
+                .filter_map(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                target_ids.len(),
+                1,
+                "same-command related hyperlink reuse must create one target: {creation_messages:?}"
+            );
+            let target_id = target_ids[0].clone();
+            ctx.wait_until_scheduler_state("related hyperlink second navigation", |conn| {
+                conn.browser_context_by_id("BID-popup-related-hyperlink-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .is_some_and(|target| target.target_url() == "about:blank#related-two")
+            })
+            .await;
+
+            ctx.process_async(json!({
+                "id": 15102,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id }
+            }))
+            .await;
+            let session_id = take_response_by_id(&mut ctx, 15102)["result"]["sessionId"]
+                .as_str()
+                .expect("related hyperlink popup session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 15103,
+                "sessionId": session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${window.name}|${window.opener !== null}|${location.hash}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15103,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "relatedLinkName|true|#related-two"
+                    }
+                }),
+                Some(&session_id),
+            );
+
+            ctx.conn
+                .browser_context_by_id_mut("BID-popup-related-hyperlink-name")
+                .expect("browser context")
+                .target_window_names
+                .clear();
+            ctx.sent.clear();
+            ctx.process_async(json!({
+                "id": 15104,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { const a = document.createElement('a'); a.href = 'about:blank#related-noreferrer'; a.target = 'relatedLinkName'; a.rel = 'noreferrer'; document.body.append(a); a.click(); return true; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15104,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let reuse_messages = ctx.take_all();
+            assert!(
+                !reuse_messages
+                    .iter()
+                    .any(|message| message["method"] == json!("Target.targetCreated")),
+                "renderer related lookup must not depend on the protocol name projection: {reuse_messages:?}"
+            );
+            ctx.wait_until_scheduler_state("related noreferrer hyperlink reuse", |conn| {
+                conn.browser_context_by_id("BID-popup-related-hyperlink-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .is_some_and(|target| target.target_url() == "about:blank#related-noreferrer")
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 15105,
+                "sessionId": session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${window.name}|${window.opener !== null}|${location.hash}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15105,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "relatedLinkName|true|#related-noreferrer"
+                    }
+                }),
+                Some(&session_id),
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_form_post_reuses_renderer_group_target_and_preserves_exact_request() {
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let submit_tx = request_tx.clone();
+        axum::serve(
+            listener,
+            Router::new().route(
+                "/submit",
+                axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                    let submit_tx = submit_tx.clone();
+                    async move {
+                        let content_type = headers
+                            .get(CONTENT_TYPE)
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let referer = headers
+                            .get("referer")
+                            .and_then(|value| value.to_str().ok())
+                            .map(str::to_owned);
+                        let _ = submit_tx.send((content_type, referer, body.to_vec()));
+                        (
+                            [(CONTENT_TYPE.as_str(), "text/html")],
+                            "<!doctype html><main data-owner=form-post>related form POST</main>",
+                        )
+                    }
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-related-form-name",
+                "TID-opener-related-form-name",
+                "<main>related form opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15121,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { const form = document.createElement('form'); form.action = 'about:blank#related-form-first'; form.target = 'relatedFormName'; form.rel = 'opener'; document.body.append(form); form.submit(); return true; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15121,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let creation_messages = ctx.take_all();
+            let target_id = creation_messages
+                .iter()
+                .find(|message| message["method"] == json!("Target.targetCreated"))
+                .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .unwrap_or_else(|| {
+                    panic!("named form must create one related target: {creation_messages:?}")
+                })
+                .to_owned();
+            assert_eq!(
+                creation_messages
+                    .iter()
+                    .filter(|message| message["method"] == json!("Target.targetCreated"))
+                    .count(),
+                1,
+                "one named form submission must create one target: {creation_messages:?}"
+            );
+            ctx.wait_until_scheduler_state("related form initial navigation", |conn| {
+                conn.browser_context_by_id("BID-popup-related-form-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| {
+                        page.final_url().as_str() == "about:blank?#related-form-first"
+                    })
+            })
+            .await;
+
+            ctx.process_async(json!({
+                "id": 15122,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id }
+            }))
+            .await;
+            let session_id = take_response_by_id(&mut ctx, 15122)["result"]["sessionId"]
+                .as_str()
+                .expect("related form target session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 15123,
+                "sessionId": session_id,
+                "method": "Network.enable"
+            }))
+            .await;
+            ctx.expect_result(15123, json!({}), Some(&session_id));
+            ctx.process_async(json!({
+                "id": 15126,
+                "sessionId": session_id,
+                "method": "Page.enable"
+            }))
+            .await;
+            ctx.expect_result(15126, json!({}), Some(&session_id));
+
+            ctx.conn
+                .browser_context_by_id_mut("BID-popup-related-form-name")
+                .expect("browser context")
+                .target_window_names
+                .clear();
+            ctx.sent.clear();
+            let submit_url = format!("http://{addr}/submit?existing=1");
+            ctx.process_async(json!({
+                "id": 15124,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(r#"(() => {{ const form = document.createElement('form'); form.method = 'post'; form.action = {submit_url:?}; form.target = 'relatedFormName'; form.rel = 'noreferrer'; const input = document.createElement('input'); input.name = 'form field'; input.value = 'form+value'; form.append(input); document.body.append(form); form.submit(); return true; }})()"#),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15124,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            assert!(
+                !ctx.sent
+                    .iter()
+                    .any(|message| message["method"] == json!("Target.targetCreated")),
+                "renderer-selected named form reuse must not depend on protocol name projection: {:?}",
+                ctx.sent
+            );
+
+            let (content_type, referer, request_body) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                request_rx.recv(),
+            )
+            .await
+            .expect("related target POST should reach the loopback server")
+            .expect("related target POST observation channel should remain open");
+            assert_eq!(
+                content_type.as_deref(),
+                Some("application/x-www-form-urlencoded")
+            );
+            assert_eq!(referer, None, "noreferrer must suppress the POST Referer");
+            assert_eq!(request_body, b"form+field=form%2Bvalue");
+
+            let post_request = ctx
+                .wait_for_scheduler_message("named form target POST Network request", |message| {
+                    message["method"] == json!("Network.requestWillBeSent")
+                        && message["params"]["request"]["url"] == json!(submit_url)
+                })
+                .await;
+            assert_eq!(post_request["params"]["request"]["method"], json!("POST"));
+            assert_eq!(
+                post_request["params"]["request"]["postData"],
+                json!("form+field=form%2Bvalue")
+            );
+            assert_eq!(
+                post_request["params"]["request"]["headers"]["Content-Type"],
+                json!("application/x-www-form-urlencoded")
+            );
+
+            ctx.wait_until_scheduler_state("related form POST commit", |conn| {
+                conn.browser_context_by_id("BID-popup-related-form-name")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == submit_url)
+            })
+            .await;
+            ctx.wait_for_scheduler_message("related form POST load completion", |message| {
+                message["method"] == json!("Page.frameStoppedLoading")
+                    && message["params"]["frameId"] == json!(target_id)
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 15125,
+                "sessionId": session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${window.name}|${window.opener !== null}|${document.referrer}|${document.querySelector('main').dataset.owner}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15125,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": "relatedFormName|true||form-post"
+                    }
+                }),
+                Some(&session_id),
+            );
+        })
+        .await;
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn base_target_blank_form_post_creates_fresh_target_with_exact_request() {
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let submit_tx = request_tx.clone();
+        axum::serve(
+            listener,
+            Router::new()
+                .route(
+                    "/opener",
+                    get(|| async {
+                        (
+                            [(CONTENT_TYPE.as_str(), "text/html")],
+                            "<!doctype html><head></head><body><main>form opener</main></body>",
+                        )
+                    }),
+                )
+                .route(
+                    "/base-submit",
+                    axum::routing::post(move |headers: HeaderMap, body: axum::body::Bytes| {
+                        let submit_tx = submit_tx.clone();
+                        async move {
+                            let content_type = headers
+                                .get(CONTENT_TYPE)
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned);
+                            let referer = headers
+                                .get("referer")
+                                .and_then(|value| value.to_str().ok())
+                                .map(str::to_owned);
+                            let _ = submit_tx.send((content_type, referer, body.to_vec()));
+                            (
+                                [(CONTENT_TYPE.as_str(), "text/html")],
+                                "<!doctype html><main data-owner=base-post>base target POST</main>",
+                            )
+                        }
+                    }),
+                ),
+        )
+        .await
+        .unwrap();
+    });
+
+    let mut ctx = TestContext::new();
+    enable_root_target_discovery_for_test(&mut ctx);
+    let mut browser_context = ctx
+        .conn
+        .new_browser_context("BID-popup-base-form-target".to_owned());
+    browser_context.set_active_target_id("TID-opener-base-form-target");
+    ctx.conn.browser_context = Some(browser_context);
+    let opener_url = format!("http://{addr}/opener");
+    let page = ctx
+        .conn
+        .load_page_via_runtime_async(&opener_url)
+        .await
+        .expect("base-target form opener should load");
+    {
+        let browser_context = ctx.conn.browser_context.as_mut().unwrap();
+        browser_context.set_target_url(page.final_url().as_str().to_owned());
+        let _ = browser_context
+            .active_target
+            .runtime_slot
+            .replace_loaded_page(Some(page));
+    }
+    ctx.enable_background_navigation_scheduler_for_test();
+    ctx.sent.clear();
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let submit_url = format!("http://{addr}/base-submit");
+            ctx.process_async(json!({
+                "id": 15131,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": format!(r#"(() => {{ const base = document.createElement('base'); base.target = '_blank'; document.head.append(base); const form = document.createElement('form'); form.method = 'post'; form.action = {submit_url:?}; const input = document.createElement('input'); input.name = 'base target'; input.value = 'post body'; form.append(input); document.body.append(form); form.submit(); return true; }})()"#),
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15131,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let creation_messages = ctx.take_all();
+            let created = creation_messages
+                .iter()
+                .find(|message| message["method"] == json!("Target.targetCreated"))
+                .unwrap_or_else(|| {
+                    panic!("base target=_blank form must create a target: {creation_messages:?}")
+                });
+            assert_eq!(created["params"]["targetInfo"]["url"], json!(submit_url));
+            assert_eq!(
+                created["params"]["targetInfo"]["canAccessOpener"],
+                json!(false)
+            );
+            let target_id = created["params"]["targetInfo"]["targetId"]
+                .as_str()
+                .expect("base-targeted form target id")
+                .to_owned();
+
+            let (content_type, referer, request_body) = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                request_rx.recv(),
+            )
+            .await
+            .expect("base-targeted POST should reach the loopback server")
+            .expect("base-targeted POST observation channel should remain open");
+            assert_eq!(
+                content_type.as_deref(),
+                Some("application/x-www-form-urlencoded")
+            );
+            assert_eq!(referer.as_deref(), Some(opener_url.as_str()));
+            assert_eq!(request_body, b"base+target=post+body");
+            assert!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-base-form-target")
+                    .and_then(|browser_context| {
+                        browser_context.active_target.runtime_slot.loaded_page()
+                    })
+                    .is_some_and(|page| page.final_url().as_str() == opener_url),
+                "POST target=_blank must not replace the opener Page"
+            );
+
+            ctx.wait_until_scheduler_state("base-targeted form POST commit", |conn| {
+                conn.browser_context_by_id("BID-popup-base-form-target")
+                    .and_then(|browser_context| browser_context.background_target(&target_id))
+                    .and_then(|target| target.loaded_page())
+                    .is_some_and(|page| page.final_url().as_str() == submit_url)
+            })
+            .await;
+            ctx.process_async(json!({
+                "id": 15132,
+                "method": "Target.attachToTarget",
+                "params": { "targetId": target_id }
+            }))
+            .await;
+            let session_id = take_response_by_id(&mut ctx, 15132)["result"]["sessionId"]
+                .as_str()
+                .expect("base-targeted form session id")
+                .to_owned();
+            ctx.process_async(json!({
+                "id": 15133,
+                "sessionId": session_id,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "`${window.name}|${window.opener === null}|${document.referrer}|${document.querySelector('main').dataset.owner}`",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15133,
+                json!({
+                    "result": {
+                        "type": "string",
+                        "value": format!("|true|{opener_url}|base-post")
+                    }
+                }),
+                Some(&session_id),
+            );
+        })
+        .await;
+
+    server.abort();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn named_suppress_opener_hyperlinks_create_distinct_fresh_groups_with_live_names() {
+    let mut ctx = TestContext::new();
+    ctx.enable_background_navigation_scheduler_for_test();
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            load_bc_with_titled_page_async(
+                &mut ctx,
+                "BID-popup-fresh-hyperlink-name",
+                "TID-opener-fresh-hyperlink-name",
+                "<main>fresh hyperlink opener</main>",
+            )
+            .await;
+            ctx.sent.clear();
+
+            ctx.process_async(json!({
+                "id": 15111,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "expression": "(() => { const click = (hash, rel) => { const a = document.createElement('a'); a.href = `about:blank#${hash}`; a.target = 'isolatedLinkName'; a.rel = rel; document.body.append(a); a.click(); }; click('fresh-link-one', 'noopener'); click('fresh-link-two', 'noreferrer'); return true; })()",
+                    "returnByValue": true
+                }
+            }))
+            .await;
+            ctx.expect_result(
+                15111,
+                json!({
+                    "result": {
+                        "type": "boolean",
+                        "value": true
+                    }
+                }),
+                None,
+            );
+            let creation_messages = ctx.take_all();
+            let target_ids = creation_messages
+                .iter()
+                .filter(|message| message["method"] == json!("Target.targetCreated"))
+                .filter_map(|message| message["params"]["targetInfo"]["targetId"].as_str())
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                target_ids.len(),
+                2,
+                "same-name suppress-opener hyperlinks must create two Fresh targets: {creation_messages:?}"
+            );
+            assert_ne!(target_ids[0], target_ids[1]);
+            assert_eq!(
+                ctx.conn
+                    .browser_context_by_id("BID-popup-fresh-hyperlink-name")
+                    .and_then(|browser_context| {
+                        browser_context.target_id_for_window_name("isolatedLinkName")
+                    }),
+                None,
+                "Fresh hyperlink targets must not enter the browser-context name projection"
+            );
+
+            for (index, target_id) in target_ids.iter().enumerate() {
+                let attach_id = 15112 + index as u64;
+                ctx.process_async(json!({
+                    "id": attach_id,
+                    "method": "Target.attachToTarget",
+                    "params": { "targetId": target_id }
+                }))
+                .await;
+                let session_id = take_response_by_id(&mut ctx, attach_id)["result"]["sessionId"]
+                    .as_str()
+                    .expect("fresh hyperlink popup session id")
+                    .to_owned();
+                let evaluate_id = 15114 + index as u64;
+                ctx.process_async(json!({
+                    "id": evaluate_id,
+                    "sessionId": session_id,
+                    "method": "Runtime.evaluate",
+                    "params": {
+                        "expression": "`${window.name}|${window.opener === null}`",
+                        "returnByValue": true
+                    }
+                }))
+                .await;
+                ctx.expect_result(
+                    evaluate_id,
+                    json!({
+                        "result": {
+                            "type": "string",
+                            "value": "isolatedLinkName|true"
+                        }
+                    }),
+                    Some(&session_id),
+                );
+            }
         })
         .await;
 }

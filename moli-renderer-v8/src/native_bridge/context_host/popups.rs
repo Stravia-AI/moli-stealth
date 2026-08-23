@@ -610,6 +610,7 @@ impl JsContextHost {
         target_name: &str,
         href: &str,
         auxiliary_page_exposes_opener: Option<bool>,
+        stage_named_related_page: bool,
         creator_base_url: Url,
         creator_policy_container: DocumentPolicyContainer,
     ) -> Option<OpenedLightweightPopup<'s>> {
@@ -646,7 +647,8 @@ impl JsContextHost {
             !opener_sandbox_policy.is_some_and(|policy| policy.forces_opaque_origin);
         if let (Some(pending_auxiliary_page), Some(opener)) = (pending_auxiliary_page, opener)
             && auxiliary_page_exposes_opener == Some(true)
-            && trackable_lightweight_popup_window_name(target_name).is_none()
+            && (stage_named_related_page
+                || trackable_lightweight_popup_window_name(target_name).is_none())
             && let Ok(requested_url) = Url::parse(href)
             && requested_url.scheme() != "javascript"
         {
@@ -655,6 +657,7 @@ impl JsContextHost {
                 host_ptr,
                 opener,
                 opener_child_handle,
+                target_name,
                 requested_url,
                 pending_auxiliary_page,
                 opener_sandbox_policy,
@@ -704,6 +707,7 @@ impl JsContextHost {
         host_ptr: *mut JsContextHost,
         opener: v8::Local<'s, v8::Object>,
         opener_child_handle: Option<DomHandle>,
+        target_name: &str,
         requested_url: Url,
         pending_auxiliary_page: RendererPendingAuxiliaryPage,
         opener_sandbox_policy: Option<DocumentSandboxPolicy>,
@@ -790,7 +794,7 @@ impl JsContextHost {
             auxiliary_popup_id: popup_id,
             staged_window_proxy,
             opener: Some(v8::Global::new(scope, opener)),
-            window_name: String::new(),
+            window_name: trackable_lightweight_popup_window_name(target_name).unwrap_or_default(),
         };
         if let Err(error) =
             self.stage_related_initial_empty_page_in_scope(scope, pending_auxiliary_page, init)

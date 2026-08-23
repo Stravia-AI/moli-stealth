@@ -5092,7 +5092,7 @@ async fn same_context_loaded_background_window_open_self_navigates_owner_without
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
+async fn protocol_name_projection_cannot_redirect_popup_to_unrelated_background_owner() {
     let mut ctx = TestContext::new();
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -5123,13 +5123,24 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
     let response = take_response_by_id(&mut ctx, 1041949446);
     assert_eq!(response["result"]["result"]["type"], json!("boolean"));
     assert_eq!(response["result"]["result"]["value"], json!(true));
+    let emitted = ctx.take_all();
+    let created_target_id = emitted
+        .iter()
+        .find(|message| message["method"] == json!("Target.targetCreated"))
+        .and_then(|message| message["params"]["targetInfo"]["targetId"].as_str())
+        .expect("renderer-selected named popup should create a new target")
+        .to_owned();
+    assert_ne!(
+        created_target_id, owner.target_id,
+        "a protocol-only name projection must not become renderer group authority"
+    );
     ctx.wait_until_scheduler_state(
-        "named popup navigation commit and foreground activation",
+        "renderer-selected named popup navigation and foreground activation",
         |conn| {
             conn.browser_context_by_id("BID-9-NAMED-POPUP")
                 .is_some_and(|browser_context| {
-                    browser_context.active_target_id() == Some(owner.target_id.as_str())
-                        && loaded_page_for_target(browser_context, &owner.target_id).is_some_and(
+                    browser_context.active_target_id() == Some(created_target_id.as_str())
+                        && loaded_page_for_target(browser_context, &created_target_id).is_some_and(
                             |page| {
                                 page.final_url().as_str()
                                     == "data:text/html,<title>named</title><main>named target</main>"
@@ -5139,44 +5150,13 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
         },
     )
     .await;
-    ctx.wait_for_document_continuation_for_test(
-        Some(&owner.session_id),
-        "named background popup Document continuation",
-    )
-    .await;
-    let emitted = ctx.take_all();
-    assert!(
-        !emitted
-            .iter()
-            .any(|message| message["method"] == json!("Target.targetCreated")),
-        "reusing a loaded named target must not create a new popup target: {emitted:?}"
-    );
-    let changed = emitted
-        .iter()
-        .find(|message| {
-            message["method"] == json!("Target.targetInfoChanged")
-                && message["params"]["targetInfo"]["targetId"] == json!(owner.target_id)
-                && message["params"]["targetInfo"]["url"]
-                    == json!("data:text/html,<title>named</title><main>named target</main>")
-        })
-        .unwrap_or_else(|| {
-            panic!("loaded named target reuse should report targetInfoChanged: {emitted:?}")
-        });
-    assert_eq!(
-        changed["params"]["targetInfo"]["targetId"],
-        json!(owner.target_id)
-    );
-    assert_eq!(
-        changed["params"]["targetInfo"]["url"],
-        json!("data:text/html,<title>named</title><main>named target</main>")
-    );
 
     {
         let browser_context = ctx.conn.browser_context.as_ref().expect("browser context");
         assert_eq!(
             browser_context.active_target_id(),
-            Some(owner.target_id.as_str()),
-            "ordinary window.open should promote its reused named target"
+            Some(created_target_id.as_str()),
+            "ordinary window.open should promote the renderer-selected new target"
         );
         assert_eq!(
             browser_context.target_url(),
@@ -5184,13 +5164,24 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
         );
         assert!(
             browser_context.has_loaded_page(),
-            "named popup reuse should replace the existing owner loaded page"
+            "the renderer-selected popup should retain its loaded Page"
+        );
+        let background_target = browser_context
+            .background_target(&owner.target_id)
+            .expect("background target should remain parked");
+        assert_eq!(
+            background_target.target_url(),
+            "data:text/html,<title>background</title><main>background target</main>"
         );
         assert!(
-            browser_context
-                .background_target("TID-000000000NPA")
-                .is_some(),
-            "foreground named-target reuse should demote the previous active target"
+            background_target.has_loaded_page(),
+            "the unrelated background owner must remain loaded"
+        );
+        let popup_target = browser_context
+            .background_target("TID-000000000NPA");
+        assert!(
+            popup_target.is_some(),
+            "foreground popup creation should demote the previous active target"
         );
     }
 
@@ -5204,7 +5195,10 @@ async fn same_context_named_popup_reuse_navigates_and_promotes_loaded_owner() {
     }))
     .await;
     let response = take_response_by_id(&mut ctx, 1041949447);
-    assert_eq!(response["result"]["result"]["value"], json!("named target"));
+    assert_eq!(
+        response["result"]["result"]["value"],
+        json!("background target")
+    );
         })
         .await;
 }
