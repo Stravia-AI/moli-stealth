@@ -17,7 +17,7 @@
 | Read page content | `--dump markdown` | Default for research and summarization |
 | Inspect semantic structure | `--dump semantic_tree_text` | Compact roles, labels, text, and backend node IDs |
 | Process semantic structure | `--dump semantic_tree` | Structured accessibility-oriented payload |
-| Process stable fields | `--dump json` | Returns `final_url`, `status`, and `html` |
+| Process stable fields | `--dump json` | Returns `final_url`, `status`, `title`, `headers`, `redirect_chain`, and `html` |
 | Inspect exact DOM | `--dump html` | Useful when Markdown loses important structure |
 | Diagnose requests | `--dump json --trace-network` | Adds the `network` object |
 | Capture the viewport | `--layout --dump screenshot` | Writes PNG bytes to stdout |
@@ -25,6 +25,11 @@
 | Capture a paginated document | `--layout --dump pdf` | Writes PDF bytes to stdout |
 
 Raw non-HTML responses support only `html` and `json`.
+
+JSON `headers` is an ordered list of `{name, value}` records so duplicate
+headers are preserved. `redirect_chain` contains every main-navigation HTTP
+redirect hop in order. Add `--trace-network` only with an explicit
+`--dump json`; it appends the structured `network` object.
 
 ## Readiness
 
@@ -143,7 +148,14 @@ For a crawl rather than a single lookup:
 ## Request State and Policy
 
 - Add initial navigation headers with repeated `-H 'Name: Value'`.
+- Set the initial navigation method with `-X/--method METHOD`; add a UTF-8 body
+  with `--body TEXT`. Normal HTTP redirect rules apply, including method/body
+  preservation across 307 and 308 responses.
 - Import cookie files with repeated `--cookie-file`.
+- Write final unpartitioned cookies as an interoperable Netscape file with
+  `--cookie-jar PATH`. The output can be imported by a later `--cookie-file`;
+  use `--profile-dir` when partitioned cookies or richer browser state must be
+  preserved.
 - Use `--profile-dir` when state must persist across invocations; it also
   provides the default HTTP cache location unless `--http-cache-dir` is set.
 - Use `--http-proxy`, `--http-no-proxy`, or
@@ -159,6 +171,19 @@ For a crawl rather than a single lookup:
   task explicitly requires pre-navigation instrumentation.
 - Combine `--block-private-networks` with `--block-cidrs` for untrusted URL
   workloads that need explicit network boundaries.
+
+For example, send an initial JSON POST and retain both response metadata and
+the final cookie state:
+
+```bash
+moli fetch \
+  --method POST \
+  --body '{"query":"moli"}' \
+  -H 'Content-Type: application/json' \
+  --cookie-jar cookies.txt \
+  --dump json \
+  "https://example.com/search"
+```
 
 ## Failure Diagnosis
 

@@ -81,8 +81,9 @@ structure-first; enable layout only when the result needs pixels or pagination.
 - Use `markdown` for prose, documentation, articles, and direct model reading.
 - Use `semantic_tree_text` when navigation-heavy markup makes Markdown noisy or
   when roles and accessible names matter.
-- Use `json` for automation that needs `final_url`, HTTP `status`, serialized
-  `html`, or network trace data.
+- Use `json` for automation that needs `final_url`, HTTP `status`, `title`,
+  duplicate-safe response `headers`, the main-navigation `redirect_chain`,
+  serialized `html`, or network trace data.
 - Use `html` to diagnose DOM serialization or preserve exact markup.
 - Use `screenshot` for a viewport PNG when appearance is evidence. It requires
   `--layout`.
@@ -119,10 +120,13 @@ unrelated actions.
   authorized intranet task.
 - Keep TLS verification enabled. Do not bypass authentication, paywalls,
   CAPTCHAs, or access controls.
-- Use `--cookie-file` or `--profile-dir` only for state the user is authorized
-  to use. Never expose headers, cookies, or tokens in the response.
+- Use `--cookie-file`, `--cookie-jar`, or `--profile-dir` only for state the
+  user is authorized to use. Treat cookie inputs and outputs as sensitive;
+  never expose headers, cookies, or tokens in the response.
 - Remember that `-H/--header` applies to the initial navigation, not every
-  subresource.
+  subresource. `-X/--method` and `--body` likewise configure only the initial
+  navigation.
+- Pair `--trace-network` with an explicit `--dump json`.
 - Treat stdout as the requested artifact. Redirect screenshot, full-document
   screenshot, and PDF output to files, verify that they are non-empty and have
   the expected type, and never print their binary bytes into a text response.
