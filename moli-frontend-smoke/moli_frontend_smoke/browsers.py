@@ -270,8 +270,6 @@ async def start_moli(binary: Path) -> BrowserProcess:
             cache_dir,
             "--log-level",
             "info",
-            "--log-format",
-            "logfmt",
         ],
     )
 

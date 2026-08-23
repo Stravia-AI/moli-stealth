@@ -216,7 +216,7 @@ evaluation environments, and reinforcement-learning workloads.
   screenshots, and low-frequency CPU-rendered DevTools screencast frames.
 - **Controllable operational options** — profiles, cookies, HTTP cache, proxies,
   resource families, connection limits, timeouts, private-network policy,
-  user-agent overrides, structured logging, and network diagnostics are all
+  user-agent overrides, diagnostic logging, and network diagnostics are all
   available.
 
 ## Moli's relationship with Lexmount

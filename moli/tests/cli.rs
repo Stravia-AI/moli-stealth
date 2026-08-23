@@ -8,9 +8,9 @@ use std::{
 };
 
 use moli::cli::{
-    Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogFormat, LogLevel,
-    RequestHeaderArg, ResponseJsonPathArg, ResponseRegexArg, ServeArgs, StripModeChoice,
-    StripOptions, WebBotAuthProfileChoice, normalize_args_for_compat,
+    Cli, Commands, CommonArgs, DumpFormat, FetchArgs, FetchWaitUntil, LogLevel, RequestHeaderArg,
+    ResponseJsonPathArg, ResponseRegexArg, ServeArgs, StripModeChoice, StripOptions,
+    WebBotAuthProfileChoice, normalize_args_for_compat,
 };
 use moli::config::AppConfig;
 use moli_browser_profile::BrowserProfilePaths;
@@ -62,8 +62,6 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
         "4096",
         "--log-level",
         "info",
-        "--log-format",
-        "pretty",
         "--log-filter-scopes",
         "http,event",
         "--user-agent-suffix",
@@ -137,7 +135,6 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                 block_private_networks: false,
                 block_cidrs: None,
                 log_level: Some(LogLevel::Info),
-                log_format: Some(LogFormat::Pretty),
                 log_filter_scopes: Some("http,event".to_owned()),
                 user_agent: None,
                 user_agent_suffix: Some("internal-tester".to_owned()),
@@ -1392,6 +1389,7 @@ fn removed_long_form_flags_are_rejected() {
         "--enable-video-fetch",
         "--enable-media-fetch",
         "--enable-text-track-fetch",
+        "--log-format",
     ] {
         let error = Cli::try_parse_from(["moli", "serve", flag]).unwrap_err();
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);

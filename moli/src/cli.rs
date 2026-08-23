@@ -462,9 +462,6 @@ pub struct CommonArgs {
     #[arg(short = 'L', long, value_enum)]
     pub log_level: Option<LogLevel>,
 
-    #[arg(long, value_enum)]
-    pub log_format: Option<LogFormat>,
-
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub log_filter_scopes: Option<String>,
 
@@ -530,13 +527,6 @@ impl LogLevel {
             Self::Error | Self::Fatal => "error",
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
-#[value(rename_all = "snake_case")]
-pub enum LogFormat {
-    Pretty,
-    Logfmt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
