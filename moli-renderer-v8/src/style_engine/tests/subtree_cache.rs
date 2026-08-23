@@ -1436,14 +1436,14 @@ fn document_source_update_preserves_shadow_scope_cascade_data() {
     active_inputs
         .shadow_stylesheet_sources
         .push((active_shadow_root, vec![active_shadow_source]));
-    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
+    let active_key = StyleWorldKey::new(&active_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
 
     let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .shadow_stylesheet_sources
         .push((detached_shadow_root, vec![detached_shadow_source]));
-    let detached_key = StyleWorldKey::new(&document_url, &detached_inputs, None);
+    let detached_key = StyleWorldKey::new(&detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -1513,7 +1513,7 @@ fn document_source_update_preserves_shadow_scope_cascade_data() {
     active_inputs
         .document_stylesheet_sources
         .push(second_document_source);
-    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
+    let active_key = StyleWorldKey::new(&active_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
     let active_cascade_data_after =
         engine.with_retained_style_system_for_document_for_test(document, |retained| {
@@ -4699,33 +4699,7 @@ fn matching_dependency_sources_have_explicit_source_and_scope_ids() {
     assert!(!shadow_fallback_roots.contains(&document));
 }
 #[test]
-fn style_world_identity_ignores_document_fragment() {
-    let old_url = url::Url::parse("https://example.test/page.html#old").unwrap();
-    let new_url = url::Url::parse("https://example.test/page.html#new").unwrap();
-    let mut inputs = FullStyleWorldSnapshot::default();
-    inputs
-        .document_stylesheet_sources
-        .push(StyloStylesheetSource::new(
-            ".probe { color: green; }".to_owned(),
-            old_url.clone(),
-        ));
-    let mut next_inputs = FullStyleWorldSnapshot::default();
-    next_inputs
-        .document_stylesheet_sources
-        .push(StyloStylesheetSource::new(
-            ".probe { color: green; }".to_owned(),
-            new_url.clone(),
-        ));
-
-    assert_eq!(
-        StyleWorldKey::new(&old_url, &inputs, None),
-        StyleWorldKey::new(&new_url, &next_inputs, None)
-    );
-}
-
-#[test]
 fn style_world_identity_changes_when_screen_size_changes() {
-    let document_url = url::Url::parse("https://example.test/page.html").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
     let viewport =
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1920.0), Some(1080.0));
@@ -4733,8 +4707,8 @@ fn style_world_identity_changes_when_screen_size_changes() {
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1366.0), Some(768.0));
 
     assert_ne!(
-        StyleWorldKey::new(&document_url, &inputs, viewport),
-        StyleWorldKey::new(&document_url, &inputs, next_viewport)
+        StyleWorldKey::new(&inputs, viewport),
+        StyleWorldKey::new(&inputs, next_viewport)
     );
 }
 
@@ -4757,13 +4731,12 @@ fn style_world_identity_does_not_hash_stylesheet_text() {
         ));
 
     assert_eq!(
-        StyleWorldKey::new(&document_url, &inputs, None),
-        StyleWorldKey::new(&document_url, &next_inputs, None)
+        StyleWorldKey::new(&inputs, None),
+        StyleWorldKey::new(&next_inputs, None)
     );
 }
 #[test]
 fn style_world_identity_does_not_hash_stylesheet_base_urls() {
-    let document_url = url::Url::parse("https://example.test/page.html").unwrap();
     let old_base = url::Url::parse("https://example.test/assets/app.css").unwrap();
     let next_base = url::Url::parse("https://cdn.example.test/assets/app.css").unwrap();
     let mut inputs = FullStyleWorldSnapshot::default();
@@ -4782,13 +4755,12 @@ fn style_world_identity_does_not_hash_stylesheet_base_urls() {
         ));
 
     assert_eq!(
-        StyleWorldKey::new(&document_url, &inputs, None),
-        StyleWorldKey::new(&document_url, &next_inputs, None)
+        StyleWorldKey::new(&inputs, None),
+        StyleWorldKey::new(&next_inputs, None)
     );
 }
 #[test]
 fn style_world_identity_changes_when_document_quirks_mode_changes() {
-    let document_url = url::Url::parse("https://example.test/page.html").unwrap();
     let standards_inputs = FullStyleWorldSnapshot::default();
     let quirks_inputs = FullStyleWorldSnapshot {
         quirks_mode: style::context::QuirksMode::Quirks,
@@ -4796,15 +4768,13 @@ fn style_world_identity_changes_when_document_quirks_mode_changes() {
     };
 
     assert_ne!(
-        StyleWorldKey::new(&document_url, &standards_inputs, None),
-        StyleWorldKey::new(&document_url, &quirks_inputs, None)
+        StyleWorldKey::new(&standards_inputs, None),
+        StyleWorldKey::new(&quirks_inputs, None)
     );
 }
 
 #[test]
 fn style_world_identity_mismatch_trace_records_changed_dimensions() {
-    let previous_url = url::Url::parse("https://example.test/old.html").unwrap();
-    let next_url = url::Url::parse("https://example.test/new.html").unwrap();
     let previous_inputs = FullStyleWorldSnapshot::default();
 
     let mut next_inputs = previous_inputs.clone();
@@ -4816,25 +4786,21 @@ fn style_world_identity_mismatch_trace_records_changed_dimensions() {
     );
     next_inputs.quirks_mode = style::context::QuirksMode::Quirks;
     let previous_key = StyleWorldKey::new(
-        &previous_url,
         &previous_inputs,
         StyleViewport::new(Some(800.0), Some(600.0)).with_screen_size(Some(1920.0), Some(1080.0)),
     );
     let next_key = StyleWorldKey::new(
-        &next_url,
         &next_inputs,
         StyleViewport::new(Some(1024.0), Some(768.0)).with_screen_size(Some(1366.0), Some(768.0)),
     );
 
     let trace = previous_key.mismatch_trace(&next_key);
 
-    assert!(trace.document_url_changed);
-    assert_eq!(trace.previous_document_url, previous_url);
-    assert_eq!(trace.next_document_url, next_url);
     assert!(trace.viewport_changed);
     assert!(trace.screen_changed);
     assert!(trace.environment_changed);
     assert!(trace.quirks_mode_changed);
+    assert!(trace.requires_style_system_replacement());
 }
 
 #[test]
@@ -4998,7 +4964,6 @@ fn document_stylesheet_fallback_updates_the_persistent_world_in_place() {
             document_url.clone(),
         ));
     let first_key = StyleWorldKey::new_for_observation(
-        &document_url,
         &first_inputs,
         StyleViewport::default(),
         StyleTreeScopeVersions::current(&host, Some(document)),
@@ -5085,9 +5050,8 @@ fn style_subtree_invalidation_retains_style_system() {
     let target = host.create_element("section");
     assert!(host.append_child(document, target));
     let mut engine = MoliStyleEngine::new();
-    let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
 
     engine.ensure_retained_style_system_for_document(
         &host,
@@ -5117,7 +5081,6 @@ fn retained_style_system_keeps_cascade_data_for_empty_shadow_scopes() {
         .expect("closed host should accept a shadow root");
 
     let engine = MoliStyleEngine::new();
-    let document_url = url::Url::parse("https://example.test/empty-scopes.html").unwrap();
     let mut inputs = FullStyleWorldSnapshot::default();
     inputs
         .shadow_stylesheet_sources
@@ -5125,7 +5088,7 @@ fn retained_style_system_keeps_cascade_data_for_empty_shadow_scopes() {
     inputs
         .shadow_stylesheet_sources
         .push((closed_root, Vec::new()));
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     engine.with_retained_style_system_for_document_for_test(document, |retained| {
@@ -5361,7 +5324,7 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
         document_stylesheet_sources: vec![first_source],
         ..Default::default()
     };
-    let first_key = StyleWorldKey::new(&document_url, &first_inputs, None);
+    let first_key = StyleWorldKey::new(&first_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, first_key, &first_inputs);
 
     let first = engine
@@ -5387,7 +5350,7 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
     assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 1);
 
     let viewport = StyleViewport::from_width(Some(640.0));
-    let viewport_key = StyleWorldKey::new(&document_url, &first_inputs, viewport);
+    let viewport_key = StyleWorldKey::new(&first_inputs, viewport);
     engine.ensure_retained_style_system_for_document(&host, document, viewport_key, &first_inputs);
     let after_viewport_change = engine
         .stylesheet_resource_snapshot_for_document(document)
@@ -5413,7 +5376,7 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
         document_stylesheet_sources: vec![same_resources_source],
         ..Default::default()
     };
-    let same_resources_key = StyleWorldKey::new(&document_url, &same_resources_inputs, viewport);
+    let same_resources_key = StyleWorldKey::new(&same_resources_inputs, viewport);
     engine.ensure_retained_style_system_for_document(
         &host,
         document,
@@ -5441,7 +5404,7 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
         document_stylesheet_sources: vec![second_source],
         ..Default::default()
     };
-    let second_key = StyleWorldKey::new(&document_url, &second_inputs, viewport);
+    let second_key = StyleWorldKey::new(&second_inputs, viewport);
     engine.ensure_retained_style_system_for_document(&host, document, second_key, &second_inputs);
 
     let second = engine
@@ -5688,7 +5651,7 @@ fn one_shadow_stylesheet_change_preserves_the_other_scope_cascade_data() {
     first_inputs
         .shadow_stylesheet_sources
         .push((second_root, vec![second_source.clone()]));
-    let first_key = StyleWorldKey::new(&document_url, &first_inputs, None);
+    let first_key = StyleWorldKey::new(&first_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, first_key, &first_inputs);
 
     let initial_data =
@@ -5720,7 +5683,7 @@ fn one_shadow_stylesheet_change_preserves_the_other_scope_cascade_data() {
     second_inputs
         .shadow_stylesheet_sources
         .push((second_root, vec![second_source]));
-    let second_key = StyleWorldKey::new(&document_url, &second_inputs, None);
+    let second_key = StyleWorldKey::new(&second_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, second_key, &second_inputs);
 
     engine.with_retained_style_system_for_document_for_test(document, |retained| {
@@ -5799,7 +5762,7 @@ fn style_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine
@@ -5891,7 +5854,7 @@ fn detached_subtree_invalidation_clears_only_affected_shadow_cascade_data() {
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine
@@ -5990,14 +5953,14 @@ fn document_stylesheet_dirty_mark_isolated_to_its_document_world() {
     active_inputs
         .shadow_stylesheet_sources
         .push((active_shadow_root, vec![active_source]));
-    let active_key = StyleWorldKey::new(&document_url, &active_inputs, None);
+    let active_key = StyleWorldKey::new(&active_inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &active_inputs);
 
     let mut detached_inputs = FullStyleWorldSnapshot::default();
     detached_inputs
         .shadow_stylesheet_sources
         .push((detached_shadow_root, vec![detached_source]));
-    let detached_key = StyleWorldKey::new(&document_url, &detached_inputs, None);
+    let detached_key = StyleWorldKey::new(&detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -6200,7 +6163,7 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
     let engine = MoliStyleEngine::new();
     let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
-    let active_key = StyleWorldKey::new(&document_url, &inputs, None);
+    let active_key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, active_key, &inputs);
     ensure_adapter_element_data(&engine, &host, active);
     assert!(engine.dom_adapter.has_element_data(active));
@@ -6213,7 +6176,7 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
     first_detached_inputs
         .document_stylesheet_sources
         .push(detached_source);
-    let first_detached_key = StyleWorldKey::new(&document_url, &first_detached_inputs, None);
+    let first_detached_key = StyleWorldKey::new(&first_detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
@@ -6229,7 +6192,7 @@ fn detached_retained_rebuild_preserves_active_document_adapter_element_data() {
     next_detached_inputs
         .document_stylesheet_sources
         .push(next_detached_source);
-    let next_detached_key = StyleWorldKey::new(&document_url, &next_detached_inputs, None);
+    let next_detached_key = StyleWorldKey::new(&next_detached_inputs, None);
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,

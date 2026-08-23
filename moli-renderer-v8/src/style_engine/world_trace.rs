@@ -56,7 +56,6 @@ pub(super) fn trace_retained_style_system_change(
         stylist_identity = retained.stylist_identity,
         stylist_flush_count = retained.stylist.num_rebuilds(),
         custom_property_history_is_append_only,
-        document_url = %retained.key.document_url,
         document_stylesheet_input_count = inputs.document_stylesheet_sources.len(),
         shadow_stylesheet_input_count = inputs.shadow_stylesheet_sources.len(),
         retained_shadow_cascade_count = retained.shadow_cascade_data.len(),

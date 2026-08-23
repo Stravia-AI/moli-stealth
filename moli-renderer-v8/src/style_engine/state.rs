@@ -194,7 +194,6 @@ impl StyleDocumentState {
 
     pub(super) fn retained_style_system_is_current_for_observation(
         &self,
-        document_url: &url::Url,
         viewport: StyleViewport,
         environment: StyloStyleEnvironment,
         quirks_mode: style::context::QuirksMode,
@@ -211,7 +210,6 @@ impl StyleDocumentState {
             .as_ref()
             .is_some_and(|retained| {
                 retained.key.matches_observation_environment(
-                    document_url,
                     viewport,
                     environment,
                     quirks_mode,

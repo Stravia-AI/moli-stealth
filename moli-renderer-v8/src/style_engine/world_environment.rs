@@ -207,7 +207,6 @@ impl StyloStyleReducedPreference {
 
 #[derive(Clone, Debug)]
 pub(crate) struct StyleWorldEnvironment {
-    pub(super) document_url: url::Url,
     pub(super) viewport: StyleViewport,
     pub(super) media: StyloStyleEnvironment,
     pub(super) quirks_mode: style::context::QuirksMode,
@@ -216,14 +215,12 @@ pub(crate) struct StyleWorldEnvironment {
 
 impl StyleWorldEnvironment {
     pub(crate) fn new(
-        document_url: url::Url,
         viewport: StyleViewport,
         media: StyloStyleEnvironment,
         quirks_mode: style::context::QuirksMode,
         tree_scope_versions: StyleTreeScopeVersions,
     ) -> Self {
         Self {
-            document_url,
             viewport,
             media,
             quirks_mode,

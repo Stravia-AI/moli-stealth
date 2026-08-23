@@ -526,6 +526,18 @@ pub(crate) fn iframe_handle_viewport(
     iframe_handle_viewport_with_depth(host, frame_handle, 0)
 }
 
+pub(in crate::native_bridge::element) fn style_viewport_for_document(
+    host: &JsContextHost,
+    document: DomHandle,
+) -> StyleViewport {
+    if document == host.document_handle() {
+        return host.style_viewport();
+    }
+    host.child_browsing_context_host_for_document_handle(document)
+        .and_then(|frame| iframe_handle_viewport(host, frame))
+        .unwrap_or_default()
+}
+
 pub(crate) fn computed_style_property_values_for_document_snapshot(
     host: &JsContextHost,
     handle: DomHandle,
@@ -669,10 +681,8 @@ fn style_computation_context_for_document_snapshot(
             return Some(DocumentSnapshotStyleComputation::HiddenChildFrame);
         }
         Some(DocumentSnapshotStyleComputation::Available(
-            StyleComputationContext::new(
-                iframe_handle_viewport(host, frame_handle).unwrap_or_default(),
-            )
-            .with_read_document(Some(document)),
+            StyleComputationContext::new(style_viewport_for_document(host, document))
+                .with_read_document(Some(document)),
         ))
     }
 }
@@ -685,10 +695,12 @@ fn iframe_handle_viewport_with_depth(
     if depth > 32 {
         return None;
     }
-    let parent_viewport = host
+    let parent_document = host
         .dom_host()
         .owner_document_handle(frame_handle)
-        .and_then(|document| host.child_browsing_context_host_for_document_handle(document))
+        .unwrap_or_else(|| host.document_handle());
+    let parent_viewport = host
+        .child_browsing_context_host_for_document_handle(parent_document)
         .filter(|parent_frame| *parent_frame != frame_handle)
         .and_then(|parent_frame| iframe_handle_viewport_with_depth(host, parent_frame, depth + 1));
     let parent_viewport = parent_viewport.unwrap_or_else(|| host.style_viewport());
@@ -701,50 +713,52 @@ fn iframe_handle_viewport_with_depth(
             .with_screen_size(parent_viewport.screen_width, parent_viewport.screen_height),
         );
     }
-    let computed_width = style_property_value_with_context(
-        host,
-        frame_handle,
-        StyleMode::Computed,
-        "width",
-        StyleComputationContext::new(parent_viewport),
-    );
-    let width = css_px_value(&computed_width)
-        .or_else(|| {
-            parent_viewport
-                .width
-                .zip(css_percent_value(&computed_width))
-                .map(|(parent_width, percent)| parent_width * percent / 100.0)
-        })
-        .or_else(|| {
-            host.dom_host()
-                .get_attribute(frame_handle, "width")
-                .and_then(|value| iframe_width_attribute_viewport_width(&value))
-        });
-    let computed_height = style_property_value_with_context(
-        host,
-        frame_handle,
-        StyleMode::Computed,
-        "height",
-        StyleComputationContext::new(parent_viewport),
-    );
-    let height = css_px_value(&computed_height)
-        .or_else(|| {
-            parent_viewport
-                .height
-                .zip(css_percent_value(&computed_height))
-                .map(|(parent_height, percent)| parent_height * percent / 100.0)
-        })
-        .or_else(|| {
-            host.dom_host()
-                .get_attribute(frame_handle, "height")
-                .and_then(|value| iframe_dimension_attribute_viewport_size(&value))
-        })
-        .or(Some(
-            moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_height,
-        ));
     Some(
-        StyleViewport::new(width, height)
-            .with_screen_size(parent_viewport.screen_width, parent_viewport.screen_height),
+        host.inferred_frame_style_viewport(frame_handle, parent_document, parent_viewport, || {
+            let computed_width = style_property_value_with_context(
+                host,
+                frame_handle,
+                StyleMode::Computed,
+                "width",
+                StyleComputationContext::new(parent_viewport),
+            );
+            let width = css_px_value(&computed_width)
+                .or_else(|| {
+                    parent_viewport
+                        .width
+                        .zip(css_percent_value(&computed_width))
+                        .map(|(parent_width, percent)| parent_width * percent / 100.0)
+                })
+                .or_else(|| {
+                    host.dom_host()
+                        .get_attribute(frame_handle, "width")
+                        .and_then(|value| iframe_width_attribute_viewport_width(&value))
+                });
+            let computed_height = style_property_value_with_context(
+                host,
+                frame_handle,
+                StyleMode::Computed,
+                "height",
+                StyleComputationContext::new(parent_viewport),
+            );
+            let height = css_px_value(&computed_height)
+                .or_else(|| {
+                    parent_viewport
+                        .height
+                        .zip(css_percent_value(&computed_height))
+                        .map(|(parent_height, percent)| parent_height * percent / 100.0)
+                })
+                .or_else(|| {
+                    host.dom_host()
+                        .get_attribute(frame_handle, "height")
+                        .and_then(|value| iframe_dimension_attribute_viewport_size(&value))
+                })
+                .or(Some(
+                    moli_browser_profile::DEFAULT_WINDOW_SURFACE_PROFILE.inner_height,
+                ));
+            StyleViewport::new(width, height)
+                .with_screen_size(parent_viewport.screen_width, parent_viewport.screen_height)
+        }),
     )
 }
 

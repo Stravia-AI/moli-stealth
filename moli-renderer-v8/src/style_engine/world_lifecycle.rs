@@ -28,7 +28,6 @@ pub(super) fn retained_style_world_update_plan(
     host: &DomHost,
     document_state: &StyleDocumentState,
     document: DomHandle,
-    document_url: &url::Url,
     viewport: StyleViewport,
     environment: StyloStyleEnvironment,
     quirks_mode: QuirksMode,
@@ -40,7 +39,7 @@ pub(super) fn retained_style_world_update_plan(
             (
                 retained
                     .key
-                    .requires_replacement_for_observation(document_url, quirks_mode),
+                    .requires_replacement_for_observation(quirks_mode),
                 retained
                     .key
                     .device_differs_from_observation(viewport, environment),

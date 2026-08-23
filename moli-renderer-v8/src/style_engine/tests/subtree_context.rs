@@ -296,9 +296,8 @@ fn pending_attribute_mutation_invalidations_merge_for_batch_drain() {
         style,
         ".first { color: red; } .second { color: blue; }".into(),
     );
-    let document_url = host.document_url().expect("test document url").clone();
     let inputs = FullStyleWorldSnapshot::default();
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
     let media = crate::protocol_types::EmulatedMediaOverrides::default();
 

@@ -96,12 +96,7 @@ pub(super) fn prepare_style_world_update(
 ) -> Rc<PreparedStyleWorldUpdate> {
     let media = StyloStyleEnvironment::from_emulated_media(runtime.emulated_media());
     let quirks_mode = quirks_mode(runtime, key.source_document());
-    let document_url = key
-        .source_document()
-        .map(|document| runtime.document_url_for_handle(document))
-        .unwrap_or_else(|| runtime.document_url().clone());
     let environment = StyleWorldEnvironment::new(
-        document_url,
         context.viewport(),
         media,
         quirks_mode,

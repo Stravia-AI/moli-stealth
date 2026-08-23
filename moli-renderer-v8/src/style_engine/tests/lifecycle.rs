@@ -481,7 +481,6 @@ fn retained_sources_are_scoped_to_document_worlds() {
     let mut host = test_host();
     let document = host.document_handle();
     let mut engine = MoliStyleEngine::new();
-    let document_url = host.document_url().expect("test document url").clone();
 
     let disconnected_style = host.create_element("style");
     engine.set_owner_style_sheet_text_with_host(
@@ -509,7 +508,7 @@ fn retained_sources_are_scoped_to_document_worlds() {
     engine.ensure_retained_style_system_for_document(
         &host,
         host.document_handle(),
-        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(host.document_handle(), |retained| {
@@ -546,7 +545,7 @@ fn retained_sources_are_scoped_to_document_worlds() {
     engine.ensure_retained_style_system_for_document(
         &host,
         host.document_handle(),
-        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(host.document_handle(), |retained| {
@@ -559,7 +558,7 @@ fn retained_sources_are_scoped_to_document_worlds() {
     engine.ensure_retained_style_system_for_document(
         &host,
         detached_document,
-        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(detached_document, |retained| {
@@ -2180,7 +2179,6 @@ fn missing_document_adopted_sources_remain_trackable_without_retained_source() {
     let host = test_host();
     let mut engine = MoliStyleEngine::new();
     let missing_document = NativeNodeId::new(90_001);
-    let document_url = host.document_url().expect("test document url").clone();
     let source_url = url::Url::parse("https://example.test/missing-document.css").unwrap();
     let source_id = StyleSourceId::document_adopted_style_sheet(missing_document, 0);
 
@@ -2217,7 +2215,7 @@ fn missing_document_adopted_sources_remain_trackable_without_retained_source() {
     engine.ensure_retained_style_system_for_document(
         &host,
         host.document_handle(),
-        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(host.document_handle(), |retained| {

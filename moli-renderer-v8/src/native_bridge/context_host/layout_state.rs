@@ -7,8 +7,22 @@ use crate::{
     css_resource_urls::{CompletedStylesheetWebFont, StylesheetLoadBlockingResource},
     document_runtime::DomHandle,
     script_vm::web_fonts::{DocumentWebFontCompletion, DocumentWebFontState},
-    style_engine::StylesheetResourceGeneration,
+    style_engine::{StyleViewport, StylesheetResourceGeneration, StyloStyleEnvironment},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct InferredFrameStyleViewportCacheKey {
+    pub(super) dom_version: u64,
+    pub(super) parent_style_epoch: u64,
+    pub(super) parent_viewport: StyleViewport,
+    pub(super) environment: StyloStyleEnvironment,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct CachedInferredFrameStyleViewport {
+    key: InferredFrameStyleViewportCacheKey,
+    viewport: StyleViewport,
+}
 
 /// Layout-facing state whose lifetime is bounded by exactly one main Document.
 ///
@@ -34,6 +48,14 @@ pub(super) struct DocumentLayoutState {
     /// separate from the single latest-tree slot because a later fresh layout
     /// may replace that slot while the frame view remains live.
     frame_viewports: HashMap<DomHandle, LayoutViewport>,
+    /// Authored-size fallback used before parent layout publishes an exact
+    /// iframe content viewport. The dependency key makes clean style reads
+    /// cheap without turning this into independently valid layout state.
+    inferred_frame_style_viewports: HashMap<DomHandle, CachedInferredFrameStyleViewport>,
+    #[cfg(test)]
+    inferred_frame_style_viewport_cache_hits: u64,
+    #[cfg(test)]
+    inferred_frame_style_viewport_cache_misses: u64,
 }
 
 impl DocumentLayoutState {
@@ -123,6 +145,39 @@ impl DocumentLayoutState {
         self.frame_viewports.get(&frame).copied()
     }
 
+    pub(super) fn inferred_frame_style_viewport(
+        &mut self,
+        frame: DomHandle,
+        key: InferredFrameStyleViewportCacheKey,
+    ) -> Option<StyleViewport> {
+        let viewport = self
+            .inferred_frame_style_viewports
+            .get(&frame)
+            .filter(|cached| cached.key == key)
+            .map(|cached| cached.viewport);
+        #[cfg(test)]
+        if viewport.is_some() {
+            self.inferred_frame_style_viewport_cache_hits = self
+                .inferred_frame_style_viewport_cache_hits
+                .saturating_add(1);
+        } else {
+            self.inferred_frame_style_viewport_cache_misses = self
+                .inferred_frame_style_viewport_cache_misses
+                .saturating_add(1);
+        }
+        viewport
+    }
+
+    pub(super) fn publish_inferred_frame_style_viewport(
+        &mut self,
+        frame: DomHandle,
+        key: InferredFrameStyleViewportCacheKey,
+        viewport: StyleViewport,
+    ) {
+        self.inferred_frame_style_viewports
+            .insert(frame, CachedInferredFrameStyleViewport { key, viewport });
+    }
+
     pub(super) fn update_frame_viewports(
         &mut self,
         updates: impl IntoIterator<Item = (DomHandle, Option<LayoutViewport>)>,
@@ -144,6 +199,17 @@ impl DocumentLayoutState {
         mut is_live: impl FnMut(DomHandle) -> bool,
     ) {
         self.frame_viewports.retain(|frame, _| is_live(*frame));
+        self.inferred_frame_style_viewports
+            .retain(|frame, _| is_live(*frame));
+    }
+
+    #[cfg(test)]
+    pub(super) fn inferred_frame_style_viewport_cache_observability(&self) -> (u64, u64, usize) {
+        (
+            self.inferred_frame_style_viewport_cache_hits,
+            self.inferred_frame_style_viewport_cache_misses,
+            self.inferred_frame_style_viewports.len(),
+        )
     }
 
     #[cfg(test)]

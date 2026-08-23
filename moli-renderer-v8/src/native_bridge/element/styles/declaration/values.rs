@@ -185,8 +185,7 @@ impl<'a> StyleResolutionContext<'a> {
 
 impl<'a> ComputedStyleRead<'a> {
     pub(crate) fn new(runtime: &'a JsContextHost, handle: DomHandle) -> Self {
-        let context = StyleComputationContext::new(runtime.style_viewport());
-        Self::new_with_context(runtime, handle, context)
+        StyleObservation::new(runtime).read(handle)
     }
 
     pub(in crate::native_bridge::element::styles) fn new_with_context(
@@ -202,6 +201,16 @@ impl<'a> ComputedStyleRead<'a> {
             return String::new();
         };
         self.property_in_prepared_scope(&property)
+    }
+
+    fn resolution_context(&self) -> StyleResolutionContext<'_> {
+        StyleResolutionContext::observed(
+            self.context,
+            None,
+            self.observation_inputs.as_ref(),
+            self.handle,
+            self.stylo_style.as_ref(),
+        )
     }
 
     pub(in crate::native_bridge::element) fn rendered_style_facts(
@@ -425,23 +434,8 @@ pub(crate) fn active_css_animation_transform_value(
     runtime: &JsContextHost,
     handle: DomHandle,
 ) -> Option<String> {
-    active_css_animation_transform_value_with_context(
-        runtime,
-        handle,
-        StyleComputationContext::new(runtime.style_viewport()),
-    )
-}
-
-fn active_css_animation_transform_value_with_context(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-    context: StyleComputationContext,
-) -> Option<String> {
-    active_css_animation_transform_value_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(context),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    active_css_animation_transform_value_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn active_css_animation_transform_value_with_resolution(
@@ -486,23 +480,8 @@ fn active_css_animation_property_values_with_resolution(
 }
 
 fn active_css_animation_names(runtime: &JsContextHost, handle: DomHandle) -> Vec<String> {
-    active_css_animation_names_with_context(
-        runtime,
-        handle,
-        StyleComputationContext::new(runtime.style_viewport()),
-    )
-}
-
-fn active_css_animation_names_with_context(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-    context: StyleComputationContext,
-) -> Vec<String> {
-    active_css_animation_names_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(context),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    active_css_animation_names_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn active_css_animation_names_with_resolution(
@@ -1496,13 +1475,7 @@ pub(crate) fn style_property_value(
     property: &str,
 ) -> String {
     if mode == StyleMode::Computed {
-        return style_property_value_with_context(
-            runtime,
-            handle,
-            mode,
-            property,
-            StyleComputationContext::new(runtime.style_viewport()),
-        );
+        return ComputedStyleRead::new(runtime, handle).property(property);
     }
     style_property_value_with_viewport_width(runtime, handle, mode, property, None)
 }
@@ -3017,19 +2990,12 @@ fn css_numeric_context(
     runtime: &JsContextHost,
     handle: DomHandle,
 ) -> moli_css_parse::CssNumericContext {
-    css_numeric_context_with_viewport(runtime, handle, runtime.style_viewport())
-}
-
-fn css_numeric_context_with_viewport(
-    runtime: &JsContextHost,
-    handle: DomHandle,
-    viewport: StyleViewport,
-) -> moli_css_parse::CssNumericContext {
+    let read = ComputedStyleRead::new(runtime, handle);
     css_numeric_context_with_viewport_and_resolution(
         runtime,
         handle,
-        viewport,
-        StyleResolutionContext::independent(StyleComputationContext::new(viewport)),
+        read.context.viewport(),
+        read.resolution_context(),
     )
 }
 
@@ -5013,11 +4979,8 @@ fn container_type_is_size_container(value: &str) -> bool {
 }
 
 fn inline_width_px(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {
-    inline_width_px_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(StyleComputationContext::new(runtime.style_viewport())),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    inline_width_px_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn inline_width_px_with_resolution(
@@ -5637,11 +5600,8 @@ fn resolve_computed_inset_length_percentage(
 }
 
 fn computed_position(runtime: &JsContextHost, handle: DomHandle) -> String {
-    computed_position_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(StyleComputationContext::new(runtime.style_viewport())),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    computed_position_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn computed_position_with_resolution(
@@ -5705,11 +5665,8 @@ fn physical_inset_logical_source(
 }
 
 fn computed_direction(runtime: &JsContextHost, handle: DomHandle) -> String {
-    computed_direction_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(StyleComputationContext::new(runtime.style_viewport())),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    computed_direction_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn computed_direction_with_resolution(
@@ -5737,13 +5694,9 @@ fn raw_stylo_computed_style_value(
     handle: DomHandle,
     property: &str,
 ) -> String {
-    raw_stylo_computed_style_value_with_context(
-        runtime,
-        handle,
-        property,
-        StyleComputationContext::new(runtime.style_viewport()),
-    )
-    .unwrap_or_default()
+    ComputedStyleRead::new(runtime, handle)
+        .raw_primary_property(property)
+        .unwrap_or_default()
 }
 
 fn raw_stylo_computed_style_value_with_inputs(
@@ -6240,11 +6193,8 @@ fn computed_line_height_px_with_resolution(
 }
 
 fn computed_font_size_px(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {
-    computed_font_size_px_with_resolution(
-        runtime,
-        handle,
-        StyleResolutionContext::independent(StyleComputationContext::new(runtime.style_viewport())),
-    )
+    let read = ComputedStyleRead::new(runtime, handle);
+    computed_font_size_px_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn inline_font_size_px(runtime: &JsContextHost, handle: DomHandle) -> Option<f64> {

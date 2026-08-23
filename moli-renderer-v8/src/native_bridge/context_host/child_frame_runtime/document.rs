@@ -270,9 +270,11 @@ fn install_child_document_stream_methods<'s>(
                 value.into(),
             );
         }
-        runtime
-            .dom_host_mut()
-            .mark_subtree_connected_preserving_owner_document(document_handle);
+        if !runtime.dom_host().is_connected(document_handle) {
+            runtime
+                .dom_host_mut()
+                .mark_subtree_connected_preserving_owner_document(document_handle);
+        }
     }
     let _ = ChildDocumentStreamMethodsDeclaration::new(handle_value).initialize(scope, document);
 }

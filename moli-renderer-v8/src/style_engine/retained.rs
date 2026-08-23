@@ -22,7 +22,8 @@ use super::{
     state::RetainedStyleSystem,
     stylesheet::{
         append_stylesheet_to_stylist, install_active_stylesheet, install_active_stylesheets,
-        new_style_device_with_viewport_bits, new_stylist_with_viewport_bits,
+        moli_ua_stylesheet_base_url, new_style_device_with_viewport_bits,
+        new_stylist_with_viewport_bits,
     },
     stylesheet_resources::StylesheetResourceManifest,
     ua::HTML_STYLESHEET as MOLI_UA_STYLESHEET,
@@ -97,7 +98,7 @@ pub(super) fn build_retained_style_system(
         &mut stylist,
         shared_lock,
         MOLI_UA_STYLESHEET,
-        &key.document_url,
+        moli_ua_stylesheet_base_url(),
         Origin::UserAgent,
         key.quirks_mode,
     );

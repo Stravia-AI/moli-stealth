@@ -309,7 +309,6 @@ pub(super) fn computed_style_property_value(
         None => None,
     };
     let style_system_key = StyleWorldKey::new_for_observation(
-        document_url,
         inputs,
         viewport,
         super::StyleTreeScopeVersions::current(host, Some(owner_document)),
@@ -383,7 +382,6 @@ pub(super) fn computed_style_snapshot_after_style_update(
 ) -> Option<StyloComputedStyleSnapshot> {
     let owner_document = owner_document_for_computed_style_read(host, handle)?;
     let style_system_key = StyleWorldKey::new_for_observation(
-        document_url,
         inputs,
         viewport,
         super::StyleTreeScopeVersions::current(host, Some(owner_document)),
@@ -428,14 +426,10 @@ pub(super) fn computed_style_snapshot_from_current_observation(
         .and_then(Node::as_document)
         .map(|document| document.quirks_mode())
         .unwrap_or(QuirksMode::NoQuirks);
-    let style_document_url = host
-        .document_url_for_handle(owner_document)
-        .unwrap_or(document_url);
     let world = engine.world_for_document(owner_document);
     if !world
         .document_state
         .retained_style_system_is_current_for_observation(
-            style_document_url,
             viewport,
             environment,
             quirks_mode,
@@ -446,7 +440,6 @@ pub(super) fn computed_style_snapshot_from_current_observation(
             host,
             &world.document_state,
             owner_document,
-            style_document_url,
             viewport,
             environment,
             quirks_mode,
@@ -482,7 +475,6 @@ pub(super) fn computed_style_snapshot_after_world_update(
         StyleWorldUpdate::Full(inputs) => {
             let environment = update.environment();
             let style_system_key = StyleWorldKey::new_for_observation(
-                &environment.document_url,
                 inputs,
                 environment.viewport,
                 environment.tree_scope_versions,

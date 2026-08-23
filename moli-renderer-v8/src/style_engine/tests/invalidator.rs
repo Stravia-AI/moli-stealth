@@ -120,9 +120,8 @@ fn retained_system_mutations_without_computed_cache_still_queue_work() {
         style,
         "section:has(span) { color: red; }".into(),
     );
-    let document_url = host.document_url().expect("test document url").clone();
     let inputs = FullStyleWorldSnapshot::default();
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
     assert_eq!(
         engine.computed_style_cache_entry_count_for_document_for_test(document),
@@ -552,7 +551,7 @@ fn stylo_tree_invalidator_wrapper_collects_sibling_roots() {
             document, 0,
         ))),
     );
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
 
     let (roots, requires_fallback) = collect_source_invalidation_roots_for_test(
@@ -592,7 +591,7 @@ fn stylo_tree_invalidator_wrapper_handles_normal_dependency_chains() {
             document, 0,
         ))),
     );
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
 
     let (roots, requires_fallback) = collect_source_invalidation_roots_for_test(
@@ -635,7 +634,7 @@ fn stylo_tree_invalidator_wrapper_handles_scope_dependency_chains() {
             document, 0,
         ))),
     );
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
 
     let (roots, requires_fallback) = collect_source_invalidation_roots_for_test(
@@ -675,7 +674,7 @@ fn stylo_tree_invalidator_wrapper_accepts_empty_scope_dependency_result() {
             document, 0,
         ))),
     );
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, host.document_handle(), key, &inputs);
 
     let (roots, requires_fallback) = collect_source_invalidation_roots_for_test(

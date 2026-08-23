@@ -4529,6 +4529,288 @@ fn computed_style_child_document_viewport_units_use_css_iframe_size() {
 }
 
 #[test]
+fn child_document_mixed_style_observations_do_not_churn_the_retained_world() {
+    let mut vm = new_storage_test_vm("https://child-style-observation-context.test/");
+    let warmup = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement('iframe');
+  frame.id = 'mixed-observation-frame';
+  frame.style.cssText = 'width: 240px; height: 160px';
+  (document.body || document.documentElement || document).appendChild(frame);
+
+  const childWindow = frame.contentWindow;
+  const childDocument = childWindow.document;
+  childDocument.open();
+  childDocument.write(`
+    <style>#mixed-observation-target { color: rgb(0, 128, 0); }</style>
+    <style media="(max-width: 300px)">
+      .narrow-child-rule { display: block; }
+    </style>
+    <style media="(min-width: 700px)">
+      .wide-child-rule { display: block; }
+    </style>
+    <body><div id="mixed-observation-target"
+      style="font-size: 16px; transition-duration: calc(1s); text-size-adjust: calc(100%)"
+    >child text</div></body>`);
+  childDocument.close();
+
+  const shadowHost = childDocument.createElement('section');
+  childDocument.body.appendChild(shadowHost);
+  shadowHost.attachShadow({ mode: 'open' }).innerHTML = `
+    <style media="(max-width: 300px)">:host { display: block; }</style>
+    <span>shadow text</span>`;
+
+  const target = childDocument.getElementById('mixed-observation-target');
+  globalThis.__mixedStyleObservation = { childWindow, target };
+  return [
+    target.checkVisibility(),
+    target.innerText,
+    childWindow.getComputedStyle(target).color
+  ].join('|');
+})()
+"#,
+        )
+        .expect("mixed child-document style observation fixture should initialize");
+    assert_eq!(warmup, "true|child text|rgb(0, 128, 0)");
+
+    let child_document = child_document_handle_for_frame_id(&vm, "mixed-observation-frame");
+    let child_updates = vm.retained_style_system_update_count_for_document_for_test(child_document);
+    let child_stylist = vm.retained_stylist_identity_for_document_for_test(child_document);
+    let materializations = vm
+        ._context_host
+        .borrow()
+        .style_world_update_materializations_for_test();
+    let dom_version = vm._context_host.borrow().dom_host().dom_version();
+    let (_, viewport_cache_misses, viewport_cache_entries) = vm
+        ._context_host
+        .borrow()
+        .inferred_frame_style_viewport_cache_observability();
+
+    let visibility_result = vm
+        .eval(
+            r#"
+(() => {
+  const { target } = __mixedStyleObservation;
+  let visible = 0;
+  for (let index = 0; index < 12; index += 1) {
+    visible += target.checkVisibility() ? 1 : 0;
+  }
+  return String(visible);
+})()
+"#,
+        )
+        .expect("repeated child checkVisibility observations should remain stable");
+    assert_eq!(visibility_result, "12");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates,
+        "child checkVisibility must use the child style environment",
+    );
+
+    let inner_text_result = vm
+        .eval(
+            r#"
+(() => {
+  const { target } = __mixedStyleObservation;
+  let length = 0;
+  for (let index = 0; index < 12; index += 1) {
+    length += target.innerText.length;
+  }
+  return String(length);
+})()
+"#,
+        )
+        .expect("repeated child innerText observations should remain stable");
+    assert_eq!(inner_text_result, "120");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates,
+        "child innerText must use the child style environment",
+    );
+
+    let computed_result = vm
+        .eval(
+            r#"
+(() => {
+  const { childWindow, target } = __mixedStyleObservation;
+  let length = 0;
+  for (let index = 0; index < 12; index += 1) {
+    length += childWindow.getComputedStyle(target).color.length;
+  }
+  return String(length);
+})()
+"#,
+        )
+        .expect("repeated child computed-style observations should remain stable");
+    assert_eq!(computed_result, "168");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates,
+        "child getComputedStyle must retain the child style environment",
+    );
+
+    let mixed_result = vm
+        .eval(
+            r#"
+(() => {
+  const { childWindow, target } = __mixedStyleObservation;
+  let checksum = 0;
+  for (let index = 0; index < 12; index += 1) {
+    checksum += target.checkVisibility() ? 1 : 0;
+    checksum += target.innerText.length;
+    checksum += childWindow.getComputedStyle(target).color.length;
+  }
+  return String(checksum);
+})()
+"#,
+        )
+        .expect("mixed child-document style observations should remain stable");
+    assert_eq!(mixed_result, "300");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        child_updates,
+        "alternating child DOM APIs must not change the retained child style environment",
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(child_document),
+        child_stylist,
+        "alternating child DOM APIs must retain the same child Stylist",
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        materializations,
+        "alternating child DOM APIs must not materialize clean style-world updates",
+    );
+    assert_eq!(
+        vm._context_host.borrow().dom_host().dom_version(),
+        dom_version,
+        "installing an existing child document wrapper must not report a DOM mutation",
+    );
+    let (_, final_viewport_cache_misses, final_viewport_cache_entries) = vm
+        ._context_host
+        .borrow()
+        .inferred_frame_style_viewport_cache_observability();
+    assert_eq!(
+        final_viewport_cache_misses, viewport_cache_misses,
+        "clean child style observations must reuse the inferred iframe viewport",
+    );
+    assert_eq!(final_viewport_cache_entries, viewport_cache_entries);
+}
+
+#[test]
+fn nested_child_mixed_style_observations_keep_each_document_viewport() {
+    let mut vm = new_storage_test_vm("https://nested-style-observation-context.test/");
+    let warmup = vm
+        .eval(
+            r#"
+(() => {
+  const outerFrame = document.createElement('iframe');
+  outerFrame.id = 'mixed-observation-outer-frame';
+  outerFrame.style.cssText = 'width: 500px; height: 300px';
+  (document.body || document.documentElement || document).appendChild(outerFrame);
+
+  const outerWindow = outerFrame.contentWindow;
+  const outerDocument = outerWindow.document;
+  outerDocument.open();
+  outerDocument.write(`
+    <style media="(width: 500px)">body { color: rgb(1, 2, 3); }</style>
+    <body><iframe id="mixed-observation-inner-frame"
+      style="width: 180px; height: 90px"></iframe></body>`);
+  outerDocument.close();
+
+  const innerFrame = outerDocument.getElementById('mixed-observation-inner-frame');
+  const innerWindow = innerFrame.contentWindow;
+  const innerDocument = innerWindow.document;
+  innerDocument.open();
+  innerDocument.write(`
+    <style>#mixed-observation-nested-target { color: rgb(0, 128, 0); }</style>
+    <style media="(max-width: 200px)">
+      .narrow-nested-rule { display: block; }
+    </style>
+    <style media="(min-width: 700px)">
+      .wide-nested-rule { display: block; }
+    </style>
+    <body><div id="mixed-observation-nested-target">nested text</div></body>`);
+  innerDocument.close();
+
+  const target = innerDocument.getElementById('mixed-observation-nested-target');
+  target.checkVisibility();
+  outerWindow.getComputedStyle(innerFrame).display;
+  const color = innerWindow.getComputedStyle(target).color;
+  globalThis.__nestedMixedStyleObservation = { innerWindow, target };
+  return color;
+})()
+"#,
+        )
+        .expect("nested mixed style observation fixture should initialize");
+    assert_eq!(warmup, "rgb(0, 128, 0)");
+
+    let documents = [
+        vm.document_handle_for_test(),
+        child_document_handle_for_frame_id(&vm, "mixed-observation-outer-frame"),
+        child_document_handle_for_frame_id(&vm, "mixed-observation-inner-frame"),
+    ];
+    let updates = documents
+        .map(|document| vm.retained_style_system_update_count_for_document_for_test(document));
+    let stylists =
+        documents.map(|document| vm.retained_stylist_identity_for_document_for_test(document));
+    let dom_version = vm._context_host.borrow().dom_host().dom_version();
+    let (_, viewport_cache_misses, viewport_cache_entries) = vm
+        ._context_host
+        .borrow()
+        .inferred_frame_style_viewport_cache_observability();
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const { innerWindow, target } = __nestedMixedStyleObservation;
+  let checksum = 0;
+  for (let index = 0; index < 12; index += 1) {
+    checksum += target.checkVisibility() ? 1 : 0;
+    checksum += target.innerText.length;
+    checksum += innerWindow.getComputedStyle(target).color.length;
+  }
+  return String(checksum);
+})()
+"#,
+        )
+        .expect("nested mixed style observations should remain stable");
+    assert_eq!(result, "312");
+
+    for (index, document) in documents.into_iter().enumerate() {
+        assert_eq!(
+            vm.retained_style_system_update_count_for_document_for_test(document),
+            updates[index],
+            "mixed nested DOM APIs must not update retained style document {index}",
+        );
+        assert_eq!(
+            vm.retained_stylist_identity_for_document_for_test(document),
+            stylists[index],
+            "mixed nested DOM APIs must retain Stylist identity for document {index}",
+        );
+    }
+    assert_eq!(
+        vm._context_host.borrow().dom_host().dom_version(),
+        dom_version,
+        "nested child document wrappers must remain connected without repeated mutations",
+    );
+    let (_, final_viewport_cache_misses, final_viewport_cache_entries) = vm
+        ._context_host
+        .borrow()
+        .inferred_frame_style_viewport_cache_observability();
+    assert_eq!(
+        final_viewport_cache_misses, viewport_cache_misses,
+        "clean nested style observations must reuse every inferred iframe viewport",
+    );
+    assert_eq!(final_viewport_cache_entries, viewport_cache_entries);
+}
+
+#[test]
 fn child_window_and_mock_root_geometry_use_iframe_viewport() {
     let mut vm = new_storage_test_vm("https://child-window-viewport.test/");
 

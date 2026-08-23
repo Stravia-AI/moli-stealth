@@ -42,10 +42,13 @@ use super::{
     world_key::{DEFAULT_VIEWPORT_HEIGHT, DEFAULT_VIEWPORT_WIDTH},
 };
 
+static MOLI_UA_STYLESHEET_BASE_URL: LazyLock<url::Url> =
+    LazyLock::new(|| url::Url::parse("about:blank").expect("valid built-in stylesheet base URL"));
+
 static MOLI_UA_SOURCE_METADATA: LazyLock<StyleSourceMetadata> = LazyLock::new(|| {
     style_source_metadata_for_css_text_with_origin(
         MOLI_UA_STYLESHEET,
-        &url::Url::parse("about:blank").expect("valid built-in stylesheet base URL"),
+        moli_ua_stylesheet_base_url(),
         Origin::UserAgent,
     )
 });
@@ -68,6 +71,10 @@ pub(crate) fn reset_author_source_text_parse_count_for_test() {
 #[cfg(test)]
 pub(crate) fn author_source_text_parse_count_for_test() -> usize {
     AUTHOR_SOURCE_TEXT_PARSE_COUNT.with(std::cell::Cell::get)
+}
+
+pub(super) fn moli_ua_stylesheet_base_url() -> &'static url::Url {
+    &MOLI_UA_STYLESHEET_BASE_URL
 }
 
 #[derive(Debug)]

@@ -8138,13 +8138,16 @@ fn inner_text_updates_device_in_place_without_full_style_world_snapshots() {
 }
 
 #[test]
-fn inner_text_replaces_style_world_after_document_url_change() {
+fn same_document_history_url_mutations_preserve_style_world() {
     let mut vm = new_parsed_test_vm(
         "https://inner-text-document-url-style-world.test/start/index.html",
-        r#"<!doctype html><html><head>
-          <base href="https://cdn.test/stable-base/">
-          <style>#target { text-transform: uppercase; }</style>
-        </head><body><div id="target">mixed</div></body></html>"#,
+        r#"<!doctype html><html><head><style>
+          #target { text-transform: uppercase; background-image: url(asset.png); }
+          #hash-target:target { text-transform: lowercase; }
+        </style></head><body>
+          <div id="target">mixed</div>
+          <div id="hash-target">HASH</div>
+        </body></html>"#,
     );
 
     assert_eq!(
@@ -8152,6 +8155,15 @@ fn inner_text_replaces_style_world_after_document_url_change() {
             .expect("initial innerText read should evaluate"),
         "MIXED"
     );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).backgroundImage")
+            .expect("initial stylesheet URL should evaluate"),
+        r#"url("https://inner-text-document-url-style-world.test/start/asset.png")"#
+    );
+    let document = vm.document_handle_for_test();
+    let stylist_identity = vm.retained_stylist_identity_for_document_for_test(document);
+    let rebuilds = vm.retained_style_system_rebuild_count_for_document_for_test(document);
+    let updates = vm.retained_style_system_update_count_for_document_for_test(document);
     let update_materializations_after_initial = vm
         ._context_host
         .borrow()
@@ -8168,47 +8180,92 @@ fn inner_text_replaces_style_world_after_document_url_change() {
         .expect("innerText after same-document URL mutation should evaluate"),
         "MIXED"
     );
-    let update_materializations_after_url_change = vm
-        ._context_host
-        .borrow()
-        .style_world_update_materializations_for_test();
-    let full_snapshots_after_url_change = vm
-        ._context_host
-        .borrow()
-        .style_world_full_snapshots_for_test();
-
     assert_eq!(
-        vm.eval("document.getElementById('target').innerText")
-            .expect("repeated innerText after URL mutation should evaluate"),
+        vm.eval("document.baseURI")
+            .expect("base URI after pushState should evaluate"),
+        "https://inner-text-document-url-style-world.test/next/path"
+    );
+    assert_eq!(
+        vm.eval("getComputedStyle(document.getElementById('target')).backgroundImage")
+            .expect("existing stylesheet URL after pushState should evaluate"),
+        r#"url("https://inner-text-document-url-style-world.test/start/asset.png")"#,
+        "an existing inline stylesheet keeps its processing-time base URL"
+    );
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const dynamic = document.createElement('div');
+              dynamic.style.backgroundImage = 'url(new.png)';
+              document.body.appendChild(dynamic);
+              return getComputedStyle(dynamic).backgroundImage;
+            })()"#
+        )
+        .expect("new inline declaration after pushState should evaluate"),
+        r#"url("https://inner-text-document-url-style-world.test/next/new.png")"#,
+        "new style declarations must observe the updated Document base URL"
+    );
+    assert_eq!(
+        vm.eval(
+            "history.replaceState(null, '', '?view=compact'); document.getElementById('target').innerText"
+        )
+        .expect("innerText after same-document query mutation should evaluate"),
         "MIXED"
     );
-    let update_materializations_after_repeated = vm
-        ._context_host
-        .borrow()
-        .style_world_update_materializations_for_test();
-    let full_snapshots_after_repeated = vm
-        ._context_host
-        .borrow()
-        .style_world_full_snapshots_for_test();
+    assert_eq!(
+        vm.eval("document.baseURI")
+            .expect("base URI after replaceState should evaluate"),
+        "https://inner-text-document-url-style-world.test/next/path?view=compact"
+    );
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const target = document.getElementById('target');
+              for (let index = 0; index < 64; index += 1) {
+                history.replaceState(null, '', `?view=${index}`);
+                void target.innerText;
+              }
+              return target.innerText;
+            })()"#
+        )
+        .expect("repeated history URL and layout observations should evaluate"),
+        "MIXED"
+    );
+    assert_eq!(
+        vm.eval(
+            "history.replaceState(null, '', '#hash-target'); document.getElementById('hash-target').innerText"
+        )
+        .expect(":target style after same-document fragment mutation should evaluate"),
+        "hash"
+    );
 
     assert_eq!(
-        update_materializations_after_url_change
-            .saturating_sub(update_materializations_after_initial),
-        1
+        vm.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "same-Document history mutations must retain the Stylist"
     );
     assert_eq!(
-        full_snapshots_after_url_change.saturating_sub(full_snapshots_after_initial),
-        1,
-        "a path-changing history mutation is an explicit style-world replacement boundary"
+        vm.retained_style_system_rebuild_count_for_document_for_test(document),
+        rebuilds,
+        "same-Document history mutations must not rebuild the style world"
     );
     assert_eq!(
-        update_materializations_after_repeated
-            .saturating_sub(update_materializations_after_url_change),
-        0
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates,
+        "path, query, and fragment changes need no retained style-world update"
     );
     assert_eq!(
-        full_snapshots_after_repeated.saturating_sub(full_snapshots_after_url_change),
-        0
+        vm._context_host
+            .borrow()
+            .style_world_update_materializations_for_test(),
+        update_materializations_after_initial,
+        "history URL mutations must not materialize stylesheet inputs"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .style_world_full_snapshots_for_test(),
+        full_snapshots_after_initial,
+        "history URL mutations must not materialize a full style snapshot"
     );
 }
 

@@ -763,7 +763,7 @@ fn mixed_cleanup_clears_shadow_cascade_data_only_for_source_fallback_roots() {
             document_url.clone(),
         )],
     ));
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (exact_cascade_data, fallback_cascade_data, structural_cascade_data) = engine
@@ -1761,7 +1761,7 @@ fn subtree_fallback_cleanup_clears_only_affected_shadow_cascade_data() {
     inputs
         .shadow_stylesheet_sources
         .push((second_shadow_root, vec![second_source]));
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let (first_cascade_data, second_cascade_data) = engine

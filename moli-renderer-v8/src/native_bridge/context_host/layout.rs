@@ -6,11 +6,13 @@ use moli_layout::{
 };
 
 use super::JsContextHost;
+use super::layout_state::InferredFrameStyleViewportCacheKey;
 use crate::{
     css_resource_urls::{CompletedStylesheetWebFont, StylesheetLoadBlockingResource},
     document_runtime::DomHandle,
     native_bridge::element::iframe_handle_viewport,
     script_vm::web_fonts::DocumentWebFontCompletion,
+    style_engine::{StyleViewport, StyloStyleEnvironment},
 };
 
 /// Resets the entry flag on every return path, including unwinding.
@@ -138,6 +140,40 @@ impl JsContextHost {
             .try_borrow()
             .ok()?
             .frame_viewport(frame)
+    }
+
+    pub(crate) fn inferred_frame_style_viewport(
+        &self,
+        frame: DomHandle,
+        parent_document: DomHandle,
+        parent_viewport: StyleViewport,
+        compute: impl FnOnce() -> StyleViewport,
+    ) -> StyleViewport {
+        let key = InferredFrameStyleViewportCacheKey {
+            dom_version: self.dom_host().dom_version(),
+            parent_style_epoch: self
+                .style_engine
+                .target_context_epoch_for_document(parent_document),
+            parent_viewport,
+            environment: StyloStyleEnvironment::from_emulated_media(self.emulated_media()),
+        };
+        if let Ok(mut state) = self.document_layout_state.try_borrow_mut()
+            && let Some(viewport) = state.inferred_frame_style_viewport(frame, key)
+        {
+            return viewport;
+        }
+        let viewport = compute();
+        if let Ok(mut state) = self.document_layout_state.try_borrow_mut() {
+            state.publish_inferred_frame_style_viewport(frame, key, viewport);
+        }
+        viewport
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inferred_frame_style_viewport_cache_observability(&self) -> (u64, u64, usize) {
+        self.document_layout_state
+            .borrow()
+            .inferred_frame_style_viewport_cache_observability()
     }
 
     pub(crate) fn with_fresh_layout_pass_for_document<T>(

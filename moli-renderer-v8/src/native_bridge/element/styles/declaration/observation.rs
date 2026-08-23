@@ -9,6 +9,7 @@ use crate::{
 };
 
 use super::super::super::super::JsContextHost;
+use super::super::style_viewport_for_document;
 use super::style_world::{
     StyleObservationKey, prepare_style_world_update, stylesheet_query_fallback,
     stylesheet_source_document_for_handle,
@@ -71,7 +72,10 @@ struct ComputedStyleReadInvariant {
 /// query needs it, then shared by every read in this observation.
 pub(crate) struct StyleObservation<'a> {
     runtime: &'a JsContextHost,
-    context: StyleComputationContext,
+    /// `None` resolves one stable context per touched Document. Layout and
+    /// detached CSSOM snapshots use `Some` to pin an exact caller-owned
+    /// viewport instead.
+    fixed_context: Option<StyleComputationContext>,
     drained_document: Option<DomHandle>,
     additional_drained_documents: Vec<DomHandle>,
     primary_document: Option<Rc<StyleObservationInputs<'a>>>,
@@ -109,6 +113,10 @@ impl<'a> StyleObservationInputs<'a> {
 
     fn tree_scope_versions(&self) -> crate::style_engine::StyleTreeScopeVersions {
         self.key.tree_scope_versions()
+    }
+
+    fn context(&self) -> StyleComputationContext {
+        self.context
     }
 
     fn prepared_update(&self, plan: &StyleWorldUpdatePlan) -> Rc<PreparedStyleWorldUpdate> {
@@ -166,10 +174,7 @@ impl RetainedStyleObservation for StyleObservationInputs<'_> {
 
 impl<'a> StyleObservation<'a> {
     pub(crate) fn new(runtime: &'a JsContextHost) -> Self {
-        Self::new_with_context(
-            runtime,
-            StyleComputationContext::new(runtime.style_viewport()),
-        )
+        Self::new_with_fixed_context(runtime, None)
     }
 
     /// Creates one synchronous style-observation scope for an exact document
@@ -195,9 +200,16 @@ impl<'a> StyleObservation<'a> {
         runtime: &'a JsContextHost,
         context: StyleComputationContext,
     ) -> Self {
+        Self::new_with_fixed_context(runtime, Some(context))
+    }
+
+    fn new_with_fixed_context(
+        runtime: &'a JsContextHost,
+        fixed_context: Option<StyleComputationContext>,
+    ) -> Self {
         Self {
             runtime,
-            context,
+            fixed_context,
             drained_document: None,
             additional_drained_documents: Vec::new(),
             primary_document: None,
@@ -212,7 +224,10 @@ impl<'a> StyleObservation<'a> {
     }
 
     pub(crate) fn read(&mut self, handle: DomHandle) -> ComputedStyleRead<'a> {
-        let read_document = self.context.resolved_read_document(self.runtime, handle);
+        let read_document = self
+            .fixed_context
+            .unwrap_or_default()
+            .resolved_read_document(self.runtime, handle);
         if self.drained_document != Some(read_document)
             && !self.additional_drained_documents.contains(&read_document)
         {
@@ -228,13 +243,14 @@ impl<'a> StyleObservation<'a> {
         }
 
         let source_document = stylesheet_source_document_for_handle(self.runtime, handle);
-        let observation_inputs = self.observation_inputs(source_document);
+        let observation_inputs = self.observation_inputs(source_document, read_document);
+        let context = observation_inputs.context();
         let stylo_style = match self
             .runtime
             .computed_style_snapshot_from_current_observation(
                 handle,
                 read_document,
-                self.context.viewport,
+                context.viewport,
                 observation_inputs.tree_scope_versions(),
             ) {
             StyleObservationSnapshot::Current(style) => style,
@@ -252,7 +268,7 @@ impl<'a> StyleObservation<'a> {
         ComputedStyleRead {
             runtime: self.runtime,
             handle,
-            context: self.context,
+            context,
             observation_inputs,
             stylo_style,
         }
@@ -261,6 +277,7 @@ impl<'a> StyleObservation<'a> {
     fn observation_inputs(
         &mut self,
         source_document: Option<DomHandle>,
+        read_document: DomHandle,
     ) -> Rc<StyleObservationInputs<'a>> {
         if let Some(observation) = self.primary_document.as_ref()
             && observation.source_document() == source_document
@@ -275,10 +292,13 @@ impl<'a> StyleObservation<'a> {
             return Rc::clone(observation);
         }
 
+        let context = self.fixed_context.unwrap_or_else(|| {
+            StyleComputationContext::new(style_viewport_for_document(self.runtime, read_document))
+        });
         let observation = Rc::new(StyleObservationInputs::new(
             self.runtime,
             source_document,
-            self.context,
+            context,
         ));
         if self.primary_document.is_none() {
             self.primary_document = Some(Rc::clone(&observation));

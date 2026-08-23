@@ -289,9 +289,8 @@ fn missing_retained_cascade_data_reaches_cleanup_application_table() {
     let mut engine = MoliStyleEngine::new();
     let root = host.document_handle();
     engine.set_document_adopted_style_sheet_sources(root, Vec::new());
-    let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, root, key, &inputs);
 
     let source_id = StyleSourceId::document_adopted_style_sheet(root, 0);
@@ -1443,7 +1442,7 @@ fn source_dependency_request_translation_preserves_context_fallback_kind_with_re
     engine.set_document_adopted_style_sheet_sources(document, vec![source.clone()]);
     let mut inputs = FullStyleWorldSnapshot::default();
     inputs.document_stylesheet_sources.push(source);
-    let key = StyleWorldKey::new(&base_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
     engine.ensure_retained_style_system_for_document(&host, document, key, &inputs);
 
     let application = engine
@@ -2444,9 +2443,8 @@ fn retained_style_system_cache_hit_preserves_computed_and_retained_generations()
     let engine = MoliStyleEngine::new();
     let host = test_host();
     let document = host.document_handle();
-    let document_url = url::Url::parse("https://example.test/").unwrap();
     let inputs = FullStyleWorldSnapshot::default();
-    let key = StyleWorldKey::new(&document_url, &inputs, None);
+    let key = StyleWorldKey::new(&inputs, None);
 
     engine.ensure_retained_style_system_for_document(
         &host,
@@ -2495,8 +2493,8 @@ fn viewport_change_updates_the_persistent_style_world_in_place() {
     };
     let initial_viewport = StyleViewport::from_width(Some(800.0));
     let next_viewport = StyleViewport::from_width(Some(640.0));
-    let initial_key = StyleWorldKey::new(&document_url, &inputs, initial_viewport);
-    let viewport_key = StyleWorldKey::new(&document_url, &inputs, next_viewport);
+    let initial_key = StyleWorldKey::new(&inputs, initial_viewport);
+    let viewport_key = StyleWorldKey::new(&inputs, next_viewport);
     let mismatch = initial_key.mismatch_trace(&viewport_key);
     assert!(mismatch.viewport_changed);
 
@@ -2855,7 +2853,7 @@ fn cache_key_source_matching_skips_inactive_owner_sources() {
     engine.ensure_retained_style_system_for_document(
         &host,
         host.document_handle(),
-        StyleWorldKey::new(&document_url, &inputs, None),
+        StyleWorldKey::new(&inputs, None),
         &inputs,
     );
     engine.with_retained_style_system_for_document_for_test(host.document_handle(), |retained| {
