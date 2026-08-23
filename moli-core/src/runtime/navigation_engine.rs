@@ -1804,6 +1804,7 @@ impl NavigationEngine {
                 navigation_initiator_url,
                 redirected,
                 redirect_count,
+                Vec::new(),
                 response_status,
                 response_headers,
                 &loader,

@@ -82,8 +82,7 @@ const COOKIE_REPLACE_RED_HTML: &str =
     "<!doctype html><html><body><main>replace-cookie=red</main></body></html>";
 const COOKIE_REPLACE_BLUE_HTML: &str =
     "<!doctype html><html><body><main>replace-cookie=blue</main></body></html>";
-const COOKIE_CHAIN_OK_HTML: &str =
-    "<!doctype html><html><body><main>cookie-chain=ok</main></body></html>";
+const COOKIE_CHAIN_OK_HTML: &str = "<!doctype html><html><head><title>Cookie chain final</title></head><body><main>cookie-chain=ok</main></body></html>";
 const COOKIE_CHAIN_BROKEN_HTML: &str =
     "<!doctype html><html><body><main>cookie-chain=broken</main></body></html>";
 const COOKIE_LOCATION_GATE_MISSING_HTML: &str = "<!doctype html><html><body><main>cookie-location-gate=missing</main><script>document.cookie='ttwid=fixture; Path=/; Max-Age=3600; SameSite=Lax'; if (!location.search.includes('wid=')) location.replace(location.pathname + '?wid=fixture');</script></body></html>";

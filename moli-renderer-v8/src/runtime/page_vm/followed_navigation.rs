@@ -191,7 +191,15 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
     );
     let local_executor_clone = local_executor.clone();
     let loader_for_bootstrap = loader.clone();
-    let (requested_url, closed_message, bootstrap): (
+    let (
+        requested_url,
+        navigation_redirected,
+        navigation_redirect_chain,
+        closed_message,
+        bootstrap,
+    ): (
+        _,
+        _,
         _,
         _,
         Pin<
@@ -214,6 +222,13 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
             requested_url,
             response,
         } => {
+            let navigation_redirected = response.redirected;
+            let navigation_redirect_chain = response
+                .redirect_chain
+                .iter()
+                .cloned()
+                .map(Into::into)
+                .collect();
             let bootstrap = Box::pin(async move {
                 let started = Instant::now();
                 let result = match boundary {
@@ -249,6 +264,8 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
             });
             (
                 requested_url,
+                navigation_redirected,
+                navigation_redirect_chain,
                 "committed location-navigation bootstrap local task channel closed",
                 bootstrap,
             )
@@ -301,6 +318,8 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
             });
             (
                 requested_url,
+                false,
+                Vec::new(),
                 "committed local-response navigation bootstrap local task channel closed",
                 bootstrap,
             )
@@ -315,9 +334,14 @@ pub(super) async fn bootstrap_committed_followed_location_navigation(
         .await?;
     attach_followed_navigation_response(
         &mut page_vm_outcome,
-        requested_url,
-        response_status,
-        response_headers,
+        PageVmNavigationResponse {
+            requested_url,
+            redirected: navigation_redirected,
+            redirect_count: navigation_redirect_chain.len(),
+            redirect_chain: navigation_redirect_chain,
+            status: response_status,
+            headers: response_headers,
+        },
     );
     Ok(page_vm_outcome)
 }
@@ -394,36 +418,22 @@ async fn streaming_navigation_result_to_turn_outcome(
 
 pub(in crate::runtime) fn attach_navigation_response_to_page_vm(
     page_vm: &mut PageVm,
-    requested_url: Url,
-    response_status: u16,
-    response_headers: Vec<(String, String)>,
+    response: PageVmNavigationResponse,
 ) {
-    page_vm.navigation_response = Some(PageVmNavigationResponse {
-        requested_url,
-        status: response_status,
-        headers: response_headers,
-    });
+    page_vm.navigation_response = Some(response);
 }
 
 fn attach_followed_navigation_response(
     page_vm_outcome: &mut PageVmFollowedNavigationBuildOutcome,
-    requested_url: Url,
-    response_status: u16,
-    response_headers: Vec<(String, String)>,
+    response: PageVmNavigationResponse,
 ) {
     match page_vm_outcome {
         PageVmFollowedNavigationBuildOutcome::ContinuePostParseLifecycle { page_vm, .. }
         | PageVmFollowedNavigationBuildOutcome::TriggeredNavigation { page_vm, .. } => {
-            attach_navigation_response_to_page_vm(
-                page_vm,
-                requested_url,
-                response_status,
-                response_headers,
-            );
+            attach_navigation_response_to_page_vm(page_vm, response);
         }
         PageVmFollowedNavigationBuildOutcome::PendingPhaseOne(pending) => {
-            pending.metadata.followed_navigation_response =
-                Some((requested_url, response_status, response_headers));
+            pending.metadata.committed_navigation_response = Some(response);
         }
         PageVmFollowedNavigationBuildOutcome::Download(_) => {}
     }

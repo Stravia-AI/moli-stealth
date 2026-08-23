@@ -166,6 +166,10 @@ impl Page {
         self.page_state.navigation_redirect_count()
     }
 
+    pub fn navigation_redirect_chain(&self) -> &[super::NavigationRedirect] {
+        self.page_state.navigation_redirect_chain()
+    }
+
     pub fn final_url(&self) -> &Url {
         self.page_state.final_url()
     }

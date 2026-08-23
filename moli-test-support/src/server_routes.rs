@@ -108,6 +108,10 @@ pub(super) fn build_router() -> Router {
             get(location_nav_assign_source_page),
         )
         .route(
+            "/location-nav/http-redirect-source",
+            get(location_nav_http_redirect_source_page),
+        )
+        .route(
             "/location-nav/href-source",
             get(location_nav_href_source_page),
         )

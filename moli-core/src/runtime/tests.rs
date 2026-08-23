@@ -4419,6 +4419,7 @@ async fn renderer_owner_remove_unknown_page_keeps_never_tracked_state() -> Resul
                 navigation_initiator_url: None,
                 navigation_redirected: false,
                 navigation_redirect_count: 0,
+                navigation_redirect_chain: Vec::new(),
                 final_url: Url::parse("https://example.com/final")?,
                 document_title: String::new(),
                 status: 200,
