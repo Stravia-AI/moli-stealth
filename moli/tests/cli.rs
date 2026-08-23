@@ -674,13 +674,26 @@ fn app_config_uses_moli_user_agent_defaults() {
         "fetch",
         "--user-agent",
         "ExampleBrowser/1.0",
-        "--user-agent-suffix",
-        "ignored",
         "https://example.com",
     ]))
     .unwrap();
     let config = AppConfig::from_cli(&cli).unwrap();
     assert_eq!(config.browser.fetch().user_agent(), "ExampleBrowser/1.0");
+}
+
+#[test]
+fn user_agent_and_suffix_conflict() {
+    let error = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "-A",
+        "ExampleBrowser/1.0",
+        "--user-agent-suffix",
+        "internal-tester",
+        "https://example.com",
+    ]))
+    .unwrap_err();
+    assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
 
 #[test]
