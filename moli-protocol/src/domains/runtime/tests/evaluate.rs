@@ -3652,7 +3652,7 @@ async fn scoped_binding_persists_across_navigation_for_registered_named_world() 
     assert!(add_script["result"]["identifier"].as_str().is_some());
     ctx.sent.clear();
 
-    ctx.process_async(json!({
+    ctx.process_and_wait_for_response_async(json!({
         "id": 334,
         "method": "Page.navigate",
         "sessionId": "SID-1",
@@ -6651,7 +6651,7 @@ async fn registered_named_world_object_handles_remain_callable_after_navigation(
     );
     ctx.sent.clear();
 
-    ctx.process_async(json!({
+    ctx.process_and_wait_for_response_async(json!({
         "id": 507,
         "method": "Page.navigate",
         "sessionId": "SID-1",

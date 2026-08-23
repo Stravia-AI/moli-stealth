@@ -924,6 +924,10 @@ async fn interleaved_response_heads_only_commit_the_current_prepared_document() 
         .map(moli_core::page::Page::renderer_devtools_agent_token)
         .expect("interleaved navigation initial renderer agent");
     ctx.enable_page_events_for_test(Some("SID-1"));
+    wait_until_scheduler_message(&mut ctx, "initial Page.loadEventFired", |message| {
+        message["method"] == json!("Page.loadEventFired") && message["sessionId"] == json!("SID-1")
+    })
+    .await;
     ctx.sent.clear();
 
     ctx.process_async(json!({
@@ -3471,6 +3475,11 @@ async fn fulfill_request_completes_navigation_with_synthetic_response() {
         .expect("fulfilled navigation initial renderer agent");
     ctx.enable_page_events_for_test(Some("SID-1"));
     ctx.enable_dom_events_for_test(Some("SID-1"));
+    wait_until_scheduler_message(&mut ctx, "initial Page.loadEventFired", |message| {
+        message["method"] == json!("Page.loadEventFired") && message["sessionId"] == json!("SID-1")
+    })
+    .await;
+    ctx.sent.clear();
 
     ctx.process_async(json!({
         "id": 36,

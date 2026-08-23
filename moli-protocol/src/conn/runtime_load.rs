@@ -2093,9 +2093,11 @@ impl CdpConnection {
                     .infers_renderer_navigation_referrer(),
             );
         }
-        load_inputs.with_main_document_commit_seed(RendererMainDocumentCommitSeed::from_navigation(
-            navigation,
-        ))
+        load_inputs
+            .with_main_document_commit_seed(RendererMainDocumentCommitSeed::from_navigation(
+                navigation,
+            ))
+            .with_stable_page_replacement()
     }
 
     pub(crate) fn prepared_document_commit_configuration_for_session_owner(
@@ -3122,7 +3124,7 @@ impl CdpConnection {
         load_inputs: &TargetNavigationLoadInputs,
         engine: &mut NavigationEngine,
     ) -> NavigationRendererPageReservation {
-        if load_inputs.has_main_document_commit_seed()
+        if load_inputs.replaces_stable_page()
             && let (Some(target_page), Some(renderer_page)) = (
                 self.target_page_residence_identity_for_session(session_id),
                 self.renderer_page_residence_identity_for_session_owner(session_id),

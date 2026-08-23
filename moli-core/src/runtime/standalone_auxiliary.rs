@@ -972,7 +972,7 @@ async fn create_auxiliary_initial_page(
     request.top_level_navigation_dispatch =
         moli_renderer_v8::RendererTopLevelNavigationDispatch::FollowInStandaloneAdapter;
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(request)))
         .await
         .context("failed to build standalone auxiliary initial empty Document")?;
     let (handle, page_state, diagnostics, page_creation_artifacts, pending_download) =

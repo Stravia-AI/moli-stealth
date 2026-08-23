@@ -562,7 +562,7 @@ async fn same_context_background_session_can_stage_its_own_pre_document_state_be
         assert_eq!(active.active_target_id(), Some(second_target_id.as_str()));
     }
 
-    ctx.process_async(json!({
+    ctx.process_and_wait_for_response_async(json!({
         "id": 104192,
         "method": "Page.navigate",
         "sessionId": second_session_id,

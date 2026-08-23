@@ -302,6 +302,25 @@ impl TargetRuntimeSlot {
     pub(crate) fn replace_loaded_page(&mut self, page: Option<Page>) -> Option<Page> {
         self.javascript_dialog_scope.retire();
         let mut page = page;
+        let retained_predecessor = self.rotate_current_document_output_for_replacement();
+        self.ensure_renderer_attachment_for_replacement(page.as_mut());
+        let previous = self.page_slot.replace_loaded_page(page);
+        if retained_predecessor {
+            self.reset_replacement_document_output_state();
+        } else {
+            self.reset_document_output_state();
+        }
+        self.ingest_owner_page_observable_output_updates();
+        previous
+    }
+
+    /// Moves the exact committed Document's request-id correlations out of
+    /// the current target queue before its successor becomes observable.
+    ///
+    /// This is Document-scoped rather than Page-scoped. A stable renderer Page
+    /// replaces only its resident Document, but the old realm can still append
+    /// cancellation terminals to the Page output stream during teardown.
+    fn rotate_current_document_output_for_replacement(&mut self) -> bool {
         let retiring_document = self
             .page_slot
             .loaded_page()
@@ -313,26 +332,17 @@ impl TargetRuntimeSlot {
                     binding.clone(),
                 )
             });
-        let retiring_document =
-            retiring_document.map(|(renderer_page, page_attachment_id, binding)| {
-                RetiringRendererDocumentOutput {
-                    renderer_page,
-                    page_attachment_id,
-                    binding,
-                    network_agent: self.network_agent.rotate_document_for_replacement(),
-                }
+        let Some((renderer_page, page_attachment_id, binding)) = retiring_document else {
+            return false;
+        };
+        self.retiring_renderer_document_outputs
+            .push(RetiringRendererDocumentOutput {
+                renderer_page,
+                page_attachment_id,
+                binding,
+                network_agent: self.network_agent.rotate_document_for_replacement(),
             });
-        self.ensure_renderer_attachment_for_replacement(page.as_mut());
-        let previous = self.page_slot.replace_loaded_page(page);
-        if let Some(retiring_document) = retiring_document {
-            self.retiring_renderer_document_outputs
-                .push(retiring_document);
-            self.reset_replacement_document_output_state();
-        } else {
-            self.reset_document_output_state();
-        }
-        self.ingest_owner_page_observable_output_updates();
-        previous
+        true
     }
 
     pub(crate) fn clear_loaded_page_with_reason(
@@ -547,7 +557,11 @@ impl TargetRuntimeSlot {
         }
         page.bind_renderer_agent_attachment(current.id());
         self.javascript_dialog_scope.retire();
-        self.reset_document_output_state();
+        if self.rotate_current_document_output_for_replacement() {
+            self.reset_replacement_document_output_state();
+        } else {
+            self.reset_document_output_state();
+        }
         self.ingest_owner_page_observable_output_updates();
         Ok(transaction.previous())
     }

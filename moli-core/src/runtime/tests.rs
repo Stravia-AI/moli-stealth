@@ -253,7 +253,9 @@ async fn page_creation_diagnostics_include_default_runtime_context_event() -> Re
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let (handle, page_state, diagnostics, artifacts, pending_download) =
         renderer_owner.materialize_page_created_reply_parts(reply)?;
@@ -344,7 +346,9 @@ async fn page_creation_diagnostics_fence_initial_runtime_observable_output() -> 
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let (handle, page_state, diagnostics, _artifacts, pending_download) =
         renderer_owner.materialize_page_created_reply_parts(reply)?;
@@ -4109,7 +4113,9 @@ async fn renderer_owner_create_page_command_produces_page() -> Result<()> {
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     assert_eq!(
         renderer_owner.len(),
@@ -4171,7 +4177,9 @@ async fn renderer_owner_created_page_runs_common_page_commands() -> Result<()> {
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5156,7 +5164,9 @@ async fn renderer_owner_created_page_runs_runtime_protocol_commands() -> Result<
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5221,7 +5231,9 @@ async fn renderer_owner_created_page_runs_document_start_commands() -> Result<()
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5401,7 +5413,9 @@ async fn renderer_owner_created_page_runs_input_commands() -> Result<()> {
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5476,7 +5490,9 @@ async fn renderer_owner_created_page_runs_input_query_commands() -> Result<()> {
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5572,7 +5588,9 @@ async fn renderer_owner_created_page_reports_real_client_rect_for_positioned_nod
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5655,7 +5673,9 @@ async fn renderer_owner_created_page_resolves_backend_node_runtime_object() -> R
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5740,7 +5760,9 @@ async fn runtime_object_resolve_uses_live_backend_node_for_stale_snapshot_path()
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 
@@ -5875,7 +5897,9 @@ async fn renderer_owner_created_page_runs_inline_stylesheet_commands() -> Result
     );
 
     let reply = renderer_owner
-        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+        .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+            create_page_request,
+        )))
         .await?;
     let mut page = materialize_page_created_reply(&renderer_owner, reply)?;
 

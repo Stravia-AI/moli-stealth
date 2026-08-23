@@ -187,13 +187,17 @@ impl RendererInspectorPauseBridge {
         }
     }
 
-    pub(crate) fn configure_page_route(&self, output_journal: RendererTurnOutputJournal) {
+    pub(crate) fn configure_page_route(
+        &self,
+        agent_token: RendererDevToolsAgentToken,
+        output_journal: RendererTurnOutputJournal,
+    ) {
         let stream = output_journal.stream();
         let RendererOutputResidenceIdentity::Page { page_id, .. } = stream.residence() else {
             panic!("an Inspector pause route requires a Page output stream");
         };
         self.shared.state.lock().routes.insert(
-            stream.renderer_agent(),
+            agent_token,
             RendererInspectorPauseRoute {
                 page_id,
                 output_journal,

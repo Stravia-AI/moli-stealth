@@ -21,14 +21,15 @@ fn configure_page(
     page_id: PageId,
 ) -> RendererDevToolsAgentToken {
     let agent_token = RendererDevToolsAgentToken::allocate();
-    bridge.configure_page_route(RendererTurnOutputJournal::new(
-        crate::runtime::RendererOutputStreamIdentity::new_page(
+    bridge.configure_page_route(
+        agent_token,
+        RendererTurnOutputJournal::new(crate::runtime::RendererOutputStreamIdentity::new_page(
             crate::runtime::RendererOwnerLocalHostId::new_for_testing(page_id.as_u64()),
             page_id,
             agent_token,
             crate::runtime::RendererPageOutputOwnerReservationId::allocate(),
-        ),
-    ));
+        )),
+    );
     agent_token
 }
 

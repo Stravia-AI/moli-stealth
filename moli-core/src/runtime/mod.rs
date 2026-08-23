@@ -1155,7 +1155,9 @@ impl Browser {
         create_page_request.indexed_db_manager = Some(self.partition.weak_indexed_db_manager());
         create_page_request.storage_bucket_store = Some(self.partition.storage_bucket_store());
         let reply = renderer_owner
-            .dispatch_command(RendererOwnerCommand::CreateHtmlPage(create_page_request))
+            .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(
+                create_page_request,
+            )))
             .await?;
         let page = materialize_page_created_reply(&renderer_owner, reply)?;
         info!(

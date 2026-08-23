@@ -10220,6 +10220,48 @@ P6R10 至此完成当前单进程 popup owner 计划。剩余 26 fail 与 15 tim
 不能在未确认 owner 前继续扩展 popup transaction。真实 renderer process、OOPIF、fenced/guest 与完整 Reporting
 仍按产品决策独立立项。
 
+### 公开仓库迁移与 stable Page owner 适配（2026-08-24）
+
+旧仓库 `popup-refactor` 的十二个内聚提交已经按原顺序迁移到公开仓库，公开提交范围为
+`486e7d8bf` 到 `b8ba0364d`。迁移前的公开基线 `0e597fc37` 另保存在
+`backup/popup-refactor-pre-import-20260823-0e597fc37`，因此导入前状态仍可独立检查。
+
+公开仓库在这段时间已经建立了更严格的 stable Page / replacement Document owner。直接保留旧仓库的隐含
+假设会让代码通过 cherry-pick，却在完整门禁中暴露错误，因此本轮同时完成以下适配：
+
+1. `TargetNavigationLoadInputs` 用显式 `replace_stable_page` 表达 replacement admission，不再把
+   `RendererMainDocumentCommitSeed` 的存在误当成 Page replacement identity。
+2. `DocumentCommit` reply boundary 只发布命令响应；typed document continuation 一直保留到 exact
+   post-parse lifecycle 完成并发布最终 Page state。`Pending`、`Blocked` 与中途 Document replacement 都不能提前
+   settle continuation。
+3. stable Page 更换 Document 时，把旧 Document 的 Network request-id correlation 移入 retiring output
+   residence。旧 realm teardown 产生的 Fetch/XHR `ERR_ABORTED` terminal 因此仍在 successor Document 可观察前
+   精确投影，不会因 Page residence 未变化而被清空。
+4. inspector pause route 由“output journal 创建时的 agent”改成显式的 current
+   `RendererDevToolsAgentToken -> stable Page output journal`。replacement Document 的新 agent 因而可以继续发布
+   `Debugger.paused`，同时 Page output stream 保持稳定。
+5. WebDriver Classic element frame target 在查找 frame owner 前先走已有的 attached-element 验证，stale element
+   返回 stale element reference，不再错误降级为 no such frame。
+6. 依赖 author script、binding 或 utility world 已完成的协议测试显式等待 document continuation；Fetch fixture
+   先消费 initial empty Document 的 load event，避免把旧事件误认成新 navigation 的因果前缀。
+
+公开仓库最终 Rust 状态使用以下门禁验收：
+
+```bash
+cargo nextest run --no-fail-fast
+# run 36bfddaf-5b9f-401e-88e7-ae3bff58165f
+# 16530 passed, 14 skipped
+
+cargo fmt --all --check
+# passed
+
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+# passed in 51.69s
+```
+
+这组适配不恢复 lightweight popup 双栈，也不改变 P6R10 的产品边界；它把已经完成的 popup owner 设计接到
+公开仓库当前的 typed replacement、output residence 和 inspector routing 基础上。
+
 ## 验收不变量
 
 迁移完成至少要满足以下不变量。

@@ -391,22 +391,6 @@ impl LivePagePendingNavigationCompletion {
         true
     }
 
-    pub(super) fn take_document_continuation_publisher(
-        &mut self,
-    ) -> Option<RendererDocumentContinuationPublisher> {
-        match self {
-            Self::PublishedPageCreation {
-                document_continuation_publisher,
-                ..
-            }
-            | Self::PublishedPreparedPageReplacement {
-                document_continuation_publisher,
-                ..
-            } => document_continuation_publisher.take(),
-            _ => None,
-        }
-    }
-
     pub(super) fn is_prepared_page_replacement_commit(&self) -> bool {
         matches!(self, Self::CommitPreparedPageReplacement { .. })
     }
@@ -3316,6 +3300,7 @@ impl RendererOwnerLocalStore {
             .expect("new renderer page must be resident after attach commit");
         let devtools_target = attached_entry.page_vm().devtools_target();
         devtools_target.pause_ref().configure_page_route(
+            attached_entry.page_vm().devtools_agent_token(),
             attached_entry
                 .page_vm()
                 .renderer_page_script_environment()

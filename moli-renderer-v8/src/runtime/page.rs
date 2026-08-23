@@ -480,7 +480,7 @@ impl JsRuntime {
         let reply = self
             .inner
             .renderer_owner
-            .dispatch_command(RendererOwnerCommand::CreateHtmlPage(request))
+            .dispatch_command(RendererOwnerCommand::CreateHtmlPage(Box::new(request)))
             .await?;
         self.inner
             .renderer_owner
@@ -645,7 +645,7 @@ impl JsRuntime {
         let reply_rx = self
             .inner
             .renderer_owner
-            .enqueue_command_with_reply(RendererOwnerCommand::CreateHtmlPage(request))?;
+            .enqueue_command_with_reply(RendererOwnerCommand::CreateHtmlPage(Box::new(request)))?;
         Ok(PendingHtmlPage {
             runtime: self.clone(),
             reply_rx,
@@ -954,7 +954,7 @@ impl JsRuntime {
             .renderer_owner
             .dispatch_command(RendererOwnerCommand::PrepareStreamingRawDocument {
                 token: page_reservation,
-                request,
+                request: Box::new(request),
             })
             .await?;
         match reply {

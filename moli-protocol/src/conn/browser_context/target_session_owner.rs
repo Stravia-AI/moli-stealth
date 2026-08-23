@@ -212,6 +212,7 @@ pub(crate) struct TargetNavigationLoadInputs {
         (bool, Option<moli_core::page::SubresourceResourceType>),
     pub(crate) permission_overrides: Vec<moli_core::page::PermissionOverrideRegistration>,
     main_document_commit_seed: Option<RendererMainDocumentCommitSeed>,
+    replace_stable_page: bool,
 }
 
 impl TargetNavigationLoadInputs {
@@ -242,16 +243,25 @@ impl TargetNavigationLoadInputs {
         })
     }
 
-    pub(crate) fn has_main_document_commit_seed(&self) -> bool {
-        self.main_document_commit_seed.is_some()
-    }
-
     pub(crate) fn with_main_document_commit_seed(
         mut self,
         seed: RendererMainDocumentCommitSeed,
     ) -> Self {
         self.main_document_commit_seed = Some(seed);
         self
+    }
+
+    pub(crate) fn with_stable_page_replacement(mut self) -> Self {
+        debug_assert!(
+            self.main_document_commit_seed.is_some(),
+            "stable Page replacement requires a frozen main Document commit"
+        );
+        self.replace_stable_page = true;
+        self
+    }
+
+    pub(crate) fn replaces_stable_page(&self) -> bool {
+        self.replace_stable_page
     }
 
     pub(crate) fn with_renderer_navigation_source(
@@ -382,6 +392,7 @@ impl TargetNavigationLoadInputs {
                 .subresource_interception_config(),
             permission_overrides: Vec::new(),
             main_document_commit_seed: None,
+            replace_stable_page: false,
         }
     }
 
@@ -429,6 +440,7 @@ impl TargetNavigationLoadInputs {
             fetch_subresource_interception: (false, None),
             permission_overrides: Vec::new(),
             main_document_commit_seed: None,
+            replace_stable_page: false,
         }
     }
 
@@ -990,6 +1002,7 @@ impl<'a> TargetSessionOwnerRef<'a> {
                         .subresource_interception_config(),
                     permission_overrides: Vec::new(),
                     main_document_commit_seed: None,
+                    replace_stable_page: false,
                 }
             }
             Self::NoLoadedBrowserContext => unreachable!(

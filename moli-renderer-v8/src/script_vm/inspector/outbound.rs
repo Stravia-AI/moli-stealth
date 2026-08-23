@@ -759,8 +759,8 @@ mod tests {
             RendererOutputStreamIdentity::new_page_for_protocol_test(PageId::new_for_testing(41)),
         );
         let pause_bridge = crate::devtools::pause::RendererInspectorPauseBridge::default();
-        pause_bridge.configure_page_route(journal.clone());
         let agent_token = RendererDevToolsAgentToken::allocate();
+        pause_bridge.configure_page_route(agent_token, journal.clone());
         let session = DevToolsSessionKey::Primary;
         let io_ingress = crate::devtools::ingress::io::RendererInspectorIoIngress::new(
             pause_bridge.pause_loop_wake(),

@@ -245,9 +245,6 @@ impl PageV8ForegroundTaskTurnAction {
             PageV8ForegroundTaskEffect::Ran | PageV8ForegroundTaskEffect::RanScriptAgentCheckpoint
         )
     }
-    pub(crate) const fn requires_output_capture(self) -> bool {
-        self.entered_isolate()
-    }
 }
 
 pub(crate) type PageV8ForegroundTaskTurnOutcome =

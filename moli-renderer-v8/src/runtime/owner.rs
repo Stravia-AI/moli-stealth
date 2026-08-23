@@ -270,14 +270,14 @@ pub struct RendererCreateStreamingRawPageRequest {
 }
 
 pub enum RendererOwnerCommand {
-    CreateHtmlPage(RendererCreateHtmlPageRequest),
+    CreateHtmlPage(Box<RendererCreateHtmlPageRequest>),
     ReserveLivePageReplacement {
         token: RendererPageToken,
         output_owner_reservation_id: RendererPageOutputOwnerReservationId,
     },
     PrepareStreamingRawDocument {
         token: RendererPageReservationToken,
-        request: RendererCreateStreamingRawPageRequest,
+        request: Box<RendererCreateStreamingRawPageRequest>,
     },
     UpdatePreparedRendererDocumentCommitConfiguration {
         token: RendererPageReservationToken,
@@ -1905,7 +1905,7 @@ impl RendererOwnerHandle {
         document: RendererDocumentLifecycleIdentity,
         target_stage: PageVmInitStage,
         follow_count: usize,
-        mut completion: LivePagePendingNavigationCompletion,
+        completion: LivePagePendingNavigationCompletion,
     ) -> RenderRuntimeDispatchOutcome {
         let retire_page_on_failure = completion.retires_page_on_navigation_failure();
         let mut entry = match take_entry_for_command_on_bound_owner_local_store(token) {
@@ -1933,12 +1933,7 @@ impl RendererOwnerHandle {
                     completion,
                 ),
             DocumentLifecycleObserverOutcome::Pending => {
-                self.restore_live_page_entry_and_settle_document_continuation(
-                    token,
-                    entry,
-                    &mut completion,
-                )
-                .await;
+                self.restore_live_page_entry(token, entry);
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
@@ -1953,12 +1948,7 @@ impl RendererOwnerHandle {
                 }
             }
             DocumentLifecycleObserverOutcome::DocumentReplaced { document } => {
-                self.restore_live_page_entry_and_settle_document_continuation(
-                    token,
-                    entry,
-                    &mut completion,
-                )
-                .await;
+                self.restore_live_page_entry(token, entry);
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
@@ -2641,7 +2631,7 @@ impl RendererOwnerHandle {
                 let reservation = request.page_reservation;
                 let outcome = self
                     .create_page_reply_from_html_request_on_owner_local_store(
-                        request,
+                        *request,
                         owner_local_store,
                     )
                     .await;
@@ -2659,7 +2649,7 @@ impl RendererOwnerHandle {
                 let outcome = self
                     .prepare_renderer_document_on_owner_local_store(
                         token,
-                        request,
+                        *request,
                         owner_local_store,
                     )
                     .await;
@@ -3786,23 +3776,6 @@ impl RendererOwnerHandle {
             self.publish_renderer_output(output);
         }
         output_fence
-    }
-
-    async fn restore_live_page_entry_and_settle_document_continuation(
-        &self,
-        token: RendererPageToken,
-        entry: LivePageEntry,
-        completion: &mut LivePagePendingNavigationCompletion,
-    ) {
-        let Some(publisher) = completion.take_document_continuation_publisher() else {
-            self.restore_live_page_entry(token, entry);
-            return;
-        };
-        let (entry, page_state_result) =
-            commit_page_state_on_entry_via_local_task(self.state.local_executor.clone(), entry)
-                .await;
-        let output_fence = self.restore_live_page_entry_with_output_fence(token, entry);
-        publisher.settle(output_fence, page_state_result.ok());
     }
 
     fn retire_pending_phase_one_page_entry(
@@ -5555,6 +5528,7 @@ impl RendererOwnerHandle {
                 // owner wake route.
                 let devtools_target = entry.page_vm().devtools_target();
                 devtools_target.pause_ref().configure_page_route(
+                    entry.page_vm().devtools_agent_token(),
                     entry
                         .page_vm()
                         .renderer_page_script_environment()
@@ -7207,7 +7181,7 @@ impl RendererOwnerHandle {
         entry: LivePageEntry,
         target_stage: PageVmInitStage,
         follow_count: usize,
-        mut completion: LivePagePendingNavigationCompletion,
+        completion: LivePagePendingNavigationCompletion,
         outcome: DocumentLifecycleTurnOutcome,
     ) -> RenderRuntimeDispatchOutcome {
         match outcome {
@@ -7251,12 +7225,7 @@ impl RendererOwnerHandle {
                 readiness: DocumentLifecycleTurnReadiness::Blocked { document },
                 ..
             } => {
-                self.restore_live_page_entry_and_settle_document_continuation(
-                    token,
-                    entry,
-                    &mut completion,
-                )
-                .await;
+                self.restore_live_page_entry(token, entry);
                 RenderRuntimeDispatchOutcome::ContinueAfterPageWake {
                     turn: Box::new(
                         RenderRuntimeTurn::ContinueLivePageNavigationPostParseLifecycle {
