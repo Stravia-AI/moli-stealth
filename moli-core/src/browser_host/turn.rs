@@ -10,24 +10,15 @@ use super::{BrowserOwnerInput, BrowserOwnerInputKind};
 #[must_use = "a selected Browser Host turn must be consumed by its executor"]
 pub struct BrowserHostTurn {
     input: BrowserOwnerInput,
-    ready_after_selection: usize,
 }
 
 impl BrowserHostTurn {
-    pub(super) fn new(input: BrowserOwnerInput, ready_after_selection: usize) -> Self {
-        Self {
-            input,
-            ready_after_selection,
-        }
+    pub(super) fn new(input: BrowserOwnerInput) -> Self {
+        Self { input }
     }
 
     pub fn kind(&self) -> BrowserOwnerInputKind {
         self.input.kind()
-    }
-
-    /// Snapshot of inputs still ready immediately after this FIFO selection.
-    pub fn ready_after_selection(&self) -> usize {
-        self.ready_after_selection
     }
 
     pub fn into_input(self) -> BrowserOwnerInput {

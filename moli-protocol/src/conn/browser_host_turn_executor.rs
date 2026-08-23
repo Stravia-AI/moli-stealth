@@ -240,9 +240,7 @@ impl BrowserHostTurnExecutor for BrowserHostTurnExecution<'_> {
             tracing::info!(
                 target: "moli_cdp_runtime",
                 stage = "browser_owner_input_start",
-                executor_turn_sequence = self.turn_sequence(),
                 kind = ?turn.kind(),
-                remaining = turn.ready_after_selection(),
             );
         }
         match turn.into_input() {

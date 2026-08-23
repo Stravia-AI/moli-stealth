@@ -361,6 +361,7 @@ pub(crate) struct CdpBrowserFactProjector {
     pending_facts: VecDeque<PendingBrowserFact>,
     lifecycle_causal_links: BTreeMap<BrowserFactSequence, CommittedRendererDocumentBinding>,
     last_observed_sequence: Option<BrowserFactSequence>,
+    #[cfg(test)]
     last_projected_sequence: Option<BrowserFactSequence>,
     terminal_error: Option<BrowserFactProjectionError>,
 }
@@ -372,6 +373,7 @@ impl CdpBrowserFactProjector {
             pending_facts: VecDeque::new(),
             lifecycle_causal_links: BTreeMap::new(),
             last_observed_sequence: None,
+            #[cfg(test)]
             last_projected_sequence: None,
             terminal_error: None,
         }
@@ -1064,10 +1066,15 @@ impl CdpBrowserFactProjector {
     }
 
     fn record_projected(&mut self, sequence: BrowserFactSequence) {
-        self.last_projected_sequence = Some(
-            self.last_projected_sequence
-                .map_or(sequence, |previous| previous.max(sequence)),
-        );
+        #[cfg(test)]
+        {
+            self.last_projected_sequence = Some(
+                self.last_projected_sequence
+                    .map_or(sequence, |previous| previous.max(sequence)),
+            );
+        }
+        #[cfg(not(test))]
+        let _ = sequence;
     }
 
     fn fail(&mut self, error: BrowserFactProjectionError) -> BrowserFactProjectionError {

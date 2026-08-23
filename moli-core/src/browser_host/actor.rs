@@ -67,7 +67,7 @@ impl BrowserHostActor {
         let Some(input) = self.input_rx.recv().await else {
             return BrowserHostTurnSelection::Closed;
         };
-        self.selected_turn = Some(BrowserHostTurn::new(input, self.input_rx.len()));
+        self.selected_turn = Some(BrowserHostTurn::new(input));
         BrowserHostTurnSelection::Selected
     }
 
@@ -87,7 +87,7 @@ impl BrowserHostActor {
             turn
         } else {
             let input = self.input_rx.try_recv().ok()?;
-            BrowserHostTurn::new(input, self.input_rx.len())
+            BrowserHostTurn::new(input)
         };
         Some(executor.execute_browser_host_turn(turn))
     }
@@ -163,7 +163,6 @@ mod tests {
         let first = actor
             .complete_next_turn(&mut executor)
             .expect("first owner turn");
-        assert_eq!(first.ready_after_selection(), 1);
         let first = first.into_input();
         let BrowserOwnerInput::RendererIntent(RendererBrowserIntent::TopLevelLocationNavigation(
             first,
@@ -177,7 +176,6 @@ mod tests {
         let second = actor
             .complete_next_turn(&mut executor)
             .expect("second owner turn");
-        assert_eq!(second.ready_after_selection(), 0);
         let second = second.into_input();
         let BrowserOwnerInput::RendererIntent(RendererBrowserIntent::TopLevelLocationNavigation(
             second,
