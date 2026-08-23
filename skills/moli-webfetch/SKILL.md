@@ -123,7 +123,8 @@ unrelated actions.
 - Use `--cookie-file` or `--profile-dir` only for state the user is authorized
   to use. Never expose headers, cookies, or tokens in the response.
 - Remember that `-H/--header` applies to the initial navigation, not every
-  subresource.
+  subresource. `-X/--method` and `--body` likewise configure only the initial
+  navigation.
 - Treat stdout as the requested artifact. Redirect screenshot, full-document
   screenshot, and PDF output to files, verify that they are non-empty and have
   the expected type, and never print their binary bytes into a text response.

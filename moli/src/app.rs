@@ -42,7 +42,7 @@ pub async fn run_cli_with_config<W: Write>(
 ) -> Result<()> {
     match cli.command {
         Commands::Fetch(args) => {
-            let request = build_fetch_request(&args.url, &config)?;
+            let request = build_fetch_request(&args, &config)?;
             if config.browser.fetch().obey_robots() {
                 // Checked before the browser starts so a refused fetch costs
                 // nothing but the robots.txt request itself.
@@ -145,11 +145,14 @@ pub async fn run_cli_with_config<W: Write>(
     Ok(())
 }
 
-fn build_fetch_request(url: &str, config: &AppConfig) -> Result<Request> {
-    let mut request = Request::get(url)?;
-    // Keep CLI-provided headers scoped to the initial document navigation.
-    request.request_headers = config.fetch.request_headers.clone();
-    Ok(request)
+fn build_fetch_request(args: &crate::cli::FetchArgs, config: &AppConfig) -> Result<Request> {
+    Request::new(
+        &args.method,
+        &args.url,
+        args.body.clone(),
+        config.fetch.request_headers.clone(),
+    )
+    .map(Request::with_top_level_navigation_cookie_context)
 }
 
 struct CliFetchFailureContext {
