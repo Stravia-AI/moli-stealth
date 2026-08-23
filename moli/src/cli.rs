@@ -468,10 +468,10 @@ pub struct CommonArgs {
     #[arg(long, num_args = 0..=1, default_missing_value = "")]
     pub log_filter_scopes: Option<String>,
 
-    #[arg(short = 'A', long)]
+    #[arg(short = 'A', long, conflicts_with = "user_agent_suffix")]
     pub user_agent: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, conflicts_with = "user_agent")]
     pub user_agent_suffix: Option<String>,
 
     /// Unencrypted PKCS#8 Ed25519 private key used for Web Bot Auth signatures.
