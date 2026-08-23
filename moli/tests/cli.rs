@@ -564,8 +564,6 @@ fn infers_serve_mode_when_called_without_args() {
             host: "127.0.0.1".to_owned(),
             port: 9222,
             timeout: 10,
-            cdp_max_connections: 16,
-            cdp_max_pending_connections: 128,
             common: CommonArgs::default(),
         }))
     );
@@ -591,8 +589,6 @@ fn parses_serve_flags_with_explicit_command() {
             host: "0.0.0.0".to_owned(),
             port: 9333,
             timeout: 42,
-            cdp_max_connections: 16,
-            cdp_max_pending_connections: 128,
             common: CommonArgs::default(),
         }))
     );
@@ -1386,6 +1382,8 @@ fn parse_env_flags_in_child_process() {
 #[test]
 fn removed_long_form_flags_are_rejected() {
     for flag in [
+        "--cdp-max-connections",
+        "--cdp-max-pending-connections",
         "--no-layout",
         "--enable-all-resource-fetch",
         "--enable-image-fetch",

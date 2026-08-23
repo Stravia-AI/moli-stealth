@@ -178,9 +178,7 @@ def test_launchers_delegate_atomic_port_selection_to_each_browser(
     monkeypatch.setattr(browsers.tempfile, "mkdtemp", fake_mkdtemp)
 
     asyncio.run(browsers.start_chromium(Path("/test/chromium")))
-    asyncio.run(
-        browsers.start_moli(Path("/test/moli"), max_connections=17)
-    )
+    asyncio.run(browsers.start_moli(Path("/test/moli")))
 
     chromium = calls[0]
     assert "--remote-debugging-port=0" in chromium["command"]
@@ -195,7 +193,7 @@ def test_launchers_delegate_atomic_port_selection_to_each_browser(
     moli = calls[1]
     command = moli["command"]
     assert command[command.index("--port") + 1] == "0"
-    assert command[command.index("--cdp-max-connections") + 1] == "17"
+    assert "--cdp-max-connections" not in command
     assert "endpoint" not in moli
     assert (
         moli["endpoint_parser"](

@@ -4,8 +4,6 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub timeout_secs: u32,
-    pub cdp_max_connections: u16,
-    pub cdp_max_pending_connections: u16,
 }
 
 impl ServerConfig {
@@ -20,8 +18,6 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_owned(),
             port: 9222,
             timeout_secs: 10,
-            cdp_max_connections: 16,
-            cdp_max_pending_connections: 128,
         }
     }
 }

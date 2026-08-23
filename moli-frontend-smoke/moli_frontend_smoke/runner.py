@@ -469,11 +469,7 @@ async def run(args: argparse.Namespace) -> tuple[int, dict[str, Any]]:
                 )
             else:
                 moli_path = moli_binary(args.moli_bin)
-                max_connections = max(16, args.jobs + 4)
-                moli_process = await start_moli(
-                    moli_path,
-                    max_connections=max_connections,
-                )
+                moli_process = await start_moli(moli_path)
                 moli_endpoint = moli_process.endpoint
                 moli_version = moli_process.version
             moli_observations = await _observe_phase(

@@ -320,12 +320,6 @@ pub struct ServeArgs {
     #[arg(short, long, default_value_t = 10)]
     pub timeout: u32,
 
-    #[arg(long, default_value_t = 16)]
-    pub cdp_max_connections: u16,
-
-    #[arg(long, default_value_t = 128)]
-    pub cdp_max_pending_connections: u16,
-
     #[command(flatten)]
     pub common: CommonArgs,
 }

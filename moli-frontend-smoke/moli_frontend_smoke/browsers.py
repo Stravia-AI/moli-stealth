@@ -251,7 +251,7 @@ async def _start_process(
     return BrowserProcess(name, endpoint, process, logs, tasks, temp_dirs, version)
 
 
-async def start_moli(binary: Path, *, max_connections: int) -> BrowserProcess:
+async def start_moli(binary: Path) -> BrowserProcess:
     cache_dir = tempfile.mkdtemp(prefix="moli-frontend-smoke-cache-")
     return await _start_process(
         name="moli",
@@ -264,8 +264,6 @@ async def start_moli(binary: Path, *, max_connections: int) -> BrowserProcess:
             "127.0.0.1",
             "--port",
             "0",
-            "--cdp-max-connections",
-            str(max_connections),
             "--resource",
             "--layout",
             "--http-cache-dir",

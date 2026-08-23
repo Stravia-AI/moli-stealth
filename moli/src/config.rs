@@ -58,8 +58,6 @@ impl AppConfig {
                 config.server.host = args.host.clone();
                 config.server.port = args.port;
                 config.server.timeout_secs = args.timeout;
-                config.server.cdp_max_connections = args.cdp_max_connections;
-                config.server.cdp_max_pending_connections = args.cdp_max_pending_connections;
             }
         }
 
