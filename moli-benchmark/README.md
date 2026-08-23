@@ -12,6 +12,10 @@ The runner records the environment and browser versions, keeps raw measurements,
 and produces a self-contained HTML report. It supports quick local checks,
 cross-engine investigations, and formal release-readiness runs.
 
+The `navigation-trace` suite additionally records exact-Document
+CLI/CDP/BiDi/Classic traces under `navigation-trace/`, including per-run JSONL
+and a cross-frontend comparison summary.
+
 ## Quick start
 
 You need Python 3.11 or newer, [`uv`](https://docs.astral.sh/uv/), and a release
@@ -35,6 +39,7 @@ Run a compact fetch/CDP comparison across the configured engines:
 
 ```bash
 uv run moli-benchmark run --profile horizontal --timeout 10
+uv run moli-benchmark navigation-trace --runs 10 --timeout 10
 ```
 
 Run one deterministic case while working on Moli:

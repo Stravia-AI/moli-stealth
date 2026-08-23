@@ -27,6 +27,7 @@ from .config import FORMAL_RESULTS_ROOT, RESULTS_ROOT, moli_binary
 from .crawler import run_crawler_suite
 from .environment import collect_environment
 from .html_report import write_benchmark_html
+from .navigation_trace import run_navigation_trace_suite
 from .publish_readiness import build_publish_readiness
 from .report_diff import build_report_diff, load_baseline_summary
 from .startup import (
@@ -897,6 +898,39 @@ def cmd_cdp_smoke(args: argparse.Namespace) -> int:
     return 1 if summary.get("gate_failures") else 0
 
 
+def cmd_navigation_trace(args: argparse.Namespace) -> int:
+    output_dir = ensure_dir(_report_output_dir(args))
+    moli_bin = moli_binary(args.moli_bin)
+    target_matrix = _target_matrix(
+        moli_bin,
+        lightpanda_override=args.lightpanda_bin,
+        chrome_override=args.chrome_bin,
+        obscura_override=args.obscura_bin,
+    )
+    _write_metadata(
+        output_dir,
+        moli_bin,
+        lightpanda_override=args.lightpanda_bin,
+        chrome_override=args.chrome_bin,
+        obscura_override=args.obscura_bin,
+    )
+    summary = run_navigation_trace_suite(
+        moli_bin=moli_bin,
+        output_dir=output_dir,
+        runs=_runs(args),
+        timeout_seconds=args.timeout,
+    )
+    _finish_report(
+        output_dir=output_dir,
+        moli_bin=moli_bin,
+        target_matrix=target_matrix,
+        summaries=[summary],
+        baseline_report=args.baseline_report,
+    )
+    print(output_dir)
+    return 1 if summary.get("gate_failures") else 0
+
+
 def cmd_wpt(args: argparse.Namespace) -> int:
     output_dir = ensure_dir(_report_output_dir(args))
     moli_bin = None
@@ -1100,6 +1134,13 @@ def build_parser() -> argparse.ArgumentParser:
     cdp_smoke.add_argument("--group", action="append")
     cdp_smoke.add_argument("--command", nargs=argparse.REMAINDER)
     cdp_smoke.set_defaults(func=cmd_cdp_smoke)
+
+    navigation_trace = subparsers.add_parser(
+        "navigation-trace",
+        help="compare one exact navigation trace across CLI, CDP, BiDi, and Classic",
+    )
+    _add_common_run_args(navigation_trace)
+    navigation_trace.set_defaults(func=cmd_navigation_trace)
 
     wpt = subparsers.add_parser("wpt", help="run or collect WPT compat reports")
     _add_output_args(wpt)

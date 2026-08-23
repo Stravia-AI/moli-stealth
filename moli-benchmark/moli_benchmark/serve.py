@@ -121,6 +121,8 @@ def start_moli_serve(
     *,
     time_verbose_path: Path | None = None,
     cgroup_artifact_dir: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
+    resource_sample_interval_seconds: float = 0.1,
 ) -> ServeHandle:
     logs: list[str] = []
     reserved_port = reserve_port()
@@ -139,10 +141,13 @@ def start_moli_serve(
             time_verbose_path,
         )
         reserved_port.release_socket()
+        env = clear_proxy_env(os.environ)
+        if env_overrides is not None:
+            env.update(env_overrides)
         process = subprocess.Popen(
             command,
             cwd=REPO_ROOT,
-            env=clear_proxy_env(os.environ),
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             start_new_session=True,
@@ -151,7 +156,10 @@ def start_moli_serve(
     except BaseException:
         reserved_port.close()
         raise
-    sampler = ResourceSampler(process.pid)
+    sampler = ResourceSampler(
+        process.pid,
+        interval_seconds=resource_sample_interval_seconds,
+    )
     sampler.start()
     handle = ServeHandle(
         process=process,

@@ -156,6 +156,7 @@ def run_process(
     timeout_seconds: float,
     env: dict[str, str] | None = None,
     sample_resources: bool = True,
+    resource_sample_interval_seconds: float = 0.1,
     time_verbose_path: Path | None = None,
     cgroup_artifact_dir: Path | None = None,
 ) -> ProcessResult:
@@ -169,7 +170,11 @@ def run_process(
         stderr=subprocess.PIPE,
         start_new_session=True,
     )
-    sampler = ResourceSampler(process.pid) if sample_resources else None
+    sampler = (
+        ResourceSampler(process.pid, interval_seconds=resource_sample_interval_seconds)
+        if sample_resources
+        else None
+    )
     cgroup = collect_cgroup_artifacts(process.pid, cgroup_artifact_dir) if cgroup_artifact_dir is not None else None
     if sampler is not None:
         sampler.start()

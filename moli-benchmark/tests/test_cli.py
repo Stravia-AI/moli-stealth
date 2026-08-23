@@ -159,6 +159,24 @@ class CliAmiiboProfileTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             parser.parse_args(["agent-episode", "--live"])
 
+    def test_navigation_trace_command_uses_common_run_controls(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "navigation-trace",
+                "--moli-bin",
+                "/tmp/moli",
+                "--runs",
+                "3",
+                "--timeout",
+                "12",
+            ]
+        )
+
+        self.assertEqual(args.command, "navigation-trace")
+        self.assertEqual(args.moli_bin, "/tmp/moli")
+        self.assertEqual(args.runs, 3)
+        self.assertEqual(args.timeout, 12.0)
+
     def test_finish_report_builds_readiness_after_top_level_artifacts_exist(self) -> None:
         summaries = [
             {
