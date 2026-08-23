@@ -4578,6 +4578,11 @@ fn child_document_mixed_style_observations_do_not_churn_the_retained_world() {
     let child_document = child_document_handle_for_frame_id(&vm, "mixed-observation-frame");
     let child_updates = vm.retained_style_system_update_count_for_document_for_test(child_document);
     let child_stylist = vm.retained_stylist_identity_for_document_for_test(child_document);
+    #[cfg(debug_assertions)]
+    let invariant_checks = vm
+        ._context_host
+        .borrow()
+        .completed_style_observation_stability_check_count_for_document_for_test(child_document);
     let materializations = vm
         ._context_host
         .borrow()
@@ -4699,6 +4704,86 @@ fn child_document_mixed_style_observations_do_not_churn_the_retained_world() {
         "clean child style observations must reuse the inferred iframe viewport",
     );
     assert_eq!(final_viewport_cache_entries, viewport_cache_entries);
+    #[cfg(debug_assertions)]
+    assert!(
+        vm._context_host
+            .borrow()
+            .completed_style_observation_stability_check_count_for_document_for_test(
+                child_document,
+            )
+            > invariant_checks,
+        "independent child DOM API operations must be compared by the persistent style-world invariant",
+    );
+}
+
+#[test]
+fn layout_publishes_authoritative_iframe_viewport_without_style_world_ping_pong() {
+    let mut vm = new_storage_test_vm("https://authoritative-child-style-viewport.test/");
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement('iframe');
+  frame.id = 'authoritative-style-viewport-frame';
+  frame.style.cssText = [
+    'box-sizing:border-box',
+    'width:200px',
+    'height:160px',
+    'padding:20px',
+    'border:10px solid black'
+  ].join(';');
+  (document.body || document.documentElement || document).appendChild(frame);
+
+  const childWindow = frame.contentWindow;
+  const childDocument = childWindow.document;
+  childDocument.open();
+  childDocument.write(`
+    <style>
+      body { color: rgb(0, 0, 0); }
+      @media (width: 200px) { body { color: rgb(200, 0, 0); } }
+      @media (width: 140px) { body { color: rgb(0, 140, 0); } }
+    </style>
+    <body>authoritative viewport</body>`);
+  childDocument.close();
+
+  const beforeLayout = childWindow.getComputedStyle(childDocument.body).color;
+  const frameWidth = frame.getBoundingClientRect().width;
+  const afterLayout = childWindow.getComputedStyle(childDocument.body).color;
+  globalThis.__authoritativeStyleViewport = { frame, childWindow, childDocument };
+  return [beforeLayout, frameWidth, childWindow.innerWidth, afterLayout].join('|');
+})()
+"#,
+        )
+        .expect("layout should publish an exact iframe content viewport");
+
+    assert_eq!(result, "rgb(200, 0, 0)|200|140|rgb(0, 140, 0)");
+    let child_document =
+        child_document_handle_for_frame_id(&vm, "authoritative-style-viewport-frame");
+    let updates = vm.retained_style_system_update_count_for_document_for_test(child_document);
+
+    let stable = vm
+        .eval(
+            r#"
+(() => {
+  const { frame, childWindow, childDocument } = __authoritativeStyleViewport;
+  let stable = true;
+  for (let index = 0; index < 8; index += 1) {
+    stable &&= childWindow.getComputedStyle(childDocument.body).color === 'rgb(0, 140, 0)';
+    stable &&= childDocument.body.innerText === 'authoritative viewport';
+    stable &&= frame.getBoundingClientRect().width === 200;
+    stable &&= childWindow.innerWidth === 140;
+  }
+  return String(stable);
+})()
+"#,
+        )
+        .expect("published iframe viewport should remain stable across DOM APIs");
+    assert_eq!(stable, "true");
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(child_document),
+        updates,
+        "automatic and layout observations must converge on the published iframe content viewport",
+    );
 }
 
 #[test]

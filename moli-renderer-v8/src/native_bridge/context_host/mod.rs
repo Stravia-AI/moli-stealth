@@ -806,6 +806,7 @@ pub(crate) struct JsContextHost {
     layout_snapshot_cache_hits: Cell<u64>,
     layout_snapshot_cache_misses: Cell<u64>,
     layout_snapshot_cache_publishes: Cell<u64>,
+    style_viewport_generation: Cell<u64>,
     #[cfg(test)]
     force_fresh_layout_reads_for_test: bool,
     root_document_lifecycle: Option<RendererDocumentLifecycleJournalHandle>,

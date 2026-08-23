@@ -205,6 +205,7 @@ impl JsContextHost {
             layout_snapshot_cache_hits: Cell::new(0),
             layout_snapshot_cache_misses: Cell::new(0),
             layout_snapshot_cache_publishes: Cell::new(0),
+            style_viewport_generation: Cell::new(0),
             #[cfg(test)]
             force_fresh_layout_reads_for_test: false,
             root_document_lifecycle: None,

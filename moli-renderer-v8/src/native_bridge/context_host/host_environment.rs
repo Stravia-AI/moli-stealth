@@ -1482,18 +1482,65 @@ impl JsContextHost {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn computed_style_read_invariant_state(
+    pub(crate) fn computed_style_observation_input_epochs(
         &self,
         document: DomHandle,
-    ) -> (u64, u64, u64) {
-        let (source_set_generation, retained_style_system_generation) = self
-            .style_engine
-            .computed_style_read_invariant_state(document);
-        (
+        tree_scope_versions: crate::style_engine::StyleTreeScopeVersions,
+    ) -> crate::style_engine::ComputedStyleObservationInputEpochs {
+        self.style_engine.computed_style_observation_input_epochs(
+            self.computed_style_observation_dependency_documents(document),
             self.dom_host().dom_version(),
-            source_set_generation,
-            retained_style_system_generation,
+            self.style_viewport_generation(),
+            tree_scope_versions,
         )
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn complete_computed_style_observation(
+        &self,
+        document: DomHandle,
+        input_epochs_before_read: &crate::style_engine::ComputedStyleObservationInputEpochs,
+    ) {
+        let tree_scope_versions =
+            crate::style_engine::StyleTreeScopeVersions::current(self.dom_host(), Some(document));
+        let input_epochs_after_read =
+            self.computed_style_observation_input_epochs(document, tree_scope_versions);
+        self.style_engine.complete_computed_style_observation(
+            document,
+            input_epochs_before_read,
+            input_epochs_after_read,
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    fn computed_style_observation_dependency_documents(
+        &self,
+        document: DomHandle,
+    ) -> Vec<DomHandle> {
+        let mut documents = Vec::new();
+        let mut current = Some(document);
+        while let Some(candidate) = current {
+            if documents.contains(&candidate) {
+                break;
+            }
+            documents.push(candidate);
+            if candidate == self.document_handle() {
+                break;
+            }
+            current = self
+                .child_browsing_context_host_for_document_handle(candidate)
+                .and_then(|frame| self.dom_host().owner_document_handle(frame));
+        }
+        documents
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn completed_style_observation_stability_check_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.style_engine
+            .completed_style_observation_stability_check_count_for_document_for_test(document)
     }
 
     #[cfg(test)]

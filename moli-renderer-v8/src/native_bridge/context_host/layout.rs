@@ -142,6 +142,34 @@ impl JsContextHost {
             .frame_viewport(frame)
     }
 
+    pub(crate) fn style_viewport_generation(&self) -> u64 {
+        self.style_viewport_generation.get()
+    }
+
+    /// Marks the exact viewport selected by an active layout pass before that
+    /// pass reads the Document's styles.
+    ///
+    /// An embedded Document's persistent frame viewport is published only
+    /// after the recursive pass succeeds. Advancing this input generation
+    /// first also distinguishes an explicit main-Document capture viewport
+    /// from ordinary DOM APIs selecting conflicting implicit viewports.
+    pub(crate) fn note_layout_style_viewport(&self, document: DomHandle, viewport: StyleViewport) {
+        let matches_cached = if document == self.document_handle() {
+            viewport == self.style_viewport()
+        } else {
+            self.child_browsing_context_host_for_document_handle(document)
+                .and_then(|frame| self.frame_viewport(frame))
+                .is_some_and(|cached| {
+                    viewport.width == Some(f64::from(cached.css_width))
+                        && viewport.height == Some(f64::from(cached.css_height))
+                })
+        };
+        if !matches_cached {
+            self.style_viewport_generation
+                .set(self.style_viewport_generation.get().saturating_add(1));
+        }
+    }
+
     pub(crate) fn inferred_frame_style_viewport(
         &self,
         frame: DomHandle,
@@ -241,10 +269,14 @@ impl JsContextHost {
             })
             .collect::<Vec<_>>();
         let tree = pass.into_tree();
-        {
+        let frame_viewports_changed = {
             let mut state = self.document_layout_state.borrow_mut();
             state.publish_latest_layout(document, tree);
-            state.update_frame_viewports(frame_viewports);
+            state.update_frame_viewports(frame_viewports)
+        };
+        if frame_viewports_changed {
+            self.style_viewport_generation
+                .set(self.style_viewport_generation.get().saturating_add(1));
         }
         self.last_layout_pass_metrics.set(Some(metrics));
         self.layout_snapshot_cache_publishes
@@ -448,6 +480,8 @@ impl JsContextHost {
 
     pub(crate) fn reset_document_layout_state(&self) {
         *self.document_layout_state.borrow_mut() = Default::default();
+        self.style_viewport_generation
+            .set(self.style_viewport_generation.get().saturating_add(1));
     }
 
     pub(crate) fn invalidate_layout_after_interaction_state_change(&self) {

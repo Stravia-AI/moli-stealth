@@ -22,6 +22,13 @@ impl StyleTreeScopeVersions {
                 .unwrap_or(0),
         }
     }
+
+    #[cfg(test)]
+    pub(super) const fn for_test(document_tree_scopes: u64) -> Self {
+        Self {
+            document_tree_scopes,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

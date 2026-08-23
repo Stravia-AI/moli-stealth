@@ -181,17 +181,22 @@ impl DocumentLayoutState {
     pub(super) fn update_frame_viewports(
         &mut self,
         updates: impl IntoIterator<Item = (DomHandle, Option<LayoutViewport>)>,
-    ) {
+    ) -> bool {
+        let mut changed = false;
         for (frame, viewport) in updates {
             match viewport {
                 Some(viewport) => {
-                    self.frame_viewports.insert(frame, viewport);
+                    if self.frame_viewports.get(&frame) != Some(&viewport) {
+                        self.frame_viewports.insert(frame, viewport);
+                        changed = true;
+                    }
                 }
                 None => {
-                    self.frame_viewports.remove(&frame);
+                    changed |= self.frame_viewports.remove(&frame).is_some();
                 }
             }
         }
+        changed
     }
 
     pub(super) fn retain_live_frame_viewports(

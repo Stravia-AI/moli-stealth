@@ -78,6 +78,8 @@ mod source_owner_text;
 mod source_record;
 mod source_scope_plan;
 mod state;
+#[cfg(debug_assertions)]
+pub(crate) use state::ComputedStyleObservationInputEpochs;
 mod stylesheet;
 mod stylesheet_resources;
 mod target_plan;
@@ -271,13 +273,45 @@ impl MoliStyleEngine {
     }
 
     #[cfg(debug_assertions)]
-    pub(crate) fn computed_style_read_invariant_state(&self, document: DomHandle) -> (u64, u64) {
-        let world = self.world_for_document(document);
-        let generations = world.document_state.generation_snapshot();
-        (
-            generations.source_set_generation,
-            generations.retained_style_system_generation,
-        )
+    pub(crate) fn computed_style_observation_input_epochs(
+        &self,
+        documents: impl IntoIterator<Item = DomHandle>,
+        dom_version: u64,
+        style_viewport_generation: u64,
+        tree_scope_versions: StyleTreeScopeVersions,
+    ) -> ComputedStyleObservationInputEpochs {
+        let document_generations = self
+            .document_worlds
+            .observation_generations(documents)
+            .into_iter()
+            .map(
+                |(document, source_set_generation, _, target_context_epoch)| {
+                    (document, source_set_generation, target_context_epoch)
+                },
+            )
+            .collect();
+        ComputedStyleObservationInputEpochs {
+            dom_version,
+            style_viewport_generation,
+            tree_scope_versions,
+            document_generations,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn complete_computed_style_observation(
+        &self,
+        document: DomHandle,
+        input_epochs_before_read: &ComputedStyleObservationInputEpochs,
+        input_epochs_after_read: ComputedStyleObservationInputEpochs,
+    ) {
+        self.world_for_document(document)
+            .document_state
+            .complete_computed_style_observation(
+                document,
+                input_epochs_before_read,
+                input_epochs_after_read,
+            );
     }
 
     #[cfg(test)]
@@ -303,6 +337,16 @@ impl MoliStyleEngine {
         self.world_for_document(document)
             .document_state
             .retained_style_system_generation()
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(crate) fn completed_style_observation_stability_check_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+    ) -> u64 {
+        self.world_for_document(document)
+            .document_state
+            .completed_style_observation_stability_check_count()
     }
 
     pub(crate) fn target_context_epoch_for_document(&self, document: DomHandle) -> u64 {

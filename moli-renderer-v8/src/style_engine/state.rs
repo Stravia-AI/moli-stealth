@@ -41,6 +41,35 @@ pub(super) struct RetainedStyleSystem {
     pub(super) script_custom_property_registrations: Vec<CssCustomPropertyRegistrationRecord>,
 }
 
+/// Style inputs that are allowed to change a completed Document observation.
+///
+/// This deliberately excludes computed-style and retained-world generations:
+/// those are outputs. Including either output here would let an accidental
+/// clean-operation rebuild justify itself on the next read.
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ComputedStyleObservationInputEpochs {
+    pub(crate) dom_version: u64,
+    pub(crate) style_viewport_generation: u64,
+    pub(crate) tree_scope_versions: StyleTreeScopeVersions,
+    pub(crate) document_generations: Vec<(DomHandle, u64, u64)>,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CompletedStyleObservationWorld {
+    retained_style_system_generation: u64,
+    stylist_identity: u64,
+    key: StyleWorldKey,
+}
+
+#[cfg(debug_assertions)]
+#[derive(Clone, Debug)]
+struct CompletedStyleObservation {
+    input_epochs_after_read: ComputedStyleObservationInputEpochs,
+    world: CompletedStyleObservationWorld,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct StyleDocumentGenerationSnapshot {
     pub(super) source_set_generation: u64,
@@ -57,6 +86,10 @@ pub(super) struct StyleDocumentState {
     computed_cache_generation: Cell<u64>,
     retained_style_system_generation: Cell<u64>,
     target_context_epoch: Cell<u64>,
+    #[cfg(debug_assertions)]
+    completed_style_observation: RefCell<Option<CompletedStyleObservation>>,
+    #[cfg(all(test, debug_assertions))]
+    completed_style_observation_stability_checks: Cell<u64>,
     #[cfg(test)]
     retained_style_system_rebuilds: Cell<u64>,
     #[cfg(test)]
@@ -75,6 +108,10 @@ impl StyleDocumentState {
             computed_cache_generation: Cell::new(0),
             retained_style_system_generation: Cell::new(0),
             target_context_epoch: Cell::new(0),
+            #[cfg(debug_assertions)]
+            completed_style_observation: RefCell::new(None),
+            #[cfg(all(test, debug_assertions))]
+            completed_style_observation_stability_checks: Cell::new(0),
             #[cfg(test)]
             retained_style_system_rebuilds: Cell::new(0),
             #[cfg(test)]
@@ -123,6 +160,50 @@ impl StyleDocumentState {
     pub(super) fn bump_target_context_epoch(&self) {
         self.target_context_epoch
             .set(self.target_context_epoch().saturating_add(1));
+    }
+
+    #[cfg(debug_assertions)]
+    pub(super) fn complete_computed_style_observation(
+        &self,
+        document: DomHandle,
+        input_epochs_before_read: &ComputedStyleObservationInputEpochs,
+        input_epochs_after_read: ComputedStyleObservationInputEpochs,
+    ) {
+        let Some(world) =
+            self.try_with_retained_style_system(|retained| CompletedStyleObservationWorld {
+                retained_style_system_generation: self.retained_style_system_generation.get(),
+                stylist_identity: retained.stylist_identity,
+                key: retained.key.clone(),
+            })
+        else {
+            return;
+        };
+        let current = CompletedStyleObservation {
+            input_epochs_after_read,
+            world,
+        };
+        let mut previous = self.completed_style_observation.borrow_mut();
+        if previous.as_ref().is_some_and(|previous| {
+            verify_completed_style_observation_transition(
+                document,
+                previous,
+                input_epochs_before_read,
+                &current,
+            )
+        }) {
+            #[cfg(test)]
+            self.completed_style_observation_stability_checks.set(
+                self.completed_style_observation_stability_checks
+                    .get()
+                    .saturating_add(1),
+            );
+        }
+        *previous = Some(current);
+    }
+
+    #[cfg(all(test, debug_assertions))]
+    pub(super) fn completed_style_observation_stability_check_count(&self) -> u64 {
+        self.completed_style_observation_stability_checks.get()
     }
 
     pub(super) fn clear_retained_style_system(&self) {
@@ -322,5 +403,92 @@ impl StyleDocumentState {
                     retained.stylesheet_resource_revision,
                 ))
         })
+    }
+}
+
+#[cfg(debug_assertions)]
+fn verify_completed_style_observation_transition(
+    document: DomHandle,
+    previous: &CompletedStyleObservation,
+    input_epochs_before_read: &ComputedStyleObservationInputEpochs,
+    current: &CompletedStyleObservation,
+) -> bool {
+    if previous.input_epochs_after_read != *input_epochs_before_read {
+        return false;
+    }
+    debug_assert_eq!(
+        current.world, previous.world,
+        "completed style observations changed the retained world for {document:?} without an intervening DOM, style-source, style-context, or style-viewport input change"
+    );
+    true
+}
+
+#[cfg(all(test, debug_assertions))]
+mod observation_invariant_tests {
+    use style::context::QuirksMode;
+
+    use super::*;
+
+    fn input_epochs(dom_version: u64) -> ComputedStyleObservationInputEpochs {
+        ComputedStyleObservationInputEpochs {
+            dom_version,
+            style_viewport_generation: 4,
+            tree_scope_versions: StyleTreeScopeVersions::for_test(5),
+            document_generations: vec![(DomHandle::new(1), 2, 3)],
+        }
+    }
+
+    fn world(generation: u64) -> CompletedStyleObservationWorld {
+        CompletedStyleObservationWorld {
+            retained_style_system_generation: generation,
+            stylist_identity: 9,
+            key: StyleWorldKey {
+                viewport_width_bits: 800.0_f32.to_bits(),
+                viewport_height_bits: 600.0_f32.to_bits(),
+                screen_width_bits: 800.0_f32.to_bits(),
+                screen_height_bits: 600.0_f32.to_bits(),
+                environment: StyloStyleEnvironment::default(),
+                quirks_mode: QuirksMode::NoQuirks,
+                tree_scope_versions: None,
+            },
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "without an intervening DOM, style-source, style-context")]
+    fn unchanged_inputs_reject_a_different_completed_world() {
+        let epochs = input_epochs(1);
+        let previous = CompletedStyleObservation {
+            input_epochs_after_read: epochs.clone(),
+            world: world(7),
+        };
+        let current = CompletedStyleObservation {
+            input_epochs_after_read: epochs.clone(),
+            world: world(8),
+        };
+        verify_completed_style_observation_transition(
+            DomHandle::new(1),
+            &previous,
+            &epochs,
+            &current,
+        );
+    }
+
+    #[test]
+    fn changed_inputs_allow_one_completed_world_update() {
+        let previous = CompletedStyleObservation {
+            input_epochs_after_read: input_epochs(1),
+            world: world(7),
+        };
+        let current = CompletedStyleObservation {
+            input_epochs_after_read: input_epochs(2),
+            world: world(8),
+        };
+        assert!(!verify_completed_style_observation_transition(
+            DomHandle::new(1),
+            &previous,
+            &input_epochs(2),
+            &current,
+        ));
     }
 }
