@@ -1863,6 +1863,100 @@ mod tests {
     }
 
     #[test]
+    fn implicit_move_to_detached_parent_invalidates_old_document_tree_scopes() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        let document = host.document_node_id();
+        let shadow_host = host.create_element("section");
+        assert!(host.append_child(document, shadow_host));
+        let shadow_root = host
+            .attach_shadow_root(shadow_host, "open")
+            .expect("connected shadow root");
+        let version_before_move = host.document_tree_scope_version(document);
+        assert_eq!(host.snapshot_connected_shadow_roots(), vec![shadow_root]);
+
+        let detached_parent = host.create_element("main");
+        assert!(host.append_child(detached_parent, shadow_host));
+
+        assert_eq!(
+            host.document_tree_scope_version(document),
+            version_before_move + 1,
+            "the implicit removal must invalidate the old Document TreeScope universe",
+        );
+        assert_eq!(host.connected_shadow_roots_cache_versions_for_test(), None);
+        assert!(host.snapshot_connected_shadow_roots().is_empty());
+    }
+
+    #[test]
+    fn implicit_move_of_nested_shadow_tree_invalidates_old_document_once() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        let document = host.document_node_id();
+        let outer_host = host.create_element("section");
+        assert!(host.append_child(document, outer_host));
+        let outer_root = host
+            .attach_shadow_root(outer_host, "open")
+            .expect("outer connected shadow root");
+        let inner_host = host.create_element("article");
+        assert!(host.append_child(outer_root, inner_host));
+        let inner_root = host
+            .attach_shadow_root(inner_host, "open")
+            .expect("nested connected shadow root");
+        let version_before_move = host.document_tree_scope_version(document);
+        let roots = host.snapshot_connected_shadow_roots();
+        assert!(roots.contains(&outer_root));
+        assert!(roots.contains(&inner_root));
+
+        let detached_parent = host.create_element("main");
+        assert!(host.append_child(detached_parent, outer_host));
+
+        assert_eq!(
+            host.document_tree_scope_version(document),
+            version_before_move + 1,
+            "one subtree move must advance the old Document only once",
+        );
+        assert!(!host.is_connected(outer_root));
+        assert!(!host.is_connected(inner_root));
+        assert!(host.snapshot_connected_shadow_roots().is_empty());
+    }
+
+    #[test]
+    fn implicit_cross_document_move_invalidates_both_tree_scope_universes() {
+        let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
+        let old_document = host.document_node_id();
+        let new_document = host.create_detached_html_document();
+        let new_parent = host.create_parser_element_without_attributes_for_document(
+            new_document,
+            "main".to_owned(),
+            "http://www.w3.org/1999/xhtml".to_owned(),
+            None,
+        );
+        assert!(host.append_child(new_document, new_parent));
+        host.mark_subtree_connected_preserving_owner_document(new_document);
+
+        let shadow_host = host.create_element("section");
+        assert!(host.append_child(old_document, shadow_host));
+        let shadow_root = host
+            .attach_shadow_root(shadow_host, "open")
+            .expect("old-document shadow root");
+        let old_version_before_move = host.document_tree_scope_version(old_document);
+        let new_version_before_move = host.document_tree_scope_version(new_document);
+
+        assert!(host.append_child(new_parent, shadow_host));
+
+        assert_eq!(host.owner_document_handle(shadow_host), Some(new_document));
+        assert!(host.is_connected(shadow_root));
+        assert_eq!(
+            host.document_tree_scope_version(old_document),
+            old_version_before_move + 1,
+            "the implicit removal must invalidate the departed Document",
+        );
+        assert_eq!(
+            host.document_tree_scope_version(new_document),
+            new_version_before_move + 1,
+            "the insertion must invalidate the destination Document",
+        );
+    }
+
+    #[test]
     fn connected_shadow_roots_snapshot_cache_uses_shadow_connection_version() {
         let mut host = DomHost::from_dom(NativeDom::new_html(test_url()));
         let document = host.document_node_id();

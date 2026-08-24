@@ -1544,8 +1544,13 @@ impl DomHost {
         &mut self,
         inserted_roots: &[DomHandle],
         shadow_hosts: &[DomHandle],
+        departed_connected_document: Option<DomHandle>,
     ) -> Vec<DomStylesheetOwnerChange> {
-        let mut membership_documents = HashSet::new();
+        // `insertBefore` performs an implicit removal when its child already
+        // has a parent. Preserve that pre-splice membership here so one update
+        // invalidates both the old and new Document TreeScope universes.
+        let mut membership_documents: HashSet<DomHandle> =
+            departed_connected_document.into_iter().collect();
         let mut stylesheet_owners = Vec::new();
         for &root in inserted_roots {
             let Some(node) = self.node(root) else {

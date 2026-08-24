@@ -2918,6 +2918,17 @@ impl ScriptVm {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_shadow_scope_flush_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+        root: DomHandle,
+    ) -> Option<u64> {
+        self._context_host
+            .borrow()
+            .retained_shadow_scope_flush_count_for_document_for_test(document, root)
+    }
+
+    #[cfg(test)]
     pub(crate) fn shared_worker_client_count_for_test(&self) -> usize {
         self._context_host
             .borrow()

@@ -312,6 +312,16 @@ impl DomHost {
                 &inserted_option_owner_snapshots,
             );
             let new_owner_document = self.owner_document_handle(parent);
+            let removed_connected_shadow_tree = single_child_was_connected_before_insert
+                && implicit_removal_slot_state
+                    .as_ref()
+                    .is_some_and(|(_, _, context, _)| !context.shadow_hosts.is_empty())
+                && (!self.is_connected(child) || new_owner_document != old_owner_document);
+            let departed_connected_shadow_tree_document = if removed_connected_shadow_tree {
+                old_owner_document
+            } else {
+                None
+            };
             let mut shadow_stylesheet_owner_changes = Vec::new();
             let inserted_shadow_hosts =
                 self.record_inserted_subtree_candidates_in_subtrees(&inserted_roots);
@@ -319,6 +329,7 @@ impl DomHost {
                 self.sync_shadow_tree_scopes_for_inserted_subtrees(
                     &inserted_roots,
                     &inserted_shadow_hosts,
+                    departed_connected_shadow_tree_document,
                 ),
             );
             self.record_mutation(MutationScope::QueryState);

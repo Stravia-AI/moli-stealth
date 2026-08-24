@@ -1642,6 +1642,16 @@ impl JsContextHost {
     }
 
     #[cfg(test)]
+    pub(crate) fn retained_shadow_scope_flush_count_for_document_for_test(
+        &self,
+        document: DomHandle,
+        root: DomHandle,
+    ) -> Option<u64> {
+        self.style_engine
+            .retained_shadow_scope_flush_count_for_document_for_test(document, root)
+    }
+
+    #[cfg(test)]
     pub(crate) fn pending_style_invalidation_work_item_count_for_document_for_test(
         &self,
         document: DomHandle,

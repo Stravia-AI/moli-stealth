@@ -2179,6 +2179,149 @@ fn computed_style_reuses_retained_system_across_connected_shadow_roots() {
 }
 
 #[test]
+fn implicit_move_to_detached_parent_removes_retained_shadow_scope() {
+    let mut vm = new_storage_test_vm("https://implicit-shadow-detach-style-world.test/");
+    let document = vm.document_handle_for_test();
+
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const root = document.documentElement ||
+                document.appendChild(document.createElement('html'));
+              const body = document.body || root.appendChild(document.createElement('body'));
+              const host = document.createElement('section');
+              host.id = 'movable-shadow-host';
+              body.append(host);
+              const shadow = host.attachShadow({ mode: 'open' });
+              const target = document.createElement('span');
+              target.id = 'target';
+              shadow.append(target);
+              const sheet = new CSSStyleSheet();
+              sheet.replaceSync('#target { color: rgb(1, 2, 3); }');
+              shadow.adoptedStyleSheets = [sheet];
+              globalThis.__movableShadowHost = host;
+              globalThis.__detachedShadowParent = document.createElement('div');
+              return getComputedStyle(target).color;
+            })()"#,
+        )
+        .expect("connected adopted stylesheet should resolve"),
+        "rgb(1, 2, 3)",
+    );
+    let shadow_root = {
+        let context = vm._context_host.borrow();
+        let host = context.dom_host();
+        let shadow_host = host
+            .element_handle_by_id("movable-shadow-host")
+            .expect("shadow host handle");
+        host.shadow_root_handle(shadow_host)
+            .expect("shadow root handle")
+    };
+    assert!(
+        vm.retained_shadow_scope_flush_count_for_document_for_test(document, shadow_root)
+            .is_some(),
+        "the initial observation must install the adopted ShadowRoot scope",
+    );
+    let updates_before_move = vm.retained_style_system_update_count_for_document_for_test(document);
+
+    vm.eval(
+        r#"(() => {
+          __detachedShadowParent.appendChild(__movableShadowHost);
+          return getComputedStyle(document.body).display;
+        })()"#,
+    )
+    .expect("the old Document should observe the implicit removal");
+
+    assert_eq!(
+        vm.retained_shadow_scope_flush_count_for_document_for_test(document, shadow_root),
+        None,
+        "the old Document must discard the departed adopted ShadowRoot scope",
+    );
+    assert_eq!(
+        vm.retained_style_system_update_count_for_document_for_test(document),
+        updates_before_move + 1,
+        "the next old-Document observation must apply one TreeScope update",
+    );
+}
+
+#[test]
+fn implicit_cross_document_move_transfers_retained_shadow_scope() {
+    let mut vm = new_storage_test_vm("https://implicit-shadow-cross-document.test/");
+    let parent_document = vm.document_handle_for_test();
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const html = document.documentElement ||
+                document.appendChild(document.createElement('html'));
+              const body = document.body || html.appendChild(document.createElement('body'));
+              const frame = document.createElement('iframe');
+              frame.id = 'shadow-move-frame';
+              body.append(frame);
+              frame.contentDocument.open();
+              frame.contentDocument.write('<!doctype html><body></body>');
+              frame.contentDocument.close();
+
+              const host = document.createElement('section');
+              host.id = 'cross-document-shadow-host';
+              body.append(host);
+              const shadow = host.attachShadow({ mode: 'open' });
+              shadow.innerHTML = `
+                <style>#target { color: rgb(9, 8, 7); }</style>
+                <span id="target"></span>`;
+              globalThis.__crossDocumentShadowHost = host;
+              globalThis.__crossDocumentShadowTarget = shadow.getElementById('target');
+              return getComputedStyle(__crossDocumentShadowTarget).color;
+            })()"#,
+        )
+        .expect("parent shadow style should initialize"),
+        "rgb(9, 8, 7)",
+    );
+    let child_document = child_document_handle_for_frame_id(&vm, "shadow-move-frame");
+    let shadow_root = {
+        let host = vm.document_runtime.dom_host();
+        let shadow_host = host
+            .element_handle_by_id("cross-document-shadow-host")
+            .expect("cross-document shadow host handle");
+        host.shadow_root_handle(shadow_host)
+            .expect("cross-document shadow root handle")
+    };
+    let parent_identity = vm.retained_stylist_identity_for_document_for_test(parent_document);
+    assert!(
+        vm.retained_shadow_scope_flush_count_for_document_for_test(parent_document, shadow_root)
+            .is_some()
+    );
+
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const frame = document.getElementById('shadow-move-frame');
+              frame.contentDocument.body.appendChild(__crossDocumentShadowHost);
+              const parentProbe = getComputedStyle(document.body).display;
+              const childColor = frame.contentWindow
+                .getComputedStyle(__crossDocumentShadowTarget).color;
+              return [parentProbe, childColor].join('|');
+            })()"#,
+        )
+        .expect("cross-document shadow move should evaluate"),
+        "block|rgb(9, 8, 7)",
+    );
+    assert_eq!(
+        vm.retained_stylist_identity_for_document_for_test(parent_document),
+        parent_identity,
+        "the old Document world must update in place",
+    );
+    assert_eq!(
+        vm.retained_shadow_scope_flush_count_for_document_for_test(parent_document, shadow_root),
+        None,
+        "the old Document must release the moved ShadowRoot scope",
+    );
+    assert!(
+        vm.retained_shadow_scope_flush_count_for_document_for_test(child_document, shadow_root)
+            .is_some(),
+        "the destination Document must install the moved ShadowRoot scope",
+    );
+}
+
+#[test]
 fn child_layout_uses_complete_stable_tree_scope_universe() {
     let mut vm = new_storage_test_vm("https://child-tree-scope-universe.test/");
 
