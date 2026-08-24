@@ -1587,6 +1587,88 @@ fn adopted_stylesheets_array_mutations_validate_and_resync() {
         )
     );
 }
+
+#[test]
+fn duplicate_constructed_adopted_stylesheets_reconcile_document_and_shadow_cascade_order() {
+    let mut vm = new_storage_test_vm("https://duplicate-adopted-cascade.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const html = document.documentElement || document.appendChild(document.createElement('html'));
+  const body = document.body || html.appendChild(document.createElement('body'));
+  const target = body.appendChild(document.createElement('div'));
+  const host = body.appendChild(document.createElement('section'));
+  const shadow = host.attachShadow({ mode: 'open' });
+  const shadowTarget = shadow.appendChild(document.createElement('div'));
+
+  const makeSheets = () => {
+    const zero = new CSSStyleSheet();
+    zero.replaceSync('div { z-index: 0; color: blue; }');
+    const one = new CSSStyleSheet();
+    one.replaceSync('div { z-index: 1; color: blue; }');
+    const red = new CSSStyleSheet();
+    red.replaceSync('div { color: red; }');
+    return { zero, one, red };
+  };
+  const read = element => {
+    const style = getComputedStyle(element);
+    return `${style.zIndex}:${style.color}`;
+  };
+
+  const doc = makeSheets();
+  document.adoptedStyleSheets = [doc.one, doc.zero, doc.one];
+  const documentDuplicate = read(target);
+  document.adoptedStyleSheets = [];
+  const documentEmpty = read(target);
+  document.adoptedStyleSheets = [doc.one, doc.zero];
+  const documentUnique = read(target);
+  document.adoptedStyleSheets = [doc.one, doc.zero, doc.one, doc.red];
+  const documentExpanded = read(target);
+  document.adoptedStyleSheets = [];
+  const documentRemoved = read(target);
+
+  const scoped = makeSheets();
+  shadow.adoptedStyleSheets = [scoped.one, scoped.zero, scoped.one];
+  const shadowDuplicate = read(shadowTarget);
+  shadow.adoptedStyleSheets = [];
+  const shadowEmpty = read(shadowTarget);
+  shadow.adoptedStyleSheets = [scoped.one, scoped.zero];
+  const shadowUnique = read(shadowTarget);
+  shadow.adoptedStyleSheets = [scoped.one, scoped.zero, scoped.one, scoped.red];
+  const shadowExpanded = read(shadowTarget);
+  shadow.adoptedStyleSheets = [];
+  const shadowRemoved = read(shadowTarget);
+
+  return [
+    documentDuplicate,
+    documentEmpty,
+    documentUnique,
+    documentExpanded,
+    documentRemoved,
+    shadowDuplicate,
+    shadowEmpty,
+    shadowUnique,
+    shadowExpanded,
+    shadowRemoved,
+  ].join('|');
+})()
+"#,
+        )
+        .expect("duplicate adopted stylesheet cascades should reconcile without panicking");
+
+    assert_eq!(
+        result,
+        concat!(
+            "1:rgb(0, 0, 255)|auto:rgb(0, 0, 0)|",
+            "0:rgb(0, 0, 255)|1:rgb(255, 0, 0)|auto:rgb(0, 0, 0)|",
+            "1:rgb(0, 0, 255)|auto:rgb(0, 0, 0)|",
+            "0:rgb(0, 0, 255)|1:rgb(255, 0, 0)|auto:rgb(0, 0, 0)"
+        )
+    );
+}
+
 #[test]
 fn fragment_change_without_target_selectors_preserves_style_generation() {
     let mut vm = new_parsed_test_vm(

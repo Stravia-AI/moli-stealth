@@ -313,11 +313,11 @@ fn build_shadow_scope(
     let mut author_styles = AuthorStyles::<DocumentStyleSheet>::new();
     let custom_media = CustomMediaMap::default();
     let guard = shared_lock.read();
-    for entry in active_stylesheets.entries() {
+    for stylesheet in active_stylesheets.cascade_stylesheets() {
         author_styles.stylesheets.append_stylesheet(
             Some(stylist.device()),
             &custom_media,
-            entry.stylesheet().clone(),
+            stylesheet,
             &guard,
         );
     }
@@ -337,12 +337,7 @@ fn apply_stylesheet_set_reconciliation(
     let custom_media = CustomMediaMap::default();
     let guard = shared_lock.read();
     if reconciliation.stylesheet_set_changed() {
-        let next_stylesheets = scope
-            .active_stylesheets()
-            .entries()
-            .iter()
-            .map(|entry| entry.stylesheet().clone())
-            .collect::<Vec<_>>();
+        let next_stylesheets = scope.active_stylesheets().cascade_stylesheets();
         update_shadow_stylesheet_set(
             scope.author_styles_mut(),
             stylist.device(),

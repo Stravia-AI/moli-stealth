@@ -187,6 +187,13 @@ fn installed_sources_by_id(
             continue;
         }
         let (sources, stylesheets) = sources_by_id.entry(source_id).or_default();
+        if let Some(index) = stylesheets
+            .iter()
+            .position(|stylesheet| stylesheet == entry.stylesheet())
+        {
+            sources.remove(index);
+            stylesheets.remove(index);
+        }
         sources.push(entry.source().clone());
         stylesheets.push(entry.stylesheet().clone());
     }

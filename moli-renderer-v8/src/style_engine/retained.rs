@@ -112,8 +112,8 @@ pub(super) fn build_retained_style_system(
     );
     {
         let guard = shared_lock.read();
-        for entry in document_stylesheets.entries() {
-            stylist.append_stylesheet(entry.stylesheet().clone(), &guard);
+        for stylesheet in document_stylesheets.cascade_stylesheets() {
+            stylist.append_stylesheet(stylesheet, &guard);
         }
     }
     let mut shadow_scopes = Vec::new();
@@ -124,13 +124,10 @@ pub(super) fn build_retained_style_system(
         let mut author_styles = AuthorStyles::<DocumentStyleSheet>::new();
         let custom_media = CustomMediaMap::default();
         let guard = shared_lock.read();
-        for entry in active_stylesheets.entries() {
-            author_styles.stylesheets.append_stylesheet(
-                None,
-                &custom_media,
-                entry.stylesheet().clone(),
-                &guard,
-            );
+        for stylesheet in active_stylesheets.cascade_stylesheets() {
+            author_styles
+                .stylesheets
+                .append_stylesheet(None, &custom_media, stylesheet, &guard);
         }
         author_styles.flush(&mut stylist, &guard);
         shadow_cascade_data.push((*root, author_styles.data.clone()));
@@ -401,12 +398,7 @@ fn update_document_scope(
         let guard = shared_lock.read();
         scope_fallback |= reconciliation.stylesheet_removed();
         if reconciliation.stylesheet_set_changed() {
-            let next_stylesheets = retained
-                .document_stylesheets
-                .entries()
-                .iter()
-                .map(|entry| entry.stylesheet().clone())
-                .collect::<Vec<_>>();
+            let next_stylesheets = retained.document_stylesheets.cascade_stylesheets();
             update_document_stylesheet_set(
                 &mut retained.stylist,
                 reconciliation.previous_stylesheets(),

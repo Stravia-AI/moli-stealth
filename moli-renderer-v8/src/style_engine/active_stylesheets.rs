@@ -188,6 +188,17 @@ impl ActiveStylesheetCollection {
         &self.entries
     }
 
+    /// Returns the Stylo-facing cascade list.
+    ///
+    /// The adoptedStyleSheets observable array may contain the same sheet more
+    /// than once, but Stylo's stylesheet set requires unique sheet objects.
+    /// Earlier occurrences are cascade-inert because the last occurrence of
+    /// an identical sheet has the highest position, so retain only that last
+    /// occurrence while preserving its relative order with other sheets.
+    pub(super) fn cascade_stylesheets(&self) -> Vec<DocumentStyleSheet> {
+        cascade_stylesheets(&self.entries)
+    }
+
     pub(super) fn matches_sources(&self, sources: &[StyloStylesheetSource]) -> bool {
         self.entries.len() == sources.len()
             && self
@@ -209,10 +220,7 @@ impl ActiveStylesheetCollection {
         }
 
         let mut previous = std::mem::take(&mut self.entries);
-        let previous_stylesheets = previous
-            .iter()
-            .map(|entry| entry.stylesheet().clone())
-            .collect::<Vec<_>>();
+        let previous_stylesheets = cascade_stylesheets(&previous);
         let mut in_place_updates = Vec::new();
         self.entries = sources
             .iter()
@@ -245,14 +253,12 @@ impl ActiveStylesheetCollection {
                 next_entry
             })
             .collect();
-        let stylesheet_set_changed = previous_stylesheets
-            .iter()
-            .ne(self.entries.iter().map(ActiveStylesheet::stylesheet));
+        let next_stylesheets = self.cascade_stylesheets();
+        let stylesheet_set_changed = previous_stylesheets != next_stylesheets;
         let stylesheet_removed = previous_stylesheets.iter().any(|stylesheet| {
-            !self
-                .entries
+            !next_stylesheets
                 .iter()
-                .any(|entry| entry.stylesheet() == stylesheet)
+                .any(|next_stylesheet| next_stylesheet == stylesheet)
         });
         Some(ActiveStylesheetReconciliation {
             previous_stylesheets,
@@ -261,6 +267,19 @@ impl ActiveStylesheetCollection {
             in_place_updates,
         })
     }
+}
+
+fn cascade_stylesheets(entries: &[ActiveStylesheet]) -> Vec<DocumentStyleSheet> {
+    entries
+        .iter()
+        .enumerate()
+        .filter(|(index, entry)| {
+            !entries[index + 1..]
+                .iter()
+                .any(|later| later.stylesheet() == entry.stylesheet())
+        })
+        .map(|(_, entry)| entry.stylesheet().clone())
+        .collect()
 }
 
 fn has_same_installation(previous: &StyloStylesheetSource, next: &StyloStylesheetSource) -> bool {
