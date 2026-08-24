@@ -9374,6 +9374,61 @@ async fn spawn_gated_image_resource_server(
     )
 }
 
+async fn spawn_gated_font_resource_server() -> (
+    String,
+    tokio::sync::oneshot::Receiver<String>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gated font resource server");
+    let addr = listener
+        .local_addr()
+        .expect("gated font resource server addr");
+    let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let (mut stream, _) = listener
+            .accept()
+            .await
+            .expect("accept gated font resource request");
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 1024];
+        loop {
+            let read = stream
+                .read(&mut buffer)
+                .await
+                .expect("read gated font resource request");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        let _ = request_tx.send(String::from_utf8_lossy(&request).into_owned());
+        let _ = release_rx.await;
+        const TEST_FONT: &[u8] =
+            include_bytes!("../../../../moli-layout/tests/fixtures/moli-ahem.woff2");
+        let response_head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: font/woff2\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            TEST_FONT.len()
+        );
+        let _ = stream.write_all(response_head.as_bytes()).await;
+        let _ = stream.write_all(TEST_FONT).await;
+    });
+    (
+        format!("http://{addr}/print-only.woff2"),
+        request_rx,
+        release_tx,
+        server,
+    )
+}
+
 async fn spawn_gated_text_track_resource_server(
     status: u16,
 ) -> (
@@ -11623,6 +11678,178 @@ async fn main_document_replacement_retires_pending_image_request_sequence() {
         vm.current_main_document_task_owner(),
         Some(current_owner),
         "stale image event must not replace or mutate the new owner"
+    );
+}
+
+#[tokio::test]
+async fn web_font_requests_and_registration_follow_effective_stylesheet_media() {
+    let (font_url, mut request_rx, release_tx, server) = spawn_gated_font_resource_server().await;
+    let document_url = font_url.replace("/print-only.woff2", "/page");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    loader.set_optional_resource_fetch_mask(crate::protocol_types::OptionalResourceFetchMask::FONT);
+    let (mut vm, mut resource_completions) =
+        new_storage_test_vm_with_loader_and_resource_completion_queue(&document_url, &loader);
+
+    vm.eval(&format!(
+        r#"
+(() => {{
+  const style = document.createElement("style");
+  style.media = "print";
+  style.textContent = `
+    @font-face {{ font-family: PrintOnly; src: url({font_url:?}); }}
+  `;
+  (document.head || document.documentElement || document).appendChild(style);
+  (document.body || document.documentElement).style.fontFamily = "PrintOnly, sans-serif";
+}})()
+"#
+    ))
+    .expect("print-only web-font fixture should evaluate");
+
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("screen layout refresh should succeed")
+    );
+    assert_eq!(vm.document_web_font_counts_for_test(), (0, 0, 0));
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .pending_subresource_request_count(),
+        0,
+        "a print-only font must not create a screen-media request or load delay"
+    );
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), &mut request_rx)
+            .await
+            .is_err(),
+        "the server must not observe a request while owner media is ineffective"
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
+        media: Some("print".to_owned()),
+        ..Default::default()
+    });
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("print layout refresh should succeed")
+    );
+    assert_eq!(vm.document_web_font_counts_for_test(), (1, 0, 0));
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .pending_subresource_request_count(),
+        1,
+        "activating print media must admit exactly one font request"
+    );
+    let request = tokio::time::timeout(std::time::Duration::from_secs(2), &mut request_rx)
+        .await
+        .expect("the effective font request should reach the server")
+        .expect("font request channel should remain open");
+    assert!(request.starts_with("GET /print-only.woff2 HTTP/1.1"));
+
+    release_tx.send(()).expect("release font response");
+    server.await.expect("font server should finish");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resource_completions.wait_for_arrival_without_timeout(),
+        )
+        .await
+        .expect("web font completion should reach the Networking source")
+    );
+    let completion = resource_completions
+        .pop_next_async_subresource_event()
+        .expect("web font completion must retain its typed terminal");
+    let _ = vm
+        .complete_async_subresource_fetch_event_body(completion)
+        .expect("web font completion should apply to its current document owner");
+    assert_eq!(
+        vm.document_web_font_counts_for_test(),
+        (1, 1, 1),
+        "an effective completed font must be registered for layout"
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("restored screen layout refresh should succeed")
+    );
+    assert_eq!(
+        vm.document_web_font_counts_for_test(),
+        (0, 0, 0),
+        "leaving print media must remove the slot and registered layout font"
+    );
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .pending_subresource_request_count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn pending_web_font_response_is_stale_after_stylesheet_media_stops_matching() {
+    let (font_url, request_rx, release_tx, server) = spawn_gated_font_resource_server().await;
+    let document_url = font_url.replace("/print-only.woff2", "/page");
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    loader.set_optional_resource_fetch_mask(crate::protocol_types::OptionalResourceFetchMask::FONT);
+    let (mut vm, mut resource_completions) =
+        new_storage_test_vm_with_loader_and_resource_completion_queue(&document_url, &loader);
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
+        media: Some("print".to_owned()),
+        ..Default::default()
+    });
+    vm.eval(&format!(
+        r#"
+const style = document.createElement("style");
+style.media = "print";
+style.textContent = '@font-face {{ font-family: PendingPrint; src: url({font_url:?}); }}';
+(document.head || document.documentElement || document).appendChild(style);
+"#
+    ))
+    .expect("pending print font fixture should evaluate");
+
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("print layout refresh should succeed")
+    );
+    request_rx
+        .await
+        .expect("effective pending font request should reach the server");
+    assert_eq!(vm.document_web_font_counts_for_test(), (1, 0, 0));
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("screen layout refresh should succeed")
+    );
+    assert_eq!(
+        vm.document_web_font_counts_for_test(),
+        (0, 0, 0),
+        "the new resource generation must revoke a now-ineffective pending slot"
+    );
+
+    release_tx.send(()).expect("release stale font response");
+    server.await.expect("font server should finish");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resource_completions.wait_for_arrival_without_timeout(),
+        )
+        .await
+        .expect("stale font completion should reach the Networking source")
+    );
+    let completion = resource_completions
+        .pop_next_async_subresource_event()
+        .expect("stale font completion must retain its typed terminal");
+    let _ = vm
+        .complete_async_subresource_fetch_event_body(completion)
+        .expect("stale font completion should settle without mutating layout fonts");
+    assert_eq!(vm.document_web_font_counts_for_test(), (0, 0, 0));
+    assert_eq!(
+        vm._context_host
+            .borrow()
+            .pending_subresource_request_count(),
+        0
     );
 }
 

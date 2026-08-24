@@ -5362,8 +5362,8 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
     );
     assert_eq!(
         stylesheet_resource_manifest_build_count_for_test(),
-        1,
-        "a device-only update must not rebuild the typed resource projection"
+        2,
+        "a device update must reproject effective resources without advancing an unchanged manifest"
     );
 
     let same_resources_source = StyloStylesheetSource::new(
@@ -5392,7 +5392,7 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
         "ordinary declaration changes must not restart resource reconciliation"
     );
     assert_eq!(author_source_text_parse_count_for_test(), 2);
-    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 2);
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 3);
 
     let second_source = StyloStylesheetSource::new(
         "@import url(theme-b.css); @font-face { font-family: Second; src: url(font-b.woff2); font-style: italic; }".into(),
@@ -5425,6 +5425,126 @@ fn retained_stylesheet_resource_manifest_advances_only_when_resources_change() {
         3,
         "each stylesheet revision must be parsed once for both cascade and resources"
     );
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 4);
+}
+
+#[test]
+fn retained_stylesheet_resource_manifest_tracks_effective_font_faces_across_media_changes() {
+    reset_author_source_text_parse_count_for_test();
+    reset_stylesheet_resource_manifest_build_count_for_test();
+    let mut host = test_host();
+    let document = host.document_handle();
+    let shadow_host = host.create_element("section");
+    assert!(host.append_child(document, shadow_host));
+    let shadow_root = host
+        .attach_shadow_root(shadow_host, "open")
+        .expect("font resource fixture should create a ShadowRoot");
+    let engine = MoliStyleEngine::new();
+    let document_url = url::Url::parse("https://example.test/media-fonts.html").unwrap();
+    let owner_media_source = StyloStylesheetSource::new(
+        "@font-face { font-family: OwnerPrint; src: url(owner-print.woff2); }".into(),
+        document_url.clone(),
+    )
+    .with_owner_media_text("print");
+    let nested_media_source = StyloStylesheetSource::new(
+        "@media print { @font-face { font-family: NestedPrint; src: url(nested-print.woff2); } }\
+         @media screen { @font-face { font-family: ScreenOnly; src: url(screen.woff2); } }"
+            .into(),
+        document_url,
+    );
+    let mut screen_inputs = FullStyleWorldSnapshot {
+        document_stylesheet_sources: vec![owner_media_source, nested_media_source],
+        ..Default::default()
+    };
+    screen_inputs.shadow_stylesheet_sources.push((
+        shadow_root,
+        vec![StyloStylesheetSource::new(
+            "@media print { @font-face { font-family: ShadowPrint; src: url(shadow-print.woff2); } }\
+             @media screen { @font-face { font-family: ShadowScreen; src: url(shadow-screen.woff2); } }"
+                .into(),
+            url::Url::parse("https://example.test/media-fonts.html").unwrap(),
+        )],
+    ));
+    let screen_key = StyleWorldKey::new(&screen_inputs, None);
+    engine.ensure_retained_style_system_for_document(
+        &host,
+        document,
+        screen_key.clone(),
+        &screen_inputs,
+    );
+
+    let resource_urls = |snapshot: &StylesheetResourceSnapshot| {
+        let mut urls = snapshot
+            .web_fonts()
+            .iter()
+            .map(|resource| resource.request_url().as_str().to_owned())
+            .collect::<Vec<_>>();
+        urls.sort();
+        urls
+    };
+    let screen = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("screen media must publish an effective font projection");
+    assert_eq!(
+        resource_urls(&screen),
+        [
+            "https://example.test/screen.woff2",
+            "https://example.test/shadow-screen.woff2",
+        ]
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 3);
+    assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 1);
+    let stylist_identity = engine.retained_stylist_identity_for_document_for_test(document);
+
+    let mut print_inputs = screen_inputs.clone();
+    print_inputs.environment = StyloStyleEnvironment::from_emulated_media(
+        &crate::protocol_types::EmulatedMediaOverrides {
+            media: Some("print".to_owned()),
+            ..Default::default()
+        },
+    );
+    let print_key = StyleWorldKey::new(&print_inputs, None);
+    engine.ensure_retained_style_system_for_document(&host, document, print_key, &print_inputs);
+    let print = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("print media must publish its effective font projection");
+    assert_ne!(print.generation(), screen.generation());
+    assert_eq!(
+        resource_urls(&print),
+        [
+            "https://example.test/nested-print.woff2",
+            "https://example.test/owner-print.woff2",
+            "https://example.test/shadow-print.woff2",
+        ]
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity,
+        "media changes must update the retained Stylist in place"
+    );
+    assert_eq!(
+        author_source_text_parse_count_for_test(),
+        3,
+        "device projection must reuse parsed native rules"
+    );
+
+    engine.ensure_retained_style_system_for_document(&host, document, screen_key, &screen_inputs);
+    let restored_screen = engine
+        .stylesheet_resource_snapshot_for_document(document)
+        .expect("returning to screen must publish the restored projection");
+    assert_ne!(restored_screen.generation(), print.generation());
+    assert_eq!(
+        resource_urls(&restored_screen),
+        [
+            "https://example.test/screen.woff2",
+            "https://example.test/shadow-screen.woff2",
+        ]
+    );
+    assert_eq!(
+        engine.retained_stylist_identity_for_document_for_test(document),
+        stylist_identity
+    );
+    assert_eq!(author_source_text_parse_count_for_test(), 3);
     assert_eq!(stylesheet_resource_manifest_build_count_for_test(), 3);
 }
 

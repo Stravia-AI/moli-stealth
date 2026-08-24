@@ -59,15 +59,43 @@ pub(super) fn note_full_cascade_update_fallback() {
 pub(super) struct ActiveStylesheet {
     source: StyloStylesheetSource,
     stylesheet: DocumentStyleSheet,
-    web_font_resources: Arc<[StylesheetLoadBlockingResource]>,
+    web_font_resources: Arc<[ActiveWebFontResource]>,
     import_urls: Arc<[url::Url]>,
+}
+
+/// One parsed `@font-face` resource tied to its native Stylo rule.
+///
+/// Retaining the rule address lets device changes project the already-parsed
+/// resource set through Stylo's effective-rule iterator without reparsing or
+/// treating every installed stylesheet as currently effective.
+#[derive(Clone)]
+pub(super) struct ActiveWebFontResource {
+    rule_address: usize,
+    resource: StylesheetLoadBlockingResource,
+}
+
+impl ActiveWebFontResource {
+    pub(super) fn new(rule_address: usize, resource: StylesheetLoadBlockingResource) -> Self {
+        Self {
+            rule_address,
+            resource,
+        }
+    }
+
+    pub(super) fn rule_address(&self) -> usize {
+        self.rule_address
+    }
+
+    pub(super) fn resource(&self) -> &StylesheetLoadBlockingResource {
+        &self.resource
+    }
 }
 
 impl ActiveStylesheet {
     pub(super) fn new(
         source: StyloStylesheetSource,
         stylesheet: DocumentStyleSheet,
-        web_font_resources: Arc<[StylesheetLoadBlockingResource]>,
+        web_font_resources: Arc<[ActiveWebFontResource]>,
         import_urls: Arc<[url::Url]>,
     ) -> Self {
         Self {
@@ -86,7 +114,7 @@ impl ActiveStylesheet {
         &self.stylesheet
     }
 
-    pub(super) fn web_font_resources(&self) -> &[StylesheetLoadBlockingResource] {
+    pub(super) fn web_font_resources(&self) -> &[ActiveWebFontResource] {
         self.web_font_resources.as_ref()
     }
 

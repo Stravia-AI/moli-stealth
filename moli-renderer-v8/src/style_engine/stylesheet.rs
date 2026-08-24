@@ -34,7 +34,7 @@ use crate::{document_runtime::DomHandle, dom::native::DomHost};
 
 use super::{
     StyleViewport, StyloStyleEnvironment,
-    active_stylesheets::{ActiveStylesheet, ActiveStylesheetCollection},
+    active_stylesheets::{ActiveStylesheet, ActiveStylesheetCollection, ActiveWebFontResource},
     media_list::parse_media_query_list_with_context,
     source::store::{StyleSourceMetadata, StyloStylesheetSource},
     source_id::{StyleSourceId, StyleSourceKind},
@@ -104,10 +104,12 @@ pub(super) fn install_active_stylesheet(
     let web_font_resources = native_font_face_rules_for_stylesheet(&stylesheet)
         .into_iter()
         .filter_map(|rule| {
+            let rule_address = rule.rule.raw_ptr().as_ptr() as usize;
             crate::css_resource_urls::stylesheet_web_font_resource(
                 &rule.rule_fingerprint,
                 source.base_url(),
             )
+            .map(|resource| ActiveWebFontResource::new(rule_address, resource))
         })
         .collect::<Vec<_>>();
     ActiveStylesheet::new(
@@ -206,20 +208,41 @@ pub(crate) fn native_font_face_projection_for_stylesheet(
     collect_font_face_rule_projections(contents.rules(&guard), &guard, &mut projection.all_rules);
 
     let document_stylesheet = DocumentStyleSheet::new(stylesheet.clone());
-    let custom_media = CustomMediaMap::default();
-    if document_stylesheet.enabled()
-        && document_stylesheet.is_effective_for_device(stylist.device(), &custom_media, &guard)
-    {
-        projection.effective_rule_addresses.extend(
-            contents
-                .effective_rules(stylist.device(), &custom_media, &guard)
-                .filter_map(|rule| match rule {
-                    CssRule::FontFace(rule) => Some(rule.raw_ptr().as_ptr() as usize),
-                    _ => None,
-                }),
-        );
-    }
+    projection.effective_rule_addresses = native_effective_font_face_rule_addresses_with_guard(
+        &document_stylesheet,
+        stylist.device(),
+        &CustomMediaMap::default(),
+        &guard,
+    );
     projection
+}
+
+pub(super) fn native_effective_font_face_rule_addresses(
+    stylesheet: &DocumentStyleSheet,
+    device: &Device,
+    custom_media: &CustomMediaMap,
+) -> HashSet<usize> {
+    let guard = stylesheet.0.shared_lock.read();
+    native_effective_font_face_rule_addresses_with_guard(stylesheet, device, custom_media, &guard)
+}
+
+fn native_effective_font_face_rule_addresses_with_guard(
+    stylesheet: &DocumentStyleSheet,
+    device: &Device,
+    custom_media: &CustomMediaMap,
+    guard: &style::shared_lock::SharedRwLockReadGuard<'_>,
+) -> HashSet<usize> {
+    if !stylesheet.enabled() || !stylesheet.is_effective_for_device(device, custom_media, guard) {
+        return HashSet::new();
+    }
+    stylesheet
+        .contents(guard)
+        .effective_rules(device, custom_media, guard)
+        .filter_map(|rule| match rule {
+            CssRule::FontFace(rule) => Some(rule.raw_ptr().as_ptr() as usize),
+            _ => None,
+        })
+        .collect()
 }
 
 pub(crate) fn native_font_face_rules_for_stylesheet(

@@ -157,8 +157,11 @@ pub(super) fn build_retained_style_system(
             .borrow_for_origin(Origin::UserAgent)
             .clone(),
     );
-    let stylesheet_resources =
-        StylesheetResourceManifest::from_active_stylesheets(&document_stylesheets, &shadow_scopes);
+    let stylesheet_resources = StylesheetResourceManifest::from_active_stylesheets(
+        &stylist,
+        &document_stylesheets,
+        &shadow_scopes,
+    );
 
     RetainedStyleSystem {
         stylist_identity: NEXT_STYLIST_IDENTITY.fetch_add(1, Ordering::Relaxed),
@@ -452,10 +455,11 @@ fn refresh_retained_derived_state(
                 .clone(),
         );
     }
-    if !stylesheet_collections_changed {
+    if !device_changed && !stylesheet_collections_changed {
         return;
     }
     let stylesheet_resources = StylesheetResourceManifest::from_active_stylesheets(
+        &retained.stylist,
         &retained.document_stylesheets,
         &retained.shadow_scopes,
     );

@@ -2,7 +2,12 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use crate::{css_resource_urls::StylesheetLoadBlockingResource, document_runtime::DomHandle};
 
-use super::{active_stylesheets::ActiveStylesheetCollection, shadow_scopes::ShadowScopeStyles};
+use style::{stylesheets::Origin, stylist::Stylist};
+
+use super::{
+    active_stylesheets::ActiveStylesheetCollection, shadow_scopes::ShadowScopeStyles,
+    stylesheet::native_effective_font_face_rule_addresses,
+};
 
 #[cfg(test)]
 thread_local! {
@@ -83,6 +88,7 @@ pub(super) struct StylesheetResourceManifest {
 
 impl StylesheetResourceManifest {
     pub(super) fn from_active_stylesheets(
+        stylist: &Stylist,
         document_stylesheets: &ActiveStylesheetCollection,
         shadow_scopes: &[ShadowScopeStyles],
     ) -> Self {
@@ -90,9 +96,24 @@ impl StylesheetResourceManifest {
         STYLESHEET_RESOURCE_MANIFEST_BUILD_COUNT.with(|count| count.set(count.get() + 1));
         let mut web_fonts = BTreeMap::new();
         let mut imports = BTreeMap::new();
-        collect_resources(document_stylesheets, &mut web_fonts, &mut imports);
+        collect_resources(
+            document_stylesheets,
+            stylist.device(),
+            stylist
+                .cascade_data()
+                .borrow_for_origin(Origin::Author)
+                .custom_media_map(),
+            &mut web_fonts,
+            &mut imports,
+        );
         for scope in shadow_scopes {
-            collect_resources(scope.active_stylesheets(), &mut web_fonts, &mut imports);
+            collect_resources(
+                scope.active_stylesheets(),
+                stylist.device(),
+                scope.author_styles().data.custom_media_map(),
+                &mut web_fonts,
+                &mut imports,
+            );
         }
         Self {
             web_fonts: web_fonts.into_values().collect::<Vec<_>>().into(),
@@ -114,11 +135,22 @@ impl StylesheetResourceManifest {
 
 fn collect_resources(
     stylesheets: &ActiveStylesheetCollection,
+    device: &style::device::Device,
+    custom_media: &style::stylesheets::CustomMediaMap,
     web_fonts: &mut BTreeMap<String, StylesheetLoadBlockingResource>,
     imports: &mut BTreeMap<String, url::Url>,
 ) {
     for stylesheet in stylesheets.entries() {
+        let effective_font_faces = native_effective_font_face_rule_addresses(
+            stylesheet.stylesheet(),
+            device,
+            custom_media,
+        );
         for resource in stylesheet.web_font_resources() {
+            if !effective_font_faces.contains(&resource.rule_address()) {
+                continue;
+            }
+            let resource = resource.resource();
             let Some(font) = resource.web_font() else {
                 continue;
             };
