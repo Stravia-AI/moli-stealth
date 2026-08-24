@@ -1,6 +1,10 @@
 use std::sync::Arc;
 use style::{
-    shared_lock::SharedRwLockReadGuard, stylesheets::DocumentStyleSheet, stylist::Stylist,
+    font_face::FontFaceRule,
+    servo_arc::Arc as ServoArc,
+    shared_lock::{Locked, SharedRwLockReadGuard},
+    stylesheets::DocumentStyleSheet,
+    stylist::Stylist,
 };
 
 use crate::css_resource_urls::StylesheetLoadBlockingResource;
@@ -65,25 +69,32 @@ pub(super) struct ActiveStylesheet {
 
 /// One parsed `@font-face` resource tied to its native Stylo rule.
 ///
-/// Retaining the rule address lets device changes project the already-parsed
-/// resource set through Stylo's effective-rule iterator without reparsing or
-/// treating every installed stylesheet as currently effective.
+/// The strong rule reference cannot outlive its owning `ActiveStylesheet`, but
+/// it prevents a removed rule's allocation address from being reused before
+/// the next style observation reconciles this resource snapshot.
 #[derive(Clone)]
 pub(super) struct ActiveWebFontResource {
-    rule_address: usize,
+    /// Stable native-rule identity for device-aware resource projection.
+    ///
+    /// Projection compares this allocation's address with Stylo's current
+    /// effective `@font-face` rules. Keeping a strong reference here pins that
+    /// allocation until this `ActiveStylesheet` snapshot is reconciled, so a
+    /// removed rule cannot release and recycle its address into a false match.
+    /// The rule contents are not read through this field.
+    rule: ServoArc<Locked<FontFaceRule>>,
     resource: StylesheetLoadBlockingResource,
 }
 
 impl ActiveWebFontResource {
-    pub(super) fn new(rule_address: usize, resource: StylesheetLoadBlockingResource) -> Self {
-        Self {
-            rule_address,
-            resource,
-        }
+    pub(super) fn new(
+        rule: ServoArc<Locked<FontFaceRule>>,
+        resource: StylesheetLoadBlockingResource,
+    ) -> Self {
+        Self { rule, resource }
     }
 
     pub(super) fn rule_address(&self) -> usize {
-        self.rule_address
+        self.rule.raw_ptr().as_ptr() as usize
     }
 
     pub(super) fn resource(&self) -> &StylesheetLoadBlockingResource {

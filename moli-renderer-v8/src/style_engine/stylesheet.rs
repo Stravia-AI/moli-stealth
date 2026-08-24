@@ -104,12 +104,11 @@ pub(super) fn install_active_stylesheet(
     let web_font_resources = native_font_face_rules_for_stylesheet(&stylesheet)
         .into_iter()
         .filter_map(|rule| {
-            let rule_address = rule.rule.raw_ptr().as_ptr() as usize;
-            crate::css_resource_urls::stylesheet_web_font_resource(
+            let resource = crate::css_resource_urls::stylesheet_web_font_resource(
                 &rule.rule_fingerprint,
                 source.base_url(),
-            )
-            .map(|resource| ActiveWebFontResource::new(rule_address, resource))
+            )?;
+            Some(ActiveWebFontResource::new(rule.rule, resource))
         })
         .collect::<Vec<_>>();
     ActiveStylesheet::new(
