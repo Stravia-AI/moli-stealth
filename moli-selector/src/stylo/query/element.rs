@@ -60,6 +60,14 @@ impl<'a> QueryElement<'a> {
         self.handle
     }
 
+    pub(in crate::stylo) fn host(self) -> &'a DomHost {
+        self.host
+    }
+
+    pub(in crate::stylo) fn shared_lock(self) -> &'a SharedRwLock {
+        self.shared_lock
+    }
+
     pub(crate) fn read_quirks_mode(self) -> QuirksMode {
         self.host
             .owner_document_handle(self.handle)
@@ -75,7 +83,7 @@ impl<'a> QueryElement<'a> {
             .expect("query element node should exist")
     }
 
-    pub(super) fn element(self) -> &'a Element {
+    pub(in crate::stylo) fn element(self) -> &'a Element {
         self.node()
             .as_element()
             .expect("query element should wrap an element node")
@@ -401,14 +409,7 @@ impl<'a> TElement for QueryElement<'a> {
     ) where
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
-        super::super::presentation::synthesize_svg_presentational_hints(
-            self.host,
-            self.handle,
-            self.element(),
-            self.read_quirks_mode(),
-            self.shared_lock,
-            hints,
-        );
+        self.synthesize_svg_presentational_hints(hints);
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::parser::SelectorImpl>::BorrowedLocalName {

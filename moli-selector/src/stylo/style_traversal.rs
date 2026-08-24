@@ -1480,6 +1480,13 @@ impl<'a> StyleElement<'a> {
         )
     }
 
+    fn synthesize_svg_presentational_hints<V>(&self, hints: &mut V)
+    where
+        V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
+    {
+        self.as_query().synthesize_svg_presentational_hints(hints);
+    }
+
     fn from_handle(state: &'a StyleDomState, handle: NodeId) -> Option<Self> {
         let document = state.host().owner_document_handle(handle)?;
         state.host().node(handle)?.as_element()?;
@@ -2008,14 +2015,7 @@ impl<'a> TElement for StyleElement<'a> {
     ) where
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
-        super::presentation::synthesize_svg_presentational_hints(
-            self.host(),
-            self.handle(),
-            self.element(),
-            self.as_query().read_quirks_mode(),
-            &self.style_state().shared_lock,
-            hints,
-        );
+        self.synthesize_svg_presentational_hints(hints);
     }
 
     fn local_name(&self) -> &<SelectorImpl as selectors::parser::SelectorImpl>::BorrowedLocalName {

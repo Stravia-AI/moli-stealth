@@ -15,16 +15,14 @@ use style::{
     },
     rule_tree::{CascadeLevel, CascadeOrigin},
     servo_arc::Arc,
-    shared_lock::SharedRwLock,
     stylesheets::{CssRuleType, Origin, UrlExtraData, layer_rule::LayerOrder},
     values::specified::{LengthPercentage, NoCalcLength, NoCalcPercentage},
 };
 use style_traits::ParsingMode;
 
-use crate::dom::{
-    NodeId,
-    native::{DomHost, Element},
-};
+use crate::dom::native::Element;
+
+use super::query::QueryElement;
 
 const SVG_NAMESPACE: &str = "http://www.w3.org/2000/svg";
 
@@ -100,32 +98,41 @@ pub fn is_svg_presentation_attribute_name(name: &str) -> bool {
     matches!(name, "width" | "height") || SVG_STYLE_PRESENTATION_ATTRIBUTES.contains(&name)
 }
 
-pub(super) fn synthesize_svg_presentational_hints<V>(
-    host: &DomHost,
-    handle: NodeId,
-    element: &Element,
-    quirks_mode: QuirksMode,
-    shared_lock: &SharedRwLock,
-    hints: &mut V,
-) where
-    V: Push<ApplicableDeclarationBlock>,
-{
-    if element.namespace() != SVG_NAMESPACE {
-        return;
-    }
+impl QueryElement<'_> {
+    pub(in crate::stylo) fn synthesize_svg_presentational_hints<V>(&self, hints: &mut V)
+    where
+        V: Push<ApplicableDeclarationBlock>,
+    {
+        let element = self.element();
+        if element.namespace() != SVG_NAMESPACE {
+            return;
+        }
 
-    let mut block = PropertyDeclarationBlock::new();
-    if element.local_name() == "svg" {
-        append_root_svg_size_declarations(element, &mut block);
-    }
-    append_svg_style_presentation_declarations(host, handle, element, quirks_mode, &mut block);
+        let mut block = PropertyDeclarationBlock::new();
+        if element.local_name() == "svg" {
+            append_root_svg_size_declarations(element, &mut block);
+        }
 
-    if !block.is_empty() {
-        hints.push(ApplicableDeclarationBlock::from_declarations(
-            Arc::new(shared_lock.wrap(block)),
-            CascadeLevel::new(CascadeOrigin::PresHints),
-            LayerOrder::root(),
-        ));
+        let base_url = self
+            .host()
+            .owner_document_handle(self.handle())
+            .and_then(|document| self.host().document_base_url_for_handle(document));
+        if let Some(base_url) = base_url {
+            append_svg_style_presentation_declarations(
+                element,
+                &UrlExtraData::from(base_url),
+                self.read_quirks_mode(),
+                &mut block,
+            );
+        }
+
+        if !block.is_empty() {
+            hints.push(ApplicableDeclarationBlock::from_declarations(
+                Arc::new(self.shared_lock().wrap(block)),
+                CascadeLevel::new(CascadeOrigin::PresHints),
+                LayerOrder::root(),
+            ));
+        }
     }
 }
 
@@ -149,20 +156,11 @@ fn append_root_svg_size_declarations(element: &Element, block: &mut PropertyDecl
 }
 
 fn append_svg_style_presentation_declarations(
-    host: &DomHost,
-    handle: NodeId,
     element: &Element,
+    url_data: &UrlExtraData,
     quirks_mode: QuirksMode,
     block: &mut PropertyDeclarationBlock,
 ) {
-    let Some(base_url) = host
-        .owner_document_handle(handle)
-        .and_then(|document| host.document_base_url_for_handle(document))
-    else {
-        return;
-    };
-    let url_data = UrlExtraData::from(base_url);
-
     for attribute in element.attributes() {
         if !attribute.namespace().is_empty()
             || !SVG_STYLE_PRESENTATION_ATTRIBUTES.contains(&attribute.local_name())
@@ -178,7 +176,7 @@ fn append_svg_style_presentation_declarations(
             property,
             attribute.value(),
             Origin::Author,
-            &url_data,
+            url_data,
             None,
             ParsingMode::ALLOW_UNITLESS_LENGTH | ParsingMode::ALLOW_ALL_NUMERIC_VALUES,
             quirks_mode,
