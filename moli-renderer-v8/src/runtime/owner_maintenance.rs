@@ -29,9 +29,10 @@ const ACTIVE_PAGE_MODERATE_MEMORY_PRESSURE_PERIOD: Duration = Duration::from_sec
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RendererOwnerMaintenanceAction {
-    /// Ask V8 to perform its moderate-memory-pressure maintenance for the
-    /// isolate currently attached to this Page.
-    ModerateMemoryPressure,
+    /// Ask V8 to perform memory-pressure maintenance for the isolate currently
+    /// attached to this Page. The isolate selects moderate or critical
+    /// pressure from its current heap occupancy.
+    MemoryPressure,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -102,7 +103,7 @@ impl RendererPageOwnerMaintenanceResidence {
         };
         Some(RendererOwnerMaintenanceTask {
             token,
-            action: RendererOwnerMaintenanceAction::ModerateMemoryPressure,
+            action: RendererOwnerMaintenanceAction::MemoryPressure,
             scheduled_for: deadline,
         })
     }
@@ -143,11 +144,11 @@ pub(super) async fn execute_owner_maintenance_task_on_local_lane(
     run_entry_on_bound_owner_local_store_local_task(local_executor, entry, move |entry| {
         Box::pin(async move {
             match task.action() {
-                RendererOwnerMaintenanceAction::ModerateMemoryPressure => entry
+                RendererOwnerMaintenanceAction::MemoryPressure => entry
                     .page_vm_mut()
                     .vm_mut()
                     .renderer_document_isolate_ops()
-                    .notify_renderer_document_isolate_moderate_memory_pressure(),
+                    .notify_renderer_document_isolate_memory_pressure(),
             }
         })
     })

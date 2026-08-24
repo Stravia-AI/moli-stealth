@@ -5,7 +5,7 @@ use super::{
     PostParseProcessingAction, PostParseRuntimeDriverStep, PostParseStageBoundary,
     PostParseTaskCompletion, PostParseTaskExecutionToken, PostParseTaskInvalidationPolicy,
     ReadyPostParseAction, ScriptVm, ScriptVmDefaultWorldBootstrap, StandaloneScriptVmHarness,
-    select_post_parse_driver_step,
+    renderer_document_isolate_critical_pressure_required, select_post_parse_driver_step,
 };
 use crate::document_runtime::{
     CurrentScriptContextSpec, DeferredPageTask, DeferredPageTaskLane, DeferredPageTaskState,
@@ -5191,6 +5191,20 @@ fn dom_wrapper_expando_survives_renderer_document_isolate_garbage_collection() {
         )
         .expect("wrapper expando probe should evaluate");
     assert_eq!(retained, "retained");
+}
+
+#[test]
+fn renderer_document_isolate_memory_pressure_escalates_at_one_third_of_heap_limit() {
+    assert!(!renderer_document_isolate_critical_pressure_required(0, 0));
+    assert!(!renderer_document_isolate_critical_pressure_required(
+        33, 100
+    ));
+    assert!(renderer_document_isolate_critical_pressure_required(
+        34, 100
+    ));
+    assert!(renderer_document_isolate_critical_pressure_required(
+        100, 100
+    ));
 }
 
 #[test]

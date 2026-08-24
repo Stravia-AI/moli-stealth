@@ -53,6 +53,17 @@ use url::Url;
 
 pub(crate) type ScriptVmBootstrapError = Box<(anyhow::Error, DomHost)>;
 
+fn renderer_document_isolate_critical_pressure_required(
+    used_heap_size: usize,
+    heap_size_limit: usize,
+) -> bool {
+    if heap_size_limit == 0 {
+        return false;
+    }
+    let critical_threshold = heap_size_limit / 3 + usize::from(!heap_size_limit.is_multiple_of(3));
+    used_heap_size >= critical_threshold
+}
+
 #[cfg(test)]
 fn expect_ready_child_frame_owner_source_future_for_test<F>(future: F) -> F::Output
 where
@@ -6742,10 +6753,24 @@ impl ScriptVm {
             })
     }
 
-    fn notify_renderer_document_isolate_moderate_memory_pressure(&mut self) -> Result<()> {
+    fn notify_renderer_document_isolate_memory_pressure(&mut self) -> Result<()> {
         self.renderer_document_isolate
             .with_entered_renderer_document_isolate(|isolate| {
-                isolate.memory_pressure_notification(v8::MemoryPressureLevel::Moderate);
+                let stats = isolate.get_heap_statistics();
+                if renderer_document_isolate_critical_pressure_required(
+                    stats.used_heap_size(),
+                    stats.heap_size_limit(),
+                ) {
+                    // One renderer process can host several Page isolates. A
+                    // target with a rapidly replaced child realm must not hit
+                    // V8's process-fatal heap limit before its owner can close
+                    // that target. Escalate the existing periodic maintenance
+                    // once this isolate consumes a third of its own limit.
+                    isolate.memory_pressure_notification(v8::MemoryPressureLevel::Critical);
+                    isolate.low_memory_notification();
+                } else {
+                    isolate.memory_pressure_notification(v8::MemoryPressureLevel::Moderate);
+                }
                 Ok(())
             })
     }
@@ -6821,11 +6846,8 @@ impl ScriptVmRendererDocumentIsolateOps<'_> {
         self.vm.collect_renderer_document_isolate_garbage()
     }
 
-    pub(super) fn notify_renderer_document_isolate_moderate_memory_pressure(
-        &mut self,
-    ) -> Result<()> {
-        self.vm
-            .notify_renderer_document_isolate_moderate_memory_pressure()
+    pub(super) fn notify_renderer_document_isolate_memory_pressure(&mut self) -> Result<()> {
+        self.vm.notify_renderer_document_isolate_memory_pressure()
     }
 }
 
