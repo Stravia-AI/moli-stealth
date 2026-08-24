@@ -1,7 +1,7 @@
 use std::{
     borrow::Cow,
     cell::{Cell, RefCell},
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     rc::{Rc, Weak as RcWeak},
     sync::{Arc as StdArc, Weak as StdWeak, atomic::AtomicBool},
 };
@@ -40,6 +40,14 @@ use moli_css_parse::{
     keyframe_rule_snapshot_from_native_with_stylo, parse_font_face_cssom_rule_with_stylo_context,
     refresh_native_stylesheet_namespaces_after_cssom_mutation,
 };
+
+/// Exact mutation history is an optimization, not a correctness cache. A
+/// consumer older than this window detects the generation gap and performs a
+/// full retained-stylesheet update instead of keeping old Stylo rule trees
+/// alive indefinitely.
+pub(crate) const LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY: usize = 256;
+
+pub(crate) type LiveStylesheetCascadeMutationJournal = VecDeque<LiveStylesheetCascadeMutationBatch>;
 
 #[cfg(test)]
 thread_local! {
@@ -993,7 +1001,7 @@ pub(crate) struct LiveStylesheet {
     cssom_runtime_state: LiveStylesheetCssomRuntimeState,
     contents_revision: Cell<u64>,
     cascade_generation: Cell<u64>,
-    cascade_mutations: StdArc<Mutex<Vec<LiveStylesheetCascadeMutationBatch>>>,
+    cascade_mutations: StdArc<Mutex<LiveStylesheetCascadeMutationJournal>>,
     import_generation: Cell<u64>,
     parent: RefCell<Option<LiveStylesheetParent>>,
     next_import_edge_id: Cell<u64>,
@@ -1016,8 +1024,7 @@ pub(crate) struct LiveStylesheet {
     >,
 }
 
-/// One exact Stylo rule mutation retained until every installation that still
-/// references an older cascade generation can observe it.
+/// One exact Stylo rule mutation retained within the bounded journal window.
 #[derive(Clone, Debug)]
 pub(crate) struct LiveStylesheetRuleMutation {
     rule: CssRule,
@@ -1271,7 +1278,7 @@ impl LiveStylesheet {
             cssom_runtime_state,
             contents_revision: Cell::new(1),
             cascade_generation: Cell::new(1),
-            cascade_mutations: StdArc::new(Mutex::new(Vec::new())),
+            cascade_mutations: StdArc::new(Mutex::new(VecDeque::new())),
             import_generation: Cell::new(1),
             parent: RefCell::new(None),
             next_import_edge_id: Cell::new(0),
@@ -1341,8 +1348,19 @@ impl LiveStylesheet {
 
     pub(crate) fn cascade_mutation_journal(
         &self,
-    ) -> StdArc<Mutex<Vec<LiveStylesheetCascadeMutationBatch>>> {
+    ) -> StdArc<Mutex<LiveStylesheetCascadeMutationJournal>> {
         StdArc::clone(&self.cascade_mutations)
+    }
+
+    fn publish_cascade_mutation(&self, generation: u64, mutation: LiveStylesheetCascadeMutation) {
+        let mut journal = self.cascade_mutations.lock();
+        if journal.len() == LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY {
+            journal.pop_front();
+        }
+        journal.push_back(LiveStylesheetCascadeMutationBatch {
+            generation,
+            mutation,
+        });
     }
 
     pub(crate) fn import_generation(&self) -> u64 {

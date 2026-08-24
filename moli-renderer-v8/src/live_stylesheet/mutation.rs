@@ -897,7 +897,7 @@ impl LiveStylesheet {
         let generation = self.cascade_generation();
         let mut batches = self.cascade_mutations.lock();
         let batch = batches
-            .last_mut()
+            .back_mut()
             .expect("a cascade mutation must publish one journal batch");
         debug_assert_eq!(batch.generation, generation);
         batch.mutation = LiveStylesheetCascadeMutation::Rules(mutations);

@@ -258,13 +258,7 @@ impl LiveStylesheet {
         self.for_each_import_ancestor_including_self(|stylesheet| {
             let generation = stylesheet.cascade_generation.get().saturating_add(1);
             stylesheet.cascade_generation.set(generation);
-            stylesheet
-                .cascade_mutations
-                .lock()
-                .push(LiveStylesheetCascadeMutationBatch {
-                    generation,
-                    mutation: LiveStylesheetCascadeMutation::Full,
-                });
+            stylesheet.publish_cascade_mutation(generation, LiveStylesheetCascadeMutation::Full);
             stylesheet.derived_state.clear_dependency_summary();
             stylesheet.font_face_cache.borrow_mut().take();
         });

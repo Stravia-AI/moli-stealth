@@ -58,7 +58,7 @@ enum StyloStylesheetSourceContents {
         contents_revision: u64,
         cascade_generation: u64,
         cascade_mutations: StdArc<
-            parking_lot::Mutex<Vec<crate::live_stylesheet::LiveStylesheetCascadeMutationBatch>>,
+            parking_lot::Mutex<crate::live_stylesheet::LiveStylesheetCascadeMutationJournal>,
         >,
         derived_state: StdArc<crate::live_stylesheet::LiveStylesheetDerivedState>,
         shared_initial_contents: Option<StdArc<crate::live_stylesheet::SharedStylesheetContents>>,
@@ -661,5 +661,165 @@ fn update_style_scope_identity_hash(hasher: &mut Sha256Context, scope_id: StyleS
             hasher.update([1]);
             hasher.update(root.index().to_le_bytes());
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use style::{context::QuirksMode, shared_lock::SharedRwLock, stylesheets::AllowImportRules};
+
+    use super::{LiveStylesheetCascadeUpdate, StyloStylesheetSource};
+    use crate::live_stylesheet::{
+        LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY, LiveStylesheetRegistry,
+    };
+
+    #[test]
+    fn live_cascade_mutation_journal_is_bounded_with_safe_full_fallback() {
+        let registry = LiveStylesheetRegistry::default();
+        let stylesheet = registry.create(
+            ".target { color: rgb(0, 0, 0); }",
+            url::Url::parse("https://cascade-journal.test/style.css").expect("stylesheet URL"),
+            QuirksMode::NoQuirks,
+            AllowImportRules::Yes,
+            SharedRwLock::new(),
+        );
+        let initial = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+
+        stylesheet
+            .replace_rule(".target { color: rgb(1, 2, 3); }", 0)
+            .expect("first exact rule replacement");
+        let first_update = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+        assert!(matches!(
+            first_update.live_cascade_update_since(&initial),
+            LiveStylesheetCascadeUpdate::Rules(changes) if !changes.is_empty()
+        ));
+
+        let lagging_installation = first_update;
+        for index in 0..2_048 {
+            stylesheet
+                .replace_rule(
+                    &format!(
+                        ".target {{ color: rgb({}, {}, {}); }}",
+                        index % 251,
+                        (index + 1) % 251,
+                        (index + 2) % 251,
+                    ),
+                    0,
+                )
+                .expect("stress replacement should remain valid");
+        }
+        assert_eq!(
+            stylesheet.cascade_mutation_journal().lock().len(),
+            LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY,
+            "old rule trees must not remain strongly retained without bound",
+        );
+        let after_stress = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+        assert!(matches!(
+            after_stress.live_cascade_update_since(&lagging_installation),
+            LiveStylesheetCascadeUpdate::Full
+        ));
+
+        let caught_up_installation = after_stress;
+        stylesheet
+            .replace_rule(".target { color: rgb(7, 8, 9); }", 0)
+            .expect("latest exact rule replacement");
+        let latest = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+        assert!(matches!(
+            latest.live_cascade_update_since(&caught_up_installation),
+            LiveStylesheetCascadeUpdate::Rules(changes) if !changes.is_empty()
+        ));
+    }
+
+    #[test]
+    fn live_cascade_journal_capacity_boundary_keeps_exact_updates() {
+        let registry = LiveStylesheetRegistry::default();
+        let stylesheet = registry.create(
+            ".target { color: rgb(0, 0, 0); }",
+            url::Url::parse("https://cascade-journal-boundary.test/style.css")
+                .expect("stylesheet URL"),
+            QuirksMode::NoQuirks,
+            AllowImportRules::Yes,
+            SharedRwLock::new(),
+        );
+        let one_generation_too_old = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+        stylesheet
+            .replace_rule(".target { color: rgb(1, 2, 3); }", 0)
+            .expect("boundary seed replacement");
+        let oldest_exact_predecessor = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+
+        for index in 0..LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY {
+            stylesheet
+                .replace_rule(&format!(".target {{ z-index: {}; }}", index % 100), 0)
+                .expect("boundary replacement should remain valid");
+        }
+        let current = StyloStylesheetSource::from_live_stylesheet(&stylesheet);
+        assert!(matches!(
+            current.live_cascade_update_since(&oldest_exact_predecessor),
+            LiveStylesheetCascadeUpdate::Rules(changes) if !changes.is_empty()
+        ));
+        assert!(matches!(
+            current.live_cascade_update_since(&one_generation_too_old),
+            LiveStylesheetCascadeUpdate::Full
+        ));
+    }
+
+    #[test]
+    fn imported_child_mutations_bound_both_child_and_ancestor_journals() {
+        let registry = LiveStylesheetRegistry::default();
+        let root = registry.create(
+            "@import './child.css'; .root { display: block; }",
+            url::Url::parse("https://cascade-import-journal.test/root.css")
+                .expect("root stylesheet URL"),
+            QuirksMode::NoQuirks,
+            AllowImportRules::Yes,
+            SharedRwLock::new(),
+        );
+        let request = root
+            .pending_import_requests()
+            .into_iter()
+            .next()
+            .expect("pending child import");
+        let child = registry
+            .install_import_response(
+                root.id(),
+                root.contents_revision(),
+                request.edge_id,
+                ".child { color: rgb(0, 0, 0); }",
+                request.url,
+                true,
+                true,
+            )
+            .expect("child import should install");
+        let root_before_mutation = StyloStylesheetSource::from_live_stylesheet(&root);
+        let child_before_mutation = StyloStylesheetSource::from_live_stylesheet(&child);
+
+        child
+            .replace_rule(".child { color: rgb(1, 2, 3); }", 0)
+            .expect("child exact replacement");
+        let root_after_mutation = StyloStylesheetSource::from_live_stylesheet(&root);
+        let child_after_mutation = StyloStylesheetSource::from_live_stylesheet(&child);
+        assert!(matches!(
+            child_after_mutation.live_cascade_update_since(&child_before_mutation),
+            LiveStylesheetCascadeUpdate::Rules(changes) if !changes.is_empty()
+        ));
+        assert!(matches!(
+            root_after_mutation.live_cascade_update_since(&root_before_mutation),
+            LiveStylesheetCascadeUpdate::Full
+        ));
+
+        for index in 0..(LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY * 2 + 3) {
+            child
+                .replace_rule(&format!(".child {{ z-index: {}; }}", index % 100), 0)
+                .expect("import stress replacement should remain valid");
+        }
+        assert_eq!(
+            child.cascade_mutation_journal().lock().len(),
+            LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY,
+        );
+        assert_eq!(
+            root.cascade_mutation_journal().lock().len(),
+            LIVE_STYLESHEET_CASCADE_MUTATION_JOURNAL_CAPACITY,
+            "descendant mutations must not grow an ancestor journal without bound",
+        );
     }
 }
