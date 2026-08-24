@@ -18079,30 +18079,54 @@ async fn navigator_service_worker_updatefound_and_statechange_are_runtime_driven
             const registration = await sw.register("worker-v1.js", { scope: "./" });
             await sw.ready;
             const events = [];
-            sw.addEventListener("controllerchange", () => {
-              events.push("controllerchange");
+            const expectedV2Url = new URL("worker-v2.js", location.href).href;
+            const publishProbe = () => {
+              globalThis.__serviceWorkerRuntimeEventsProbe = [
+                events.join(","),
+                registration.installing === null,
+                registration.waiting === null,
+                registration.active && registration.active.scriptURL
+              ].join("|");
+            };
+            const controllerChanged = new Promise((resolve, reject) => {
+              sw.addEventListener("controllerchange", () => {
+                events.push("controllerchange");
+                publishProbe();
+                const controller = sw.controller;
+                if (!controller || controller.scriptURL !== expectedV2Url) {
+                  reject(new Error("replacement controllerchange had the wrong controller"));
+                  return;
+                }
+                resolve();
+              }, { once: true });
             });
-            registration.addEventListener("updatefound", () => {
-              const installing = registration.installing;
-              events.push([
-                "updatefound",
-                installing && installing.scriptURL,
-                installing && installing.state
-              ].join(":"));
-              installing.addEventListener("statechange", () => {
-                events.push("statechange:" + installing.state);
-              });
+            const activated = new Promise((resolve, reject) => {
+              registration.addEventListener("updatefound", () => {
+                const installing = registration.installing;
+                events.push([
+                  "updatefound",
+                  installing && installing.scriptURL,
+                  installing && installing.state
+                ].join(":"));
+                publishProbe();
+                if (!installing || installing.scriptURL !== expectedV2Url) {
+                  reject(new Error("updatefound had the wrong installing worker"));
+                  return;
+                }
+                installing.addEventListener("statechange", () => {
+                  events.push("statechange:" + installing.state);
+                  publishProbe();
+                  if (installing.state === "activated") {
+                    resolve();
+                  } else if (installing.state === "redundant") {
+                    reject(new Error("replacement worker became redundant"));
+                  }
+                });
+              }, { once: true });
             });
             await sw.register("worker-v2.js", { scope: "./" });
-            for (let i = 0; i < 20 && !events.includes("statechange:activated"); i++) {
-              await new Promise(resolve => setTimeout(resolve, 0));
-            }
-            globalThis.__serviceWorkerRuntimeEventsProbe = [
-              events.join(","),
-              registration.installing === null,
-              registration.waiting === null,
-              registration.active && registration.active.scriptURL
-            ].join("|");
+            await Promise.all([activated, controllerChanged]);
+            publishProbe();
           })().catch(error => {
             globalThis.__serviceWorkerRuntimeEventsProbe = "error:" + String(error);
           });
