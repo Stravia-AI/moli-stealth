@@ -14,7 +14,10 @@ use super::super::{
 };
 use super::imports::stylesheet_top_level_import_urls;
 use super::shared_cache::{SharedStyleSourceContents, shared_style_source_contents};
-use crate::document_runtime::DomHandle;
+use crate::{
+    document_runtime::DomHandle, protocol_types::EmulatedMediaOverrides,
+    style_engine::StyleViewport,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) struct StylesheetFontFaceDescriptor {
@@ -191,6 +194,20 @@ impl StyloStylesheetSource {
                 moli_css_parse::native_stylesheet_css_text_with_stylo(stylesheet)
             }),
         }
+    }
+
+    /// Whether this installed source's top-level media list is effective for
+    /// compatibility paths that inspect serialized CSS outside Stylo.
+    pub(crate) fn media_matches(
+        &self,
+        emulated_media: &EmulatedMediaOverrides,
+        viewport: StyleViewport,
+    ) -> bool {
+        crate::style_engine::source_owner::stylesheet_source_media_matches(
+            &self.media_text,
+            emulated_media,
+            viewport,
+        )
     }
 
     /// Projects this source into an independently parsed text source.

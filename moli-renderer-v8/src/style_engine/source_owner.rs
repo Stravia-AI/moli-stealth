@@ -65,7 +65,7 @@ fn style_element_is_stylesheet_source_enabled(
         && moli_web_mime::is_stylesheet_type_attribute(
             host.get_attribute(handle, "type").as_deref(),
         )
-        && stylesheet_media_matches_for_stylesheet_source(media_text, emulated_media, viewport)
+        && stylesheet_source_media_matches(media_text, emulated_media, viewport)
 }
 
 pub(super) fn linked_stylesheet_media_matches_for_stylesheet_source(
@@ -73,10 +73,10 @@ pub(super) fn linked_stylesheet_media_matches_for_stylesheet_source(
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,
 ) -> bool {
-    stylesheet_media_matches_for_stylesheet_source(media_text, emulated_media, viewport)
+    stylesheet_source_media_matches(media_text, emulated_media, viewport)
 }
 
-fn stylesheet_media_matches_for_stylesheet_source(
+pub(super) fn stylesheet_source_media_matches(
     media_text: &str,
     emulated_media: &EmulatedMediaOverrides,
     viewport: StyleViewport,

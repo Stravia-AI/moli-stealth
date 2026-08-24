@@ -10012,6 +10012,120 @@ async fn css_animation_start_and_midpoint_style_are_observable() {
     assert_eq!(result, "1|250px|1");
 }
 
+#[test]
+fn raw_keyframe_scanner_respects_owner_media_changes() {
+    let mut vm = new_parsed_test_vm(
+        "https://keyframe-owner-media.test/",
+        r#"<!doctype html>
+        <style>
+          #item {
+            position: relative;
+            animation-name: print-only;
+            animation-duration: 1s;
+          }
+        </style>
+        <style media="print">
+          @keyframes print-only {
+            from { left: 100px; }
+            to { left: 400px; }
+          }
+        </style>
+        <div id="item"></div>"#,
+    );
+
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const item = document.getElementById('item');
+              return [getComputedStyle(item).left, item.getAnimations().length].join('|');
+            })()"#,
+        )
+        .expect("screen animation state should evaluate"),
+        "0px|0",
+        "a print-only keyframe rule must be invisible to the screen raw-CSS scanner",
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
+        media: Some("print".to_owned()),
+        ..Default::default()
+    });
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const item = document.getElementById('item');
+              return [getComputedStyle(item).left, item.getAnimations().length].join('|');
+            })()"#,
+        )
+        .expect("print animation state should evaluate"),
+        "250px|1",
+        "the same retained source must become visible after switching to print",
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
+    assert_eq!(
+        vm.eval(
+            r#"(() => {
+              const item = document.getElementById('item');
+              return [getComputedStyle(item).left, item.getAnimations().length].join('|');
+            })()"#,
+        )
+        .expect("restored screen animation state should evaluate"),
+        "0px|0",
+        "leaving print must hide the raw keyframe source again",
+    );
+}
+
+#[test]
+fn raw_scanners_follow_live_owner_media_attribute_mutations() {
+    let mut vm = new_parsed_test_vm(
+        "https://raw-scanner-owner-media-mutation.test/",
+        r#"<!doctype html>
+        <style>
+          #item {
+            position: relative;
+            animation: owner-gated 1s;
+            --actual: --owner-gated();
+          }
+        </style>
+        <style id="gated" media="print">
+          @keyframes owner-gated {
+            from { left: 20px; }
+            to { left: 60px; }
+          }
+          @function --owner-gated() { result: 17px; }
+        </style>
+        <div id="item"></div>"#,
+    );
+    let probe = r#"(() => {
+      const item = document.getElementById('item');
+      const computed = getComputedStyle(item);
+      return [
+        computed.left,
+        item.getAnimations().length,
+        computed.getPropertyValue('--actual')
+      ].join('|');
+    })()"#;
+
+    assert_eq!(
+        vm.eval(probe).expect("initial raw scanner state"),
+        "0px|0|--owner-gated()",
+    );
+    vm.eval("document.getElementById('gated').media = 'screen'")
+        .expect("owner media should become effective");
+    assert_eq!(
+        vm.eval(probe).expect("effective raw scanner state"),
+        "40px|1|17px",
+        "owner media mutation must update both raw compatibility scanners",
+    );
+    vm.eval("document.getElementById('gated').media = 'not all'")
+        .expect("owner media should become ineffective");
+    assert_eq!(
+        vm.eval(probe).expect("ineffective raw scanner state"),
+        "0px|0|--owner-gated()",
+        "the retained source must not leak after a second owner media mutation",
+    );
+}
+
 #[tokio::test]
 async fn registered_length_custom_property_animation_revert_uses_underlying_value() {
     let mut vm = new_parsed_test_vm(
@@ -11856,5 +11970,93 @@ fn custom_function_provenance_probe_preserves_the_retained_style_world() {
         vm.eval("getComputedStyle(document.getElementById('target')).color")
             .expect("the retained world should remain readable after the probe"),
         "rgb(1, 2, 3)"
+    );
+}
+
+#[test]
+fn raw_custom_function_scanner_respects_owner_media_changes() {
+    let mut vm = new_parsed_test_vm(
+        "https://custom-function-owner-media.test/",
+        r#"<!doctype html>
+        <style>#target { --actual: --print-only(); }</style>
+        <style media="print">
+          @function --print-only() { result: 42px; }
+        </style>
+        <div id="target"></div>"#,
+    );
+
+    assert_eq!(
+        vm.eval(
+            "getComputedStyle(document.getElementById('target')).getPropertyValue('--actual')",
+        )
+        .expect("screen custom property should evaluate"),
+        "--print-only()",
+        "a function in a print-only source must not resolve in screen media",
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
+        media: Some("print".to_owned()),
+        ..Default::default()
+    });
+    assert_eq!(
+        vm.eval(
+            "getComputedStyle(document.getElementById('target')).getPropertyValue('--actual')",
+        )
+        .expect("print custom property should evaluate"),
+        "42px",
+        "the function must become visible when its owner media becomes effective",
+    );
+
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
+    assert_eq!(
+        vm.eval(
+            "getComputedStyle(document.getElementById('target')).getPropertyValue('--actual')",
+        )
+        .expect("restored screen custom property should evaluate"),
+        "--print-only()",
+        "leaving print must hide the raw custom function source again",
+    );
+}
+
+#[test]
+fn raw_custom_function_scanner_filters_shadow_owner_media() {
+    let mut vm = new_parsed_test_vm(
+        "https://shadow-custom-function-owner-media.test/",
+        "<!doctype html><body></body>",
+    );
+    vm.eval(
+        r#"(() => {
+          const host = document.createElement('section');
+          document.body.append(host);
+          const shadow = host.attachShadow({ mode: 'open' });
+          shadow.innerHTML = `
+            <style>#target { --actual: --shadow-print-only(); }</style>
+            <style media="print">
+              @function --shadow-print-only() { result: 23px; }
+            </style>
+            <span id="target"></span>`;
+          globalThis.__shadowFunctionTarget = shadow.getElementById('target');
+        })()"#,
+    )
+    .expect("shadow custom function fixture should initialize");
+    let probe = "getComputedStyle(__shadowFunctionTarget).getPropertyValue('--actual')";
+
+    assert_eq!(
+        vm.eval(probe).expect("screen shadow function state"),
+        "--shadow-print-only()",
+    );
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides {
+        media: Some("print".to_owned()),
+        ..Default::default()
+    });
+    assert_eq!(
+        vm.eval(probe).expect("print shadow function state"),
+        "23px",
+        "a shadow-scoped function must become visible only in its effective owner media",
+    );
+    vm.set_emulated_media(&crate::protocol_types::EmulatedMediaOverrides::default());
+    assert_eq!(
+        vm.eval(probe).expect("restored shadow function state"),
+        "--shadow-print-only()",
     );
 }

@@ -31,8 +31,7 @@ use super::observation::{
     ComputedStyleRead, RetainedStyleObservation, StyleComputationContext, StyleObservation,
 };
 use super::style_world::{
-    active_stylesheet_handles, style_base_url, stylesheet_source_document_for_handle,
-    stylesheet_text,
+    effective_raw_stylesheet_sources, style_base_url, stylesheet_source_document_for_handle,
 };
 use super::{
     StyleMode, all_shorthand_applies_to, animation_shorthand_longhands, css_wide_keyword,
@@ -351,7 +350,9 @@ pub(crate) fn css_animation_start_applies(runtime: &JsContextHost, handle: DomHa
         return false;
     }
 
-    let names = active_css_animation_names(runtime, handle);
+    let read = ComputedStyleRead::new(runtime, handle);
+    let resolution = read.resolution_context();
+    let names = active_css_animation_names_with_resolution(runtime, handle, resolution);
     if names.is_empty() {
         return false;
     }
@@ -359,9 +360,13 @@ pub(crate) fn css_animation_start_applies(runtime: &JsContextHost, handle: DomHa
     let Some(document) = stylesheet_source_document_for_handle(runtime, handle) else {
         return false;
     };
-    for stylesheet in active_stylesheet_handles(runtime, document, false) {
-        let css_text = stylesheet_text(runtime, stylesheet);
-        if keyframe_has_supported_animation_values(&css_text, &names) {
+    for source in effective_raw_stylesheet_sources(
+        runtime,
+        document,
+        false,
+        resolution.computation.viewport(),
+    ) {
+        if keyframe_has_supported_animation_values(&source.serialized_css_text(), &names) {
             return true;
         }
     }
@@ -470,18 +475,19 @@ fn active_css_animation_property_values_with_resolution(
         return None;
     }
     let document = stylesheet_source_document_for_handle(runtime, handle)?;
-    for stylesheet in active_stylesheet_handles(runtime, document, false) {
-        let css_text = stylesheet_text(runtime, stylesheet);
-        if let Some(values) = keyframe_property_values(&css_text, &names, property) {
+    for source in effective_raw_stylesheet_sources(
+        runtime,
+        document,
+        false,
+        resolution.computation.viewport(),
+    ) {
+        if let Some(values) =
+            keyframe_property_values(&source.serialized_css_text(), &names, property)
+        {
             return Some(values);
         }
     }
     None
-}
-
-fn active_css_animation_names(runtime: &JsContextHost, handle: DomHandle) -> Vec<String> {
-    let read = ComputedStyleRead::new(runtime, handle);
-    active_css_animation_names_with_resolution(runtime, handle, read.resolution_context())
 }
 
 fn active_css_animation_names_with_resolution(
@@ -4540,7 +4546,7 @@ fn resolve_computed_custom_function_calls(
     let Some(scope) = scope else {
         return value.to_owned();
     };
-    let functions = visible_custom_functions_for_scope(runtime, inputs, scope);
+    let functions = visible_custom_functions_for_scope(runtime, inputs, scope, context.viewport());
     if functions.is_empty() {
         return value.to_owned();
     }
@@ -4699,9 +4705,14 @@ fn visible_custom_functions_for_scope(
     runtime: &JsContextHost,
     inputs: &FullStyleWorldSnapshot,
     scope: DomHandle,
+    viewport: StyleViewport,
 ) -> HashMap<String, CustomCssFunction> {
     let mut functions = HashMap::new();
-    for source in &inputs.document_stylesheet_sources {
+    for source in inputs
+        .document_stylesheet_sources
+        .iter()
+        .filter(|source| source.media_matches(runtime.emulated_media(), viewport))
+    {
         collect_custom_functions_from_stylesheet_source(runtime, source, &mut functions);
     }
     if runtime
@@ -4714,7 +4725,10 @@ fn visible_custom_functions_for_scope(
     let shadow_chain = shadow_root_ancestor_chain(runtime, scope);
     for (root, sources) in &inputs.shadow_stylesheet_sources {
         if shadow_chain.contains(root) {
-            for source in sources {
+            for source in sources
+                .iter()
+                .filter(|source| source.media_matches(runtime.emulated_media(), viewport))
+            {
                 collect_custom_functions_from_stylesheet_source(runtime, source, &mut functions);
             }
         }
