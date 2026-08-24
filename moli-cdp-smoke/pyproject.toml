@@ -11,7 +11,8 @@ dependencies = [
 ]
 
 [project.scripts]
-moli-cdp-smoke = "moli_cdp_smoke.runner:main"
+moli-cdp-smoke = "moli_cdp_smoke.supervisor:main"
+moli-cdp-smoke-worker = "moli_cdp_smoke.runner:main"
 
 [build-system]
 requires = ["hatchling"]

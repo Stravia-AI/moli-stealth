@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 import sys
@@ -9,6 +8,7 @@ from typing import Any
 
 from ..assertions import SmokeError
 from ..config import clear_proxy_env
+from ..process import CapturedProcessTimeout, run_captured_process
 
 
 async def run_external_json_process(
@@ -18,27 +18,28 @@ async def run_external_json_process(
     *,
     timeout_seconds: float = 45,
 ) -> None:
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        env=clear_proxy_env(os.environ),
-    )
     try:
-        stdout, stderr = await asyncio.wait_for(
-            process.communicate(), timeout=timeout_seconds
+        process = await run_captured_process(
+            argv,
+            timeout_seconds=timeout_seconds,
+            env=clear_proxy_env(os.environ),
         )
-    except asyncio.TimeoutError as error:
-        process.kill()
-        stdout, stderr = await process.communicate()
+    except CapturedProcessTimeout as error:
+        cleanup_note = ""
+        if not error.output_closed:
+            cleanup_note = (
+                "\nstdout/stderr remained open after process-group termination; "
+                "captured output is unavailable"
+            )
         raise SmokeError(
             f"{label} smoke timed out after {timeout_seconds:g}s\n"
-            f"stdout:\n{stdout.decode(errors='replace')}\n"
-            f"stderr:\n{stderr.decode(errors='replace')}"
+            f"stdout:\n{error.stdout.decode(errors='replace')}\n"
+            f"stderr:\n{error.stderr.decode(errors='replace')}"
+            f"{cleanup_note}"
         ) from error
 
-    stdout_text = stdout.decode("utf-8", errors="replace")
-    stderr_text = stderr.decode("utf-8", errors="replace")
+    stdout_text = process.stdout.decode("utf-8", errors="replace")
+    stderr_text = process.stderr.decode("utf-8", errors="replace")
     if process.returncode != 0:
         raise SmokeError(
             f"{label} smoke failed with exit code {process.returncode}\n"

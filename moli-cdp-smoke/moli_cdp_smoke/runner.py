@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable, Iterable
 from playwright.async_api import async_playwright
 
 from .assertions import record
-from .config import clear_current_process_proxy_env, reserve_port
+from .config import clear_current_process_proxy_env
 from .fixture import FixtureServer
 from .groups.action_window import run_action_window_group
 from .groups.agent_browser import run_agent_browser_group
@@ -60,7 +60,13 @@ from .groups.workers import run_workers_group
 from .groups.xhr_sync_semantics import run_xhr_sync_semantics_group
 from .helpers import attach_cdp_event_collector
 from .progress import await_with_progress
-from .serve import MoliServe, start_moli_serve, stop_moli_serve, wait_for_cdp_server
+from .serve import (
+    MoliServe,
+    start_moli_serve,
+    stop_moli_serve,
+    wait_for_cdp_server,
+    wait_for_moli_endpoint,
+)
 from .state import SmokeState
 
 
@@ -79,6 +85,13 @@ class SmokeGroup:
     description: str
     phase: str
     runner: RawGroupRunner | ExternalGroupRunner | PageGroupRunner | BrowserGroupRunner
+
+
+async def _await_group(group: SmokeGroup, awaitable: Awaitable[None]) -> None:
+    await await_with_progress(
+        f"group/{group.phase}/{group.name}",
+        awaitable,
+    )
 
 
 RAW_GROUPS: tuple[SmokeGroup, ...] = (
@@ -436,8 +449,11 @@ async def run_smoke(
     if results is None:
         results = []
     temp_dir = Path(tempfile.mkdtemp(prefix="moli-pw-smoke-"))
-    playwright = await await_with_progress("playwright/start", async_playwright().start())
+    playwright = None
     try:
+        playwright = await await_with_progress(
+            "playwright/start", async_playwright().start()
+        )
         browser = await await_with_progress(
             "playwright/connect-over-cdp",
             playwright.chromium.connect_over_cdp(endpoint, timeout=10_000),
@@ -500,36 +516,37 @@ async def run_smoke(
             )
 
             for group in selection.page_groups:
-                await await_with_progress(
-                    f"group/{group.phase}/{group.name}",
+                await _await_group(
+                    group,
                     group.runner(state),  # type: ignore[misc]
                 )
 
             await await_with_progress("playwright/context-close", context.close())
             for group in selection.browser_groups:
-                await await_with_progress(
-                    f"group/{group.phase}/{group.name}",
+                await _await_group(
+                    group,
                     group.runner(browser, fixture_server.url, results),  # type: ignore[misc]
                 )
             return results
         finally:
             await await_with_progress("playwright/browser-close", browser.close())
-            shutil.rmtree(temp_dir, ignore_errors=True)
     finally:
-        await await_with_progress("playwright/stop", playwright.stop())
+        if playwright is not None:
+            await await_with_progress("playwright/stop", playwright.stop())
+        shutil.rmtree(temp_dir, ignore_errors=True)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run Playwright CDP smoke workflows against moli."
+        description="Run one isolated CDP smoke group against moli."
     )
     parser.add_argument(
         "--group",
         action="append",
         default=[],
         help=(
-            "Run only the named group. May be repeated or comma-separated. "
-            "Defaults to every repository-managed group."
+            "Run exactly one named group. The supervisor is responsible for "
+            "selecting and scheduling multiple groups."
         ),
     )
     parser.add_argument(
@@ -541,7 +558,30 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--endpoint",
         help="Use an existing HTTP CDP endpoint instead of starting moli serve.",
     )
+    parser.add_argument(
+        "--result",
+        type=Path,
+        help="Atomically write the worker result JSON to this path.",
+    )
     return parser.parse_args(argv)
+
+
+def _emit_worker_payload(
+    payload: dict[str, Any],
+    result_path: Path | None,
+    *,
+    failed: bool,
+) -> None:
+    rendered = json.dumps(payload, indent=2, ensure_ascii=False) + "\n"
+    if result_path is None:
+        print(rendered, file=sys.stderr if failed else sys.stdout, end="")
+        return
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = result_path.with_name(
+        f".{result_path.name}.tmp-{os.getpid()}"
+    )
+    temporary.write_text(rendered, encoding="utf-8")
+    os.replace(temporary, result_path)
 
 
 async def async_main(argv: list[str] | None = None) -> int:
@@ -550,59 +590,70 @@ async def async_main(argv: list[str] | None = None) -> int:
         print(json.dumps({"groups": group_listing()}, indent=2, ensure_ascii=False))
         return 0
     selection = resolve_group_selection(args.group)
+    if len(selection.groups) != 1:
+        raise RuntimeError(
+            "moli-cdp-smoke-worker requires exactly one --group; "
+            "use moli-cdp-smoke to schedule the suite"
+        )
+    selected_group = selection.groups[0]
     fixture = FixtureServer()
+    fixture_started = False
     serve: MoliServe | None = None
     results: list[dict[str, Any]] = []
+    endpoint: str | None = None
+    failures: list[str] = []
     try:
         fixture.start()
+        fixture_started = True
         if args.endpoint:
             endpoint = args.endpoint.rstrip("/")
         else:
             port_env = os.environ.get("MOLI_CDP_PORT")
-            port = int(port_env) if port_env else reserve_port()
-            if port <= 0 or port > 65535:
+            port = int(port_env) if port_env else 0
+            if port < 0 or port > 65535 or (port == 0 and port_env is not None):
                 raise RuntimeError(f"invalid MOLI_CDP_PORT: {port_env}")
             serve = await start_moli_serve(port)
-            endpoint = f"http://127.0.0.1:{port}"
-        await wait_for_cdp_server(endpoint, serve)
-        for group in selection.raw_groups:
-            await await_with_progress(
-                f"group/{group.phase}/{group.name}",
-                group.runner(endpoint, fixture.url, results),  # type: ignore[misc]
+            endpoint = await wait_for_moli_endpoint(serve)
+        if endpoint is None:
+            raise RuntimeError("CDP endpoint was not initialized")
+        if serve is None:
+            await wait_for_cdp_server(endpoint, serve)
+        for current_group in selection.raw_groups:
+            await _await_group(
+                current_group,
+                current_group.runner(endpoint, fixture.url, results),  # type: ignore[misc]
             )
         await run_smoke(endpoint, fixture, selection, results)
-        for group in selection.external_groups:
-            await await_with_progress(
-                f"group/{group.phase}/{group.name}",
-                group.runner(endpoint, fixture.url, results),  # type: ignore[misc]
+        for current_group in selection.external_groups:
+            await _await_group(
+                current_group,
+                current_group.runner(endpoint, fixture.url, results),  # type: ignore[misc]
             )
-        ok = not any(result.get("ok") is False for result in results)
-        print(
-            json.dumps(
-                {
-                    "ok": ok,
-                    "endpoint": endpoint,
-                    "fixture": fixture.url,
-                    "results": results,
-                },
-                indent=2,
-                ensure_ascii=False,
-            )
-        )
-        return 0 if ok else 1
     except Exception as error:
-        print(
-            json.dumps(
-                {"ok": False, "error": "".join(traceback.format_exception(error)), "results": results},
-                indent=2,
-                ensure_ascii=False,
-            ),
-            file=sys.stderr,
-        )
-        return 1
+        failures.append("".join(traceback.format_exception(error)))
     finally:
-        await stop_moli_serve(serve)
-        fixture.stop()
+        try:
+            await stop_moli_serve(serve)
+        except Exception as error:
+            failures.append("".join(traceback.format_exception(error)))
+        if fixture_started:
+            try:
+                fixture.stop()
+            except Exception as error:
+                failures.append("".join(traceback.format_exception(error)))
+
+    ok = not failures and not any(result.get("ok") is False for result in results)
+    payload: dict[str, Any] = {
+        "ok": ok,
+        "group": selected_group.name,
+        "endpoint": endpoint,
+        "fixture": fixture.url,
+        "results": results,
+    }
+    if failures:
+        payload["error"] = "\n".join(failures)
+    _emit_worker_payload(payload, args.result, failed=not ok)
+    return 0 if ok else 1
 
 
 def main(argv: list[str] | None = None) -> None:

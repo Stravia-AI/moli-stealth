@@ -61,6 +61,35 @@ class RunnerProgressTests(unittest.IsolatedAsyncioTestCase):
             r"elapsed=\d+\.\d{3}s error=CancelledError$",
         )
 
+    async def test_timeout_cancels_the_operation_and_reports_its_label(self) -> None:
+        cancelled = asyncio.Event()
+
+        async def wait_forever() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaisesRegex(
+            TimeoutError,
+            r"test/timeout timed out after 0\.01s",
+        ):
+            await await_with_progress(
+                "test/timeout",
+                wait_forever(),
+                timeout_seconds=0.01,
+            )
+
+        self.assertTrue(cancelled.is_set())
+        lines = stderr.getvalue().splitlines()
+        self.assertEqual(lines[0], "[moli-cdp-smoke] START test/timeout")
+        self.assertRegex(
+            lines[1],
+            r"^\[moli-cdp-smoke\] FAIL test/timeout "
+            r"elapsed=\d+\.\d{3}s error=TimeoutError$",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

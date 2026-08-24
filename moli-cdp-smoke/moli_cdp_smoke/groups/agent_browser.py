@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from ..assertions import SmokeError, record
 from ..config import clear_proxy_env
+from ..process import CapturedProcessTimeout, run_captured_process
 from .tracing import _assert_cpu_profile_events, _hot_function_expression
 
 
@@ -45,24 +46,17 @@ def _agent_browser_env() -> dict[str, str]:
 
 
 async def _agent_browser_version(binary: str) -> str:
-    process = await asyncio.create_subprocess_exec(
-        binary,
-        "--version",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(), timeout=5
+        process = await run_captured_process(
+            [binary, "--version"],
+            timeout_seconds=5,
         )
-    except asyncio.TimeoutError as error:
-        process.kill()
-        await process.communicate()
+    except CapturedProcessTimeout as error:
         raise SmokeError("agent-browser --version timed out") from error
 
     output = "\n".join(
         part.decode("utf-8", errors="replace").strip()
-        for part in (stdout_bytes, stderr_bytes)
+        for part in (process.stdout, process.stderr)
         if part
     )
     match = re.search(r"\b(\d+)\.(\d+)\.(\d+)\b", output)
@@ -113,28 +107,22 @@ async def _run_agent_browser(
         "--json",
         *args,
     ]
-    process = await asyncio.create_subprocess_exec(
-        *argv,
-        cwd=str(cwd),
-        env=_agent_browser_env(),
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
-        stdout_bytes, stderr_bytes = await asyncio.wait_for(
-            process.communicate(), timeout=timeout_seconds
+        process = await run_captured_process(
+            argv,
+            timeout_seconds=timeout_seconds,
+            cwd=str(cwd),
+            env=_agent_browser_env(),
         )
-    except asyncio.TimeoutError as error:
-        process.kill()
-        stdout_bytes, stderr_bytes = await process.communicate()
+    except CapturedProcessTimeout as error:
         raise SmokeError(
             f"agent-browser command {args!r} timed out after {timeout_seconds}s\n"
-            f"stdout:\n{stdout_bytes.decode(errors='replace')}\n"
-            f"stderr:\n{stderr_bytes.decode(errors='replace')}"
+            f"stdout:\n{error.stdout.decode(errors='replace')}\n"
+            f"stderr:\n{error.stderr.decode(errors='replace')}"
         ) from error
 
-    stdout = stdout_bytes.decode("utf-8", errors="replace")
-    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    stdout = process.stdout.decode("utf-8", errors="replace")
+    stderr = process.stderr.decode("utf-8", errors="replace")
     return _parse_command_payload(stdout, stderr, argv)
 
 

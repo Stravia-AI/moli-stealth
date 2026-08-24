@@ -6,11 +6,10 @@ import math
 from typing import Any
 
 from ..assertions import SmokeError, assert_equal, record
-from ..config import reserve_port
 from ..jpeg_image import jpeg_dimensions
 from ..png_image import decode_png
 from ..raw_cdp import RawCdpClient, connect_raw_cdp, discover_websocket_url
-from ..serve import start_moli_serve, stop_moli_serve, wait_for_cdp_server
+from ..serve import start_moli_serve, stop_moli_serve, wait_for_moli_endpoint
 
 
 SCREENSHOT_UNSUPPORTED = (
@@ -648,13 +647,11 @@ async def _run_default_mock_boundary(
     fixture: str,
     results: list[dict[str, Any]],
 ) -> None:
-    port = reserve_port()
-    serve = await start_moli_serve(port, layout=False)
-    endpoint = f"http://127.0.0.1:{port}"
+    serve = await start_moli_serve(layout=False)
+    endpoint = await wait_for_moli_endpoint(serve)
     client: RawCdpClient | None = None
     target_id: str | None = None
     try:
-        await wait_for_cdp_server(endpoint, serve)
         client = await connect_raw_cdp(endpoint)
         target_id, session_id = await _open_target(
             client,

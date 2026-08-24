@@ -134,7 +134,20 @@ jobs:
         continue-on-error: true
         env:
           MOLI_BIN: ${{ github.workspace }}/target/release/moli
-        run: uv run --project moli-cdp-smoke --no-sync moli-cdp-smoke
+        run: >-
+          uv run --project moli-cdp-smoke --no-sync
+          moli-cdp-smoke
+          --jobs 4
+          --output-dir ${{ github.workspace }}/target/smoke/cdp-ci
+
+      - name: Upload CDP smoke diagnostics
+        if: ${{ always() && steps.cdp.outcome != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cdp-smoke-diagnostics
+          path: target/smoke/cdp-ci
+          if-no-files-found: warn
 
       - name: Run full WebDriver smoke
         id: webdriver

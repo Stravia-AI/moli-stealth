@@ -340,11 +340,28 @@ npm ci
 uv run moli-cdp-smoke
 ```
 
-With no `--group`, the runner executes every raw, Playwright page, browser, and
-repository-managed external-client group, including `inspector-routing` and the
-pinned Puppeteer client. CI invokes that same unfiltered default. External-client
-groups whose binaries or dependency environments are not owned by this project
-remain explicit integration runs.
+With no `--group`, the supervisor executes every raw, Playwright page, browser,
+and repository-managed external-client group, including `inspector-routing`
+and the pinned Puppeteer client. Every group runs in a separate worker process
+with its own Moli process, fixture server, HTTP cache, Playwright context, and
+temporary directories. One failed or wedged group therefore cannot retain
+state or child processes for the next group.
+
+The default concurrency is one worker. Use bounded parallelism explicitly;
+CI runs the same unfiltered suite with four workers:
+
+```bash
+uv run moli-cdp-smoke --jobs 4
+```
+
+Each run writes `summary.json` plus one log and one result JSON per worker under
+`target/smoke/cdp/<run-id>/`. Use `--output-dir` for a stable artifact path and
+`--timeout` to change the per-worker wall-clock limit. The worker also retains
+its own protocol-operation timeouts, so the wall limit is a final process-level
+safety boundary rather than the primary synchronization mechanism.
+
+External-client groups whose binaries or dependency environments are not owned
+by this project remain explicit integration runs.
 
 List available scenario groups:
 
@@ -407,7 +424,9 @@ ordering between the two routes. A normal debugger pause must pump mixed V8
 and non-V8 Main commands from the same session in send order. An
 instrumentation pause must leave Main blocked and admit only IO work.
 
-Run the same focused group against an already-running Chromium CDP endpoint:
+Run the same focused group against an already-running Chromium CDP endpoint.
+The Python workers are still separate, but an explicitly supplied external
+browser endpoint is shared rather than restarted by the supervisor:
 
 ```bash
 uv run moli-cdp-smoke \
@@ -472,7 +491,9 @@ MOLI_BIN=../target/release/moli uv run moli-cdp-smoke
 Useful environment variables:
 
 - `MOLI_BIN`: path to the `moli` binary under test.
-- `MOLI_CDP_PORT`: CDP server port. Defaults to a free local port.
+- `MOLI_CDP_PORT`: fixed CDP server port for single-worker debugging. By
+  default every worker uses `--port 0` and reads the OS-selected endpoint from
+  Moli's bound-listener log. A fixed port is rejected with parallel workers.
 - `MOLI_SMOKE_GROUPS`: comma-separated smoke group list. CLI `--group` takes precedence.
 - `MOLI_INSPECTOR_ROUTING_SCENARIOS`: comma-separated scenario names within the `inspector-routing` group.
 - `MOLI_SMOKE_TRACE=1`: print extra runner-side trace logs.
