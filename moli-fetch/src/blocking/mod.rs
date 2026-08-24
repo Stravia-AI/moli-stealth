@@ -661,8 +661,23 @@ pub(crate) fn configure_easy<H: Handler>(
     easy.url(request_url.as_str())
         .with_context(|| anyhow!("failed to set curl request url to {}", request_url))?;
 
+    if request.method.eq_ignore_ascii_case("HEAD") && request.body.is_some() {
+        bail!("HEAD request bodies are not supported");
+    }
+
     match request.method.as_str() {
-        "GET" => easy.get(true).context("failed to configure GET request")?,
+        "GET" if request.body.is_none() => {
+            easy.get(true).context("failed to configure GET request")?
+        }
+        "GET" => {
+            // CURLOPT_HTTPGET resets libcurl's upload state. Use a custom GET
+            // method when a body is present so CURLOPT_POSTFIELDS remains on
+            // the wire while response handling retains normal GET semantics.
+            easy.custom_request("GET")
+                .context("failed to configure GET request with body")?;
+            easy.post_fields_copy(request.body.as_deref().unwrap_or_default())
+                .context("failed to set GET body")?;
+        }
         "HEAD" => easy
             .nobody(true)
             .context("failed to configure HEAD request")?,
@@ -739,13 +754,16 @@ pub(crate) fn configure_easy<H: Handler>(
             has_headers = true;
         }
     }
-    if request.method.eq_ignore_ascii_case("POST") && !has_content_type_header {
-        // libcurl otherwise synthesizes `Content-Type: application/x-www-form-urlencoded`
-        // for POST bodies. Browser fetch/sendBeacon only send Content-Type when
-        // BodyInit or caller headers produce one, so suppress curl's transport default.
+    if (request.method.eq_ignore_ascii_case("POST")
+        || request.method.eq_ignore_ascii_case("GET") && request.body.is_some())
+        && !has_content_type_header
+    {
+        // CURLOPT_POSTFIELDS otherwise makes libcurl synthesize
+        // `Content-Type: application/x-www-form-urlencoded`, including for a
+        // custom GET. A generic Moli request body has no implied media type.
         headers
             .append("Content-Type:")
-            .context("failed to suppress curl default POST content-type")?;
+            .context("failed to suppress curl default request body content-type")?;
         has_headers = true;
     }
 

@@ -11,7 +11,7 @@ use crate::{
     cookie_cache, fetch_dump, robots,
 };
 use anyhow::Result;
-use anyhow::{Context, anyhow};
+use anyhow::{Context, anyhow, bail};
 use clap::Parser;
 use moli_core::runtime::{
     Browser, FetchReadinessTimeout, FetchedDocument, NavigationRuntimeConfig,
@@ -146,6 +146,9 @@ pub async fn run_cli_with_config<W: Write>(
 }
 
 fn build_fetch_request(args: &crate::cli::FetchArgs, config: &AppConfig) -> Result<Request> {
+    if args.method.eq_ignore_ascii_case("HEAD") && args.body.is_some() {
+        bail!("HEAD request bodies are not supported");
+    }
     Request::new(
         &args.method,
         &args.url,

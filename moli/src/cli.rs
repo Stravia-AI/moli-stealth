@@ -57,7 +57,8 @@ pub struct FetchArgs {
     )]
     pub method: String,
 
-    /// UTF-8 body for the initial document request.
+    /// UTF-8 body for the initial document request. GET bodies are sent;
+    /// HEAD bodies are rejected.
     #[arg(long, value_name = "TEXT")]
     pub body: Option<String>,
 
