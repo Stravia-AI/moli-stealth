@@ -9,7 +9,9 @@ use moli_selector::StyloSourceDependencySummary;
 use style::{
     context::QuirksMode,
     device::{Device, servo::FontMetricsProvider},
-    font_face::FontFaceRule,
+    font_face::{
+        FontFaceRule, FontFaceSourceFormat, FontFaceSourceFormatKeyword, Source, SourceList,
+    },
     font_metrics::FontMetrics,
     properties::{ComputedValues, style_structs::Font},
     servo::media_features::PointerCapabilities,
@@ -104,10 +106,11 @@ pub(super) fn install_active_stylesheet(
     let web_font_resources = native_font_face_rules_for_stylesheet(&stylesheet)
         .into_iter()
         .filter_map(|rule| {
-            let resource = crate::css_resource_urls::stylesheet_web_font_resource(
-                &rule.rule_fingerprint,
-                source.base_url(),
-            )?;
+            let resource =
+                crate::css_resource_urls::stylesheet_web_font_resource_with_resolved_url(
+                    &rule.rule_fingerprint,
+                    rule.request_url?,
+                )?;
             Some(ActiveWebFontResource::new(rule.rule, resource))
         })
         .collect::<Vec<_>>();
@@ -174,6 +177,10 @@ pub(crate) struct NativeStylesheetFontFaceRuleProjection {
     pub(crate) rule: ServoArc<Locked<FontFaceRule>>,
     pub(crate) rule_fingerprint: String,
     pub(crate) descriptor: moli_css_parse::CssFontFace,
+    /// First supported network source, resolved by Stylo in the exact parser
+    /// context that owns this rule. Imported rules therefore retain the base
+    /// URL of their imported stylesheet rather than inheriting the root base.
+    pub(crate) request_url: Option<url::Url>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -283,11 +290,43 @@ fn collect_font_face_rule_projections(
                         family: family.name.to_string(),
                         source: serialized_source,
                     },
+                    request_url: preferred_native_font_source_url(source),
                 });
             }
             continue;
         }
         collect_font_face_rule_projections(rule.children(guard), guard, projections);
+    }
+}
+
+fn preferred_native_font_source_url(source_list: &SourceList) -> Option<url::Url> {
+    source_list.0.iter().find_map(|source| {
+        let Source::Url(source) = source else {
+            return None;
+        };
+        if !native_font_source_format_is_supported(source.format_hint.as_ref()) {
+            return None;
+        }
+        let url = source.url.url()?;
+        matches!(url.scheme(), "http" | "https" | "data" | "blob").then(|| (**url).clone())
+    })
+}
+
+fn native_font_source_format_is_supported(format: Option<&FontFaceSourceFormat>) -> bool {
+    match format {
+        None => true,
+        Some(FontFaceSourceFormat::Keyword(format)) => matches!(
+            format,
+            FontFaceSourceFormatKeyword::Collection
+                | FontFaceSourceFormatKeyword::Opentype
+                | FontFaceSourceFormatKeyword::Truetype
+                | FontFaceSourceFormatKeyword::Woff
+                | FontFaceSourceFormatKeyword::Woff2
+        ),
+        Some(FontFaceSourceFormat::String(format)) => matches!(
+            format.to_ascii_lowercase().as_str(),
+            "collection" | "opentype" | "otf" | "truetype" | "ttf" | "woff" | "woff2"
+        ),
     }
 }
 

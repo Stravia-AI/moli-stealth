@@ -9429,6 +9429,121 @@ async fn spawn_gated_font_resource_server() -> (
     )
 }
 
+async fn spawn_imported_font_graph_server() -> (
+    Url,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::watch::Sender<bool>,
+    tokio::sync::oneshot::Sender<()>,
+    tokio::task::JoinHandle<()>,
+) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind imported-font graph server");
+    let address = listener.local_addr().expect("imported-font server address");
+    let base_url = Url::parse(&format!("http://{address}/")).expect("imported-font base URL");
+    let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (font_release_tx, font_release_rx) = tokio::sync::watch::channel(false);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.expect("accept imported-font request");
+                    let request_tx = request_tx.clone();
+                    let mut font_release_rx = font_release_rx.clone();
+                    connections.spawn(async move {
+                        let mut request = Vec::new();
+                        let mut buffer = [0_u8; 2048];
+                        loop {
+                            let read = stream
+                                .read(&mut buffer)
+                                .await
+                                .expect("read imported-font request");
+                            assert_ne!(read, 0, "imported-font request ended before headers");
+                            request.extend_from_slice(&buffer[..read]);
+                            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        let request_head = String::from_utf8_lossy(&request);
+                        let target = request_head
+                            .lines()
+                            .next()
+                            .and_then(|line| line.split_ascii_whitespace().nth(1))
+                            .expect("imported-font request target")
+                            .to_owned();
+                        let _ = request_tx.send(target.clone());
+
+                        const ROOT_CSS: &[u8] = b"@import '../theme/imported.css';";
+                        const IMPORTED_CSS: &[u8] = br#"
+                            @font-face {
+                                font-family: ImportedAhem;
+                                src: url('./fonts/imported.woff2') format('woff2');
+                            }
+                            #font-probe {
+                                display: inline-block;
+                                font-family: ImportedAhem;
+                                font-size: 20px;
+                                line-height: 20px;
+                                white-space: pre;
+                            }
+                        "#;
+                        const TEST_FONT: &[u8] = include_bytes!(
+                            "../../../../moli-layout/tests/fixtures/moli-ahem.woff2"
+                        );
+                        let (status, content_type, body, gate_font): (
+                            &str,
+                            &str,
+                            &[u8],
+                            bool,
+                        ) = match target.as_str() {
+                            "/css/root.css" => ("200 OK", "text/css", ROOT_CSS, false),
+                            "/theme/imported.css" => {
+                                ("200 OK", "text/css", IMPORTED_CSS, false)
+                            }
+                            "/theme/fonts/imported.woff2" => {
+                                ("200 OK", "font/woff2", TEST_FONT, true)
+                            }
+                            "/css/fonts/imported.woff2" => {
+                                ("404 Not Found", "text/plain", b"wrong font base", false)
+                            }
+                            _ => ("404 Not Found", "text/plain", b"not found", false),
+                        };
+                        if gate_font {
+                            while !*font_release_rx.borrow() {
+                                if font_release_rx.changed().await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        let response_head = format!(
+                            "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                            body.len(),
+                        );
+                        stream
+                            .write_all(response_head.as_bytes())
+                            .await
+                            .expect("write imported-font response head");
+                        stream
+                            .write_all(body)
+                            .await
+                            .expect("write imported-font response body");
+                    });
+                }
+                _ = &mut shutdown_rx => break,
+            }
+        }
+        drop(request_tx);
+        while let Some(result) = connections.join_next().await {
+            result.expect("imported-font connection task");
+        }
+    });
+    (base_url, request_rx, font_release_tx, shutdown_tx, server)
+}
+
 async fn spawn_gated_text_track_resource_server(
     status: u16,
 ) -> (
@@ -11784,6 +11899,135 @@ async fn web_font_requests_and_registration_follow_effective_stylesheet_media() 
             .pending_subresource_request_count(),
         0
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn imported_web_font_keeps_its_response_base_slot_through_layout_reconciliation() {
+    let (base_url, mut requests, font_release, shutdown, server) =
+        spawn_imported_font_graph_server().await;
+    let document_url = base_url.join("page.html").expect("document URL");
+    let root_stylesheet_url = base_url.join("css/root.css").expect("root stylesheet URL");
+    let html = format!(
+        concat!(
+            "<!doctype html><html><head>",
+            "<link rel='stylesheet' href='{}'>",
+            "</head><body><span id='font-probe'>MMMM</span></body></html>",
+        ),
+        root_stylesheet_url,
+    );
+    let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
+    loader.set_optional_resource_fetch_mask(crate::protocol_types::OptionalResourceFetchMask::FONT);
+    let (mut vm, mut resource_completions) =
+        new_parsed_test_vm_with_loader_and_resource_completion_queue(
+            document_url.as_str(),
+            &html,
+            &loader,
+        );
+
+    vm.queue_initial_connected_style_loads_for_current_owner();
+    vm.prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+    for phase in ["root stylesheet", "import graph"] {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(2),
+                vm.wait_for_and_apply_stylesheet_networking_body_for_test(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("{phase} completion timed out")),
+            "{phase} completion should reach the stylesheet task source",
+        );
+    }
+
+    let mut observed_paths = Vec::new();
+    while !observed_paths
+        .iter()
+        .any(|path| path == "/theme/fonts/imported.woff2")
+    {
+        let path = tokio::time::timeout(std::time::Duration::from_secs(2), requests.recv())
+            .await
+            .expect("expected imported stylesheet/font request")
+            .expect("imported-font server request stream");
+        observed_paths.push(path);
+    }
+    assert!(observed_paths.iter().any(|path| path == "/css/root.css"));
+    assert!(
+        observed_paths
+            .iter()
+            .any(|path| path == "/theme/imported.css")
+    );
+
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("layout reconciliation should succeed")
+    );
+    assert_eq!(
+        vm.document_web_font_counts_for_test(),
+        (1, 0, 0),
+        "retained reconciliation must preserve the one pending response-base slot",
+    );
+    let fallback_probe_width = vm
+        .eval("String(document.getElementById('font-probe').getBoundingClientRect().width)")
+        .expect("fallback probe width")
+        .parse::<f64>()
+        .expect("numeric fallback probe width");
+    if let Ok(Some(path)) =
+        tokio::time::timeout(std::time::Duration::from_millis(150), requests.recv()).await
+    {
+        observed_paths.push(path);
+    }
+    while let Ok(path) = requests.try_recv() {
+        observed_paths.push(path);
+    }
+    assert!(
+        !observed_paths
+            .iter()
+            .any(|path| path == "/css/fonts/imported.woff2"),
+        "layout reconciliation must not request the imported rule against the root CSS base: {observed_paths:?}",
+    );
+
+    font_release
+        .send(true)
+        .expect("release imported Ahem response");
+    assert!(
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            resource_completions.wait_for_arrival_without_timeout(),
+        )
+        .await
+        .expect("imported font completion should reach the resource source")
+    );
+    let completion = resource_completions
+        .pop_next_async_subresource_event()
+        .expect("imported font completion body");
+    let _ = vm
+        .complete_async_subresource_fetch_event_body(completion)
+        .expect("the response-base slot should accept its font completion");
+    assert_eq!(
+        vm.document_web_font_counts_for_test(),
+        (1, 1, 1),
+        "the correct slot and registered layout font must survive reconciliation",
+    );
+
+    assert!(
+        vm.refresh_layout_snapshot_for_test(moli_layout::LayoutViewport::new(800, 600, 1.0,))
+            .expect("web-font layout refresh should succeed")
+    );
+    let probe_width = vm
+        .eval("String(document.getElementById('font-probe').getBoundingClientRect().width)")
+        .expect("Ahem probe width")
+        .parse::<f64>()
+        .expect("numeric Ahem probe width");
+    assert!(
+        (probe_width - 48.0).abs() <= 0.05,
+        "the four-glyph probe should use the deterministic Ahem fixture metrics after registration; got {probe_width}",
+    );
+    assert!(
+        (probe_width - fallback_probe_width).abs() > 0.5,
+        "registered Ahem metrics must replace the pending fallback metrics; before={fallback_probe_width}, after={probe_width}",
+    );
+
+    let _ = shutdown.send(());
+    server.await.expect("imported-font server should finish");
 }
 
 #[tokio::test]

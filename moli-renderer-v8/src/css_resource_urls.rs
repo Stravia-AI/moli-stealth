@@ -164,23 +164,57 @@ pub(crate) fn stylesheet_web_font_resource(
 ) -> Option<StylesheetLoadBlockingResource> {
     let descriptor = parsed_web_font_face(css_text)?;
     let request_url = preferred_font_source_url(descriptor.source(), base_url)?;
+    Some(stylesheet_web_font_resource_with_descriptor(
+        css_text,
+        request_url,
+        descriptor,
+    ))
+}
+
+/// Projects a native Stylo `@font-face` rule using the URL already resolved
+/// in that rule's own parser context.
+///
+/// Imported rules retain their imported stylesheet's URL context inside
+/// `SpecifiedUrl`. Callers must use this entry point instead of resolving the
+/// serialized, relative `src` value against the root stylesheet again.
+pub(crate) fn stylesheet_web_font_resource_with_resolved_url(
+    css_text: &str,
+    request_url: Url,
+) -> Option<StylesheetLoadBlockingResource> {
+    if !matches!(request_url.scheme(), "http" | "https" | "data" | "blob") {
+        return None;
+    }
+    let descriptor = parsed_web_font_face(css_text)?;
+    Some(stylesheet_web_font_resource_with_descriptor(
+        css_text,
+        request_url,
+        descriptor,
+    ))
+}
+
+fn stylesheet_web_font_resource_with_descriptor(
+    css_text: &str,
+    request_url: Url,
+    descriptor: ParsedWebFontFace,
+) -> StylesheetLoadBlockingResource {
     // The slot describes a declaration, not a layout generation. Two
-    // identical declarations may safely share decoded font data, while a
-    // CSSOM replacement gets a different slot even when it occupies the same
-    // rule index.
-    let mut slot_material = Vec::with_capacity(base_url.as_str().len() + css_text.len() + 1);
-    slot_material.extend_from_slice(base_url.as_str().as_bytes());
+    // projections of the same parsed rule (the import response and the later
+    // retained style world) must converge on one slot. Conversely, identical
+    // relative declarations parsed under different stylesheet bases must not
+    // alias, so identity includes the resolved request URL.
+    let mut slot_material = Vec::with_capacity(request_url.as_str().len() + css_text.len() + 1);
+    slot_material.extend_from_slice(request_url.as_str().as_bytes());
     slot_material.push(0);
     slot_material.extend_from_slice(css_text.as_bytes());
     let slot = format!("stylesheet-font:{}", sha256_hex(&slot_material));
-    Some(StylesheetLoadBlockingResource::font(
+    StylesheetLoadBlockingResource::font(
         request_url,
         StylesheetWebFont {
             slot,
             face: descriptor.into_face(),
             request_id: None,
         },
-    ))
+    )
 }
 
 fn collect_font_face_rule_css(rules: &[moli_css_parse::CssRuleSnapshot], output: &mut Vec<String>) {
@@ -514,6 +548,65 @@ mod tests {
                 .face()
                 .unicode_ranges()
                 .is_empty()
+        );
+    }
+
+    #[test]
+    fn native_resolved_font_projection_converges_with_import_response_slot() {
+        let css_text = r#"
+            @font-face {
+                font-family: Imported;
+                src: local("Imported"),
+                     url("./fonts/imported.svg") format("svg"),
+                     url("./fonts/imported.woff2") format("woff2");
+                font-weight: 625 800;
+                unicode-range: U+20-7E;
+            }
+        "#;
+        let imported_base =
+            Url::parse("https://example.test/theme/imported.css").expect("imported base URL");
+        let resolved = Url::parse("https://example.test/theme/fonts/imported.woff2")
+            .expect("resolved native font URL");
+
+        let response_projection = stylesheet_web_font_resource(css_text, &imported_base)
+            .expect("the import response should project its font");
+        let native_projection =
+            stylesheet_web_font_resource_with_resolved_url(css_text, resolved.clone())
+                .expect("the retained native rule should project its resolved font");
+
+        assert_eq!(response_projection.request_url(), &resolved);
+        assert_eq!(native_projection.request_url(), &resolved);
+        assert_eq!(
+            response_projection
+                .web_font()
+                .expect("response font")
+                .slot(),
+            native_projection.web_font().expect("native font").slot(),
+            "the early import-response registration and retained manifest must keep one slot",
+        );
+        assert_eq!(
+            response_projection
+                .web_font()
+                .expect("response font")
+                .face(),
+            native_projection.web_font().expect("native font").face(),
+        );
+    }
+
+    #[test]
+    fn resolved_request_url_keeps_identical_relative_rules_in_distinct_slots() {
+        let css_text = "@font-face { font-family: Shared; src: url(./fonts/shared.woff2); }";
+        let first_url = Url::parse("https://example.test/first/fonts/shared.woff2").unwrap();
+        let second_url = Url::parse("https://example.test/second/fonts/shared.woff2").unwrap();
+        let first = stylesheet_web_font_resource_with_resolved_url(css_text, first_url)
+            .expect("first native resource");
+        let second = stylesheet_web_font_resource_with_resolved_url(css_text, second_url)
+            .expect("second native resource");
+
+        assert_ne!(
+            first.web_font().expect("first font").slot(),
+            second.web_font().expect("second font").slot(),
+            "equal relative text parsed in different stylesheet directories must not alias",
         );
     }
 
