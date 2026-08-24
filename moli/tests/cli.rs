@@ -34,11 +34,10 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
         "X-Test: one",
         "-H",
         "X-Trace: two",
-        "--noscript",
         "--with-base",
         "--with-frames",
         "--strip-mode",
-        "css,ui",
+        "js,css,ui",
         "--obey-robots",
         "--http-proxy",
         "http://proxy.internal:8080",
@@ -84,12 +83,15 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                     value: "two".to_owned(),
                 },
             ],
-            noscript: true,
             with_base: true,
             with_frames: true,
             trace_network: false,
             trace_matched_response_body: false,
-            strip_mode: vec![StripModeChoice::Css, StripModeChoice::Ui],
+            strip_mode: vec![
+                StripModeChoice::Js,
+                StripModeChoice::Css,
+                StripModeChoice::Ui,
+            ],
             wait_until: FetchWaitUntil::Done,
             redirect_wait_ms: 1_000,
             wait_selector: None,
@@ -413,7 +415,6 @@ fn infers_fetch_mode_from_bare_url() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: None,
             headers: vec![],
-            noscript: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -453,7 +454,6 @@ fn parses_bare_dump_with_explicit_fetch_command_and_defaults_to_html() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: Some(DumpFormat::Html),
             headers: vec![],
-            noscript: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -497,7 +497,6 @@ fn parses_header_flag_with_explicit_fetch_command() {
                 name: "X-Test".to_owned(),
                 value: "one".to_owned(),
             }],
-            noscript: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -865,9 +864,8 @@ fn fetch_strip_options_combine_cli_selections() {
     let cli = Cli::try_parse_from(normalize_args_for_compat([
         "moli",
         "fetch",
-        "--noscript",
         "--strip-mode",
-        "ui,css",
+        "js,ui,css",
         "https://example.com",
     ]))
     .unwrap();
@@ -884,6 +882,19 @@ fn fetch_strip_options_combine_cli_selections() {
             css: true,
         }
     );
+}
+
+#[test]
+fn rejects_removed_noscript_flag() {
+    let error = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--noscript",
+        "https://example.com",
+    ]))
+    .unwrap_err();
+
+    assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
 }
 
 #[test]

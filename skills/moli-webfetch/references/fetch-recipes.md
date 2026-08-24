@@ -79,7 +79,7 @@ moli fetch \
 
 ## Dynamic Content and Frames
 
-JavaScript runs by default. `--noscript` strips JavaScript from serialized
+JavaScript runs by default. `--strip-mode js` strips JavaScript from serialized
 output; it does not mean that navigation ran without JavaScript.
 
 If expected text is absent:

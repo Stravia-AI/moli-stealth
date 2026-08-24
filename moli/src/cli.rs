@@ -48,9 +48,6 @@ pub struct FetchArgs {
     pub headers: Vec<RequestHeaderArg>,
 
     #[arg(long)]
-    pub noscript: bool,
-
-    #[arg(long)]
     pub with_base: bool,
 
     #[arg(long)]
@@ -170,10 +167,6 @@ pub struct FetchArgs {
 impl FetchArgs {
     pub fn strip_options(&self) -> StripOptions {
         let mut strip = StripOptions::default();
-
-        if self.noscript {
-            strip.js = true;
-        }
 
         for mode in &self.strip_mode {
             match mode {
@@ -735,7 +728,6 @@ mod tests {
             "main",
             "--timeout",
             "5000",
-            "--noscript",
             "--layout",
             "--image",
             "--font",
@@ -760,7 +752,6 @@ mod tests {
             "main",
             "-t",
             "5000",
-            "--noscript",
             "-l",
             "--image",
             "--font",
