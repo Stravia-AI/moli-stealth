@@ -19,6 +19,7 @@ from urllib.request import Request, urlopen
 from PIL import Image
 
 from moli_benchmark.config import clear_current_proxy_env
+from moli_benchmark.raw_cdp import RawCdpError
 from moli_benchmark.wpt_cross.__main__ import (
     CASE_LIST_FILES,
     WPT_CROSS_CASE_TIMEOUT_SECONDS,
@@ -79,8 +80,14 @@ from moli_benchmark.wpt_cross.any_js import (
 )
 from moli_benchmark.wpt_cross.render_html import render_html
 from moli_benchmark.wpt_cross.runner import (
+    _AttachedPage,
     _PageSessionUnusable,
     _ReftestEvidence,
+    _close_page,
+    _has_navigation_evidence,
+    _navigation_identity,
+    _normalized_case_path,
+    _normalized_navigation_url,
     _run_async,
     _run_one_case,
     _write_reftest_failure_artifacts,
@@ -145,9 +152,23 @@ clear_current_proxy_env()
 
 class WptCrossTests(unittest.TestCase):
     def test_cdp_command_failure_marks_page_session_unusable(self) -> None:
+        navigation_response = {
+            "result": {"frameId": "FRAME-1", "loaderId": "LOADER-1"},
+            "sessionId": "SESSION-1",
+        }
+        navigation_event = {
+            "method": "Page.frameNavigated",
+            "sessionId": "SESSION-1",
+            "params": {
+                "frame": {"id": "FRAME-1", "loaderId": "LOADER-1"}
+            },
+        }
         for receive_effect, error_prefix in (
             (asyncio.TimeoutError(), "navigate failed:"),
-            ([({"result": {}}, []), asyncio.TimeoutError()], "evaluate failed:"),
+            (
+                [(navigation_response, [navigation_event]), asyncio.TimeoutError()],
+                "evaluate failed:",
+            ),
         ):
             with self.subTest(error_prefix=error_prefix):
                 client = SimpleNamespace(
@@ -168,6 +189,315 @@ class WptCrossTests(unittest.TestCase):
                 case_result = raised.exception.case_result
                 self.assertEqual(case_result.status, "error")
                 self.assertTrue((case_result.error or "").startswith(error_prefix))
+                self.assertIn("TimeoutError", case_result.error or "")
+
+    def test_navigation_identity_rejects_failed_or_unbound_navigation(self) -> None:
+        with self.assertRaisesRegex(RawCdpError, "ERR_NAME_NOT_RESOLVED"):
+            _navigation_identity(
+                {
+                    "sessionId": "SESSION-1",
+                    "result": {
+                        "frameId": "FRAME-1",
+                        "errorText": "net::ERR_NAME_NOT_RESOLVED",
+                    },
+                },
+                session_id="SESSION-1",
+                expected_url="http://localhost/case.html",
+            )
+        with self.assertRaisesRegex(RawCdpError, "produced a download"):
+            _navigation_identity(
+                {
+                    "sessionId": "SESSION-1",
+                    "result": {
+                        "frameId": "FRAME-1",
+                        "loaderId": "LOADER-1",
+                        "isDownload": True,
+                    },
+                },
+                session_id="SESSION-1",
+                expected_url="http://localhost/case.html",
+            )
+        with self.assertRaisesRegex(RawCdpError, "no loaderId"):
+            _navigation_identity(
+                {
+                    "sessionId": "SESSION-1",
+                    "result": {"frameId": "FRAME-1"},
+                },
+                session_id="SESSION-1",
+                expected_url="http://localhost/case.html",
+            )
+
+    def test_navigation_evidence_requires_exact_session_frame_and_loader(self) -> None:
+        identity = _navigation_identity(
+            {
+                "sessionId": "SESSION-1",
+                "result": {"frameId": "FRAME-1", "loaderId": "LOADER-1"},
+            },
+            session_id="SESSION-1",
+            expected_url="http://localhost/case.html",
+        )
+        stale = {
+            "method": "Page.lifecycleEvent",
+            "sessionId": "SESSION-1",
+            "params": {"frameId": "FRAME-1", "loaderId": "LOADER-OLD"},
+        }
+        wrong_session = {
+            "method": "Page.frameNavigated",
+            "sessionId": "SESSION-OLD",
+            "params": {
+                "frame": {"id": "FRAME-1", "loaderId": "LOADER-1"}
+            },
+        }
+        current = {
+            "method": "Page.frameNavigated",
+            "sessionId": "SESSION-1",
+            "params": {
+                "frame": {
+                    "id": "FRAME-1",
+                    "loaderId": "LOADER-1",
+                    "url": "http://localhost/case.html",
+                }
+            },
+        }
+        wrong_url = {
+            "method": "Page.frameNavigated",
+            "sessionId": "SESSION-1",
+            "params": {
+                "frame": {
+                    "id": "FRAME-1",
+                    "loaderId": "LOADER-1",
+                    "url": "http://localhost/other.html",
+                }
+            },
+        }
+
+        self.assertFalse(_has_navigation_evidence([stale, wrong_session], identity))
+        self.assertFalse(_has_navigation_evidence([wrong_url], identity))
+        self.assertTrue(
+            _has_navigation_evidence([stale, wrong_session, current], identity)
+        )
+
+    def test_case_path_and_url_normalization_ignore_leading_slash_and_fragment(self) -> None:
+        self.assertEqual(
+            _normalized_case_path("/dom/case.html?variant=1#ignored"),
+            "dom/case.html?variant=1",
+        )
+        self.assertEqual(
+            _normalized_navigation_url(
+                "HTTP://LOCALHOST:8000/dom/case.html?variant=1#ignored"
+            ),
+            "http://localhost:8000/dom/case.html?variant=1",
+        )
+        self.assertEqual(
+            _normalized_navigation_url(
+                "http://localhost:8000/xhr/case.html?load fires normally"
+            ),
+            "http://localhost:8000/xhr/case.html?load%20fires%20normally",
+        )
+
+    def test_run_one_case_rejects_wrong_initial_commit_url(self) -> None:
+        client = SimpleNamespace(
+            send=AsyncMock(return_value=1),
+            recv_until_id=AsyncMock(
+                return_value=(
+                    {
+                        "sessionId": "SESSION-1",
+                        "result": {"frameId": "FRAME-1", "loaderId": "LOADER-1"},
+                    },
+                    [
+                        {
+                            "method": "Page.frameNavigated",
+                            "sessionId": "SESSION-1",
+                            "params": {
+                                "frame": {
+                                    "id": "FRAME-1",
+                                    "loaderId": "LOADER-1",
+                                    "url": "http://localhost/wrong.html",
+                                }
+                            },
+                        }
+                    ],
+                )
+            ),
+        )
+
+        result = asyncio.run(
+            _run_one_case(
+                client=client,  # type: ignore[arg-type]
+                session_id="SESSION-1",
+                case_path="expected.html",
+                url="http://localhost/expected.html",
+                timeout_seconds=1.0,
+            )
+        )
+
+        self.assertEqual(result.status, "error")
+        self.assertIn("unexpected URL", result.error or "")
+        self.assertEqual(client.send.await_count, 1)
+
+    def test_run_one_case_ignores_stale_payload_until_navigation_is_bound(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, dict | None, str | None]] = []
+
+            async def send(
+                self,
+                method: str,
+                params: dict | None = None,
+                *,
+                session_id: str | None = None,
+            ) -> int:
+                self.commands.append((method, params, session_id))
+                return len(self.commands)
+
+            async def recv_until_id(
+                self, command_id: int, *, timeout: float
+            ) -> tuple[dict, list[dict]]:
+                method = self.commands[command_id - 1][0]
+                if method == "Page.navigate":
+                    return (
+                        {
+                            "sessionId": "SESSION-1",
+                            "result": {
+                                "frameId": "FRAME-1",
+                                "loaderId": "LOADER-1",
+                            },
+                        },
+                        [
+                            {
+                                "method": "Page.lifecycleEvent",
+                                "sessionId": "SESSION-1",
+                                "params": {
+                                    "frameId": "FRAME-1",
+                                    "loaderId": "LOADER-OLD",
+                                },
+                            }
+                        ],
+                    )
+                evaluation_count = sum(
+                    command[0] == "Runtime.evaluate"
+                    for command in self.commands[:command_id]
+                )
+                payload_case = (
+                    "/old-case.html" if evaluation_count == 1 else "/new-case.html"
+                )
+                payload = {
+                    "case_path": payload_case,
+                    "source": "completion-callback",
+                    "harness": {"status": 0},
+                    "tests": [{"name": "current result", "status": 0}],
+                }
+                events = []
+                if evaluation_count == 2:
+                    events.append(
+                        {
+                            "method": "Page.frameNavigated",
+                            "sessionId": "SESSION-1",
+                            "params": {
+                                "frame": {
+                                    "id": "FRAME-1",
+                                    "loaderId": "LOADER-1",
+                                    "url": "http://localhost/new-case.html",
+                                }
+                            },
+                        }
+                    )
+                return (
+                    {
+                        "result": {
+                            "result": {
+                                "value": {
+                                    # The test may legitimately change its live
+                                    # URL after the initial loader committed.
+                                    "href": "http://localhost/after-push-state",
+                                    "casePath": "/after-push-state",
+                                    "bridgeInstalled": True,
+                                    "payload": payload,
+                                }
+                            }
+                        }
+                    },
+                    events,
+                )
+
+        client = FakeClient()
+        result = asyncio.run(
+            _run_one_case(
+                client=client,  # type: ignore[arg-type]
+                session_id="SESSION-1",
+                case_path="new-case.html",
+                url="http://localhost/new-case.html",
+                timeout_seconds=1.0,
+            )
+        )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.subtests_pass, 1)
+        self.assertEqual(
+            sum(command[0] == "Runtime.evaluate" for command in client.commands),
+            2,
+        )
+
+    def test_close_page_disposes_context_with_all_auxiliary_targets(self) -> None:
+        class FakeClient:
+            def __init__(self) -> None:
+                self.commands: list[tuple[str, dict | None]] = []
+                self.get_targets_count = 0
+
+            async def send(
+                self,
+                method: str,
+                params: dict | None = None,
+                *,
+                session_id: str | None = None,
+            ) -> int:
+                self.commands.append((method, params))
+                return len(self.commands)
+
+            async def recv_until_id(
+                self, command_id: int, *, timeout: float
+            ) -> tuple[dict, list[dict]]:
+                method = self.commands[command_id - 1][0]
+                if method == "Target.getTargets":
+                    self.get_targets_count += 1
+                    infos = (
+                        [
+                            {
+                                "targetId": "TARGET-1",
+                                "browserContextId": "CONTEXT-1",
+                            },
+                            {
+                                "targetId": "POPUP-1",
+                                "browserContextId": "CONTEXT-1",
+                            },
+                        ]
+                        if self.get_targets_count == 1
+                        else []
+                    )
+                    return ({"result": {"targetInfos": infos}}, [])
+                return ({"result": {}}, [])
+
+        client = FakeClient()
+        asyncio.run(
+            _close_page(
+                client,  # type: ignore[arg-type]
+                _AttachedPage(
+                    "CONTEXT-1",
+                    "TARGET-1",
+                    "SESSION-1",
+                    frozenset({"PREWARM"}),
+                ),
+            )
+        )
+
+        self.assertIn(
+            (
+                "Target.disposeBrowserContext",
+                {"browserContextId": "CONTEXT-1"},
+            ),
+            client.commands,
+        )
+        self.assertNotIn("Target.closeTarget", [method for method, _ in client.commands])
 
     def test_unusable_page_session_preserves_case_result_and_relaunches(self) -> None:
         def handle(name: str) -> SimpleNamespace:
@@ -203,6 +533,9 @@ class WptCrossTests(unittest.TestCase):
             duration_ms=1.0,
         )
 
+        first_page = _AttachedPage("CONTEXT-1", "TARGET-1", "SESSION-1", frozenset())
+        second_page = _AttachedPage("CONTEXT-2", "TARGET-2", "SESSION-2", frozenset())
+
         with (
             patch(
                 "moli_benchmark.wpt_cross.runner.connect_raw_cdp",
@@ -210,7 +543,7 @@ class WptCrossTests(unittest.TestCase):
             ),
             patch(
                 "moli_benchmark.wpt_cross.runner._attach_page",
-                new=AsyncMock(return_value="SESSION-1"),
+                new=AsyncMock(return_value=first_page),
             ),
             patch(
                 "moli_benchmark.wpt_cross.runner._run_one_case",
@@ -221,8 +554,12 @@ class WptCrossTests(unittest.TestCase):
             patch(
                 "moli_benchmark.wpt_cross.runner._try_relaunch",
                 new=AsyncMock(
-                    return_value=(second_handle, second_client, "SESSION-2")
+                    return_value=(second_handle, second_client, second_page)
                 ),
+            ),
+            patch(
+                "moli_benchmark.wpt_cross.runner._close_page",
+                new=AsyncMock(),
             ),
         ):
             result = asyncio.run(
@@ -243,6 +580,82 @@ class WptCrossTests(unittest.TestCase):
         self.assertIs(result.cases[0], failed_case)
         self.assertIs(result.cases[1], passed_case)
         self.assertEqual(driver.shutdown.call_count, 2)
+
+    def test_successful_cases_rotate_isolated_page_contexts(self) -> None:
+        handle = SimpleNamespace(
+            process=SimpleNamespace(poll=lambda: None),
+            binary=None,
+            binary_sha256=None,
+            binary_version=None,
+            endpoint="http://engine",
+            ready_ms=1.0,
+        )
+        client = SimpleNamespace(websocket=SimpleNamespace(close=AsyncMock()))
+        driver = SimpleNamespace(
+            name="moli",
+            launch=Mock(return_value=handle),
+            shutdown=Mock(return_value={"stopped": True}),
+        )
+        first_page = _AttachedPage(
+            "CONTEXT-1", "TARGET-1", "SESSION-1", frozenset()
+        )
+        second_page = _AttachedPage(
+            "CONTEXT-2", "TARGET-2", "SESSION-2", frozenset()
+        )
+        first_result = CaseResult(
+            "first.html", "http://localhost/first.html", "pass", 1.0
+        )
+        second_result = CaseResult(
+            "second.html", "http://localhost/second.html", "pass", 1.0
+        )
+        attach = AsyncMock(side_effect=[first_page, second_page])
+        close = AsyncMock()
+        run_case = AsyncMock(side_effect=[first_result, second_result])
+
+        with (
+            patch(
+                "moli_benchmark.wpt_cross.runner.connect_raw_cdp",
+                new=AsyncMock(return_value=client),
+            ),
+            patch(
+                "moli_benchmark.wpt_cross.runner._attach_page",
+                new=attach,
+            ),
+            patch(
+                "moli_benchmark.wpt_cross.runner._close_page",
+                new=close,
+            ),
+            patch(
+                "moli_benchmark.wpt_cross.runner._run_one_case",
+                new=run_case,
+            ),
+        ):
+            result = asyncio.run(
+                _run_async(
+                    driver=driver,  # type: ignore[arg-type]
+                    binary_override=None,
+                    cases=[
+                        ("first.html", "http://localhost/first.html"),
+                        ("second.html", "http://localhost/second.html"),
+                    ],
+                    case_timeout_seconds=1.0,
+                    launch_timeout_seconds=1.0,
+                    viewport=None,
+                    artifact_output_dir=None,
+                )
+            )
+
+        self.assertEqual(result.cases, [first_result, second_result])
+        self.assertEqual(
+            [call.kwargs["session_id"] for call in run_case.await_args_list],
+            ["SESSION-1", "SESSION-2"],
+        )
+        self.assertEqual(
+            [call.args[1] for call in close.await_args_list],
+            [first_page, second_page],
+        )
+        self.assertEqual(attach.await_count, 2)
+        self.assertEqual(driver.launch.call_count, 1)
 
     def test_moli_wpt_commands_enable_layout_and_resources(self) -> None:
         self.assertEqual(
@@ -291,18 +704,31 @@ class WptCrossTests(unittest.TestCase):
         self.assertNotIn("--wait_ms", command)
         self.assertNotIn("--http_timeout", command)
 
-    def test_parser_hides_fixed_timeout_and_parallelism_knobs(self) -> None:
+    def test_parser_exposes_configurable_parallelism_with_stable_timeout(self) -> None:
         parser = _build_parser()
         help_text = parser.format_help()
 
         self.assertEqual(WPT_CROSS_CASE_TIMEOUT_SECONDS, 120.0)
-        self.assertEqual(WPT_CROSS_PARALLELISM, 100)
+        self.assertEqual(WPT_CROSS_PARALLELISM, 50)
         self.assertNotIn("--case-timeout", help_text)
         self.assertNotIn("--case-timeout-engine", help_text)
-        self.assertNotIn("--parallelism", help_text)
+        self.assertIn("--parallelism", help_text)
         self.assertNotIn("--cdp-parallelism", help_text)
         self.assertNotIn("--run-order", parser.format_help())
         self.assertNotIn("--shuffle-seed", parser.format_help())
+        required = [
+            "--wpt-root",
+            "/tmp/wpt",
+            "--engine",
+            "moli",
+            "--output-dir",
+            "/tmp/out",
+        ]
+        self.assertEqual(parser.parse_args(required).parallelism, 50)
+        self.assertEqual(
+            parser.parse_args([*required, "--parallelism", "7"]).parallelism,
+            7,
+        )
 
     def test_layout_profiles_are_explicit_and_keep_fixed_parallelism(self) -> None:
         parser = _build_parser()
@@ -334,7 +760,7 @@ class WptCrossTests(unittest.TestCase):
             (800, 600),
         )
         self.assertEqual(LAYOUT_VIEWPORT.device_scale_factor, 1.0)
-        self.assertEqual(WPT_CROSS_PARALLELISM, 100)
+        self.assertEqual(WPT_CROSS_PARALLELISM, 50)
 
     def test_all_profile_matrix_deduplicates_default_and_layout_cases(self) -> None:
         semantic = WptCase("css/cssom-view/shared.html")
@@ -1323,7 +1749,7 @@ class WptCrossTests(unittest.TestCase):
         self.assertEqual(captured["case_timeout_seconds"], WPT_CROSS_CASE_TIMEOUT_SECONDS)
         self.assertEqual(captured["parallelism"], WPT_CROSS_PARALLELISM)
 
-    def test_main_uses_fixed_parallelism_for_cdp_runner(self) -> None:
+    def test_main_uses_requested_parallelism_for_cdp_runner(self) -> None:
         calls: list[dict[str, object]] = []
 
         class FakeServer:
@@ -1422,14 +1848,16 @@ class WptCrossTests(unittest.TestCase):
                         str(output_dir),
                         "--mode",
                         "cdp",
+                        "--parallelism",
+                        "2",
                     ]
                 )
 
         self.assertEqual(code, 0)
-        self.assertEqual(len(calls), len(cases))
+        self.assertEqual(len(calls), 2)
         self.assertTrue(all(call["case_timeout_seconds"] == WPT_CROSS_CASE_TIMEOUT_SECONDS for call in calls))
         self.assertEqual(
-            sorted(call["cases"][0][0] for call in calls),
+            sorted(case[0] for call in calls for case in call["cases"]),
             [case.case_path for case in cases],
         )
 
@@ -1633,7 +2061,7 @@ class WptCrossTests(unittest.TestCase):
 
         self.assertEqual(_harness_timeout_multiplier(30.0, 10.0, case.case_path), 1.0)
 
-    def test_parser_rejects_removed_timeout_and_parallelism_flags(self) -> None:
+    def test_parser_rejects_removed_timeout_flags_and_legacy_parallelism(self) -> None:
         parser = _build_parser()
         base = [
             "--wpt-root",
@@ -1646,11 +2074,18 @@ class WptCrossTests(unittest.TestCase):
         for removed_flag in (
             "--case-timeout",
             "--case-timeout-engine",
-            "--parallelism",
             "--cdp-parallelism",
         ):
             with self.subTest(removed_flag=removed_flag), self.assertRaises(SystemExit):
                 parser.parse_args([*base, removed_flag, "1"])
+
+        for invalid_parallelism in ("0", "-1", "not-an-integer"):
+            with self.subTest(invalid_parallelism=invalid_parallelism), self.assertRaises(
+                SystemExit
+            ):
+                parser.parse_args(
+                    [*base, "--parallelism", invalid_parallelism]
+                )
 
     def test_main_matrix_preserves_harness_message(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

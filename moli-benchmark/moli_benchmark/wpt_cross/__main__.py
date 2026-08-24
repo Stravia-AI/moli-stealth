@@ -54,7 +54,7 @@ from ..config import clear_current_proxy_env
 
 REPO_CASE_LIST_DIR = Path(__file__).resolve().parents[2] / "wpt-cross-current"
 WPT_CROSS_CASE_TIMEOUT_SECONDS = 120.0
-WPT_CROSS_PARALLELISM = 100
+WPT_CROSS_PARALLELISM = 50
 WPT_CROSS_PROFILES = (
     "default",
     "layout-testharness",
@@ -79,6 +79,16 @@ NON_TRUSTWORTHY_ORIGIN_CASES = frozenset(
         "pointerevents/pointerevent_constructor.html",
     }
 )
+
+
+def _positive_parallelism(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("parallelism must be an integer") from error
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError("parallelism must be positive")
+    return parsed
 
 
 def _case_requires_trustworthy_origin(case_path: str) -> bool:
@@ -196,6 +206,15 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=30.0,
         help="Per-engine launch (CDP ready) timeout in seconds.",
+    )
+    parser.add_argument(
+        "--parallelism",
+        type=_positive_parallelism,
+        default=WPT_CROSS_PARALLELISM,
+        help=(
+            "Maximum concurrent engine workers for WPT cases "
+            f"(default: {WPT_CROSS_PARALLELISM})."
+        ),
     )
     parser.add_argument(
         "--moli-bin",
@@ -789,14 +808,14 @@ def main(argv: list[str] | None = None) -> int:
                     execution_cases=scheduled_cases_for_engine_cli,
                     binary_override=_binary_override_for(engine, args),
                     case_timeout_seconds=engine_case_timeout,
-                    parallelism=WPT_CROSS_PARALLELISM,
+                    parallelism=args.parallelism,
                 )
             else:
                 print(
                     f"[wpt-cross] running {engine} (CDP mode) on {len(cases_for_engine)} cases via fixture origins",
                     file=sys.stderr,
                 )
-                cdp_par = WPT_CROSS_PARALLELISM
+                cdp_par = args.parallelism
                 if cdp_par == 1 or len(cases_for_engine) <= 1:
                     result = run_engine_on_cases(
                         driver=driver,

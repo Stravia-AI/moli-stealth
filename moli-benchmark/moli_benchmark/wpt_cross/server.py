@@ -31,6 +31,7 @@ import mimetypes
 import re
 import socket
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -1432,7 +1433,18 @@ def _wpt_cookie_websocket_set_cookie(query: str) -> str | None:
     return None
 
 
-class _Ipv6ThreadingHTTPServer(ThreadingHTTPServer):
+class _FixtureThreadingHTTPServer(ThreadingHTTPServer):
+    def handle_error(self, request: object, client_address: object) -> None:
+        # Disposing a case BrowserContext intentionally cancels any auxiliary
+        # requests that outlive the harness result. The stdlib server prints a
+        # full traceback for those routine disconnects, obscuring real fixture
+        # failures during parallel runs.
+        if isinstance(sys.exc_info()[1], (BrokenPipeError, ConnectionResetError)):
+            return
+        super().handle_error(request, client_address)
+
+
+class _Ipv6ThreadingHTTPServer(_FixtureThreadingHTTPServer):
     address_family = socket.AF_INET6
 
 
@@ -2542,9 +2554,11 @@ class WptFixtureServer:
         self.results = ResultsStore()
         self.csp_reports = CspReportStore()
         handler_cls = _make_handler(self.wpt_root, self.results, self.csp_reports)
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        self.httpd = _FixtureThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
         self.port = int(self.httpd.server_address[1])
-        self.alternate_httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+        self.alternate_httpd = _FixtureThreadingHTTPServer(
+            ("127.0.0.1", 0), handler_cls
+        )
         self.alternate_port = int(self.alternate_httpd.server_address[1])
         for httpd in (self.httpd, self.alternate_httpd):
             self._configure_httpd_defaults(

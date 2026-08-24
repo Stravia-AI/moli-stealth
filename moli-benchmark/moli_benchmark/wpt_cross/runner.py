@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from PIL import Image, ImageChops
 
@@ -140,6 +141,22 @@ class _PageSessionUnusable(RuntimeError):
         super().__init__(case_result.error or "page session became unusable")
 
 
+@dataclass(frozen=True)
+class _AttachedPage:
+    browser_context_id: str | None
+    target_id: str
+    session_id: str
+    baseline_target_ids: frozenset[str] | None
+
+
+@dataclass(frozen=True)
+class _NavigationIdentity:
+    session_id: str
+    frame_id: str
+    loader_id: str
+    expected_url: str
+
+
 _TRACE_METHODS = {"Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"}
 
 
@@ -212,101 +229,323 @@ def _failure_names(tests: Any) -> list[str]:
     return names
 
 
+def _exception_text(error: BaseException) -> str:
+    return str(error) or type(error).__name__
+
+
+async def _target_infos(client: RawCdpClient) -> list[dict[str, Any]]:
+    command_id = await client.send("Target.getTargets")
+    response, _ = await client.recv_until_id(command_id, timeout=5)
+    infos = (response.get("result") or {}).get("targetInfos")
+    if not isinstance(infos, list):
+        raise RawCdpError(f"Target.getTargets returned invalid targetInfos: {response}")
+    return [info for info in infos if isinstance(info, dict)]
+
+
+def _target_ids(infos: list[dict[str, Any]]) -> frozenset[str]:
+    return frozenset(
+        target_id
+        for info in infos
+        if isinstance((target_id := info.get("targetId")), str) and target_id
+    )
+
+
+async def _close_target(client: RawCdpClient, target_id: str) -> None:
+    command_id = await client.send("Target.closeTarget", {"targetId": target_id})
+    response, _ = await client.recv_until_id(command_id, timeout=5)
+    success = (response.get("result") or {}).get("success")
+    if success is False:
+        raise RawCdpError(f"Target.closeTarget rejected target {target_id}")
+
+
+async def _close_page(client: RawCdpClient, page: _AttachedPage) -> None:
+    """Dispose one case's storage context and every target created inside it."""
+
+    try:
+        before = await _target_infos(client)
+    except (RawCdpError, asyncio.TimeoutError):
+        before = []
+
+    if page.browser_context_id is not None:
+        command_id = await client.send(
+            "Target.disposeBrowserContext",
+            {"browserContextId": page.browser_context_id},
+        )
+        await client.recv_until_id(command_id, timeout=10)
+    else:
+        owned_ids = {
+            target_id
+            for info in before
+            if isinstance((target_id := info.get("targetId")), str)
+            and target_id
+            and (
+                target_id == page.target_id
+                or (
+                    page.baseline_target_ids is not None
+                    and target_id not in page.baseline_target_ids
+                )
+            )
+        }
+        owned_ids.add(page.target_id)
+        for target_id in sorted(owned_ids):
+            await _close_target(client, target_id)
+
+    try:
+        after = await _target_infos(client)
+    except (RawCdpError, asyncio.TimeoutError):
+        return
+
+    residual_ids = {
+        target_id
+        for info in after
+        if isinstance((target_id := info.get("targetId")), str)
+        and target_id
+        and (
+            (
+                page.browser_context_id is not None
+                and info.get("browserContextId") == page.browser_context_id
+            )
+            or (
+                page.browser_context_id is None
+                and (
+                    target_id == page.target_id
+                    or (
+                        page.baseline_target_ids is not None
+                        and target_id not in page.baseline_target_ids
+                    )
+                )
+            )
+        )
+    }
+    for target_id in sorted(residual_ids):
+        await _close_target(client, target_id)
+
+    if residual_ids:
+        remaining = _target_ids(await _target_infos(client))
+        leaked = residual_ids & remaining
+        if leaked:
+            raise RawCdpError(
+                f"case cleanup left auxiliary targets alive: {sorted(leaked)}"
+            )
+
+
 async def _attach_page(
     client: RawCdpClient,
     *,
     viewport: Viewport | None = None,
-) -> str:
-    """Create a fresh BrowserContext + Target and return its sessionId.
+) -> _AttachedPage:
+    """Create an isolated BrowserContext + Target for exactly one WPT case."""
 
-    Falls back to the default target if Target.createBrowserContext is not
-    supported. Enables Runtime/Page/Log so we can collect harness results
-    and console errors.
-    """
+    try:
+        baseline_target_ids: frozenset[str] | None = _target_ids(
+            await _target_infos(client)
+        )
+    except (RawCdpError, asyncio.TimeoutError):
+        baseline_target_ids = None
 
     browser_context_id: str | None = None
+    target: str | None = None
     try:
-        ctx_id = await client.send("Target.createBrowserContext")
-        ctx_resp, _ = await client.recv_until_id(ctx_id, timeout=5)
-        value = (ctx_resp.get("result") or {}).get("browserContextId")
-        if isinstance(value, str) and value:
-            browser_context_id = value
-    except RawCdpError:
-        browser_context_id = None
-    except asyncio.TimeoutError:
-        browser_context_id = None
-
-    target_params: dict[str, Any] = {"url": "about:blank"}
-    if browser_context_id:
-        target_params["browserContextId"] = browser_context_id
-    target_id = await client.send("Target.createTarget", target_params)
-    target_resp, _ = await client.recv_until_id(target_id, timeout=10)
-    target = (target_resp.get("result") or {}).get("targetId")
-    if not isinstance(target, str) or not target:
-        raise RuntimeError(f"missing targetId in createTarget response: {target_resp}")
-
-    attach_id = await client.send("Target.attachToTarget", {"targetId": target, "flatten": True})
-    attach_resp, _ = await client.recv_until_id(attach_id, timeout=5)
-    session_id = (attach_resp.get("result") or {}).get("sessionId")
-    if not isinstance(session_id, str) or not session_id:
-        raise RuntimeError(f"missing sessionId in attachToTarget response: {attach_resp}")
-
-    for method in ("Runtime.enable", "Page.enable"):
-        cmd_id = await client.send(method, session_id=session_id)
-        await client.recv_until_id(cmd_id, timeout=5)
-    if viewport is not None:
-        cmd_id = await client.send(
-            "Emulation.setDeviceMetricsOverride",
-            {
-                "width": viewport.width,
-                "height": viewport.height,
-                "deviceScaleFactor": viewport.device_scale_factor,
-                "mobile": False,
-            },
-            session_id=session_id,
-        )
-        await client.recv_until_id(cmd_id, timeout=5)
-    for method in ("Log.enable",):
         try:
-            cmd_id = await client.send(method, session_id=session_id)
+            ctx_id = await client.send("Target.createBrowserContext")
+            ctx_resp, _ = await client.recv_until_id(ctx_id, timeout=5)
+            value = (ctx_resp.get("result") or {}).get("browserContextId")
+            if isinstance(value, str) and value:
+                browser_context_id = value
+        except (RawCdpError, asyncio.TimeoutError):
+            browser_context_id = None
+
+        target_params: dict[str, Any] = {"url": "about:blank"}
+        if browser_context_id:
+            target_params["browserContextId"] = browser_context_id
+        target_id = await client.send("Target.createTarget", target_params)
+        target_resp, _ = await client.recv_until_id(target_id, timeout=10)
+        target = (target_resp.get("result") or {}).get("targetId")
+        if not isinstance(target, str) or not target:
+            raise RuntimeError(f"missing targetId in createTarget response: {target_resp}")
+
+        attach_id = await client.send(
+            "Target.attachToTarget", {"targetId": target, "flatten": True}
+        )
+        attach_resp, _ = await client.recv_until_id(attach_id, timeout=5)
+        session_id = (attach_resp.get("result") or {}).get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            raise RuntimeError(f"missing sessionId in attachToTarget response: {attach_resp}")
+
+        for method, params in (
+            ("Runtime.enable", None),
+            ("Page.enable", None),
+            ("Page.setLifecycleEventsEnabled", {"enabled": True}),
+        ):
+            cmd_id = await client.send(method, params, session_id=session_id)
+            await client.recv_until_id(cmd_id, timeout=5)
+        if viewport is not None:
+            cmd_id = await client.send(
+                "Emulation.setDeviceMetricsOverride",
+                {
+                    "width": viewport.width,
+                    "height": viewport.height,
+                    "deviceScaleFactor": viewport.device_scale_factor,
+                    "mobile": False,
+                },
+                session_id=session_id,
+            )
+            await client.recv_until_id(cmd_id, timeout=5)
+        try:
+            cmd_id = await client.send("Log.enable", session_id=session_id)
             await client.recv_until_id(cmd_id, timeout=3)
         except (RawCdpError, asyncio.TimeoutError):
             pass
 
-    return session_id
+        return _AttachedPage(
+            browser_context_id=browser_context_id,
+            target_id=target,
+            session_id=session_id,
+            baseline_target_ids=baseline_target_ids,
+        )
+    except BaseException:
+        if target is not None:
+            try:
+                await _close_page(
+                    client,
+                    _AttachedPage(
+                        browser_context_id=browser_context_id,
+                        target_id=target,
+                        session_id="",
+                        baseline_target_ids=baseline_target_ids,
+                    ),
+                )
+            except BaseException:
+                pass
+        elif browser_context_id is not None:
+            try:
+                command_id = await client.send(
+                    "Target.disposeBrowserContext",
+                    {"browserContextId": browser_context_id},
+                )
+                await client.recv_until_id(command_id, timeout=5)
+            except BaseException:
+                pass
+        raise
 
 
 _HARNESS_PROBE_EXPRESSION = """
 (function() {
-  if (typeof window === 'undefined') return null;
-  if (typeof window.__bench_wpt__ === 'undefined') return null;
-  return window.__bench_wpt__;
-})()
-"""
-
-_BRIDGE_INSTALLED_EXPRESSION = """
-(function() {
-  var t = (typeof window !== 'undefined') ? window.__bench_wpt_trace__ : null;
-  if (!Array.isArray(t)) return false;
-  for (var i = 0; i < t.length; i++) {
-    if (t[i] && t[i].installing === true) return true;
+  if (typeof window === 'undefined' || typeof location === 'undefined') return null;
+  var trace = window.__bench_wpt_trace__;
+  var bridgeInstalled = false;
+  if (Array.isArray(trace)) {
+    for (var i = 0; i < trace.length; i++) {
+      if (trace[i] && trace[i].installing === true) {
+        bridgeInstalled = true;
+        break;
+      }
+    }
   }
-  return false;
+  return {
+    bridgeInstalled: bridgeInstalled,
+    payload: typeof window.__bench_wpt__ === 'undefined' ? null : window.__bench_wpt__
+  };
 })()
 """
 
 
-async def _bridge_installed(client: RawCdpClient, session_id: str) -> bool:
-    try:
-        eval_id = await client.send(
-            "Runtime.evaluate",
-            {"expression": _BRIDGE_INSTALLED_EXPRESSION, "returnByValue": True},
-            session_id=session_id,
+def _normalized_case_path(value: str) -> str:
+    parts = urlsplit(value)
+    path = quote(parts.path.lstrip("/"), safe="/%:@!$&'()*+,;=-._~")
+    query = quote(parts.query, safe="=&?/%:@!$'()*+,;[-]._~")
+    return urlunsplit(("", "", path, query, ""))
+
+
+def _normalized_navigation_url(value: str) -> str:
+    parts = urlsplit(value)
+    path = quote(parts.path or "/", safe="/%:@!$&'()*+,;=-._~")
+    query = quote(parts.query, safe="=&?/%:@!$'()*+,;[-]._~")
+    return urlunsplit(
+        (
+            parts.scheme.lower(),
+            parts.netloc.lower(),
+            path,
+            query,
+            "",
         )
-        response, _ = await client.recv_until_id(eval_id, timeout=5)
-    except (RawCdpError, asyncio.TimeoutError):
-        return False
-    return bool(((response.get("result") or {}).get("result") or {}).get("value"))
+    )
+
+
+def _navigation_identity(
+    response: dict[str, Any],
+    *,
+    session_id: str,
+    expected_url: str,
+) -> _NavigationIdentity:
+    response_session = response.get("sessionId")
+    if response_session is not None and response_session != session_id:
+        raise RawCdpError(
+            f"Page.navigate response belonged to session {response_session!r}, "
+            f"expected {session_id!r}"
+        )
+    result = response.get("result")
+    if not isinstance(result, dict):
+        raise RawCdpError(f"Page.navigate returned no result: {response}")
+    error_text = result.get("errorText")
+    if isinstance(error_text, str) and error_text:
+        raise RawCdpError(f"Page.navigate failed for `{expected_url}`: {error_text}")
+    if result.get("isDownload") is True:
+        raise RawCdpError(f"Page.navigate produced a download for `{expected_url}`")
+    frame_id = result.get("frameId")
+    loader_id = result.get("loaderId")
+    if not isinstance(frame_id, str) or not frame_id:
+        raise RawCdpError(f"Page.navigate returned no frameId: {response}")
+    if not isinstance(loader_id, str) or not loader_id:
+        raise RawCdpError(f"Page.navigate returned no loaderId: {response}")
+    return _NavigationIdentity(
+        session_id=session_id,
+        frame_id=frame_id,
+        loader_id=loader_id,
+        expected_url=expected_url,
+    )
+
+
+def _navigation_commit_url(
+    messages: list[dict[str, Any]], identity: _NavigationIdentity
+) -> str | None:
+    for message in messages:
+        if message.get("sessionId") != identity.session_id:
+            continue
+        if message.get("method") != "Page.frameNavigated":
+            continue
+        frame = (message.get("params") or {}).get("frame") or {}
+        if (
+            frame.get("id") == identity.frame_id
+            and frame.get("loaderId") == identity.loader_id
+            and isinstance(frame.get("url"), str)
+        ):
+            return frame["url"]
+    return None
+
+
+def _has_navigation_evidence(
+    messages: list[dict[str, Any]], identity: _NavigationIdentity
+) -> bool:
+    committed_url = _navigation_commit_url(messages, identity)
+    return committed_url is not None and (
+        _normalized_navigation_url(committed_url)
+        == _normalized_navigation_url(identity.expected_url)
+    )
+
+
+def _navigation_commit_error(
+    identity: _NavigationIdentity, committed_url: str | None
+) -> str | None:
+    if committed_url is None or (
+        _normalized_navigation_url(committed_url)
+        == _normalized_navigation_url(identity.expected_url)
+    ):
+        return None
+    return (
+        f"Page.navigate committed loader {identity.loader_id} to unexpected URL "
+        f"`{committed_url}`; expected `{identity.expected_url}`"
+    )
 
 
 async def _run_one_case(
@@ -318,11 +557,20 @@ async def _run_one_case(
     timeout_seconds: float,
 ) -> CaseResult:
     started = time.perf_counter()
+    deadline = started + timeout_seconds
     seen_messages: list[dict[str, Any]] = []
     try:
         nav_id = await client.send("Page.navigate", {"url": url}, session_id=session_id)
-        _, nav_seen = await client.recv_until_id(nav_id, timeout=timeout_seconds)
+        nav_response, nav_seen = await client.recv_until_id(
+            nav_id,
+            timeout=max(0.01, deadline - time.perf_counter()),
+        )
         seen_messages.extend(nav_seen)
+        identity = _navigation_identity(
+            nav_response,
+            session_id=session_id,
+            expected_url=url,
+        )
     except (RawCdpError, asyncio.TimeoutError) as error:
         raise _PageSessionUnusable(
             CaseResult(
@@ -330,12 +578,25 @@ async def _run_one_case(
                 url=url,
                 status="error",
                 duration_ms=(time.perf_counter() - started) * 1000.0,
-                error=f"navigate failed: {error}",
+                error=f"navigate failed: {_exception_text(error)}",
             )
         ) from error
 
-    deadline = time.perf_counter() + timeout_seconds
     payload: Any = None
+    bridge_installed = False
+    committed_url = _navigation_commit_url(seen_messages, identity)
+    commit_error = _navigation_commit_error(identity, committed_url)
+    if commit_error is not None:
+        return CaseResult(
+            case_path=case_path,
+            url=url,
+            status="error",
+            duration_ms=(time.perf_counter() - started) * 1000.0,
+            error=commit_error,
+        )
+    navigation_observed = committed_url is not None
+    expected_case_path = _normalized_case_path(case_path)
+    last_payload_case_path: str | None = None
     while time.perf_counter() < deadline:
         try:
             eval_id = await client.send(
@@ -347,7 +608,10 @@ async def _run_one_case(
                 },
                 session_id=session_id,
             )
-            response, eval_seen = await client.recv_until_id(eval_id, timeout=5)
+            response, eval_seen = await client.recv_until_id(
+                eval_id,
+                timeout=max(0.01, min(5.0, deadline - time.perf_counter())),
+            )
             seen_messages.extend(eval_seen)
         except (RawCdpError, asyncio.TimeoutError) as error:
             raise _PageSessionUnusable(
@@ -356,25 +620,65 @@ async def _run_one_case(
                     url=url,
                     status="error",
                     duration_ms=(time.perf_counter() - started) * 1000.0,
-                    error=f"evaluate failed: {error}",
+                    error=f"evaluate failed: {_exception_text(error)}",
                 )
             ) from error
+        if committed_url is None:
+            committed_url = _navigation_commit_url(eval_seen, identity)
+            commit_error = _navigation_commit_error(identity, committed_url)
+            if commit_error is not None:
+                return CaseResult(
+                    case_path=case_path,
+                    url=url,
+                    status="error",
+                    duration_ms=(time.perf_counter() - started) * 1000.0,
+                    error=commit_error,
+                )
+            navigation_observed = committed_url is not None
         result = ((response.get("result") or {}).get("result") or {})
         value = result.get("value")
         if isinstance(value, dict):
-            source = value.get("source") if isinstance(value.get("source"), str) else None
-            payload = value
-            if source in FINAL_PAYLOAD_SOURCES:
-                break
+            if navigation_observed:
+                bridge_installed = bridge_installed or value.get("bridgeInstalled") is True
+                candidate = value.get("payload")
+                if isinstance(candidate, dict):
+                    # A bridge payload is stronger evidence than the optional
+                    # trace array: some pages replace or mutate the trace after
+                    # the bridge has already published its terminal snapshot.
+                    bridge_installed = True
+                    candidate_case_path = candidate.get("case_path")
+                    if isinstance(candidate_case_path, str):
+                        last_payload_case_path = candidate_case_path
+                    if (
+                        isinstance(candidate_case_path, str)
+                        and _normalized_case_path(candidate_case_path)
+                        == expected_case_path
+                    ):
+                        source = (
+                            candidate.get("source")
+                            if isinstance(candidate.get("source"), str)
+                            else None
+                        )
+                        payload = candidate
+                        if source in FINAL_PAYLOAD_SOURCES:
+                            break
         await asyncio.sleep(0.05)
 
     duration_ms = (time.perf_counter() - started) * 1000.0
     console_errors, js_exceptions = _count_traces(seen_messages)
-    # Distinguish "bridge never installed" (engine couldn't load
-    # testharness.js at all) from "bridge installed but testharness never
-    # produced results" (engine-side completion bug). A non-final payload also
-    # proves the bridge was installed, but it is not enough to pass the case.
-    bridge_installed = payload is not None or await _bridge_installed(client, session_id)
+    error: str | None = None
+    if not navigation_observed:
+        error = (
+            "Page.navigate returned loader/frame identity but no matching "
+            "navigation event was observed"
+        )
+    elif last_payload_case_path is not None and (
+        _normalized_case_path(last_payload_case_path) != expected_case_path
+    ):
+        error = (
+            f"ignored harness payload for `{last_payload_case_path}` while "
+            f"waiting for `{case_path}`"
+        )
     return classify_payload(
         payload=payload if isinstance(payload, dict) else None,
         case_path=case_path,
@@ -383,6 +687,7 @@ async def _run_one_case(
         bridge_installed=bridge_installed,
         console_errors=console_errors,
         js_exceptions=js_exceptions,
+        error=error,
     )
 
 
@@ -486,6 +791,8 @@ async def _wait_for_reftest_ready(
     session_id: str,
     url: str,
     timeout_seconds: float,
+    identity: _NavigationIdentity,
+    navigation_observed: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     deadline = time.perf_counter() + timeout_seconds
     seen_messages: list[dict[str, Any]] = []
@@ -504,6 +811,9 @@ async def _wait_for_reftest_ready(
                 timeout=max(0.01, min(5.0, remaining)),
             )
             seen_messages.extend(messages)
+            navigation_observed = navigation_observed or _has_navigation_evidence(
+                messages, identity
+            )
         except (RawCdpError, asyncio.TimeoutError):
             await asyncio.sleep(0.025)
             continue
@@ -511,6 +821,7 @@ async def _wait_for_reftest_ready(
         if (
             isinstance(value, dict)
             and value.get("href") == value.get("expectedHref")
+            and navigation_observed
         ):
             break
         await asyncio.sleep(0.025)
@@ -531,9 +842,24 @@ async def _wait_for_reftest_ready(
     )
     response, messages = await client.recv_until_id(eval_id, timeout=remaining)
     seen_messages.extend(messages)
+    navigation_observed = navigation_observed or _has_navigation_evidence(
+        messages, identity
+    )
     value = _remote_object_value(response)
     if not isinstance(value, dict):
         raise RuntimeError(f"reftest readiness script failed for {url}: {response}")
+    if not navigation_observed:
+        raise RuntimeError(
+            f"reftest observed no navigation event for frame={identity.frame_id} "
+            f"loader={identity.loader_id}"
+        )
+    href = value.get("href")
+    if not isinstance(href, str) or (
+        _normalized_navigation_url(href) != _normalized_navigation_url(url)
+    ):
+        raise RuntimeError(
+            f"reftest committed to unexpected URL {href!r}; expected {url!r}"
+        )
     return value, seen_messages
 
 
@@ -549,15 +875,19 @@ async def _navigate_and_capture_reftest(
     nav_id = await client.send("Page.navigate", {"url": url}, session_id=session_id)
     nav_response, nav_seen = await client.recv_until_id(nav_id, timeout=timeout_seconds)
     seen_messages.extend(nav_seen)
-    nav_result = nav_response.get("result") or {}
-    if nav_result.get("errorText"):
-        raise RuntimeError(f"navigation failed for {url}: {nav_result['errorText']}")
+    identity = _navigation_identity(
+        nav_response,
+        session_id=session_id,
+        expected_url=url,
+    )
 
     ready, ready_seen = await _wait_for_reftest_ready(
         client,
         session_id,
         url,
         timeout_seconds,
+        identity,
+        _has_navigation_evidence(nav_seen, identity),
     )
     seen_messages.extend(ready_seen)
     actual_viewport = (ready.get("width"), ready.get("height"))
@@ -1059,7 +1389,7 @@ async def _run_async(
         effective_viewport = LAYOUT_VIEWPORT
 
     try:
-        session_id = await _attach_page(client, viewport=effective_viewport)
+        page = await _attach_page(client, viewport=effective_viewport)
     except Exception as error:
         result.setup_error = f"attach failed: {error}"
         try:
@@ -1113,13 +1443,13 @@ async def _run_async(
                     continue
                 consecutive_relaunch_failures = 0
                 relaunch_count += 1
-                # swap in new handle/client/session
+                # Swap in a fresh engine and the isolated page for its next case.
                 try:
                     await client.websocket.close()
                 except Exception:
                     pass
                 driver.shutdown(handle)  # ensure old handle fully reaped
-                handle, client, session_id = relaunched
+                handle, client, page = relaunched
                 reference_cache.clear()
                 continue
 
@@ -1129,7 +1459,7 @@ async def _run_async(
                         raise RuntimeError("reftest requires a fixed viewport")
                     case_result = await _run_one_reftest(
                         client=client,
-                        session_id=session_id,
+                        session_id=page.session_id,
                         case=case,
                         viewport=effective_viewport,
                         engine=driver.name,
@@ -1139,7 +1469,7 @@ async def _run_async(
                 else:
                     case_result = await _run_one_case(
                         client=client,
-                        session_id=session_id,
+                        session_id=page.session_id,
                         case_path=case_path,
                         url=url,
                         timeout_seconds=timeout_seconds,
@@ -1177,6 +1507,7 @@ async def _run_async(
                 except Exception:
                     pass
                 driver.shutdown(handle)
+                page = None
                 relaunched = await _try_relaunch(
                     driver=driver,
                     binary_override=binary_override,
@@ -1199,7 +1530,7 @@ async def _run_async(
                         break
                     # client/handle are dead; fabricate placeholders that will fail
                     # the poll() check next iteration -> retry relaunch path.
-                    handle, client, session_id = await _wait_then_retry_launch(
+                    handle, client, page = await _wait_then_retry_launch(
                         driver,
                         binary_override,
                         launch_timeout_seconds,
@@ -1216,13 +1547,59 @@ async def _run_async(
                     consecutive_relaunch_failures = 0
                 relaunch_count += 1
                 if relaunched is not None:
-                    handle, client, session_id = relaunched
+                    handle, client, page = relaunched
                     reference_cache.clear()
                 continue
 
             consecutive_relaunch_failures = 0
             result.cases.append(case_result)
+            if case_index + 1 < len(cases):
+                try:
+                    await _close_page(client, page)
+                    page = await _attach_page(client, viewport=effective_viewport)
+                except Exception:
+                    # The completed case keeps its result, but no later case may
+                    # inherit an incompletely disposed context or target set.
+                    try:
+                        await client.websocket.close()
+                    except Exception:
+                        pass
+                    driver.shutdown(handle)
+                    page = None
+                    relaunched = await _try_relaunch(
+                        driver=driver,
+                        binary_override=binary_override,
+                        launch_timeout_seconds=launch_timeout_seconds,
+                        viewport=effective_viewport,
+                    )
+                    relaunch_count += 1
+                    if relaunched is None:
+                        for remaining in cases[case_index + 1:]:
+                            rp, ru, _ = _case_parts(
+                                remaining, case_timeout_seconds
+                            )
+                            result.cases.append(
+                                CaseResult(
+                                    case_path=rp,
+                                    url=ru,
+                                    status="crash",
+                                    duration_ms=None,
+                                    error=(
+                                        "fresh page setup failed after case cleanup; "
+                                        "engine relaunch also failed"
+                                    ),
+                                    test_type=_case_test_type(remaining),
+                                )
+                            )
+                        break
+                    handle, client, page = relaunched
+                    reference_cache.clear()
     finally:
+        if page is not None:
+            try:
+                await _close_page(client, page)
+            except Exception:
+                pass
         try:
             await client.websocket.close()
         except Exception:
@@ -1240,7 +1617,7 @@ async def _try_relaunch(
     binary_override: str | None,
     launch_timeout_seconds: float,
     viewport: Viewport | None,
-) -> tuple[EngineDriverHandle, RawCdpClient, str] | None:
+) -> tuple[EngineDriverHandle, RawCdpClient, _AttachedPage] | None:
     """Relaunch engine + reconnect CDP + reattach. Returns None on failure."""
 
     try:
@@ -1259,7 +1636,7 @@ async def _try_relaunch(
             pass
         return None
     try:
-        new_session_id = await _attach_page(new_client, viewport=viewport)
+        new_page = await _attach_page(new_client, viewport=viewport)
     except Exception:
         try:
             await new_client.websocket.close()
@@ -1270,7 +1647,7 @@ async def _try_relaunch(
         except Exception:
             pass
         return None
-    return new_handle, new_client, new_session_id
+    return new_handle, new_client, new_page
 
 
 async def _wait_then_retry_launch(
@@ -1282,7 +1659,7 @@ async def _wait_then_retry_launch(
     case_index: int,
     case_timeout_seconds: float,
     viewport: Viewport | None,
-) -> tuple[EngineDriverHandle | None, RawCdpClient | None, str | None]:
+) -> tuple[EngineDriverHandle | None, RawCdpClient | None, _AttachedPage | None]:
     await asyncio.sleep(1.0)
     relaunched = await _try_relaunch(
         driver=driver,
