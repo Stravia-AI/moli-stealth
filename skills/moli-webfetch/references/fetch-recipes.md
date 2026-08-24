@@ -28,8 +28,7 @@ Raw non-HTML responses support only `html` and `json`.
 
 JSON `headers` is an ordered list of `{name, value}` records so duplicate
 headers are preserved. `redirect_chain` contains every main-navigation HTTP
-redirect hop in order. Add `--trace-network` only with an explicit
-`--dump json`; it appends the structured `network` object.
+redirect hop in order.
 
 ## Readiness
 
