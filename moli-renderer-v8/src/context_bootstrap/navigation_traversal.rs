@@ -24,6 +24,7 @@ use super::navigation_events::{
 };
 use super::navigation_lifecycle::finish_navigation_error_events;
 use super::navigation_projection::visible_navigation_entries_len;
+use super::navigation_reload::{NavigationReloadAdmission, navigation_reload_admission};
 use super::navigation_result::{
     navigation_current_entry_result_with_pending_finished, navigation_dom_exception,
     navigation_immediate_current_entry_result, navigation_pending_result,
@@ -218,6 +219,11 @@ pub(super) fn navigation_reload_callback<'s>(
         return;
     };
     let options = args.get(0).to_object(scope);
+    let navigation_info = options.and_then(|options| {
+        options
+            .get(scope, v8str(scope, "info").into())
+            .filter(|value| !value.is_undefined())
+    });
     let cloned_navigation_state = match clone_navigation_state_arg_for_result(scope, options) {
         Ok(state) => state,
         Err(error) => {
@@ -245,11 +251,15 @@ pub(super) fn navigation_reload_callback<'s>(
         );
         return;
     }
-    let navigation_info = options.and_then(|options| {
-        options
-            .get(scope, v8str(scope, "info").into())
-            .filter(|value| !value.is_undefined())
-    });
+    if matches!(
+        navigation_reload_admission(scope, owner),
+        NavigationReloadAdmission::NoCommittedHistoryItem
+    ) {
+        // Navigation API methods on an initial-empty Document return a
+        // correctly-shaped result whose promises intentionally never settle.
+        rv.set(navigation_pending_result(scope).into());
+        return;
+    }
     if navigation_document_can_update_current_entry(scope, owner)
         && let Some(navigation) = window_navigation_for_holder(scope, owner)
     {

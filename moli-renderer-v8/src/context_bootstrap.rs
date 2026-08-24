@@ -55,6 +55,7 @@ mod navigation_history_pruning;
 mod navigation_lifecycle;
 mod navigation_mutation;
 mod navigation_projection;
+mod navigation_reload;
 mod navigation_restore;
 mod navigation_result;
 mod navigation_seed;

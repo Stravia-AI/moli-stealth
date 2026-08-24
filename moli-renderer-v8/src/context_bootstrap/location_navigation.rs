@@ -26,6 +26,7 @@ use super::navigation_mutation::{
     apply_local_window_location_navigation, apply_navigation_navigate_same_document,
     sync_local_document_front_from_window, update_navigation_current_entry_for_same_document,
 };
+use super::navigation_reload::{NavigationReloadAdmission, navigation_reload_admission};
 use super::navigation_result::{
     cancel_pending_same_document_navigation_finishes,
     cancel_pending_same_document_navigation_finishes_including_reentrant, navigation_dom_exception,
@@ -260,6 +261,14 @@ fn navigate_location_object_with_source_element_and_child_navigate_event<'s>(
             "Blocked a sandboxed frame from navigating an ancestor browsing context.",
             "SecurityError",
         );
+        return;
+    }
+    if matches!(kind, LocationNavigationKind::Reload)
+        && matches!(
+            navigation_reload_admission(scope, owner),
+            NavigationReloadAdmission::NoCommittedHistoryItem
+        )
+    {
         return;
     }
     if let Some(popup_id) = crate::native_bridge::lightweight_popup_id_from_window(scope, owner)

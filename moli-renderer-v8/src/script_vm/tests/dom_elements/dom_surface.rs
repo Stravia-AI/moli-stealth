@@ -12900,6 +12900,252 @@ globalThis.__probeOneSidedDomainFrame = () => {
     assert_eq!(server.finish_targets().await, vec!["/child.html"]);
 }
 
+#[test]
+fn initial_empty_iframe_reload_uses_shared_no_history_admission() {
+    let mut vm = new_storage_test_vm("https://initial-empty-reload.test/page.html");
+
+    let setup = vm
+        .eval(
+            r#"
+(() => {
+  const frame = document.createElement('iframe');
+  (document.body || document.documentElement || document).appendChild(frame);
+  const child = frame.contentWindow;
+  const log = [];
+  const optionReads = [];
+  child.navigation.onnavigate = () => log.push('navigate');
+  child.navigation.onnavigatesuccess = () => log.push('navigatesuccess');
+  child.navigation.onnavigateerror = () => log.push('navigateerror');
+
+  const options = {};
+  Object.defineProperties(options, {
+    info: {
+      get() {
+        optionReads.push('info');
+        return 'initial-empty';
+      }
+    },
+    state: {
+      get() {
+        optionReads.push('state');
+        return { initialEmpty: true };
+      }
+    }
+  });
+  const result = child.navigation.reload(options);
+  result.committed.then(
+    () => log.push('committed:fulfilled'),
+    () => log.push('committed:rejected')
+  );
+  result.finished.then(
+    () => log.push('finished:fulfilled'),
+    () => log.push('finished:rejected')
+  );
+  child.location.reload();
+  child.history.go(0);
+  Promise.resolve().then(() => log.push('checkpoint'));
+  globalThis.__initialEmptyReloadFrame = frame;
+  globalThis.__initialEmptyReloadLog = log;
+
+  return JSON.stringify({
+    href: child.location.href,
+    resultRealm: Object.getPrototypeOf(result) === child.Object.prototype,
+    keys: Reflect.ownKeys(result),
+    committedPromise: result.committed instanceof child.Promise,
+    finishedPromise: result.finished instanceof child.Promise,
+    distinctPromises: result.committed !== result.finished,
+    optionReads,
+    log
+  });
+})()
+"#,
+        )
+        .expect("initial-empty reload setup should evaluate");
+
+    assert_eq!(
+        setup,
+        r#"{"href":"about:blank","resultRealm":true,"keys":["committed","finished"],"committedPromise":true,"finishedPromise":true,"distinctPromises":true,"optionReads":["info","state"],"log":[]}"#
+    );
+    assert_eq!(
+        vm.eval("globalThis.__initialEmptyReloadLog.join('|')")
+            .expect("initial-empty reload microtask log should evaluate"),
+        "checkpoint"
+    );
+    assert_eq!(
+        vm.eval("globalThis.__initialEmptyReloadFrame.contentWindow.location.href")
+            .expect("initial-empty reload location should evaluate"),
+        "about:blank"
+    );
+}
+
+#[test]
+fn non_initial_about_blank_iframe_remains_reloadable() {
+    let mut vm = new_storage_test_vm("https://non-initial-blank-reload.test/page.html");
+
+    vm.exec(
+        r#"
+const frame = document.createElement('iframe');
+frame.srcdoc = '<p>first committed document</p>';
+(document.body || document.documentElement || document).appendChild(frame);
+globalThis.__nonInitialBlankReloadFrame = frame;
+"#,
+        None,
+    )
+    .expect("committed child setup should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+
+    vm.exec(
+        r#"
+__nonInitialBlankReloadFrame.src = 'about:blank';
+"#,
+        None,
+    )
+    .expect("non-initial about:blank navigation should evaluate");
+    vm.drain_pending_child_frame_work_for_test();
+    assert_eq!(
+        vm.eval("__nonInitialBlankReloadFrame.contentWindow.location.href")
+            .expect("non-initial about:blank location should evaluate"),
+        "about:blank"
+    );
+
+    vm.exec(
+        r#"
+globalThis.__nonInitialBlankReloadLoads = 0;
+__nonInitialBlankReloadFrame.onload = () => {
+  globalThis.__nonInitialBlankReloadLoads += 1;
+};
+globalThis.__nonInitialBlankNavigationResult =
+  __nonInitialBlankReloadFrame.contentWindow.navigation.reload();
+"#,
+        None,
+    )
+    .expect("non-initial about:blank reload should evaluate");
+    assert!(
+        vm.has_pending_child_navigation_commit_for_test(),
+        "a committed about:blank Document must be admitted to the reload pipeline"
+    );
+
+    vm.drain_pending_child_frame_work_for_test();
+    assert_eq!(
+        vm.eval(
+            r#"[
+  __nonInitialBlankReloadFrame.contentWindow.location.href,
+  __nonInitialBlankReloadLoads
+].join('|')"#,
+        )
+        .expect("non-initial about:blank reload result should evaluate"),
+        "about:blank|1"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn initial_empty_lazy_iframe_reload_preserves_pending_attribute_navigation() {
+    const PARENT_HOST: &str = "lazy-iframe-reload.test";
+
+    let server = StaticHttpServer::spawn(3).await;
+    let parent_url = server.url_for_host(PARENT_HOST, "/page.html");
+    let location_url = server.url_for_host(PARENT_HOST, "/location-child.html");
+    let navigation_url = server.url_for_host(PARENT_HOST, "/navigation-child.html");
+    let history_url = server.url_for_host(PARENT_HOST, "/history-child.html");
+    let loader = static_http_loader([server.resolve_entry(PARENT_HOST)]);
+    let mut vm = new_storage_page_task_executor_test_vm_with_loader(parent_url.as_str(), &loader);
+
+    vm.exec(
+        r#"
+globalThis.__lazyReloadLoads = { location: 0, navigation: 0, history: 0 };
+globalThis.__lazyNavigationReloadSettled = 'pending';
+globalThis.__lazyNavigationReloadOptionReads = [];
+
+const locationFrame = document.createElement('iframe');
+locationFrame.loading = 'lazy';
+locationFrame.hidden = true;
+locationFrame.src = '/location-child.html';
+locationFrame.onload = () => { globalThis.__lazyReloadLoads.location += 1; };
+(document.body || document.documentElement || document).appendChild(locationFrame);
+locationFrame.contentWindow.location.reload();
+locationFrame.hidden = false;
+globalThis.__lazyLocationReloadFrame = locationFrame;
+
+const navigationFrame = document.createElement('iframe');
+navigationFrame.loading = 'lazy';
+navigationFrame.hidden = true;
+navigationFrame.src = '/navigation-child.html';
+navigationFrame.onload = () => { globalThis.__lazyReloadLoads.navigation += 1; };
+(document.body || document.documentElement || document).appendChild(navigationFrame);
+const reloadOptions = {};
+Object.defineProperties(reloadOptions, {
+  state: {
+    get() {
+      globalThis.__lazyNavigationReloadOptionReads.push('state');
+      return { retained: true };
+    }
+  },
+  info: {
+    get() {
+      globalThis.__lazyNavigationReloadOptionReads.push('info');
+      return 'retained';
+    }
+  }
+});
+const reloadResult = navigationFrame.contentWindow.navigation.reload(reloadOptions);
+Promise.all([reloadResult.committed, reloadResult.finished]).then(
+  () => { globalThis.__lazyNavigationReloadSettled = 'fulfilled'; },
+  () => { globalThis.__lazyNavigationReloadSettled = 'rejected'; }
+);
+navigationFrame.hidden = false;
+globalThis.__lazyNavigationReloadFrame = navigationFrame;
+
+const historyFrame = document.createElement('iframe');
+historyFrame.loading = 'lazy';
+historyFrame.hidden = true;
+historyFrame.src = '/history-child.html';
+historyFrame.onload = () => { globalThis.__lazyReloadLoads.history += 1; };
+(document.body || document.documentElement || document).appendChild(historyFrame);
+historyFrame.contentWindow.history.go(0);
+historyFrame.hidden = false;
+globalThis.__lazyHistoryReloadFrame = historyFrame;
+"#,
+        None,
+    )
+    .expect("lazy iframe reload setup should evaluate");
+
+    advance_page_task_executor_until_eval_equals(
+        &mut vm,
+        &loader,
+        "String(__lazyReloadLoads.location === 1 && __lazyReloadLoads.navigation === 1 && __lazyReloadLoads.history === 1)",
+        "true",
+        "all reload entry points should preserve the pending attribute navigation",
+    )
+    .await;
+
+    assert_eq!(
+        vm.eval(
+            r#"[
+  __lazyLocationReloadFrame.contentWindow.location.href,
+  __lazyNavigationReloadFrame.contentWindow.location.href,
+  __lazyHistoryReloadFrame.contentWindow.location.href,
+  __lazyReloadLoads.location,
+  __lazyReloadLoads.navigation,
+  __lazyReloadLoads.history,
+  __lazyNavigationReloadSettled,
+  __lazyNavigationReloadOptionReads.join(',')
+].join('|')"#,
+        )
+        .expect("lazy iframe reload result should evaluate"),
+        format!("{location_url}|{navigation_url}|{history_url}|1|1|1|pending|info,state")
+    );
+    let mut request_targets = server.finish_targets().await;
+    request_targets.sort();
+    assert_eq!(
+        request_targets,
+        vec![
+            "/history-child.html",
+            "/location-child.html",
+            "/navigation-child.html"
+        ]
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn lazy_iframe_location_replace_cancels_pending_attribute_navigation() {
     const PARENT_HOST: &str = "lazy-iframe-replace.test";
