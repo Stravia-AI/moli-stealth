@@ -486,22 +486,15 @@ def _case_timeout(base_seconds: float, case: WptCase) -> float:
     return base_seconds
 
 
-STEP_TIMEOUT_SENSITIVE_CASES = frozenset(
-    {
-        "html/semantics/scripting-1/the-script-element/module/dynamic-import/delay-load-event.html",
-    }
-)
+def _harness_timeout_multiplier(case: WptCase) -> float:
+    """Preserve WPT's own normal/long timeout semantics.
 
+    The benchmark's outer case deadline is transport and cleanup headroom. It
+    must not stretch testharness.js timers, or a test that should report a WPT
+    timeout can keep an engine busy until the outer deadline instead.
+    """
 
-def _harness_timeout_multiplier(
-    case_timeout_seconds: float,
-    default_harness_timeout_seconds: float,
-    case_path: str | None = None,
-) -> float:
-    case_path = case_path.split("?", 1)[0].split("#", 1)[0] if case_path else None
-    if case_path in STEP_TIMEOUT_SENSITIVE_CASES:
-        return 1.0
-    return max(1.0, case_timeout_seconds / default_harness_timeout_seconds)
+    return max(1.0, case.timeout_multiplier)
 
 
 def _is_layout_profile(profile: str) -> bool:
@@ -683,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Fixture server is started lazily (we need it before ANY engine runs).
-    from .server import DEFAULT_TESTHARNESS_TIMEOUT_SECONDS, WptFixtureServer
+    from .server import WptFixtureServer
 
     started_at = time.perf_counter()
     engine_results: dict[str, list[dict[str, Any]]] = {}
@@ -724,17 +717,10 @@ def main(argv: list[str] | None = None) -> int:
             engine_case_timeout = WPT_CROSS_CASE_TIMEOUT_SECONDS
             server.set_harness_timeout_multipliers(
                 {
-                    case.case_path: _harness_timeout_multiplier(
-                        _case_timeout(engine_case_timeout, case),
-                        DEFAULT_TESTHARNESS_TIMEOUT_SECONDS,
-                        case.case_path,
-                    )
+                    case.case_path: _harness_timeout_multiplier(case)
                     for case in cases
                 },
-                default_multiplier=_harness_timeout_multiplier(
-                    engine_case_timeout,
-                    DEFAULT_TESTHARNESS_TIMEOUT_SECONDS,
-                ),
+                default_multiplier=1.0,
             )
             cases_for_engine = [
                 _cdp_case_run(
@@ -776,11 +762,7 @@ def main(argv: list[str] | None = None) -> int:
                         case.case_path,
                         _url_for_case_origin(server, case.case_path, external=external),
                         _case_timeout(engine_case_timeout, case),
-                        _harness_timeout_multiplier(
-                            _case_timeout(engine_case_timeout, case),
-                            DEFAULT_TESTHARNESS_TIMEOUT_SECONDS,
-                            case.case_path,
-                        ),
+                        _harness_timeout_multiplier(case),
                     )
                     for case in cases
                 ]
@@ -789,11 +771,7 @@ def main(argv: list[str] | None = None) -> int:
                         case.case_path,
                         _url_for_case_origin(server, case.case_path, external=external),
                         _case_timeout(engine_case_timeout, case),
-                        _harness_timeout_multiplier(
-                            _case_timeout(engine_case_timeout, case),
-                            DEFAULT_TESTHARNESS_TIMEOUT_SECONDS,
-                            case.case_path,
-                        ),
+                        _harness_timeout_multiplier(case),
                     )
                     for case in scheduled_cases
                 ]

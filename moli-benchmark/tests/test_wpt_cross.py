@@ -687,10 +687,14 @@ class WptCrossTests(unittest.TestCase):
             ],
         )
 
-    def test_harness_timeout_multiplier_never_shortens_wpt_delays(self) -> None:
-        self.assertEqual(_harness_timeout_multiplier(8.0, 10.0), 1.0)
-        self.assertEqual(_harness_timeout_multiplier(10.0, 10.0), 1.0)
-        self.assertEqual(_harness_timeout_multiplier(50.0, 10.0), 5.0)
+    def test_harness_timeout_multiplier_uses_wpt_case_metadata(self) -> None:
+        self.assertEqual(_harness_timeout_multiplier(WptCase("normal.html")), 1.0)
+        self.assertEqual(
+            _harness_timeout_multiplier(
+                WptCase("long.html", timeout_multiplier=LONG_TIMEOUT_MULTIPLIER)
+            ),
+            LONG_TIMEOUT_MULTIPLIER,
+        )
 
     def test_lightpanda_cli_fetch_keeps_configured_timeout(self) -> None:
         command = _lightpanda_fetch(Path("/bin/lightpanda"), "http://127.0.0.1:8000/case.html", 30.0)
@@ -1606,19 +1610,19 @@ class WptCrossTests(unittest.TestCase):
                         "secure-contexts/basic-shared-worker.html",
                         "http://[2001:db8::1]:9000/secure-contexts/basic-shared-worker.html",
                         WPT_CROSS_CASE_TIMEOUT_SECONDS,
-                        WPT_CROSS_CASE_TIMEOUT_SECONDS / 10.0,
+                        1.0,
                     ),
                     (
                         "digital-credentials/non-secure-contexts.http.html",
                         "http://[2001:db8::1]:9000/digital-credentials/non-secure-contexts.http.html",
                         WPT_CROSS_CASE_TIMEOUT_SECONDS,
-                        WPT_CROSS_CASE_TIMEOUT_SECONDS / 10.0,
+                        1.0,
                     ),
                     (
                         "WebCryptoAPI/digest/digest.https.html",
                         "http://127.0.0.1:8000/WebCryptoAPI/digest/digest.https.html",
                         WPT_CROSS_CASE_TIMEOUT_SECONDS,
-                        WPT_CROSS_CASE_TIMEOUT_SECONDS / 10.0,
+                        1.0,
                     )
                 ]
             ],
@@ -1952,7 +1956,7 @@ class WptCrossTests(unittest.TestCase):
         self.assertEqual(summary["profile"], "layout-testharness")
         self.assertEqual(summary["viewport"]["width"], 800)
 
-    def test_main_preserves_harness_multiplier_except_step_timeout_sensitive_cases(self) -> None:
+    def test_main_uses_wpt_harness_multipliers_independent_of_outer_deadline(self) -> None:
         calls = []
 
         class FakeServer:
@@ -2045,21 +2049,21 @@ class WptCrossTests(unittest.TestCase):
             [
                 (
                     {
-                        "normal.html": 12.0,
-                        "long.html": 12.0,
+                        "normal.html": 1.0,
+                        "long.html": LONG_TIMEOUT_MULTIPLIER,
                         "html/semantics/scripting-1/the-script-element/module/dynamic-import/delay-load-event.html": 1.0,
                     },
-                    12.0,
+                    1.0,
                 )
             ],
         )
 
-    def test_harness_timeout_multiplier_keeps_dynamic_import_step_timeout_unscaled(self) -> None:
+    def test_normal_dynamic_import_uses_normal_wpt_timeout(self) -> None:
         case = WptCase(
             "html/semantics/scripting-1/the-script-element/module/dynamic-import/delay-load-event.html"
         )
 
-        self.assertEqual(_harness_timeout_multiplier(30.0, 10.0, case.case_path), 1.0)
+        self.assertEqual(_harness_timeout_multiplier(case), 1.0)
 
     def test_parser_rejects_removed_timeout_flags_and_legacy_parallelism(self) -> None:
         parser = _build_parser()
@@ -5081,7 +5085,7 @@ test(() => {}, "ok");
         self.assertIsNone(result.error)
         self.assertEqual(result.payload_source, "completion-callback")
 
-    def test_cli_runner_uses_process_pool_even_for_single_parallelism(self) -> None:
+    def test_cli_runner_defaults_harness_timeout_independent_of_process_deadline(self) -> None:
         class FakeFuture:
             def __init__(self, result: CaseResult) -> None:
                 self._result = result
@@ -5151,11 +5155,16 @@ test(() => {}, "ok");
                 fixture_server=fixture_server,
                 cases=[
                     (
-                        "case.html",
-                        "http://[2001:db8::1]:9000/case.html",
-                        12.0,
-                        1.2,
-                    )
+                        "normal.html",
+                        "http://[2001:db8::1]:9000/normal.html",
+                        120.0,
+                    ),
+                    (
+                        "long.html",
+                        "http://[2001:db8::1]:9000/long.html",
+                        120.0,
+                        LONG_TIMEOUT_MULTIPLIER,
+                    ),
                 ],
                 parallelism=1,
                 progress_every=0,
@@ -5164,11 +5173,15 @@ test(() => {}, "ok");
         pool = FakeProcessPoolExecutor.instances[0]
         self.assertEqual(pool.max_workers, 1)
         self.assertEqual(pool.mp_context.get_start_method(), "spawn")
-        self.assertEqual(pool.submitted[0][1].case_path, "case.html")
+        self.assertEqual(pool.submitted[0][1].case_path, "normal.html")
         self.assertTrue(pool.submitted[0][1].external)
-        self.assertEqual(pool.submitted[0][1].timeout_seconds, 12.0)
-        self.assertEqual(pool.submitted[0][1].harness_timeout_multiplier, 1.2)
-        self.assertEqual(result.cases[0].status, "pass")
+        self.assertEqual(pool.submitted[0][1].timeout_seconds, 120.0)
+        self.assertEqual(pool.submitted[0][1].harness_timeout_multiplier, 1.0)
+        self.assertEqual(
+            pool.submitted[1][1].harness_timeout_multiplier,
+            LONG_TIMEOUT_MULTIPLIER,
+        )
+        self.assertTrue(all(case.status == "pass" for case in result.cases))
         self.assertEqual(result.shutdown_info["scheduler"], "process-pool")
 
     def test_moli_cli_worker_appends_hardcoded_wpt_user_agent(self) -> None:

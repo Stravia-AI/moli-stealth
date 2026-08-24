@@ -35,7 +35,7 @@ from ..versions import sha256_file
 from .engine import EngineDriver, build_driver
 from .runner import CaseResult, EngineRunResult, classify_payload
 from .runner import FINAL_PAYLOAD_SOURCES
-from .server import DEFAULT_TESTHARNESS_TIMEOUT_SECONDS, WptFixtureServer
+from .server import WptFixtureServer
 
 CaseRun = tuple[str, str] | tuple[str, str, float] | tuple[str, str, float, float]
 MAX_RECORDED_STDERR_CHARS = 2000
@@ -119,10 +119,6 @@ def _run_cli_subprocess(
 
 def _bridge_key_for_case(case_path: str) -> str:
     return case_path if case_path.startswith("/") else "/" + case_path
-
-
-def _default_harness_timeout_multiplier(timeout_seconds: float) -> float:
-    return max(1.0, timeout_seconds / DEFAULT_TESTHARNESS_TIMEOUT_SECONDS)
 
 
 class _BenchPayloadParser(HTMLParser):
@@ -411,17 +407,12 @@ def run_engine_on_cases_cli(
             return case[0], external, case[2], case[3]
         if len(case) == 3:
             timeout_seconds = case[2]
-            return (
-                case[0],
-                external,
-                timeout_seconds,
-                _default_harness_timeout_multiplier(timeout_seconds),
-            )
+            return (case[0], external, timeout_seconds, 1.0)
         return (
             case[0],
             external,
             case_timeout_seconds,
-            _default_harness_timeout_multiplier(case_timeout_seconds),
+            1.0,
         )
 
     results_by_path: dict[str, CaseResult] = {}
