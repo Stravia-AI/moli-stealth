@@ -14,7 +14,8 @@ from ..serve import start_moli_serve, stop_moli_serve, wait_for_cdp_server
 
 
 SCREENSHOT_UNSUPPORTED = (
-    "Page.captureScreenshot is not supported: renderer screenshots are not implemented."
+    "Page.captureScreenshot is not supported: renderer layout is disabled; "
+    "start Moli with --layout."
 )
 SCREENCAST_UNSUPPORTED = (
     "Page.startScreencast is not supported: renderer layout is disabled."
