@@ -2009,7 +2009,10 @@ impl<'a> TElement for StyleElement<'a> {
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
         super::presentation::synthesize_svg_presentational_hints(
+            self.host(),
+            self.handle(),
             self.element(),
+            self.as_query().read_quirks_mode(),
             &self.style_state().shared_lock,
             hints,
         );

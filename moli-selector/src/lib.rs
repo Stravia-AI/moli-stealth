@@ -56,7 +56,7 @@ pub use stylo::{
     StyloSourceStyleInvalidationTargetResultRecord, StyloStateInvalidationRoot,
     StyloStyleInvalidationQuery, StyloStyleInvalidationSnapshot,
     StyloStyleInvalidationSnapshotAttribute, StyloStyleSourceScope,
-    StyloStylesheetSourceScopeFallbackInput,
+    StyloStylesheetSourceScopeFallbackInput, is_svg_presentation_attribute_name,
     stylo_attribute_change_can_skip_fallback_without_dependency,
     stylo_attribute_change_can_use_retained_invalidator, stylo_element_dependency_snapshot,
     stylo_fallback_roots_plan, stylo_focus_change_invalidation_roots,

@@ -163,12 +163,14 @@ pub(crate) enum StyleAttributeImpact {
 
 impl StyleAttributeImpact {
     pub(crate) fn for_attribute_name(name: &str) -> Self {
-        match name.to_ascii_lowercase().as_str() {
+        let name = name.to_ascii_lowercase();
+        match name.as_str() {
             "style" | "class" | "id" => Self::ComputedStyle,
             "hidden" | "width" | "height" | "cols" | "rows" | "size" | "value" | "border"
             | "slot" | "align" => Self::LayoutMetric,
             "href" | "rel" | "media" | "blocking" | "disabled" => Self::StylesheetLinkage,
             "type" => Self::LayoutMetricAndStylesheetLinkage,
+            _ if moli_selector::is_svg_presentation_attribute_name(&name) => Self::LayoutMetric,
             _ => Self::None,
         }
     }

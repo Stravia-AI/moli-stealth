@@ -2540,6 +2540,13 @@ fn style_attribute_impact_classifies_dom_and_stylesheet_inputs() {
     assert!(!StyleAttributeImpact::for_attribute_name("width").changes_computed_style());
     assert!(!StyleAttributeImpact::for_attribute_name("width").changes_stylesheet_linkage());
 
+    for attribute in ["fill", "stroke", "stroke-width", "paint-order"] {
+        assert!(
+            StyleAttributeImpact::for_attribute_name(attribute).affects_layout_metric(),
+            "SVG presentation attribute {attribute} must invalidate computed paint"
+        );
+    }
+
     assert!(!StyleAttributeImpact::for_attribute_name("href").affects_layout_metric());
     assert!(StyleAttributeImpact::for_attribute_name("href").changes_stylesheet_linkage());
 

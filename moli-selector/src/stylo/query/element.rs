@@ -402,7 +402,10 @@ impl<'a> TElement for QueryElement<'a> {
         V: selectors::sink::Push<style::applicable_declarations::ApplicableDeclarationBlock>,
     {
         super::super::presentation::synthesize_svg_presentational_hints(
+            self.host,
+            self.handle,
             self.element(),
+            self.read_quirks_mode(),
             self.shared_lock,
             hints,
         );
