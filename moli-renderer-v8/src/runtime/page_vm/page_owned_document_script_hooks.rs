@@ -78,7 +78,7 @@ impl PageOwnedDocumentScriptHooks for MainPageOwnedDocumentScriptHooks<'_, '_> {
     ) -> Pin<Box<dyn Future<Output = PageOwnedDocumentScriptBodyExecution> + 'a>> {
         Box::pin(async move {
             let local_executor = self.page_vm.local_executor.clone();
-            let script_execution_disabled = self.page_vm.script_execution_disabled();
+            let script_execution_disabled = !self.page_vm.main_document_scripting_enabled();
             let outcome = execute_prepared_script_on_script_execution_lane(
                 &local_executor,
                 self.loader,

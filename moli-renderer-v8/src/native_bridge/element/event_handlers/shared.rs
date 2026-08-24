@@ -76,6 +76,10 @@ fn compile_event_attribute_handler_for_owner_with_context<'s>(
     arguments: &[v8::Local<'s, v8::String>],
     context_extensions: &[v8::Local<'s, v8::Object>],
 ) -> Option<v8::Local<'s, v8::Function>> {
+    let host = unsafe { &*host_ptr };
+    if !host.owner_scripting_enabled(owner) {
+        return None;
+    }
     if !unsafe { &mut *host_ptr }.allows_inline_event_handler_by_csp(scope, owner, source) {
         return None;
     }

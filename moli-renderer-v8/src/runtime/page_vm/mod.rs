@@ -4541,7 +4541,7 @@ impl PageVm {
         request_url: &Url,
         fetch_metadata: &crate::planning::ScriptFetchMetadata,
     ) -> ScannedScriptAdmission {
-        if self.script_execution_disabled() {
+        if !self.main_document_scripting_enabled() {
             return ScannedScriptAdmission::DeferredToParser(
                 ScannedScriptDeferral::ScriptExecutionDisabled,
             );
@@ -5029,6 +5029,10 @@ impl PageVm {
 
     pub(super) fn script_execution_disabled(&self) -> bool {
         self.vm().script_execution_disabled()
+    }
+
+    pub(super) fn main_document_scripting_enabled(&self) -> bool {
+        self.vm().document_runtime.document_scripting_enabled()
     }
 
     pub(crate) fn script_execution_control(

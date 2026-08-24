@@ -142,7 +142,7 @@ mod tests {
 
     #[test]
     fn enqueue_post_parse_lifecycle_page_owned_work_routes_through_document_runtime_owner() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
@@ -206,7 +206,7 @@ mod tests {
 
     #[test]
     fn prepare_post_parse_lifecycle_page_owned_work_injects_boundaries_around_trailing_work() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
@@ -241,7 +241,7 @@ mod tests {
     #[test]
     fn prepare_post_parse_lifecycle_page_owned_work_keeps_runtime_async_tail_after_domcontentloaded()
      {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn stale_parser_deferred_marker_without_owned_queue_cannot_block_dcl() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
@@ -476,7 +476,7 @@ mod tests {
 
     #[test]
     fn document_write_owned_handle_binding_uses_document_write_source() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script src='/written.js'></script></head><body></body></html>"
                 .to_owned(),
@@ -512,7 +512,7 @@ mod tests {
 
     #[test]
     fn inline_script_load_policy_does_not_require_a_host_handle() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script>window.inline = true;</script></head><body></body></html>"
                 .to_owned(),
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn parser_owned_module_failure_planning_uses_explicitly_bound_parser_handle() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script type='module' src='/app.mjs'></script></head><body></body></html>"
                 .to_owned(),
@@ -580,7 +580,7 @@ mod tests {
         expected = "parser-owned script should bind host handle before failure planning"
     )]
     fn parser_created_module_failure_planning_production_path_rejects_missing_handle() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script type='module' src='/app.mjs'></script></head><body></body></html>"
                 .to_owned(),
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn non_parser_created_module_failure_planning_does_not_synthesize_parser_owned_handle() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -651,7 +651,7 @@ mod tests {
 
     #[test]
     fn runtime_owned_in_order_prepared_script_does_not_wait_for_blocking_stylesheets() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -688,7 +688,7 @@ mod tests {
 
     #[test]
     fn parser_owned_defer_prepared_script_waits_for_blocking_stylesheets() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -725,7 +725,7 @@ mod tests {
 
     #[test]
     fn runtime_owned_in_order_prepared_script_does_not_wait_until_domcontentloaded() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -762,7 +762,7 @@ mod tests {
 
     #[test]
     fn runtime_owned_async_prepared_script_does_not_wait_until_domcontentloaded() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -799,7 +799,7 @@ mod tests {
 
     #[test]
     fn runtime_owned_module_prepared_script_does_not_wait_until_domcontentloaded() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -837,7 +837,7 @@ mod tests {
 
     #[test]
     fn domcontentloaded_state_does_not_reintroduce_runtime_owned_in_order_wait() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -876,7 +876,7 @@ mod tests {
 
     #[test]
     fn parser_owned_script_event_planning_resolves_the_preparation_time_handle() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script src='/missing.js'></script></head><body></body></html>"
                 .to_owned(),
@@ -896,7 +896,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "parser-owned handle binding requires a parser-created <script>")]
     fn parser_owned_handle_binding_rejects_non_parser_created_script() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );

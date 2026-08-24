@@ -589,7 +589,7 @@ mod tests {
 
     #[test]
     fn parser_script_classification_uses_language_when_type_is_absent() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><script language='javascript'>ok()</script><script language=' javascript '>bad()</script>".to_owned(),
         );
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn parser_script_classification_applies_legacy_for_event_gate() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><script for=' window ' event=' onload() '>ok()</script><script for='window' event='onclick'>bad()</script>".to_owned(),
         );
@@ -632,7 +632,7 @@ mod tests {
 
     #[test]
     fn parser_script_classification_applies_nomodule_only_to_classic_scripts() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><script nomodule>legacy()</script><script nomodule type='module'>modern()</script>"
                 .to_owned(),
@@ -655,7 +655,7 @@ mod tests {
 
     #[test]
     fn parser_svg_script_ignores_html_only_classification_and_scheduling_attributes() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><svg><script nomodule defer language='application/json' for='not-window' event='onclick' href='/svg.js'></script></svg>"
                 .to_owned(),
@@ -678,7 +678,7 @@ mod tests {
     #[test]
     fn empty_external_script_src_is_not_resolved_to_document_url() {
         let final_url = Url::parse("https://example.test/page.html").unwrap();
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             final_url.clone(),
             "<!doctype html><script src=\"\"></script>".to_owned(),
         );
@@ -700,7 +700,7 @@ mod tests {
 
     #[test]
     fn parser_script_source_uses_direct_text_children_only() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -724,7 +724,7 @@ mod tests {
     #[test]
     fn external_script_src_resolves_against_document_base_url() {
         let final_url = Url::parse("https://example.test/fetch-src/alpha/base.html").unwrap();
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             final_url.clone(),
             "<!doctype html><base href=\"../beta/\"><script src=\"test.js\"></script>".to_owned(),
         );

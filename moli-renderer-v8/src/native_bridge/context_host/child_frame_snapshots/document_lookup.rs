@@ -31,11 +31,13 @@ impl JsContextHost {
             let Some(snapshot) = self.child_browsing_context_snapshot_markup(handle) else {
                 continue;
             };
+            let scripting_enabled = self.child_browsing_context_scripting_enabled(handle);
             if let Some(snapshot) = self.find_detached_child_document_snapshot_by_frame_id(
                 &parent_frame_id,
                 frame_id,
                 &snapshot.url,
                 &snapshot.markup,
+                scripting_enabled,
                 0,
             ) {
                 return Some(snapshot);
@@ -79,13 +81,15 @@ impl JsContextHost {
         target_frame_id: &str,
         document_url: &Url,
         markup: &str,
+        scripting_enabled: bool,
         depth: usize,
     ) -> Option<ChildBrowsingContextDocumentSnapshot> {
         if depth >= MAX_CHILD_FRAME_TREE_DEPTH {
             return None;
         }
 
-        let document = crate::parser::HtmlParser.parse(document_url.clone(), markup.to_owned());
+        let document = crate::parser::HtmlParser::with_scripting_enabled(scripting_enabled)
+            .parse(document_url.clone(), markup.to_owned());
         let document_base_url = document
             .document()
             .map(|doc| doc.base_url().clone())
@@ -96,6 +100,7 @@ impl JsContextHost {
             &document_base_url,
             parent_frame_id,
             target_frame_id,
+            scripting_enabled,
             depth,
         )
     }
@@ -107,6 +112,7 @@ impl JsContextHost {
         document_base_url: &Url,
         parent_frame_id: &str,
         target_frame_id: &str,
+        document_scripting_enabled: bool,
         depth: usize,
     ) -> Option<ChildBrowsingContextDocumentSnapshot> {
         let mut ordinal = 0usize;
@@ -116,6 +122,7 @@ impl JsContextHost {
             document_base_url,
             parent_frame_id,
             target_frame_id,
+            document_scripting_enabled,
             depth,
             &mut ordinal,
         )
@@ -128,6 +135,7 @@ impl JsContextHost {
         document_base_url: &Url,
         parent_frame_id: &str,
         target_frame_id: &str,
+        document_scripting_enabled: bool,
         depth: usize,
         ordinal: &mut usize,
     ) -> Option<ChildBrowsingContextDocumentSnapshot> {
@@ -144,6 +152,12 @@ impl JsContextHost {
                     &bootstrap,
                     document_base_url,
                 )?;
+                let scripting_enabled = Self::detached_child_document_scripting_enabled(
+                    document,
+                    child,
+                    document_scripting_enabled,
+                    &snapshot,
+                );
                 if frame_id == target_frame_id {
                     return Some(ChildBrowsingContextDocumentSnapshot {
                         url: snapshot.url.as_str().to_owned(),
@@ -155,6 +169,7 @@ impl JsContextHost {
                     target_frame_id,
                     &snapshot.url,
                     &snapshot.markup,
+                    scripting_enabled,
                     depth + 1,
                 ) {
                     return Some(found);
@@ -167,6 +182,7 @@ impl JsContextHost {
                 document_base_url,
                 parent_frame_id,
                 target_frame_id,
+                document_scripting_enabled,
                 depth,
                 ordinal,
             ) {

@@ -625,11 +625,13 @@ mod tests {
     #[test]
     fn parser_insertion_context_does_not_require_current_script() {
         let url = Url::parse("https://example.com/").unwrap();
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             url.clone(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
-        let stream = Rc::new(RefCell::new(HtmlParser.start_document(url)));
+        let stream = Rc::new(RefCell::new(
+            HtmlParser::SCRIPTING_ENABLED.start_document(url),
+        ));
         let mut runtime = DocumentRuntime::new(&document);
 
         runtime.set_current_script_context(CurrentScriptContextSpec {
@@ -753,7 +755,7 @@ mod tests {
 
     #[test]
     fn runtime_binding_queue_is_drained_once() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -777,7 +779,7 @@ mod tests {
 
     #[test]
     fn document_replacement_parser_blocker_tracks_the_actual_input_stream() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -800,7 +802,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_modulepreloads_use_as_module_type_for_keys() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             concat!(
                 "<!doctype html><html><head>",
@@ -888,7 +890,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_modulepreload_as_values_match_wpt_matrix() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             modulepreload_as_matrix_markup("https://cdn.example/assets/"),
         );
@@ -945,7 +947,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_modulepreload_invalid_as_warns_each_link_once() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             concat!(
                 "<!doctype html><html><head>",
@@ -1032,7 +1034,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_modulepreloads_ignore_fetchpriority_hint() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             concat!(
                 "<!doctype html><html><head>",
@@ -1063,7 +1065,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_modulepreloads_skip_non_matching_media() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             concat!(
                 "<!doctype html><html><head>",
@@ -1109,7 +1111,7 @@ mod tests {
 
     #[test]
     fn parser_discovered_images_mark_first_five_non_small_priority_boost_candidates() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/pages/index.html").unwrap(),
             concat!(
                 "<!doctype html><html><body>",
@@ -1171,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn domcontentloaded_overtakes_pending_connected_style_load() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1209,7 +1211,7 @@ mod tests {
 
     #[test]
     fn parse_time_lifecycle_page_task_materializes_as_page_owned_work() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
         );
@@ -1227,7 +1229,7 @@ mod tests {
 
     #[test]
     fn ready_document_processing_wake_allows_domcontentloaded_past_pending_connected_style_load() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1258,7 +1260,7 @@ mod tests {
 
     #[test]
     fn parse_time_pending_processing_ignores_pending_connected_style_load() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1288,7 +1290,7 @@ mod tests {
 
     #[test]
     fn pending_connected_style_queue_is_not_window_load_readiness_fact_source() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1321,7 +1323,7 @@ mod tests {
 
     #[tokio::test]
     async fn domcontentloaded_is_not_blocked_by_post_domcontentloaded_runtime_backlog() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1340,7 +1342,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_parse_owner_driver_step_keeps_domcontentloaded_ready_with_runtime_backlog() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1363,7 +1365,7 @@ mod tests {
 
     #[tokio::test]
     async fn ready_connected_style_load_does_not_overtake_domcontentloaded() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1416,7 +1418,7 @@ mod tests {
 
     #[tokio::test]
     async fn ready_connected_style_load_dispatches_while_defer_source_is_pending() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1468,7 +1470,7 @@ mod tests {
     }
     #[tokio::test(flavor = "current_thread")]
     async fn parser_owned_pre_domcontentloaded_task_waits_behind_defer_like_front() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1497,7 +1499,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn post_parse_owner_dispatches_ready_connected_style_before_reporting_script_source_wait()
     {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -1554,7 +1556,7 @@ mod tests {
 
     #[test]
     fn parser_owned_pre_domcontentloaded_delivery_drains_ahead_of_window_load() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1582,7 +1584,7 @@ mod tests {
 
     #[test]
     fn parser_owned_pre_domcontentloaded_delivery_keeps_owner_source_behind_run_record_front() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1623,7 +1625,7 @@ mod tests {
     #[test]
     fn parser_owned_pre_domcontentloaded_delivery_preserves_owner_order_ahead_of_domcontentloaded()
     {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1656,7 +1658,7 @@ mod tests {
 
     #[test]
     fn parser_owned_pre_domcontentloaded_owner_source_drains_when_queue_is_empty() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1680,7 +1682,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_parse_owner_driver_step_keeps_non_window_tail_ready_with_runtime_backlog() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1706,7 +1708,7 @@ mod tests {
 
     #[test]
     fn parser_owned_pre_domcontentloaded_task_overtakes_other_post_parse_front() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1736,7 +1738,7 @@ mod tests {
     #[test]
     fn post_parse_page_task_pop_blocker_distinguishes_parser_owned_source_from_window_load_backlog()
     {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1766,7 +1768,7 @@ mod tests {
 
     #[test]
     fn post_parse_owner_readiness_keeps_domcontentloaded_unblocked_with_parser_owned_source() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         );
@@ -1801,7 +1803,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_parse_owner_driver_step_awaits_when_window_load_is_blocked_by_runtime_backlog() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),

@@ -12066,7 +12066,7 @@ fn contextual_fragment_document_element_fragment_append_runs_scripts() {
 }
 
 #[test]
-fn sandboxed_contextual_fragment_parses_noscript_when_scripting_disabled() {
+fn sandboxed_fragment_parsers_parse_noscript_when_scripting_disabled() {
     let mut vm = new_storage_test_vm("https://sandbox-contextual-fragment-noscript.test/");
 
     let result = vm
@@ -12078,21 +12078,215 @@ fn sandboxed_contextual_fragment_parses_noscript_when_scripting_disabled() {
   (document.body || document.documentElement || document).appendChild(iframe);
   const doc = iframe.contentDocument;
   iframe.contentWindow.didRunScript = false;
-  const html =
+  const contextualHtml =
     "<script>window.didRunScript = true<\/script>" +
-    "<noscript><div id=nos></div>";
-  const fragment = doc.createRange().createContextualFragment(html);
+    "<noscript><div id=contextual-nos></div>";
+  const fragment = doc.createRange().createContextualFragment(contextualHtml);
   doc.body.appendChild(fragment);
+
+  const inner = doc.createElement("div");
+  inner.innerHTML = "<noscript><div id=inner-nos></div></noscript>";
+  doc.body.appendChild(inner);
+
+  const unsafe = doc.createElement("div");
+  unsafe.setHTMLUnsafe("<noscript><div id=unsafe-nos></div></noscript>");
+  doc.body.appendChild(unsafe);
+
   return [
     iframe.contentWindow.didRunScript,
-    doc.getElementById("nos") !== null
+    doc.getElementById("contextual-nos") !== null,
+    doc.getElementById("inner-nos") !== null,
+    doc.getElementById("unsafe-nos") !== null
   ].join("|");
 })()
 "#,
         )
-        .expect("sandboxed contextual fragment noscript probe should evaluate");
+        .expect("sandboxed fragment noscript probe should evaluate");
 
-    assert_eq!(result, "false|true");
+    assert_eq!(result, "false|true|true|true");
+}
+
+#[test]
+fn globally_disabled_fragment_parsers_parse_noscript_markup() {
+    let mut vm = new_storage_test_vm("https://disabled-fragment-noscript.test/");
+    vm.set_script_execution_disabled(true);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body || document.documentElement || document;
+  const inner = document.createElement("div");
+  inner.innerHTML = "<noscript><span id=inner-fallback></span></noscript>";
+  root.appendChild(inner);
+
+  const unsafe = document.createElement("div");
+  unsafe.setHTMLUnsafe("<noscript><span id=unsafe-fallback></span></noscript>");
+  root.appendChild(unsafe);
+
+  return [
+    document.getElementById("inner-fallback") !== null,
+    document.getElementById("unsafe-fallback") !== null
+  ].join("|");
+})()
+"#,
+        )
+        .expect("globally disabled fragment noscript probe should evaluate");
+
+    assert_eq!(result, "true|true");
+}
+
+#[test]
+fn response_csp_sandbox_disables_top_document_scripting_semantics() {
+    let mut vm = new_storage_test_vm("https://response-sandbox-noscript.test/");
+    vm.set_response_content_security_policies(&["sandbox".to_owned()]);
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body || document.documentElement || document;
+  const inner = document.createElement("div");
+  inner.innerHTML = "<noscript><span id=inner-fallback></span></noscript>";
+  root.appendChild(inner);
+
+  globalThis.__sandboxDynamicScriptRan = false;
+  const script = document.createElement("script");
+  script.textContent = "globalThis.__sandboxDynamicScriptRan = true";
+  root.appendChild(script);
+
+  globalThis.__sandboxHandlerRan = false;
+  const button = document.createElement("button");
+  button.setAttribute("onclick", "globalThis.__sandboxHandlerRan = true");
+  root.appendChild(button);
+  button.click();
+
+  const beforeOpen = [
+    document.getElementById("inner-fallback") !== null,
+    globalThis.__sandboxDynamicScriptRan,
+    globalThis.__sandboxHandlerRan
+  ];
+
+  document.open();
+  document.write(
+    "<!doctype html><noscript><main id=document-write-fallback></main></noscript>"
+  );
+  document.close();
+  return beforeOpen.concat(
+    document.getElementById("document-write-fallback") !== null
+  ).join("|");
+})()
+"#,
+        )
+        .expect("response CSP sandbox scripting probe should evaluate");
+
+    assert_eq!(result, "true|false|false|true");
+}
+
+#[tokio::test]
+async fn detached_frame_tree_snapshot_reuses_each_child_document_scripting_policy() {
+    let mut enabled_vm = new_storage_test_vm("https://enabled-detached-frame-tree-noscript.test/");
+
+    enabled_vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body || document.documentElement || document;
+  const frame = document.createElement("iframe");
+  frame.id = "enabled";
+  frame.srcdoc =
+    '<noscript><base href="https://enabled-fallback-base.test/"><iframe id="enabled-fallback" name="enabled-fallback"></iframe></noscript>';
+  root.appendChild(frame);
+})()
+"#,
+        )
+        .expect("scripting-enabled detached frame-tree fixture should evaluate");
+    expect_one_child_frame_task_source(
+        &mut enabled_vm,
+        ChildFrameSemanticTurnKind::NavigationCommit,
+        "enabled srcdoc commit",
+    )
+    .await;
+
+    let enabled_handle = enabled_vm
+        .document_runtime
+        .dom_host()
+        .element_handle_by_id("enabled")
+        .expect("scripting-enabled iframe owner");
+    assert_ne!(
+        enabled_vm
+            ._context_host
+            .borrow()
+            .child_browsing_context_base_url(enabled_handle)
+            .as_ref()
+            .map(Url::as_str),
+        Some("https://enabled-fallback-base.test/"),
+        "scripting-enabled noscript contents must not install a fallback base element"
+    );
+    let enabled_tree = enabled_vm.child_browsing_context_frame_tree_snapshot_for_protocol();
+    assert_eq!(enabled_tree.len(), 1);
+    assert!(
+        enabled_tree[0].child_frames.is_empty(),
+        "scripting-enabled noscript contents must remain text in snapshot fallback parsing"
+    );
+
+    let mut sandboxed_vm =
+        new_storage_test_vm("https://sandboxed-detached-frame-tree-noscript.test/");
+    sandboxed_vm
+        .eval(
+            r#"
+(() => {
+  const root = document.body || document.documentElement || document;
+  const frame = document.createElement("iframe");
+  frame.id = "sandboxed";
+  frame.setAttribute("sandbox", "allow-same-origin");
+  frame.srcdoc =
+    '<noscript><base href="https://sandboxed-fallback-base.test/"><iframe id="sandboxed-fallback" name="sandboxed-fallback"></iframe></noscript>';
+  root.appendChild(frame);
+})()
+"#,
+        )
+        .expect("sandboxed detached frame-tree fixture should evaluate");
+    expect_one_child_frame_task_source(
+        &mut sandboxed_vm,
+        ChildFrameSemanticTurnKind::NavigationCommit,
+        "sandboxed srcdoc commit",
+    )
+    .await;
+
+    let sandboxed_handle = sandboxed_vm
+        .document_runtime
+        .dom_host()
+        .element_handle_by_id("sandboxed")
+        .expect("sandboxed iframe owner");
+    assert_eq!(
+        sandboxed_vm
+            ._context_host
+            .borrow()
+            .child_browsing_context_base_url(sandboxed_handle)
+            .as_ref()
+            .map(Url::as_str),
+        Some("https://sandboxed-fallback-base.test/"),
+        "script-disallowed noscript contents must contribute their base element"
+    );
+    let sandboxed_tree = sandboxed_vm.child_browsing_context_frame_tree_snapshot_for_protocol();
+    assert_eq!(sandboxed_tree.len(), 1);
+    assert_eq!(
+        sandboxed_tree[0]
+            .child_frames
+            .iter()
+            .map(|frame| frame.owner_element_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("sandboxed-fallback")],
+        "script-disallowed noscript contents must remain markup in snapshot fallback parsing"
+    );
+    let nested_frame_id = sandboxed_tree[0].child_frames[0].frame_id.clone();
+    assert!(
+        sandboxed_vm
+            .child_browsing_context_document_snapshot_by_frame_id(&nested_frame_id)
+            .is_some(),
+        "frame-id lookup must use the same scripting-disabled snapshot parser"
+    );
 }
 
 #[test]

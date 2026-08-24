@@ -46,7 +46,7 @@ pub(super) enum ParserBlockingPreloadDisposition {
 pub(super) struct BufferedDocumentPreloadState {
     pub(super) entries: DocumentScriptPreloadStore,
     document_character_set: String,
-    script_fetch_interception_enabled: bool,
+    script_fetch_requires_owner_admission: bool,
     response_csp_requires_parser_admission: bool,
     owner_wake: Option<RendererOwnerWakeSender>,
     resource_task_runner: Option<crate::network::RendererResourceTaskRunner>,
@@ -195,7 +195,7 @@ impl Default for BufferedDocumentPreloadState {
         Self {
             entries: DocumentScriptPreloadStore::default(),
             document_character_set: "UTF-8".to_owned(),
-            script_fetch_interception_enabled: false,
+            script_fetch_requires_owner_admission: false,
             response_csp_requires_parser_admission: false,
             owner_wake: None,
             resource_task_runner: None,
@@ -316,7 +316,7 @@ impl BufferedDocumentPreloadState {
         loader: &ResourceRequestClient,
         service_worker_context: Option<&ServiceWorkerScriptPreloadContext>,
     ) {
-        let requires_owner_admission = self.script_fetch_interception_enabled
+        let requires_owner_admission = self.script_fetch_requires_owner_admission
             || self.response_csp_requires_parser_admission
             || self.meta_csp_preload_gate.has_seen_meta_csp();
         let (owner_admitted, legacy_preloads): (Vec<_>, Vec<_>) =
@@ -336,8 +336,8 @@ impl BufferedDocumentPreloadState {
         self.document_character_set = document_character_set.to_owned();
     }
 
-    pub(super) fn set_script_fetch_interception_enabled(&mut self, enabled: bool) {
-        self.script_fetch_interception_enabled = enabled;
+    pub(super) fn set_script_fetch_requires_owner_admission(&mut self, required: bool) {
+        self.script_fetch_requires_owner_admission = required;
     }
 
     pub(super) fn set_response_csp_requires_parser_admission(&mut self, required: bool) {

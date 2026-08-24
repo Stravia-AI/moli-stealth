@@ -108,7 +108,7 @@ impl PreparedRuntimeScriptStart {
             dom_host,
             document,
             node,
-            ScriptElementLoaderOptions::default(),
+            ScriptElementLoaderOptions::with_scripting_enabled(true),
         )
     }
 

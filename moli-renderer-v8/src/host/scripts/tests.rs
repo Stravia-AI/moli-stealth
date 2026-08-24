@@ -1,9 +1,11 @@
 use super::{
-    HostScriptScheduler, ModuleFailurePolicy, PreparedRuntimeScriptStart, QueuedScriptFailureKind,
-    RuntimeScriptPreparationContext, RuntimeScriptStartDecision, ScriptEventDispatchPolicy,
+    HostScriptScheduler, ModuleFailurePolicy, PreparedRuntimeScriptStart,
+    PreparedRuntimeScriptStartCommit, QueuedScriptFailureKind, RuntimeScriptPreparationContext,
+    RuntimeScriptStartDecision, ScriptElementLoaderOptions, ScriptEventDispatchPolicy,
     ScriptEventPolicy, ScriptEventSkipReason, ScriptFailurePageTaskPolicy,
     ScriptHandleExecutionSubject, ScriptHandleSource, ScriptHandleStartState,
-    ScriptHostEventSubject, ScriptStartCommitKind, prepare_script_start,
+    ScriptHostEventSubject, ScriptStartCommitKind, plan_script_start,
+    prepare_runtime_script_start_commit, prepare_script_start,
 };
 use crate::{
     dom::{
@@ -267,7 +269,7 @@ fn queueing_dynamic_module_does_not_block_later_import_map_merge() {
 fn prepared_runtime_script_start_captures_document_and_base_urls_at_prepare_time() {
     let initial_url =
         Url::parse("https://example.test/base/").expect("initial test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         initial_url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -314,6 +316,79 @@ fn prepared_runtime_script_start_captures_document_and_base_urls_at_prepare_time
 }
 
 #[test]
+fn scripting_disabled_runtime_scripts_commit_skip_without_queueing_work() {
+    for (label, src, source, script_type) in [
+        ("external classic", Some("blocked.js"), "", None),
+        ("inline classic", None, "globalThis.blocked = true", None),
+        (
+            "inline module",
+            None,
+            "globalThis.blockedModule = true",
+            Some("module"),
+        ),
+        (
+            "inline import map",
+            None,
+            r#"{"imports":{"blocked":"/blocked.js"}}"#,
+            Some("importmap"),
+        ),
+    ] {
+        let url = Url::parse("https://example.test/").expect("test url should parse");
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
+            url.clone(),
+            "<!doctype html><html><head></head><body></body></html>".to_owned(),
+        );
+        let mut dom_host = DomHost::from_dom(document.clone());
+        let body = document.document_body_handle().expect("body should exist");
+        let script = dom_host.create_element("script");
+        if let Some(src) = src {
+            assert!(dom_host.set_attribute(script, "src", src), "{label}");
+        }
+        if let Some(script_type) = script_type {
+            assert!(
+                dom_host.set_attribute(script, "type", script_type),
+                "{label}"
+            );
+        }
+        if !source.is_empty() {
+            assert!(dom_host.set_text_content(script, source), "{label}");
+        }
+        assert!(dom_host.append_child(body, script), "{label}");
+
+        let document_state = HostDocumentState::new(url);
+        let plan = plan_script_start(
+            &mut dom_host,
+            &document_state,
+            script,
+            &format!("disabled-{label}"),
+            ScriptElementLoaderOptions::with_scripting_enabled(false),
+        )
+        .unwrap_or_else(|| panic!("{label} should produce a start plan"));
+        let mut scripts = HostScriptScheduler::default();
+        let committed = prepare_runtime_script_start_commit(&mut dom_host, &mut scripts, plan)
+            .unwrap_or_else(|error| panic!("{label} skip commit failed: {error}"));
+
+        assert!(
+            matches!(committed, PreparedRuntimeScriptStartCommit::Noop),
+            "{label} must not produce executable work"
+        );
+        assert!(
+            dom_host
+                .node(script)
+                .and_then(Node::as_element)
+                .is_some_and(|element| element.script_already_started()),
+            "{label} must remain inert if scripting is enabled later"
+        );
+        let queued = scripts.drain_dynamic_scripts();
+        assert!(queued.in_order.is_empty(), "{label}");
+        assert!(queued.importmap_in_order.is_empty(), "{label}");
+        assert!(queued.module_in_order.is_empty(), "{label}");
+        assert!(queued.async_scripts.is_empty(), "{label}");
+        assert!(queued.failed_scripts.is_empty(), "{label}");
+    }
+}
+
+#[test]
 fn parser_inserted_classification_differs_from_dynamic_classification() {
     let parser_mode = classify_script_mode(ScriptSchedulingInput {
         parser_inserted: true,
@@ -356,7 +431,7 @@ fn parser_history_can_survive_without_falling_back_to_parser_owned_modes() {
 #[test]
 fn runtime_script_start_uses_language_attribute_when_type_is_absent() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body><script language='javascript'>window.ok = true;</script><script language=' javascript '>window.bad = true;</script></body></html>".to_owned(),
     );
@@ -388,7 +463,7 @@ fn runtime_script_start_uses_language_attribute_when_type_is_absent() {
 #[test]
 fn runtime_script_start_applies_legacy_for_event_gate() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body><script for=' window ' event=' onload '>window.ok = true;</script><script for='window' event='onclick'>window.bad = true;</script></body></html>".to_owned(),
     );
@@ -420,7 +495,7 @@ fn runtime_script_start_applies_legacy_for_event_gate() {
 #[test]
 fn runtime_svg_script_ignores_html_only_classification_attributes() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -462,7 +537,7 @@ fn runtime_svg_script_ignores_html_only_classification_attributes() {
 #[test]
 fn runtime_script_start_uses_direct_text_children_only() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -524,7 +599,7 @@ fn runtime_script_start_uses_direct_text_children_only() {
 #[test]
 fn runtime_owned_in_order_scripts_created_while_loading_do_not_wait_for_domcontentloaded() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -568,7 +643,7 @@ fn runtime_owned_in_order_scripts_created_while_loading_do_not_wait_for_domconte
 #[test]
 fn runtime_owned_module_scripts_created_while_loading_do_not_wait_for_domcontentloaded() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -616,7 +691,7 @@ fn runtime_owned_module_scripts_created_while_loading_do_not_wait_for_domcontent
 #[test]
 fn runtime_owned_in_order_scripts_created_after_loading_do_not_set_domcontentloaded_wait_flag() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -657,7 +732,7 @@ fn runtime_owned_in_order_scripts_created_after_loading_do_not_set_domcontentloa
 #[test]
 fn runtime_owned_handles_do_not_wait_for_blocking_stylesheets() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -682,7 +757,7 @@ fn runtime_owned_handles_do_not_wait_for_blocking_stylesheets() {
 #[test]
 fn parser_owned_handles_wait_for_blocking_stylesheets() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -707,7 +782,7 @@ fn parser_owned_handles_wait_for_blocking_stylesheets() {
 #[test]
 fn runtime_preparation_capture_uses_live_document_base_url() {
     let url = Url::parse("https://example.test/page/index.html").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -755,7 +830,7 @@ fn runtime_preparation_capture_uses_live_document_base_url() {
 #[test]
 fn connected_datablock_type_mutation_alone_does_not_prepare() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -784,7 +859,7 @@ fn connected_datablock_type_mutation_alone_does_not_prepare() {
 #[test]
 fn parser_created_script_type_mutation_alone_does_not_prepare() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url,
         "<!doctype html><html><head><script type=\"text/plain\">window.ran = true;</script></head></html>"
             .to_owned(),
@@ -807,7 +882,7 @@ fn parser_created_script_type_mutation_alone_does_not_prepare() {
 #[test]
 fn parser_created_script_text_mutation_after_type_change_still_prepares() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url,
         "<!doctype html><html><head><script type=\"text/plain\">window.ran = true;</script></head></html>"
             .to_owned(),
@@ -832,7 +907,7 @@ fn parser_created_script_text_mutation_after_type_change_still_prepares() {
 #[test]
 fn parser_created_datablock_prepare_consumes_parser_inserted_state() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head><script type=\"text/plain\" src=\"/data.txt\"></script></head></html>"
             .to_owned(),
@@ -900,7 +975,7 @@ fn parser_created_datablock_prepare_consumes_parser_inserted_state() {
 #[test]
 fn parser_created_external_script_reactivation_keeps_in_order_prepare_position() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head><script id=\"test\" type=\"text/plain\" src=\"/one.js\"></script></head></html>"
             .to_owned(),
@@ -981,7 +1056,7 @@ fn parser_created_external_script_reactivation_keeps_in_order_prepare_position()
 #[test]
 fn parser_created_external_script_reactivation_without_async_false_stays_async() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head><script id=\"test\" type=\"text/plain\" src=\"/one.js\"></script></head></html>"
             .to_owned(),
@@ -1056,7 +1131,7 @@ fn parser_created_external_script_reactivation_without_async_false_stays_async()
 #[test]
 fn prepare_script_start_invalid_external_src_queues_error_and_commits_start() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1127,7 +1202,7 @@ fn prepare_script_start_invalid_external_src_queues_error_and_commits_start() {
 #[test]
 fn prepare_script_start_empty_src_queues_async_error() {
     let url = Url::parse("https://example.test/page.html").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1177,7 +1252,7 @@ fn prepare_script_start_empty_src_queues_async_error() {
 #[test]
 fn prepare_module_empty_src_queues_top_level_load_failure() {
     let url = Url::parse("https://example.test/page.html").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1216,7 +1291,7 @@ fn prepare_module_empty_src_queues_top_level_load_failure() {
 #[test]
 fn prepare_script_start_invalid_importmap_src_queues_error_and_commits_start() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1292,7 +1367,7 @@ fn prepare_script_start_invalid_importmap_src_queues_error_and_commits_start() {
 #[test]
 fn prepare_script_start_registers_inline_importmap_without_script_queue() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1350,7 +1425,7 @@ fn prepare_script_start_registers_inline_importmap_without_script_queue() {
 #[test]
 fn invalid_inline_importmap_reports_failure_without_script_queue() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1391,7 +1466,7 @@ fn invalid_inline_importmap_reports_failure_without_script_queue() {
 #[test]
 fn prepare_script_start_nomodule_commits_skip_and_blocks_later_restart() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1467,7 +1542,7 @@ fn prepare_script_start_nomodule_commits_skip_and_blocks_later_restart() {
 #[test]
 fn prepare_script_start_external_importmap_commits_error_without_script_work() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1537,7 +1612,7 @@ fn prepare_script_start_external_importmap_commits_error_without_script_work() {
 #[test]
 fn prepare_script_start_committed_queue_stays_inert_across_src_mutation() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1598,7 +1673,7 @@ fn prepare_script_start_committed_queue_stays_inert_across_src_mutation() {
 #[test]
 fn prepare_script_start_reservation_blocks_orphaned_queue_entry_when_commit_is_denied() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -1656,7 +1731,7 @@ fn prepare_script_start_reservation_blocks_orphaned_queue_entry_when_commit_is_d
 #[test]
 fn prepare_script_start_committed_inline_execution_stays_inert_after_reattach() {
     let url = Url::parse("https://example.test/").expect("test url should parse");
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         url.clone(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );

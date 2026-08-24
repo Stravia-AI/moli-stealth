@@ -47,6 +47,9 @@ impl DocumentRuntime {
         &mut self,
         link_handles: impl IntoIterator<Item = DomHandle>,
     ) -> ParserDiscoveredModulepreloadResult {
+        if !self.document_scripting_enabled() {
+            return ParserDiscoveredModulepreloadResult::default();
+        }
         let Some(document_url) = self.dom_host.final_url().cloned() else {
             return ParserDiscoveredModulepreloadResult::default();
         };
@@ -204,7 +207,7 @@ mod tests {
 
     #[test]
     fn parser_modulepreload_candidate_cannot_cross_document_open_replacement() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/initial.html").expect("test URL"),
             concat!(
                 "<!doctype html><html><head>",
@@ -241,5 +244,32 @@ mod tests {
             runtime.take_next_native_module_owner_event().is_none(),
             "a stale parser candidate must not publish a link terminal into the replacement"
         );
+    }
+
+    #[test]
+    fn parser_modulepreload_is_inert_when_script_execution_is_disabled() {
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
+            Url::parse("https://example.test/page.html").expect("test URL"),
+            concat!(
+                "<!doctype html><html><head>",
+                "<link id='preload' rel='modulepreload' href='/app.mjs'>",
+                "</head><body></body></html>",
+            )
+            .to_owned(),
+        );
+        let mut runtime = DocumentRuntime::new(&document);
+        runtime.set_script_execution_disabled(true);
+        let preload = runtime
+            .dom_host()
+            .element_handle_by_id("preload")
+            .expect("modulepreload link");
+
+        let (requests, warnings, link_error_tasks) = runtime
+            .accept_parser_discovered_modulepreload_links([preload])
+            .into_parts();
+
+        assert!(requests.is_empty());
+        assert!(warnings.is_empty());
+        assert_eq!(link_error_tasks, 0);
     }
 }

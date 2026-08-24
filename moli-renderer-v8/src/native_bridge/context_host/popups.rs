@@ -858,12 +858,15 @@ impl JsContextHost {
             self.lightweight_popup_window_names.insert(name, popup_id);
         }
         if moli_url::is_about_blank(&initial_url)
-            && let Some(document) = crate::dom_parser::parse_detached_child_document_from_source(
+            && let Some(document) = crate::dom_parser::parse_child_document_projection_from_source(
                 scope,
                 initial_url.clone(),
                 "<!doctype html><html><head></head><body></body></html>",
                 Some("text/html"),
                 None,
+                crate::parser::HtmlParser::with_scripting_enabled(
+                    self.lightweight_popup_scripting_enabled(popup_id),
+                ),
             )
         {
             if let Some(document_handle) =
@@ -2077,12 +2080,15 @@ impl JsContextHost {
             } else {
                 String::new()
             };
-        let Some(document) = crate::dom_parser::parse_detached_child_document_from_source(
+        let Some(document) = crate::dom_parser::parse_child_document_projection_from_source(
             scope,
             document_url,
             "<!doctype html><html><head></head><body></body></html>",
             Some("text/html"),
             None,
+            crate::parser::HtmlParser::with_scripting_enabled(
+                self.lightweight_popup_scripting_enabled(popup_id),
+            ),
         ) else {
             return;
         };
@@ -2442,13 +2448,18 @@ impl JsContextHost {
                     &base_url,
                     &document_referrer,
                 );
-                if let Some(document) = crate::dom_parser::parse_detached_child_document_from_source(
-                    scope,
-                    final_url.clone(),
-                    &loaded.markup,
-                    loaded.content_type.as_deref(),
-                    Some(&loaded.character_set),
-                ) {
+                if let Some(document) =
+                    crate::dom_parser::parse_child_document_projection_from_source(
+                        scope,
+                        final_url.clone(),
+                        &loaded.markup,
+                        loaded.content_type.as_deref(),
+                        Some(&loaded.character_set),
+                        crate::parser::HtmlParser::with_scripting_enabled(
+                            self.lightweight_popup_scripting_enabled(popup_id),
+                        ),
+                    )
+                {
                     let host_ptr = self as *mut JsContextHost;
                     let document_base_url = lightweight_popup_parsed_document_base_url(
                         host_ptr, scope, document, &final_url,

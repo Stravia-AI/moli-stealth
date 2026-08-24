@@ -65,19 +65,15 @@ impl ConcurrentParseTimeRuntime {
         html: String,
         started: Instant,
     ) -> Result<ParseTimePageVmCreationOutcome> {
-        let mut state = ParseTimeDriverState::new(final_url.clone());
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled(
+            final_url.clone(),
+            main_document_parser_scripting_enabled(env),
+        );
         state
             .buffered_document_preloads
-            .set_script_fetch_interception_enabled(
-                env.fetch_subresource_interception_enabled
-                    && env.fetch_subresource_interception_resource_type.is_none_or(
-                        |resource_type| {
-                            resource_type.has_same_cdp_fetch_interception_type(
-                                crate::types::SubresourceResourceType::Script,
-                            )
-                        },
-                    ),
-            );
+            .set_script_fetch_requires_owner_admission(script_preloads_require_owner_admission(
+                env,
+            ));
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
@@ -150,16 +146,9 @@ impl ConcurrentParseTimeRuntime {
             .set_xml_document_content_type(document_content_type);
         state
             .buffered_document_preloads
-            .set_script_fetch_interception_enabled(
-                env.fetch_subresource_interception_enabled
-                    && env.fetch_subresource_interception_resource_type.is_none_or(
-                        |resource_type| {
-                            resource_type.has_same_cdp_fetch_interception_type(
-                                crate::types::SubresourceResourceType::Script,
-                            )
-                        },
-                    ),
-            );
+            .set_script_fetch_requires_owner_admission(script_preloads_require_owner_admission(
+                env,
+            ));
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(

@@ -25472,7 +25472,7 @@ async fn lightweight_popup_response_csp_sandbox_without_allow_scripts_blocks_inl
         "response CSP sandbox popup test server",
         "response CSP sandbox popup",
         "Content-Security-Policy: sandbox allow-same-origin",
-        r#"<!doctype html><script>opener.__popupResponseSandboxScriptEvents.push("script");</script>"#,
+        r#"<!doctype html><script>opener.__popupResponseSandboxScriptEvents.push("script");</script><noscript><span id="popup-response-sandbox-fallback"></span></noscript>"#,
     )
     .await;
     let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default()).expect("loader");
@@ -25490,7 +25490,16 @@ async fn lightweight_popup_response_csp_sandbox_without_allow_scripts_blocks_inl
   globalThis.__popupResponseSandboxScriptEvents = [];
   const popup = open({popup_url_literal});
   popup.onload = () => {{
-    __popupResponseSandboxScriptEvents.push("load:" + (popup.document.defaultView === popup));
+    const fallback = popup.document.createElement("div");
+    fallback.innerHTML =
+      "<noscript><span id=popup-sandbox-fallback></span></noscript>";
+    (popup.document.body || popup.document.documentElement).appendChild(fallback);
+    __popupResponseSandboxScriptEvents.push([
+      "load",
+      popup.document.defaultView === popup,
+      popup.document.getElementById("popup-response-sandbox-fallback") !== null,
+      popup.document.getElementById("popup-sandbox-fallback") !== null
+    ].join(":"));
   }};
   return __popupResponseSandboxScriptEvents.length;
 }})()
@@ -25519,7 +25528,7 @@ async fn lightweight_popup_response_csp_sandbox_without_allow_scripts_blocks_inl
     assert_eq!(
         vm.eval("__popupResponseSandboxScriptEvents.join('|')")
             .expect("popup response CSP sandbox event log should evaluate"),
-        "load:true"
+        "load:true:true:true"
     );
 }
 

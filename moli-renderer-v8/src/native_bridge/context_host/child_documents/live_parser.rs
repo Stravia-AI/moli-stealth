@@ -577,75 +577,14 @@ impl JsContextHost {
         document_handle: DomHandle,
         handoff: ParserScriptHandoff,
     ) -> ScriptDisposition {
-        let (script_handle, start_line, start_column) = match &handoff {
-            ParserScriptHandoff::BlockingClassic {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            }
-            | ParserScriptHandoff::AsyncPostParse {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            }
-            | ParserScriptHandoff::NonAsyncPostParse {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            }
-            | ParserScriptHandoff::ImportMap {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            }
-            | ParserScriptHandoff::NoExecution {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            }
-            | ParserScriptHandoff::PreparationFailure {
-                node_id,
-                start_line,
-                start_column,
-                ..
-            } => (*node_id, *start_line, *start_column),
-        };
+        let (script_handle, start_line, start_column) = handoff.start_position();
         self.note_parser_script_start_position(script_handle, start_line, start_column);
 
         if !self.child_browsing_context_scripting_enabled(child_handle) {
-            match handoff {
-                ParserScriptHandoff::NoExecution {
-                    node_id, outcome, ..
-                } => {
-                    crate::host::apply_parser_script_element_state_transition(
-                        self.dom_host_mut(),
-                        node_id,
-                        outcome.element_state_transition(),
-                    );
-                }
-                ParserScriptHandoff::PreparationFailure {
-                    node_id, failure, ..
-                } => {
-                    crate::host::apply_parser_script_element_state_transition(
-                        self.dom_host_mut(),
-                        node_id,
-                        failure.element_state_transition(),
-                    );
-                }
-                ParserScriptHandoff::BlockingClassic { node_id, .. }
-                | ParserScriptHandoff::AsyncPostParse { node_id, .. }
-                | ParserScriptHandoff::NonAsyncPostParse { node_id, .. }
-                | ParserScriptHandoff::ImportMap { node_id, .. } => {
-                    let _ = self
-                        .dom_host_mut()
-                        .set_script_already_started(node_id, true);
-                }
-            }
+            crate::host::apply_parser_script_element_state_without_execution(
+                self.dom_host_mut(),
+                &handoff,
+            );
             return ScriptDisposition::Continue;
         }
 
@@ -986,7 +925,7 @@ impl JsContextHost {
         document_handle: DomHandle,
         link_handles: Vec<DomHandle>,
     ) {
-        if link_handles.is_empty() {
+        if link_handles.is_empty() || !self.child_browsing_context_scripting_enabled(child_handle) {
             return;
         }
         for link_handle in link_handles {
@@ -1067,7 +1006,11 @@ impl JsContextHost {
             .current_child_document_task_owner(child_handle)
             .expect("committed child document-open parser must have a task owner");
         assert_eq!(task_owner.document_owner(), owner);
-        let parser = DocumentParserSession::start_open_live_document(document_url, document_handle);
+        let parser = DocumentParserSession::start_open_live_document(
+            document_url,
+            document_handle,
+            self.child_browsing_context_scripting_enabled(child_handle),
+        );
         self.child_document_parsers.replace(owner, parser);
     }
 
@@ -1577,7 +1520,11 @@ impl JsContextHost {
                 document_handle,
             )
         } else {
-            DocumentParserSession::start_finite_live_document(document_base_url, document_handle)
+            DocumentParserSession::start_finite_live_document(
+                document_base_url,
+                document_handle,
+                self.child_browsing_context_scripting_enabled(child_handle),
+            )
         };
         let task_owner = self
             .frame_owner_store

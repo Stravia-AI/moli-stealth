@@ -271,6 +271,10 @@ impl DocumentRuntime {
         self.script_execution_control.is_disabled()
     }
 
+    pub(crate) fn document_scripting_enabled(&self) -> bool {
+        !self.script_execution_disabled() && self.document_sandbox_policy().allows_scripts
+    }
+
     pub(crate) fn script_execution_control(
         &self,
     ) -> crate::script_execution_control::RendererScriptExecutionControl {

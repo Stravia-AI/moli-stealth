@@ -39,7 +39,7 @@ impl DocumentRuntime {
         {
             return DocumentWriteScriptRunOutcome::Complete;
         }
-        if self.script_execution_disabled() {
+        if !self.document_scripting_enabled() {
             let _ = self.dom_host.set_script_already_started(node, true);
             return DocumentWriteScriptRunOutcome::Complete;
         }

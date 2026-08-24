@@ -84,15 +84,31 @@ pub(crate) enum RuntimeScriptStartDecision {
     },
 }
 
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ScriptElementLoaderOptions {
     pub(crate) allow_parser_blocking_modes: bool,
     pub(crate) suppress_force_async: bool,
     pub(crate) document_write_connected: bool,
+    /// Scripting is disabled for the script element's relevant settings object.
+    /// Valid scripts still commit their already-started state, but they must not
+    /// fetch, register an import map, or execute.
+    pub(crate) scripting_disabled: bool,
     /// The caller will apply Trusted Types script-text preparation to the
     /// returned inline source, so a changed empty source may still become
     /// executable before the HTML empty-source check takes effect.
     pub(crate) prepare_changed_empty_inline_source: bool,
+}
+
+impl ScriptElementLoaderOptions {
+    pub(crate) const fn with_scripting_enabled(scripting_enabled: bool) -> Self {
+        Self {
+            allow_parser_blocking_modes: false,
+            suppress_force_async: false,
+            document_write_connected: false,
+            scripting_disabled: !scripting_enabled,
+            prepare_changed_empty_inline_source: false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -322,6 +338,12 @@ pub(crate) fn decide_runtime_script_start(
             )),
         };
     }
+    if options.scripting_disabled {
+        return RuntimeScriptStartDecision::Skip {
+            commit_start: true,
+            reason: Some(ScriptSkipReason::ScriptExecutionDisabled),
+        };
+    }
     let source = match script_src {
         Some(source) => source,
         None => {
@@ -426,6 +448,27 @@ pub(crate) fn apply_parser_script_element_state_transition(
             let _ = dom_host.set_script_already_started(node, true);
         }
     }
+}
+
+pub(crate) fn apply_parser_script_element_state_without_execution(
+    dom_host: &mut DomHost,
+    handoff: &crate::parser::ParserScriptHandoff,
+) {
+    let transition = match handoff {
+        crate::parser::ParserScriptHandoff::NoExecution { outcome, .. } => {
+            outcome.element_state_transition()
+        }
+        crate::parser::ParserScriptHandoff::PreparationFailure { failure, .. } => {
+            failure.element_state_transition()
+        }
+        crate::parser::ParserScriptHandoff::BlockingClassic { .. }
+        | crate::parser::ParserScriptHandoff::AsyncPostParse { .. }
+        | crate::parser::ParserScriptHandoff::NonAsyncPostParse { .. }
+        | crate::parser::ParserScriptHandoff::ImportMap { .. } => {
+            crate::parser::ParserScriptElementStateTransition::MarkAlreadyStarted
+        }
+    };
+    apply_parser_script_element_state_transition(dom_host, handoff.node_id(), transition);
 }
 
 fn consume_parser_inserted_script_prepare_state_with_async_attribute(

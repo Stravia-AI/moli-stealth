@@ -14,9 +14,17 @@ pub(super) struct ParseTimeDriverState {
 }
 
 impl ParseTimeDriverState {
-    pub(super) fn new(final_url: Url) -> Self {
+    #[cfg(test)]
+    pub(super) fn new_with_scripting_enabled_for_test(final_url: Url) -> Self {
+        Self::new_with_scripting_enabled(final_url, true)
+    }
+
+    pub(super) fn new_with_scripting_enabled(final_url: Url, scripting_enabled: bool) -> Self {
         Self {
-            parser_session: DocumentParserSession::start_main_document(final_url.clone()),
+            parser_session: DocumentParserSession::start_main_document(
+                final_url.clone(),
+                scripting_enabled,
+            ),
             final_url,
             document_character_set: "UTF-8".to_owned(),
             scheduler: DocumentScriptScheduler::new(),

@@ -1,6 +1,41 @@
 use super::*;
 
 #[test]
+fn detached_domparser_parses_noscript_with_scripting_disabled() {
+    let mut vm = new_storage_test_vm("https://detached-domparser-noscript.test/");
+
+    let result = vm
+        .eval(
+            r#"
+(() => {
+  const doc = new DOMParser().parseFromString(
+    "<body><noscript><span id='fallback'></span></noscript></body>",
+    "text/html"
+  );
+  const reparsed = doc.createElement("div");
+  reparsed.innerHTML =
+    "<noscript><span id='fragment-fallback'></span></noscript>";
+  doc.body.appendChild(reparsed);
+
+  const created = document.implementation.createHTMLDocument("");
+  created.body.innerHTML =
+    "<noscript><span id='created-fallback'></span></noscript>";
+
+  return [
+    doc.getElementById("fallback") !== null,
+    doc.querySelector("noscript")?.children.length,
+    doc.getElementById("fragment-fallback") !== null,
+    created.getElementById("created-fallback") !== null
+  ].join("|");
+})()
+"#,
+        )
+        .expect("detached DOMParser noscript probe should evaluate");
+
+    assert_eq!(result, "true|1|true|true");
+}
+
+#[test]
 fn detached_domparser_query_and_element_collections_use_native_handles() {
     let mut vm = new_storage_test_vm("https://detached-domparser-query.test/");
 

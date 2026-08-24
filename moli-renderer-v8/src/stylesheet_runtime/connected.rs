@@ -832,6 +832,24 @@ impl DocumentRuntime {
             let resource_type = element
                 .map(preload_like_link_resource_type)
                 .unwrap_or(SubresourceResourceType::Fetch);
+            let is_modulepreload =
+                self.connected_owner_uses_non_blocking_modulepreload_identity(handle);
+            if !self.document_scripting_enabled()
+                && (is_modulepreload || resource_type == SubresourceResourceType::Script)
+            {
+                // Script-disabled Documents do not even fetch page-authored
+                // preload/modulepreload resources. Release any load-event
+                // lease without posting a synthetic terminal event.
+                self.stylesheet_lifecycle
+                    .owner_states
+                    .clear_async_operations(handle);
+                self.settle_connected_style_load_admission(
+                    host_ptr,
+                    event_admission,
+                    "script execution disabled",
+                );
+                return result;
+            }
             if let Some((key, preload)) = self.connected_modulepreload_request(handle, &url) {
                 let unchanged = self
                     .stylesheet_lifecycle
@@ -2309,7 +2327,7 @@ mod tests {
 
     #[test]
     fn blocked_csp_disposition_does_not_hide_initial_style_error_task() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>body { color: red }</style></head></html>"
@@ -2527,7 +2545,7 @@ mod tests {
 
     #[test]
     fn native_module_source_completion_marks_modulepreload_script_link_ready() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\"></head><body></body></html>"
@@ -2563,7 +2581,7 @@ mod tests {
 
     #[test]
     fn native_module_failure_completion_marks_modulepreload_script_link_ready_for_error() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\"></head><body></body></html>"
@@ -2601,7 +2619,7 @@ mod tests {
 
     #[test]
     fn native_module_completion_marks_css_modulepreload_link_ready_when_as_style() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/style.css\" as=\"style\"></head><body></body></html>"
@@ -2640,7 +2658,7 @@ mod tests {
 
     #[test]
     fn implicit_css_suffix_modulepreload_keeps_its_captured_javascript_key() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/style.css\"></head><body></body></html>"
@@ -2675,7 +2693,7 @@ mod tests {
 
     #[test]
     fn stale_same_key_native_modulepreload_client_cannot_complete_new_processing() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=modulepreload href=/same.mjs></head><body></body></html>"
@@ -2714,7 +2732,7 @@ mod tests {
 
     #[test]
     fn posted_native_modulepreload_event_keeps_accepted_client_after_reprocess() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=modulepreload href=/same.mjs></head><body></body></html>"
@@ -2747,7 +2765,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_script_link_returns_owner_start() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\"></head><body></body></html>"
@@ -2807,8 +2825,37 @@ mod tests {
     }
 
     #[test]
+    fn script_disabled_document_does_not_start_connected_script_preloads() -> Result<()> {
+        let parser = HtmlParser::SCRIPTING_ENABLED;
+        let document = parser.parse(
+            Url::parse("https://example.test/page").unwrap(),
+            concat!(
+                "<!doctype html><html><head>",
+                "<link rel='preload' as='script' href='/classic.js'>",
+                "<link rel='modulepreload' href='/module.mjs'>",
+                "</head><body></body></html>",
+            )
+            .to_owned(),
+        );
+        let mut runtime = DocumentRuntime::new(&document);
+        runtime.set_script_execution_disabled(true);
+
+        runtime.queue_initial_connected_style_loads();
+        let (starts, warnings) = runtime.prime_pending_connected_style_loads().into_parts();
+
+        assert!(starts.is_empty());
+        assert!(warnings.is_empty());
+        assert!(
+            !runtime.has_pending_style_loads(),
+            "inert script preloads must not retain load-event or module-map work"
+        );
+        assert!(runtime.pop_ready_connected_style_load().is_none());
+        Ok(())
+    }
+
+    #[test]
     fn connected_modulepreload_supported_as_values_return_owner_starts() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -2861,7 +2908,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_as_values_match_wpt_matrix() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             modulepreload_as_matrix_markup(),
@@ -2923,7 +2970,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_ignores_fetchpriority_hint() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -2954,7 +3001,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_skips_non_matching_media() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -2999,7 +3046,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_invalid_as_records_warning_and_error_event() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/bad.bin\" as=\"image\"></head><body></body></html>"
@@ -3039,7 +3086,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn connected_modulepreload_start_survives_installed_loader_fast_path() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\"></head><body></body></html>"
@@ -3064,7 +3111,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn connected_modulepreload_invalid_as_warning_survives_installed_loader_fast_path()
     -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/bad.bin\" as=\"image\"></head><body></body></html>"
@@ -3095,7 +3142,7 @@ mod tests {
 
     #[test]
     fn connected_modulepreload_script_link_reuses_fetched_module_map_entry() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\"></head><body></body></html>"
@@ -3153,7 +3200,7 @@ mod tests {
 
     #[test]
     fn processed_inline_source_ignores_imports_after_style_rules() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>.ready { color: green; } @import url('/late.css');</style></head><body></body></html>"
@@ -3173,7 +3220,7 @@ mod tests {
 
     #[test]
     fn processed_inline_source_allows_charset_before_imports() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>@charset \"utf-8\"; @import url('/early.css'); .ready { color: green; }</style></head><body></body></html>"
@@ -3193,7 +3240,7 @@ mod tests {
 
     #[test]
     fn processed_inline_source_deduplicates_imports_in_document_order() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3223,7 +3270,7 @@ mod tests {
 
     #[test]
     fn blocking_stylesheet_promotion_leaves_independent_style_import_operation_pending() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>@import url('/runtime.css');</style></head><body></body></html>"
@@ -3280,7 +3327,7 @@ mod tests {
 
     #[tokio::test]
     async fn data_stylesheet_link_with_failed_import_queues_error_event() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3329,7 +3376,7 @@ mod tests {
 
     #[test]
     fn connected_style_data_import_without_nested_import_queues_load_event() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3361,7 +3408,7 @@ mod tests {
 
     #[test]
     fn connected_style_data_import_failure_queues_error_event() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3393,7 +3440,7 @@ mod tests {
 
     #[test]
     fn modulepreload_link_readiness_uses_module_script_credentials() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\" crossorigin=\"use-credentials\"></head><body></body></html>"
@@ -3415,7 +3462,7 @@ mod tests {
 
     #[test]
     fn anonymous_modulepreload_link_readiness_uses_same_origin_credentials() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"modulepreload\" href=\"/app.mjs\" crossorigin=\"anonymous\"></head><body></body></html>"
@@ -3497,7 +3544,7 @@ mod tests {
     #[tokio::test]
     async fn image_preload_link_becomes_ready_without_network_when_image_fetch_disabled()
     -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"image\" href=\"http://127.0.0.1:9/image.png\"></head><body></body></html>"
@@ -3532,7 +3579,7 @@ mod tests {
 
     #[test]
     fn font_preload_link_readiness_tracks_font_type_and_priority_hint() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"font\" href=\"/font.woff2\" fetchpriority=\"high\"></head><body></body></html>"
@@ -3549,7 +3596,7 @@ mod tests {
     #[tokio::test]
     async fn style_preload_request_attribute_change_replaces_exact_client_and_fetch() -> Result<()>
     {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=preload as=style href='http://127.0.0.1:9/a.css' crossorigin=anonymous></head><body></body></html>"
@@ -3622,7 +3669,7 @@ mod tests {
 
     #[tokio::test]
     async fn stylesheet_and_modulepreload_switches_drop_stale_event_bindings() -> Result<()> {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=preload as=style href='http://127.0.0.1:9/shared'></head><body></body></html>"
@@ -3719,7 +3766,7 @@ mod tests {
 
     #[test]
     fn media_preload_link_readiness_tracks_audio_and_video_types() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3763,7 +3810,7 @@ mod tests {
 
     #[test]
     fn late_style_preload_link_readiness_uses_medium_stylesheet_request_type() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"style\" href=\"/late.css\"></head><body></body></html>"
@@ -3794,7 +3841,7 @@ mod tests {
 
     #[test]
     fn initial_scan_marks_preload_stylesheet_after_first_image_as_late() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -3819,7 +3866,7 @@ mod tests {
 
     #[test]
     fn parser_created_non_blocking_media_stylesheet_waits_for_initial_scan() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"stylesheet\" media=\"print\" href=\"/print.css\"></head><body></body></html>"
@@ -3850,7 +3897,7 @@ mod tests {
 
     #[test]
     fn parser_created_style_element_waits_for_initial_scan() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>@import url('/missing.css');</style></head><body></body></html>"
@@ -3881,7 +3928,7 @@ mod tests {
 
     #[test]
     fn initial_scan_does_not_repeat_a_previously_processed_connected_style() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><style>body { color: red; }</style></head><body></body></html>"
@@ -3924,7 +3971,7 @@ mod tests {
 
     #[tokio::test]
     async fn parser_roundtrip_does_not_reschedule_connected_style_event() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"stylesheet\" href=\"data:text/css,body{}\"></head><body></body></html>"
@@ -4025,7 +4072,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_stylesheet_fetch_admission_posts_event_without_another_network_terminal() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let href = "data:text/css,body{}";
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
@@ -4218,7 +4265,7 @@ mod tests {
         });
 
         let document_url = Url::parse(&format!("http://{addr}/page.html")).unwrap();
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             document_url,
             "<!doctype html><html><head>\
@@ -4306,7 +4353,7 @@ mod tests {
     #[tokio::test]
     async fn completed_style_preload_admits_late_stylesheet_install_client() {
         let href = "data:text/css,.late%7Bcolor%3Agreen%7D";
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             format!(
@@ -4369,7 +4416,7 @@ mod tests {
     #[tokio::test]
     async fn completed_stylesheet_admits_late_preload_event_only_client() {
         let href = "data:text/css,.first%7Bcolor%3Agreen%7D";
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             format!(
@@ -4425,7 +4472,7 @@ mod tests {
 
     #[test]
     fn prefetch_link_readiness_uses_fetch_cdp_type_and_link_prefetch_request_type() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"prefetch\" as=\"image\" href=\"/next.png\"></head><body></body></html>"
@@ -4445,7 +4492,7 @@ mod tests {
 
     #[test]
     fn fetch_preload_link_readiness_uses_fetch_cdp_type_and_raw_request_type() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"fetch\" href=\"/data.json\"></head><body></body></html>"
@@ -4466,7 +4513,7 @@ mod tests {
 
     #[test]
     fn crossorigin_fetch_preload_link_readiness_uses_cors_mode() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             concat!(
@@ -4516,7 +4563,7 @@ mod tests {
 
     #[test]
     fn style_preload_link_without_crossorigin_uses_no_cors_request_parameters() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"style\" href=\"/style.css\"></head><body></body></html>"
@@ -4547,7 +4594,7 @@ mod tests {
 
     #[test]
     fn anonymous_style_preload_uses_cors_request_parameters() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"preload\" as=\"style\" href=\"/style.css\" crossorigin=\"anonymous\"></head><body></body></html>"
@@ -4578,7 +4625,7 @@ mod tests {
 
     #[test]
     fn compression_dictionary_link_readiness_uses_other_cdp_type_and_dictionary_request_type() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"compression-dictionary\" href=\"/dict.bin\"></head><body></body></html>"
@@ -4600,7 +4647,7 @@ mod tests {
 
     #[test]
     fn connected_style_load_handles_include_prefetch_links() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"prefetch\" href=\"/next.html\"></head><body></body></html>"
@@ -4625,7 +4672,7 @@ mod tests {
 
     #[test]
     fn connected_style_load_handles_include_compression_dictionary_links() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/page").unwrap(),
             "<!doctype html><html><head><link rel=\"compression-dictionary\" href=\"/dict.bin\"></head><body></body></html>"

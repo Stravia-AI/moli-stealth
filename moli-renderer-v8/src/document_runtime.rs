@@ -1368,7 +1368,7 @@ mod tests {
 
     #[test]
     fn live_runtime_dom_host_forwards_the_canonical_document_base_url() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/path/page.html").unwrap(),
             "<!doctype html><html><head><base href=\"/assets/\"></head></html>".to_owned(),
         );
@@ -1391,7 +1391,7 @@ mod tests {
 
     #[test]
     fn dom_host_builds_from_parsed_document_and_updates_text_content() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main>seed</main></body></html>".to_owned(),
@@ -1412,7 +1412,7 @@ mod tests {
 
     #[test]
     fn live_runtime_dom_host_direct_borrow_does_not_block_runtime_access() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main>seed</main></body></html>".to_owned(),
@@ -1428,7 +1428,7 @@ mod tests {
 
     #[test]
     fn parser_reentry_state_tracks_script_pause_insertion_and_dynamic_markup() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1500,7 +1500,7 @@ mod tests {
 
     #[test]
     fn structural_mutation_guard_tracks_nested_raw_tree_splices() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1531,7 +1531,7 @@ mod tests {
 
     #[test]
     fn parser_runtime_dom_owner_allows_nested_steps_on_same_document_incarnation() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main>seed</main></body></html>".to_owned(),
@@ -1562,7 +1562,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "current Document incarnation")]
     fn parser_runtime_dom_owner_rejects_document_replacement() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main>seed</main></body></html>".to_owned(),
@@ -1576,7 +1576,7 @@ mod tests {
 
     #[test]
     fn dom_host_updates_tree_navigation_and_contains_relations() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main id=one>one</main><main id=two>two</main></body></html>"
@@ -1647,7 +1647,7 @@ mod tests {
 
     #[test]
     fn dom_host_reports_unified_mutation_effects() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1699,7 +1699,7 @@ mod tests {
 
     #[test]
     fn dom_host_uses_connected_script_roots_only_for_non_script_subtrees() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1724,7 +1724,7 @@ mod tests {
 
     #[test]
     fn dom_host_scans_connected_shadow_trees_for_scripts() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1752,7 +1752,7 @@ mod tests {
 
     #[test]
     fn dom_host_flattens_nested_slot_fallback_without_losing_siblings() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1795,7 +1795,7 @@ mod tests {
 
     #[test]
     fn dom_host_slot_mutation_effects_mark_old_and_new_slots() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1839,7 +1839,7 @@ mod tests {
 
     #[test]
     fn dom_host_move_effects_mark_shadow_slot_changes() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1894,7 +1894,7 @@ mod tests {
 
     #[test]
     fn document_runtime_replace_live_document_preserves_shadow_root_bindings() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -1937,7 +1937,7 @@ mod tests {
 
     #[test]
     fn document_runtime_replace_live_document_preserves_script_already_started() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script src=\"/app.js\"></script></head><body></body></html>"
@@ -1971,7 +1971,7 @@ mod tests {
 
     #[test]
     fn document_runtime_can_mark_script_already_started_by_node_id() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script src=\"/app.js\"></script></head><body></body></html>"
@@ -2001,7 +2001,7 @@ mod tests {
 
     #[test]
     fn document_runtime_sets_parser_script_force_async_like_chrome() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><script></script><script async></script></head><body></body></html>"
@@ -2044,7 +2044,7 @@ mod tests {
 
     #[test]
     fn document_runtime_snapshot_projects_live_dom_without_reparse() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body><main id=seed>seed</main></body></html>"
@@ -2078,7 +2078,7 @@ mod tests {
 
     #[test]
     fn parser_roundtrip_through_live_runtime_keeps_style_import_text_before_later_script() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let mut stream = parser.start_document(Url::parse("https://example.com/").unwrap());
         let html = "<!doctype html><html><head><script>window.start = 1;</script><style>@import url('/slow.css');</style><script>window.afterStyle = 1;</script><script src='/blocking.js'></script></head><body><div id='late'>late</div></body></html>";
 
@@ -2137,7 +2137,7 @@ mod tests {
 
     #[test]
     fn parser_roundtrip_after_live_dom_mutation_keeps_later_body_hidden() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let mut stream = parser.start_document(Url::parse("https://example.com/").unwrap());
         let html = "<!doctype html><html><head><script>window.start = 1;</script><script>window.after = 1;</script></head><body><div id='late'>late</div></body></html>";
 
@@ -2189,7 +2189,7 @@ mod tests {
 
     #[test]
     fn precedes_in_document_order_handles_disconnected_roots_without_underflow() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><div id=live></div></body></html>".to_owned(),
@@ -2209,7 +2209,7 @@ mod tests {
 
     #[test]
     fn dom_host_import_and_adopt_node_preserve_owner_document_and_parentage() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><div id=container><span id=seed>seed</span></div></body></html>"
@@ -2252,7 +2252,7 @@ mod tests {
 
     #[test]
     fn dom_host_rebuilds_id_lookup_after_id_attribute_mutation() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main id=one>one</main><main>two</main></body></html>"
@@ -2275,7 +2275,7 @@ mod tests {
 
     #[test]
     fn dom_host_invalidates_live_collection_cache_on_tree_and_attribute_mutations() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><main></main></body></html>".to_owned(),
@@ -2322,7 +2322,7 @@ mod tests {
 
     #[test]
     fn dom_host_normalize_merges_adjacent_text_nodes_recursively() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><div id=container></div></body></html>".to_owned(),
@@ -2393,7 +2393,7 @@ mod tests {
 
     #[tokio::test]
     async fn injected_page_task_can_wake_parse_time_turn_without_timeout_fallback() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),
@@ -2494,7 +2494,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn response_csp_blocks_ownerless_stylesheet_admission() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
@@ -2553,7 +2553,7 @@ mod tests {
 
     #[test]
     fn stale_connected_stylesheet_network_result_releases_source_owner() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href=/current.css></head><body></body></html>"
@@ -2593,7 +2593,7 @@ mod tests {
 
     #[tokio::test]
     async fn active_link_load_keeps_physical_observation_separate_from_client_terminal() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href=/current.css></head><body></body></html>"
@@ -2640,7 +2640,7 @@ mod tests {
 
     #[tokio::test]
     async fn removed_link_rejects_its_detached_load_network_source_owner() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href=/current.css></head><body></body></html>"
@@ -2689,7 +2689,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_link_rejects_its_detached_load_network_source_owner() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href=/current.css></head><body></body></html>"
@@ -2741,7 +2741,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_url_reprocess_rejects_the_detached_owner_bound_load_object() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href=/a.css></head><body></body></html>"
@@ -2794,7 +2794,7 @@ mod tests {
 
     #[tokio::test]
     async fn linked_stylesheet_request_attribute_reprocess_captures_new_fetch_options() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.com/page").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='http://127.0.0.1:9/a.css' crossorigin=anonymous integrity=sha256-first referrerpolicy=no-referrer fetchpriority=low></head><body></body></html>"
@@ -3031,7 +3031,7 @@ mod tests {
         });
 
         let document_url = Url::parse(&format!("http://{addr}/page")).unwrap();
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             document_url.clone(),
             "<!doctype html><html><head><style>@import url('/imported.css');</style><script src='/app.js'></script></head><body></body></html>".to_owned(),
@@ -3117,7 +3117,7 @@ mod tests {
         });
 
         let document_url = Url::parse(&format!("http://{addr}/page")).unwrap();
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             document_url.clone(),
             "<!doctype html><html><head><style>@import url('/imported.css');</style><script src='/app.js'></script></head><body></body></html>".to_owned(),
@@ -3214,7 +3214,7 @@ mod tests {
         });
 
         let document_url = Url::parse(&format!("http://{addr}/page")).unwrap();
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             document_url.clone(),
             "<!doctype html><html><head><style>@import url('/missing.css');</style></head><body></body></html>"
@@ -3288,7 +3288,7 @@ mod tests {
 
     #[test]
     fn drained_preload_like_network_result_still_drives_load_event_result() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document_url = Url::parse("https://example.com/page").unwrap();
         let request_url = Url::parse("https://example.com/chunk.js").unwrap();
         let document = parser.parse(
@@ -3361,7 +3361,7 @@ mod tests {
 
     #[test]
     fn same_parameter_connected_completion_cannot_cross_operation_identity() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document_url = Url::parse("https://example.com/page").unwrap();
         let request_url = Url::parse("https://example.com/a.css").unwrap();
         let document = parser.parse(
@@ -3461,7 +3461,7 @@ mod tests {
 
     #[test]
     fn accepted_style_import_result_installs_only_for_its_exact_processing_operation() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document_url = Url::parse("https://example.com/page").unwrap();
         let request_url = Url::parse("https://example.com/shared.css").unwrap();
         let document = parser.parse(
@@ -3518,7 +3518,7 @@ mod tests {
 
     #[test]
     fn accepted_style_import_result_loses_install_authority_after_same_url_aba() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document_url = Url::parse("https://example.com/page").unwrap();
         let request_url = Url::parse("https://example.com/shared.css").unwrap();
         let document = parser.parse(

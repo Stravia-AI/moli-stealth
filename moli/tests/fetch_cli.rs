@@ -34,6 +34,9 @@ use support::FixtureServer;
 use tokio::{io::AsyncReadExt, net::TcpListener, task::JoinHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
+#[path = "fetch_cli/disable_js.rs"]
+mod disable_js;
+
 struct Output {
     status: OutputStatus,
     stdout: Vec<u8>,

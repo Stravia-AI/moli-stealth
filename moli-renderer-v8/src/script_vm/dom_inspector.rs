@@ -90,12 +90,13 @@ fn parsed_inspector_attributes(
         .unwrap_or(false);
 
     let parsed = if is_html_document {
-        HtmlParser.parse_fragment_without_declarative_shadow_roots(
-            document_url,
-            "http://www.w3.org/1999/xhtml",
-            "body",
-            markup,
-        )
+        HtmlParser::with_scripting_enabled(runtime.document_scripting_enabled(document_handle))
+            .parse_fragment_without_declarative_shadow_roots(
+                document_url,
+                "http://www.w3.org/1999/xhtml",
+                "body",
+                markup,
+            )
     } else {
         let parsed = XmlParser.parse(document_url, markup);
         if !parsed.parse_errors().is_empty() {

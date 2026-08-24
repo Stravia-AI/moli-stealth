@@ -139,19 +139,15 @@ impl ConcurrentParseTimeRuntime {
                 &response_final_url,
                 &response_headers,
             );
-        let mut state = ParseTimeDriverState::new(response_final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled(
+            response_final_url,
+            main_document_parser_scripting_enabled(&env),
+        );
         state
             .buffered_document_preloads
-            .set_script_fetch_interception_enabled(
-                env.fetch_subresource_interception_enabled
-                    && env.fetch_subresource_interception_resource_type.is_none_or(
-                        |resource_type| {
-                            resource_type.has_same_cdp_fetch_interception_type(
-                                crate::types::SubresourceResourceType::Script,
-                            )
-                        },
-                    ),
-            );
+            .set_script_fetch_requires_owner_admission(script_preloads_require_owner_admission(
+                &env,
+            ));
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
@@ -416,19 +412,15 @@ impl ConcurrentParseTimeRuntime {
                 },
             )));
         }
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled(
+            final_url,
+            main_document_parser_scripting_enabled(&env),
+        );
         state
             .buffered_document_preloads
-            .set_script_fetch_interception_enabled(
-                env.fetch_subresource_interception_enabled
-                    && env.fetch_subresource_interception_resource_type.is_none_or(
-                        |resource_type| {
-                            resource_type.has_same_cdp_fetch_interception_type(
-                                crate::types::SubresourceResourceType::Script,
-                            )
-                        },
-                    ),
-            );
+            .set_script_fetch_requires_owner_admission(script_preloads_require_owner_admission(
+                &env,
+            ));
         state
             .buffered_document_preloads
             .set_response_csp_requires_parser_admission(
@@ -1164,7 +1156,7 @@ mod tests {
         let loader_owner =
             ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
         let loader = loader_owner.handle();
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
         let parser_dom_host = state
             .parser_session
             .stream_handle()
@@ -1421,8 +1413,9 @@ mod tests {
         let loader = ResourceRequestClient::new(&moli_fetch::FetchConfig::default())
             .expect("test loader should construct");
         let mut source = RawDocumentBodySource::External(raw_body);
-        let mut state =
-            ParseTimeDriverState::new(Url::parse("https://example.test/").expect("test url"));
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(
+            Url::parse("https://example.test/").expect("test url"),
+        );
         let headers = vec![(
             "Content-Type".to_owned(),
             "text/html; charset=utf-8".to_owned(),

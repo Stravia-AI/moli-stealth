@@ -233,6 +233,10 @@ impl Browser {
             config.optional_resource_fetch_mask(),
             config.subframe_loading_enabled(),
         );
+        // A script-disabled CLI fetch must not execute site-owned JavaScript
+        // through a previously registered Service Worker before the new
+        // Document's own execution policy can take effect.
+        page_network_policy.set_bypass_service_worker(config.script_execution_disabled());
         let browser_context_owner =
             RendererBrowserContextRuntime::new_owned_with_service_worker_resource_store_and_browser_resource_runtime(
                 partition.service_worker_resource_store(),
@@ -1126,6 +1130,7 @@ impl Browser {
             None,
             stage,
         );
+        create_page_request.script_execution_disabled = self.config.script_execution_disabled();
         create_page_request.wpt_extensions_enabled = self.config.wpt_extensions_enabled();
         create_page_request.reply_boundary = reply_boundary;
         create_page_request.lifecycle_decider = lifecycle_decider;
@@ -1259,7 +1264,7 @@ impl Browser {
                 vec![],
                 None,
                 None,
-                false,
+                self.config.script_execution_disabled(),
                 false,
                 1.0,
                 Default::default(),

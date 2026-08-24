@@ -15,14 +15,12 @@ pub(in crate::context_bootstrap) fn create_contextual_fragment_internal<'s>(
         return create_detached_contextual_fragment(scope, document, html);
     };
     let document_handle = range_tree_op_node_handle(scope, host_ptr, document)?;
-    let scripting_enabled = runtime.document_scripting_enabled(document_handle);
     let fragment = runtime.build_range_contextual_fragment_from_html(
         scope,
         host_ptr,
         document_handle,
         context_handle,
         html,
-        scripting_enabled,
     )?;
     runtime
         .native_bridge_mut()

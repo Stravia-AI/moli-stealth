@@ -441,7 +441,9 @@ impl MutationCoordinator {
             dom_host,
             document,
             node,
-            ScriptElementLoaderOptions::default(),
+            ScriptElementLoaderOptions::with_scripting_enabled(
+                unsafe { &*host_ptr }.document_scripting_enabled(owner_document_handle),
+            ),
         )
         .into_parts();
         match decision {

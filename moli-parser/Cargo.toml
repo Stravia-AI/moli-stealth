@@ -4,6 +4,12 @@ name = "moli-parser"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+# Convenience parser policies for fixtures. Production callers must derive the
+# scripting state from the target Document and construct the parser explicitly.
+test-support = []
+
 [dependencies]
 anyhow = "1.0.100"
 html5ever = "0.39.0"

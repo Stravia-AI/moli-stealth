@@ -162,6 +162,7 @@ impl JsContextHost {
     pub(crate) fn child_browsing_context_base_url(&self, handle: DomHandle) -> Option<Url> {
         let entry = self.child_browsing_contexts.get(&handle)?;
         let document_url = self.child_browsing_context_current_url(handle)?;
+        let scripting_enabled = self.child_browsing_context_scripting_enabled(handle);
         if entry.pending_attribute_bootstrap_commit()
             && let Some(snapshot) = self
                 .materialize_local_child_snapshot_for_bootstrap(handle, entry.attribute_bootstrap())
@@ -171,7 +172,11 @@ impl JsContextHost {
             {
                 return Some(self.document_base_url_for_child_context(handle));
             }
-            return Some(child_snapshot_base_url(&snapshot, snapshot.url.clone()));
+            return Some(child_snapshot_base_url(
+                &snapshot,
+                snapshot.url.clone(),
+                scripting_enabled,
+            ));
         }
         let inherits_parent_about_blank = moli_url::is_about_blank(&document_url)
             && self.child_browsing_context_inherits_parent_origin(handle);
@@ -194,7 +199,11 @@ impl JsContextHost {
         let Some(snapshot) = entry.cached_snapshot_ref() else {
             return Some(document_url);
         };
-        Some(child_snapshot_base_url(snapshot, document_url))
+        Some(child_snapshot_base_url(
+            snapshot,
+            document_url,
+            scripting_enabled,
+        ))
     }
 
     pub(in crate::native_bridge::context_host) fn push_child_subresource_request_scope(
@@ -702,13 +711,44 @@ impl JsContextHost {
             && self
                 .child_browsing_contexts
                 .get(&handle)
-                .is_none_or(|entry| entry.document_sandbox_allows_scripts())
+                .is_some_and(|entry| entry.document_sandbox_allows_scripts())
+    }
+
+    pub(crate) fn lightweight_popup_scripting_enabled(&self, popup_id: u64) -> bool {
+        !self.script_execution_disabled()
+            && self
+                .lightweight_popup_policy_container(popup_id)
+                .is_some_and(|policy| policy.sandbox.allows_scripts)
     }
 
     pub(crate) fn document_scripting_enabled(&self, document_handle: DomHandle) -> bool {
+        if document_handle == self.document_handle() {
+            return !self.script_execution_disabled()
+                && self.document_policy_container().sandbox.allows_scripts;
+        }
+        if let Some(popup_id) = self.lightweight_popup_id_for_document_handle(document_handle) {
+            return self.lightweight_popup_scripting_enabled(popup_id);
+        }
         self.child_browsing_context_host_for_document_handle(document_handle)
             .map(|handle| self.child_browsing_context_scripting_enabled(handle))
-            .unwrap_or(true)
+            // DOMParser and document.implementation documents have no browsing
+            // context, so scripting is disabled for their fragment parsers too.
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn owner_scripting_enabled(&self, owner: OwnerDispatchScope) -> bool {
+        match owner {
+            OwnerDispatchScope::Top => {
+                !self.script_execution_disabled()
+                    && self.document_policy_container().sandbox.allows_scripts
+            }
+            OwnerDispatchScope::LightweightPopup(popup_id) => {
+                self.lightweight_popup_scripting_enabled(popup_id)
+            }
+            OwnerDispatchScope::Child(handle) => {
+                self.child_browsing_context_scripting_enabled(handle)
+            }
+        }
     }
 
     pub(crate) fn child_browsing_context_inherits_parent_origin(&self, handle: DomHandle) -> bool {
@@ -771,8 +811,13 @@ fn web_storage_key_for_origin_and_top_level_site_with_nonce(
     MoliStorageKey::new(origin.to_owned(), top_level_site, opaque_nonce, relation)
 }
 
-fn child_snapshot_base_url(snapshot: &ChildBrowsingContextSnapshot, fallback: Url) -> Url {
-    let document = crate::parser::HtmlParser.parse(snapshot.url.clone(), snapshot.markup.clone());
+fn child_snapshot_base_url(
+    snapshot: &ChildBrowsingContextSnapshot,
+    fallback: Url,
+    scripting_enabled: bool,
+) -> Url {
+    let document = crate::parser::HtmlParser::with_scripting_enabled(scripting_enabled)
+        .parse(snapshot.url.clone(), snapshot.markup.clone());
     document
         .document()
         .map(|doc| doc.base_url().clone())

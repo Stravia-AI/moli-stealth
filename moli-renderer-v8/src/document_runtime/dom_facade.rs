@@ -892,7 +892,7 @@ mod tests {
     use crate::dom::native::DomStylesheetOwnerChangeKind;
 
     fn runtime_with_body() -> (DocumentRuntime, DomHandle) {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             Url::parse("https://example.test/").unwrap(),
             "<!doctype html><html><body></body></html>".to_owned(),

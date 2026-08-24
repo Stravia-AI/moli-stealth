@@ -45,12 +45,13 @@ pub(in crate::native_bridge) fn detached_iframe_content_document<'s>(
         } else {
             parsed_base_url
         };
-    let document = crate::dom_parser::parse_detached_child_document_from_source(
+    let document = crate::dom_parser::parse_child_document_projection_from_source(
         scope,
         snapshot.url.clone(),
         &snapshot.markup,
         snapshot.content_type.as_deref(),
         Some(&snapshot.character_set),
+        HtmlParser::with_scripting_enabled(false),
     )?;
     if let Some(base_url) = v8_string(scope, base_url.as_str()) {
         set_private_value(
@@ -154,7 +155,8 @@ fn detached_iframe_srcdoc_base_url<'s>(
 }
 
 fn snapshot_base_url(document_url: Url, markup: &str) -> Url {
-    let document = HtmlParser.parse(document_url.clone(), markup.to_owned());
+    let document =
+        HtmlParser::with_scripting_enabled(false).parse(document_url.clone(), markup.to_owned());
     document
         .document()
         .map(|doc| doc.base_url().clone())

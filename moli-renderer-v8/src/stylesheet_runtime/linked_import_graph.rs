@@ -509,7 +509,7 @@ mod tests {
     #[tokio::test]
     async fn invalidated_blocking_transport_can_release_the_shared_graph() {
         let document_url = Url::parse("https://example.test/page").unwrap();
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let first_document = parser.parse(
             document_url.clone(),
             "<!doctype html><style>@import url('data:text/css,.first%7Bcolor:red%7D');</style>"

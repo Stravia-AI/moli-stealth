@@ -108,6 +108,7 @@ wasm_dep_analyzer = { git = "https://github.com/ldm0/wasm_dep_analyzer", branch 
 
 [dev-dependencies]
 moli-fetch = { path = "../moli-fetch", features = ["test-support"] }
+moli-parser = { path = "../moli-parser", features = ["test-support"] }
 moli-page-types = { path = "../moli-page-types", features = ["test-support"] }
 moli-v8-test-util = { path = "../moli-v8-test-util" }
 moli-websocket = { path = "../moli-websocket", features = ["test-support"] }

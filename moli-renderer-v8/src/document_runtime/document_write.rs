@@ -328,6 +328,7 @@ impl DocumentRuntime {
         let parser = DocumentParserSession::start_open_live_document(
             self.document_url().clone(),
             self.document_handle(),
+            self.document_scripting_enabled(),
         );
         self.root_document_parser = Some(parser);
     }
@@ -608,7 +609,7 @@ impl DocumentRuntime {
         scripting_enabled: bool,
     ) -> Option<DomHandle> {
         let first_node_index = self.dom_host().dom().len();
-        let parser = HtmlParser;
+        let parser = HtmlParser::with_scripting_enabled(scripting_enabled);
         let context_node = self.dom_host().node(context_handle);
         let context_namespace = context_node
             .and_then(Node::namespace)
@@ -624,12 +625,11 @@ impl DocumentRuntime {
         {
             context_local_name = "body".to_owned();
         }
-        let parsed = parser.parse_fragment_without_declarative_shadow_roots_with_scripting(
+        let parsed = parser.parse_fragment_without_declarative_shadow_roots(
             self.document_url().clone(),
             &context_namespace,
             &context_local_name,
             html.to_owned(),
-            scripting_enabled,
         );
         let is_frameset_context = context_namespace == "http://www.w3.org/1999/xhtml"
             && context_local_name.eq_ignore_ascii_case("frameset");
@@ -705,8 +705,8 @@ impl DocumentRuntime {
         document_handle: DomHandle,
         context_handle: DomHandle,
         html: &str,
-        scripting_enabled: bool,
     ) -> Option<DomHandle> {
+        let scripting_enabled = unsafe { &*host_ptr }.document_scripting_enabled(document_handle);
         self.build_fragment_from_html_with_context_mode(
             scope,
             host_ptr,
@@ -730,6 +730,7 @@ impl DocumentRuntime {
         scripts_already_started: bool,
         custom_element_upgrade_timing: HtmlFragmentCustomElementUpgradeTiming,
     ) -> Option<DomHandle> {
+        let scripting_enabled = unsafe { &*host_ptr }.document_scripting_enabled(document_handle);
         self.build_fragment_from_html_with_context_mode(
             scope,
             host_ptr,
@@ -739,7 +740,7 @@ impl DocumentRuntime {
             scripts_already_started,
             custom_element_upgrade_timing,
             HtmlFragmentParserContextMode::Standard,
-            true,
+            scripting_enabled,
         )
     }
 
@@ -753,7 +754,8 @@ impl DocumentRuntime {
         custom_element_upgrade_timing: HtmlFragmentCustomElementUpgradeTiming,
     ) -> Option<DomHandle> {
         let first_node_index = self.dom_host().dom().len();
-        let parser = HtmlParser;
+        let scripting_enabled = unsafe { &*host_ptr }.document_scripting_enabled(document_handle);
+        let parser = HtmlParser::with_scripting_enabled(scripting_enabled);
         let context_node = self.dom_host().node(context_handle);
         let context_namespace = context_node
             .and_then(Node::namespace)
@@ -2751,7 +2753,8 @@ mod tests {
     #[test]
     fn root_document_parser_is_owned_by_shared_open_session() {
         let document_url = Url::parse("https://document-write.test/root-owner.html").unwrap();
-        let document = HtmlParser.parse(document_url, "<!doctype html>".to_owned());
+        let document =
+            HtmlParser::SCRIPTING_ENABLED.parse(document_url, "<!doctype html>".to_owned());
         let mut runtime = DocumentRuntime::new(&document);
 
         runtime.start_root_document_parser_stream();
@@ -2772,7 +2775,8 @@ mod tests {
     #[should_panic(expected = "document.write external-script load id space exhausted")]
     fn document_write_external_script_load_ids_never_wrap() {
         let document_url = Url::parse("https://document-write.test/load-id.html").unwrap();
-        let document = HtmlParser.parse(document_url, "<!doctype html>".to_owned());
+        let document =
+            HtmlParser::SCRIPTING_ENABLED.parse(document_url, "<!doctype html>".to_owned());
         let mut runtime = DocumentRuntime::new(&document);
         runtime.next_document_write_external_script_load_id = u64::MAX;
 
@@ -2797,7 +2801,8 @@ mod tests {
         .enumerate()
         {
             let document_url = Url::parse("https://document-write.test/page.html").unwrap();
-            let document = HtmlParser.parse(document_url.clone(), html.to_owned());
+            let document =
+                HtmlParser::SCRIPTING_ENABLED.parse(document_url.clone(), html.to_owned());
             let node = document.script_handles()[0];
             let mut runtime = DocumentRuntime::new(&document);
             let script = prepared_script(node, kind, mode, document_url);

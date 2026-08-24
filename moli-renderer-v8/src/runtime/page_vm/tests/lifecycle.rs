@@ -3359,7 +3359,7 @@ fn page_state_capture_publishes_lightweight_document_metadata() {
         crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
     let document_url = Url::parse("https://metadata-cache.test/page").expect("document URL");
     let dom_host = DomHost::from_dom(
-        HtmlParser.parse(
+        HtmlParser::SCRIPTING_ENABLED.parse(
             document_url.clone(),
             "<!doctype html><html><head><title>metadata-title</title></head><body></body></html>"
                 .to_owned(),
@@ -3393,7 +3393,7 @@ fn serialize_html_reads_current_document_after_document_open() {
     let loader =
         crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
     let document_url = Url::parse("https://document-cache.test/").expect("test URL");
-    let dom_host = DomHost::from_dom(HtmlParser.parse(
+    let dom_host = DomHost::from_dom(HtmlParser::SCRIPTING_ENABLED.parse(
         document_url,
         "<!doctype html><html><head></head><body>before</body></html>".to_owned(),
     ));

@@ -18,7 +18,9 @@ impl DocumentRuntime {
     ) -> Option<RuntimeScriptStartPlan> {
         let options = crate::host::ScriptElementLoaderOptions {
             prepare_changed_empty_inline_source: self.requires_trusted_types_for_script(),
-            ..crate::host::ScriptElementLoaderOptions::default()
+            ..crate::host::ScriptElementLoaderOptions::with_scripting_enabled(
+                self.document_scripting_enabled(),
+            )
         };
         plan_script_start(
             &mut self.dom_host,

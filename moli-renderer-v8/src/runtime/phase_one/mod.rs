@@ -95,6 +95,25 @@ mod non_executable_script_tests;
 use super::script_preloads::*;
 use super::script_preloads::{BufferedDocumentPreloadState, ServiceWorkerScriptPreloadContext};
 
+fn script_preloads_require_owner_admission(env: &PageVmEnvConfig) -> bool {
+    !main_document_parser_scripting_enabled(env)
+        || env.fetch_subresource_interception_enabled
+            && env
+                .fetch_subresource_interception_resource_type
+                .is_none_or(|resource_type| {
+                    resource_type.has_same_cdp_fetch_interception_type(
+                        crate::types::SubresourceResourceType::Script,
+                    )
+                })
+}
+
+fn main_document_parser_scripting_enabled(env: &PageVmEnvConfig) -> bool {
+    !env.script_execution_disabled
+        && crate::content_security_policy::content_security_policy_sandbox_allows_scripts(
+            &env.response_content_security_policies,
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,7 +232,10 @@ mod tests {
         let loader = Box::leak(Box::new(
             ResourceRequestClient::new(&FetchConfig::default()).expect("default loader"),
         ));
-        let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+        let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled(
+            final_url,
+            main_document_parser_scripting_enabled(&env),
+        )));
         let parser_dom_host = state
             .parser_session
             .stream_handle()
@@ -414,7 +436,7 @@ mod tests {
             .await
     }
 
-    async fn parse_phase_one_html_into_page_vm_for_test_with_env(
+    pub(super) async fn parse_phase_one_html_into_page_vm_for_test_with_env(
         html: &'static str,
         env: PageVmEnvConfig,
     ) -> PageVm {
@@ -450,6 +472,65 @@ mod tests {
         .expect("parser step should complete");
         assert!(matches!(outcome, ParserStepAdvanceOutcome::Continue));
         page_vm
+    }
+
+    #[test]
+    fn main_document_parser_derives_scripting_state_from_runtime_and_response_sandbox() {
+        const MARKUP: &str = "<!doctype html><noscript><main id='fallback'></main></noscript>";
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime should build");
+
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            for (script_execution_disabled, policy, fallback_expected) in [
+                (false, None, false),
+                (true, None, true),
+                (false, Some("script-src 'none'"), false),
+                (false, Some("sandbox"), true),
+                (false, Some("sandbox allow-scripts"), false),
+            ] {
+                let env = default_test_page_vm_env_config_with(|env| {
+                    env.script_execution_disabled = script_execution_disabled;
+                    env.response_content_security_policies =
+                        policy.into_iter().map(str::to_owned).collect();
+                });
+                let page_vm =
+                    parse_phase_one_html_into_page_vm_for_test_with_env(MARKUP, env).await;
+                let fallback_present = page_vm
+                    .vm()
+                    .document_runtime
+                    .dom_host()
+                    .element_handle_by_id("fallback")
+                    .is_some();
+                assert_eq!(
+                    fallback_present, fallback_expected,
+                    "unexpected noscript parse for disabled={script_execution_disabled}, policy={policy:?}"
+                );
+            }
+
+            for (policy, script_expected) in
+                [("sandbox", false), ("sandbox allow-scripts", true)]
+            {
+                let env = default_test_page_vm_env_config_with(|env| {
+                    env.response_content_security_policies = vec![policy.to_owned()];
+                });
+                let page_vm = parse_phase_one_html_into_page_vm_for_test_with_env(
+                    "<!doctype html><script>document.documentElement.setAttribute('data-script-ran', 'yes')</script>",
+                    env,
+                )
+                .await;
+                let dom_host = page_vm.vm().document_runtime.dom_host();
+                let document_element = dom_host
+                    .document_element_handle()
+                    .expect("parser should create the document element");
+                assert_eq!(
+                    dom_host.get_attribute(document_element, "data-script-ran").is_some(),
+                    script_expected,
+                    "unexpected parser script execution for policy={policy:?}"
+                );
+            }
+        }));
     }
 
     #[test]
@@ -1996,7 +2077,7 @@ document.body.setAttribute('data-error-state', [
         }
     }
 
-    fn default_test_page_vm_env_config_with(
+    pub(super) fn default_test_page_vm_env_config_with(
         update: impl FnOnce(&mut PageVmEnvConfig),
     ) -> PageVmEnvConfig {
         let mut env = default_test_page_vm_env_config();
@@ -2747,6 +2828,41 @@ document.body.setAttribute('data-error-state', [
     }
 
     #[test]
+    fn script_disabled_preload_scan_defers_every_script_to_the_page_owner() {
+        let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
+        let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
+        let env = default_test_page_vm_env_config_with(|env| {
+            env.script_execution_disabled = true;
+        });
+        let mut cache = BufferedDocumentPreloadState::default();
+        cache.set_script_fetch_requires_owner_admission(script_preloads_require_owner_admission(
+            &env,
+        ));
+
+        cache.append_to_main_document_scan(
+            &final_url,
+            concat!(
+                "<script src='/blocking.js'></script>",
+                "<script defer src='/defer.js'></script>",
+                "<script async src='/async.js'></script>",
+                "<script type='module' src='/module.js'></script>",
+            ),
+            &loader,
+        );
+
+        assert!(
+            cache.entries.is_empty(),
+            "the preload scanner must not start a physical script fetch before the disabled page owner can reject it"
+        );
+        assert_eq!(
+            preload_request_urls(cache.take_pending_script_preloads_for_test()),
+            ["blocking.js", "defer.js", "async.js", "module.js"].map(|name| {
+                Url::parse(&format!("https://example.test/{name}")).expect("script preload URL")
+            })
+        );
+    }
+
+    #[test]
     fn meta_csp_gate_waits_for_every_scanner_seen_policy() {
         let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
@@ -2961,7 +3077,7 @@ document.body.setAttribute('data-error-state', [
                 "#;
                 let loader = ResourceRequestClient::new(&FetchConfig::default())
                     .expect("default loader");
-                let mut state = ParseTimeDriverState::new(final_url.clone());
+                let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone());
                 let parser_dom_host = state
                     .parser_session
                     .stream_handle()
@@ -3786,7 +3902,7 @@ document.body.setAttribute('data-error-state', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -3890,7 +4006,7 @@ document.body.setAttribute('data-error-state', [
             let loader_owner =
                 ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
             let loader = loader_owner.clone();
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             state.close_input();
             let parser_bridge =
                 crate::document_runtime::ParserConnectedScriptBridge::for_session(
@@ -4016,7 +4132,7 @@ document.body.setAttribute('data-error-state', [
             let loader = Box::leak(Box::new(
                 ResourceRequestClient::new(&FetchConfig::default()).expect("default loader"),
             ));
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state
                 .parser_session
                 .stream_handle()
@@ -4107,7 +4223,7 @@ document.body.setAttribute('data-error-state', [
             let loader = Box::leak(Box::new(
                 ResourceRequestClient::new(&FetchConfig::default()).expect("default loader"),
             ));
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state
                 .parser_session
                 .stream_handle()
@@ -4676,7 +4792,7 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             state.input_closed = true;
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
@@ -4796,7 +4912,7 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -4862,7 +4978,7 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -5073,7 +5189,7 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let env = default_test_page_vm_env_config_with(|env| {
@@ -5149,7 +5265,7 @@ queueMicrotask(() => window.__mainParserClassicCheckpointEvents.push('script-mic
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let env = default_test_page_vm_env_config_with(|env| {
@@ -5372,7 +5488,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
         runtime.block_on(async move {
             let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             bind_preload_state_to_current_test_runtime(&mut state.buffered_document_preloads);
             let session = state.parser_session.stream_handle().borrow().script_input_session();
             session.enqueue_script_input_preload_html("<script sr".to_owned());
@@ -5470,7 +5586,8 @@ globalThis.__outerDocumentWriteScriptContinued = true;
         let (script_url, server) = spawn_single_script_server(script_body).await;
         let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url.clone());
+        let mut state =
+            ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone());
         let browser_context_owner = crate::runtime::RendererBrowserContextRuntime::new();
         let browser_context_runtime = browser_context_owner.handle();
         let completion_queue = crate::page_task_queue::RendererPageServiceWorkerTestHarness::new();
@@ -5563,7 +5680,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
         runtime.block_on(async move {
             let final_url = Url::parse("https://example.test/docs/page.html").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             bind_preload_state_to_current_test_runtime(&mut state.buffered_document_preloads);
             let session = state.parser_session.stream_handle().borrow().script_input_session();
 
@@ -5609,7 +5726,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
     #[test]
     fn parse_time_driver_state_can_select_live_stream_backend_for_testing() {
         let final_url = Url::parse("https://example.test/").expect("test url");
-        let state = ParseTimeDriverState::new(final_url);
+        let state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
 
         assert!(
             state
@@ -5624,7 +5741,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
     fn parser_owner_boundary_with_live_backend_queues_document_turn_before_runtime_work() {
         let final_url = Url::parse("https://example.test/").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
         let mut owner = ParseTimeOwner::Parser;
         let mut parser_step_ready = false;
         let mut pending_parsing_blocking_wait = PendingParsingBlockingWait::None;
@@ -5761,7 +5878,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -5845,7 +5962,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
     fn parser_step_without_script_handoff_consumes_live_backend_dom() {
         let final_url = Url::parse("https://example.test/").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
         let driver = ParserDriver {
             loader: &loader,
             final_url: &state.final_url,
@@ -5901,7 +6018,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
     fn parser_step_with_inline_script_surfaces_handoff_on_live_backend() {
         let final_url = Url::parse("https://example.test/").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
         let driver = ParserDriver {
             loader: &loader,
             final_url: &state.final_url,
@@ -5965,7 +6082,7 @@ globalThis.__outerDocumentWriteScriptContinued = true;
     fn parser_step_with_inline_svg_script_surfaces_shared_script_handoff() {
         let final_url = Url::parse("https://example.test/").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url);
+        let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
         let driver = ParserDriver {
             loader: &loader,
             final_url: &state.final_url,
@@ -13523,7 +13640,7 @@ document.body.append(window.jsRemovedLazyMedia, window.parserRemovedLazyMedia);
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let _js_runtime = crate::JsRuntime::initialize();
             let mut driver = ParserDriver {
                 loader,
@@ -13604,7 +13721,7 @@ document.body.setAttribute('data-result', `${before}|${style.color}`);
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let _js_runtime = crate::JsRuntime::initialize();
             let mut driver = ParserDriver {
                 loader,
@@ -13703,7 +13820,7 @@ document.body.setAttribute('data-result', `${before}|${style.color}`);
                 Url::parse("https://parser-sync-custom-element.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -13822,7 +13939,7 @@ document.body.setAttribute('data-result', [
                 Url::parse("https://parser-returned-custom-element.test/").expect("test url");
             let loader: &'static ResourceRequestClient =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -13962,7 +14079,7 @@ document.body.setAttribute('data-result', [
         runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let state = ParseTimeDriverState::new(final_url.clone());
+            let state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone());
             let _js_runtime = crate::JsRuntime::initialize();
             let html =
                 r#"<!doctype html><style>div { color: red } .foo { color: lime }</style><body><div id="target"></div></body>"#;
@@ -14036,7 +14153,7 @@ document.body.setAttribute('data-result', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -14210,7 +14327,7 @@ document.body.setAttribute('data-result', [
             let loader = Box::leak(Box::new(
                 ResourceRequestClient::new(&FetchConfig::default()).expect("default loader"),
             ));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -14459,7 +14576,7 @@ document.body.setAttribute('data-result', [
             let loader = Box::leak(Box::new(
                 ResourceRequestClient::new(&FetchConfig::default()).expect("default loader"),
             ));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url.clone())));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone())));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -14665,7 +14782,7 @@ document.body.setAttribute('data-result', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -14831,7 +14948,7 @@ for (const [id, flag] of [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -14907,7 +15024,7 @@ document.body.setAttribute('data-result', 'done');
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -14991,7 +15108,7 @@ document.body.setAttribute('data-result', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15165,7 +15282,7 @@ document.body.setAttribute('data-parser-returned', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15334,7 +15451,7 @@ document.body.setAttribute('data-idl-nonce', element.nonce);
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15572,7 +15689,7 @@ document.body.setAttribute('data-input', [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15750,7 +15867,7 @@ document.body.setAttribute('data-face-disabled', String(face.matches(':disabled'
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15864,7 +15981,7 @@ document.body.setAttribute('data-after-visible', String(!!document.getElementByI
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -15986,7 +16103,7 @@ document.body.setAttribute('data-after-body-visible', String(!!document.getEleme
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -16076,7 +16193,7 @@ document.body.setAttribute('data-token', instance.getAttribute('data-token') || 
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -16219,7 +16336,7 @@ document.body.setAttribute('data-bad-write', String(!!document.getElementById('b
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -16292,7 +16409,8 @@ document.body.setAttribute("data-range", [
     fn inline_script_handoff_is_classified_as_blocking_classic_on_live_backend() {
         let final_url = Url::parse("https://example.test/").expect("test url");
         let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-        let mut state = ParseTimeDriverState::new(final_url.clone());
+        let mut state =
+            ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url.clone());
         let driver = ParserDriver {
             loader: &loader,
             final_url: &state.final_url,
@@ -16349,7 +16467,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -16450,7 +16568,7 @@ document.body.setAttribute("data-range", [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
             let mut state =
-                ParseTimeDriverState::new(final_url);
+                ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -16590,7 +16708,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -16719,7 +16837,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -16914,7 +17032,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -17044,7 +17162,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -17140,7 +17258,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let mut driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -17248,7 +17366,7 @@ document.body.setAttribute("data-range", [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("default loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let mut driver = ParserDriver {
                 loader,
                 final_url: &state.final_url,
@@ -17384,7 +17502,7 @@ document.body.setAttribute("data-range", [
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
             let mut state =
-                ParseTimeDriverState::new(final_url);
+                ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let driver = ParserDriver {
                 loader: &loader,
                 final_url: &state.final_url,
@@ -17452,7 +17570,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state.parser_session.stream_handle().borrow_mut().take_parser_stream_dom_host();
             let local_executor = JsLocalExecutor::new();
             let mut page_vm = PageVm::new(
@@ -17542,7 +17660,7 @@ document.body.setAttribute("data-range", [
             let _js_runtime = crate::JsRuntime::initialize();
             let final_url = Url::parse("https://example.test/").expect("test url");
             let loader = ResourceRequestClient::new(&FetchConfig::default()).expect("default loader");
-            let mut state = ParseTimeDriverState::new(final_url);
+            let mut state = ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url);
             let parser_dom_host = state
                 .parser_session
                 .stream_handle()

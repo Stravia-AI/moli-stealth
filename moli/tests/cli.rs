@@ -34,6 +34,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
         "X-Test: one",
         "-H",
         "X-Trace: two",
+        "--disable-js",
         "--with-base",
         "--with-frames",
         "--strip-mode",
@@ -83,6 +84,7 @@ fn parses_explicit_fetch_command_with_compatibility_flags() {
                     value: "two".to_owned(),
                 },
             ],
+            disable_js: true,
             with_base: true,
             with_frames: true,
             trace_network: false,
@@ -415,6 +417,7 @@ fn infers_fetch_mode_from_bare_url() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: None,
             headers: vec![],
+            disable_js: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -454,6 +457,7 @@ fn parses_bare_dump_with_explicit_fetch_command_and_defaults_to_html() {
         Commands::Fetch(Box::new(FetchArgs {
             dump: Some(DumpFormat::Html),
             headers: vec![],
+            disable_js: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -497,6 +501,7 @@ fn parses_header_flag_with_explicit_fetch_command() {
                 name: "X-Test".to_owned(),
                 value: "one".to_owned(),
             }],
+            disable_js: false,
             with_base: false,
             with_frames: false,
             trace_network: false,
@@ -882,6 +887,23 @@ fn fetch_strip_options_combine_cli_selections() {
             css: true,
         }
     );
+}
+
+#[test]
+fn disable_js_rejects_document_start_script_injection() {
+    for injection in ["--document-start-script", "--document-start-script-file"] {
+        let error = Cli::try_parse_from(normalize_args_for_compat([
+            "moli",
+            "fetch",
+            "--disable-js",
+            injection,
+            "fixture.js",
+            "https://example.com",
+        ]))
+        .unwrap_err();
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }
 
 #[test]
@@ -1319,6 +1341,36 @@ fn app_config_from_fetch_cli_enables_image_fetch() {
 
     let config = AppConfig::from_cli(&cli).unwrap();
     assert!(config.browser.image_fetch_enabled());
+}
+
+#[test]
+fn app_config_from_fetch_cli_disables_script_execution_only_when_requested() {
+    let enabled = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "https://example.com",
+    ]))
+    .unwrap();
+    assert!(
+        !AppConfig::from_cli(&enabled)
+            .unwrap()
+            .browser
+            .script_execution_disabled()
+    );
+
+    let disabled = Cli::try_parse_from(normalize_args_for_compat([
+        "moli",
+        "fetch",
+        "--disable-js",
+        "https://example.com",
+    ]))
+    .unwrap();
+    assert!(
+        AppConfig::from_cli(&disabled)
+            .unwrap()
+            .browser
+            .script_execution_disabled()
+    );
 }
 
 #[test]

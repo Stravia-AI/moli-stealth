@@ -675,9 +675,9 @@ impl DocumentParserDriver {
 }
 
 impl DocumentParserSession {
-    pub(crate) fn start_main_document(document_url: Url) -> Self {
+    pub(crate) fn start_main_document(document_url: Url, scripting_enabled: bool) -> Self {
         Self::new_html(
-            HtmlParser.start_document(document_url),
+            HtmlParser::with_scripting_enabled(scripting_enabled).start_document(document_url),
             DocumentParserLifetime::Finite,
         )
     }
@@ -692,9 +692,11 @@ impl DocumentParserSession {
     pub(crate) fn start_finite_live_document(
         document_url: Url,
         document_handle: NativeNodeId,
+        scripting_enabled: bool,
     ) -> Self {
         Self::new_html(
-            HtmlParser.start_live_document_root(document_url, document_handle),
+            HtmlParser::with_scripting_enabled(scripting_enabled)
+                .start_live_document_root(document_url, document_handle),
             DocumentParserLifetime::Finite,
         )
     }
@@ -712,9 +714,11 @@ impl DocumentParserSession {
     pub(crate) fn start_open_live_document(
         document_url: Url,
         document_handle: NativeNodeId,
+        scripting_enabled: bool,
     ) -> Self {
         Self::new_html(
-            HtmlParser.start_live_document_root(document_url, document_handle),
+            HtmlParser::with_scripting_enabled(scripting_enabled)
+                .start_live_document_root(document_url, document_handle),
             DocumentParserLifetime::Open,
         )
     }
@@ -1193,6 +1197,7 @@ mod session_state_tests {
         DocumentParserSession::start_finite_live_document(
             Url::parse("https://parser-session.test/").expect("test URL"),
             NativeNodeId::new(1),
+            true,
         )
     }
 
@@ -1234,6 +1239,7 @@ mod session_state_tests {
         let mut parser = DocumentParserSession::start_open_live_document(
             Url::parse("https://parser-session.test/").expect("test URL"),
             NativeNodeId::new(1),
+            true,
         );
         let permit = parser.suspend(ParserSuspensionCause::ParserClassicSource {
             script: NativeNodeId::new(8),
@@ -1365,6 +1371,7 @@ mod session_state_tests {
         let mut parser = DocumentParserSession::start_open_live_document(
             Url::parse("https://parser-session.test/").expect("test URL"),
             NativeNodeId::new(1),
+            true,
         );
         let control = parser.control_handle();
         let nesting = control.enter_parser_script_nesting();

@@ -40,6 +40,10 @@ pub(crate) struct DetachedChildBrowsingContextDocumentSnapshot {
     pub(crate) owner_node_id: crate::document_runtime::DomHandle,
     pub(crate) url: Url,
     pub(crate) markup: String,
+    /// Parser-only scripting state captured from the detached Document owner.
+    /// DOMSnapshot reparses `markup`, so it must preserve `<noscript>` semantics
+    /// without implying that snapshot parsing executes JavaScript.
+    pub(crate) scripting_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

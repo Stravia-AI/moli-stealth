@@ -128,7 +128,7 @@ pub(super) fn parser_blocking_script_can_start_external_source_load(
     page_vm: &PageVm,
     script: &PreparedScript,
 ) -> bool {
-    if page_vm.script_execution_disabled() {
+    if !page_vm.main_document_scripting_enabled() {
         return false;
     }
     if script.source_kind != crate::types::ScriptSourceKind::External {

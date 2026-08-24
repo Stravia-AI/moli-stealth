@@ -11,6 +11,7 @@ pub struct BrowserConfig {
     layout_policy: LayoutPolicy,
     optional_resource_fetch_mask: OptionalResourceFetchMask,
     subframe_loading_enabled: bool,
+    script_execution_disabled: bool,
     wpt_extensions_enabled: bool,
 }
 
@@ -23,6 +24,7 @@ impl Default for BrowserConfig {
             layout_policy: LayoutPolicy::default(),
             optional_resource_fetch_mask: OptionalResourceFetchMask::NONE,
             subframe_loading_enabled: true,
+            script_execution_disabled: false,
             wpt_extensions_enabled: false,
         }
     }
@@ -125,6 +127,14 @@ impl BrowserConfig {
         self
     }
 
+    pub fn script_execution_disabled(&self) -> bool {
+        self.script_execution_disabled
+    }
+
+    pub fn set_script_execution_disabled(&mut self, disabled: bool) {
+        self.script_execution_disabled = disabled;
+    }
+
     pub fn wpt_extensions_enabled(&self) -> bool {
         self.wpt_extensions_enabled
     }
@@ -207,6 +217,15 @@ mod tests {
                 "{resource_type:?} is outside the optional-resource policy"
             );
         }
+    }
+
+    #[test]
+    fn browser_config_defaults_to_script_execution_and_can_disable_it() {
+        let mut config = BrowserConfig::default();
+        assert!(!config.script_execution_disabled());
+
+        config.set_script_execution_disabled(true);
+        assert!(config.script_execution_disabled());
     }
 
     #[test]

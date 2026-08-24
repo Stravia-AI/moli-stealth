@@ -14,7 +14,7 @@ fn data_block_completes_in_parser_turn_without_page_task() {
             let final_url = Url::parse("https://example.test/").expect("test URL");
             let loader =
                 Box::leak(Box::new(ResourceRequestClient::new(&FetchConfig::default()).expect("test loader")));
-            let state = Box::leak(Box::new(ParseTimeDriverState::new(final_url)));
+            let state = Box::leak(Box::new(ParseTimeDriverState::new_with_scripting_enabled_for_test(final_url)));
             let parser_dom_host = state
                 .parser_session
                 .stream_handle()
@@ -108,4 +108,50 @@ document.body.setAttribute(
             );
         }));
     });
+}
+
+#[test]
+fn parser_owned_import_map_is_not_registered_when_script_execution_is_disabled() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("current-thread runtime should build");
+
+    runtime.block_on(tokio::task::LocalSet::new().run_until(async move {
+        let env = super::tests::default_test_page_vm_env_config_with(|env| {
+            env.script_execution_disabled = true;
+        });
+        let mut page_vm = super::tests::parse_phase_one_html_into_page_vm_for_test_with_env(
+            r#"<!doctype html><html><head><script type="importmap">{"imports":{"fixture":"/module.mjs"}}</script></head><body></body></html>"#,
+            env,
+        )
+        .await;
+        let base_url = Url::parse("https://example.test/").expect("base url");
+
+        assert!(
+            page_vm
+                .vm_mut()
+                .document_runtime
+                .resolve_module_specifier("fixture", &base_url)
+                .is_err(),
+            "a disabled parser-owned import map must not alter module resolution"
+        );
+        let document = page_vm.vm().document_runtime.dom_host().document_handle();
+        let scripts = page_vm
+            .vm()
+            .document_runtime
+            .dom_host()
+            .script_handles_in_subtree(document);
+        assert_eq!(scripts.len(), 1);
+        assert!(
+            page_vm
+                .vm()
+                .document_runtime
+                .dom_host()
+                .node(scripts[0])
+                .and_then(Node::as_element)
+                .is_some_and(|element| element.script_already_started()),
+            "the disabled import map must remain inert if scripting is enabled later"
+        );
+    }));
 }

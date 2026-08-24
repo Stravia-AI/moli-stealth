@@ -31,6 +31,17 @@ use crate::parser_script::payload::{ParserClassicScriptMetadata, ParserPreparedC
 use crate::planning::PreparedScript;
 use html5ever::tree_builder::QuirksMode;
 
+fn disabled_script_run(script: &PreparedScript) -> crate::types::ScriptRun {
+    crate::types::ScriptRun::skipped(
+        script.node_id,
+        script.kind,
+        script.mode,
+        script.source_kind,
+        script.url.clone(),
+        crate::types::ScriptSkipReason::ScriptExecutionDisabled,
+    )
+}
+
 struct PhaseOneParserOwner<'a> {
     vm: &'a mut ScriptVm,
 }
@@ -810,6 +821,66 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         .await
     }
 
+    fn suppress_parser_script_handoff_if_scripting_is_disabled(
+        &mut self,
+        page_vm: &mut PageVm,
+        handoff: &ParserScriptHandoff,
+    ) -> bool {
+        if page_vm.main_document_scripting_enabled()
+            || matches!(handoff, ParserScriptHandoff::NoExecution { .. })
+        {
+            return false;
+        }
+
+        let (run, parser_blocking) = match handoff {
+            ParserScriptHandoff::BlockingClassic { script, .. } => {
+                (Some(disabled_script_run(script)), true)
+            }
+            ParserScriptHandoff::AsyncPostParse { script, .. }
+            | ParserScriptHandoff::NonAsyncPostParse { script, .. } => {
+                (Some(disabled_script_run(script)), false)
+            }
+            ParserScriptHandoff::ImportMap { import_map, .. } => {
+                let source_kind = match &import_map.source {
+                    crate::parser::PreparedImportMapSource::Inline(_) => {
+                        crate::types::ScriptSourceKind::Inline
+                    }
+                    crate::parser::PreparedImportMapSource::ExternalUnsupported => {
+                        crate::types::ScriptSourceKind::External
+                    }
+                };
+                (
+                    Some(crate::types::ScriptRun::skipped(
+                        import_map.node_id,
+                        crate::types::ScriptKind::ImportMap,
+                        crate::types::ScriptMode::ImportMapInOrder,
+                        source_kind,
+                        import_map.base_url.clone(),
+                        crate::types::ScriptSkipReason::ScriptExecutionDisabled,
+                    )),
+                    false,
+                )
+            }
+            ParserScriptHandoff::PreparationFailure { .. } => (None, false),
+            ParserScriptHandoff::NoExecution { .. } => unreachable!(),
+        };
+        let (handle, start_line, start_column) = handoff.start_position();
+
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .note_parser_script_start_position(handle, start_line, start_column);
+        crate::host::apply_parser_script_element_state_without_execution(
+            page_vm.vm_mut().document_runtime.dom_host_mut(),
+            handoff,
+        );
+        page_vm.report.runs.extend(run);
+        if parser_blocking {
+            self.finish_parser_blocking_pause();
+        }
+        true
+    }
+
     async fn handle_parse_time_script_handoff_for_owner(
         &mut self,
         page_vm: &mut PageVm,
@@ -825,6 +896,9 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
                 "dropping stale main parser script handoff"
             );
             return Ok(ScriptHandoffOutcome::StoppedCurrentDocument);
+        }
+        if self.suppress_parser_script_handoff_if_scripting_is_disabled(page_vm, &handoff) {
+            return Ok(ScriptHandoffOutcome::NoNavigation);
         }
         match handoff {
             ParserScriptHandoff::BlockingClassic {
@@ -1399,43 +1473,45 @@ impl<'loader, 'state> ParserDriver<'loader, 'state> {
         page_vm
             .vm_mut()
             .accept_parser_discovered_native_modulepreloads(modulepreload_link_candidates);
-        for mut script in async_prefetch_scripts {
-            bind_parser_owned_script_handle(page_vm, &mut script);
-            self.buffered_document_preloads
-                .claim_pending_script_preload_for_parser(&script);
-            let shared_preload = self
-                .buffered_document_preloads
-                .shared_preload_for_script(&script);
-            let document_character_set = page_vm
-                .vm()
-                .document_runtime
-                .document_character_set()
-                .to_owned();
-            let resource_task_runner = page_vm.resource_task_runner();
-            let _ = self.scheduler.accept_parser_discovered_async_candidate(
-                script,
-                self.loader,
-                resource_task_runner,
-                shared_preload,
-                Some(&document_character_set),
-                |script| {
-                    let binding = page_vm
-                        .vm_mut()
-                        .accept_main_document_script_load_delay_binding(
-                            parser_document_owner,
-                            crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
-                        )
-                        .expect("current parser async discovery must bind lifecycle ownership");
-                    tracing::debug!(
-                        ?parser_document_owner,
-                        script_node_id = ?script.node_id,
-                        script_url = %script.url,
-                        load_delay_token = ?binding.load_delay_token(),
-                        "accepted main parser async classic lifecycle binding before source work"
-                    );
-                    binding
-                },
-            );
+        if page_vm.main_document_scripting_enabled() {
+            for mut script in async_prefetch_scripts {
+                bind_parser_owned_script_handle(page_vm, &mut script);
+                self.buffered_document_preloads
+                    .claim_pending_script_preload_for_parser(&script);
+                let shared_preload = self
+                    .buffered_document_preloads
+                    .shared_preload_for_script(&script);
+                let document_character_set = page_vm
+                    .vm()
+                    .document_runtime
+                    .document_character_set()
+                    .to_owned();
+                let resource_task_runner = page_vm.resource_task_runner();
+                let _ = self.scheduler.accept_parser_discovered_async_candidate(
+                    script,
+                    self.loader,
+                    resource_task_runner,
+                    shared_preload,
+                    Some(&document_character_set),
+                    |script| {
+                        let binding = page_vm
+                            .vm_mut()
+                            .accept_main_document_script_load_delay_binding(
+                                parser_document_owner,
+                                crate::frame_owner_model::MainDocumentScriptLoadDelayKind::Classic,
+                            )
+                            .expect("current parser async discovery must bind lifecycle ownership");
+                        tracing::debug!(
+                            ?parser_document_owner,
+                            script_node_id = ?script.node_id,
+                            script_url = %script.url,
+                            load_delay_token = ?binding.load_delay_token(),
+                            "accepted main parser async classic lifecycle binding before source work"
+                        );
+                        binding
+                    },
+                );
+            }
         }
         page_vm
             .vm_mut()

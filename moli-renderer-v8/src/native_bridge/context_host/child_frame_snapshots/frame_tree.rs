@@ -34,6 +34,7 @@ impl JsContextHost {
                     "",
                     &snapshot.url,
                     &snapshot.markup,
+                    self.child_browsing_context_scripting_enabled(handle),
                     0,
                     parent_scope,
                 )
@@ -74,6 +75,7 @@ impl JsContextHost {
                     "",
                     &snapshot.url,
                     &snapshot.markup,
+                    self.child_browsing_context_scripting_enabled(handle),
                     0,
                     parent_scope,
                 )
@@ -135,6 +137,7 @@ impl JsContextHost {
                         &identity.frame_id,
                         &snapshot.url,
                         &snapshot.markup,
+                        self.child_browsing_context_scripting_enabled(handle),
                         depth,
                         storage_scope.clone(),
                     )

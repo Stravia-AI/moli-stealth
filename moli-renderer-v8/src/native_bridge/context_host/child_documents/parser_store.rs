@@ -122,6 +122,7 @@ mod tests {
         DocumentParserSession::start_finite_live_document(
             Url::parse("https://child-parser-store.test/").expect("test url"),
             NativeNodeId::new(1),
+            true,
         )
     }
 
@@ -149,6 +150,7 @@ mod tests {
             DocumentParserSession::start_open_live_document(
                 Url::parse("https://child-parser-store.test/").expect("test url"),
                 NativeNodeId::new(1),
+                true,
             ),
         );
         assert!(!store.is_complete_for(owner));

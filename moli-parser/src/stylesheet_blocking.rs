@@ -67,7 +67,7 @@ mod tests {
 
     #[test]
     fn document_owned_blocking_candidates_include_parser_created_style_imports() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             url::Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><style>@import url('/slow.css');</style><script defer>window.x = 1;</script></head></html>".to_owned(),
@@ -94,7 +94,7 @@ mod tests {
 
     #[test]
     fn parser_created_link_blocker_is_captured_before_link_processing_state_is_consumed() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let mut stream = parser.start_document(url::Url::parse("https://example.com/").unwrap());
         stream.append_to_end(
             "<!doctype html><html><head><link rel=stylesheet href='/slow.css'><script>window.x = 1;</script></head></html>".to_owned(),
@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn stylesheet_link_resolves_against_the_processed_document_base_url() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             url::Url::parse("https://example.com/page/index.html").unwrap(),
             "<!doctype html><html><head><base href=\"/assets/\"><link rel=\"stylesheet\" href=\"app.css\"></head></html>"
@@ -196,7 +196,7 @@ mod tests {
 
     #[test]
     fn connected_preload_like_link_url_accepts_prefetch() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             url::Url::parse("https://example.com/path/page.html").unwrap(),
             "<!doctype html><html><head><link rel=\"prefetch\" href=\"../next.html\"></head><body></body></html>"
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn connected_preload_like_link_url_accepts_compression_dictionary() {
-        let parser = HtmlParser;
+        let parser = HtmlParser::SCRIPTING_ENABLED;
         let document = parser.parse(
             url::Url::parse("https://example.com/path/page.html").unwrap(),
             "<!doctype html><html><head><link rel=\"compression-dictionary\" href=\"../dict.bin\"></head><body></body></html>"

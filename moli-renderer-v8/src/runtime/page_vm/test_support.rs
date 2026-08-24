@@ -110,7 +110,7 @@ impl PageVmTaskExecutorTestHarness {
         loader: &ResourceRequestClient,
         browser_context_runtime: crate::runtime::RendererBrowserContextRuntime,
     ) -> Self {
-        let dom_host = DomHost::from_dom(HtmlParser.parse(
+        let dom_host = DomHost::from_dom(HtmlParser::SCRIPTING_ENABLED.parse(
             document_url,
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         ));

@@ -252,7 +252,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_parser_finalization_does_not_rediscover_parser_scripts_from_dom() {
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://post-parse.test/page.html").expect("test url"),
             "<!doctype html><script type='module'>export const value = 1;</script>".to_owned(),
         );

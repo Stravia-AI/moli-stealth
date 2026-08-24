@@ -43,6 +43,7 @@ pub(super) use self::scripts::{
     RuntimeScriptStartPlan, RuntimeScriptStartReservation, ScriptElementLoader,
     ScriptElementLoaderOptions, ScriptEventKind, ScriptEventTask, ScriptHandleSource,
     ScriptPageTaskExecutionKind, apply_parser_script_element_state_transition,
+    apply_parser_script_element_state_without_execution,
     begin_prepared_document_write_script_start, build_runtime_prepared_script,
     cancel_runtime_script_start_admission, dispatch_script_event,
     finish_runtime_script_start_admission, plan_script_start, prepare_runtime_script_start_commit,

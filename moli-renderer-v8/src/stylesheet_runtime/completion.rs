@@ -358,7 +358,7 @@ mod tests {
             client_count,
         )
         .collect::<String>();
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/page").unwrap(),
             format!("<!doctype html><html><head>{links}</head><body></body></html>"),
         );

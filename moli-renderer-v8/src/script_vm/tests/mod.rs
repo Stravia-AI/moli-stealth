@@ -593,7 +593,8 @@ fn new_parsed_page_task_executor_test_vm(
     markup: &str,
     loader: &ResourceRequestClient,
 ) -> crate::runtime::PageVmTaskExecutorTestHarness {
-    let document = HtmlParser.parse(Url::parse(url).expect("test URL"), markup.to_owned());
+    let document =
+        HtmlParser::SCRIPTING_ENABLED.parse(Url::parse(url).expect("test URL"), markup.to_owned());
     let page = crate::runtime::PageVmTaskExecutorTestHarness::new_with_dom_host(
         DomHost::from_dom(document),
         loader,
@@ -606,7 +607,8 @@ fn new_streamed_parser_page_task_executor_test_vm(
     markup: &str,
     loader: &ResourceRequestClient,
 ) -> crate::runtime::PageVmTaskExecutorTestHarness {
-    let mut stream = HtmlParser.start_document(Url::parse(url).expect("test URL"));
+    let mut stream =
+        HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test URL"));
     stream.feed(markup);
     let page = crate::runtime::PageVmTaskExecutorTestHarness::new_with_dom_host(
         stream.take_parser_stream_dom_host(),
@@ -13952,7 +13954,8 @@ async fn main_document_replacement_retires_pending_media_and_text_track_sequence
 
 fn new_parsed_test_vm(url: &str, markup: &str) -> StandaloneScriptVmHarness {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(Url::parse(url).expect("test url"), markup.to_owned());
+    let document =
+        HtmlParser::SCRIPTING_ENABLED.parse(Url::parse(url).expect("test url"), markup.to_owned());
     let page_task_queue = crate::page_task_queue::PageTaskQueueTestHarness::new();
     let post_domcontentloaded_page_task_sender =
         page_task_queue.owner_attached_runtime_page_task_sender_for_test();
@@ -13982,7 +13985,8 @@ fn new_parsed_test_vm_with_loader_and_resource_completion_queue(
     RendererResourceCompletionTestHarness,
 ) {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(Url::parse(url).expect("test url"), markup.to_owned());
+    let document =
+        HtmlParser::SCRIPTING_ENABLED.parse(Url::parse(url).expect("test url"), markup.to_owned());
     let page_task_queue = crate::page_task_queue::PageTaskQueueTestHarness::new();
     let post_domcontentloaded_page_task_sender =
         page_task_queue.owner_attached_runtime_page_task_sender_for_test();
@@ -14171,7 +14175,8 @@ async fn in_flight_connected_modulepreload_does_not_delay_window_load() {
 
 fn new_streamed_parser_test_vm(url: &str, markup: &str) -> StandaloneScriptVmHarness {
     let _js_runtime = crate::JsRuntime::initialize();
-    let mut stream = HtmlParser.start_document(Url::parse(url).expect("test url"));
+    let mut stream =
+        HtmlParser::SCRIPTING_ENABLED.start_document(Url::parse(url).expect("test url"));
     stream.feed(markup);
     let dom_host = stream.take_parser_stream_dom_host();
     let page_task_queue = crate::page_task_queue::PageTaskQueueTestHarness::new();

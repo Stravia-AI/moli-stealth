@@ -21,7 +21,7 @@ fn prepared_post_parse_script(position: usize, mode: ScriptMode) -> PreparedScri
         ScriptMode::Normal => "",
         other => panic!("unsupported test script mode: {other:?}"),
     };
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").expect("test url"),
             format!(
                 "<!doctype html><html><head><script{attribute} src=\"/script-{position}.js\"></script></head><body></body></html>"
@@ -373,7 +373,7 @@ fn module_graph_redirect_final_url_obeys_script_src_csp() {
 #[tokio::test]
 async fn external_module_prepared_script_hides_root_graph_fetch_in_owner_state() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/page.html").expect("test url"),
         "<!doctype html><html><head><script type=\"module\" src=\"/entry\"></script></head></html>"
             .to_owned(),
@@ -1075,7 +1075,7 @@ async fn page_timer_turn_propagates_host_driver_failure() {
 #[tokio::test]
 async fn post_parse_round_injects_lifecycle_boundary_tasks_around_trailing_work() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2191,7 +2191,7 @@ fn session_storage_does_not_cross_browsing_context_handle_boundaries() {
 async fn poll_next_post_parse_driver_step_requests_wait_when_owner_progress_is_pending_but_not_ready()
  {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -2236,7 +2236,7 @@ async fn poll_next_post_parse_driver_step_requests_wait_when_owner_progress_is_p
 #[tokio::test]
 async fn poll_next_post_parse_driver_step_prefers_owner_action_over_runtime_continuation() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head><link rel=stylesheet href='/app.css'></head><body></body></html>"
                 .to_owned(),
@@ -2299,7 +2299,7 @@ async fn poll_next_post_parse_driver_step_prefers_owner_action_over_runtime_cont
 async fn poll_next_post_parse_driver_step_requests_wait_for_runtime_backlog_without_owner_progress()
 {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2529,7 +2529,7 @@ fn post_parse_lifecycle_driver_idle_completion_preserves_round_stats() {
 #[tokio::test]
 async fn next_post_parse_lifecycle_advance_from_driver_returns_complete_when_driver_is_idle() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2575,7 +2575,7 @@ async fn next_post_parse_lifecycle_advance_from_driver_returns_complete_when_dri
 async fn next_post_parse_lifecycle_advance_from_driver_returns_page_owned_task_for_ready_processing_action()
  {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2630,7 +2630,7 @@ async fn next_post_parse_lifecycle_advance_from_driver_returns_page_owned_task_f
 #[tokio::test]
 async fn finish_completed_post_parse_page_owned_task_or_continue_returns_boundary_completion() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2681,7 +2681,7 @@ async fn finish_completed_post_parse_page_owned_task_or_continue_returns_boundar
 #[tokio::test]
 async fn advance_post_parse_lifecycle_returns_completion_from_completed_boundary_task() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2741,7 +2741,7 @@ async fn advance_post_parse_lifecycle_returns_completion_from_completed_boundary
 #[tokio::test]
 async fn advance_post_parse_lifecycle_continues_to_driver_after_non_boundary_completion() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2808,7 +2808,7 @@ async fn advance_post_parse_lifecycle_continues_to_driver_after_non_boundary_com
 async fn advance_post_parse_lifecycle_restarts_invalidated_round_after_completed_task_before_returning_task()
  {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2870,7 +2870,7 @@ async fn advance_post_parse_lifecycle_restarts_invalidated_round_after_completed
 #[tokio::test]
 async fn advance_post_parse_lifecycle_restarts_invalidated_round_before_boundary_completion() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -2994,7 +2994,7 @@ async fn prepare_post_parse_task_execution_restarts_restartable_task_after_inval
 #[test]
 fn poll_next_post_parse_driver_step_returns_idle_without_owner_or_runtime_work() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3041,7 +3041,7 @@ fn runtime_script_work_pause_tracks_internal_pause_kind() {
 #[test]
 fn selected_post_parse_action_settlement_publishes_concrete_runtime_followup() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3078,7 +3078,7 @@ fn selected_post_parse_action_settlement_publishes_concrete_runtime_followup() {
 #[test]
 fn selected_post_parse_action_settlement_arms_stable_continuation_state() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3127,7 +3127,7 @@ fn selected_post_parse_action_settlement_arms_stable_continuation_state() {
 fn runtime_owned_module_source_ready_before_domcontentloaded_publishes_task_without_starting_graph_inline()
  {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3189,7 +3189,7 @@ fn runtime_owned_module_source_ready_before_domcontentloaded_publishes_task_with
 #[test]
 fn explicitly_domcontentloaded_gated_runtime_head_is_not_admitted_early() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3257,7 +3257,7 @@ fn explicitly_domcontentloaded_gated_runtime_head_is_not_admitted_early() {
 #[tokio::test]
 async fn reentrant_runtime_admission_survives_page_task_claim_in_stable_authority() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3447,7 +3447,7 @@ async fn reentrant_runtime_admission_survives_page_task_claim_in_stable_authorit
 #[test]
 fn script_terminal_event_body_defers_listener_reaction_to_task_completion() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3525,7 +3525,7 @@ fn script_terminal_event_body_defers_listener_reaction_to_task_completion() {
 #[test]
 fn runtime_dynamic_script_terminal_consumes_its_accepted_document_lease_inline() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3646,7 +3646,7 @@ fn runtime_dynamic_script_terminal_consumes_its_accepted_document_lease_inline()
 #[test]
 fn runtime_owned_inline_importmap_bypasses_dcl_gate() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3707,7 +3707,7 @@ fn runtime_owned_inline_importmap_bypasses_dcl_gate() {
 #[test]
 fn followup_task_boundary_preserves_pending_dynamic_source_residence() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3747,7 +3747,7 @@ fn followup_task_boundary_preserves_pending_dynamic_source_residence() {
 #[tokio::test]
 async fn queued_pre_domcontentloaded_runtime_tasks_are_backfilled_ahead_of_domcontentloaded() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3805,7 +3805,7 @@ async fn queued_pre_domcontentloaded_runtime_tasks_are_backfilled_ahead_of_domco
 #[test]
 fn selected_post_parse_action_keeps_pending_dynamic_source_out_of_pre_dcl_lane_after_dcl() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3850,7 +3850,7 @@ fn selected_post_parse_action_keeps_pending_dynamic_source_out_of_pre_dcl_lane_a
 #[test]
 fn post_parse_owner_readiness_does_not_block_window_load_for_generic_post_dcl_pause_state() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     );
@@ -3887,7 +3887,7 @@ fn post_parse_owner_readiness_does_not_block_window_load_for_generic_post_dcl_pa
 #[test]
 fn document_write_owned_inline_normal_defers_already_started_until_execution_without_handle() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").unwrap(),
         "<!doctype html><html><head><script>window.test = 1;</script></head><body></body></html>"
             .to_owned(),
@@ -3950,7 +3950,7 @@ fn document_write_owned_inline_normal_defers_already_started_until_execution_wit
 #[test]
 fn script_inner_text_exposes_inline_json_payload() {
     let _js_runtime = crate::JsRuntime::initialize();
-    let document = HtmlParser.parse(
+    let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><body><script id=\"RENDER_DATA\" type=\"application/json\">%7B%22data%22%3A1%7D</script></body></html>"
                 .to_owned(),

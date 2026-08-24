@@ -348,8 +348,11 @@ fn detached_document_root(
         owner_node_id,
         url,
         markup,
+        scripting_enabled,
     } = snapshot;
-    let dom_host = DomHost::from_dom(crate::parser::HtmlParser.parse(url, markup));
+    let dom_host = DomHost::from_dom(
+        crate::parser::HtmlParser::with_scripting_enabled(scripting_enabled).parse(url, markup),
+    );
     let root =
         live_document_node_snapshot(&dom_host, dom_host.dom().document_node_id(), -1, None, true)?;
     Some(CapturedDocumentRoot {
@@ -609,6 +612,34 @@ fn text_content(snapshot: &DocumentNodeSnapshot) -> String {
 mod tests {
     use super::*;
     use moli_page_types::DocumentNodeAssociatedSnapshot;
+    use url::Url;
+
+    fn snapshot_contains_element_id(snapshot: &DocumentNodeSnapshot, id: &str) -> bool {
+        snapshot
+            .attributes
+            .iter()
+            .any(|attribute| attribute.local_name == "id" && attribute.value == id)
+            || snapshot
+                .children
+                .iter()
+                .any(|child| snapshot_contains_element_id(child, id))
+            || snapshot
+                .shadow_roots
+                .iter()
+                .any(|root| snapshot_contains_element_id(root, id))
+    }
+
+    fn detached_noscript_document_root(scripting_enabled: bool) -> CapturedDocumentRoot {
+        detached_document_root(DetachedChildBrowsingContextDocumentSnapshot {
+            parent_frame_id: "parent".to_owned(),
+            frame_id: "child".to_owned(),
+            owner_node_id: crate::dom::native::NativeNodeId::new(7),
+            url: Url::parse("https://detached-dom-snapshot.test/").expect("test URL"),
+            markup: "<noscript><span id='fallback'></span></noscript>".to_owned(),
+            scripting_enabled,
+        })
+        .expect("detached document root")
+    }
 
     fn element_snapshot(index: usize, child: Option<DocumentNodeSnapshot>) -> DocumentNodeSnapshot {
         let children = child.into_iter().collect::<Vec<_>>();
@@ -670,6 +701,21 @@ mod tests {
         assert_eq!(
             builder.backend_node_id,
             vec![snapshot.backend_node_id.unwrap()]
+        );
+    }
+
+    #[test]
+    fn detached_dom_snapshot_reuses_document_scripting_policy() {
+        let enabled = detached_noscript_document_root(true);
+        assert!(
+            !snapshot_contains_element_id(&enabled.root, "fallback"),
+            "scripting-enabled noscript contents must remain text in DOMSnapshot fallback parsing"
+        );
+
+        let disabled = detached_noscript_document_root(false);
+        assert!(
+            snapshot_contains_element_id(&disabled.root, "fallback"),
+            "scripting-disabled noscript contents must remain markup in DOMSnapshot fallback parsing"
         );
     }
 

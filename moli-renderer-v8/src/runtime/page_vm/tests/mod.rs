@@ -1574,7 +1574,7 @@ fn test_page_vm_with_document_url(document_url: Url) -> PageVm {
 fn test_page_vm_with_root_frame_id(root_frame_id: &str) -> PageVm {
     let loader_owner =
         crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
-    let dom_host = DomHost::from_dom(HtmlParser.parse(
+    let dom_host = DomHost::from_dom(HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://example.com/").expect("test Document URL"),
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     ));
@@ -1737,7 +1737,7 @@ fn test_page_vm_with_loader_document_url_hooks_and_response_referrer_policy(
     runtime_hooks: PageVmRuntimeHooks,
     response_referrer_policy: Option<String>,
 ) -> PageVm {
-    let dom_host = DomHost::from_dom(HtmlParser.parse(
+    let dom_host = DomHost::from_dom(HtmlParser::SCRIPTING_ENABLED.parse(
         document_url,
         "<!doctype html><html><head></head><body></body></html>".to_owned(),
     ));
@@ -3152,7 +3152,7 @@ fn default_runtime_hooks_reject_direct_no_owner_page_vm_construction() {
             reserved_service_worker_client_id: None,
         },
         PageVmRuntimeHooks::default(),
-        DomHost::from_dom(HtmlParser.parse(
+        DomHost::from_dom(HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.com/").unwrap(),
             "<!doctype html><html><head></head><body></body></html>".to_owned(),
         )),

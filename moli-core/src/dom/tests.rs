@@ -5,7 +5,7 @@ use crate::{parser::HtmlParser, renderer::ReflectorRegistry};
 use super::native::{NativeDom, NodeType};
 
 fn parse_fixture(html: &str) -> NativeDom {
-    HtmlParser.parse(
+    HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("https://fixture.moli.local/native-dom.html")
             .expect("fixture url must be valid"),
         html.to_owned(),

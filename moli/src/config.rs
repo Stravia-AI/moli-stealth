@@ -41,6 +41,9 @@ impl AppConfig {
                     .iter()
                     .map(|header| (header.name.clone(), header.value.clone()))
                     .collect();
+                config
+                    .browser
+                    .set_script_execution_disabled(args.disable_js);
                 config.fetch.dump_mode = args.dump;
                 config.fetch.strip = args.strip_options();
                 config.fetch.with_base = args.with_base;

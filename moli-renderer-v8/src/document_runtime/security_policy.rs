@@ -2163,7 +2163,7 @@ mod tests {
 
     fn runtime_for_html(html: &str) -> DocumentRuntime {
         let document_url = Url::parse("https://example.test/page").expect("document url");
-        let document = HtmlParser.parse(document_url, html.to_owned());
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(document_url, html.to_owned());
         DocumentRuntime::from_document(document)
     }
 

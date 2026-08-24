@@ -18,7 +18,7 @@ use crate::{
 use super::{QueryEngine, error::SelectorErrorKind};
 
 pub(crate) fn parse_document(html: &str) -> NativeDom {
-    HtmlParser.parse(
+    HtmlParser::SCRIPTING_ENABLED.parse(
         Url::parse("http://example.test/").expect("valid test url"),
         html.to_owned(),
     )

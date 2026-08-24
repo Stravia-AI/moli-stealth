@@ -22,21 +22,30 @@ use moli_stylesheet_blocking::{
     DocumentBlockingStylesheetSignature, DocumentOwnedBlockingStylesheetDiscoveryInput,
 };
 
+#[cfg(any(test, feature = "test-support"))]
+use super::live_target::new_live_fragment_root_html_tree_sink_stream;
 use super::live_target::{
     ParserDomMutationConsumer, ParserDomReadConsumer, ParserElementCreationConsumer,
     ParserMutationEffectConsumer, ParserMutationEffectDelivery, ParserRuntimeDomSinks,
     ParserStreamHtmlTreeSinkTarget, new_live_document_root_html_tree_sink_stream,
-    new_live_fragment_root_html_tree_sink_stream, new_parser_stream_html_tree_sink_stream,
-    new_parser_stream_html_tree_sink_target,
+    new_parser_stream_html_tree_sink_stream, new_parser_stream_html_tree_sink_target,
 };
 use super::{
     ParserSourcePosition, html_chunks,
-    session::{HtmlParserSession, html_parse_opts, html_parse_opts_with_scripting},
+    session::{HtmlParserSession, html_parse_opts_with_scripting},
     stream::HtmlTreeSinkStream,
 };
 
-#[derive(Debug, Clone, Default)]
-pub struct HtmlParser;
+/// HTML parser configured with the scripting state of the target `Document`.
+///
+/// This state controls HTML parsing semantics such as `<noscript>` tokenization;
+/// it does not execute JavaScript. Callers must choose the state explicitly so
+/// detached and sandboxed documents cannot accidentally inherit the normal
+/// browsing-context default.
+#[derive(Debug, Clone, Copy)]
+pub struct HtmlParser {
+    scripting_enabled: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct ParserInputSession(Rc<RefCell<ParserInputState>>);
@@ -130,13 +139,47 @@ pub enum ParserScriptHandoff {
 
 impl ParserScriptHandoff {
     pub fn node_id(&self) -> NativeNodeId {
+        self.start_position().0
+    }
+
+    pub fn start_position(&self) -> (NativeNodeId, u64, u64) {
         match self {
-            Self::BlockingClassic { node_id, .. }
-            | Self::AsyncPostParse { node_id, .. }
-            | Self::NonAsyncPostParse { node_id, .. }
-            | Self::ImportMap { node_id, .. }
-            | Self::NoExecution { node_id, .. }
-            | Self::PreparationFailure { node_id, .. } => *node_id,
+            Self::BlockingClassic {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            }
+            | Self::AsyncPostParse {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            }
+            | Self::NonAsyncPostParse {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            }
+            | Self::ImportMap {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            }
+            | Self::NoExecution {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            }
+            | Self::PreparationFailure {
+                node_id,
+                start_line,
+                start_column,
+                ..
+            } => (*node_id, *start_line, *start_column),
         }
     }
 }
@@ -331,6 +374,18 @@ pub(super) struct DocumentSink {
 }
 
 impl HtmlParser {
+    /// Convenience policy for tests that model an executable `Document`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const SCRIPTING_ENABLED: Self = Self::with_scripting_enabled(true);
+
+    /// Convenience policy for tests that model a non-executable `Document`.
+    #[cfg(any(test, feature = "test-support"))]
+    pub const SCRIPTING_DISABLED: Self = Self::with_scripting_enabled(false);
+
+    pub const fn with_scripting_enabled(scripting_enabled: bool) -> Self {
+        Self { scripting_enabled }
+    }
+
     pub fn parse(&self, final_url: Url, html: String) -> NativeDom {
         self.parse_dom_host(final_url, html).into_dom()
     }
@@ -350,7 +405,8 @@ impl HtmlParser {
     ) -> NativeDom {
         let target =
             ParserStreamHtmlTreeSinkTarget::new_with_declarative_shadow_roots(final_url, false);
-        let mut stream = HtmlTreeSinkStream::from_target(target);
+        let mut stream =
+            HtmlTreeSinkStream::from_target_with_scripting(target, self.scripting_enabled);
         for chunk in html_chunks(&html) {
             stream.feed(chunk);
         }
@@ -358,7 +414,7 @@ impl HtmlParser {
     }
 
     pub fn start_document(&self, final_url: Url) -> DocumentStream {
-        DocumentStream::new_parser_stream(final_url)
+        DocumentStream::new_parser_stream(final_url, self.scripting_enabled)
     }
 
     pub fn start_live_document_root(
@@ -366,7 +422,7 @@ impl HtmlParser {
         final_url: Url,
         document_handle: NativeNodeId,
     ) -> DocumentStream {
-        DocumentStream::new_live_document_root(final_url, document_handle)
+        DocumentStream::new_live_document_root(final_url, document_handle, self.scripting_enabled)
     }
 
     pub fn parse_fragment(
@@ -382,7 +438,7 @@ impl HtmlParser {
             context_local_name,
             html,
             true,
-            true,
+            self.scripting_enabled,
         )
     }
 
@@ -393,30 +449,13 @@ impl HtmlParser {
         context_local_name: &str,
         html: String,
     ) -> NativeDom {
-        self.parse_fragment_without_declarative_shadow_roots_with_scripting(
-            final_url,
-            context_namespace,
-            context_local_name,
-            html,
-            true,
-        )
-    }
-
-    pub fn parse_fragment_without_declarative_shadow_roots_with_scripting(
-        &self,
-        final_url: Url,
-        context_namespace: &str,
-        context_local_name: &str,
-        html: String,
-        scripting_enabled: bool,
-    ) -> NativeDom {
         self.parse_fragment_with_declarative_shadow_roots(
             final_url,
             context_namespace,
             context_local_name,
             html,
             false,
-            scripting_enabled,
+            self.scripting_enabled,
         )
     }
 
@@ -468,8 +507,12 @@ impl HtmlParser {
         );
         let context_handle = ParseHandle::new_synthetic_fragment_context(Rc::new(context));
         let sink = DocumentSink::new(target);
-        let mut parser =
-            HtmlParserSession::new_fragment(sink, html_parse_opts(), context_handle, true);
+        let mut parser = HtmlParserSession::new_fragment(
+            sink,
+            html_parse_opts_with_scripting(self.scripting_enabled),
+            context_handle,
+            self.scripting_enabled,
+        );
 
         for chunk in html_chunks(&html) {
             parser.process(StrTendril::from(chunk));
@@ -485,20 +528,29 @@ impl Default for ParserInputQueue {
 }
 
 impl DocumentStream {
-    fn new_parser_stream(final_url: Url) -> Self {
+    fn new_parser_stream(final_url: Url, scripting_enabled: bool) -> Self {
         Self {
-            inner: new_parser_stream_html_tree_sink_stream(final_url),
+            inner: new_parser_stream_html_tree_sink_stream(final_url, scripting_enabled),
             input: HtmlParserInputStream::default(),
         }
     }
 
-    fn new_live_document_root(final_url: Url, document_handle: NativeNodeId) -> Self {
+    fn new_live_document_root(
+        final_url: Url,
+        document_handle: NativeNodeId,
+        scripting_enabled: bool,
+    ) -> Self {
         Self {
-            inner: new_live_document_root_html_tree_sink_stream(final_url, document_handle),
+            inner: new_live_document_root_html_tree_sink_stream(
+                final_url,
+                document_handle,
+                scripting_enabled,
+            ),
             input: HtmlParserInputStream::default(),
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     fn new_live_fragment_root(
         final_url: Url,
         fragment_handle: NativeNodeId,
@@ -507,6 +559,7 @@ impl DocumentStream {
         context_local_name: &str,
         runtime_dom_sinks: ParserRuntimeDomSinks,
         allow_declarative_shadow_roots: bool,
+        scripting_enabled: bool,
     ) -> Self {
         Self {
             inner: new_live_fragment_root_html_tree_sink_stream(
@@ -517,26 +570,31 @@ impl DocumentStream {
                 context_local_name,
                 runtime_dom_sinks,
                 allow_declarative_shadow_roots,
+                scripting_enabled,
             ),
             input: HtmlParserInputStream::default(),
         }
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn is_parser_stream_backend_for_testing(&self) -> bool {
         true
     }
 
-    pub fn new_parser_stream_for_testing(final_url: Url) -> Self {
-        Self::new_parser_stream(final_url)
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_scripting_enabled_parser_stream_for_testing(final_url: Url) -> Self {
+        Self::new_parser_stream(final_url, true)
     }
 
-    pub fn new_live_document_root_for_testing(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_scripting_enabled_live_document_root_for_testing(
         final_url: Url,
         document_handle: NativeNodeId,
     ) -> Self {
-        Self::new_live_document_root(final_url, document_handle)
+        Self::new_live_document_root(final_url, document_handle, true)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn new_live_fragment_root_for_testing<T>(
         final_url: Url,
         fragment_handle: NativeNodeId,
@@ -545,6 +603,7 @@ impl DocumentStream {
         context_local_name: &str,
         consumer: &mut T,
         allow_declarative_shadow_roots: bool,
+        scripting_enabled: bool,
     ) -> Self
     where
         T: ParserDomReadConsumer + ParserDomMutationConsumer + ParserMutationEffectConsumer,
@@ -561,6 +620,7 @@ impl DocumentStream {
             context_local_name,
             runtime_dom_sinks,
             allow_declarative_shadow_roots,
+            scripting_enabled,
         )
     }
 
@@ -648,6 +708,7 @@ impl DocumentStream {
         pending
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub fn queued_end_segment_count_for_testing(&self) -> usize {
         self.input.end_segments.len()
     }
@@ -1686,10 +1747,17 @@ mod tests {
     const MATHML_NS: &str = "http://www.w3.org/1998/Math/MathML";
 
     fn parse_test_document(html: &str) -> NativeDom {
-        HtmlParser.parse(
+        HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://example.test/").expect("test url"),
             html.to_owned(),
         )
+    }
+
+    fn parse_test_document_with_scripting(html: &str, scripting_enabled: bool) -> NativeDom {
+        let mut stream = HtmlParser::with_scripting_enabled(scripting_enabled)
+            .start_document(Url::parse("https://example.test/").expect("test url"));
+        stream.feed(html);
+        stream.finish()
     }
 
     fn first_element_by_ns(
@@ -1732,8 +1800,79 @@ mod tests {
     }
 
     #[test]
+    fn document_scripting_flag_controls_noscript_tokenization() {
+        let html = concat!(
+            "<!doctype html><html><head>",
+            "<noscript><link id='fallback-style' rel='stylesheet' href='/fallback.css'></noscript>",
+            "</head><body>",
+            "<noscript><main id='fallback'>fallback</main></noscript>",
+            "</body></html>",
+        );
+
+        let disabled = parse_test_document_with_scripting(html, false);
+        assert_eq!(
+            disabled
+                .elements_by_tag_name_ns(disabled.document_node_id(), Some(HTML_NS), "link", true,)
+                .len(),
+            1,
+            "head noscript content must be parsed as markup when scripting is disabled"
+        );
+        assert_eq!(
+            disabled
+                .elements_by_tag_name_ns(disabled.document_node_id(), Some(HTML_NS), "main", true,)
+                .len(),
+            1,
+            "body noscript content must be parsed as markup when scripting is disabled"
+        );
+
+        let enabled = parse_test_document_with_scripting(html, true);
+        assert!(
+            enabled
+                .elements_by_tag_name_ns(enabled.document_node_id(), Some(HTML_NS), "link", true,)
+                .is_empty(),
+            "head noscript markup must remain inert when scripting is enabled"
+        );
+        assert!(
+            enabled
+                .elements_by_tag_name_ns(enabled.document_node_id(), Some(HTML_NS), "main", true,)
+                .is_empty(),
+            "body noscript markup must remain raw text when scripting is enabled"
+        );
+    }
+
+    #[test]
+    fn fragment_scripting_flag_controls_noscript_tokenization() {
+        let parse = |scripting_enabled| {
+            HtmlParser::with_scripting_enabled(scripting_enabled)
+                .parse_fragment_without_declarative_shadow_roots(
+                    Url::parse("https://example.test/").expect("test url"),
+                    HTML_NS,
+                    "body",
+                    "<noscript><span id='fallback'></span></noscript>".to_owned(),
+                )
+        };
+
+        let disabled = parse(false);
+        assert_eq!(
+            disabled
+                .elements_by_tag_name_ns(disabled.document_node_id(), Some(HTML_NS), "span", true,)
+                .len(),
+            1,
+            "a scripting-disabled fragment must parse noscript children as markup"
+        );
+
+        let enabled = parse(true);
+        assert!(
+            enabled
+                .elements_by_tag_name_ns(enabled.document_node_id(), Some(HTML_NS), "span", true,)
+                .is_empty(),
+            "a scripting-enabled fragment must keep noscript children as text"
+        );
+    }
+
+    #[test]
     fn template_contents_do_not_publish_document_stylesheet_candidates() {
-        let document = HtmlParser.parse_dom_host(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse_dom_host(
             Url::parse("https://template-styles.test/page.html").expect("test URL"),
             concat!(
                 "<!doctype html>",

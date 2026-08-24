@@ -47,6 +47,14 @@ pub struct FetchArgs {
     #[arg(short = 'H', long = "header", value_name = "HEADER", value_parser = parse_request_header_arg)]
     pub headers: Vec<RequestHeaderArg>,
 
+    /// Disable page-authored JavaScript before the Document starts parsing.
+    /// Stylesheets still load; automation expressions remain available.
+    #[arg(
+        long,
+        conflicts_with_all = ["document_start_script", "document_start_script_file"]
+    )]
+    pub disable_js: bool,
+
     #[arg(long)]
     pub with_base: bool,
 

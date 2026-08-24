@@ -41,6 +41,7 @@ impl JsContextHost {
             let Some(snapshot) = self.child_browsing_context_snapshot_markup(handle) else {
                 continue;
             };
+            let scripting_enabled = self.child_browsing_context_scripting_enabled(handle);
             let parent_scope = self
                 .child_browsing_context_web_storage_scope(
                     handle,
@@ -53,12 +54,14 @@ impl JsContextHost {
                 owner_node_id: handle,
                 url: snapshot.url.clone(),
                 markup: snapshot.markup.clone(),
+                scripting_enabled,
             });
             snapshots.extend(
                 self.detached_child_browsing_context_document_snapshots_in_markup(
                     &frame_id,
                     &snapshot.url,
                     &snapshot.markup,
+                    scripting_enabled,
                     0,
                     parent_scope,
                 ),
@@ -72,6 +75,7 @@ impl JsContextHost {
         parent_frame_id: &str,
         document_url: &Url,
         markup: &str,
+        scripting_enabled: bool,
         depth: usize,
         parent_scope: WebStorageScope,
     ) -> Vec<DetachedChildBrowsingContextDocumentSnapshot> {
@@ -79,7 +83,8 @@ impl JsContextHost {
             return Vec::new();
         }
 
-        let document = crate::parser::HtmlParser.parse(document_url.clone(), markup.to_owned());
+        let document = crate::parser::HtmlParser::with_scripting_enabled(scripting_enabled)
+            .parse(document_url.clone(), markup.to_owned());
         let document_base_url = document
             .document()
             .map(|doc| doc.base_url().clone())
@@ -89,6 +94,7 @@ impl JsContextHost {
             document.document_node_id(),
             &document_base_url,
             parent_frame_id,
+            scripting_enabled,
             depth,
             parent_scope,
         )
@@ -100,6 +106,7 @@ impl JsContextHost {
         root: DomHandle,
         document_base_url: &Url,
         parent_frame_id: &str,
+        document_scripting_enabled: bool,
         depth: usize,
         parent_scope: WebStorageScope,
     ) -> Vec<DetachedChildBrowsingContextDocumentSnapshot> {
@@ -133,18 +140,26 @@ impl JsContextHost {
                     security_origin_inherited,
                     parent_scope.clone(),
                 );
+                let scripting_enabled = Self::detached_child_document_scripting_enabled(
+                    document,
+                    child,
+                    document_scripting_enabled,
+                    &snapshot,
+                );
                 snapshots.push(DetachedChildBrowsingContextDocumentSnapshot {
                     parent_frame_id: parent_frame_id.to_owned(),
                     frame_id: frame_id.clone(),
                     owner_node_id: child,
                     url: snapshot.url.clone(),
                     markup: snapshot.markup.clone(),
+                    scripting_enabled,
                 });
                 snapshots.extend(
                     self.detached_child_browsing_context_document_snapshots_in_markup(
                         &frame_id,
                         &snapshot.url,
                         &snapshot.markup,
+                        scripting_enabled,
                         depth + 1,
                         parent_scope,
                     ),
@@ -162,6 +177,7 @@ impl JsContextHost {
         parent_frame_id: &str,
         document_url: &Url,
         markup: &str,
+        scripting_enabled: bool,
         depth: usize,
         parent_scope: WebStorageScope,
     ) -> Vec<ChildBrowsingContextFrameSnapshot> {
@@ -169,7 +185,8 @@ impl JsContextHost {
             return Vec::new();
         }
 
-        let document = crate::parser::HtmlParser.parse(document_url.clone(), markup.to_owned());
+        let document = crate::parser::HtmlParser::with_scripting_enabled(scripting_enabled)
+            .parse(document_url.clone(), markup.to_owned());
         let document_base_url = document
             .document()
             .map(|doc| doc.base_url().clone())
@@ -179,6 +196,7 @@ impl JsContextHost {
             document.document_node_id(),
             &document_base_url,
             parent_frame_id,
+            scripting_enabled,
             depth,
             parent_scope,
         )
@@ -190,6 +208,7 @@ impl JsContextHost {
         root: DomHandle,
         document_base_url: &Url,
         parent_frame_id: &str,
+        document_scripting_enabled: bool,
         depth: usize,
         parent_scope: WebStorageScope,
     ) -> Vec<ChildBrowsingContextFrameSnapshot> {
@@ -204,6 +223,7 @@ impl JsContextHost {
                     document_base_url,
                     parent_frame_id,
                     snapshots.len() + 1,
+                    document_scripting_enabled,
                     depth,
                     parent_scope.clone(),
                 ));
@@ -222,6 +242,7 @@ impl JsContextHost {
         document_base_url: &Url,
         parent_frame_id: &str,
         ordinal: usize,
+        document_scripting_enabled: bool,
         depth: usize,
         parent_scope: WebStorageScope,
     ) -> ChildBrowsingContextFrameSnapshot {
@@ -256,10 +277,17 @@ impl JsContextHost {
         let child_frames = self
             .detached_child_browsing_context_snapshot_markup(&bootstrap, document_base_url)
             .map(|snapshot| {
+                let scripting_enabled = Self::detached_child_document_scripting_enabled(
+                    document,
+                    handle,
+                    document_scripting_enabled,
+                    &snapshot,
+                );
                 self.detached_child_browsing_context_frame_tree_snapshot(
                     &frame_id,
                     &snapshot.url,
                     &snapshot.markup,
+                    scripting_enabled,
                     depth + 1,
                     storage_scope.clone(),
                 )
@@ -276,6 +304,20 @@ impl JsContextHost {
             security_origin_opaque,
             child_frames,
         }
+    }
+
+    pub(in crate::native_bridge::context_host::child_frame_snapshots) fn detached_child_document_scripting_enabled(
+        document: &crate::dom::native::NativeDom,
+        owner: DomHandle,
+        parent_scripting_enabled: bool,
+        snapshot: &ChildBrowsingContextSnapshot,
+    ) -> bool {
+        parent_scripting_enabled
+            && super::super::child_frames::document_sandbox_policy_from_attribute(
+                document.get_attribute(owner, "sandbox").as_deref(),
+            )
+            .allows_scripts
+            && snapshot.policy_container.sandbox.allows_scripts
     }
 
     pub(in crate::native_bridge::context_host::child_frame_snapshots) fn is_detached_child_browsing_context_host_handle(

@@ -538,7 +538,7 @@ mod tests {
 
     #[test]
     fn document_runtime_finds_top_level_meta_refresh() {
-        let document = crate::parser::HtmlParser.parse(
+        let document = crate::parser::HtmlParser::SCRIPTING_ENABLED.parse(
             base_url(),
             r#"<!doctype html><head><meta http-equiv="refresh" content="0;redirected.html"></head>"#
                 .to_owned(),
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn sandbox_without_allow_scripts_blocks_meta_refresh_at_creation_time() {
-        let document = crate::parser::HtmlParser.parse(
+        let document = crate::parser::HtmlParser::SCRIPTING_ENABLED.parse(
             base_url(),
             r#"<!doctype html><head><meta http-equiv="refresh" content="0;redirected.html"></head>"#
                 .to_owned(),
@@ -576,7 +576,7 @@ mod tests {
 
     #[test]
     fn document_runtime_preserves_delayed_top_level_meta_refresh() {
-        let document = crate::parser::HtmlParser.parse(
+        let document = crate::parser::HtmlParser::SCRIPTING_ENABLED.parse(
             base_url(),
             r#"<!doctype html><head><meta http-equiv="refresh" content="1.5;redirected.html"></head>"#
                 .to_owned(),

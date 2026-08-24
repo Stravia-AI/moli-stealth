@@ -36,6 +36,7 @@ url = "2.5.7"
 
 [dev-dependencies]
 moli-fetch = { path = "../moli-fetch", features = ["test-support"] }
+moli-parser = { path = "../moli-parser", features = ["test-support"] }
 # Integration tests compile moli-core as a normal dependency, so `cfg(test)` in
 # moli-renderer-v8 would not apply. Enable the renderer feature through this
 # dev-dependency instead; production dependencies keep it disabled by default.

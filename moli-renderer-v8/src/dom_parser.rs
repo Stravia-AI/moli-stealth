@@ -267,8 +267,8 @@ pub(crate) fn parse_detached_html_document_from_source<'s>(
     document_url: Url,
     source: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let parser = HtmlParser;
-    let parsed = parser.parse_without_declarative_shadow_roots(document_url, source.to_owned());
+    let parsed = HtmlParser::with_scripting_enabled(false)
+        .parse_without_declarative_shadow_roots(document_url, source.to_owned());
     build_detached_document(scope, parsed, DetachedDocumentKind::Html, false)
 }
 
@@ -277,20 +277,27 @@ pub(crate) fn parse_detached_html_document_from_source_with_declarative_shadow_r
     document_url: Url,
     source: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let parser = HtmlParser;
-    let parsed = parser.parse_dom_host(document_url, source.to_owned());
+    let parsed =
+        HtmlParser::with_scripting_enabled(false).parse_dom_host(document_url, source.to_owned());
     build_detached_document_from_dom_host(scope, parsed, DetachedDocumentKind::Html, true)
 }
 
-pub(crate) fn parse_detached_child_document_from_source<'s>(
+/// Builds the DOM projection used for a child browsing-context document.
+///
+/// The projection never executes scripts itself. `html_parser` carries the
+/// target Document's scripting state solely for parser behavior such as
+/// `<noscript>` tokenization; every caller must select that state explicitly.
+pub(crate) fn parse_child_document_projection_from_source<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     document_url: Url,
     source: &str,
     content_type: Option<&str>,
     character_set: Option<&str>,
+    html_parser: HtmlParser,
 ) -> Option<v8::Local<'s, v8::Object>> {
     let source = preserve_decoded_bom_only_child_body(source, content_type);
-    let (parsed, kind) = parse_child_document_snapshot(document_url, &source, content_type);
+    let (parsed, kind) =
+        parse_child_document_snapshot(document_url, &source, content_type, html_parser);
     build_detached_document_from_dom_host_with_content_type(
         scope,
         parsed,
@@ -316,6 +323,7 @@ fn parse_child_document_snapshot(
     document_url: Url,
     source: &str,
     content_type: Option<&str>,
+    html_parser: HtmlParser,
 ) -> (DomHost, DetachedDocumentKind) {
     if content_type.is_some_and(is_dom_parser_xml_mime)
         || child_document_url_is_xml_like(&document_url)
@@ -326,9 +334,8 @@ fn parse_child_document_snapshot(
             DetachedDocumentKind::Xml,
         );
     }
-    let parser = HtmlParser;
     (
-        parser.parse_dom_host(document_url, source.to_owned()),
+        html_parser.parse_dom_host(document_url, source.to_owned()),
         DetachedDocumentKind::Html,
     )
 }
@@ -435,6 +442,7 @@ mod tests {
             Url::parse("https://example.test/common/dummy.xml").unwrap(),
             "<foo>Dummy XML document</foo>\n",
             None,
+            HtmlParser::SCRIPTING_ENABLED,
         );
         let xml_root = first_document_element(&xml);
         assert_eq!(xml_kind, DetachedDocumentKind::Xml);
@@ -448,6 +456,7 @@ mod tests {
             r#"<!DOCTYPE html><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Dummy XHTML document</title></head><body /></html>
 "#,
             None,
+            HtmlParser::SCRIPTING_ENABLED,
         );
         let xhtml_root = first_document_element(&xhtml);
         assert_eq!(xhtml_kind, DetachedDocumentKind::Xml);
@@ -460,6 +469,7 @@ mod tests {
             Url::parse("https://example.test/common/dummy.html").unwrap(),
             "<p>Dummy HTML document</p>\n",
             None,
+            HtmlParser::SCRIPTING_ENABLED,
         );
         let html_root = html.document_element_handle().expect("html root");
         assert_eq!(html_kind, DetachedDocumentKind::Html);
@@ -467,5 +477,24 @@ mod tests {
             html.text_content(html_root).as_deref(),
             Some("Dummy HTML document\n")
         );
+    }
+
+    #[test]
+    fn child_document_projection_uses_explicit_scripting_mode() {
+        let parse = |parser| {
+            parse_child_document_snapshot(
+                Url::parse("https://example.test/child.html").expect("test URL"),
+                "<noscript><span id='fallback'></span></noscript>",
+                Some("text/html"),
+                parser,
+            )
+            .0
+        };
+
+        let enabled = parse(HtmlParser::SCRIPTING_ENABLED);
+        assert!(enabled.element_handle_by_id("fallback").is_none());
+
+        let disabled = parse(HtmlParser::SCRIPTING_DISABLED);
+        assert!(disabled.element_handle_by_id("fallback").is_some());
     }
 }

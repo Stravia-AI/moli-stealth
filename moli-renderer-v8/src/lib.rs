@@ -146,7 +146,7 @@ pub(crate) fn parse_html_test_fixture_with_parser_outputs(
     Vec<parser::ParserScriptHandoff>,
     Vec<DocumentOwnedBlockingStylesheetDiscoveryInput>,
 ) {
-    let mut stream = parser::HtmlParser.start_document(final_url);
+    let mut stream = parser::HtmlParser::SCRIPTING_ENABLED.start_document(final_url);
     stream.append_to_end(html);
     let mut scripts = Vec::new();
     let mut blocking_stylesheets = Vec::new();

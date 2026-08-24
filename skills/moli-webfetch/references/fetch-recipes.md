@@ -82,6 +82,12 @@ moli fetch \
 JavaScript runs by default. `--strip-mode js` strips JavaScript from serialized
 output; it does not mean that navigation ran without JavaScript.
 
+Use `--disable-js` when page-authored scripts must neither load nor execute.
+Moli still parses and renders HTML, loads stylesheets (including `@import`),
+loads same-origin frames, and exposes `<noscript>` fallback content. Automation
+predicates such as `--wait-script` remain available; the flag controls page
+code, not the caller's inspection channel.
+
 If expected text is absent:
 
 1. Confirm the HTTP status and final URL with `--dump json`.

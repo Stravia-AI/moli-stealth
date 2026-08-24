@@ -1,7 +1,10 @@
+#[cfg(any(test, feature = "test-support"))]
 use std::rc::Rc;
 
+#[cfg(any(test, feature = "test-support"))]
+use html5ever::{LocalName, Namespace, QualName};
 use html5ever::{
-    LocalName, Namespace, ParseOpts, QualName,
+    ParseOpts,
     tendril::StrTendril,
     tokenizer::{
         BufferQueue, TagKind, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
@@ -9,6 +12,7 @@ use html5ever::{
     tree_builder::{TreeBuilder, TreeBuilderOpts, TreeSink},
 };
 use markup5ever::TokenizerResult;
+#[cfg(any(test, feature = "test-support"))]
 use moli_dom::native::NativeNodeId;
 
 use super::{
@@ -306,9 +310,10 @@ fn feed_with_definitive_encoding(
 
 pub(super) fn new_html_tree_sink_session(
     target: ParserStreamHtmlTreeSinkTarget,
+    scripting_enabled: bool,
 ) -> HtmlTreeSinkSession {
     let sink = DocumentSink::new(target);
-    let parser = HtmlParserSession::new(sink, html_parse_opts());
+    let parser = HtmlParserSession::new(sink, html_parse_opts_with_scripting(scripting_enabled));
     let script_input = ParserInputQueue::default();
 
     HtmlTreeSinkSession {
@@ -317,11 +322,13 @@ pub(super) fn new_html_tree_sink_session(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 pub(super) fn new_fragment_html_tree_sink_session(
     target: ParserStreamHtmlTreeSinkTarget,
     context_handle: NativeNodeId,
     context_namespace: &str,
     context_local_name: &str,
+    scripting_enabled: bool,
 ) -> HtmlTreeSinkSession {
     let sink = DocumentSink::new(target);
     let context = QualName::new(
@@ -330,17 +337,18 @@ pub(super) fn new_fragment_html_tree_sink_session(
         LocalName::from(context_local_name),
     );
     let context_handle = ParseHandle::new(context_handle, Some(Rc::new(context)));
-    let parser = HtmlParserSession::new_fragment(sink, html_parse_opts(), context_handle, true);
+    let parser = HtmlParserSession::new_fragment(
+        sink,
+        html_parse_opts_with_scripting(scripting_enabled),
+        context_handle,
+        scripting_enabled,
+    );
     let script_input = ParserInputQueue::default();
 
     HtmlTreeSinkSession {
         parser,
         script_input,
     }
-}
-
-pub(super) fn html_parse_opts() -> ParseOpts {
-    html_parse_opts_with_scripting(true)
 }
 
 pub(super) fn html_parse_opts_with_scripting(scripting_enabled: bool) -> ParseOpts {
