@@ -10,7 +10,6 @@ test-support = []
 
 [dependencies]
 anyhow = "1.0.100"
-axum = { version = "0.8.6", features = ["ws"] }
 base64 = "0.22"
 indexmap = "2.6"
 moli-bounded-buffer = { path = "../moli-bounded-buffer" }
@@ -49,6 +48,7 @@ http = "1"
 sanitize-filename = "=0.6.0"
 
 [dev-dependencies]
+axum = { version = "0.8.6", features = ["ws"] }
 moli-cookie-jar = { path = "../moli-cookie-jar", features = ["test-support"] }
 moli-image = { path = "../moli-image" }
 moli-storage-service = { path = "../moli-storage-service" }

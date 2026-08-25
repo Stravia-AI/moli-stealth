@@ -2068,7 +2068,6 @@ dependencies = [
  "document-features",
  "idna",
  "indexmap",
- "log",
  "publicsuffix",
  "time",
  "url",
@@ -2256,8 +2255,6 @@ name = "moli-import-map"
 version = "0.1.0"
 dependencies = [
  "import_map",
- "moli-page-types",
- "moli-script",
  "serde_json",
  "url",
 ]
@@ -2642,7 +2639,6 @@ dependencies = [
  "stylo",
  "stylo_dom",
  "stylo_traits",
- "tracing",
  "url",
 ]
 

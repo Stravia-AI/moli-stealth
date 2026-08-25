@@ -18,7 +18,6 @@ precomputed-hash = "0.1"
 selectors = "0.40"
 stylo = "0.20"
 style_traits = { package = "stylo_traits", version = "0.20" }
-tracing = "0.1.41"
 url = "2.5.7"
 
 [lints]
