@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+kurbo = "=0.13.1"
 moli-css-parse = { path = "../moli-css-parse" }
 svgtypes = "0.16.1"
 

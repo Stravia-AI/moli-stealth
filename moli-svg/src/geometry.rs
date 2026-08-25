@@ -1,5 +1,13 @@
 use crate::helpers::svg_number_list;
-use crate::path::path_geometry_segments;
+use crate::path::path_geometry;
+use kurbo::{
+    Arc, BezPath, Circle, Ellipse, ParamCurve, ParamCurveArclen, ParamCurveExtrema,
+    ParamCurveNearest, PathEl, PathSeg, Point, Rect, Shape,
+};
+
+const SHAPE_PATH_TOLERANCE: f64 = 0.1;
+const ARC_LENGTH_ACCURACY: f64 = 1e-6;
+const FILL_BOUNDARY_EPSILON: f64 = 1e-9;
 
 #[derive(Clone, Copy, Debug)]
 pub struct SvgGeometryPoint {
@@ -15,17 +23,16 @@ impl SvgGeometryPoint {
 
 #[derive(Clone, Copy, Debug)]
 pub struct SvgGeometrySegment {
-    start: SvgGeometryPoint,
-    end: SvgGeometryPoint,
+    inner: PathSeg,
 }
 
 impl SvgGeometrySegment {
-    pub(crate) fn new(start: SvgGeometryPoint, end: SvgGeometryPoint) -> Self {
-        Self { start, end }
+    fn new(inner: PathSeg) -> Self {
+        Self { inner }
     }
 
     pub fn length(&self) -> f64 {
-        (self.end.x - self.start.x).hypot(self.end.y - self.start.y)
+        self.inner.arclen(ARC_LENGTH_ACCURACY)
     }
 }
 
@@ -75,113 +82,41 @@ pub enum SvgGeometryElement {
 }
 
 pub fn segments_for_element(element: SvgGeometryElement) -> Vec<SvgGeometrySegment> {
-    match element {
-        SvgGeometryElement::Circle { cx, cy, r } => circle_segments(cx, cy, r),
-        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => ellipse_segments(cx, cy, rx, ry),
-        SvgGeometryElement::Line { x1, y1, x2, y2 } => {
-            vec![SvgGeometrySegment::new(
-                SvgGeometryPoint::new(x1, y1),
-                SvgGeometryPoint::new(x2, y2),
-            )]
-        }
-        SvgGeometryElement::Path { d } => path_geometry_segments(&d).unwrap_or_default(),
-        SvgGeometryElement::Polygon { points } => {
-            poly_points_geometry_segments(&points, true).unwrap_or_default()
-        }
-        SvgGeometryElement::Polyline { points } => {
-            poly_points_geometry_segments(&points, false).unwrap_or_default()
-        }
-        SvgGeometryElement::Rect {
-            x,
-            y,
-            width,
-            height,
-            rx,
-            ry,
-        } => rect_segments(x, y, width, height, rx, ry),
-    }
+    geometry_path(&element)
+        .unwrap_or_default()
+        .segments()
+        .map(SvgGeometrySegment::new)
+        .collect()
 }
 
 pub fn bounding_box_for_segments(segments: &[SvgGeometrySegment]) -> Option<SvgGeometryBox> {
-    let first = segments.first()?;
-    let mut min_x = first.start.x.min(first.end.x);
-    let mut min_y = first.start.y.min(first.end.y);
-    let mut max_x = first.start.x.max(first.end.x);
-    let mut max_y = first.start.y.max(first.end.y);
-    for segment in &segments[1..] {
-        min_x = min_x.min(segment.start.x).min(segment.end.x);
-        min_y = min_y.min(segment.start.y).min(segment.end.y);
-        max_x = max_x.max(segment.start.x).max(segment.end.x);
-        max_y = max_y.max(segment.start.y).max(segment.end.y);
-    }
+    let mut segments = segments.iter();
+    let first = segments.next()?;
+    let bounds = segments.fold(
+        ParamCurveExtrema::bounding_box(&first.inner),
+        |bounds, segment| bounds.union(ParamCurveExtrema::bounding_box(&segment.inner)),
+    );
     Some(SvgGeometryBox {
-        x: min_x,
-        y: min_y,
-        width: max_x - min_x,
-        height: max_y - min_y,
+        x: bounds.x0,
+        y: bounds.y0,
+        width: bounds.width(),
+        height: bounds.height(),
     })
 }
 
 pub fn is_point_in_fill(element: &SvgGeometryElement, point: SvgGeometryPoint) -> bool {
-    match element {
-        SvgGeometryElement::Circle { cx, cy, r } => {
-            *r > 0.0 && (point.x - cx).hypot(point.y - cy) <= *r
-        }
-        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => {
-            if *rx <= 0.0 || *ry <= 0.0 {
-                return false;
-            }
-            let x = (point.x - cx) / rx;
-            let y = (point.y - cy) / ry;
-            x * x + y * y <= 1.0
-        }
-        SvgGeometryElement::Line { .. } => false,
-        SvgGeometryElement::Path { d } => path_geometry_segments(d)
-            .is_some_and(|segments| is_point_in_closed_segments(&segments, point)),
-        SvgGeometryElement::Polygon { points } => poly_points_geometry_segments(points, true)
-            .is_some_and(|segments| is_point_in_closed_segments(&segments, point)),
-        SvgGeometryElement::Polyline { points } => poly_points_geometry_segments(points, false)
-            .is_some_and(|segments| is_point_in_closed_segments(&segments, point)),
-        SvgGeometryElement::Rect {
-            x,
-            y,
-            width,
-            height,
-            rx,
-            ry,
-        } => {
-            if *width <= 0.0
-                || *height <= 0.0
-                || point.x < *x
-                || point.x > *x + *width
-                || point.y < *y
-                || point.y > *y + *height
-            {
-                return false;
-            }
-            let (rx, ry) = normalized_rect_radii(*width, *height, *rx, *ry);
-            if rx == 0.0 || ry == 0.0 {
-                return true;
-            }
-            let corner_center_x = if point.x < *x + rx {
-                *x + rx
-            } else if point.x > *x + *width - rx {
-                *x + *width - rx
-            } else {
-                return true;
-            };
-            let corner_center_y = if point.y < *y + ry {
-                *y + ry
-            } else if point.y > *y + *height - ry {
-                *y + *height - ry
-            } else {
-                return true;
-            };
-            let dx = (point.x - corner_center_x) / rx;
-            let dy = (point.y - corner_center_y) / ry;
-            dx * dx + dy * dy <= 1.0
-        }
+    if matches!(element, SvgGeometryElement::Line { .. }) {
+        return false;
     }
+    geometry_path(element).is_some_and(|path| {
+        let path = close_subpaths_for_fill(&path);
+        let point = Point::new(point.x, point.y);
+        path.winding(point) != 0
+            || path.segments().any(|segment| {
+                segment.nearest(point, FILL_BOUNDARY_EPSILON).distance_sq
+                    <= FILL_BOUNDARY_EPSILON.powi(2)
+            })
+    })
 }
 
 pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeometryPoint {
@@ -189,7 +124,7 @@ pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeo
         return SvgGeometryPoint::new(0.0, 0.0);
     };
     if distance <= 0.0 {
-        return first.start;
+        return svg_point(first.inner.start());
     }
     let mut remaining = distance;
     for segment in segments {
@@ -198,75 +133,58 @@ pub fn point_at_length(segments: &[SvgGeometrySegment], distance: f64) -> SvgGeo
             continue;
         }
         if remaining <= length {
-            let t = remaining / length;
-            return SvgGeometryPoint::new(
-                segment.start.x + (segment.end.x - segment.start.x) * t,
-                segment.start.y + (segment.end.y - segment.start.y) * t,
-            );
+            let parameter = segment.inner.inv_arclen(remaining, ARC_LENGTH_ACCURACY);
+            return svg_point(segment.inner.eval(parameter));
         }
         remaining -= length;
     }
     segments
         .last()
-        .map(|segment| segment.end)
+        .map(|segment| svg_point(segment.inner.end()))
         .unwrap_or(SvgGeometryPoint::new(0.0, 0.0))
 }
 
-fn circle_segments(cx: f64, cy: f64, r: f64) -> Vec<SvgGeometrySegment> {
-    if r <= 0.0 {
-        return Vec::new();
+fn geometry_path(element: &SvgGeometryElement) -> Option<BezPath> {
+    match element {
+        SvgGeometryElement::Circle { cx, cy, r } => Some(if *r > 0.0 {
+            Circle::new(Point::new(*cx, *cy), *r).to_path(SHAPE_PATH_TOLERANCE)
+        } else {
+            BezPath::new()
+        }),
+        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => Some(if *rx > 0.0 && *ry > 0.0 {
+            Ellipse::new(Point::new(*cx, *cy), (*rx, *ry), 0.0).to_path(SHAPE_PATH_TOLERANCE)
+        } else {
+            BezPath::new()
+        }),
+        SvgGeometryElement::Line { x1, y1, x2, y2 } => {
+            let mut path = BezPath::new();
+            path.move_to((*x1, *y1));
+            path.line_to((*x2, *y2));
+            Some(path)
+        }
+        SvgGeometryElement::Path { d } => path_geometry(d),
+        SvgGeometryElement::Polygon { points } => poly_points_geometry_path(points, true),
+        SvgGeometryElement::Polyline { points } => poly_points_geometry_path(points, false),
+        SvgGeometryElement::Rect {
+            x,
+            y,
+            width,
+            height,
+            rx,
+            ry,
+        } => Some(rect_path(*x, *y, *width, *height, *rx, *ry)),
     }
-    sampled_closed_parametric_segments(64, |theta| {
-        SvgGeometryPoint::new(cx + r * theta.cos(), cy + r * theta.sin())
-    })
 }
 
-fn ellipse_segments(cx: f64, cy: f64, rx: f64, ry: f64) -> Vec<SvgGeometrySegment> {
-    if rx <= 0.0 || ry <= 0.0 {
-        return Vec::new();
-    }
-    sampled_closed_parametric_segments(96, |theta| {
-        SvgGeometryPoint::new(cx + rx * theta.cos(), cy + ry * theta.sin())
-    })
-}
-
-fn sampled_closed_parametric_segments(
-    steps: usize,
-    point_at_angle: impl Fn(f64) -> SvgGeometryPoint,
-) -> Vec<SvgGeometrySegment> {
-    let mut points = Vec::with_capacity(steps);
-    for index in 0..steps {
-        let theta = (index as f64 / steps as f64) * std::f64::consts::TAU;
-        points.push(point_at_angle(theta));
-    }
-    segments_from_points(&points, true)
-}
-
-fn rect_segments(
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    rx: f64,
-    ry: f64,
-) -> Vec<SvgGeometrySegment> {
+fn rect_path(x: f64, y: f64, width: f64, height: f64, rx: f64, ry: f64) -> BezPath {
     if width <= 0.0 || height <= 0.0 {
-        return Vec::new();
+        return BezPath::new();
     }
     let (rx, ry) = normalized_rect_radii(width, height, rx, ry);
     if rx > 0.0 && ry > 0.0 {
-        return rounded_rect_segments(x, y, width, height, rx, ry);
+        return rounded_rect_path(x, y, width, height, rx, ry);
     }
-    let top_left = SvgGeometryPoint::new(x, y);
-    let top_right = SvgGeometryPoint::new(x + width, y);
-    let bottom_right = SvgGeometryPoint::new(x + width, y + height);
-    let bottom_left = SvgGeometryPoint::new(x, y + height);
-    vec![
-        SvgGeometrySegment::new(top_left, top_right),
-        SvgGeometrySegment::new(top_right, bottom_right),
-        SvgGeometrySegment::new(bottom_right, bottom_left),
-        SvgGeometrySegment::new(bottom_left, top_left),
-    ]
+    Rect::new(x, y, x + width, y + height).to_path(SHAPE_PATH_TOLERANCE)
 }
 
 fn normalized_rect_radii(width: f64, height: f64, rx: f64, ry: f64) -> (f64, f64) {
@@ -276,145 +194,87 @@ fn normalized_rect_radii(width: f64, height: f64, rx: f64, ry: f64) -> (f64, f64
     (rx.min(width / 2.0), ry.min(height / 2.0))
 }
 
-fn rounded_rect_segments(
-    x: f64,
-    y: f64,
-    width: f64,
-    height: f64,
-    rx: f64,
-    ry: f64,
-) -> Vec<SvgGeometrySegment> {
-    let mut points = vec![
-        SvgGeometryPoint::new(x + rx, y),
-        SvgGeometryPoint::new(x + width - rx, y),
-    ];
-    push_rounded_rect_corner_points(&mut points, x + width - rx, y + ry, -90.0, 0.0, rx, ry);
-    points.push(SvgGeometryPoint::new(x + width, y + height - ry));
-    push_rounded_rect_corner_points(
-        &mut points,
-        x + width - rx,
-        y + height - ry,
-        0.0,
-        90.0,
-        rx,
-        ry,
-    );
-    points.push(SvgGeometryPoint::new(x + rx, y + height));
-    push_rounded_rect_corner_points(&mut points, x + rx, y + height - ry, 90.0, 180.0, rx, ry);
-    points.push(SvgGeometryPoint::new(x, y + ry));
-    push_rounded_rect_corner_points(&mut points, x + rx, y + ry, 180.0, 270.0, rx, ry);
-    segments_from_points(&points, true)
+fn rounded_rect_path(x: f64, y: f64, width: f64, height: f64, rx: f64, ry: f64) -> BezPath {
+    let mut path = BezPath::new();
+    path.move_to((x + rx, y));
+    path.line_to((x + width - rx, y));
+    append_quarter_ellipse(&mut path, x + width - rx, y + ry, rx, ry, -90.0);
+    path.line_to((x + width, y + height - ry));
+    append_quarter_ellipse(&mut path, x + width - rx, y + height - ry, rx, ry, 0.0);
+    path.line_to((x + rx, y + height));
+    append_quarter_ellipse(&mut path, x + rx, y + height - ry, rx, ry, 90.0);
+    path.line_to((x, y + ry));
+    append_quarter_ellipse(&mut path, x + rx, y + ry, rx, ry, 180.0);
+    path.close_path();
+    path
 }
 
-fn push_rounded_rect_corner_points(
-    points: &mut Vec<SvgGeometryPoint>,
+fn append_quarter_ellipse(
+    path: &mut BezPath,
     cx: f64,
     cy: f64,
-    start_degrees: f64,
-    end_degrees: f64,
     rx: f64,
     ry: f64,
+    start_degrees: f64,
 ) {
-    const ROUNDED_RECT_ARC_STEPS: usize = 8;
-    for step in 1..=ROUNDED_RECT_ARC_STEPS {
-        let t = step as f64 / ROUNDED_RECT_ARC_STEPS as f64;
-        let angle = (start_degrees + (end_degrees - start_degrees) * t).to_radians();
-        points.push(SvgGeometryPoint::new(
-            cx + rx * angle.cos(),
-            cy + ry * angle.sin(),
-        ));
-    }
+    path.extend(
+        Arc::new(
+            Point::new(cx, cy),
+            (rx, ry),
+            start_degrees.to_radians(),
+            std::f64::consts::FRAC_PI_2,
+            0.0,
+        )
+        .append_iter(SHAPE_PATH_TOLERANCE),
+    );
 }
 
-pub(crate) fn poly_points_geometry_segments(
-    raw: &str,
-    close: bool,
-) -> Option<Vec<SvgGeometrySegment>> {
+fn poly_points_geometry_path(raw: &str, close: bool) -> Option<BezPath> {
     let coordinates = svg_number_list(raw)?;
     if coordinates.len() < 4 || !coordinates.len().is_multiple_of(2) {
         return None;
     }
-    let mut points = Vec::with_capacity(coordinates.len() / 2);
-    for pair in coordinates.chunks_exact(2) {
-        points.push(SvgGeometryPoint::new(pair[0], pair[1]));
+    let mut coordinates = coordinates.chunks_exact(2);
+    let first = coordinates.next()?;
+    let mut path = BezPath::new();
+    path.move_to((first[0], first[1]));
+    for pair in coordinates {
+        path.line_to((pair[0], pair[1]));
     }
-    Some(segments_from_points(&points, close))
+    if close {
+        path.close_path();
+    }
+    Some(path)
 }
 
-fn is_point_in_closed_segments(segments: &[SvgGeometrySegment], point: SvgGeometryPoint) -> bool {
-    if segments.is_empty() {
-        return false;
+fn close_subpaths_for_fill(path: &BezPath) -> BezPath {
+    let mut closed = BezPath::new();
+    let mut subpath_is_open = false;
+    for element in path.elements() {
+        match *element {
+            PathEl::MoveTo(point) => {
+                if subpath_is_open {
+                    closed.close_path();
+                }
+                closed.move_to(point);
+                subpath_is_open = true;
+            }
+            PathEl::ClosePath => {
+                closed.close_path();
+                subpath_is_open = false;
+            }
+            element => {
+                closed.push(element);
+                subpath_is_open = true;
+            }
+        }
     }
-    if segments
-        .iter()
-        .any(|segment| point_is_on_segment(point, segment))
-    {
-        return true;
+    if subpath_is_open {
+        closed.close_path();
     }
-
-    let mut inside = false;
-    for segment in segments {
-        toggle_ray_crossing(segment, point, &mut inside);
-    }
-    if let Some(closing_segment) = closing_segment_for_segments(segments) {
-        toggle_ray_crossing(&closing_segment, point, &mut inside);
-    }
-    inside
+    closed
 }
 
-fn closing_segment_for_segments(segments: &[SvgGeometrySegment]) -> Option<SvgGeometrySegment> {
-    let first = segments.first()?;
-    let last = segments.last()?;
-    if points_are_close(last.end, first.start) {
-        None
-    } else {
-        Some(SvgGeometrySegment::new(last.end, first.start))
-    }
-}
-
-fn toggle_ray_crossing(segment: &SvgGeometrySegment, point: SvgGeometryPoint, inside: &mut bool) {
-    let y1 = segment.start.y;
-    let y2 = segment.end.y;
-    if (y1 > point.y) == (y2 > point.y) {
-        return;
-    }
-    let x_intersection =
-        segment.start.x + (point.y - y1) * (segment.end.x - segment.start.x) / (y2 - y1);
-    if point.x < x_intersection {
-        *inside = !*inside;
-    }
-}
-
-fn point_is_on_segment(point: SvgGeometryPoint, segment: &SvgGeometrySegment) -> bool {
-    const EPSILON: f64 = 1e-9;
-    let dx = segment.end.x - segment.start.x;
-    let dy = segment.end.y - segment.start.y;
-    let cross = (point.x - segment.start.x) * dy - (point.y - segment.start.y) * dx;
-    if cross.abs() > EPSILON {
-        return false;
-    }
-    let dot = (point.x - segment.start.x) * dx + (point.y - segment.start.y) * dy;
-    if dot < -EPSILON {
-        return false;
-    }
-    dot <= dx * dx + dy * dy + EPSILON
-}
-
-fn points_are_close(a: SvgGeometryPoint, b: SvgGeometryPoint) -> bool {
-    const EPSILON: f64 = 1e-9;
-    (a.x - b.x).abs() <= EPSILON && (a.y - b.y).abs() <= EPSILON
-}
-
-fn segments_from_points(points: &[SvgGeometryPoint], close: bool) -> Vec<SvgGeometrySegment> {
-    if points.len() < 2 {
-        return Vec::new();
-    }
-    let mut segments = points
-        .windows(2)
-        .map(|pair| SvgGeometrySegment::new(pair[0], pair[1]))
-        .collect::<Vec<_>>();
-    if close && let Some(last) = points.last().copied() {
-        segments.push(SvgGeometrySegment::new(last, points[0]));
-    }
-    segments
+fn svg_point(point: Point) -> SvgGeometryPoint {
+    SvgGeometryPoint::new(point.x, point.y)
 }

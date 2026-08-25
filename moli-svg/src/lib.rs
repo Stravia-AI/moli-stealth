@@ -20,8 +20,6 @@ pub use transform::{
 
 #[cfg(test)]
 mod tests {
-    use crate::geometry::poly_points_geometry_segments;
-    use crate::path::path_geometry_segments;
     use crate::{
         SvgGeometryElement, SvgGeometryPoint, SvgGeometrySegment, SvgLengthUnit,
         SvgMatrixComponents, SvgTransform, SvgTransformKind, bounding_box_for_segments,
@@ -29,6 +27,16 @@ mod tests {
         parse_number, parse_number_list, parse_transform_attribute, point_at_length,
         segments_for_element, serialize_number, serialize_transform_list,
     };
+
+    fn path_segments(raw: &str) -> Vec<SvgGeometrySegment> {
+        segments_for_element(SvgGeometryElement::Path { d: raw.to_owned() })
+    }
+
+    fn polyline_segments(raw: &str) -> Vec<SvgGeometrySegment> {
+        segments_for_element(SvgGeometryElement::Polyline {
+            points: raw.to_owned(),
+        })
+    }
 
     fn assert_close(actual: f64, expected: f64) {
         assert!(
@@ -46,7 +54,7 @@ mod tests {
 
     #[test]
     fn path_geometry_handles_line_commands_and_points() {
-        let segments = path_geometry_segments("M 0 0 L 3 4 H 7 V 1").unwrap();
+        let segments = path_segments("M 0 0 L 3 4 H 7 V 1");
         let total = segments.iter().map(|segment| segment.length()).sum::<f64>();
         assert_close(total, 12.0);
 
@@ -54,7 +62,7 @@ mod tests {
         assert_close(point.x, 5.0);
         assert_close(point.y, 4.0);
 
-        let compact = path_geometry_segments("M10-20l30.1.5.1-20z").unwrap();
+        let compact = path_segments("M10-20l30.1.5.1-20z");
         let compact_end = point_at_length(&compact, 10_000.0);
         assert_close(compact_end.x, 10.0);
         assert_close(compact_end.y, -20.0);
@@ -62,7 +70,7 @@ mod tests {
 
     #[test]
     fn path_geometry_handles_relative_commands_and_close_path() {
-        let segments = path_geometry_segments("m 1 1 l 3 0 v 4 h -3 z").unwrap();
+        let segments = path_segments("m 1 1 l 3 0 v 4 h -3 z");
         let total = segments.iter().map(|segment| segment.length()).sum::<f64>();
         assert_close(total, 14.0);
 
@@ -72,14 +80,14 @@ mod tests {
     }
 
     #[test]
-    fn path_geometry_samples_cubic_and_quadratic_curves() {
-        let cubic = path_geometry_segments("M 0 0 C 0 10 10 10 10 0").unwrap();
+    fn path_geometry_preserves_cubic_and_quadratic_curves() {
+        let cubic = path_segments("M 0 0 C 0 10 10 10 10 0");
         assert!(cubic.iter().map(|segment| segment.length()).sum::<f64>() > 19.0);
         let cubic_end = point_at_length(&cubic, 10_000.0);
         assert_close(cubic_end.x, 10.0);
         assert_close(cubic_end.y, 0.0);
 
-        let quadratic = path_geometry_segments("M 0 0 Q 5 10 10 0 T 20 0").unwrap();
+        let quadratic = path_segments("M 0 0 Q 5 10 10 0 T 20 0");
         assert!(
             quadratic
                 .iter()
@@ -93,15 +101,15 @@ mod tests {
     }
 
     #[test]
-    fn path_geometry_samples_arc_curves() {
-        let arc = path_geometry_segments("M 0 0 A 10 10 0 0 1 20 0").unwrap();
+    fn path_geometry_converts_svg_arcs_to_bezier_curves() {
+        let arc = path_segments("M 0 0 A 10 10 0 0 1 20 0");
         let total = arc.iter().map(|segment| segment.length()).sum::<f64>();
         assert_near(total, std::f64::consts::PI * 10.0, 0.1);
         let arc_end = point_at_length(&arc, 10_000.0);
         assert_close(arc_end.x, 20.0);
         assert_close(arc_end.y, 0.0);
 
-        let relative_arc = path_geometry_segments("M 10 10 a 5 5 0 0 0 10 0").unwrap();
+        let relative_arc = path_segments("M 10 10 a 5 5 0 0 0 10 0");
         let relative_end = point_at_length(&relative_arc, 10_000.0);
         assert_close(relative_end.x, 20.0);
         assert_close(relative_end.y, 10.0);
@@ -123,7 +131,7 @@ mod tests {
         assert_close(rect_box.width, 30.0);
         assert_close(rect_box.height, 40.0);
 
-        let path = path_geometry_segments("M 0 0 L 3 4 H 7 V 1").unwrap();
+        let path = path_segments("M 0 0 L 3 4 H 7 V 1");
         let path_box = bounding_box_for_segments(&path).unwrap();
         assert_close(path_box.x, 0.0);
         assert_close(path_box.y, 0.0);
@@ -132,7 +140,7 @@ mod tests {
     }
 
     #[test]
-    fn rounded_rect_geometry_samples_corner_arcs() {
+    fn rounded_rect_geometry_uses_elliptical_corner_arcs() {
         let rect = segments_for_element(SvgGeometryElement::Rect {
             x: 0.0,
             y: 0.0,
@@ -142,7 +150,7 @@ mod tests {
             ry: 50.0,
         });
         let length = rect.iter().map(SvgGeometrySegment::length).sum::<f64>();
-        assert_near(length, 913.65, 0.1);
+        assert_near(length, 600.0 + std::f64::consts::PI * 100.0, 0.1);
         let bbox = bounding_box_for_segments(&rect).unwrap();
         assert_close(bbox.x, 0.0);
         assert_close(bbox.y, 0.0);
@@ -172,7 +180,19 @@ mod tests {
             ry: 0.0,
         };
         assert!(is_point_in_fill(&rect, SvgGeometryPoint::new(25.0, 30.0)));
+        assert!(is_point_in_fill(&rect, SvgGeometryPoint::new(10.0, 30.0)));
+        assert!(is_point_in_fill(&rect, SvgGeometryPoint::new(40.0, 30.0)));
+        assert!(is_point_in_fill(&rect, SvgGeometryPoint::new(25.0, 20.0)));
+        assert!(is_point_in_fill(&rect, SvgGeometryPoint::new(25.0, 60.0)));
         assert!(!is_point_in_fill(&rect, SvgGeometryPoint::new(0.0, 0.0)));
+
+        let line = SvgGeometryElement::Line {
+            x1: 0.0,
+            y1: 0.0,
+            x2: 10.0,
+            y2: 10.0,
+        };
+        assert!(!is_point_in_fill(&line, SvgGeometryPoint::new(5.0, 5.0)));
 
         let rounded_rect = SvgGeometryElement::Rect {
             x: 0.0,
@@ -216,9 +236,43 @@ mod tests {
     }
 
     #[test]
+    fn fill_containment_uses_nonzero_winding_and_closes_each_subpath() {
+        let same_direction_rings = SvgGeometryElement::Path {
+            d: "M0 0H10V10H0Z M2 2H8V8H2Z".to_owned(),
+        };
+        assert!(is_point_in_fill(
+            &same_direction_rings,
+            SvgGeometryPoint::new(5.0, 5.0)
+        ));
+
+        let open_subpaths = SvgGeometryElement::Path {
+            d: "M0 0L10 0L10 10 M20 0L30 0L30 10".to_owned(),
+        };
+        assert!(is_point_in_fill(
+            &open_subpaths,
+            SvgGeometryPoint::new(8.0, 2.0)
+        ));
+        assert!(is_point_in_fill(
+            &open_subpaths,
+            SvgGeometryPoint::new(28.0, 2.0)
+        ));
+    }
+
+    #[test]
+    fn curve_bounding_box_uses_bezier_extrema() {
+        let path = path_segments("M0 0 C100 100 100-100 200 0");
+        let bounds = bounding_box_for_segments(&path).unwrap();
+        let y_extent = 50.0 / 3.0 * 3.0_f64.sqrt();
+        assert_near(bounds.x, 0.0, 1e-9);
+        assert_near(bounds.y, -y_extent, 1e-9);
+        assert_near(bounds.width, 200.0, 1e-9);
+        assert_near(bounds.height, y_extent * 2.0, 1e-9);
+    }
+
+    #[test]
     fn poly_points_geometry_rejects_odd_coordinates() {
-        assert!(poly_points_geometry_segments("0 0 10", false).is_none());
-        let compact = poly_points_geometry_segments("0,0 10-5 20.5.5", false).unwrap();
+        assert!(polyline_segments("0 0 10").is_empty());
+        let compact = polyline_segments("0,0 10-5 20.5.5");
         assert_eq!(compact.len(), 2);
         let compact_end = point_at_length(&compact, 10_000.0);
         assert_close(compact_end.x, 20.5);
@@ -251,7 +305,7 @@ mod tests {
     }
 
     #[test]
-    fn circle_and_ellipse_geometry_are_sampled_closed_shapes() {
+    fn circle_and_ellipse_geometry_are_bezier_paths() {
         let circle = segments_for_element(SvgGeometryElement::Circle {
             cx: 0.0,
             cy: 0.0,
