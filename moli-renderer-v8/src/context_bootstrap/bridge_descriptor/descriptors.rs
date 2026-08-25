@@ -122,6 +122,11 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
         SpecializedTemplateInstaller::None,
         SVG_GEOMETRY_RUNTIME_INSTALL_GROUPS,
     ),
+    descriptor(
+        "SVGForeignObjectElement",
+        Some("SVGGraphicsElement"),
+        ELEMENT_GROUPS,
+    ),
     descriptor("SVGGElement", Some("SVGGraphicsElement"), ELEMENT_GROUPS),
     descriptor(
         "SVGImageElement",
@@ -217,6 +222,19 @@ const NODE_BRIDGE_DESCRIPTORS: &[BridgeDescriptor] = &[
     ),
     specialized_descriptor(
         "SVGTextElement",
+        Some("SVGTextPositioningElement"),
+        ELEMENT_GROUPS,
+        SpecializedTemplateInstaller::None,
+        RuntimeInstallGroups {
+            svg_geometry_path_length: false,
+            svg_rect_animated_lengths: false,
+            svg_text_positioning_lists: true,
+            svg_pattern_transform: false,
+            svg_gradient_transform: false,
+        },
+    ),
+    specialized_descriptor(
+        "SVGTSpanElement",
         Some("SVGTextPositioningElement"),
         ELEMENT_GROUPS,
         SpecializedTemplateInstaller::None,

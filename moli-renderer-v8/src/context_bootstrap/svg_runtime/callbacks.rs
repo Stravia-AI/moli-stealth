@@ -3,6 +3,10 @@ use super::*;
 use crate::util::serialize_v8_array;
 
 const SVG_RECT_ANIMATED_LENGTH_ATTRIBUTES: &[&str] = &["x", "y", "width", "height", "rx", "ry"];
+const SVG_CIRCLE_ANIMATED_LENGTH_ATTRIBUTES: &[&str] = &["cx", "cy", "r"];
+const SVG_ELLIPSE_ANIMATED_LENGTH_ATTRIBUTES: &[&str] = &["cx", "cy", "rx", "ry"];
+const SVG_LINE_ANIMATED_LENGTH_ATTRIBUTES: &[&str] = &["x1", "y1", "x2", "y2"];
+const SVG_BOX_ANIMATED_LENGTH_ATTRIBUTES: &[&str] = &["x", "y", "width", "height"];
 const SVG_LENGTH_ACCESSOR_NAMES: &[&str] = &[
     "unitType",
     "value",
@@ -45,18 +49,85 @@ fn require_svg_receiver<'s>(
 pub(super) fn svg_rect_animated_length_getter<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     args: v8::FunctionCallbackArguments<'s>,
-    mut rv: v8::ReturnValue<'_, v8::Value>,
+    rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let Some(name) = callback_data_item(
+    svg_element_animated_length_getter(
         scope,
         &args,
+        rv,
         SVG_RECT_ANIMATED_LENGTH_ATTRIBUTES,
         "SVGRectElement animated length attributes",
-    ) else {
+    );
+}
+
+pub(super) fn svg_circle_animated_length_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    svg_element_animated_length_getter(
+        scope,
+        &args,
+        rv,
+        SVG_CIRCLE_ANIMATED_LENGTH_ATTRIBUTES,
+        "SVGCircleElement animated length attributes",
+    );
+}
+
+pub(super) fn svg_ellipse_animated_length_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    svg_element_animated_length_getter(
+        scope,
+        &args,
+        rv,
+        SVG_ELLIPSE_ANIMATED_LENGTH_ATTRIBUTES,
+        "SVGEllipseElement animated length attributes",
+    );
+}
+
+pub(super) fn svg_line_animated_length_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    svg_element_animated_length_getter(
+        scope,
+        &args,
+        rv,
+        SVG_LINE_ANIMATED_LENGTH_ATTRIBUTES,
+        "SVGLineElement animated length attributes",
+    );
+}
+
+pub(super) fn svg_box_animated_length_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: v8::FunctionCallbackArguments<'s>,
+    rv: v8::ReturnValue<'_, v8::Value>,
+) {
+    svg_element_animated_length_getter(
+        scope,
+        &args,
+        rv,
+        SVG_BOX_ANIMATED_LENGTH_ATTRIBUTES,
+        "SVG graphics box animated length attributes",
+    );
+}
+
+fn svg_element_animated_length_getter<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    args: &v8::FunctionCallbackArguments<'s>,
+    mut rv: v8::ReturnValue<'_, v8::Value>,
+    attributes: &'static [&'static str],
+    label: &'static str,
+) {
+    let Some(name) = callback_data_item(scope, args, attributes, label) else {
         rv.set_undefined();
         return;
     };
-    let slot = svg_rect_animated_length_slot(name);
+    let slot = svg_animated_length_attribute_slot(name);
     let owner = args.this();
     if let Some(value) = get_private_value(scope, owner, slot) {
         if let Ok(object) = v8::Local::<v8::Object>::try_from(value) {

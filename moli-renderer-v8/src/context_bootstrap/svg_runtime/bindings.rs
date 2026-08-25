@@ -808,6 +808,67 @@ struct SvgRectElementPrototypeAccessorsDeclaration {
     ry: (),
 }
 
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGCircleElement", enumerable)]
+struct SvgCircleElementPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property = "cx", getter = svg_circle_animated_length_getter, data = callback_data_index_value(scope, 0))]
+    cx: (),
+
+    #[webapi(accessor_property = "cy", getter = svg_circle_animated_length_getter, data = callback_data_index_value(scope, 1))]
+    cy: (),
+
+    #[webapi(accessor_property = "r", getter = svg_circle_animated_length_getter, data = callback_data_index_value(scope, 2))]
+    r: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGEllipseElement", enumerable)]
+struct SvgEllipseElementPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property = "cx", getter = svg_ellipse_animated_length_getter, data = callback_data_index_value(scope, 0))]
+    cx: (),
+
+    #[webapi(accessor_property = "cy", getter = svg_ellipse_animated_length_getter, data = callback_data_index_value(scope, 1))]
+    cy: (),
+
+    #[webapi(accessor_property = "rx", getter = svg_ellipse_animated_length_getter, data = callback_data_index_value(scope, 2))]
+    rx: (),
+
+    #[webapi(accessor_property = "ry", getter = svg_ellipse_animated_length_getter, data = callback_data_index_value(scope, 3))]
+    ry: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGLineElement", enumerable)]
+struct SvgLineElementPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property = "x1", getter = svg_line_animated_length_getter, data = callback_data_index_value(scope, 0))]
+    x1: (),
+
+    #[webapi(accessor_property = "y1", getter = svg_line_animated_length_getter, data = callback_data_index_value(scope, 1))]
+    y1: (),
+
+    #[webapi(accessor_property = "x2", getter = svg_line_animated_length_getter, data = callback_data_index_value(scope, 2))]
+    x2: (),
+
+    #[webapi(accessor_property = "y2", getter = svg_line_animated_length_getter, data = callback_data_index_value(scope, 3))]
+    y2: (),
+}
+
+#[derive(WebApiFunctionTemplate)]
+#[webapi(name = "SVGGraphicsBoxElement", enumerable)]
+struct SvgGraphicsBoxElementPrototypeAccessorsDeclaration {
+    #[webapi(accessor_property = "x", getter = svg_box_animated_length_getter, data = callback_data_index_value(scope, 0))]
+    x: (),
+
+    #[webapi(accessor_property = "y", getter = svg_box_animated_length_getter, data = callback_data_index_value(scope, 1))]
+    y: (),
+
+    #[webapi(accessor_property = "width", getter = svg_box_animated_length_getter, data = callback_data_index_value(scope, 2))]
+    width: (),
+
+    #[webapi(accessor_property = "height", getter = svg_box_animated_length_getter, data = callback_data_index_value(scope, 3))]
+    height: (),
+}
+
 pub(super) fn install_svg_length_bindings<'s>(
     scope: &mut v8::PinScope<'s, '_, ()>,
     template: v8::Local<'s, v8::FunctionTemplate>,
@@ -1008,6 +1069,26 @@ pub(super) fn install_svg_element_accessor_bindings<'s>(
         }
         "SVGRectElement" => {
             SvgRectElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGCircleElement" => {
+            SvgCircleElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGEllipseElement" => {
+            SvgEllipseElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGLineElement" => {
+            SvgLineElementPrototypeAccessorsDeclaration::initialize_prototype_template(
+                scope, prototype,
+            );
+        }
+        "SVGImageElement" | "SVGUseElement" | "SVGForeignObjectElement" => {
+            SvgGraphicsBoxElementPrototypeAccessorsDeclaration::initialize_prototype_template(
                 scope, prototype,
             );
         }

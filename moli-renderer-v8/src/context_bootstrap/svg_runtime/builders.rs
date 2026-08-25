@@ -1288,15 +1288,22 @@ pub(super) fn svg_matrix_default(slot: &str) -> f64 {
     }
 }
 
-pub(super) fn svg_rect_animated_length_slot(name: &str) -> &'static str {
+pub(super) fn svg_animated_length_attribute_slot(name: &str) -> &'static str {
     match name {
-        "x" => "__moliSvgRectX",
-        "y" => "__moliSvgRectY",
-        "width" => "__moliSvgRectWidth",
-        "height" => "__moliSvgRectHeight",
-        "rx" => "__moliSvgRectRx",
-        "ry" => "__moliSvgRectRy",
-        _ => "__moliSvgRectUnknown",
+        "x" => "__moliSvgAnimatedX",
+        "y" => "__moliSvgAnimatedY",
+        "width" => "__moliSvgAnimatedWidth",
+        "height" => "__moliSvgAnimatedHeight",
+        "cx" => "__moliSvgAnimatedCx",
+        "cy" => "__moliSvgAnimatedCy",
+        "r" => "__moliSvgAnimatedR",
+        "rx" => "__moliSvgAnimatedRx",
+        "ry" => "__moliSvgAnimatedRy",
+        "x1" => "__moliSvgAnimatedX1",
+        "y1" => "__moliSvgAnimatedY1",
+        "x2" => "__moliSvgAnimatedX2",
+        "y2" => "__moliSvgAnimatedY2",
+        _ => "__moliSvgAnimatedUnknown",
     }
 }
 

@@ -183,6 +183,10 @@ fn svg_element_interface_name_specializes_standard_elements() {
     assert_eq!(svg_element_interface_name("defs"), "SVGDefsElement");
     assert_eq!(svg_element_interface_name("desc"), "SVGDescElement");
     assert_eq!(svg_element_interface_name("ellipse"), "SVGEllipseElement");
+    assert_eq!(
+        svg_element_interface_name("foreignObject"),
+        "SVGForeignObjectElement"
+    );
     assert_eq!(svg_element_interface_name("g"), "SVGGElement");
     assert_eq!(svg_element_interface_name("image"), "SVGImageElement");
     assert_eq!(svg_element_interface_name("line"), "SVGLineElement");
@@ -205,6 +209,7 @@ fn svg_element_interface_name_specializes_standard_elements() {
     assert_eq!(svg_element_interface_name("symbol"), "SVGSymbolElement");
     assert_eq!(svg_element_interface_name("text"), "SVGTextElement");
     assert_eq!(svg_element_interface_name("title"), "SVGTitleElement");
+    assert_eq!(svg_element_interface_name("tspan"), "SVGTSpanElement");
     assert_eq!(svg_element_interface_name("use"), "SVGUseElement");
     assert_eq!(svg_element_interface_name("style"), "SVGStyleElement");
     assert_eq!(svg_element_interface_name("custom"), "SVGElement");

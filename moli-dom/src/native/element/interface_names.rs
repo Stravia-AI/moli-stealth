@@ -95,6 +95,7 @@ pub fn svg_element_interface_name(local_name: &str) -> &'static str {
         "defs" => "SVGDefsElement",
         "desc" => "SVGDescElement",
         "ellipse" => "SVGEllipseElement",
+        "foreignObject" => "SVGForeignObjectElement",
         "g" => "SVGGElement",
         "image" => "SVGImageElement",
         "line" => "SVGLineElement",
@@ -112,6 +113,7 @@ pub fn svg_element_interface_name(local_name: &str) -> &'static str {
         "symbol" => "SVGSymbolElement",
         "text" => "SVGTextElement",
         "title" => "SVGTitleElement",
+        "tspan" => "SVGTSpanElement",
         "use" => "SVGUseElement",
         _ => "SVGElement",
     }
