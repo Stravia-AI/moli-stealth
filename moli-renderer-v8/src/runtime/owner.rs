@@ -3992,8 +3992,14 @@ impl RendererOwnerHandle {
         } else {
             // A closed command observer may detach the same continuation into
             // background work while converting the parked turn. Promote that
-            // detached driver too; a cancelled page legitimately leaves none.
-            let _ = pending_turns.promote_phase_one_parser_continuation(token);
+            // detached driver too. Only an already-retired Page may
+            // legitimately leave no driver; a live Page would otherwise hang
+            // after consuming the one-shot parser admission.
+            let promoted = pending_turns.promote_phase_one_parser_continuation(token);
+            assert!(
+                promoted || !self.state.page_table.contains_page(token.page_id()),
+                "an admitted main-parser continuation lost its phase-one driver while the Page remained live"
+            );
         }
     }
 
@@ -7418,10 +7424,18 @@ mod tests {
     }
 
     #[test]
-    fn selected_parser_admission_promotes_its_phase_one_driver() {
+    fn selected_parser_admission_precedes_an_ordinary_same_page_turn() {
         let parser_token = RendererPageToken::new_for_testing(PageId::new_for_testing(8));
         let unrelated_token = RendererPageToken::new_for_testing(PageId::new_for_testing(9));
         let mut pending = RenderRuntimePendingTurnQueue::default();
+        pending.push_back(RenderRuntimePendingTurn {
+            reply_tx: None,
+            turn: RenderRuntimeTurn::RunPageTurn {
+                token: parser_token,
+            },
+            allow_command_overtake: true,
+            command_admission_output_predecessor: None,
+        });
         pending.push_back(RenderRuntimePendingTurn {
             reply_tx: None,
             turn: RenderRuntimeTurn::RunPageTurn {
@@ -7449,6 +7463,13 @@ mod tests {
         assert!(
             !promoted.allow_command_overtake,
             "no command or unrelated Page turn may split a selected parser task from its phase-one consumer"
+        );
+        assert_eq!(
+            pending
+                .pop_front()
+                .and_then(|pending| pending.page_owner_token()),
+            Some(parser_token),
+            "ordinary Networking work for the same Page must remain behind the admitted parser driver"
         );
         assert_eq!(
             pending
