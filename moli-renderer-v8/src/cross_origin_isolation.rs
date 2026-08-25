@@ -190,7 +190,7 @@ impl CrossOriginOpenerPolicyCommit {
 pub(crate) struct CrossOriginOpenerPolicyNavigationResult {
     pub(crate) browsing_context_group_swap: bool,
     pub(crate) commit: CrossOriginOpenerPolicyCommit,
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[cfg(test)]
     pub(crate) virtual_group_switch_count: usize,
 }
 
@@ -362,6 +362,7 @@ pub(crate) fn evaluate_cross_origin_opener_policy_navigation(
         current: current.clone(),
         navigation_from_initial_empty_document: current.is_initial_empty_document,
         browsing_context_group_swap: false,
+        #[cfg(test)]
         virtual_group_switch_count: 0,
         reports: Vec::new(),
         has_other_window_in_browsing_context_group,
@@ -379,6 +380,7 @@ pub(crate) fn evaluate_cross_origin_opener_policy_navigation(
     status.current.is_initial_empty_document = false;
     CrossOriginOpenerPolicyNavigationResult {
         browsing_context_group_swap: status.browsing_context_group_swap,
+        #[cfg(test)]
         virtual_group_switch_count: status.virtual_group_switch_count,
         commit: CrossOriginOpenerPolicyCommit::Navigation {
             state: status.current,
@@ -391,6 +393,7 @@ struct CrossOriginOpenerPolicyNavigationStatus {
     current: TopLevelDocumentCrossOriginOpenerPolicy,
     navigation_from_initial_empty_document: bool,
     browsing_context_group_swap: bool,
+    #[cfg(test)]
     virtual_group_switch_count: usize,
     reports: Vec<Request>,
     has_other_window_in_browsing_context_group: bool,
@@ -405,7 +408,10 @@ impl CrossOriginOpenerPolicyNavigationStatus {
         response_headers: &[(String, String)],
     ) {
         self.browsing_context_group_swap = true;
-        self.virtual_group_switch_count += 1;
+        #[cfg(test)]
+        {
+            self.virtual_group_switch_count += 1;
+        }
         self.current = TopLevelDocumentCrossOriginOpenerPolicy::from_response_with_identity(
             response_url,
             response_headers,
@@ -474,7 +480,10 @@ impl CrossOriginOpenerPolicyNavigationStatus {
         if self.browsing_context_group_swap || virtual_browsing_context_group_swap {
             response.virtual_browsing_context_group =
                 CrossOriginOpenerPolicyVirtualGroupId::allocate();
-            self.virtual_group_switch_count += 1;
+            #[cfg(test)]
+            {
+                self.virtual_group_switch_count += 1;
+            }
         }
         response.is_initial_empty_document = false;
         self.current = response;
