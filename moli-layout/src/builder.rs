@@ -16,11 +16,13 @@ use crate::{
     LayoutAnonymousReason, LayoutBoxId, LayoutBoxKind, LayoutCapabilityDiagnostic, LayoutDisplay,
     LayoutElementCategory, LayoutElementSemantics, LayoutError, LayoutPseudo, LayoutSource,
     LayoutSourceKind, LayoutStyleResolver, LayoutWorld, ResolvedLayoutStyle,
+    form::form_control_intrinsic_size,
     replaced::ReplacedContext,
     style::{InlineWhiteSpaceCollapse, LayoutOverflowMode},
     world::{ViewportDefiningBox, ViewportScrollPolicy},
 };
 use style::values::generics::image::GenericImage;
+use taffy::Size;
 
 /// Constructs a complete pass-local CSS box tree from a borrowed source view.
 pub fn build_layout_world<S, R>(
@@ -94,6 +96,7 @@ where
         let Some(mut root_style) = self.styles.primary_style(source_root)? else {
             return Err(LayoutError::MissingRootStyle { source_label });
         };
+        root_style.adjust_for_element_content(&root_semantics.content);
         let root_metrics = self.source.replaced_metrics(source_root);
         if root_semantics.is_hidden_input()
             || (root_style.display() == LayoutDisplay::Contents
@@ -105,12 +108,12 @@ where
             root_style.force_display_none();
         }
         if root_semantics.is_replaced() {
-            root_style.mark_replaced(natural_replaced_ratio(&root_semantics, root_metrics));
-        } else if matches!(
-            root_semantics.category,
-            crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Button)
-        ) {
-            root_style.mark_intrinsic_form_control_container();
+            root_style.mark_replaced();
+        } else if is_button(&root_semantics) {
+            root_style.adjust_button_flow_layout();
+        }
+        if is_menu_list_select(&root_semantics) {
+            root_style.mark_menu_list_formatting_context();
         }
         let root_kind = principal_kind(&root_semantics, &root_style);
         let root_generates_principal_box = root_style.display() != LayoutDisplay::None;
@@ -129,7 +132,14 @@ where
             // `display:none`.
             root.source = None;
         }
-        let mut world = LayoutWorld::new(root);
+        let mut world = LayoutWorld::new(
+            root,
+            source_root,
+            self.source.root_is_document_element(),
+            self.source.document_body(),
+            self.source.document_mode(),
+            self.source.viewport_scroll_offset(),
+        );
         let root_box = world.root();
         if root_generates_principal_box {
             world.map_source(source_root, root_box);
@@ -141,8 +151,15 @@ where
             root_style.display(),
             LayoutDisplay::None | LayoutDisplay::Contents
         ) && !is_leaf_element(&root_semantics, root_kind, &root_style)
+            && !world.boxes[root_box.index()].used_content_visibility_skips_contents()
         {
-            self.populate_root(&mut world, root_box, source_root, &root_style)?;
+            self.populate_root(
+                &mut world,
+                root_box,
+                source_root,
+                &root_semantics,
+                &root_style,
+            )?;
         }
 
         world.compact_reachable();
@@ -157,6 +174,7 @@ where
         world: &mut LayoutWorld<S::NodeId>,
         root_box: LayoutBoxId,
         source_node: S::NodeId,
+        semantics: &LayoutElementSemantics,
         style: &ResolvedLayoutStyle,
     ) -> Result<(), LayoutError> {
         if !self.active_sources.insert(source_node) {
@@ -165,7 +183,7 @@ where
             });
         }
         let result = (|| {
-            let children = self.build_element_child_stream(world, source_node, style)?;
+            let children = self.build_element_child_stream(world, source_node, semantics, style)?;
             let _ = self.attach_children(world, root_box, source_node, style, children, false)?;
             Ok(())
         })();
@@ -201,7 +219,6 @@ where
                     LayoutBoxKind::Text,
                     ResolvedLayoutStyle::text_leaf_from(inherited_style),
                     Some(Arc::from(text)),
-                    None,
                 ));
                 world.boxes[id.index()].text_selection = self.source.text_selection(source_node);
                 world.map_source(source_node, id);
@@ -241,14 +258,15 @@ where
                     blocks_propagation: style.applies_any_viewport_containment(),
                 });
             }
+            style.adjust_for_element_content(&semantics.content);
             let metrics = self.source.replaced_metrics(source_node);
             if semantics.is_replaced() {
-                style.mark_replaced(natural_replaced_ratio(&semantics, metrics));
-            } else if matches!(
-                semantics.category,
-                crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Button)
-            ) {
-                style.mark_intrinsic_form_control_container();
+                style.mark_replaced();
+            } else if is_button(&semantics) {
+                style.adjust_button_flow_layout();
+            }
+            if is_menu_list_select(&semantics) {
+                style.mark_menu_list_formatting_context();
             }
 
             if semantics.is_hidden_input()
@@ -261,7 +279,8 @@ where
             match style.display() {
                 LayoutDisplay::None => Ok(Vec::new()),
                 LayoutDisplay::Contents => {
-                    let children = self.build_element_child_stream(world, source_node, &style)?;
+                    let children =
+                        self.build_element_child_stream(world, source_node, &semantics, &style)?;
                     world.map_display_contents_source(source_node, &children);
                     Ok(children)
                 }
@@ -278,11 +297,14 @@ where
                     let id = world.allocate(box_node);
                     world.map_source(source_node, id);
 
-                    if is_leaf_element(&semantics, kind, &style) {
+                    if is_leaf_element(&semantics, kind, &style)
+                        || world.boxes[id.index()].used_content_visibility_skips_contents()
+                    {
                         return Ok(vec![id]);
                     }
 
-                    let children = self.build_element_child_stream(world, source_node, &style)?;
+                    let children =
+                        self.build_element_child_stream(world, source_node, &semantics, &style)?;
                     self.attach_children(world, id, source_node, &style, children, true)
                 }
             }
@@ -343,6 +365,14 @@ where
         style: ResolvedLayoutStyle,
         metrics: Option<crate::ReplacedMetrics>,
     ) -> crate::LayoutBox<S::NodeId> {
+        let form_control_size =
+            form_control_intrinsic_size(&semantics, style.font_size(), style.line_height());
+        let replaced_context = build_replaced_context(
+            &semantics,
+            metrics,
+            form_control_size,
+            style.effective_zoom(),
+        );
         let mut layout_box = LayoutWorld::new_box(
             Some(source_node),
             None,
@@ -354,8 +384,13 @@ where
             kind,
             style.clone(),
             None,
-            metrics,
         );
+        layout_box.replaced_context = replaced_context;
+        if is_menu_list_select(&semantics) {
+            layout_box.default_intrinsic_content_size = form_control_size
+                .map(|size| size.map(Some))
+                .unwrap_or(Size::NONE);
+        }
         layout_box.replaced_image = self.source.replaced_image(source_node, &style);
         if !matches!(
             style.display(),
@@ -363,7 +398,12 @@ where
         ) {
             layout_box.css_images = self.css_image_resources(source_node, &style);
         }
-        layout_box.scroll_offset = self.source.scroll_offset(source_node);
+        let scroll_offset = self.source.scroll_offset(source_node);
+        let effective_zoom = style.effective_zoom();
+        layout_box.scroll_offset = crate::LayoutPoint::new(
+            scroll_offset.x * effective_zoom,
+            scroll_offset.y * effective_zoom,
+        );
         layout_box
     }
 
@@ -371,6 +411,7 @@ where
         &mut self,
         world: &mut LayoutWorld<S::NodeId>,
         source_node: S::NodeId,
+        semantics: &LayoutElementSemantics,
         style: &ResolvedLayoutStyle,
     ) -> Result<Vec<LayoutBoxId>, LayoutError> {
         let mut children = Vec::new();
@@ -378,11 +419,43 @@ where
             children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Marker)?);
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::Before)?);
-        for child in self.checked_flat_children(source_node)? {
-            children.extend(self.build_source_node(world, child, style)?);
+        if let Some(fallback) = semantics.image_fallback() {
+            if !fallback.alternative_text().is_empty() {
+                children.push(self.allocate_image_fallback_text(
+                    world,
+                    source_node,
+                    style,
+                    fallback.alternative_text(),
+                ));
+            }
+        } else {
+            for child in self.checked_flat_children(source_node)? {
+                children.extend(self.build_source_node(world, child, style)?);
+            }
         }
         children.extend(self.build_pseudo(world, source_node, LayoutPseudo::After)?);
         Ok(children)
+    }
+
+    fn allocate_image_fallback_text(
+        &self,
+        world: &mut LayoutWorld<S::NodeId>,
+        owner: S::NodeId,
+        style: &ResolvedLayoutStyle,
+        text: &str,
+    ) -> LayoutBoxId {
+        world.allocate(LayoutWorld::new_box(
+            None,
+            Some(owner),
+            None,
+            format!("{}::image-fallback-text", self.source.label(owner)),
+            Some(self.source.label(owner)),
+            None,
+            None,
+            LayoutBoxKind::Text,
+            ResolvedLayoutStyle::text_leaf_from(style),
+            Some(Arc::from(text)),
+        ))
     }
 
     fn build_pseudo(
@@ -436,7 +509,6 @@ where
             kind,
             style.clone(),
             None,
-            None,
         );
         layout_box.css_images = self.css_image_resources(owner, &style);
         if style.has_unsupported_generated_content() {
@@ -469,7 +541,6 @@ where
             LayoutBoxKind::Text,
             ResolvedLayoutStyle::text_leaf_from(pseudo_style),
             Some(Arc::from(text)),
-            None,
         ))
     }
 
@@ -482,6 +553,11 @@ where
         children: Vec<LayoutBoxId>,
         allow_inline_split: bool,
     ) -> Result<Vec<LayoutBoxId>, LayoutError> {
+        // Preserve the LayoutObject/source ownership before table repair,
+        // anonymous block wrapping, or block-in-inline splitting rewrites the
+        // formatting tree. A promoted block must still see its inline source
+        // parent for containing-block and CSSOM ancestry.
+        world.record_structural_children(box_id, &children)?;
         let table_role = self.table_role(world, box_id)?;
         let children = if table_role == Some(TableBoxRole::Column) {
             Vec::new()
@@ -611,7 +687,6 @@ where
             Some(LayoutAnonymousReason::InlineSplitContinuation),
             LayoutBoxKind::InlineContinuation,
             style.clone(),
-            None,
             None,
         );
         continuation.css_images = self.css_image_resources(owner, style);
@@ -836,7 +911,6 @@ where
             Some(reason),
             anonymous_kind,
             style,
-            None,
             None,
         );
         anonymous.inline_formatting_context = true;
@@ -1097,7 +1171,6 @@ where
             kind,
             style,
             None,
-            None,
         ));
         output.push(id);
         Ok(id)
@@ -1247,7 +1320,7 @@ where
                 "element local name must not be empty",
             ));
         }
-        if semantics.replaced.is_none() && self.source.replaced_metrics(node).is_some() {
+        if !semantics.is_replaced() && self.source.replaced_metrics(node).is_some() {
             return Err(LayoutError::source_contract(
                 source,
                 "non-replaced element exposed replaced metrics",
@@ -1284,21 +1357,46 @@ struct ViewportBodyCandidate<N> {
     blocks_propagation: bool,
 }
 
-fn natural_replaced_ratio(
+fn build_replaced_context(
     semantics: &LayoutElementSemantics,
     metrics: Option<crate::ReplacedMetrics>,
-) -> Option<f32> {
-    let sizing_kind = if matches!(
+    form_control_size: Option<Size<f32>>,
+    effective_zoom: f32,
+) -> Option<ReplacedContext> {
+    if !semantics.is_replaced() {
+        return None;
+    }
+    if matches!(
         semantics.category,
         crate::LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Input(
             crate::LayoutInputControlKind::Image
         ))
     ) {
-        crate::LayoutReplacedKind::Image
-    } else {
-        semantics.replaced?
-    };
-    ReplacedContext::for_element(sizing_kind, metrics).inherent_ratio()
+        return Some(ReplacedContext::for_element(
+            crate::LayoutReplacedKind::Image,
+            metrics,
+            effective_zoom,
+        ));
+    }
+    form_control_size
+        .map(ReplacedContext::form_control)
+        .or_else(|| {
+            semantics
+                .replaced_kind()
+                .map(|kind| ReplacedContext::for_element(kind, metrics, effective_zoom))
+        })
+}
+
+fn is_button(semantics: &LayoutElementSemantics) -> bool {
+    matches!(
+        semantics.category,
+        LayoutElementCategory::FormControl(crate::LayoutFormControlKind::Button)
+    )
+}
+
+fn is_menu_list_select(semantics: &LayoutElementSemantics) -> bool {
+    semantics.select_presentation() == Some(crate::LayoutSelectPresentation::MenuList)
+        && !semantics.is_replaced()
 }
 
 fn whitespace_text_is_ignorable(text: &str, mode: InlineWhiteSpaceCollapse) -> bool {
@@ -1324,6 +1422,9 @@ fn principal_kind(
     semantics: &LayoutElementSemantics,
     style: &ResolvedLayoutStyle,
 ) -> LayoutBoxKind {
+    if style.image_fallback_is_atomic(&semantics.content) {
+        return LayoutBoxKind::ImageFallback;
+    }
     match semantics.category {
         LayoutElementCategory::LineBreak => return LayoutBoxKind::LineBreak,
         LayoutElementCategory::FormControl(_) => return LayoutBoxKind::FormControl,
@@ -1366,6 +1467,7 @@ fn is_leaf_element(
     style: &ResolvedLayoutStyle,
 ) -> bool {
     semantics.is_replaced()
+        || is_menu_list_select(semantics)
         || semantics.category == LayoutElementCategory::LineBreak
         || kind == LayoutBoxKind::TableColumn
         || style.display() == LayoutDisplay::TableColumn

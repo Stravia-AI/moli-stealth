@@ -1,4 +1,6 @@
-use crate::{LayoutError, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform2D, LayoutViewport};
+use crate::{
+    LayoutError, LayoutPoint, LayoutRect, LayoutSize, LayoutTransform2D, LayoutViewport, PaintColor,
+};
 
 /// Exclusive CSS-pixel limit for either side of an automatic full-document
 /// capture, matching Chromium's `Page.captureScreenshot` boundary.
@@ -31,6 +33,12 @@ pub struct PaintCaptureRequest {
     /// distinction outside [`PaintCaptureRegion`], because both use the same
     /// document-coordinate raster rectangle.
     pub include_viewport_controls: bool,
+    /// Color behind the document canvas before CSS canvas propagation.
+    ///
+    /// Main-frame captures use an opaque white browser surface. Embedded
+    /// browsing contexts use transparent black so their owner element remains
+    /// visible unless the child document supplies its own canvas background.
+    pub base_background_color: PaintColor,
     /// Maximum encoded image width in device pixels.
     pub max_width: Option<u32>,
     /// Maximum encoded image height in device pixels.
@@ -44,6 +52,7 @@ impl PaintCaptureRequest {
             region: PaintCaptureRegion::Viewport,
             include_backgrounds: true,
             include_viewport_controls: true,
+            base_background_color: PaintColor::WHITE,
             max_width: None,
             max_height: None,
         }
@@ -55,6 +64,7 @@ impl PaintCaptureRequest {
             region: PaintCaptureRegion::Viewport,
             include_backgrounds: true,
             include_viewport_controls: true,
+            base_background_color: PaintColor::WHITE,
             max_width,
             max_height,
         }
@@ -66,6 +76,7 @@ impl PaintCaptureRequest {
             region: PaintCaptureRegion::FullDocument,
             include_backgrounds: true,
             include_viewport_controls: false,
+            base_background_color: PaintColor::WHITE,
             max_width: None,
             max_height: None,
         }
@@ -77,6 +88,7 @@ impl PaintCaptureRequest {
             region: PaintCaptureRegion::PageClip { rect, scale },
             include_backgrounds: true,
             include_viewport_controls: false,
+            base_background_color: PaintColor::WHITE,
             max_width: None,
             max_height: None,
         }
@@ -125,6 +137,7 @@ pub(crate) struct ResolvedPaintCapture {
     /// document and page-clip captures paint page content only, matching
     /// Chromium's compositor capture behavior.
     pub(crate) paint_root_scrollbars: bool,
+    pub(crate) base_background_color: PaintColor,
 }
 
 impl PaintCaptureRequest {
@@ -201,6 +214,7 @@ impl PaintCaptureRequest {
             ),
             include_backgrounds: self.include_backgrounds,
             paint_root_scrollbars,
+            base_background_color: self.base_background_color,
         })
     }
 }
@@ -289,6 +303,22 @@ mod tests {
             LayoutPoint::ZERO
         );
         assert!(!capture.paint_root_scrollbars);
+        assert_eq!(capture.base_background_color, PaintColor::WHITE);
+    }
+
+    #[test]
+    fn embedded_capture_can_select_a_transparent_base_background() {
+        let mut request = PaintCaptureRequest::viewport();
+        request.base_background_color = PaintColor::TRANSPARENT;
+        let capture = request
+            .resolve(
+                LayoutViewport::new(100, 80, 1.0),
+                LayoutPoint::ZERO,
+                LayoutSize::new(100.0, 80.0),
+            )
+            .expect("embedded viewport capture");
+
+        assert_eq!(capture.base_background_color, PaintColor::TRANSPARENT);
     }
 
     #[test]
@@ -300,6 +330,7 @@ mod tests {
             },
             include_backgrounds: true,
             include_viewport_controls: false,
+            base_background_color: PaintColor::WHITE,
             max_width: Some(500),
             max_height: Some(200),
         }

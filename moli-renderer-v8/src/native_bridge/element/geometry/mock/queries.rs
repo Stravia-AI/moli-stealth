@@ -2,9 +2,10 @@ use std::time::Duration;
 
 use moli_layout::{
     LayoutAnswers, LayoutBoxModel, LayoutCaretPosition, LayoutDocumentMetrics,
-    LayoutElementMetrics, LayoutFlushReason, LayoutHit, LayoutIntersectionGeometry,
-    LayoutPassMetrics, LayoutPoint, LayoutQuery, LayoutQueryAnswer, LayoutQueryBatch,
-    LayoutScrollContainerMetrics, LayoutScrollIntoViewGeometry, LayoutSize,
+    LayoutDocumentScrollMetrics, LayoutElementMetrics, LayoutFlushReason, LayoutHit,
+    LayoutIntersectionGeometry, LayoutPassMetrics, LayoutPoint, LayoutQuery, LayoutQueryAnswer,
+    LayoutQueryBatch, LayoutScrollContainerKind, LayoutScrollContainerMetrics,
+    LayoutScrollIntoViewGeometry, LayoutSize,
 };
 
 use super::super::client_rect::{quad_from_client_rect, zero_client_rect};
@@ -45,6 +46,54 @@ pub(crate) fn answer_queries(
                     ),
                 })
             }
+            LayoutQuery::DocumentScrollMetrics => {
+                let root = runtime
+                    .dom_host()
+                    .dom()
+                    .document_element_handle_for_document(document);
+                let scrolling_element =
+                    if runtime.dom_host().document_quirks_mode_for_handle(document)
+                        == Some(selectors::matching::QuirksMode::Quirks)
+                    {
+                        runtime
+                            .dom_host()
+                            .document_body_handle_for_document(document)
+                    } else {
+                        root
+                    };
+                let viewport_scroll = root
+                    .and_then(|root| runtime.dom_host().node(root))
+                    .and_then(Node::as_element)
+                    .map(|element| {
+                        LayoutPoint::new(element.scroll_left() as f32, element.scroll_top() as f32)
+                    })
+                    .unwrap_or(LayoutPoint::ZERO);
+                let scrollport = moli_layout::LayoutRect::new(
+                    0.0,
+                    0.0,
+                    viewport.css_width as f32,
+                    viewport.css_height as f32,
+                );
+                LayoutQueryAnswer::DocumentScrollMetrics(LayoutDocumentScrollMetrics {
+                    scrolling_element,
+                    viewport_extent: moli_layout::LayoutScrollExtent {
+                        scrollport,
+                        scrollable_overflow: scrollport,
+                        scroll_size: LayoutSize::new(scrollport.width, scrollport.height),
+                        applied_offset: viewport_scroll,
+                        minimum_offset: LayoutPoint::ZERO,
+                        maximum_offset: LayoutPoint::ZERO,
+                        is_scroll_container: true,
+                        allows_user_scroll_x: true,
+                        allows_user_scroll_y: true,
+                        clips_overflow: true,
+                        horizontal_scrollbar: None,
+                        vertical_scrollbar: None,
+                        scrollbar_corner: None,
+                        scrollbar_colors: None,
+                    },
+                })
+            }
             LayoutQuery::BoxModel { source } => {
                 LayoutQueryAnswer::BoxModel(mock_box_model(runtime, *source))
             }
@@ -69,6 +118,9 @@ pub(crate) fn answer_queries(
             LayoutQuery::ElementMetrics { source } => {
                 LayoutQueryAnswer::ElementMetrics(mock_element_metrics(runtime, *source))
             }
+            LayoutQuery::UsedBoxSize { .. } => LayoutQueryAnswer::UsedBoxSize(None),
+            LayoutQuery::UsedMargin { .. } => LayoutQueryAnswer::UsedMargin(None),
+            LayoutQuery::UsedGridTracks { .. } => LayoutQueryAnswer::UsedGridTracks(None),
             LayoutQuery::ScrollIntoViewGeometry { source } => {
                 LayoutQueryAnswer::ScrollIntoViewGeometry(mock_scroll_into_view_geometry(
                     runtime, document, *source,
@@ -179,6 +231,10 @@ fn mock_element_metrics(
     Some(LayoutElementMetrics {
         offset_parent: compute_mock_offset_parent(runtime, source),
         offset_position: LayoutPoint::new(rect.left as f32, rect.top as f32),
+        border_origin_in_viewport_ignoring_css_transforms: LayoutPoint::new(
+            rect.left as f32,
+            rect.top as f32,
+        ),
         offset_size: size,
         content_size: size,
         client_size: size,
@@ -213,6 +269,7 @@ fn mock_scroll_into_view_geometry(
         .and_then(|root| {
             mock_element_metrics(runtime, root).map(|metrics| LayoutScrollContainerMetrics {
                 source: root,
+                kind: LayoutScrollContainerKind::Viewport,
                 metrics,
             })
         })

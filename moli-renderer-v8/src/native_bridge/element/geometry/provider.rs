@@ -2,7 +2,8 @@ use std::collections::HashSet;
 
 use moli_layout::{
     LayoutAnswers, LayoutBoxModel, LayoutCaretPosition, LayoutDocumentMetrics,
-    LayoutElementMetrics, LayoutError, LayoutFlushReason, LayoutHit, LayoutPoint, LayoutQuery,
+    LayoutDocumentScrollMetrics, LayoutElementMetrics, LayoutError, LayoutFlushReason,
+    LayoutGridGeometry, LayoutHit, LayoutPhysicalBoxStrut, LayoutPoint, LayoutQuery,
     LayoutQueryAnswer, LayoutQueryBatch, LayoutScrollIntoViewGeometry,
 };
 
@@ -234,6 +235,92 @@ pub(crate) fn observable_element_metrics(
     }
 }
 
+pub(crate) fn observable_used_box_size(
+    runtime: &JsContextHost,
+    source: DomHandle,
+    reason: LayoutFlushReason,
+) -> Result<Option<moli_layout::LayoutSize>, LayoutError> {
+    if !runtime.dom_host().is_connected(source) {
+        return Ok(None);
+    }
+    let Some(document) = runtime.layout_document_for_source(source) else {
+        return Ok(None);
+    };
+    let answers = observable_geometry_batch(
+        runtime,
+        document,
+        reason,
+        &LayoutQueryBatch::new(vec![LayoutQuery::UsedBoxSize { source }]),
+    )?;
+    match answers.answers.into_iter().next() {
+        Some(LayoutQueryAnswer::UsedBoxSize(size)) => Ok(size),
+        _ => Err(provider_contract_error("used box size")),
+    }
+}
+
+pub(crate) fn observable_used_margin(
+    runtime: &JsContextHost,
+    source: DomHandle,
+    reason: LayoutFlushReason,
+) -> Result<Option<LayoutPhysicalBoxStrut>, LayoutError> {
+    if !runtime.dom_host().is_connected(source) {
+        return Ok(None);
+    }
+    let Some(document) = runtime.layout_document_for_source(source) else {
+        return Ok(None);
+    };
+    let answers = observable_geometry_batch(
+        runtime,
+        document,
+        reason,
+        &LayoutQueryBatch::new(vec![LayoutQuery::UsedMargin { source }]),
+    )?;
+    match answers.answers.into_iter().next() {
+        Some(LayoutQueryAnswer::UsedMargin(margin)) => Ok(margin),
+        _ => Err(provider_contract_error("used margin")),
+    }
+}
+
+pub(crate) fn observable_used_grid_tracks(
+    runtime: &JsContextHost,
+    source: DomHandle,
+    reason: LayoutFlushReason,
+) -> Result<Option<LayoutGridGeometry>, LayoutError> {
+    if !runtime.dom_host().is_connected(source) {
+        return Ok(None);
+    }
+    let Some(document) = runtime.layout_document_for_source(source) else {
+        return Ok(None);
+    };
+    let answers = observable_geometry_batch(
+        runtime,
+        document,
+        reason,
+        &LayoutQueryBatch::new(vec![LayoutQuery::UsedGridTracks { source }]),
+    )?;
+    match answers.answers.into_iter().next() {
+        Some(LayoutQueryAnswer::UsedGridTracks(tracks)) => Ok(tracks),
+        _ => Err(provider_contract_error("used Grid tracks")),
+    }
+}
+
+pub(crate) fn observable_document_scroll_metrics(
+    runtime: &JsContextHost,
+    document: DomHandle,
+    reason: LayoutFlushReason,
+) -> Result<LayoutDocumentScrollMetrics<DomHandle>, LayoutError> {
+    let answers = observable_geometry_batch(
+        runtime,
+        document,
+        reason,
+        &LayoutQueryBatch::new(vec![LayoutQuery::DocumentScrollMetrics]),
+    )?;
+    match answers.answers.into_iter().next() {
+        Some(LayoutQueryAnswer::DocumentScrollMetrics(metrics)) => Ok(metrics),
+        _ => Err(provider_contract_error("document scroll metrics")),
+    }
+}
+
 pub(crate) fn observable_scroll_into_view_geometry(
     runtime: &JsContextHost,
     source: DomHandle,
@@ -254,6 +341,38 @@ pub(crate) fn observable_scroll_into_view_geometry(
     match answers.answers.into_iter().next() {
         Some(LayoutQueryAnswer::ScrollIntoViewGeometry(geometry)) => Ok(geometry),
         _ => Err(provider_contract_error("scroll-into-view geometry")),
+    }
+}
+
+/// Resolves the foremost painted hit and the viewport sampled by the same
+/// frozen layout pass. CSSOM's single-point surface consumes this query;
+/// penetrating list queries use `observable_hit_test_all` instead.
+pub(crate) fn observable_hit_test(
+    runtime: &JsContextHost,
+    document: DomHandle,
+    point: LayoutPoint,
+    ignore_pointer_events_none: bool,
+    reason: LayoutFlushReason,
+) -> Result<(LayoutDocumentMetrics, Option<LayoutHit<DomHandle>>), LayoutError> {
+    let answers = observable_geometry_batch(
+        runtime,
+        document,
+        reason,
+        &LayoutQueryBatch::new(vec![
+            LayoutQuery::DocumentMetrics,
+            LayoutQuery::HitTest {
+                point,
+                ignore_pointer_events_none,
+            },
+        ]),
+    )?;
+    let mut answers = answers.answers.into_iter();
+    match (answers.next(), answers.next()) {
+        (
+            Some(LayoutQueryAnswer::DocumentMetrics(metrics)),
+            Some(LayoutQueryAnswer::HitTest(hit)),
+        ) => Ok((metrics, hit)),
+        _ => Err(provider_contract_error("hit test")),
     }
 }
 

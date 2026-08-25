@@ -79,9 +79,9 @@ where
 {
     let root = projection.world.root;
     let (canvas_color, propagated_background) = if capture.include_backgrounds {
-        canvas_background(projection.world, root)
+        canvas_background(projection.world, root, capture.base_background_color)
     } else {
-        (PaintColor::WHITE, None)
+        (capture.base_background_color, None)
     };
     let mut snapshot = PaintSnapshot::new(projection.viewport, canvas_color);
     snapshot.surface = capture.surface;
@@ -421,6 +421,7 @@ fn pop_clips(count: usize, snapshot: &mut PaintSnapshot) {
 fn canvas_background<N>(
     world: &LayoutWorld<N>,
     root: LayoutBoxId,
+    base_background_color: PaintColor,
 ) -> (PaintColor, Option<LayoutBoxId>)
 where
     N: Copy + Debug + Eq + Hash,
@@ -430,7 +431,7 @@ where
         .element_semantics()
         .is_some_and(|element| element.is_html_element("html"));
     if !is_html_root {
-        return (PaintColor::WHITE, None);
+        return (base_background_color, None);
     }
     if style_has_canvas_background(&root_box.style) {
         return (root_box.style.background_color(), Some(root));
@@ -450,7 +451,7 @@ where
         }
         stack.extend(layout_box.children.iter().rev().copied());
     }
-    (PaintColor::WHITE, None)
+    (base_background_color, None)
 }
 
 fn style_has_canvas_background(style: &crate::ResolvedLayoutStyle) -> bool {
@@ -478,7 +479,7 @@ fn project_box_background<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &projection.world.boxes[id.index()];
-    if layout_box.inline_flattened || !layout_box.style.is_visible() {
+    if layout_box.inline_flattened || !layout_box.is_visible_for_paint() {
         return;
     }
     let geometry = &projection.boxes[id.index()];
@@ -615,7 +616,7 @@ fn project_box_text_clip_mask<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &projection.world.boxes[id.index()];
-    if !layout_box.style.is_visible() {
+    if !layout_box.is_visible_for_paint() {
         return;
     }
     let geometry = &projection.boxes[id.index()];
@@ -637,7 +638,7 @@ fn project_outset_box_shadows<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &projection.world.boxes[id.index()];
-    if layout_box.inline_flattened || !layout_box.style.is_visible() {
+    if layout_box.inline_flattened || !layout_box.is_visible_for_paint() {
         return;
     }
     let geometry = &projection.boxes[id.index()];
@@ -678,7 +679,7 @@ fn project_box_outline<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &projection.world.boxes[id.index()];
-    if layout_box.inline_flattened || !layout_box.style.is_visible() {
+    if layout_box.inline_flattened || !layout_box.is_visible_for_paint() {
         return;
     }
     let geometry = &projection.boxes[id.index()];
@@ -706,7 +707,7 @@ fn project_box_contents<N>(
     N: Copy + Debug + Eq + Hash,
 {
     let layout_box = &projection.world.boxes[id.index()];
-    if !layout_box.style.is_visible() {
+    if !layout_box.is_visible_for_paint() {
         return;
     }
     let geometry = &projection.boxes[id.index()];
@@ -759,7 +760,7 @@ where
     if has_embedded_frame
         && layout_box
             .element_semantics()
-            .is_some_and(|semantics| semantics.replaced == Some(LayoutReplacedKind::Frame))
+            .is_some_and(|semantics| semantics.replaced_kind() == Some(LayoutReplacedKind::Frame))
     {
         return None;
     }
@@ -769,7 +770,7 @@ where
             LayoutInputControlKind::Image,
         )) => Some(UnavailableReplacedContentPaint::OpaquePlaceholder),
         LayoutElementCategory::FormControl(_) => None,
-        _ => match semantics.replaced {
+        _ => match semantics.replaced_kind() {
             Some(LayoutReplacedKind::Canvas) => {
                 Some(UnavailableReplacedContentPaint::TransparentCanvas)
             }

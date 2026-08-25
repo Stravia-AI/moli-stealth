@@ -13,6 +13,7 @@ use crate::{
         document_runtime::DomHandle,
         native_bridge::element::geometry::{
             ClientRect, observable_bounding_client_rect, observable_bounding_client_rects,
+            observable_used_box_size, observable_used_grid_tracks, observable_used_margin,
         },
         style_engine::{
             ComputedDisplayKind, ComputedRenderedStyleFacts, FullStyleWorldSnapshot, StyleViewport,
@@ -5061,6 +5062,18 @@ fn resolve_moli_computed_style_value(
     if property == "font-family" {
         return normalize_cssom_font_family_value(value).unwrap_or_else(|| value.to_owned());
     }
+    if matches!(property, "grid-template-columns" | "grid-template-rows")
+        && let Some(tracks) = resolved_grid_template_tracks(runtime, handle, property, context)
+    {
+        return tracks;
+    }
+    if matches!(property, "width" | "height") {
+        match resolved_layout_box_dimension(runtime, handle, property, context) {
+            Some(ResolvedLayoutValue::Used(size)) => return size,
+            Some(ResolvedLayoutValue::Computed) => return value.to_owned(),
+            None => {}
+        }
+    }
     if property == "width"
         && let Some(width) =
             resolve_computed_width_with_inline_fallback(runtime, handle, value, context, resolution)
@@ -5079,6 +5092,16 @@ fn resolve_moli_computed_style_value(
             resolve_computed_line_height_with_resolution(runtime, handle, value, resolution)
     {
         return line_height;
+    }
+    if matches!(
+        property,
+        "margin-top" | "margin-right" | "margin-bottom" | "margin-left"
+    ) {
+        match resolved_layout_margin(runtime, handle, property, value, context) {
+            Some(ResolvedLayoutValue::Used(margin)) => return margin,
+            Some(ResolvedLayoutValue::Computed) => return value.to_owned(),
+            None => {}
+        }
     }
     // Horizontal used-value resolution recursively reads the containing block
     // and the element's own width from this exact retained observation.
@@ -5105,6 +5128,158 @@ fn resolve_moli_computed_style_value(
         return resolve_computed_auto_min_size(runtime, handle, resolution);
     }
     value.to_owned()
+}
+
+fn resolved_grid_template_tracks(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    property: &str,
+    context: StyleComputationContext,
+) -> Option<String> {
+    if !context.reads_resolved_values() || !runtime.layout_policy().uses_real_layout() {
+        return None;
+    }
+    let grid = observable_used_grid_tracks(
+        runtime,
+        handle,
+        moli_layout::LayoutFlushReason::SynchronousGeometry,
+    )
+    .ok()??;
+    let tracks = match property {
+        "grid-template-columns" => &grid.columns,
+        "grid-template-rows" => &grid.rows,
+        _ => return None,
+    };
+
+    serialize_used_grid_track_list(tracks)
+}
+
+fn serialize_used_grid_track_list(tracks: &moli_layout::LayoutGridTrackGeometry) -> Option<String> {
+    if tracks.track_count() != tracks.sizes.len() {
+        return None;
+    }
+    if tracks.sizes.is_empty() {
+        return Some("none".to_owned());
+    }
+    if tracks.explicit_line_names.len() != tracks.explicit_track_count.saturating_add(1) {
+        return None;
+    }
+    let mut components = Vec::with_capacity(
+        tracks.sizes.len().saturating_add(
+            tracks
+                .explicit_line_names
+                .iter()
+                .filter(|names| !names.is_empty())
+                .count(),
+        ),
+    );
+    let mut size_index = 0usize;
+    for _ in 0..tracks.negative_implicit_track_count {
+        components.push(format_non_negative_used_css_px(f64::from(
+            *tracks.sizes.get(size_index)?,
+        )));
+        size_index += 1;
+    }
+    for (track_index, names) in tracks.explicit_line_names.iter().enumerate() {
+        if !names.is_empty() {
+            let mut serialized = String::from("[");
+            for (index, name) in names.iter().enumerate() {
+                if index > 0 {
+                    serialized.push(' ');
+                }
+                serialize_identifier(name, &mut serialized)
+                    .expect("serializing an identifier into String cannot fail");
+            }
+            serialized.push(']');
+            components.push(serialized);
+        }
+        if track_index < tracks.explicit_track_count {
+            components.push(format_non_negative_used_css_px(f64::from(
+                *tracks.sizes.get(size_index)?,
+            )));
+            size_index += 1;
+        }
+    }
+    for _ in 0..tracks.positive_implicit_track_count {
+        components.push(format_non_negative_used_css_px(f64::from(
+            *tracks.sizes.get(size_index)?,
+        )));
+        size_index += 1;
+    }
+    (size_index == tracks.sizes.len()).then(|| components.join(" "))
+}
+
+enum ResolvedLayoutValue {
+    Used(String),
+    Computed,
+}
+
+fn resolved_layout_margin(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    property: &str,
+    value: &str,
+    context: StyleComputationContext,
+) -> Option<ResolvedLayoutValue> {
+    // Blink consults LayoutBox only for non-fixed Length values. Keep fixed
+    // pixel values in computed-style space so layout subpixel quantization
+    // cannot change their serialization.
+    if parse_css_px(value).is_some()
+        || !context.reads_resolved_values()
+        || !runtime.layout_policy().uses_real_layout()
+    {
+        return None;
+    }
+    let margin = observable_used_margin(
+        runtime,
+        handle,
+        moli_layout::LayoutFlushReason::SynchronousGeometry,
+    )
+    .ok()?;
+    let Some(margin) = margin else {
+        // Non-box layout objects expose the computed value, matching Blink's
+        // DynamicTo<LayoutBox> boundary.
+        return Some(ResolvedLayoutValue::Computed);
+    };
+    let value = match property {
+        "margin-top" => margin.top,
+        "margin-right" => margin.right,
+        "margin-bottom" => margin.bottom,
+        "margin-left" => margin.left,
+        _ => return None,
+    };
+    Some(ResolvedLayoutValue::Used(format_css_px(f64::from(value))))
+}
+
+fn resolved_layout_box_dimension(
+    runtime: &JsContextHost,
+    handle: DomHandle,
+    property: &str,
+    context: StyleComputationContext,
+) -> Option<ResolvedLayoutValue> {
+    if !context.reads_resolved_values() || !runtime.layout_policy().uses_real_layout() {
+        return None;
+    }
+    let size = observable_used_box_size(
+        runtime,
+        handle,
+        moli_layout::LayoutFlushReason::SynchronousGeometry,
+    )
+    .ok()?;
+    let Some(size) = size else {
+        // The published tree has no principal CSS-box used value (for
+        // example, for a non-replaced inline or a box-suppressed element).
+        // Do not reconstruct one from declarations and ancestor sizes.
+        return Some(ResolvedLayoutValue::Computed);
+    };
+    let value = match property {
+        "width" => size.width,
+        "height" => size.height,
+        _ => return None,
+    };
+    Some(ResolvedLayoutValue::Used(format_non_negative_used_css_px(
+        f64::from(value),
+    )))
 }
 
 fn computed_axis_position_shorthand_value(

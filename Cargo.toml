@@ -86,17 +86,18 @@ license = "MIT OR Apache-2.0"
 
 [patch.crates-io]
 xml5ever = { path = "vendor/xml5ever-0.39.0" }
+parley = { git = "https://github.com/ldm0/parley", rev = "bc97a16495ebeaa443b3c0571b9fab315394e573" }
 curl = { git = "https://github.com/ldm0/curl-rust", branch = "lightmount" }
 curl-sys = { git = "https://github.com/ldm0/curl-rust", branch = "lightmount" }
 cookie = { git = "https://github.com/ldm0/cookie-rs", branch = "priority" }
 v8 = { path = "vendor/v8-146.9.0" }
-selectors = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-stylo = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "74cd014af14d84db1fc8faed85086895012fc687" }
-taffy = { git = "https://github.com/ldm0/taffy", rev = "722358e39cd42cb95cc93d5bf06f3a2940a05748" }
+selectors = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+stylo = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+stylo_atoms = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+stylo_dom = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+stylo_static_prefs = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+stylo_traits = { git = "https://github.com/ldm0/stylo", rev = "aabb003836d3d165682da328f9cfe97c414f2734" }
+taffy = { git = "https://github.com/ldm0/taffy", rev = "fdded29e454718bb465cc3d1cb0d34189dfac809" }
 
 [workspace.lints.clippy]
 disallowed_methods = "deny"

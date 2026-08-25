@@ -230,17 +230,7 @@ fn perform_bubbling_scroll_into_view(
         if delta_x == 0.0 && delta_y == 0.0 {
             continue;
         }
-        let container_document = unsafe { &*runtime_ptr }
-            .dom_host()
-            .owner_document_handle(container.source);
-        let is_document_scroller = container_document.is_some_and(|document| {
-            unsafe { &*runtime_ptr }
-                .dom_host()
-                .dom()
-                .document_element_handle_for_document(document)
-                == Some(container.source)
-        });
-        if is_document_scroller {
+        if container.kind == moli_layout::LayoutScrollContainerKind::Viewport {
             changed |= apply_observable_window_scroll(
                 scope,
                 runtime_ptr,
@@ -251,7 +241,7 @@ fn perform_bubbling_scroll_into_view(
                 f64::from(metrics.scroll_offset.y),
             );
         } else {
-            set_node_scroll_position(
+            changed |= set_node_scroll_position(
                 scope,
                 runtime_ptr,
                 container.source,
@@ -259,7 +249,6 @@ fn perform_bubbling_scroll_into_view(
                 target_y,
                 true,
             );
-            changed = true;
         }
         translate_quads_for_scroll(
             &mut geometry.target_rects,

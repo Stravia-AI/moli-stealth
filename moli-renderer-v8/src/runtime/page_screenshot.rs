@@ -213,6 +213,7 @@ impl PageVm {
             region: moli_layout::PaintCaptureRegion::Viewport,
             include_backgrounds: true,
             include_viewport_controls: true,
+            base_background_color: moli_layout::PaintColor::WHITE,
             max_width: request.max_width,
             max_height: request.max_height,
         };
@@ -356,6 +357,7 @@ impl RendererCaptureScreenshotRequest {
                 RendererScreenshotPurpose::Screenshot => true,
             },
             include_viewport_controls,
+            base_background_color: moli_layout::PaintColor::WHITE,
             max_width: self.max_width,
             max_height: self.max_height,
         })

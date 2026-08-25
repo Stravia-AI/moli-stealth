@@ -12,6 +12,28 @@ pub(super) fn node_scroll_position(runtime: &JsContextHost, handle: DomHandle) -
         .unwrap_or((0.0, 0.0))
 }
 
+fn live_scroll_position_for_container(
+    runtime: &JsContextHost,
+    source: DomHandle,
+    kind: moli_layout::LayoutScrollContainerKind,
+) -> (f64, f64) {
+    if kind == moli_layout::LayoutScrollContainerKind::Element {
+        return node_scroll_position(runtime, source);
+    }
+
+    runtime
+        .dom_host()
+        .owner_document_handle(source)
+        .and_then(|document| {
+            runtime
+                .dom_host()
+                .dom()
+                .document_element_handle_for_document(document)
+        })
+        .map(|carrier| node_scroll_position(runtime, carrier))
+        .unwrap_or((0.0, 0.0))
+}
+
 pub(super) fn resolve_scroll_target(
     runtime: &JsContextHost,
     handle: DomHandle,
@@ -55,7 +77,7 @@ pub(super) fn set_node_scroll_position(
 pub(super) fn apply_observable_window_scroll(
     scope: &mut v8::PinScope<'_, '_>,
     runtime_ptr: *mut JsContextHost,
-    scrolling_element: DomHandle,
+    viewport_source: DomHandle,
     target_x: f64,
     target_y: f64,
     current_x: f64,
@@ -65,17 +87,18 @@ pub(super) fn apply_observable_window_scroll(
     if !changed {
         return false;
     }
-    set_node_scroll_position(
-        scope,
-        runtime_ptr,
-        scrolling_element,
-        target_x,
-        target_y,
-        false,
-    );
-    let endpoint = unsafe { &*runtime_ptr }
+    let document = unsafe { &*runtime_ptr }
         .dom_host()
-        .owner_document_handle(scrolling_element)
+        .owner_document_handle(viewport_source);
+    if let Some(carrier) = document.and_then(|document| {
+        unsafe { &*runtime_ptr }
+            .dom_host()
+            .dom()
+            .document_element_handle_for_document(document)
+    }) {
+        set_node_scroll_position(scope, runtime_ptr, carrier, target_x, target_y, false);
+    }
+    let endpoint = document
         .and_then(|document| unsafe { &*runtime_ptr }.window_endpoint_for_document(document));
     if let Some(endpoint) = endpoint {
         unsafe { &mut *runtime_ptr }.scroll_window_endpoint_to(scope, endpoint, target_x, target_y);
@@ -231,6 +254,7 @@ pub(crate) fn perform_wheel_scroll_default_action(
             0,
             moli_layout::LayoutScrollContainerMetrics {
                 source: target,
+                kind: moli_layout::LayoutScrollContainerKind::Element,
                 metrics,
             },
         );
@@ -241,8 +265,16 @@ pub(crate) fn perform_wheel_scroll_default_action(
         if remaining_x == 0.0 && remaining_y == 0.0 {
             break;
         }
-        let (current_x, current_y) =
-            node_scroll_position(unsafe { &*runtime_ptr }, container.source);
+        // The layout geometry is deliberately a frozen snapshot, while a
+        // wheel batch can apply several scroll steps before the next layout.
+        // Read the live DOM offset so those steps accumulate. Viewport
+        // geometry may be sourced from a propagated body, but the observable
+        // window scroll position is carried by the document element.
+        let (current_x, current_y) = live_scroll_position_for_container(
+            unsafe { &*runtime_ptr },
+            container.source,
+            container.kind,
+        );
         let (target_x, next_remaining_x) = consume_wheel_axis(
             current_x,
             f64::from(container.metrics.minimum_scroll_offset.x),
@@ -263,17 +295,7 @@ pub(crate) fn perform_wheel_scroll_default_action(
             continue;
         }
 
-        let container_document = unsafe { &*runtime_ptr }
-            .dom_host()
-            .owner_document_handle(container.source);
-        let is_document_scroller = container_document.is_some_and(|document| {
-            unsafe { &*runtime_ptr }
-                .dom_host()
-                .dom()
-                .document_element_handle_for_document(document)
-                == Some(container.source)
-        });
-        if is_document_scroller {
+        if container.kind == moli_layout::LayoutScrollContainerKind::Viewport {
             changed |= apply_observable_window_scroll(
                 scope,
                 runtime_ptr,
@@ -284,7 +306,7 @@ pub(crate) fn perform_wheel_scroll_default_action(
                 current_y,
             );
         } else {
-            set_node_scroll_position(
+            changed |= set_node_scroll_position(
                 scope,
                 runtime_ptr,
                 container.source,
@@ -292,7 +314,6 @@ pub(crate) fn perform_wheel_scroll_default_action(
                 target_y,
                 true,
             );
-            changed = true;
         }
     }
     Ok(changed)
