@@ -349,18 +349,23 @@ fn navigate_resolved_child_target<'s>(
     resolved_url: &str,
     source_element: Option<v8::Local<'s, v8::Object>>,
 ) -> bool {
-    let target_host = unsafe { &mut *target_host_ptr };
     let target_url = url::Url::parse(resolved_url).ok();
-    let target_is_same_origin_with_top = target_url
-        .as_ref()
-        .is_some_and(|url| moli_url::same_origin(target_host.document_url(), url));
-    let target_is_same_document_with_child = target_url.as_ref().is_some_and(|url| {
-        target_host
-            .child_browsing_context_current_url(target_handle)
-            .is_some_and(|current| urls_refer_to_same_document(&current, url))
-    });
-    if ((target_is_same_origin_with_top
-        && target_host.child_browsing_context_is_same_origin_with_top(target_handle))
+    let (target_is_same_origin_with_top, target_is_same_document_with_child) = {
+        let target_host = unsafe { &*target_host_ptr };
+        (
+            target_url
+                .as_ref()
+                .is_some_and(|url| moli_url::same_origin(target_host.document_url(), url)),
+            target_url.as_ref().is_some_and(|url| {
+                target_host
+                    .child_browsing_context_current_url(target_handle)
+                    .is_some_and(|current| urls_refer_to_same_document(&current, url))
+            }),
+        )
+    };
+    let target_child_is_same_origin_with_top =
+        unsafe { &*target_host_ptr }.child_browsing_context_is_same_origin_with_top(target_handle);
+    if ((target_is_same_origin_with_top && target_child_is_same_origin_with_top)
         || target_is_same_document_with_child)
         && !dispatch_cross_document_navigation_navigate_event_for_window(
             scope,
@@ -373,7 +378,14 @@ fn navigate_resolved_child_target<'s>(
     {
         return true;
     }
-    target_host.navigate_child_browsing_context_to_url(scope, target_handle, resolved_url)
+    // NavigateEvent executes author code and may synchronously re-enter this
+    // host. Reborrow only after it returns; retaining `&mut JsContextHost`
+    // across that callback would permit an aliased mutable reborrow.
+    unsafe { &mut *target_host_ptr }.navigate_child_browsing_context_to_url(
+        scope,
+        target_handle,
+        resolved_url,
+    )
 }
 
 /// Resolve one ordinary browsing-context name using Blink's frame-tree order:
@@ -1768,7 +1780,6 @@ fn navigate_element_popup_target<'s, 'entries>(
             .unwrap_or_default()
     };
     let opener = (!relations.suppress_opener).then_some(creator.opener);
-    let runtime = unsafe { &mut *runtime_ptr };
     let ordinary_target_name = (SpecialBrowsingContextTarget::parse(target_name).is_none()
         && !target_name.is_empty())
     .then_some(target_name);
@@ -1776,7 +1787,7 @@ fn navigate_element_popup_target<'s, 'entries>(
         .is_some()
         .then(|| {
             resolved_related_target.or_else(|| {
-                runtime
+                unsafe { &*runtime_ptr }
                     .related_page_named_target_for_navigation(
                         scope,
                         ordinary_target_name.expect("ordinary target name was checked"),
@@ -1803,8 +1814,12 @@ fn navigate_element_popup_target<'s, 'entries>(
             return true;
         }
         let resolved_target_page = target.page();
-        let destination_navigation_allowed =
-            destination_policy.allows_navigation(scope, runtime, source_handle, resolved_url);
+        let destination_navigation_allowed = destination_policy.allows_navigation(
+            scope,
+            unsafe { &mut *runtime_ptr },
+            source_handle,
+            resolved_url,
+        );
         if !destination_navigation_allowed {
             return true;
         }
@@ -1843,11 +1858,11 @@ fn navigate_element_popup_target<'s, 'entries>(
                 unreachable!("non-local related target must retain its remote route")
             };
             let Some(source_identity) =
-                source_identity_for_dispatch_scope(scope, runtime, dispatch_scope)
+                source_identity_for_dispatch_scope(scope, unsafe { &*runtime_ptr }, dispatch_scope)
             else {
                 return true;
             };
-            let Some(source) = runtime.renderer_remote_javascript_url_source(
+            let Some(source) = (unsafe { &*runtime_ptr }).renderer_remote_javascript_url_source(
                 source_identity,
                 relations.suppress_referrer,
             ) else {
@@ -1861,7 +1876,7 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 source,
             );
-            if !append_remote_window_proxy_command(runtime, command) {
+            if !append_remote_window_proxy_command(unsafe { &*runtime_ptr }, command) {
                 return true;
             }
         }
@@ -1884,9 +1899,12 @@ fn navigate_element_popup_target<'s, 'entries>(
             document_referrer,
         )
         .with_resolved_target_page(resolved_target_page);
-        runtime.record_pending_popup_activation(activation, None);
+        // The target NavigateEvent above can re-enter the source Page. Acquire
+        // the mutable host only after that author callback has completed.
+        unsafe { &mut *runtime_ptr }.record_pending_popup_activation(activation, None);
         return true;
     }
+    let runtime = unsafe { &mut *runtime_ptr };
     if !source_javascript_url_allows_new_context_by_policy(
         scope,
         runtime,

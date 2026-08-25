@@ -9102,6 +9102,9 @@ link.target = 'target';
 root.appendChild(link);
 let seen = [];
 frame.contentWindow.navigation.onnavigate = e => {
+  const marker = document.createElement('span');
+  marker.id = 'reentrant-target-navigation';
+  root.appendChild(marker);
   seen.push([
     e.navigationType,
     e.cancelable,
@@ -9114,7 +9117,8 @@ frame.contentWindow.navigation.onnavigate = e => {
     e.destination.key,
     e.destination.id,
     e.destination.index,
-    e.sourceElement === link
+    e.sourceElement === link,
+    marker.ownerDocument === document
   ].join(','));
 };
 link.click();
@@ -9125,7 +9129,7 @@ seen.join('|')
 
     assert_eq!(
         result,
-        "push,true,true,false,false,true,https://targeted-child-navigate.test/next.html,false,,,-1,true"
+        "push,true,true,false,false,true,https://targeted-child-navigate.test/next.html,false,,,-1,true,true"
     );
 }
 #[test]

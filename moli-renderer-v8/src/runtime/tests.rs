@@ -13952,6 +13952,10 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
 (() => {
   const target = window.open("about:blank", "cancellable-form-target");
   target.eval(`navigation.onnavigate = event => {
+    const marker = opener.document.createElement("span");
+    marker.id = "reentrant-related-form-marker";
+    marker.textContent = event.formData.get("cancel field");
+    opener.document.body.appendChild(marker);
     opener.__cancellableFormObservation = [
       event.formData.get("cancel field"),
       event.cancelable,
@@ -13996,7 +14000,11 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
   form.appendChild(input);
   document.body.appendChild(form);
   form.submit();
-  return globalThis.__cancellableFormObservation;
+  const marker = document.getElementById("reentrant-related-form-marker");
+  return [
+    globalThis.__cancellableFormObservation,
+    marker && marker.textContent
+  ].join("|");
 })()
 "#
             .to_owned(),
@@ -14007,7 +14015,7 @@ async fn per_page_isolate_policy_keeps_window_open_routes_page_owned() {
     assert_eq!(
         renderer_json_value(canceled_form_result),
         Some(serde_json::json!(
-            "cancel+value|true|true|true|https://example.test/canceled-related-form-post"
+            "cancel+value|true|true|true|https://example.test/canceled-related-form-post|cancel+value"
         ))
     );
     let canceled_form_publications = output_rx.drain();
