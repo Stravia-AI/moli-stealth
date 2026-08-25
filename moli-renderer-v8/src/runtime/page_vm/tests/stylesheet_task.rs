@@ -1095,6 +1095,12 @@ async fn stale_linked_import_completion_does_not_repopulate_replacement_graph() 
                 ".retired-import { color: red; }".to_owned(),
                 Duration::from_millis(100),
             ),
+            (
+                "/replacement-blocker.css",
+                "HTTP/1.1 200 OK",
+                "body { color: green; }".to_owned(),
+                Duration::from_secs(2),
+            ),
         ])
         .await;
         let loader =
@@ -1142,8 +1148,28 @@ document.head.append(retired);
             .take_stylesheet_networking_body_task_for_test()
             .expect("the delayed linked import terminal should remain selectable");
 
+        let replacement_blocker = format!("{base_url}/replacement-blocker.css");
+        page_vm.vm_mut().eval(&format!(
+            r#"
+document.open();
+globalThis.__replacementParserTail = "pending";
+document.write('<!doctype html><html><head><link id="replacement-blocker" rel="stylesheet" href="{replacement_blocker}"></head><body><script>globalThis.__replacementParserTail = "ran";</script><p>tail</p>');
+"replaced"
+"#,
+        ))?;
+        assert!(
+            page_vm
+                .vm()
+                .document_runtime
+                .has_pending_document_write_stylesheet_blocked_script(),
+            "Document B should retain its own stylesheet-blocked parser tail"
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__replacementParserTail")?,
+            "pending"
+        );
         page_vm.vm_mut().eval(
-            "document.open(); document.write('<!doctype html><p>replacement</p>'); document.close();",
+            "document.getElementById('replacement-blocker').remove(); 'removed'",
         )?;
         assert_eq!(
             page_vm
@@ -1197,7 +1223,12 @@ document.head.append(retired);
                 &loader,
             )
             .await?;
-        server.await.expect("stale linked import fixture server");
+        assert_eq!(
+            page_vm.vm_mut().eval("__replacementParserTail")?,
+            "pending",
+            "Document A's stale completion must not resume Document B's parser"
+        );
+        server.abort();
         Ok::<_, anyhow::Error>(())
     })
     .await

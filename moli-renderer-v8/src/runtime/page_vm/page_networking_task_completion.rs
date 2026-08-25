@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 
-use crate::page_task_queue::PageNetworkingTurnAction;
+use crate::page_task_queue::{PageNetworkingTurnAction, PageStylesheetNetworkingTargetEffect};
 
 use super::{IntoPageTaskCompletion, PageVm};
 
@@ -36,18 +36,37 @@ impl PageVm {
                 .await?;
             }
             PageNetworkingTurnAction::StylesheetCompletion(action) => {
+                let completion_owner = action.owner;
+                let applied_to_current_owner = matches!(
+                    action.target_effect,
+                    PageStylesheetNetworkingTargetEffect::AppliedToCurrentOwner
+                );
                 self.finish_selected_page_task_completion(
                     action.into_page_task_completion(),
                     loader,
                 )
                 .await?;
-                // A stylesheet terminal may release a parser created by
-                // document.write()/Page.setDocumentContent after the initial
-                // phase-one driver has retired. Resume that parser at the
-                // resource-completion boundary, before the independently
-                // queued link/style load event can be selected.
-                self.run_ready_document_write_stylesheet_blocked_script()
-                    .await?;
+                let completion_owner_is_still_current = self.vm().stylesheet_task_owner_is_current(
+                    self.document_lifecycle.identity().document,
+                    completion_owner,
+                );
+                // Phase one consumes its selected, exact-owner continuation
+                // as the sole parser-resume authority. The direct fallback is
+                // only for a document.write()/Page.setDocumentContent parser
+                // created after that driver retired. A stale completion, or a
+                // checkpoint that replaced its Document, must never touch the
+                // replacement parser.
+                if applied_to_current_owner
+                    && completion_owner_is_still_current
+                    && self
+                        .vm()
+                        .document_runtime
+                        .main_parser_continuation_producer()
+                        .is_none()
+                {
+                    self.run_ready_document_write_stylesheet_blocked_script()
+                        .await?;
+                }
             }
             PageNetworkingTurnAction::WorkerHostBridge(action) => {
                 self.finish_selected_page_task_completion(
