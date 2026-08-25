@@ -22,6 +22,30 @@ pub(crate) type CdpBackgroundNavigationCompletionReceiver =
     mpsc::UnboundedReceiver<BackgroundNavigationCompletion>;
 pub(crate) type CdpRendererPublicationReceiver = moli_core::RendererOutputTransportReceiver;
 
+/// The exact renderer transport capability needed to cross an owner-turn
+/// predecessor.
+///
+/// Both the persistent service loop and the CDP actor own this same
+/// capability, although the latter stores its Browser Host lane separately.
+/// Keeping the boundary as a trait prevents either loop from regaining access
+/// to the rest of the other's input mux.
+pub(crate) trait RendererTransportSource {
+    fn renderer_publication_receiver(&self) -> &CdpRendererPublicationReceiver;
+
+    fn admit_or_buffer_renderer_publication(
+        &mut self,
+        publication: RendererOutputTransportMessage,
+        navigation_gate_open: bool,
+        released_navigation_stream: Option<RendererOutputStreamIdentity>,
+    ) -> Option<RendererOutputTransportMessage>;
+
+    fn receive_concrete_renderer_transport(
+        &mut self,
+        predecessor_stream: RendererOutputStreamIdentity,
+        releases_navigation_stream: bool,
+    ) -> impl Future<Output = Option<RendererOutputTransportMessage>>;
+}
+
 /// Holds only renderer publications whose main-Document fact arrived before
 /// the independently transported Browser commit.
 ///
@@ -158,7 +182,7 @@ impl BrowserHostExecutionLane {
     pub(crate) fn start_next_turn(
         &mut self,
         host_adapter: &mut moli_protocol::DevToolsHostAdapter,
-    ) -> Option<moli_protocol::CdpTurnOutcome> {
+    ) -> Option<moli_protocol::CdpRendererOwnerTurnOutcome> {
         self.owner.start_next_turn(host_adapter)
     }
 
@@ -166,7 +190,7 @@ impl BrowserHostExecutionLane {
         &mut self,
         host_adapter: &mut moli_protocol::DevToolsHostAdapter,
         completed: CompletedBrowserHostTurn,
-    ) -> moli_protocol::CdpTurnOutcome {
+    ) -> moli_protocol::CdpRendererOwnerTurnOutcome {
         self.owner.complete_turn(host_adapter, completed).await
     }
 }
@@ -320,6 +344,34 @@ impl CdpSchedulerEventReceivers {
                 })
             }
         }
+    }
+}
+
+impl RendererTransportSource for CdpSchedulerEventReceivers {
+    fn renderer_publication_receiver(&self) -> &CdpRendererPublicationReceiver {
+        &self.renderer_publication_rx
+    }
+
+    fn admit_or_buffer_renderer_publication(
+        &mut self,
+        publication: RendererOutputTransportMessage,
+        navigation_gate_open: bool,
+        released_navigation_stream: Option<RendererOutputStreamIdentity>,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.admit_or_buffer_navigation_renderer_publication(
+            publication,
+            navigation_gate_open,
+            released_navigation_stream,
+        )
+    }
+
+    async fn receive_concrete_renderer_transport(
+        &mut self,
+        predecessor_stream: RendererOutputStreamIdentity,
+        releases_navigation_stream: bool,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.recv_concrete_renderer_transport(predecessor_stream, releases_navigation_stream)
+            .await
     }
 }
 

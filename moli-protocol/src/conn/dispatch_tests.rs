@@ -7897,21 +7897,16 @@ fn command_dispatch_completes_dom_sync_and_error_commands_without_legacy_fallbac
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
     let mut browser_context = BrowserContext::new("BID-page-preload-live".to_owned());
     browser_context.set_active_target_id("TID-page-preload-live".to_owned());
     browser_context.attach_active_session("SID-page-preload-live");
-    conn.insert_browser_context(browser_context);
-    let page = conn
-        .load_page_via_runtime_async("data:text/html,<p>preload</p>")
-        .await
-        .expect("page should load");
-    conn.browser_context
-        .as_mut()
-        .expect("browser context")
-        .active_target
-        .runtime_slot
-        .set_loaded_page_for_test(page);
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.install_navigation_fixture_for_session_owner(
+        "data:text/html,<p>preload</p>",
+        Some("SID-page-preload-live"),
+    )
+    .await;
 
     let add_raw = serde_json::to_string(&json!({
         "id": 42,
@@ -7923,16 +7918,19 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let add_pending = match conn.start_command_dispatch(&add_raw) {
+    let add_pending = match ctx.conn.start_command_dispatch(&add_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.addScriptToEvaluateOnNewDocument should update the live page")
         }
     };
-    let add_step = conn
+    let add_step = ctx
+        .conn
         .complete_pending_command_dispatch(add_pending.wait().await)
         .await;
-    let add_messages = complete_messages(add_step);
+    let (add_messages, add_scheduler_events) =
+        ctx.complete_command_task_step_for_test(add_step).await;
+    assert!(add_scheduler_events.is_empty());
     assert_eq!(add_messages.len(), 1);
     assert_eq!(add_messages[0]["id"], json!(42));
     assert_eq!(add_messages[0]["sessionId"], json!("SID-page-preload-live"));
@@ -7941,7 +7939,8 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         .expect("preload identifier")
         .to_owned();
     assert!(
-        conn.browser_context
+        ctx.conn
+            .browser_context
             .as_ref()
             .expect("browser context")
             .active_target
@@ -7963,17 +7962,18 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         "params": { "identifier": identifier }
     }))
     .unwrap();
-    let remove_pending = match conn.start_command_dispatch(&remove_raw) {
+    let remove_pending = match ctx.conn.start_command_dispatch(&remove_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.removeScriptToEvaluateOnNewDocument should update the live page")
         }
     };
-    let remove_step = conn
+    let remove_step = ctx
+        .conn
         .complete_pending_command_dispatch(remove_pending.wait().await)
         .await;
     assert_eq!(
-        complete_messages(remove_step),
+        ctx.complete_command_task_step_for_test(remove_step).await.0,
         vec![json!({
             "id": 43,
             "sessionId": "SID-page-preload-live",
@@ -7981,7 +7981,8 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         })]
     );
     assert!(
-        conn.browser_context
+        ctx.conn
+            .browser_context
             .as_ref()
             .expect("browser context")
             .active_target
@@ -8001,14 +8002,16 @@ async fn command_dispatch_completes_live_page_preload_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let create_world_pending = match conn.start_command_dispatch(&create_world_raw) {
+    let create_world_pending = match ctx.conn.start_command_dispatch(&create_world_raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Page.createIsolatedWorld should use explicit pending page dispatch")
         }
     };
-    let create_world_messages =
-        complete_command_task_for_test(&mut conn, *create_world_pending).await;
+    let create_world_messages = ctx
+        .complete_command_task_step_for_test(CdpCommandTaskStep::Pending(create_world_pending))
+        .await
+        .0;
     assert_eq!(create_world_messages.len(), 1);
     assert_eq!(create_world_messages[0]["id"], json!(44));
     assert_eq!(
@@ -9110,20 +9113,12 @@ async fn pending_security_tls_keeps_background_owner_route_across_completion() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_fetch_enable_without_legacy_fallback() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
     let mut browser_context = BrowserContext::new("BID-fetch-live".to_owned());
     browser_context.set_active_target_id("TID-fetch-live".to_owned());
-    conn.insert_browser_context(browser_context);
-    let page = conn
-        .load_page_via_runtime_async("data:text/html,<p>fetch</p>")
-        .await
-        .expect("page should load");
-    conn.browser_context
-        .as_mut()
-        .expect("browser context")
-        .active_target
-        .runtime_slot
-        .set_loaded_page_for_test(page);
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<p>fetch</p>", None)
+        .await;
 
     let raw = serde_json::to_string(&json!({
         "id": 69,
@@ -9133,16 +9128,16 @@ async fn command_dispatch_completes_live_fetch_enable_without_legacy_fallback() 
         }
     }))
     .unwrap();
-    let pending = match conn.start_command_dispatch(&raw) {
+    let pending = match ctx.conn.start_command_dispatch(&raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Fetch.enable should update live page interception state")
         }
     };
     let completed = pending.wait().await;
-    let step = conn.complete_pending_command_dispatch(completed).await;
+    let step = ctx.conn.complete_pending_command_dispatch(completed).await;
     assert_eq!(
-        complete_messages(step),
+        ctx.complete_command_task_step_for_test(step).await.0,
         vec![json!({ "id": 69, "result": {} })]
     );
 }
@@ -9345,44 +9340,36 @@ async fn devtools_network_intercept_commands_route_to_fetch_owner() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn command_dispatch_completes_live_fetch_disable_without_legacy_fallback() {
-    let mut conn = CdpConnection::new();
+    let mut ctx = crate::testing::TestContext::new();
     let mut browser_context = BrowserContext::new("BID-fetch-disable-live".to_owned());
     browser_context.set_active_target_id("TID-fetch-disable-live".to_owned());
     browser_context
         .active_target
         .fetch_owner
         .configure(None, true, Vec::new());
-    conn.insert_browser_context(browser_context);
-    let page = conn
-        .load_page_via_runtime_async("data:text/html,<p>fetch disable</p>")
-        .await
-        .expect("page should load");
-    conn.browser_context
-        .as_mut()
-        .expect("browser context")
-        .active_target
-        .runtime_slot
-        .set_loaded_page_for_test(page);
+    ctx.conn.insert_browser_context(browser_context);
+    ctx.install_navigation_fixture_for_session_owner("data:text/html,<p>fetch disable</p>", None)
+        .await;
 
     let raw = serde_json::to_string(&json!({
         "id": 6901,
         "method": "Fetch.disable"
     }))
     .unwrap();
-    let pending = match conn.start_command_dispatch(&raw) {
+    let pending = match ctx.conn.start_command_dispatch(&raw) {
         CdpCommandTaskStep::Pending(pending) => pending,
         CdpCommandTaskStep::Complete(_) => {
             panic!("live Fetch.disable should clear live page interception state")
         }
     };
     let completed = pending.wait().await;
-    let step = conn.complete_pending_command_dispatch(completed).await;
+    let step = ctx.conn.complete_pending_command_dispatch(completed).await;
     assert_eq!(
-        complete_messages(step),
+        ctx.complete_command_task_step_for_test(step).await.0,
         vec![json!({ "id": 6901, "result": {} })]
     );
     assert!(
-        !conn
+        !ctx.conn
             .browser_context
             .as_ref()
             .expect("browser context should remain loaded")

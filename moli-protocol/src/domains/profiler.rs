@@ -103,7 +103,12 @@ mod tests {
             let completed = pending.wait().await;
             match ctx.conn.complete_pending_command_dispatch(completed).await {
                 CdpCommandTaskStep::Pending(next) => pending = *next,
-                CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
+                CdpCommandTaskStep::Complete(outcome) => {
+                    return ctx
+                        .route_completed_command_outcome_for_test(outcome)
+                        .await
+                        .0;
+                }
             }
         }
     }

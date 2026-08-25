@@ -55,6 +55,7 @@ impl CdpScheduler {
         response: RuntimeInspectorResponseReady,
     ) -> bool {
         self.host_adapter
+            .commands()
             .route_runtime_deferred_inspector_response(pending, response)
             .await
     }
@@ -93,6 +94,7 @@ impl CdpScheduler {
         let mut protocol_output = ProtocolOutputSequence::empty();
         let mut step = self
             .host_adapter
+            .commands()
             .start_devtools_runtime_command_dispatch(command)
             .await;
         loop {
@@ -159,6 +161,7 @@ impl CdpScheduler {
                     };
                     step = self
                         .host_adapter
+                        .commands()
                         .complete_devtools_runtime_command_dispatch(completed)
                         .await;
                 }
@@ -175,6 +178,7 @@ impl CdpScheduler {
         let protocol_output = ProtocolOutputSequence::empty();
         let step = self
             .host_adapter
+            .commands()
             .start_devtools_runtime_command_dispatch(command)
             .await;
         self.continue_devtools_runtime_command_until_deferred_reply_or_complete(
@@ -229,6 +233,7 @@ impl CdpScheduler {
     ) {
         let pending = *pending;
         self.host_adapter
+            .commands()
             .forget_runtime_deferred_inspector_reply(pending.pending);
     }
 
@@ -352,6 +357,7 @@ impl CdpScheduler {
                     };
                     step = self
                         .host_adapter
+                        .commands()
                         .complete_devtools_runtime_command_dispatch(completed)
                         .await;
                 }
@@ -463,6 +469,7 @@ impl CdpScheduler {
                 Some(response_rx) => response_rx,
                 None => {
                     self.host_adapter
+                        .commands()
                         .forget_runtime_deferred_inspector_reply(pending);
                     return Err(DevToolsError::new(
                         DevToolsErrorKind::Internal,
@@ -479,6 +486,7 @@ impl CdpScheduler {
             let mut command_events = ready_output.take_protocol_events_with_id(command_id);
             if !command_events.is_empty() {
                 self.host_adapter
+                    .commands()
                     .forget_runtime_deferred_inspector_reply(pending);
                 return Err(DevToolsError::new(
                     DevToolsErrorKind::Internal,
@@ -505,7 +513,7 @@ impl CdpScheduler {
                         .await
                     {
                         let mut completed = self
-                            .host_adapter
+                            .host_adapter.commands()
                             .complete_runtime_deferred_inspector_reply(pending);
                         completed
                             .append_interleaved_protocol_events(interleaved_command_events);
@@ -514,7 +522,7 @@ impl CdpScheduler {
                     continue;
                 }
                 _ = wait_until_runtime_deadline(deadline) => {
-                    self.host_adapter
+                    self.host_adapter.commands()
                         .forget_runtime_deferred_inspector_reply(pending);
                     return Err(runtime_command_timeout_error());
                 }
@@ -535,7 +543,7 @@ impl CdpScheduler {
                     };
                     let mut command_events = output.take_protocol_events_with_id(command_id);
                     if !command_events.is_empty() {
-                        self.host_adapter
+                        self.host_adapter.commands()
                             .forget_runtime_deferred_inspector_reply(pending);
                         return Err(DevToolsError::new(
                             DevToolsErrorKind::Internal,
@@ -591,10 +599,12 @@ impl CdpScheduler {
         drop(response_wait_handle);
         let mut completed = self
             .host_adapter
+            .commands()
             .complete_runtime_deferred_inspector_reply(pending);
         completed.append_interleaved_protocol_events(interleaved_command_events);
         let step = self
             .host_adapter
+            .commands()
             .complete_devtools_runtime_command_dispatch(completed)
             .await;
         self.continue_devtools_runtime_command_until_deferred_reply_or_complete(

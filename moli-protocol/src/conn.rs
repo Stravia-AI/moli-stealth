@@ -639,8 +639,8 @@ pub(crate) use runtime_load::{
 use scheduler_hooks::CdpSchedulerHooks;
 use scheduler_state::CdpConnectionSchedulerState;
 pub use scheduler_state::{
-    BackgroundNavigationCancellation, BackgroundNavigationGateKey, CdpSchedulerEvent,
-    CdpRendererOwnerTurnOutcome, CdpTurnOutcome,
+    BackgroundNavigationCancellation, BackgroundNavigationGateKey, CdpRendererOwnerTurnOutcome,
+    CdpSchedulerEvent, CdpTurnOutcome,
 };
 #[cfg(test)]
 pub(crate) use site_data_manager_surface::{

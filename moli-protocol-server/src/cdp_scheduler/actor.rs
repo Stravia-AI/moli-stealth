@@ -31,6 +31,7 @@ use super::{
     CommandDispatchStepOutput, CommandOutputReleasePermit, CommandStartAction, CommandTaskStep,
     CommandTurnOutput, NavigationRendererPublicationBuffer, ProtocolAdapterScheduler,
     ProtocolAdapterSchedulerAdvance, ProtocolAdapterSchedulerInput, ProtocolOutputSequence,
+    RendererTransportSource,
 };
 
 struct PendingRuntimeDeferredReplyState {
@@ -179,6 +180,34 @@ impl SchedulerInputReceivers {
     }
 }
 
+impl RendererTransportSource for SchedulerInputReceivers {
+    fn renderer_publication_receiver(&self) -> &CdpRendererPublicationReceiver {
+        &self.renderer_publication_rx
+    }
+
+    fn admit_or_buffer_renderer_publication(
+        &mut self,
+        publication: RendererOutputTransportMessage,
+        navigation_gate_open: bool,
+        released_navigation_stream: Option<RendererOutputStreamIdentity>,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.admit_or_buffer_navigation_renderer_publication(
+            publication,
+            navigation_gate_open,
+            released_navigation_stream,
+        )
+    }
+
+    async fn receive_concrete_renderer_transport(
+        &mut self,
+        predecessor_stream: RendererOutputStreamIdentity,
+        releases_navigation_stream: bool,
+    ) -> Option<RendererOutputTransportMessage> {
+        self.recv_concrete_renderer_transport(predecessor_stream, releases_navigation_stream)
+            .await
+    }
+}
+
 impl SchedulerInputReceivers {
     fn take_buffered_renderer_publication(
         &mut self,
@@ -305,6 +334,7 @@ async fn run_cdp_scheduler_actor(
         mpsc::unbounded_channel();
     scheduler
         .host_adapter
+        .control()
         .set_runtime_inspector_response_ready_sender(deferred_runtime_response_tx.clone());
     let mut adapter_scheduler = ProtocolAdapterScheduler::<CommandDispatchState>::default();
     let mut pending_runtime_deferred_replies: VecDeque<PendingRuntimeDeferredReplyState> =
@@ -348,22 +378,42 @@ async fn run_cdp_scheduler_actor(
         tokio::select! {
             biased;
             wake = browser_host.recv_wake() => {
-                let output = match wake {
+                let outcome = match wake {
                     BrowserHostExecutionWake::TurnSelected => {
                         scheduler.complete_next_browser_owner_input(&mut browser_host)
                     }
                     BrowserHostExecutionWake::ParticipantCompleted(completed) => {
-                        scheduler
-                            .complete_browser_host_participant(&mut browser_host, *completed)
-                            .await
+                        Some(
+                            scheduler
+                                .complete_browser_host_participant(&mut browser_host, *completed)
+                                .await,
+                        )
                     }
                     BrowserHostExecutionWake::DetachedNavigationCompleted(_) => {
                         tracing::error!(
                             "actor scheduler received a direct-frontend navigation completion"
                         );
-                        ProtocolOutputSequence::empty()
+                        None
                     }
                     BrowserHostExecutionWake::Closed => break,
+                };
+                let output = if let Some(outcome) = outcome {
+                    match scheduler
+                        .apply_renderer_owner_turn_outcome(&mut scheduler_input_rx, outcome)
+                        .await
+                    {
+                        Ok(output) => output,
+                        Err(failure) => {
+                            let (_, error) = failure.into_parts();
+                            tracing::error!(
+                                error = %error.message,
+                                "terminating frontend after Browser Host renderer predecessor failure"
+                            );
+                            break;
+                        }
+                    }
+                } else {
+                    ProtocolOutputSequence::empty()
                 };
                 if !flush_protocol_output_with_runtime_deferred_reply_routing(
                     &frontend_router,
@@ -700,6 +750,7 @@ async fn flush_renderer_publication_predecessor(
     };
     while !scheduler
         .host_adapter
+        .view()
         .renderer_output_cursor_is_projected(predecessor.cursor())
     {
         let predecessor_stream = predecessor.cursor().stream();
@@ -855,6 +906,7 @@ impl RuntimeDeferredReplyCompletion {
             assert!(
                 scheduler
                     .host_adapter
+                    .view()
                     .renderer_output_cursor_is_projected(predecessor.cursor()),
                 "a deferred Runtime response must not cross its renderer owner edge before its command-turn cursor is projected"
             );
@@ -1113,6 +1165,7 @@ async fn fail_runtime_deferred_reply_for_loose_protocol_response(
     let output_session_id = pending.output_session_id;
     scheduler
         .host_adapter
+        .commands()
         .forget_cdp_deferred_inspector_reply(pending.pending);
     let command_output = pending
         .dispatch
@@ -1153,6 +1206,7 @@ async fn complete_runtime_deferred_reply_for_renderer_response(
         .expect("pending runtime deferred reply index came from position()");
     scheduler
         .host_adapter
+        .commands()
         .route_cdp_deferred_inspector_response(&mut pending.pending, response)
         .await;
     Ok(
@@ -1225,6 +1279,7 @@ async fn complete_runtime_deferred_reply_state(
     let session_id = pending.pending.session_id().map(str::to_owned);
     let completed = scheduler
         .host_adapter
+        .commands()
         .complete_cdp_deferred_inspector_reply(pending.pending);
     match scheduler
         .complete_pending_command_dispatch_with_context(completed, &mut pending.command_context)

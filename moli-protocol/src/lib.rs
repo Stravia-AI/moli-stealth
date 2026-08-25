@@ -16,7 +16,10 @@ pub mod test_support;
 pub mod testing;
 pub mod version;
 
-pub use devtools_host_adapter::DevToolsHostAdapter;
+pub use devtools_host_adapter::{
+    DevToolsCommandDispatch, DevToolsHostAdapter, DevToolsHostControl, DevToolsHostView,
+    DevToolsSchedulerProjection,
+};
 pub use devtools_runtime::*;
 
 pub use conn::{
@@ -24,8 +27,8 @@ pub use conn::{
     BackgroundNavigationGateKey, BackgroundOutputClosed, BackgroundProtocolEvent,
     BrowserBackgroundOutputReceiver, BrowserHostTurnDispatch, BrowserHostTurnExecutorOwner,
     CdpCommandTaskStep, CdpConnection, CdpInitialStoragePartition, CdpRendererCommandAccess,
-    CdpRendererCommandReplacement, CdpRendererCommandReplayDispatch, CdpSchedulerEvent,
-    CdpTargetHostLifecycleDelta, CdpTargetHostLifecycleObserver, CdpTurnOutcome,
+    CdpRendererCommandReplacement, CdpRendererCommandReplayDispatch, CdpRendererOwnerTurnOutcome,
+    CdpSchedulerEvent, CdpTargetHostLifecycleDelta, CdpTargetHostLifecycleObserver, CdpTurnOutcome,
     CommandDispatchContext, CommandResponseFlushContext, CommandResponseFlushPermit,
     CompletedBrowserHostTurn, CompletedCdpCommandDispatch,
     CompletedDeferredMainDocumentLoadCompletion, CompletedRuntimeProtocolMessageDispatch,

@@ -27,7 +27,7 @@ pub(crate) enum BrowserTargetPromotionError {
 
 pub(crate) enum BrowserTargetPromotionStart {
     Complete(bool),
-    Pending(PendingBrowserTargetPromotion),
+    Pending(Box<PendingBrowserTargetPromotion>),
 }
 
 pub(crate) struct PendingBrowserTargetPromotion {
@@ -281,7 +281,7 @@ impl CdpConnection {
         if projected.synchronize_loaded_page()
             && let Some(pending) = self.start_active_target_promotion_page_synchronization()?
         {
-            return Ok(BrowserTargetPromotionStart::Pending(pending));
+            return Ok(BrowserTargetPromotionStart::Pending(Box::new(pending)));
         }
         self.refresh_active_browser_context_loader();
         Ok(BrowserTargetPromotionStart::Complete(true))

@@ -34,6 +34,73 @@ impl DevToolsHostAdapter {
         owner.bind_turn(&mut self.connection)
     }
 
+    /// Borrows the read-only identity and routing capability.
+    pub fn view(&self) -> DevToolsHostView<'_> {
+        DevToolsHostView {
+            connection: &self.connection,
+        }
+    }
+
+    /// Borrows the host configuration and frontend-listener capability.
+    pub fn control(&mut self) -> DevToolsHostControl<'_> {
+        DevToolsHostControl {
+            connection: &mut self.connection,
+        }
+    }
+
+    /// Borrows the frontend command execution capability.
+    pub fn commands(&mut self) -> DevToolsCommandDispatch<'_> {
+        DevToolsCommandDispatch {
+            connection: &mut self.connection,
+        }
+    }
+
+    /// Borrows the scheduler-side physical projection capability.
+    pub fn projection(&mut self) -> DevToolsSchedulerProjection<'_> {
+        DevToolsSchedulerProjection {
+            connection: &mut self.connection,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn into_connection_for_test(self) -> CdpConnection {
+        self.connection
+    }
+}
+
+/// Read-only browser identity and routing decisions.
+///
+/// This capability cannot execute commands or mutate the physical protocol
+/// projection.
+pub struct DevToolsHostView<'a> {
+    connection: &'a CdpConnection,
+}
+
+/// Host initialization and frontend-listener configuration.
+///
+/// This capability cannot dispatch frontend commands or project scheduler
+/// work.
+pub struct DevToolsHostControl<'a> {
+    connection: &'a mut CdpConnection,
+}
+
+/// Frontend command start/completion and its move-owned continuations.
+///
+/// This capability deliberately excludes scheduler projection turns and raw
+/// Browser Host execution authority.
+pub struct DevToolsCommandDispatch<'a> {
+    connection: &'a mut CdpConnection,
+}
+
+/// Scheduler-side projection of already-selected protocol and renderer work.
+///
+/// This capability cannot start new frontend commands or select Browser Host
+/// turns.
+pub struct DevToolsSchedulerProjection<'a> {
+    connection: &'a mut CdpConnection,
+}
+
+impl DevToolsHostView<'_> {
     pub fn browser_host_state(&self) -> moli_core::browser_host::BrowserHostState {
         self.connection.browser_host_state()
     }
@@ -81,30 +148,23 @@ impl DevToolsHostAdapter {
         self.connection.renderer_output_cursor_is_projected(cursor)
     }
 
-    pub fn admit_runtime_command_output_barrier(
-        &self,
-        barriers: &mut crate::RuntimeCommandOutputBarriers,
-        command_id: u64,
-        session_id: Option<&str>,
-    ) -> Option<crate::RuntimeCommandOutputBarrierPermit> {
-        barriers.admit(&self.connection, command_id, session_id)
-    }
-
     pub fn observes_main_document_load_for_devtools_context(
         &self,
         work: &crate::ProtocolSchedulerWork,
         context: &crate::devtools_runtime::DevToolsCommandContext,
     ) -> bool {
-        work.observes_main_document_load_for_devtools_context(&self.connection, context)
+        work.observes_main_document_load_for_devtools_context(self.connection, context)
     }
 
     pub fn background_event_route_is_current(
         &self,
         event: &crate::BackgroundProtocolEvent,
     ) -> bool {
-        event.route_is_current(&self.connection)
+        event.route_is_current(self.connection)
     }
+}
 
+impl DevToolsHostControl<'_> {
     pub fn set_target_host_lifecycle_observer(
         &mut self,
         observer: crate::CdpTargetHostLifecycleObserver,
@@ -198,7 +258,7 @@ impl DevToolsHostAdapter {
     pub async fn enable_runtime_listener_for_target(
         &mut self,
         target_id: &str,
-    ) -> Option<crate::CdpTurnOutcome> {
+    ) -> Option<crate::CdpRendererOwnerTurnOutcome> {
         self.connection
             .enable_runtime_listener_for_target(target_id)
             .await
@@ -207,12 +267,14 @@ impl DevToolsHostAdapter {
     pub async fn disable_runtime_listener_for_target(
         &mut self,
         target_id: &str,
-    ) -> Option<crate::CdpTurnOutcome> {
+    ) -> Option<crate::CdpRendererOwnerTurnOutcome> {
         self.connection
             .disable_runtime_listener_for_target(target_id)
             .await
     }
+}
 
+impl DevToolsCommandDispatch<'_> {
     pub fn page_residence_identity_for_devtools_context(
         &mut self,
         context: &crate::devtools_runtime::DevToolsCommandContext,
@@ -237,6 +299,17 @@ impl DevToolsHostAdapter {
     ) -> Option<crate::DevToolsDocumentLifecycleWaitKey> {
         self.connection
             .capture_devtools_document_lifecycle_wait_key(context, expected_loader_id, milestone)
+    }
+}
+
+impl DevToolsSchedulerProjection<'_> {
+    pub fn admit_runtime_command_output_barrier(
+        &self,
+        barriers: &mut crate::RuntimeCommandOutputBarriers,
+        command_id: u64,
+        session_id: Option<&str>,
+    ) -> Option<crate::RuntimeCommandOutputBarrierPermit> {
+        barriers.admit(self.connection, command_id, session_id)
     }
 
     pub fn capture_browser_fact_wake(
@@ -297,7 +370,9 @@ impl DevToolsHostAdapter {
                 background_events,
             );
     }
+}
 
+impl DevToolsCommandDispatch<'_> {
     pub fn start_parsed_command_dispatch_with_context(
         &mut self,
         command: &crate::ParsedCdpCommand,
@@ -320,7 +395,7 @@ impl DevToolsHostAdapter {
     pub async fn process_message_with_turn_outcome_async(
         &mut self,
         raw: &str,
-    ) -> crate::CdpTurnOutcome {
+    ) -> crate::CdpRendererOwnerTurnOutcome {
         self.connection
             .process_message_with_turn_outcome_async(raw)
             .await
@@ -417,7 +492,9 @@ impl DevToolsHostAdapter {
             .complete_devtools_runtime_command_dispatch(completed)
             .await
     }
+}
 
+impl DevToolsSchedulerProjection<'_> {
     pub async fn complete_ready_protocol_scheduler_work_turn(
         &mut self,
         work: crate::ProtocolSchedulerWork,
@@ -460,7 +537,7 @@ impl DevToolsHostAdapter {
         &mut self,
         completion: crate::BackgroundNavigationCompletion,
     ) -> (
-        crate::CdpTurnOutcome,
+        crate::CdpRendererOwnerTurnOutcome,
         crate::BackgroundNavigationTurnDisposition,
     ) {
         self.connection
@@ -476,14 +553,16 @@ impl DevToolsHostAdapter {
             .complete_deferred_main_document_load_completion_for_scheduler(completion)
             .await
     }
+}
 
+impl DevToolsCommandDispatch<'_> {
     pub async fn route_runtime_deferred_inspector_response(
         &mut self,
         pending: &mut crate::PendingDevToolsRuntimeCommandDispatch,
         response: crate::conn::RuntimeInspectorResponseReady,
     ) -> bool {
         pending
-            .route_scheduler_deferred_inspector_response(&mut self.connection, response)
+            .route_scheduler_deferred_inspector_response(self.connection, response)
             .await
     }
 
@@ -491,14 +570,14 @@ impl DevToolsHostAdapter {
         &mut self,
         pending: crate::PendingDevToolsRuntimeCommandDispatch,
     ) -> crate::CompletedDevToolsRuntimeCommandDispatch {
-        pending.complete_scheduler_deferred_inspector_reply(&mut self.connection)
+        pending.complete_scheduler_deferred_inspector_reply(self.connection)
     }
 
     pub fn forget_runtime_deferred_inspector_reply(
         &mut self,
         pending: crate::PendingDevToolsRuntimeCommandDispatch,
     ) {
-        pending.forget_scheduler_deferred_inspector_reply(&mut self.connection);
+        pending.forget_scheduler_deferred_inspector_reply(self.connection);
     }
 
     pub async fn route_cdp_deferred_inspector_response(
@@ -507,7 +586,7 @@ impl DevToolsHostAdapter {
         response: crate::conn::RuntimeInspectorResponseReady,
     ) -> bool {
         pending
-            .route_scheduler_deferred_inspector_response(&mut self.connection, response)
+            .route_scheduler_deferred_inspector_response(self.connection, response)
             .await
     }
 
@@ -515,19 +594,14 @@ impl DevToolsHostAdapter {
         &mut self,
         pending: crate::PendingCdpCommandDispatch,
     ) -> crate::CompletedCdpCommandDispatch {
-        pending.complete_scheduler_deferred_inspector_reply(&mut self.connection)
+        pending.complete_scheduler_deferred_inspector_reply(self.connection)
     }
 
     pub fn forget_cdp_deferred_inspector_reply(
         &mut self,
         pending: crate::PendingCdpCommandDispatch,
     ) {
-        pending.forget_scheduler_deferred_inspector_reply(&mut self.connection);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn into_connection_for_test(self) -> CdpConnection {
-        self.connection
+        pending.forget_scheduler_deferred_inspector_reply(self.connection);
     }
 }
 
@@ -547,6 +621,7 @@ mod tests {
 
         assert_eq!(
             adapter
+                .view()
                 .browser_host_state()
                 .navigation_owner()
                 .browser_instance_id(),

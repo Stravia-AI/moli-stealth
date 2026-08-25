@@ -36,6 +36,7 @@ impl CdpScheduler {
     ) -> DevToolsCommandExecution {
         let start = self
             .host_adapter
+            .commands()
             .try_start_devtools_fetch_command_task(command)
             .await;
         match start {
@@ -168,6 +169,7 @@ impl CdpScheduler {
     ) -> DevToolsCommandExecution {
         let outcome = self
             .host_adapter
+            .commands()
             .complete_devtools_fetch_command_task(completed)
             .await;
         let mut execution = self

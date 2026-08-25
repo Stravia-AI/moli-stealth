@@ -58,7 +58,7 @@ impl CdpFrontendTargetControl {
             .as_str()
             .with_context(|| format!("CDP target {target_id} did not return an attach session"))?
             .to_owned();
-        if target_id == scheduler.host_adapter.default_target_id() {
+        if target_id == scheduler.host_adapter.view().default_target_id() {
             self.default_target_materialized = true;
         }
         Ok(session_id)
@@ -212,7 +212,7 @@ impl CdpFrontendTargetControl {
         // A fresh connection may reuse its unclaimed default placeholder for
         // the first createTarget. The protocol server publishes that default
         // ID permanently, so materialize it before creating another target.
-        let default_target_id = scheduler.host_adapter.default_target_id().to_owned();
+        let default_target_id = scheduler.host_adapter.view().default_target_id().to_owned();
         let control_session_id = self
             .ensure_browser_control_session(scheduler, frontend_router)
             .await?;
@@ -261,6 +261,7 @@ impl CdpFrontendTargetControl {
         }
         let outcome = scheduler
             .host_adapter
+            .commands()
             .process_message_with_turn_outcome_async(&command.to_string())
             .await;
         let (protocol_events, scheduler_events, renderer_output_predecessor) =

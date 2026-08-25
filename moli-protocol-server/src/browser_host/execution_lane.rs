@@ -1,6 +1,6 @@
 use moli_core::browser_host::{BrowserHostActor, BrowserHostTurnSelection};
 use moli_protocol::{
-    BrowserHostTurnDispatch, BrowserHostTurnExecutorOwner, CdpTurnOutcome,
+    BrowserHostTurnDispatch, BrowserHostTurnExecutorOwner, CdpRendererOwnerTurnOutcome,
     CompletedBrowserHostTurn, DevToolsHostAdapter,
 };
 use tokio::sync::mpsc;
@@ -66,7 +66,7 @@ impl BrowserHostOwnerLane {
     pub(crate) fn start_next_turn(
         &mut self,
         host_adapter: &mut DevToolsHostAdapter,
-    ) -> Option<CdpTurnOutcome> {
+    ) -> Option<CdpRendererOwnerTurnOutcome> {
         let dispatch = self
             .executor_owner
             .start_next_turn(&mut self.actor, host_adapter)?;
@@ -77,7 +77,7 @@ impl BrowserHostOwnerLane {
         &mut self,
         host_adapter: &mut DevToolsHostAdapter,
         completed: CompletedBrowserHostTurn,
-    ) -> CdpTurnOutcome {
+    ) -> CdpRendererOwnerTurnOutcome {
         let dispatch = self
             .executor_owner
             .complete_turn(host_adapter, completed)
@@ -85,7 +85,7 @@ impl BrowserHostOwnerLane {
         self.register_dispatch(dispatch)
     }
 
-    fn register_dispatch(&self, dispatch: BrowserHostTurnDispatch) -> CdpTurnOutcome {
+    fn register_dispatch(&self, dispatch: BrowserHostTurnDispatch) -> CdpRendererOwnerTurnOutcome {
         let (outcome, pending) = dispatch.into_parts();
         if let Some(pending) = pending {
             let completion_tx = self.completion_tx.clone();

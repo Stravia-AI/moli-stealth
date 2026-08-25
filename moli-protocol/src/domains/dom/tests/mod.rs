@@ -255,7 +255,12 @@ async fn complete_pending_command_task_for_test(
         let completed = Box::pin(pending.wait()).await;
         match Box::pin(ctx.conn.complete_pending_command_dispatch(completed)).await {
             CdpCommandTaskStep::Pending(next) => pending = *next,
-            CdpCommandTaskStep::Complete(outcome) => return outcome.into_parts().0,
+            CdpCommandTaskStep::Complete(outcome) => {
+                return ctx
+                    .route_completed_command_outcome_for_test(outcome)
+                    .await
+                    .0;
+            }
         }
     }
 }
@@ -267,7 +272,11 @@ async fn complete_command_dispatch_without_legacy_fallback_for_test(
 ) -> Vec<Value> {
     let raw = command.to_string();
     match ctx.conn.start_command_dispatch(&raw) {
-        CdpCommandTaskStep::Complete(outcome) => outcome.into_parts().0,
+        CdpCommandTaskStep::Complete(outcome) => {
+            ctx.route_completed_command_outcome_for_test(outcome)
+                .await
+                .0
+        }
         CdpCommandTaskStep::Pending(pending) => {
             complete_pending_command_task_for_test(ctx, *pending).await
         }

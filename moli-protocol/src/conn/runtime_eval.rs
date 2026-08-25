@@ -5205,20 +5205,19 @@ impl CdpConnection {
         } = completed;
         let mut events = Vec::new();
         match completed {
-            CompletedRendererCallReplayDispatch::Inspector(completed) => {
-                match completed {
-                    Err(error) => {
-                        self.settle_renderer_replacement_error(
-                            &mut events,
-                            frontend_session_id.as_deref(),
-                            response_delivery,
-                            &response_sender,
-                            correlation,
-                            &error,
-                        );
-                    }
-                    Ok(completed) => {
-                        let completion = match completed.completion {
+            CompletedRendererCallReplayDispatch::Inspector(completed) => match completed {
+                Err(error) => {
+                    self.settle_renderer_replacement_error(
+                        &mut events,
+                        frontend_session_id.as_deref(),
+                        response_delivery,
+                        &response_sender,
+                        correlation,
+                        &error,
+                    );
+                }
+                Ok(completed) => {
+                    let completion = match completed.completion {
                             moli_core::page::CompletedRuntimeInspectorCommandDispatch::Owner(
                                 completion,
                             )
@@ -5234,31 +5233,31 @@ impl CdpConnection {
                                 _,
                             ) => None,
                         };
-                        if let Some(completion) = completion {
-                            match self.consume_runtime_protocol_message_completion(
-                                &completed.route,
-                                completion,
-                            ) {
-                                Err(error) => self.settle_renderer_replacement_error(
-                                    &mut events,
-                                    frontend_session_id.as_deref(),
-                                    response_delivery,
-                                    &response_sender,
-                                    correlation,
-                                    &format!("runtime inspector replay dispatch failed: {error}"),
-                                ),
-                                Ok(mut command_turn_output) => {
-                                    command_turn_output
-                                        .bind_renderer_agent_attachment(new_attachment_id);
-                                    self.ingest_runtime_protocol_message_started_route_output_updates(
-                                        &completed.route,
-                                    );
-                                    let mut command = CommandDispatchContext::default();
-                                    let completion = command
-                                        .consume_renderer_command_turn_output(command_turn_output);
-                                    events.extend(command.take_protocol_events());
-                                    events.extend(command.take_post_response_events());
-                                    match completion.into_runtime_inspector_output() {
+                    if let Some(completion) = completion {
+                        match self.consume_runtime_protocol_message_completion(
+                            &completed.route,
+                            completion,
+                        ) {
+                            Err(error) => self.settle_renderer_replacement_error(
+                                &mut events,
+                                frontend_session_id.as_deref(),
+                                response_delivery,
+                                &response_sender,
+                                correlation,
+                                &format!("runtime inspector replay dispatch failed: {error}"),
+                            ),
+                            Ok(mut command_turn_output) => {
+                                command_turn_output
+                                    .bind_renderer_agent_attachment(new_attachment_id);
+                                self.ingest_runtime_protocol_message_started_route_output_updates(
+                                    &completed.route,
+                                );
+                                let mut command = CommandDispatchContext::default();
+                                let completion = command
+                                    .consume_renderer_command_turn_output(command_turn_output);
+                                events.extend(command.take_protocol_events());
+                                events.extend(command.take_post_response_events());
+                                match completion.into_runtime_inspector_output() {
                                         None => self.settle_renderer_replacement_error(
                                             &mut events,
                                             frontend_session_id.as_deref(),
@@ -5287,12 +5286,11 @@ impl CdpConnection {
                                                 .await;
                                         }
                                     }
-                                }
                             }
                         }
                     }
                 }
-            }
+            },
             CompletedRendererCallReplayDispatch::PerformanceGetMetrics(completed) => {
                 self.settle_completed_io_renderer_replay(
                     &mut events,

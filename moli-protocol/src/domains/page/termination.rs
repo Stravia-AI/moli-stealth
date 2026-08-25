@@ -493,7 +493,7 @@ pub(crate) fn start_target_close_owner_task(
             let mut completion = completion;
             completion.out = out;
             TargetCloseOwnerTaskStep::Pending(Box::new(PendingTargetCloseOwnerTask {
-                pending,
+                pending: *pending,
                 completion,
             }))
         }
@@ -516,7 +516,7 @@ pub(crate) fn complete_target_close_owner_task(
         ),
         BrowserTargetCloseStart::Pending(pending) => {
             TargetCloseOwnerTaskStep::Pending(Box::new(PendingTargetCloseOwnerTask {
-                pending,
+                pending: *pending,
                 completion: completed.completion,
             }))
         }

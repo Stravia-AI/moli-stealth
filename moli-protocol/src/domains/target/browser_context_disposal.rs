@@ -256,7 +256,7 @@ pub(crate) async fn complete_browser_context_disposal_owner_task(
                         PendingBrowserContextDisposalOwnerTask {
                             state,
                             participant: PendingBrowserContextDisposalParticipant::TargetClose(
-                                Box::new(pending),
+                                pending,
                             ),
                         },
                     ));
@@ -506,7 +506,7 @@ fn drive_browser_context_disposal_owner_task(
                         PendingBrowserContextDisposalOwnerTask {
                             state,
                             participant: PendingBrowserContextDisposalParticipant::TargetClose(
-                                Box::new(pending),
+                                pending,
                             ),
                         },
                     ));

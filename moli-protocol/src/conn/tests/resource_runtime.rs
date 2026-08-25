@@ -1352,19 +1352,24 @@ async fn direct_runtime_evaluate_routes_to_inactive_active_owner_without_promoti
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-B"))
         .await;
 
-    let response = ctx
-        .conn
-        .process_message_messages_only_for_test(
-            r#"{"id":1,"method":"Runtime.evaluate","sessionId":"SID-B","params":{"expression":"document.title","returnByValue":true}}"#,
-        )
-        .await;
-    assert_eq!(response[0]["id"], json!(1));
+    ctx.process_async(json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-B",
+        "params": {
+            "expression": "document.title",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let response = ctx.take_response_by_id(1);
+    assert_eq!(response["id"], json!(1));
     assert_eq!(
-        response[0]["result"]["result"]["value"],
+        response["result"]["result"]["value"],
         json!("runtime-direct-owner"),
         "{response:?}"
     );
-    assert_eq!(response[0]["sessionId"], json!("SID-B"));
+    assert_eq!(response["sessionId"], json!("SID-B"));
     assert!(
         inactive_owner_fixture_selection_remains(&ctx.conn),
         "direct Runtime.evaluate should not promote the inactive owner into the active slot"
@@ -1853,23 +1858,11 @@ async fn direct_runtime_evaluate_self_popup_does_not_navigate_active_target_for_
     ctx.conn.insert_browser_context(active);
 
     let page_url = "data:text/html,<!doctype html><title>self-popup</title>";
-    let mut page = ctx
-        .conn
-        .load_page_via_runtime_async(page_url)
-        .await
-        .expect("background page should load");
-    let _ = page
-        .dispatch_runtime_protocol_message_async(
-            &json!({"id": 9007, "method": "Runtime.enable", "params": {}}).to_string(),
-        )
-        .await
-        .expect("Runtime.enable should create the owner inspector context");
-    let mut background = BackgroundTarget::with_url(
+    let background = BackgroundTarget::with_url(
         "TID-self-popup-background".to_owned(),
         Some("SID-self-popup-background".to_owned()),
-        page.final_url().as_str().to_owned(),
+        page_url.to_owned(),
     );
-    background.replace_loaded_page(Some(page));
 
     let mut inactive = BrowserContext::new("BID-self-popup-background".into());
     inactive.background_targets.push(background);
@@ -1879,7 +1872,9 @@ async fn direct_runtime_evaluate_self_popup_does_not_navigate_active_target_for_
         .expect("background Target frontend state")
         .runtime_session_state
         .runtime_frontend_enabled = true;
-    ctx.conn.inactive_browser_contexts.push(inactive);
+    insert_inactive_browser_context_for_navigation_fixture(&mut ctx.conn, inactive);
+    ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-self-popup-background"))
+        .await;
 
     ctx.sent.clear();
     ctx.process_async(json!({
@@ -2005,19 +2000,24 @@ async fn direct_runtime_evaluate_routes_to_inactive_auxiliary_owner_without_prom
     ctx.install_navigation_fixture_for_session_owner(page_url, Some("SID-aux"))
         .await;
 
-    let response = ctx
-        .conn
-        .process_message_messages_only_for_test(
-            r#"{"id":1,"method":"Runtime.evaluate","sessionId":"SID-aux","params":{"expression":"document.title","returnByValue":true}}"#,
-        )
-        .await;
-    assert_eq!(response[0]["id"], json!(1));
+    ctx.process_async(json!({
+        "id": 1,
+        "method": "Runtime.evaluate",
+        "sessionId": "SID-aux",
+        "params": {
+            "expression": "document.title",
+            "returnByValue": true
+        }
+    }))
+    .await;
+    let response = ctx.take_response_by_id(1);
+    assert_eq!(response["id"], json!(1));
     assert_eq!(
-        response[0]["result"]["result"]["value"],
+        response["result"]["result"]["value"],
         json!("runtime-direct-aux"),
         "{response:?}"
     );
-    assert_eq!(response[0]["sessionId"], json!("SID-aux"));
+    assert_eq!(response["sessionId"], json!("SID-aux"));
     assert!(
         inactive_owner_fixture_selection_remains(&ctx.conn),
         "direct auxiliary Runtime.evaluate should not promote the inactive owner"

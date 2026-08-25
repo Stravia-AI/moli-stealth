@@ -112,7 +112,7 @@ impl PendingBrowserPageTargetTermination {
 /// Result of committing one exact `Target.closeTarget` in Browser Host.
 pub(crate) enum BrowserTargetCloseStart {
     Complete(BrowserTargetTerminationProjection),
-    Pending(PendingBrowserTargetClose),
+    Pending(Box<PendingBrowserTargetClose>),
 }
 
 pub(crate) struct PendingBrowserTargetClose {
@@ -381,12 +381,12 @@ impl CdpConnection {
                     .then_some(restore_browser_context_id.as_deref())
                     .flatten(),
             );
-            BrowserTargetCloseStart::Pending(PendingBrowserTargetClose {
+            BrowserTargetCloseStart::Pending(Box::new(PendingBrowserTargetClose {
                 stage: PendingBrowserTargetCloseStage::RetiredPage {
                     cleanup: retired_cleanup,
                     continuation,
                 },
-            })
+            }))
         } else {
             self.continue_browser_target_close_after_page_disposal(
                 continuation,
@@ -468,12 +468,12 @@ impl CdpConnection {
         Some(if retired_cleanup.is_empty() {
             self.continue_browser_target_close_after_page_disposal(continuation, None)
         } else {
-            BrowserTargetCloseStart::Pending(PendingBrowserTargetClose {
+            BrowserTargetCloseStart::Pending(Box::new(PendingBrowserTargetClose {
                 stage: PendingBrowserTargetCloseStage::RetiredPage {
                     cleanup: retired_cleanup,
                     continuation,
                 },
-            })
+            }))
         })
     }
 
@@ -541,12 +541,12 @@ impl CdpConnection {
                     self.restore_target_termination_browser_context(
                         restore_browser_context_id.as_deref(),
                     );
-                    return BrowserTargetCloseStart::Pending(PendingBrowserTargetClose {
+                    return BrowserTargetCloseStart::Pending(Box::new(PendingBrowserTargetClose {
                         stage: PendingBrowserTargetCloseStage::Promotion {
-                            pending,
+                            pending: *pending,
                             projection,
                         },
-                    });
+                    }));
                 }
                 Err(error) => {
                     tracing::warn!(

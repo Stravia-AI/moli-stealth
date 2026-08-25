@@ -211,11 +211,18 @@ async fn execute_devtools_command_with_pending_navigation_wait(
             execution.execution.result = Err(pending_navigation_timeout_error());
             return execution;
         };
-        let mut progress = scheduler
-            .complete_ready_owner_and_protocol_residences_for_external_load_wait(
-                &mut receivers.browser_host,
-            )
-            .await;
+        let mut progress = match scheduler
+            .complete_ready_owner_and_protocol_residences_for_external_load_wait(receivers)
+            .await
+        {
+            Ok(progress) => progress,
+            Err(failure) => {
+                let (progress, error) = failure.into_parts();
+                execution.execution.protocol_output.append(progress);
+                execution.execution.result = Err(error);
+                return execution;
+            }
+        };
         if progress.is_empty() {
             let navigation_gate_open = scheduler.has_inflight_background_navigation();
             let input = match tokio::time::timeout(
@@ -364,17 +371,49 @@ pub(super) async fn run_devtools_host_service(
                     wake = receivers.browser_host.recv_wake() => {
                         let output = match wake {
                             BrowserHostExecutionWake::TurnSelected => {
-                                scheduler.complete_next_browser_owner_input(
+                                let Some(outcome) = scheduler.complete_next_browser_owner_input(
                                     &mut receivers.browser_host,
-                                )
+                                ) else {
+                                    continue;
+                                };
+                                match scheduler
+                                    .apply_renderer_owner_turn_outcome(&mut receivers, outcome)
+                                    .await
+                                {
+                                    Ok(output) => output,
+                                    Err(failure) => {
+                                        let (output, error) = failure.into_parts();
+                                        tracing::error!(
+                                            error = %error.message,
+                                            "detaching BiDi frontend after Browser Host renderer predecessor failure"
+                                        );
+                                        detach_bidi = true;
+                                        output
+                                    }
+                                }
                             }
                             BrowserHostExecutionWake::ParticipantCompleted(completed) => {
-                                scheduler
+                                let outcome = scheduler
                                     .complete_browser_host_participant(
                                         &mut receivers.browser_host,
                                         *completed,
                                     )
+                                    .await;
+                                match scheduler
+                                    .apply_renderer_owner_turn_outcome(&mut receivers, outcome)
                                     .await
+                                {
+                                    Ok(output) => output,
+                                    Err(failure) => {
+                                        let (output, error) = failure.into_parts();
+                                        tracing::error!(
+                                            error = %error.message,
+                                            "detaching BiDi frontend after Browser Host participant predecessor failure"
+                                        );
+                                        detach_bidi = true;
+                                        output
+                                    }
+                                }
                             }
                             BrowserHostExecutionWake::DetachedNavigationCompleted(completed) => {
                                 scheduler
@@ -515,30 +554,46 @@ pub(super) async fn run_devtools_host_service(
             tokio::select! {
                 biased;
                 wake = receivers.browser_host.recv_wake() => {
-                    let _ = match wake {
+                    let result = match wake {
                         BrowserHostExecutionWake::TurnSelected => {
-                            scheduler.complete_next_browser_owner_input(
+                            let Some(outcome) = scheduler.complete_next_browser_owner_input(
                                 &mut receivers.browser_host,
-                            )
+                            ) else {
+                                continue;
+                            };
+                            scheduler
+                                .apply_renderer_owner_turn_outcome(&mut receivers, outcome)
+                                .await
                         }
                         BrowserHostExecutionWake::ParticipantCompleted(completed) => {
-                            scheduler
+                            let outcome = scheduler
                                 .complete_browser_host_participant(
                                     &mut receivers.browser_host,
                                     *completed,
                                 )
+                                .await;
+                            scheduler
+                                .apply_renderer_owner_turn_outcome(&mut receivers, outcome)
                                 .await
                         }
                         BrowserHostExecutionWake::DetachedNavigationCompleted(completed) => {
-                            scheduler
+                            Ok(scheduler
                                 .complete_detached_devtools_browser_owner_navigation(
                                     &mut receivers,
                                     *completed,
                                 )
-                                .await
+                                .await)
                         }
                         BrowserHostExecutionWake::Closed => break,
                     };
+                    if let Err(failure) = result {
+                        let (_, error) = failure.into_parts();
+                        tracing::error!(
+                            error = %error.message,
+                            "stopping DevTools Host after Browser Host renderer predecessor failure"
+                        );
+                        break;
+                    }
                 }
                 completion = receivers.background_navigation_completion_rx.recv() => {
                     let Some(completion) = completion else {

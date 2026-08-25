@@ -133,9 +133,7 @@ pub(super) fn start_runtime_protocol_message_completion(
         | moli_core::page::CompletedRuntimeInspectorCommandDispatch::InspectorSessionResponse {
             ..
         }
-        | moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(
-            _,
-        ) => {
+        | moli_core::page::CompletedRuntimeInspectorCommandDispatch::OwnerSessionErrorSettled(_) => {
             return RuntimeProtocolMessageCompletionStep::Complete(Box::new(Ok(None)));
         }
     };

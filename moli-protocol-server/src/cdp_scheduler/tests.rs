@@ -942,7 +942,7 @@ async fn specialized_wait_yield_closes_candidate_retained_in_the_main_fifo() {
     let unrelated_later_load = deferred_main_document_load_observation_id(1);
     let (mut scheduler, browser_host_actor, _browser_fact_wake) =
         CdpScheduler::new(CdpConnection::new());
-    let mut browser_host = super::BrowserHostExecutionLane::new(browser_host_actor);
+    let _browser_host = super::BrowserHostExecutionLane::new(browser_host_actor);
     scheduler.queues.enqueue_renderer_output_publication(
         cursor,
         ProtocolOutputSequence::from_messages(vec![json!({"method": "Runtime.consoleAPICalled"})]),
@@ -953,8 +953,9 @@ async fn specialized_wait_yield_closes_candidate_retained_in_the_main_fifo() {
         work: root_frame_stopped_loading_work(1, "FRAME-1"),
     }]);
 
+    let snapshot = scheduler.queues.take_external_load_wait_snapshot();
     let _ = scheduler
-        .complete_ready_owner_and_protocol_residences_for_external_load_wait(&mut browser_host)
+        .complete_protocol_residence_snapshot(snapshot)
         .await;
 
     assert_eq!(

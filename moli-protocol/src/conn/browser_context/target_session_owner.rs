@@ -4034,9 +4034,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_event_attachments_include_every_enabled_session_on_the_exact_page() {
-        let mut conn = CdpConnection::default();
+    #[tokio::test]
+    async fn runtime_event_attachments_include_every_enabled_session_on_the_exact_page() {
+        let mut ctx = TestContext::new();
         let mut browser_context = BrowserContext::new("BID-runtime-events".to_owned());
         browser_context.set_active_target_id("TID-runtime-events".to_owned());
         browser_context.attach_active_session("SID-runtime-a".to_owned());
@@ -4050,18 +4050,21 @@ mod tests {
             "TID-runtime-events",
             "SID-runtime-disabled".to_owned(),
         ));
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(41);
-        conn.browser_context = Some(browser_context);
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<title>runtime audience</title>",
+            Some("SID-runtime-a"),
+        )
+        .await;
 
-        conn.with_target_devtools_session_state_for_session_mut(Some("SID-runtime-b"), |state| {
-            state.runtime_session_state.runtime_frontend_enabled = true
-        })
-        .expect("Runtime-enabled auxiliary session should be mutable");
+        ctx.conn
+            .with_target_devtools_session_state_for_session_mut(Some("SID-runtime-b"), |state| {
+                state.runtime_session_state.runtime_frontend_enabled = true
+            })
+            .expect("Runtime-enabled auxiliary session should be mutable");
         assert_eq!(
-            conn.runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-a"))
+            ctx.conn
+                .runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-a"))
                 .expect("the current Page should expose its Runtime audience")
                 .into_iter()
                 .map(|attachment| attachment.session_id().map(str::to_owned))
@@ -4070,12 +4073,14 @@ mod tests {
             "a disabled primary must not hide the enabled peer attachment"
         );
 
-        conn.with_target_devtools_session_state_for_session_mut(Some("SID-runtime-a"), |state| {
-            state.runtime_session_state.runtime_frontend_enabled = true
-        })
-        .expect("Runtime-enabled primary session should be mutable");
+        ctx.conn
+            .with_target_devtools_session_state_for_session_mut(Some("SID-runtime-a"), |state| {
+                state.runtime_session_state.runtime_frontend_enabled = true
+            })
+            .expect("Runtime-enabled primary session should be mutable");
         assert_eq!(
-            conn.runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-b"))
+            ctx.conn
+                .runtime_event_protocol_attachments_for_session_owner(Some("SID-runtime-b"))
                 .expect("the current Page should expose its Runtime audience")
                 .into_iter()
                 .map(|attachment| attachment.session_id().map(str::to_owned))

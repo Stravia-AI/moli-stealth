@@ -29,6 +29,7 @@ impl CdpScheduler {
     ) -> DevToolsCommandExecution {
         let start = self
             .host_adapter
+            .commands()
             .try_start_devtools_browser_owner_context_disposal_command(command)
             .await;
         match start {
@@ -159,6 +160,7 @@ impl CdpScheduler {
     ) -> DevToolsCommandExecution {
         let outcome = self
             .host_adapter
+            .commands()
             .complete_devtools_browser_owner_context_disposal_command(completed)
             .await;
         let mut execution = self

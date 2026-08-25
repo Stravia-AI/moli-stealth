@@ -391,6 +391,24 @@ mod tests {
         )
     }
 
+    async fn install_runtime_observable_test_page(ctx: &mut TestContext, url: &str) {
+        let mut browser_context = BrowserContext::new("BID-1".into());
+        browser_context.set_target_url(url.to_owned());
+        browser_context.set_active_target_id("TID-1".to_owned());
+        browser_context.attach_active_session("SID-1".to_owned());
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<!doctype html><body></body>",
+            Some("SID-1"),
+        )
+        .await;
+        ctx.conn
+            .with_target_devtools_session_state_for_session_mut(Some("SID-1"), |state| {
+                state.runtime_session_state.runtime_frontend_enabled = true;
+            })
+            .expect("Runtime test session should remain attached to the installed Page");
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn observable_emission_plan_prepares_console_log_payloads_and_advances_cursors() {
         let mut ctx = TestContext::new();
@@ -942,20 +960,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn prepared_runtime_observable_range_is_bounded_by_source_summary() {
         let mut ctx = TestContext::new();
-        let mut bc = BrowserContext::new("BID-1".into());
-        bc.set_target_url("data:text/html,observable-runtime-prepared-range-test".to_owned());
-        bc.set_active_target_id("TID-1".to_owned());
-        bc.attach_active_session("SID-1".to_owned());
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
-            .await
-            .expect("test page should load");
-        let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state_mut()
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        install_runtime_observable_test_page(
+            &mut ctx,
+            "data:text/html,observable-runtime-prepared-range-test",
+        )
+        .await;
         ctx.sent.clear();
         ctx.conn
             .evaluate_runtime_expression_with_await_async("console.warn('runtime prepared')", false)
@@ -1000,20 +1009,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn prepared_runtime_observable_uses_source_payload_without_page_readback() {
         let mut ctx = TestContext::new();
-        let mut bc = BrowserContext::new("BID-1".into());
-        bc.set_target_url("data:text/html,observable-runtime-source-payload-test".to_owned());
-        bc.set_active_target_id("TID-1".to_owned());
-        bc.attach_active_session("SID-1".to_owned());
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
-            .await
-            .expect("test page should load");
-        let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state_mut()
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        install_runtime_observable_test_page(
+            &mut ctx,
+            "data:text/html,observable-runtime-source-payload-test",
+        )
+        .await;
         ctx.sent.clear();
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
@@ -1055,20 +1055,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn prepared_runtime_observable_uses_stored_source_queue_payload() {
         let mut ctx = TestContext::new();
-        let mut bc = BrowserContext::new("BID-1".into());
-        bc.set_target_url("data:text/html,observable-runtime-stored-source-test".to_owned());
-        bc.set_active_target_id("TID-1".to_owned());
-        bc.attach_active_session("SID-1".to_owned());
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
-            .await
-            .expect("test page should load");
-        let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state_mut()
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        ctx.conn.browser_context = Some(bc);
+        install_runtime_observable_test_page(
+            &mut ctx,
+            "data:text/html,observable-runtime-stored-source-test",
+        )
+        .await;
 
         let snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(
@@ -1109,23 +1100,18 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn renderer_runtime_agent_ownership_suppresses_runtime_console_source_fallback() {
         let mut ctx = TestContext::new();
-        let mut bc = BrowserContext::new("BID-1".into());
-        bc.set_target_url("data:text/html,observable-runtime-agent-owner-test".to_owned());
-        bc.set_active_target_id("TID-1".to_owned());
-        bc.attach_active_session("SID-1".to_owned());
-        let page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<!doctype html><body></body>")
-            .await
-            .expect("test page should load");
-        let _ = bc.replace_loaded_page(Some(page));
-        bc.devtools_session_state_mut()
-            .runtime_session_state
-            .runtime_frontend_enabled = true;
-        bc.devtools_session_state_mut()
-            .console_output_session_state
-            .renderer_runtime_agent_owns_page_console_api_events = true;
-        ctx.conn.browser_context = Some(bc);
+        install_runtime_observable_test_page(
+            &mut ctx,
+            "data:text/html,observable-runtime-agent-owner-test",
+        )
+        .await;
+        ctx.conn
+            .with_target_devtools_session_state_for_session_mut(Some("SID-1"), |state| {
+                state
+                    .console_output_session_state
+                    .renderer_runtime_agent_owns_page_console_api_events = true;
+            })
+            .expect("Runtime test session should remain attached to the installed Page");
 
         let console_only_snapshot = RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
             RendererRuntimeObservableSourceSummary::from_source_messages(

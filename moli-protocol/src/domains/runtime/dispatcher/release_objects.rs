@@ -187,7 +187,10 @@ fn start_protocol_neutral_release_object_command(
         }
     };
     let command = Cmd::from_parsed(&parsed)
-        .expect("synthesized Runtime command must contain a domain separator");
+        .expect("synthesized Runtime command must contain a domain separator")
+        .with_terminal_response_delivery_override(Some(
+            RendererInspectorResponseDelivery::CommandReply,
+        ));
     let mut route_scope = conn.scoped_none_session_owner_route_override(target.route.clone());
     let step =
         try_start_runtime_command_dispatch(route_scope.conn_mut(), &command).unwrap_or_else(|| {

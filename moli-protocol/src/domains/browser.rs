@@ -1546,36 +1546,24 @@ mod tests {
             crate::conn::BrowserContext::new("BID-browser-permission".to_owned());
         browser_context.set_active_target_id("TID-browser-permission-active".to_owned());
         browser_context.attach_active_session("SID-browser-permission-active".to_owned());
-        ctx.conn.insert_browser_context(browser_context);
-
-        let active_page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<title>active permissions</title>")
-            .await
-            .expect("active page should load");
-        let background_page = ctx
-            .conn
-            .load_page_via_runtime_async("data:text/html,<title>background permissions</title>")
-            .await
-            .expect("background page should load");
-
-        let mut background = crate::conn::BackgroundTarget::with_url(
+        let background = crate::conn::BackgroundTarget::with_url(
             "TID-browser-permission-background".to_owned(),
             Some("SID-browser-permission-background".to_owned()),
-            background_page.final_url().as_str().to_owned(),
+            "data:text/html,<title>background permissions</title>".to_owned(),
         );
-        background.replace_loaded_page(Some(background_page));
-
-        let browser_context = ctx
-            .conn
-            .browser_context
-            .as_mut()
-            .expect("inserted browser context must be selected");
-        browser_context
-            .active_target
-            .runtime_slot
-            .set_loaded_page_for_test(active_page);
         browser_context.background_targets.push(background);
+        browser_context.adopt_background_target_fixture_attachments();
+        ctx.conn.insert_browser_context(browser_context);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<title>active permissions</title>",
+            Some("SID-browser-permission-active"),
+        )
+        .await;
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<title>background permissions</title>",
+            Some("SID-browser-permission-background"),
+        )
+        .await;
 
         for (id, session_id) in [
             (52, "SID-browser-permission-active"),

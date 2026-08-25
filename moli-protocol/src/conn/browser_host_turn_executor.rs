@@ -90,9 +90,7 @@ impl BrowserHostTurnDispatch {
         }
     }
 
-    pub fn into_parts(
-        self,
-    ) -> (CdpRendererOwnerTurnOutcome, Option<PendingBrowserHostTurn>) {
+    pub fn into_parts(self) -> (CdpRendererOwnerTurnOutcome, Option<PendingBrowserHostTurn>) {
         (self.outcome, self.pending)
     }
 }

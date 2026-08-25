@@ -561,8 +561,8 @@ mod tests {
         observable_source_activity_outputs, runtime_lifecycle_error_prepared_outputs,
     };
 
-    fn runtime_lifecycle_error_audience(enabled_session_ids: &[&str]) -> Vec<Option<String>> {
-        let mut conn = crate::conn::CdpConnection::default();
+    async fn runtime_lifecycle_error_audience(enabled_session_ids: &[&str]) -> Vec<Option<String>> {
+        let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new("BID-runtime-lifecycle".to_owned());
         bc.set_active_target_id("TID-runtime-lifecycle".to_owned());
         bc.set_target_url("https://example.test/runtime-lifecycle".to_owned());
@@ -575,19 +575,22 @@ mod tests {
             "TID-runtime-lifecycle",
             "SID-runtime-disabled".to_owned(),
         ));
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(17);
-        conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<title>runtime lifecycle</title>",
+            Some("SID-runtime-a"),
+        )
+        .await;
         for session_id in enabled_session_ids {
-            conn.with_target_devtools_session_state_for_session_mut(Some(session_id), |state| {
-                state.runtime_session_state.runtime_frontend_enabled = true
-            })
-            .expect("Runtime audience session should be mutable");
+            ctx.conn
+                .with_target_devtools_session_state_for_session_mut(Some(session_id), |state| {
+                    state.runtime_session_state.runtime_frontend_enabled = true
+                })
+                .expect("Runtime audience session should be mutable");
         }
 
         runtime_lifecycle_error_prepared_outputs(
-            &mut conn,
+            &mut ctx.conn,
             "uncaught timer error".to_owned(),
             Some(7),
             Some("SID-runtime-a"),
@@ -598,21 +601,25 @@ mod tests {
         .collect()
     }
 
-    #[test]
-    fn observable_source_outputs_own_runtime_observable_presence() {
-        let mut conn = crate::conn::CdpConnection::default();
+    #[tokio::test]
+    async fn observable_source_outputs_own_runtime_observable_presence() {
+        let mut ctx = TestContext::new();
         let mut bc = BrowserContext::new("BID-1".into());
-        bc.active_target
-            .runtime_slot
-            .set_page_attachment_id_for_test(1);
+        bc.set_active_target_id("TID-1".to_owned());
+        bc.attach_active_session("SID-1".to_owned());
         bc.devtools_session_state_mut()
             .runtime_session_state
             .runtime_frontend_enabled = true;
-        conn.browser_context = Some(bc);
+        ctx.conn.insert_browser_context(bc);
+        ctx.install_navigation_fixture_for_session_owner(
+            "data:text/html,<title>runtime presence</title>",
+            Some("SID-1"),
+        )
+        .await;
 
         assert_eq!(
             observable_source_activity_outputs(
-                &mut conn,
+                &mut ctx.conn,
                 &RendererPageDiagnosticsSnapshot::from_runtime_observable_source(
                     RendererRuntimeObservableSourceSummary::from_source_messages(
                         Some(7),
@@ -628,15 +635,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_lifecycle_error_freezes_every_enabled_attachment_only() {
+    #[tokio::test]
+    async fn runtime_lifecycle_error_freezes_every_enabled_attachment_only() {
         assert_eq!(
-            runtime_lifecycle_error_audience(&["SID-runtime-b"]),
+            runtime_lifecycle_error_audience(&["SID-runtime-b"]).await,
             vec![Some("SID-runtime-b".to_owned())],
             "a disabled source attachment must not hide its enabled peer"
         );
         assert_eq!(
-            runtime_lifecycle_error_audience(&["SID-runtime-a", "SID-runtime-b"]),
+            runtime_lifecycle_error_audience(&["SID-runtime-a", "SID-runtime-b"]).await,
             vec![
                 Some("SID-runtime-a".to_owned()),
                 Some("SID-runtime-b".to_owned()),
