@@ -10,9 +10,6 @@ compat/webkit-box-item-shrink-002.html
 compat/webkit-box-vertically-centered.html
 content-security-policy/embedded-enforcement/iframe-csp-attribute.html
 content-security-policy/frame-ancestors/frame-ancestors-from-serviceworker.https.html
-content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-none-block.html
-content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-self-block.html
-content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-url-block.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-same-in-cross-star-allow.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-same-in-cross-url-allow.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-same-in-same-none-block.html

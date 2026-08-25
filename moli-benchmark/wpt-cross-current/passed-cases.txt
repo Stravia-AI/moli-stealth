@@ -30,8 +30,11 @@ compat/webkit-text-fill-color-currentColor.html
 content-security-policy/default-src/default-src-strict_dynamic_and_unsafe_inline.html
 content-security-policy/font-src/font-self-allowed.html
 content-security-policy/form-action/form-action-src-javascript-prevented.html
+content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-none-block.html
+content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-self-block.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-star-allow.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-url-allow.html
+content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-cross-url-block.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-same-none-block.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-same-self-block.html
 content-security-policy/frame-ancestors/frame-ancestors-nested-cross-in-same-star-allow.html
