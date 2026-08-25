@@ -7,7 +7,8 @@ mod transform;
 
 pub use geometry::{
     SvgGeometryBox, SvgGeometryElement, SvgGeometryPoint, SvgGeometrySegment,
-    bounding_box_for_segments, is_point_in_fill, point_at_length, segments_for_element,
+    bounding_box_for_element, bounding_box_for_segments, bounding_box_for_transformed_element,
+    is_point_in_fill, point_at_length, segments_for_element,
 };
 pub use length::{
     SvgLength, SvgLengthUnit, parse_length, parse_length_list, parse_number, parse_number_list,
@@ -22,7 +23,8 @@ pub use transform::{
 mod tests {
     use crate::{
         SvgGeometryElement, SvgGeometryPoint, SvgGeometrySegment, SvgLengthUnit,
-        SvgMatrixComponents, SvgTransform, SvgTransformKind, bounding_box_for_segments,
+        SvgMatrixComponents, SvgTransform, SvgTransformKind, bounding_box_for_element,
+        bounding_box_for_segments, bounding_box_for_transformed_element,
         consolidate_transform_matrices, is_point_in_fill, parse_length, parse_length_list,
         parse_number, parse_number_list, parse_transform_attribute, point_at_length,
         segments_for_element, serialize_number, serialize_transform_list,
@@ -137,6 +139,68 @@ mod tests {
         assert_close(path_box.y, 0.0);
         assert_close(path_box.width, 7.0);
         assert_close(path_box.height, 4.0);
+    }
+
+    #[test]
+    fn element_bounding_box_preserves_move_to_only_geometry() {
+        let path = SvgGeometryElement::Path {
+            d: "M 40 20".to_owned(),
+        };
+        let bbox = bounding_box_for_element(&path).unwrap();
+        assert_close(bbox.x, 40.0);
+        assert_close(bbox.y, 20.0);
+        assert_close(bbox.width, 0.0);
+        assert_close(bbox.height, 0.0);
+
+        let polyline = SvgGeometryElement::Polyline {
+            points: "10,20".to_owned(),
+        };
+        let bbox = bounding_box_for_element(&polyline).unwrap();
+        assert_close(bbox.x, 10.0);
+        assert_close(bbox.y, 20.0);
+        assert_close(bbox.width, 0.0);
+        assert_close(bbox.height, 0.0);
+    }
+
+    #[test]
+    fn transformed_element_bounding_box_uses_kurbo_path_geometry() {
+        let path = SvgGeometryElement::Path {
+            d: "M 0 0 L 10 20".to_owned(),
+        };
+        let bbox =
+            bounding_box_for_transformed_element(&path, SvgMatrixComponents::translate(30.0, 40.0))
+                .unwrap();
+        assert_close(bbox.x, 30.0);
+        assert_close(bbox.y, 40.0);
+        assert_close(bbox.width, 10.0);
+        assert_close(bbox.height, 20.0);
+    }
+
+    #[test]
+    fn negative_ellipse_radius_falls_back_to_the_valid_radius() {
+        let rx_invalid = bounding_box_for_element(&SvgGeometryElement::Ellipse {
+            cx: 1.0,
+            cy: 12.0,
+            rx: -5.0,
+            ry: 10.0,
+        })
+        .unwrap();
+        assert_close(rx_invalid.x, -9.0);
+        assert_close(rx_invalid.y, 2.0);
+        assert_close(rx_invalid.width, 20.0);
+        assert_close(rx_invalid.height, 20.0);
+
+        let ry_invalid = bounding_box_for_element(&SvgGeometryElement::Ellipse {
+            cx: 6.0,
+            cy: 2.0,
+            rx: 5.0,
+            ry: -10.0,
+        })
+        .unwrap();
+        assert_close(ry_invalid.x, 1.0);
+        assert_close(ry_invalid.y, -3.0);
+        assert_close(ry_invalid.width, 10.0);
+        assert_close(ry_invalid.height, 10.0);
     }
 
     #[test]

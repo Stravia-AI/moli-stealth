@@ -1698,13 +1698,12 @@ pub(super) fn svg_graphics_get_bbox_callback<'s>(
     args: v8::FunctionCallbackArguments<'s>,
     mut rv: v8::ReturnValue<'_, v8::Value>,
 ) {
-    let bbox = svg_geometry::bounding_box_for_segments(&svg_geometry_segments(scope, args.this()))
-        .unwrap_or(SvgGeometryBox {
-            x: 0.0,
-            y: 0.0,
-            width: 0.0,
-            height: 0.0,
-        });
+    let bbox = svg_graphics_bounding_box(scope, args.this()).unwrap_or(SvgGeometryBox {
+        x: 0.0,
+        y: 0.0,
+        width: 0.0,
+        height: 0.0,
+    });
     rv.set(build_dom_rect_like(scope, bbox.x, bbox.y, bbox.width, bbox.height).into());
 }
 

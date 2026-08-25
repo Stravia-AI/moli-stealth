@@ -1066,6 +1066,84 @@ fn svg_specialized_accessors_live_on_owner_prototypes() {
 }
 
 #[test]
+fn svg_geometry_queries_use_computed_paths_live_tree_and_kurbo_bounds() {
+    let mut vm = new_parsed_test_vm(
+        "https://svg-geometry-wiring.test/",
+        r##"<!doctype html>
+        <style>#css_path { d: path("M 0 0 t 0 100"); }</style>
+        <svg xmlns="http://www.w3.org/2000/svg">
+          <defs><rect id="definition" x="10" y="20" width="30" height="40"/></defs>
+          <path id="css_path"/>
+          <circle id="circle" cx="50" cy="50" r="5"/>
+          <ellipse id="ellipse_rx_invalid" cx="1" cy="12" rx="-5" ry="10"/>
+          <ellipse id="ellipse_ry_invalid" cx="6" cy="2" rx="5" ry="-10"/>
+          <g id="aggregate">
+            <path id="move" d="M 40 20 h0"/>
+            <rect id="aggregate_rect" x="50" y="50" width="50" height="50"/>
+          </g>
+          <g id="child_transform"><rect x="1" y="2" width="3" height="4" transform="translate(10 20)"/></g>
+          <g id="own_transform" transform="translate(100 200)"><rect x="1" y="2" width="3" height="4"/></g>
+          <g style="display:none"><rect id="hidden_child" x="10" y="20" width="30" height="40"/></g>
+          <rect id="hidden" x="10" y="20" width="30" height="40" display="none"/>
+          <image id="image_box" x="2" y="3" width="4" height="5"/>
+          <foreignObject id="foreign_box" x="6" y="7" width="8" height="9"/>
+          <use id="use_box" href="#definition" x="5" y="7"/>
+          <text y="180" font-size="100" font-family="Ahem" transform="translate(0 -100)">X<tspan id="span">X</tspan></text>
+        </svg>"##,
+    );
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const byId = id => document.getElementById(id);
+              const clean = value => Math.abs(value - Math.round(value)) < 1e-12
+                ? Math.round(value)
+                : value;
+              const box = id => {
+                const value = byId(id).getBBox();
+                return [value.x, value.y, value.width, value.height].map(clean);
+              };
+              const before = box("aggregate");
+              const rect = byId("aggregate_rect");
+              rect.remove();
+              const afterRemove = box("aggregate");
+              byId("aggregate").appendChild(rect);
+              return JSON.stringify({
+                cssLength: byId("css_path").getTotalLength(),
+                circleRadius: byId("circle").r.baseVal.value,
+                circleLength: Math.round(byId("circle").getTotalLength()),
+                move: box("move"),
+                aggregate: before,
+                afterRemove,
+                afterAppend: box("aggregate"),
+                childTransform: box("child_transform"),
+                ownTransform: box("own_transform"),
+                hidden: box("hidden"),
+                hiddenChild: box("hidden_child"),
+                definition: box("definition"),
+                image: box("image_box"),
+                foreign: box("foreign_box"),
+                use: box("use_box"),
+                ellipseRxInvalid: box("ellipse_rx_invalid"),
+                ellipseRyInvalid: box("ellipse_ry_invalid"),
+                tspan: box("span"),
+                foreignInterface: byId("foreign_box") instanceof SVGForeignObjectElement,
+                tspanInterface: byId("span") instanceof SVGTSpanElement,
+                tspanHasBBox: typeof byId("span").getBBox === "function"
+              });
+            })()
+            "#,
+        )
+        .expect("SVG geometry wiring probe should evaluate");
+
+    assert_eq!(
+        result,
+        r#"{"cssLength":100,"circleRadius":5,"circleLength":31,"move":[40,20,0,0],"aggregate":[40,20,60,80],"afterRemove":[40,20,0,0],"afterAppend":[40,20,60,80],"childTransform":[11,22,3,4],"ownTransform":[1,2,3,4],"hidden":[0,0,0,0],"hiddenChild":[0,0,0,0],"definition":[0,0,0,0],"image":[2,3,4,5],"foreign":[6,7,8,9],"use":[15,27,30,40],"ellipseRxInvalid":[-9,2,20,20],"ellipseRyInvalid":[1,-3,10,10],"tspan":[100,100,100,100],"foreignInterface":true,"tspanInterface":true,"tspanHasBBox":true}"#,
+    );
+}
+
+#[test]
 fn element_methods_and_dataset_live_on_owner_prototypes() {
     let mut vm = new_storage_test_vm("https://example.com/");
 

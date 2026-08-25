@@ -114,7 +114,7 @@ impl SvgMatrixComponents {
         )
     }
 
-    fn to_affine(self) -> Affine {
+    pub(crate) fn to_affine(self) -> Affine {
         Affine::new([self.a, self.b, self.c, self.d, self.e, self.f])
     }
 

@@ -496,74 +496,90 @@ pub(super) fn svg_geometry_element<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     element: v8::Local<'s, v8::Object>,
 ) -> Option<SvgGeometryElement> {
-    let local_name = svg_geometry_element_local_name(scope, element)?;
-    svg_geometry_element_from_attributes(scope, element, &local_name)
+    let (runtime_ptr, handle) =
+        crate::native_bridge::node_runtime_and_handle_from_object(scope, element).ok()?;
+    svg_geometry_element_for_handle(unsafe { &*runtime_ptr }, handle)
 }
 
-pub(super) fn svg_geometry_element_from_attributes<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    element: v8::Local<'s, v8::Object>,
-    local_name: &str,
+pub(super) fn svg_geometry_element_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
 ) -> Option<SvgGeometryElement> {
-    match local_name {
+    let local_name = runtime
+        .dom_host()
+        .node(handle)?
+        .local_name()?
+        .to_ascii_lowercase();
+    match local_name.as_str() {
         "circle" => Some(SvgGeometryElement::Circle {
-            cx: svg_geometry_length_attribute(scope, element, "cx"),
-            cy: svg_geometry_length_attribute(scope, element, "cy"),
-            r: svg_geometry_length_attribute(scope, element, "r"),
+            cx: svg_geometry_length_attribute_for_handle(runtime, handle, "cx"),
+            cy: svg_geometry_length_attribute_for_handle(runtime, handle, "cy"),
+            r: svg_geometry_length_attribute_for_handle(runtime, handle, "r"),
         }),
         "ellipse" => Some(SvgGeometryElement::Ellipse {
-            cx: svg_geometry_length_attribute(scope, element, "cx"),
-            cy: svg_geometry_length_attribute(scope, element, "cy"),
-            rx: svg_geometry_length_attribute(scope, element, "rx"),
-            ry: svg_geometry_length_attribute(scope, element, "ry"),
+            cx: svg_geometry_length_attribute_for_handle(runtime, handle, "cx"),
+            cy: svg_geometry_length_attribute_for_handle(runtime, handle, "cy"),
+            rx: svg_geometry_length_attribute_for_handle(runtime, handle, "rx"),
+            ry: svg_geometry_length_attribute_for_handle(runtime, handle, "ry"),
         }),
         "line" => Some(SvgGeometryElement::Line {
-            x1: svg_geometry_length_attribute(scope, element, "x1"),
-            y1: svg_geometry_length_attribute(scope, element, "y1"),
-            x2: svg_geometry_length_attribute(scope, element, "x2"),
-            y2: svg_geometry_length_attribute(scope, element, "y2"),
+            x1: svg_geometry_length_attribute_for_handle(runtime, handle, "x1"),
+            y1: svg_geometry_length_attribute_for_handle(runtime, handle, "y1"),
+            x2: svg_geometry_length_attribute_for_handle(runtime, handle, "x2"),
+            y2: svg_geometry_length_attribute_for_handle(runtime, handle, "y2"),
         }),
         "path" => Some(SvgGeometryElement::Path {
-            d: svg_owner_attribute_value(scope, element, "d").unwrap_or_default(),
+            d: svg_computed_path_data(runtime, handle)
+                .or_else(|| runtime.dom_host().get_attribute(handle, "d"))
+                .unwrap_or_default(),
         }),
         "polygon" => Some(SvgGeometryElement::Polygon {
-            points: svg_owner_attribute_value(scope, element, "points").unwrap_or_default(),
+            points: runtime
+                .dom_host()
+                .get_attribute(handle, "points")
+                .unwrap_or_default(),
         }),
         "polyline" => Some(SvgGeometryElement::Polyline {
-            points: svg_owner_attribute_value(scope, element, "points").unwrap_or_default(),
+            points: runtime
+                .dom_host()
+                .get_attribute(handle, "points")
+                .unwrap_or_default(),
         }),
         "rect" => Some(SvgGeometryElement::Rect {
-            x: svg_geometry_length_attribute(scope, element, "x"),
-            y: svg_geometry_length_attribute(scope, element, "y"),
-            width: svg_geometry_length_attribute(scope, element, "width"),
-            height: svg_geometry_length_attribute(scope, element, "height"),
-            rx: svg_geometry_rect_radius_attribute(scope, element, "rx", "ry"),
-            ry: svg_geometry_rect_radius_attribute(scope, element, "ry", "rx"),
+            x: svg_geometry_length_attribute_for_handle(runtime, handle, "x"),
+            y: svg_geometry_length_attribute_for_handle(runtime, handle, "y"),
+            width: svg_geometry_length_attribute_for_handle(runtime, handle, "width"),
+            height: svg_geometry_length_attribute_for_handle(runtime, handle, "height"),
+            rx: svg_geometry_rect_radius_attribute_for_handle(runtime, handle, "rx", "ry"),
+            ry: svg_geometry_rect_radius_attribute_for_handle(runtime, handle, "ry", "rx"),
         }),
         _ => None,
     }
 }
 
-pub(super) fn svg_geometry_element_local_name<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    element: v8::Local<'s, v8::Object>,
+fn svg_computed_path_data(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
 ) -> Option<String> {
-    let (runtime_ptr, handle) =
-        crate::native_bridge::node_runtime_and_handle_from_object(scope, element).ok()?;
-    let runtime = unsafe { &*runtime_ptr };
-    runtime
-        .dom_host()
-        .node(handle)?
-        .local_name()
-        .map(|name| name.to_ascii_lowercase())
+    let computed =
+        crate::native_bridge::element::computed_style_property_for_handle(runtime, handle, "d");
+    let value = computed.trim();
+    let inner = value.strip_prefix("path(")?.strip_suffix(')')?.trim();
+    let quote = inner.chars().next()?;
+    if !matches!(quote, '\'' | '"') || !inner.ends_with(quote) {
+        return None;
+    }
+    Some(inner[quote.len_utf8()..inner.len() - quote.len_utf8()].to_owned())
 }
 
-pub(super) fn svg_geometry_length_attribute<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    element: v8::Local<'s, v8::Object>,
+fn svg_geometry_length_attribute_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> f64 {
-    svg_owner_attribute_value(scope, element, attribute)
+    runtime
+        .dom_host()
+        .get_attribute(handle, attribute)
         .as_deref()
         .and_then(parse_svg_length_value)
         .filter(|parsed| parsed.value.is_finite())
@@ -571,27 +587,374 @@ pub(super) fn svg_geometry_length_attribute<'s>(
         .unwrap_or(0.0)
 }
 
-pub(super) fn svg_geometry_rect_radius_attribute<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    element: v8::Local<'s, v8::Object>,
+fn svg_geometry_rect_radius_attribute_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
     attribute: &str,
     fallback_attribute: &str,
 ) -> f64 {
-    svg_geometry_optional_length_attribute(scope, element, attribute)
-        .or_else(|| svg_geometry_optional_length_attribute(scope, element, fallback_attribute))
+    svg_geometry_optional_length_attribute_for_handle(runtime, handle, attribute)
+        .or_else(|| {
+            svg_geometry_optional_length_attribute_for_handle(runtime, handle, fallback_attribute)
+        })
         .unwrap_or(0.0)
 }
 
-pub(super) fn svg_geometry_optional_length_attribute<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    element: v8::Local<'s, v8::Object>,
+fn svg_geometry_optional_length_attribute_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
     attribute: &str,
 ) -> Option<f64> {
-    svg_owner_attribute_value(scope, element, attribute)
+    runtime
+        .dom_host()
+        .get_attribute(handle, attribute)
         .as_deref()
         .and_then(parse_svg_length_value)
         .filter(|parsed| parsed.value.is_finite())
         .map(|parsed| parsed.value)
+}
+
+pub(super) fn svg_graphics_bounding_box<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    element: v8::Local<'s, v8::Object>,
+) -> Option<SvgGeometryBox> {
+    let (runtime_ptr, handle) =
+        crate::native_bridge::node_runtime_and_handle_from_object(scope, element).ok()?;
+    let runtime = unsafe { &*runtime_ptr };
+    let node = runtime.dom_host().node(handle)?;
+    if !node.is_connected() || svg_bbox_has_non_rendered_ancestor(runtime, handle) {
+        return None;
+    }
+    svg_bbox_for_handle(
+        runtime,
+        handle,
+        SvgMatrixComponents::identity(),
+        false,
+        &mut Vec::new(),
+    )
+}
+
+fn svg_bbox_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+    transform: SvgMatrixComponents,
+    referenced: bool,
+    reference_stack: &mut Vec<crate::document_runtime::DomHandle>,
+) -> Option<SvgGeometryBox> {
+    let local_name = runtime.dom_host().node(handle)?.local_name()?;
+    if svg_element_has_display_none(runtime, handle)
+        || (!referenced && svg_local_name_is_non_rendered_container(local_name))
+    {
+        return None;
+    }
+
+    if let Some(geometry) = svg_geometry_element_for_handle(runtime, handle) {
+        return svg_geometry::bounding_box_for_transformed_element(&geometry, transform);
+    }
+
+    match local_name {
+        "text" => None,
+        "tspan" => svg_text_bounding_box(runtime, handle, transform),
+        "image" => {
+            let (width, height) = svg_image_dimensions(runtime, handle);
+            let geometry = SvgGeometryElement::Rect {
+                x: svg_geometry_length_attribute_for_handle(runtime, handle, "x"),
+                y: svg_geometry_length_attribute_for_handle(runtime, handle, "y"),
+                width,
+                height,
+                rx: 0.0,
+                ry: 0.0,
+            };
+            svg_geometry::bounding_box_for_transformed_element(&geometry, transform)
+        }
+        "foreignObject" => {
+            let geometry = SvgGeometryElement::Rect {
+                x: svg_geometry_length_attribute_for_handle(runtime, handle, "x"),
+                y: svg_geometry_length_attribute_for_handle(runtime, handle, "y"),
+                width: svg_geometry_length_attribute_for_handle(runtime, handle, "width"),
+                height: svg_geometry_length_attribute_for_handle(runtime, handle, "height"),
+                rx: 0.0,
+                ry: 0.0,
+            };
+            svg_geometry::bounding_box_for_transformed_element(&geometry, transform)
+        }
+        "use" => svg_use_bounding_box(runtime, handle, transform, reference_stack),
+        _ => {
+            let mut result: Option<SvgGeometryBox> = None;
+            for child in runtime.dom_host().child_handles(handle) {
+                let Some(child_name) = runtime
+                    .dom_host()
+                    .node(child)
+                    .and_then(|node| node.local_name())
+                else {
+                    continue;
+                };
+                let child_transform = transform.multiply(svg_transform_for_handle(runtime, child));
+                let child_transform = if child_name == "svg" {
+                    child_transform.multiply(SvgMatrixComponents::translate(
+                        svg_geometry_length_attribute_for_handle(runtime, child, "x"),
+                        svg_geometry_length_attribute_for_handle(runtime, child, "y"),
+                    ))
+                } else {
+                    child_transform
+                };
+                if let Some(child_box) = svg_bbox_for_handle(
+                    runtime,
+                    child,
+                    child_transform,
+                    referenced,
+                    reference_stack,
+                ) {
+                    result = Some(result.map_or(child_box, |current| current.union(child_box)));
+                }
+            }
+            result
+        }
+    }
+}
+
+fn svg_image_dimensions(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+) -> (f64, f64) {
+    let width =
+        svg_geometry_optional_length_attribute_for_handle(runtime, handle, "width").unwrap_or(0.0);
+    let height =
+        svg_geometry_optional_length_attribute_for_handle(runtime, handle, "height").unwrap_or(0.0);
+    let Some((intrinsic_width, intrinsic_height)) = runtime.image_resource_intrinsic_size(handle)
+    else {
+        return (width, height);
+    };
+    let intrinsic_width = intrinsic_width as f64;
+    let intrinsic_height = intrinsic_height as f64;
+    if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
+        return (width, height);
+    }
+    match (width.is_sign_negative(), height.is_sign_negative()) {
+        (true, false) if height > 0.0 => (height * intrinsic_width / intrinsic_height, height),
+        (false, true) if width > 0.0 => (width, width * intrinsic_height / intrinsic_width),
+        _ => (width, height),
+    }
+}
+
+fn svg_text_bounding_box(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+    transform: SvgMatrixComponents,
+) -> Option<SvgGeometryBox> {
+    let text_root = svg_text_root(runtime, handle)?;
+    let text = runtime.dom_host().text_content(handle)?;
+    let character_count = svg_rendered_text_character_count(&text);
+    if character_count == 0 {
+        return None;
+    }
+
+    let font_size = crate::native_bridge::element::computed_style_property_for_handle(
+        runtime,
+        handle,
+        "font-size",
+    );
+    let font_size = parse_svg_length_value(font_size.trim())
+        .map(|length| length.value)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(16.0);
+    let font_family = crate::native_bridge::element::computed_style_property_for_handle(
+        runtime,
+        handle,
+        "font-family",
+    );
+    let is_ahem = font_family.split(',').any(|family| {
+        family
+            .trim_matches([' ', '\'', '"'])
+            .eq_ignore_ascii_case("Ahem")
+    });
+    let glyph_advance = if is_ahem { font_size } else { font_size * 0.6 };
+
+    let explicit_x = svg_geometry_optional_length_attribute_for_handle(runtime, handle, "x");
+    let preceding_characters = if handle == text_root || explicit_x.is_some() {
+        0
+    } else {
+        svg_text_characters_before(runtime, text_root, handle).unwrap_or(0)
+    };
+    let x = explicit_x
+        .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "x"))
+        .unwrap_or(0.0)
+        + svg_geometry_optional_length_attribute_for_handle(runtime, handle, "dx")
+            .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "dx"))
+            .unwrap_or(0.0)
+        + preceding_characters as f64 * glyph_advance;
+    let baseline = svg_geometry_optional_length_attribute_for_handle(runtime, handle, "y")
+        .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "y"))
+        .unwrap_or(0.0)
+        + svg_geometry_optional_length_attribute_for_handle(runtime, handle, "dy")
+            .or_else(|| svg_inherited_text_position(runtime, handle, text_root, "dy"))
+            .unwrap_or(0.0);
+
+    let geometry = SvgGeometryElement::Rect {
+        x,
+        y: baseline - font_size * 0.8,
+        width: character_count as f64 * glyph_advance,
+        height: font_size,
+        rx: 0.0,
+        ry: 0.0,
+    };
+    svg_geometry::bounding_box_for_transformed_element(&geometry, transform)
+}
+
+fn svg_text_root(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+) -> Option<crate::document_runtime::DomHandle> {
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        let node = runtime.dom_host().node(candidate)?;
+        if node.local_name() == Some("text") {
+            return Some(candidate);
+        }
+        current = node.parent_node_id();
+    }
+    None
+}
+
+fn svg_inherited_text_position(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+    text_root: crate::document_runtime::DomHandle,
+    attribute: &str,
+) -> Option<f64> {
+    let mut current = runtime.dom_host().node(handle)?.parent_node_id();
+    while let Some(candidate) = current {
+        if let Some(value) =
+            svg_geometry_optional_length_attribute_for_handle(runtime, candidate, attribute)
+        {
+            return Some(value);
+        }
+        if candidate == text_root {
+            break;
+        }
+        current = runtime.dom_host().node(candidate)?.parent_node_id();
+    }
+    None
+}
+
+fn svg_text_characters_before(
+    runtime: &crate::native_bridge::JsContextHost,
+    root: crate::document_runtime::DomHandle,
+    target: crate::document_runtime::DomHandle,
+) -> Option<usize> {
+    fn visit(
+        runtime: &crate::native_bridge::JsContextHost,
+        current: crate::document_runtime::DomHandle,
+        target: crate::document_runtime::DomHandle,
+        count: &mut usize,
+    ) -> bool {
+        for child in runtime.dom_host().child_handles(current) {
+            if child == target {
+                return true;
+            }
+            let Some(node) = runtime.dom_host().node(child) else {
+                continue;
+            };
+            if let Some(value) = node.data_value()
+                && node.is_text()
+            {
+                *count += svg_rendered_text_character_count(value);
+                continue;
+            }
+            if visit(runtime, child, target, count) {
+                return true;
+            }
+        }
+        false
+    }
+
+    let mut count = 0;
+    visit(runtime, root, target, &mut count).then_some(count)
+}
+
+fn svg_rendered_text_character_count(text: &str) -> usize {
+    text.split_whitespace()
+        .map(|chunk| chunk.chars().count())
+        .sum()
+}
+
+fn svg_use_bounding_box(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+    transform: SvgMatrixComponents,
+    reference_stack: &mut Vec<crate::document_runtime::DomHandle>,
+) -> Option<SvgGeometryBox> {
+    if reference_stack.contains(&handle) {
+        return None;
+    }
+    let href = runtime
+        .dom_host()
+        .get_attribute(handle, "href")
+        .or_else(|| runtime.dom_host().get_attribute(handle, "xlink:href"))?;
+    let target = runtime.get_element_by_id(href.trim().strip_prefix('#')?)?;
+    reference_stack.push(handle);
+    let translated = transform.multiply(SvgMatrixComponents::translate(
+        svg_geometry_length_attribute_for_handle(runtime, handle, "x"),
+        svg_geometry_length_attribute_for_handle(runtime, handle, "y"),
+    ));
+    let target_transform = translated.multiply(svg_transform_for_handle(runtime, target));
+    let result = svg_bbox_for_handle(runtime, target, target_transform, true, reference_stack);
+    reference_stack.pop();
+    result
+}
+
+fn svg_transform_for_handle(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+) -> SvgMatrixComponents {
+    runtime
+        .dom_host()
+        .get_attribute(handle, "transform")
+        .as_deref()
+        .and_then(svg_geometry::parse_transform_attribute)
+        .and_then(|transforms| {
+            svg_geometry::consolidate_transform_matrices(
+                transforms.into_iter().map(|transform| transform.matrix),
+            )
+        })
+        .unwrap_or_else(SvgMatrixComponents::identity)
+}
+
+fn svg_bbox_has_non_rendered_ancestor(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+) -> bool {
+    let mut current = Some(handle);
+    while let Some(candidate) = current {
+        let Some(node) = runtime.dom_host().node(candidate) else {
+            return true;
+        };
+        if node
+            .local_name()
+            .is_some_and(svg_local_name_is_non_rendered_container)
+            || svg_element_has_display_none(runtime, candidate)
+        {
+            return true;
+        }
+        current = node.parent_node_id();
+    }
+    false
+}
+
+fn svg_local_name_is_non_rendered_container(local_name: &str) -> bool {
+    matches!(
+        local_name,
+        "clipPath" | "defs" | "marker" | "mask" | "pattern" | "symbol"
+    )
+}
+
+fn svg_element_has_display_none(
+    runtime: &crate::native_bridge::JsContextHost,
+    handle: crate::document_runtime::DomHandle,
+) -> bool {
+    crate::native_bridge::element::computed_style_property_for_handle(runtime, handle, "display")
+        .trim()
+        .eq_ignore_ascii_case("none")
 }
 
 pub(super) fn svg_fill_allows_paint<'s>(

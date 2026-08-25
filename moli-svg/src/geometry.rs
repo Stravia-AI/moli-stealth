@@ -1,4 +1,5 @@
 use crate::helpers::svg_number_list;
+use crate::matrix::SvgMatrixComponents;
 use crate::path::path_geometry;
 use kurbo::{
     Arc, BezPath, Circle, Ellipse, ParamCurve, ParamCurveArclen, ParamCurveExtrema,
@@ -42,6 +43,21 @@ pub struct SvgGeometryBox {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+impl SvgGeometryBox {
+    pub fn union(self, other: Self) -> Self {
+        let x0 = self.x.min(other.x);
+        let y0 = self.y.min(other.y);
+        let x1 = (self.x + self.width).max(other.x + other.width);
+        let y1 = (self.y + self.height).max(other.y + other.height);
+        Self {
+            x: x0,
+            y: y0,
+            width: x1 - x0,
+            height: y1 - y0,
+        }
+    }
 }
 
 pub enum SvgGeometryElement {
@@ -104,6 +120,63 @@ pub fn bounding_box_for_segments(segments: &[SvgGeometrySegment]) -> Option<SvgG
     })
 }
 
+pub fn bounding_box_for_element(element: &SvgGeometryElement) -> Option<SvgGeometryBox> {
+    bounding_box_for_transformed_element(element, SvgMatrixComponents::identity())
+}
+
+pub fn bounding_box_for_transformed_element(
+    element: &SvgGeometryElement,
+    transform: SvgMatrixComponents,
+) -> Option<SvgGeometryBox> {
+    let affine = transform.to_affine();
+    let analytic_bounds = match element {
+        SvgGeometryElement::Circle { cx, cy, r } if *r > 0.0 => {
+            Some((affine * Circle::new(Point::new(*cx, *cy), *r)).bounding_box())
+        }
+        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => {
+            let (rx, ry) = normalized_ellipse_radii(*rx, *ry);
+            (rx > 0.0 && ry > 0.0).then(|| {
+                (affine * Ellipse::new(Point::new(*cx, *cy), (rx, ry), 0.0)).bounding_box()
+            })
+        }
+        _ => None,
+    };
+    if let Some(bounds) = analytic_bounds {
+        return Some(svg_box(bounds));
+    }
+    let path = geometry_path(element)?;
+    if path.elements().is_empty() {
+        return None;
+    }
+    if path.segments().next().is_none() {
+        let point = path
+            .elements()
+            .iter()
+            .rev()
+            .find_map(|element| match element {
+                PathEl::MoveTo(point) => Some(affine * *point),
+                _ => None,
+            })?;
+        return Some(SvgGeometryBox {
+            x: point.x,
+            y: point.y,
+            width: 0.0,
+            height: 0.0,
+        });
+    }
+    let bounds = (affine * path).bounding_box();
+    Some(svg_box(bounds))
+}
+
+fn svg_box(bounds: Rect) -> SvgGeometryBox {
+    SvgGeometryBox {
+        x: bounds.x0,
+        y: bounds.y0,
+        width: bounds.width(),
+        height: bounds.height(),
+    }
+}
+
 pub fn is_point_in_fill(element: &SvgGeometryElement, point: SvgGeometryPoint) -> bool {
     if matches!(element, SvgGeometryElement::Line { .. }) {
         return false;
@@ -151,11 +224,14 @@ fn geometry_path(element: &SvgGeometryElement) -> Option<BezPath> {
         } else {
             BezPath::new()
         }),
-        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => Some(if *rx > 0.0 && *ry > 0.0 {
-            Ellipse::new(Point::new(*cx, *cy), (*rx, *ry), 0.0).to_path(SHAPE_PATH_TOLERANCE)
-        } else {
-            BezPath::new()
-        }),
+        SvgGeometryElement::Ellipse { cx, cy, rx, ry } => {
+            let (rx, ry) = normalized_ellipse_radii(*rx, *ry);
+            Some(if rx > 0.0 && ry > 0.0 {
+                Ellipse::new(Point::new(*cx, *cy), (rx, ry), 0.0).to_path(SHAPE_PATH_TOLERANCE)
+            } else {
+                BezPath::new()
+            })
+        }
         SvgGeometryElement::Line { x1, y1, x2, y2 } => {
             let mut path = BezPath::new();
             path.move_to((*x1, *y1));
@@ -185,6 +261,14 @@ fn rect_path(x: f64, y: f64, width: f64, height: f64, rx: f64, ry: f64) -> BezPa
         return rounded_rect_path(x, y, width, height, rx, ry);
     }
     Rect::new(x, y, x + width, y + height).to_path(SHAPE_PATH_TOLERANCE)
+}
+
+fn normalized_ellipse_radii(rx: f64, ry: f64) -> (f64, f64) {
+    match (rx.is_sign_negative(), ry.is_sign_negative()) {
+        (true, false) => (ry, ry),
+        (false, true) => (rx, rx),
+        _ => (rx, ry),
+    }
 }
 
 fn normalized_rect_radii(width: f64, height: f64, rx: f64, ry: f64) -> (f64, f64) {
@@ -231,7 +315,7 @@ fn append_quarter_ellipse(
 
 fn poly_points_geometry_path(raw: &str, close: bool) -> Option<BezPath> {
     let coordinates = svg_number_list(raw)?;
-    if coordinates.len() < 4 || !coordinates.len().is_multiple_of(2) {
+    if coordinates.len() < 2 || !coordinates.len().is_multiple_of(2) {
         return None;
     }
     let mut coordinates = coordinates.chunks_exact(2);
