@@ -63,10 +63,12 @@ async fn start_external_child_document_load(
         .vm_mut()
         .eval(&format!(
             r#"
+{{
 const frame = document.createElement("iframe");
 frame.id = {frame_id:?};
 frame.src = {child_url:?};
 document.body.appendChild(frame);
+}}
 "#
         ))
         .expect("external child fixture should be created");
@@ -153,6 +155,90 @@ async fn production_child_document_fetch_reaches_stable_typed_turn_and_commits()
     })
     .await
     .expect("production typed child-document test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_document_response_frame_ancestors_gates_commit() {
+    run_page_vm_async_test(async move {
+        let (base_url, server) = spawn_path_response_http_server(vec![
+            (
+                "/allowed-child.html",
+                "HTTP/1.1 200 OK\r\nContent-Security-Policy: frame-ancestors *",
+                "<!doctype html><p id='allowed-child'>allowed</p>".to_owned(),
+                Duration::ZERO,
+            ),
+            (
+                "/blocked-child.html",
+                "HTTP/1.1 200 OK\r\nContent-Security-Policy: frame-ancestors 'none'",
+                "<!doctype html><script>parent.__blockedChildExecuted = true</script>\
+                 <p id='must-not-commit'>blocked</p>"
+                    .to_owned(),
+                Duration::ZERO,
+            ),
+        ])
+        .await;
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let (mut page_vm, mut queue, mut wake_rx) = owner_attached_page_vm(
+            &loader,
+            Url::parse(&format!("{base_url}/page.html")).expect("page URL"),
+        );
+
+        let allowed_url = format!("{base_url}/allowed-child.html");
+        start_external_child_document_load(&mut page_vm, "frame-ancestors-allowed", &allowed_url)
+            .await;
+        wait_for_page_resource_completion(&mut queue, &mut wake_rx, "allowed child fetch").await;
+        page_vm
+            .apply_one_page_resource_terminal_owner_admission_for_test(&mut queue)?
+            .expect("allowed child terminal should apply");
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                "document.getElementById('frame-ancestors-allowed').contentDocument\
+                 .getElementById('allowed-child').textContent"
+            )?,
+            "allowed"
+        );
+
+        page_vm
+            .vm_mut()
+            .eval("globalThis.__blockedChildExecuted = false")?;
+        let blocked_url = format!("{base_url}/blocked-child.html");
+        start_external_child_document_load(&mut page_vm, "frame-ancestors-blocked", &blocked_url)
+            .await;
+        wait_for_page_resource_completion(&mut queue, &mut wake_rx, "blocked child fetch").await;
+        page_vm
+            .apply_one_page_resource_terminal_owner_admission_for_test(&mut queue)?
+            .expect("blocked child terminal should settle");
+        assert_eq!(
+            page_vm.vm_mut().eval(
+                r#"(() => {
+                    const frame = document.getElementById("frame-ancestors-blocked");
+                    try {
+                        void frame.contentWindow.location.href;
+                        return "accessible";
+                    } catch (_) {
+                        return "blocked";
+                    }
+                })()"#
+            )?,
+            "blocked",
+            "a blocked response must leave no ancestor-accessible child Document"
+        );
+        assert_eq!(
+            page_vm
+                .vm_mut()
+                .eval("String(globalThis.__blockedChildExecuted)")?,
+            "false",
+            "blocked response script must never execute"
+        );
+
+        server
+            .await
+            .expect("frame-ancestors child server should finish");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("frame-ancestors response gate test should run");
 }
 
 #[tokio::test(flavor = "current_thread")]

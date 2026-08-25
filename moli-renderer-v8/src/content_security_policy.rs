@@ -15,6 +15,7 @@ use url::Url;
 const CONNECT_SRC: &str = "connect-src";
 const CHILD_SRC: &str = "child-src";
 const DEFAULT_SRC: &str = "default-src";
+const FRAME_ANCESTORS: &str = "frame-ancestors";
 const FRAME_SRC: &str = "frame-src";
 const IMG_SRC: &str = "img-src";
 const MANIFEST_SRC: &str = "manifest-src";
@@ -734,6 +735,47 @@ pub(crate) fn content_security_policy_url_violation_with_redirect_status_disposi
     )
 }
 
+pub(crate) fn content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+    policies: &[String],
+    protected_url: &Url,
+    ancestor_origins: &[Option<Url>],
+    disposition: ContentSecurityPolicyDisposition,
+    reporting_endpoints: &ContentSecurityPolicyReportingEndpoints,
+) -> Option<ContentSecurityPolicyUrlViolation> {
+    policies.iter().find_map(|policy| {
+        let directives = parsed_directives(policy);
+        let source_list =
+            normalized_source_list(directive_source_list(&directives, FRAME_ANCESTORS)?.to_vec());
+        if ancestor_origins.iter().all(|ancestor_origin| {
+            ancestor_origin.as_ref().is_some_and(|ancestor_origin| {
+                frame_ancestor_source_list_allows(&source_list, protected_url, ancestor_origin)
+            })
+        }) {
+            return None;
+        }
+        let document_uri = csp_url_for_report(protected_url);
+        Some(ContentSecurityPolicyUrlViolation {
+            effective_directive: FRAME_ANCESTORS,
+            blocked_uri: document_uri.clone(),
+            source_file: document_uri.clone(),
+            document_uri,
+            original_policy: policy.clone(),
+            disposition,
+            report_uri_endpoints: content_security_policy_report_uri_endpoints(
+                policy,
+                protected_url,
+            ),
+            report_to_endpoints: content_security_policy_report_to_endpoints(
+                policy,
+                reporting_endpoints,
+            ),
+            sample: String::new(),
+            line_number: 0,
+            column_number: 0,
+        })
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn content_security_policy_script_element_url_violation_with_redirect_status_disposition_reporting_endpoints_and_request(
     policies: &[String],
@@ -1200,6 +1242,26 @@ fn source_list_allows(
 ) -> bool {
     let sources = normalized_source_list(sources);
     normalized_source_list_allows_url(&sources, protected_url, request_url, redirect_status)
+}
+
+fn frame_ancestor_source_list_allows(
+    sources: &[&str],
+    protected_url: &Url,
+    ancestor_origin: &Url,
+) -> bool {
+    if sources.is_empty() || (sources.len() == 1 && csp_keyword_eq(sources[0], "none")) {
+        return false;
+    }
+    sources.iter().any(|source| {
+        !csp_keyword_eq(source, "none")
+            && !source_has_path(source)
+            && source_expression_matches(
+                source,
+                protected_url,
+                ancestor_origin,
+                ContentSecurityPolicyRedirectStatus::NoRedirect,
+            )
+    })
 }
 
 fn source_list_allows_script_element_request(
@@ -1943,6 +2005,26 @@ mod tests {
         )
     }
 
+    fn frame_ancestors_violation(
+        policies: &[&str],
+        protected_url: &str,
+        ancestor_origins: &[Option<&str>],
+    ) -> Option<ContentSecurityPolicyUrlViolation> {
+        content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+            &policies
+                .iter()
+                .map(|policy| (*policy).to_owned())
+                .collect::<Vec<_>>(),
+            &request_url(protected_url),
+            &ancestor_origins
+                .iter()
+                .map(|ancestor| ancestor.map(request_url))
+                .collect::<Vec<_>>(),
+            ContentSecurityPolicyDisposition::Enforce,
+            &ContentSecurityPolicyReportingEndpoints::default(),
+        )
+    }
+
     #[test]
     fn content_security_policy_headers_collect_enforce_headers_only() {
         let headers = vec![
@@ -1964,6 +2046,91 @@ mod tests {
         assert_eq!(
             content_security_policy_report_only_headers(&headers),
             vec!["worker-src 'none'".to_owned()]
+        );
+    }
+
+    #[test]
+    fn frame_ancestors_requires_every_ancestor_to_match() {
+        let protected_url = "https://child.test/frame.html";
+        let ancestors = [Some("https://child.test"), Some("https://top.test")];
+
+        let violation =
+            frame_ancestors_violation(&["frame-ancestors 'self'"], protected_url, &ancestors)
+                .expect("a cross-origin top ancestor must violate 'self'");
+        assert_eq!(violation.effective_directive, "frame-ancestors");
+        assert_eq!(violation.blocked_uri, protected_url);
+
+        assert!(
+            frame_ancestors_violation(&["frame-ancestors *"], protected_url, &ancestors).is_none()
+        );
+        assert!(
+            frame_ancestors_violation(
+                &["frame-ancestors https://child.test https://top.test"],
+                protected_url,
+                &ancestors,
+            )
+            .is_none()
+        );
+        assert!(
+            frame_ancestors_violation(
+                &["frame-ancestors https://child.test"],
+                protected_url,
+                &ancestors,
+            )
+            .is_some()
+        );
+    }
+
+    #[test]
+    fn frame_ancestors_has_no_fallback_and_allows_top_level_documents() {
+        assert!(
+            frame_ancestors_violation(
+                &["default-src 'none'"],
+                "https://child.test/frame.html",
+                &[Some("https://top.test")],
+            )
+            .is_none()
+        );
+        assert!(
+            frame_ancestors_violation(
+                &["frame-ancestors 'none'"],
+                "https://child.test/frame.html",
+                &[],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn every_frame_ancestors_policy_must_allow_embedding() {
+        let violation = frame_ancestors_violation(
+            &["frame-ancestors *", "frame-ancestors 'none'"],
+            "https://child.test/frame.html",
+            &[Some("https://top.test")],
+        )
+        .expect("one blocking policy must block the response");
+        assert_eq!(violation.original_policy, "frame-ancestors 'none'");
+    }
+
+    #[test]
+    fn frame_ancestors_matches_origins_and_rejects_opaque_ancestors() {
+        assert!(
+            frame_ancestors_violation(
+                &["frame-ancestors https://top.test/path"],
+                "https://child.test/frame.html",
+                &[Some("https://top.test")],
+            )
+            .is_some(),
+            "a host source containing a path must not match an ancestor origin"
+        );
+        assert!(
+            frame_ancestors_violation(
+                &["frame-ancestors *"],
+                "https://child.test/frame.html",
+                &[None],
+            )
+            .is_some(),
+            "an opaque ancestor origin must not match a source expression"
         );
     }
 

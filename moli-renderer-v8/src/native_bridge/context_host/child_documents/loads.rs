@@ -1,11 +1,16 @@
-use super::super::{ChildBrowsingContextBootstrap, JsContextHost};
+use super::super::{ChildBrowsingContextBootstrap, JsContextHost, OwnerDispatchScope};
 use super::{
     ChildDocumentNavigationInitiator, PendingChildDocumentNavigation,
     configure_child_document_navigation_request,
     snapshots::{child_document_content_type_for_url, child_document_content_type_from_headers},
 };
 use crate::{
-    content_security_policy::content_security_policy_reporting_endpoints_from_headers,
+    content_security_policy::{
+        ContentSecurityPolicyDisposition, ContentSecurityPolicyViolationEventFields,
+        content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints,
+        content_security_policy_reporting_endpoints_from_headers,
+        send_content_security_policy_reports,
+    },
     document_runtime::{
         DocumentPolicyContainer, DocumentSandboxPolicy, DomHandle,
         response_content_security_policies_from_headers,
@@ -402,6 +407,64 @@ impl JsContextHost {
             handle,
             target.load_id(),
         );
+        let result = match result {
+            Ok(ChildDocumentLoadOutcome::Loaded(mut loaded)) => {
+                if self.bypass_content_security_policy() {
+                    loaded
+                        .policy_container
+                        .clear_content_security_policy_for_bypass();
+                }
+                let ancestor_origins = self.child_document_frame_ancestor_origins(handle);
+                let reporting_endpoints =
+                    &loaded.policy_container.content_security_reporting_endpoints;
+                let report_only_violation =
+                    content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+                        &loaded
+                            .policy_container
+                            .response_content_security_report_only_policies,
+                        &loaded.final_url,
+                        &ancestor_origins,
+                        ContentSecurityPolicyDisposition::Report,
+                        reporting_endpoints,
+                    );
+                let enforced_violation =
+                    content_security_policy_frame_ancestors_violation_with_disposition_and_reporting_endpoints(
+                        &loaded.policy_container.response_content_security_policies,
+                        &loaded.final_url,
+                        &ancestor_origins,
+                        ContentSecurityPolicyDisposition::Enforce,
+                        reporting_endpoints,
+                    );
+                for violation in report_only_violation
+                    .iter()
+                    .chain(enforced_violation.iter())
+                {
+                    // The protected response never receives a Document when enforcement blocks
+                    // it, so there is no target on which to dispatch a DOM event. Keep the
+                    // violation observable to DevTools on the embedding frame owner instead.
+                    // SAFETY: JsContextHost is owned by the ScriptVm that owns this DocumentRuntime.
+                    unsafe { &mut *self.runtime }
+                        .record_content_security_policy_inspector_issue(Some(handle), violation);
+                    let fields =
+                        ContentSecurityPolicyViolationEventFields::from_url_violation(violation);
+                    send_content_security_policy_reports(
+                        pending.resource_loader.request_client(),
+                        &fields,
+                        &violation.report_uri_endpoints,
+                        &violation.report_to_endpoints,
+                    );
+                }
+                if let Some(violation) = enforced_violation {
+                    Err(format!(
+                        "child document response blocked by Content Security Policy `{}` for `{}`",
+                        violation.effective_directive, violation.blocked_uri
+                    ))
+                } else {
+                    Ok(ChildDocumentLoadOutcome::Loaded(loaded))
+                }
+            }
+            result => result,
+        };
         let document_credentialless = pending.document_credentialless;
         let credentialless_storage_nonce = pending.credentialless_storage_nonce;
         let replaces_existing_document = self
@@ -436,12 +499,7 @@ impl JsContextHost {
                 };
             }
             Ok(ChildDocumentLoadOutcome::Loaded(loaded)) => {
-                let mut loaded = *loaded;
-                if self.bypass_content_security_policy() {
-                    loaded
-                        .policy_container
-                        .clear_content_security_policy_for_bypass();
-                }
+                let loaded = *loaded;
                 if self.dispatch_child_browsing_context_unload_lifecycle_if_needed(scope, handle) {
                     body_activity = ChildDocumentLoadBodyActivity::PageCodeOrEventDispatch;
                 }
@@ -650,6 +708,35 @@ impl JsContextHost {
             pending.target.task_owner().document_id,
             pending.target.request_id(),
         );
+    }
+
+    fn child_document_frame_ancestor_origins(&self, handle: DomHandle) -> Vec<Option<url::Url>> {
+        let mut ancestors = Vec::new();
+        let mut current = handle;
+        for _ in 0..=self.child_browsing_contexts.len() {
+            let parent = self.child_browsing_context_parent_handle(current);
+            let owner_scope = match parent {
+                Some(parent) => OwnerDispatchScope::Child(parent),
+                None => self.child_browsing_context_popup_owner_id(current).map_or(
+                    OwnerDispatchScope::Top,
+                    OwnerDispatchScope::LightweightPopup,
+                ),
+            };
+            let origin = self
+                .window_access_origin_for_dispatch_scope(owner_scope)
+                .and_then(|origin| {
+                    let serialized = origin.serialized_origin();
+                    (serialized != "null")
+                        .then(|| url::Url::parse(&serialized).ok())
+                        .flatten()
+                });
+            ancestors.push(origin);
+            let Some(parent) = parent else {
+                break;
+            };
+            current = parent;
+        }
+        ancestors
     }
 }
 
