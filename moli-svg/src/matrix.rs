@@ -1,3 +1,5 @@
+use kurbo::{Affine, Point, Vec2};
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SvgMatrixComponents {
     pub a: f64,
@@ -10,91 +12,51 @@ pub struct SvgMatrixComponents {
 
 impl SvgMatrixComponents {
     pub fn identity() -> Self {
-        Self {
-            a: 1.0,
-            b: 0.0,
-            c: 0.0,
-            d: 1.0,
-            e: 0.0,
-            f: 0.0,
-        }
+        Self::from_affine(Affine::IDENTITY)
     }
 
     pub fn translate(x: f64, y: f64) -> Self {
-        Self {
-            e: x,
-            f: y,
-            ..Self::identity()
-        }
+        Self::from_affine(Affine::translate(Vec2::new(x, y)))
     }
 
     pub fn scale(x: f64, y: f64) -> Self {
-        Self {
-            a: x,
-            d: y,
-            ..Self::identity()
-        }
+        Self::from_affine(Affine::scale_non_uniform(x, y))
     }
 
     pub fn rotate(angle: f64) -> Self {
-        let radians = angle.to_radians();
-        let cos = radians.cos();
-        let sin = radians.sin();
-        Self {
-            a: cos,
-            b: sin,
-            c: -sin,
-            d: cos,
-            e: 0.0,
-            f: 0.0,
-        }
+        Self::from_affine(Affine::rotate(angle.to_radians()))
     }
 
     pub fn rotate_around(angle: f64, cx: f64, cy: f64) -> Self {
-        Self::translate(cx, cy)
-            .multiply(Self::rotate(angle))
-            .multiply(Self::translate(-cx, -cy))
+        Self::from_affine(Affine::rotate_about(angle.to_radians(), Point::new(cx, cy)))
     }
 
     pub fn skew_x(angle: f64) -> Self {
-        Self {
-            c: angle.to_radians().tan(),
-            ..Self::identity()
-        }
+        Self::from_affine(Affine::skew(angle.to_radians().tan(), 0.0))
     }
 
     pub fn skew_y(angle: f64) -> Self {
-        Self {
-            b: angle.to_radians().tan(),
-            ..Self::identity()
-        }
+        Self::from_affine(Affine::skew(0.0, angle.to_radians().tan()))
     }
 
     pub fn multiply(self, other: Self) -> Self {
-        Self {
-            a: self.a * other.a + self.c * other.b,
-            b: self.b * other.a + self.d * other.b,
-            c: self.a * other.c + self.c * other.d,
-            d: self.b * other.c + self.d * other.d,
-            e: self.a * other.e + self.c * other.f + self.e,
-            f: self.b * other.e + self.d * other.f + self.f,
-        }
+        Self::from_affine(self.to_affine() * other.to_affine())
     }
 
     pub fn then_translate(self, x: f64, y: f64) -> Self {
-        self.multiply(Self::translate(x, y))
+        Self::from_affine(self.to_affine().pre_translate(Vec2::new(x, y)))
     }
 
     pub fn then_scale(self, factor: f64) -> Self {
-        self.then_scale_non_uniform(factor, factor)
+        Self::from_affine(self.to_affine().pre_scale(factor))
     }
 
     pub fn then_scale_non_uniform(self, x: f64, y: f64) -> Self {
-        self.multiply(Self::scale(x, y))
+        Self::from_affine(self.to_affine().pre_scale_non_uniform(x, y))
     }
 
     pub fn then_rotate(self, angle: f64) -> Self {
-        self.multiply(Self::rotate(angle))
+        Self::from_affine(self.to_affine().pre_rotate(angle.to_radians()))
     }
 
     pub fn then_rotate_from_vector(self, x: f64, y: f64) -> Option<Self> {
@@ -105,29 +67,27 @@ impl SvgMatrixComponents {
     }
 
     pub fn then_flip_x(self) -> Self {
-        self.then_scale_non_uniform(-1.0, 1.0)
+        Self::from_affine(self.to_affine().pre_scale_non_uniform(-1.0, 1.0))
     }
 
     pub fn then_flip_y(self) -> Self {
-        self.then_scale_non_uniform(1.0, -1.0)
+        Self::from_affine(self.to_affine().pre_scale_non_uniform(1.0, -1.0))
     }
 
     pub fn then_skew_x(self, angle: f64) -> Self {
-        self.multiply(Self::skew_x(angle))
+        Self::from_affine(self.to_affine().pre_skew(angle.to_radians().tan(), 0.0))
     }
 
     pub fn then_skew_y(self, angle: f64) -> Self {
-        self.multiply(Self::skew_y(angle))
+        Self::from_affine(self.to_affine().pre_skew(0.0, angle.to_radians().tan()))
     }
 
     pub fn determinant(self) -> f64 {
-        self.a * self.d - self.c * self.b
+        self.to_affine().determinant()
     }
 
     pub fn has_finite_components(self) -> bool {
-        [self.a, self.b, self.c, self.d, self.e, self.f]
-            .into_iter()
-            .all(f64::is_finite)
+        self.to_affine().is_finite()
     }
 
     pub fn is_invertible(self) -> bool {
@@ -136,26 +96,10 @@ impl SvgMatrixComponents {
     }
 
     pub fn inverse(self) -> Self {
-        let determinant = self.determinant();
         if !self.is_invertible() {
-            let nan = f64::NAN;
-            return Self {
-                a: nan,
-                b: nan,
-                c: nan,
-                d: nan,
-                e: nan,
-                f: nan,
-            };
+            return Self::from_affine(Affine::new([f64::NAN; 6]));
         }
-        Self {
-            a: self.d / determinant,
-            b: -self.b / determinant,
-            c: -self.c / determinant,
-            d: self.a / determinant,
-            e: (self.c * self.f - self.d * self.e) / determinant,
-            f: (self.b * self.e - self.a * self.f) / determinant,
-        }
+        Self::from_affine(self.to_affine().inverse())
     }
 
     pub fn serialize_transform_matrix(self) -> String {
@@ -168,6 +112,15 @@ impl SvgMatrixComponents {
             serialize_number(self.e),
             serialize_number(self.f)
         )
+    }
+
+    fn to_affine(self) -> Affine {
+        Affine::new([self.a, self.b, self.c, self.d, self.e, self.f])
+    }
+
+    fn from_affine(affine: Affine) -> Self {
+        let [a, b, c, d, e, f] = affine.as_coeffs();
+        Self { a, b, c, d, e, f }
     }
 }
 
