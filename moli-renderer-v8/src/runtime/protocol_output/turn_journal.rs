@@ -190,9 +190,9 @@ impl RendererTurnOutputJournal {
     /// second completion sequencer. The returned fence names the terminal
     /// batch itself so the command completion cannot release post-response
     /// owner actions before protocol ingress admits that batch. `None` means
-    /// the exact attachment stream was already closed before it could take
-    /// ownership of the records.
-    pub(crate) fn try_publish_records_and_declare_fence(
+    /// the exact attachment stream was closed, unbound, or rejected the
+    /// publication before it could take ownership of the records.
+    pub(crate) fn try_publish_terminal_records_and_declare_fence(
         &self,
         records: impl IntoIterator<Item = PendingRendererOutputRecord>,
     ) -> Option<RendererOutputFence> {
@@ -205,23 +205,22 @@ impl RendererTurnOutputJournal {
         if state.closed {
             return None;
         }
+        // A terminal response cannot settle against a deferred publication:
+        // the DevTools session has no command-reply fallback if later
+        // transport admission fails.
+        let transport = state.transport.clone()?;
         state.records.extend(records);
         let publication = Self::settle_locked(&mut state)
-            .expect("newly appended renderer output records must settle");
+            .expect("newly appended renderer output records must settle")
+            .with_terminal_response_admission();
         let cursor = publication.cursor();
-        if let Some(transport) = state.transport.as_ref() {
-            // Admission failure means the protocol owner has retired or its
-            // bounded stream is terminal. The journal has nevertheless taken
-            // ownership at this exact sequence; falling back to another sink
-            // here could duplicate the response.
-            let _ = publication.publish_to(transport);
-        } else {
-            state.deferred_publications.push(publication);
+        // Once this exact publication is rejected, the bounded transport is
+        // terminal. Report the rejection to the response authority instead
+        // of manufacturing a fence and falsely settling the frontend call.
+        if publication.publish_to(&transport).is_err() {
+            return None;
         }
-        Some(RendererOutputFence::declare(
-            cursor,
-            state.transport.clone(),
-        ))
+        Some(RendererOutputFence::declare(cursor, Some(transport)))
     }
 
     fn settle_locked(

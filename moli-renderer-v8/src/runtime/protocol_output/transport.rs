@@ -83,7 +83,9 @@ impl RendererOutputTransportMessage {
 
     fn admission_class(&self) -> RendererOutputTransportAdmissionClass {
         match self {
-            Self::Publication(publication) if !publication.contains_owner_action() => {
+            Self::Publication(publication)
+                if !publication.requires_essential_transport_admission() =>
+            {
                 RendererOutputTransportAdmissionClass::Observation
             }
             Self::StreamControl(_)
@@ -152,11 +154,11 @@ impl RendererOutputTransportLimits {
         );
         assert!(
             self.max_observation_messages < self.max_pending_messages,
-            "renderer output transport must reserve messages for control and owner actions"
+            "renderer output transport must reserve messages for control, owner actions, and terminal responses"
         );
         assert!(
             self.max_observation_bytes < self.max_pending_bytes,
-            "renderer output transport must reserve bytes for control and owner actions"
+            "renderer output transport must reserve bytes for control, owner actions, and terminal responses"
         );
         assert!(
             self.max_message_bytes <= self.max_pending_bytes,
@@ -522,6 +524,32 @@ fn renderer_output_transport_channel_with_limits(
             closed: false,
         },
     )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(in crate::runtime) struct RendererOutputTransportTestLimits {
+    pub max_pending_messages: usize,
+    pub max_pending_bytes: usize,
+    pub max_observation_messages: usize,
+    pub max_observation_bytes: usize,
+    pub max_message_bytes: usize,
+}
+
+#[cfg(test)]
+pub(in crate::runtime) fn renderer_output_transport_channel_with_test_limits(
+    limits: RendererOutputTransportTestLimits,
+) -> (
+    RendererOutputTransportSender,
+    RendererOutputTransportReceiver,
+) {
+    renderer_output_transport_channel_with_limits(RendererOutputTransportLimits {
+        max_pending_messages: limits.max_pending_messages,
+        max_pending_bytes: limits.max_pending_bytes,
+        max_observation_messages: limits.max_observation_messages,
+        max_observation_bytes: limits.max_observation_bytes,
+        max_message_bytes: limits.max_message_bytes,
+    })
 }
 
 #[cfg(test)]

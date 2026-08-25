@@ -21,13 +21,25 @@ pub use transport::{
     RendererOutputTransportReceiver, RendererOutputTransportSendError,
     RendererOutputTransportSender, renderer_output_transport_channel,
 };
+#[cfg(test)]
+pub(in crate::runtime) use transport::{
+    RendererOutputTransportTestLimits, renderer_output_transport_channel_with_test_limits,
+};
 pub(crate) use turn_journal::RendererTurnOutputJournal;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RendererOutputPublicationAdmission {
+    Observation,
+    EssentialOwnerProgress,
+    EssentialTerminalResponse,
+}
 
 /// Move-owned output frozen at one renderer owner-turn settlement boundary.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RendererOutputPublication {
     cursor: RendererOutputCursor,
     ordering: RendererOutputPublicationOrdering,
+    admission: RendererOutputPublicationAdmission,
     records: Vec<RendererOutputRecord>,
 }
 
@@ -52,9 +64,15 @@ impl RendererOutputPublication {
             !records.is_empty(),
             "renderer output publications must be non-empty"
         );
+        let admission = if records.iter().any(RendererOutputRecord::is_owner_action) {
+            RendererOutputPublicationAdmission::EssentialOwnerProgress
+        } else {
+            RendererOutputPublicationAdmission::Observation
+        };
         Self {
             cursor,
             ordering: RendererOutputPublicationOrdering::Unconstrained,
+            admission,
             records,
         }
     }
@@ -62,6 +80,19 @@ impl RendererOutputPublication {
     pub(crate) fn with_ordering(mut self, ordering: RendererOutputPublicationOrdering) -> Self {
         self.ordering = ordering;
         self
+    }
+
+    /// Protects the one terminal response owned by a DevTools session from
+    /// ordinary observation backpressure. The response remains a protocol
+    /// observation semantically, but command completion depends on admitting
+    /// it, so transport must draw from its essential reserve.
+    pub(crate) fn with_terminal_response_admission(mut self) -> Self {
+        self.admission = RendererOutputPublicationAdmission::EssentialTerminalResponse;
+        self
+    }
+
+    pub(crate) fn requires_essential_transport_admission(&self) -> bool {
+        self.admission != RendererOutputPublicationAdmission::Observation
     }
 
     pub fn cursor(&self) -> RendererOutputCursor {
@@ -78,12 +109,6 @@ impl RendererOutputPublication {
 
     pub fn into_records(self) -> Vec<RendererOutputRecord> {
         self.records
-    }
-
-    pub(crate) fn contains_owner_action(&self) -> bool {
-        self.records
-            .iter()
-            .any(RendererOutputRecord::is_owner_action)
     }
 
     pub(crate) fn transport_charge_bytes(&self) -> usize {

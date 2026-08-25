@@ -3302,7 +3302,7 @@ impl RendererDevToolsSessionOutputHost {
             RendererProtocolObservation::RuntimeInspector(batch),
         );
         self.output_journal
-            .try_publish_records_and_declare_fence([record])
+            .try_publish_terminal_records_and_declare_fence([record])
             .ok_or(completion)
     }
 }
@@ -3593,6 +3593,9 @@ impl RendererRuntimeInspectorResponseSender {
 mod renderer_runtime_inspector_response_channel_tests {
     use super::*;
     use crate::page_task_queue::{RendererOwnerWake, RendererOwnerWakeSender};
+    use crate::runtime::protocol_output::{
+        RendererOutputTransportTestLimits, renderer_output_transport_channel_with_test_limits,
+    };
     use tokio::sync::oneshot::error::TryRecvError;
 
     fn output(call_id: i32) -> RendererRuntimeCommandOutput {
@@ -3602,6 +3605,40 @@ mod renderer_runtime_inspector_response_channel_tests {
                 "result": {},
             })),
         )
+    }
+
+    fn output_with_by_value_payload(
+        call_id: i32,
+        payload_bytes: usize,
+    ) -> RendererRuntimeCommandOutput {
+        RendererRuntimeCommandOutput::from_inspector_message(
+            RendererRuntimeInspectorMessage::protocol(json!({
+                "id": call_id,
+                "result": {
+                    "result": {
+                        "type": "string",
+                        "value": "x".repeat(payload_bytes),
+                    }
+                },
+            })),
+        )
+    }
+
+    fn observation_publication(
+        stream: RendererOutputStreamIdentity,
+        sequence: u64,
+    ) -> RendererOutputTransportMessage {
+        let record = RendererOutputRecord::new_for_test(RendererOutputItem::Observation(
+            RendererProtocolObservation::RuntimeLifecycleError {
+                text: String::new(),
+                execution_context_id: None,
+            },
+        ));
+        RendererOutputPublication::new_for_test(
+            RendererOutputCursor::new_for_test(stream, sequence),
+            vec![record],
+        )
+        .into()
     }
 
     #[tokio::test]
@@ -3877,6 +3914,186 @@ mod renderer_runtime_inspector_response_channel_tests {
         };
         assert_eq!(message.value()["id"], json!(7));
         channel.cancel();
+    }
+
+    #[tokio::test]
+    async fn session_terminal_response_uses_essential_reserve_after_observation_saturation() {
+        let page_id = PageId::new_for_testing(2);
+        let stream = RendererOutputStreamIdentity::new_page_for_protocol_test(page_id);
+        let limits = RendererOutputTransportTestLimits {
+            max_pending_messages: 4,
+            max_pending_bytes: 24 * 1024,
+            max_observation_messages: 1,
+            max_observation_bytes: 4 * 1024,
+            max_message_bytes: 16 * 1024,
+        };
+        let (transport, mut transport_rx) =
+            renderer_output_transport_channel_with_test_limits(limits);
+        let journal = RendererTurnOutputJournal::new_with_transport(stream, transport.clone());
+        assert!(matches!(
+            transport_rx.recv().await,
+            Some(RendererOutputTransportMessage::StreamControl(
+                RendererOutputStreamControl::Opened { stream: opened }
+            )) if opened == stream
+        ));
+
+        let filler_stream = RendererOutputStreamIdentity::new_shared_worker_for_protocol_test(2002);
+        transport
+            .send(observation_publication(filler_stream, 1))
+            .expect("the first observation should fill its reserved quota");
+        assert_eq!(transport.diagnostics().pending_observation_messages, 1);
+        assert_eq!(
+            transport.diagnostics().pending_observation_bytes,
+            limits.max_observation_bytes
+        );
+
+        let attachment = RendererAgentAttachmentId::allocate();
+        let (channel, receiver) = RendererRuntimeInspectorResponseChannel::new_for_delivery(
+            moli_page_types::RendererInspectorResponseDelivery::DevToolsSession,
+        );
+        assert!(receiver.is_none());
+        let sender = channel
+            .activate_sender(29, Some(attachment))
+            .route_to_devtools_session_output(RendererDevToolsSessionOutputHost::new(
+                RendererDevToolsAgentToken::allocate(),
+                DevToolsSessionKey::Attached("SID-essential-terminal".to_owned()),
+                attachment,
+                journal,
+            ));
+        let settlement_rx = sender
+            .take_session_response_settlement_receiver()
+            .expect("the session owner should await terminal response admission");
+
+        sender
+            .send_output(output_with_by_value_payload(29, 3 * 1024))
+            .expect("terminal response should use the essential reserve");
+        let settlement = settlement_rx
+            .await
+            .expect("successful transport admission should settle the session call");
+        let (fence, response_succeeded) = settlement.into_parts();
+        assert!(response_succeeded);
+        assert_eq!(transport.diagnostics().pending_observation_messages, 1);
+        assert!(
+            transport.diagnostics().admitted_essential_messages >= 3,
+            "stream open, terminal response, and its cursor lease should use essential admission"
+        );
+        assert!(!transport.diagnostics().terminal);
+
+        assert!(matches!(
+            transport_rx.recv().await,
+            Some(RendererOutputTransportMessage::Publication(publication))
+                if publication.cursor().stream() == filler_stream
+        ));
+        let terminal_publication = match transport_rx
+            .recv()
+            .await
+            .expect("terminal response publication")
+        {
+            RendererOutputTransportMessage::Publication(publication) => publication,
+            other => panic!("expected terminal response publication, got {other:?}"),
+        };
+        assert_eq!(terminal_publication.cursor(), fence.cursor());
+        let [record] = terminal_publication.records() else {
+            panic!("terminal response should remain one atomic record");
+        };
+        let RendererOutputItem::Observation(RendererProtocolObservation::RuntimeInspector(batch)) =
+            record.item()
+        else {
+            panic!("terminal response should remain a Runtime Inspector observation");
+        };
+        let [RendererRuntimeInspectorMessage::Protocol(response)] = batch.messages.as_slice()
+        else {
+            panic!("terminal publication should contain exactly one protocol response");
+        };
+        assert_eq!(response.value()["id"], json!(29));
+        assert!(matches!(
+            transport_rx.recv().await,
+            Some(RendererOutputTransportMessage::CursorLeaseDeclared { cursor, .. })
+                if cursor == fence.cursor()
+        ));
+        drop(fence);
+    }
+
+    #[tokio::test]
+    async fn rejected_session_terminal_response_does_not_settle_the_frontend_call() {
+        let page_id = PageId::new_for_testing(3);
+        let stream = RendererOutputStreamIdentity::new_page_for_protocol_test(page_id);
+        let (transport, mut transport_rx) =
+            renderer_output_transport_channel_with_test_limits(RendererOutputTransportTestLimits {
+                max_pending_messages: 1,
+                max_pending_bytes: 16 * 1024,
+                max_observation_messages: 0,
+                max_observation_bytes: 4 * 1024,
+                max_message_bytes: 16 * 1024,
+            });
+        // Keep the essential Opened message pending so the total message
+        // budget rejects the following terminal response.
+        let journal = RendererTurnOutputJournal::new_with_transport(stream, transport.clone());
+        let attachment = RendererAgentAttachmentId::allocate();
+        let (channel, receiver) = RendererRuntimeInspectorResponseChannel::new_for_delivery(
+            moli_page_types::RendererInspectorResponseDelivery::DevToolsSession,
+        );
+        assert!(receiver.is_none());
+        let sender = channel
+            .activate_sender(31, Some(attachment))
+            .route_to_devtools_session_output(RendererDevToolsSessionOutputHost::new(
+                RendererDevToolsAgentToken::allocate(),
+                DevToolsSessionKey::Attached("SID-rejected-terminal".to_owned()),
+                attachment,
+                journal,
+            ));
+        let settlement_rx = sender
+            .take_session_response_settlement_receiver()
+            .expect("the session owner should await terminal response admission");
+
+        let rejected = sender
+            .send_output(output(31))
+            .expect_err("a full total budget must reject the terminal response");
+        assert_eq!(rejected.call_id, 31);
+        assert!(transport.diagnostics().terminal);
+        assert!(
+            settlement_rx.await.is_err(),
+            "transport rejection must close rather than satisfy the settlement waiter"
+        );
+        assert!(channel.try_activate_sender(32, Some(attachment)).is_none());
+        assert!(matches!(
+            transport_rx.recv().await,
+            Some(RendererOutputTransportMessage::StreamControl(
+                RendererOutputStreamControl::Opened { stream: opened }
+            )) if opened == stream
+        ));
+        assert_eq!(transport_rx.recv().await, None);
+    }
+
+    #[tokio::test]
+    async fn unbound_session_terminal_response_is_not_deferred_or_settled() {
+        let page_id = PageId::new_for_testing(4);
+        let stream = RendererOutputStreamIdentity::new_page_for_protocol_test(page_id);
+        let journal = RendererTurnOutputJournal::new(stream);
+        let attachment = RendererAgentAttachmentId::allocate();
+        let (channel, receiver) = RendererRuntimeInspectorResponseChannel::new_for_delivery(
+            moli_page_types::RendererInspectorResponseDelivery::DevToolsSession,
+        );
+        assert!(receiver.is_none());
+        let sender = channel
+            .activate_sender(33, Some(attachment))
+            .route_to_devtools_session_output(RendererDevToolsSessionOutputHost::new(
+                RendererDevToolsAgentToken::allocate(),
+                DevToolsSessionKey::Attached("SID-unbound-terminal".to_owned()),
+                attachment,
+                journal.clone(),
+            ));
+        let settlement_rx = sender
+            .take_session_response_settlement_receiver()
+            .expect("the session owner should await terminal response admission");
+
+        let rejected = sender
+            .send_output(output(33))
+            .expect_err("an unbound transport cannot admit a terminal response");
+        assert_eq!(rejected.call_id, 33);
+        assert!(settlement_rx.await.is_err());
+        assert_eq!(journal.last_published_cursor(), None);
+        assert_eq!(journal.pending_len(), 0);
     }
 
     #[tokio::test]
