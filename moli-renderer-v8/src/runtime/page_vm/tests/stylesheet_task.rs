@@ -1708,6 +1708,14 @@ async fn failed_import_installs_an_empty_child_and_errors_the_root_link() {
         let document_url = Url::parse(&format!("{base_url}/page.html"))?;
         let (mut page_vm, _resource_source, mut wake_rx) =
             page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+        let owner = page_vm
+            .vm()
+            .current_main_document_task_owner()
+            .expect("main Document owner");
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .activate_main_parser_continuation(owner);
         page_vm.vm_mut().eval(&format!(
             r#"
 globalThis.__failedImportEvents = [];
@@ -1724,6 +1732,15 @@ document.head.append(link);
 "queued"
 "#,
         ))?;
+        let blocking_inputs = [parser_captured_stylesheet_input_for_test(
+            &page_vm,
+            "failed-import-root",
+        )];
+        let signatures = blocking_inputs
+            .iter()
+            .map(|input| input.signature().clone())
+            .collect::<Vec<_>>();
+        note_parser_captured_stylesheet_inputs_for_test(&mut page_vm, &blocking_inputs);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
@@ -1737,6 +1754,13 @@ document.head.append(link);
                 )
                 .await?
         );
+        assert!(
+            page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "the parser must remain blocked while the failing import is pending"
+        );
         wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
@@ -1746,6 +1770,15 @@ document.head.append(link);
                 )
                 .await?
         );
+        assert!(
+            !page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "a failed import graph must release script execution before reporting the error"
+        );
+        assert!(page_vm.has_ready_page_networking_task());
+        assert!(page_vm.has_ready_dom_manipulation_task_for_test());
 
         assert_eq!(
             page_vm.vm_mut().eval(
@@ -1766,16 +1799,23 @@ document.head.append(link);
             "true|0|true|rgb(1, 2, 3)|"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
-            .await;
-        let event = take_next_link_element_event_task_for_test(&mut page_vm)
-            .expect("the failed graph must publish one link event");
-        page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
-            )
-            .await?;
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "the parser continuation must remain production-selectable"
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__failedImportEvents.join('|')")?,
+            "",
+            "the parser continuation must be older than the failed link event"
+        );
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "the failed link event must remain production-selectable"
+        );
         assert_eq!(
             page_vm.vm_mut().eval("__failedImportEvents.join('|')")?,
             "error"
@@ -2255,7 +2295,12 @@ document.head.append(current);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn last_blocking_link_event_dispatches_before_parser_continuation() {
+async fn last_blocking_link_releases_parser_before_its_event() {
+    // Deliberately match Blink: stylesheet/import completion posts parser
+    // continuation independently of the later link event. This differs from
+    // the current expectation in WPT
+    // `link-load-fired-before-scripting-unblocked.html`, which Blink records
+    // as a known failure.
     run_page_vm_async_test(async move {
         let loader =
             crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
@@ -2319,31 +2364,28 @@ document.head.append(blocking);
             "stylesheet settlement should publish Blink-style parser reevaluation"
         );
 
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::DomManipulationTask)
-            .await;
-        let event = take_next_link_element_event_task_for_test(&mut page_vm)
-            .expect("blocking link load event DOM-manipulation turn");
-        page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(event),
-                &loader,
-            )
-            .await?;
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "stylesheet settlement must leave one production-selectable task"
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__blockingLinkEventSeen")?,
+            "false",
+            "the parser continuation must be older than the independent link event"
+        );
+
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "the link event must remain selectable after parser admission"
+        );
         assert_eq!(
             page_vm.vm_mut().eval("__blockingLinkEventSeen")?,
             "true",
-            "the observable link event must finish before parser admission"
-        );
-
-        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
-        assert!(
-            page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
-                )
-                .await?,
-            "stylesheet release must queue an exact main-parser continuation"
+            "the later DOM-manipulation turn must dispatch the link event"
         );
         Ok::<_, anyhow::Error>(())
     })
@@ -2352,9 +2394,10 @@ document.head.append(blocking);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn shared_blocking_fetch_waits_for_every_link_event_before_parser_continuation() {
+async fn shared_blocking_fetch_releases_parser_before_all_link_events() {
     run_page_vm_async_test(async move {
-        let loader = crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
         let document_url =
             Url::parse("https://example.com/shared-stylesheet-parser-continuation").unwrap();
         let (mut page_vm, _resource_source, mut wake_rx) =
@@ -2388,10 +2431,7 @@ for (const id of ["first", "second"]) {
             parser_captured_stylesheet_input_for_test(&page_vm, "first"),
             parser_captured_stylesheet_input_for_test(&page_vm, "second"),
         ];
-        note_parser_captured_stylesheet_inputs_for_test(
-            &mut page_vm,
-            &blocking_inputs,
-        );
+        note_parser_captured_stylesheet_inputs_for_test(&mut page_vm, &blocking_inputs);
         page_vm
             .vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
@@ -2412,63 +2452,335 @@ for (const id of ["first", "second"]) {
         );
         assert!(
             page_vm
-                .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
-                    &loader,
-                )
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
                 .await?,
-            "shared stylesheet completion must queue an early parser reevaluation turn"
+            "the coalesced parser continuation must remain production-selectable"
         );
-
-        wait_for_stylesheet_source(
-            &mut wake_rx,
-            RendererOwnerWakeSource::DomManipulationTask,
-        )
-        .await;
-        let first = take_next_link_element_event_task_for_test(&mut page_vm)
-            .expect("first blocking link event");
-        page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(first),
-                &loader,
-            )
-            .await?;
         assert_eq!(
             page_vm.vm_mut().eval("__blockingLinkEvents.length")?,
-            "1"
+            "0",
+            "all clients of the shared completion must enqueue their events after parser admission"
         );
         assert!(
             !page_vm.has_ready_page_networking_task(),
-            "the first client of a shared fetch must not release the parser while another blocking link event remains posted"
+            "one shared completion must publish only one parser continuation"
         );
 
-        let second = take_next_link_element_event_task_for_test(&mut page_vm)
-            .expect("second blocking link event");
-        page_vm
-            .run_claimed_dom_manipulation_task_through_selected_dispatcher_for_test(
-                crate::page_task_queue::RendererPageDomManipulationTask::ConnectedStyleEvent(
-                    second,
-                ),
-                &loader,
-            )
-            .await?;
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "the first link event must remain production-selectable"
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__blockingLinkEvents.length")?,
+            "1",
+            "the first link event must run after parser admission"
+        );
+
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?,
+            "the second link event must remain production-selectable"
+        );
         assert_eq!(
             page_vm.vm_mut().eval("__blockingLinkEvents.join('|')")?,
             "first|second"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("shared stylesheet parser continuation ordering test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn parser_blocking_link_waits_for_nested_imports_then_releases_before_event() {
+    run_page_vm_async_test(async move {
+        let (base_url, server) = spawn_path_response_http_server(vec![
+            (
+                "/blocking-root.css",
+                "HTTP/1.1 200 OK",
+                "@import './nested/child.css'; .root { color: rgb(1, 2, 3); }".to_owned(),
+                Duration::ZERO,
+            ),
+            (
+                "/nested/child.css",
+                "HTTP/1.1 200 OK",
+                "@import './leaf.css'; .child { color: rgb(4, 5, 6); }".to_owned(),
+                Duration::from_millis(100),
+            ),
+            (
+                "/nested/leaf.css",
+                "HTTP/1.1 200 OK",
+                ".leaf { color: rgb(7, 8, 9); }".to_owned(),
+                Duration::ZERO,
+            ),
+        ])
+        .await;
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let document_url = Url::parse(&format!("{base_url}/page.html"))?;
+        let (mut page_vm, _resource_source, mut wake_rx) =
+            page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+        let owner = page_vm
+            .vm()
+            .current_main_document_task_owner()
+            .expect("main Document owner");
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .activate_main_parser_continuation(owner);
+
+        let href = serde_json::to_string(&format!("{base_url}/blocking-root.css"))?;
+        page_vm.vm_mut().eval(&format!(
+            r#"
+globalThis.__blockingImportEvents = [];
+const blockingImport = document.createElement("link");
+blockingImport.id = "blocking-import";
+blockingImport.rel = "stylesheet";
+blockingImport.href = {href};
+blockingImport.addEventListener("load", () => __blockingImportEvents.push("load"));
+blockingImport.addEventListener("error", () => __blockingImportEvents.push("error"));
+document.head.append(blockingImport);
+"queued"
+"#,
+        ))?;
+        let blocking_inputs = [parser_captured_stylesheet_input_for_test(
+            &page_vm,
+            "blocking-import",
+        )];
+        let signatures = blocking_inputs
+            .iter()
+            .map(|input| input.signature().clone())
+            .collect::<Vec<_>>();
+        note_parser_captured_stylesheet_inputs_for_test(&mut page_vm, &blocking_inputs);
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+
+        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        assert!(
+            page_vm
+                .run_exact_selected_page_task_for_test(
+                    PageSelectedTaskTestSelector::StylesheetCompletion,
+                    &loader,
+                )
+                .await?,
+            "the root stylesheet must complete as one Networking turn"
+        );
+        assert!(
+            page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "root settlement must not release the parser while its nested import graph is pending"
+        );
+        assert!(
+            !page_vm.has_ready_page_networking_task(),
+            "a pending import graph must not publish an early parser continuation"
+        );
+        assert!(
+            !page_vm.has_ready_dom_manipulation_task_for_test(),
+            "the link event must also wait for the complete import graph"
         );
 
         wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
         assert!(
             page_vm
                 .run_exact_selected_page_task_for_test(
-                    PageSelectedTaskTestSelector::MainParserContinuation,
+                    PageSelectedTaskTestSelector::StylesheetCompletion,
                     &loader,
                 )
                 .await?,
-            "the last blocking link event must queue the parser continuation"
+            "the nested import graph must complete as one Networking turn"
+        );
+        assert!(
+            !page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "the complete import graph must release the parser before event dispatch"
+        );
+        assert!(page_vm.has_ready_page_networking_task());
+        assert!(page_vm.has_ready_dom_manipulation_task_for_test());
+
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__blockingImportEvents.join('|')")?,
+            "",
+            "the parser continuation must be older than the root link event"
+        );
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__blockingImportEvents.join('|')")?,
+            "load"
+        );
+        server.await.expect("nested blocking import fixture server");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("parser-blocking nested import ordering test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn removing_pending_parser_blocking_link_releases_parser_without_an_event() {
+    run_page_vm_async_test(async move {
+        let (base_url, server) = spawn_path_response_http_server(vec![(
+            "/slow.css",
+            "HTTP/1.1 200 OK",
+            "body { color: rgb(1, 2, 3); }".to_owned(),
+            Duration::from_secs(2),
+        )])
+        .await;
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let document_url = Url::parse(&format!("{base_url}/page.html"))?;
+        let (mut page_vm, _resource_source, _wake_rx) =
+            page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+        let owner = page_vm
+            .vm()
+            .current_main_document_task_owner()
+            .expect("main Document owner");
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .activate_main_parser_continuation(owner);
+
+        let href = serde_json::to_string(&format!("{base_url}/slow.css"))?;
+        page_vm.vm_mut().eval(&format!(
+            r#"
+globalThis.__removedBlockingEvents = [];
+const removedBlocking = document.createElement("link");
+removedBlocking.id = "removed-blocking";
+removedBlocking.rel = "stylesheet";
+removedBlocking.href = {href};
+removedBlocking.addEventListener("load", () => __removedBlockingEvents.push("load"));
+removedBlocking.addEventListener("error", () => __removedBlockingEvents.push("error"));
+document.head.append(removedBlocking);
+"queued"
+"#,
+        ))?;
+        let blocking_inputs = [parser_captured_stylesheet_input_for_test(
+            &page_vm,
+            "removed-blocking",
+        )];
+        let signatures = blocking_inputs
+            .iter()
+            .map(|input| input.signature().clone())
+            .collect::<Vec<_>>();
+        note_parser_captured_stylesheet_inputs_for_test(&mut page_vm, &blocking_inputs);
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        assert!(
+            page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter())
+        );
+
+        page_vm
+            .vm_mut()
+            .eval("document.getElementById('removed-blocking').remove(); 'removed'")?;
+        assert!(
+            !page_vm
+                .vm_mut()
+                .document_runtime
+                .has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "disconnecting the owner must remove its exact parser blocker"
+        );
+        assert!(
+            page_vm.has_ready_page_networking_task(),
+            "removing the last blocker must wake the parser"
+        );
+        assert!(
+            !page_vm.has_ready_dom_manipulation_task_for_test(),
+            "a cancelled owner must not publish a load/error event"
+        );
+        assert!(
+            page_vm
+                .run_exact_selected_page_task_for_test(
+                    PageSelectedTaskTestSelector::MainParserContinuation,
+                    &loader,
+                )
+                .await?
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__removedBlockingEvents.join('|')")?,
+            ""
+        );
+        server.abort();
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .expect("removed parser-blocking link release test should run");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn dynamic_stylesheet_completion_does_not_publish_a_parser_continuation() {
+    run_page_vm_async_test(async move {
+        let loader =
+            crate::network::ResourceRequestClient::new(&FetchConfig::default()).expect("loader");
+        let document_url = Url::parse("https://example.com/dynamic-stylesheet-event").unwrap();
+        let (mut page_vm, _resource_source, mut wake_rx) =
+            page_vm_with_bound_task_sources_and_owner_wake(&loader, document_url);
+        let owner = page_vm
+            .vm()
+            .current_main_document_task_owner()
+            .expect("main Document owner");
+        page_vm
+            .vm_mut()
+            .document_runtime
+            .activate_main_parser_continuation(owner);
+
+        page_vm.vm_mut().eval(
+            r#"
+globalThis.__dynamicStyleEvents = [];
+const dynamicStyle = document.createElement("link");
+dynamicStyle.rel = "stylesheet";
+dynamicStyle.href = "data:text/css,body%7Bcolor%3Argb(1%2C%202%2C%203)%7D";
+dynamicStyle.addEventListener("load", () => __dynamicStyleEvents.push("load"));
+document.head.append(dynamicStyle);
+"queued"
+"#,
+        )?;
+        page_vm
+            .vm_mut()
+            .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
+        wait_for_stylesheet_source(&mut wake_rx, RendererOwnerWakeSource::NetworkingTask).await;
+        assert!(
+            page_vm
+                .run_exact_selected_page_task_for_test(
+                    PageSelectedTaskTestSelector::StylesheetCompletion,
+                    &loader,
+                )
+                .await?
+        );
+        assert!(
+            !page_vm.has_ready_page_networking_task(),
+            "a dynamic non-parser-owned stylesheet must not manufacture parser work"
+        );
+        assert!(page_vm.has_ready_dom_manipulation_task_for_test());
+        assert!(
+            page_vm
+                .run_one_oldest_ready_page_task_on_owner_lane_for_test(&loader)
+                .await?
+        );
+        assert_eq!(
+            page_vm.vm_mut().eval("__dynamicStyleEvents.join('|')")?,
+            "load"
         );
         Ok::<_, anyhow::Error>(())
     })
     .await
-    .expect("shared stylesheet parser continuation ordering test should run");
+    .expect("dynamic stylesheet parser-notification test should run");
 }

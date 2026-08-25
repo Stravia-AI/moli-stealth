@@ -86,23 +86,27 @@ impl DocumentRuntime {
         &mut self,
         load: Arc<StylesheetLinkClient>,
     ) -> Option<StylesheetLinkClientTerminal> {
+        let had_pending_blocker = !self.parser_blocking_stylesheet_release_is_ready();
         let active_link_clients = self.stylesheet_lifecycle.link_client_index.len();
-        self.promote_stylesheet_link_client_candidates(vec![load], active_link_clients)
-            .into_iter()
-            .next()
+        let (terminals, settlements) =
+            self.promote_stylesheet_link_client_candidates(vec![load], active_link_clients);
+        self.publish_stylesheet_link_settlements(had_pending_blocker, settlements);
+        terminals.into_iter().next()
     }
 
     pub(super) fn promote_stylesheet_link_clients_for_fetch(
         &mut self,
         fetch: &crate::stylesheet_blocking::StylesheetFetch,
+        had_pending_blocker: bool,
     ) {
         let active_link_clients = self.stylesheet_lifecycle.link_client_index.len();
         let clients = self
             .stylesheet_lifecycle
             .link_client_index
             .take_for_fetch(fetch);
-        let terminals =
+        let (terminals, settlements) =
             self.promote_stylesheet_link_client_candidates(clients, active_link_clients);
+        self.publish_stylesheet_link_settlements(had_pending_blocker, settlements);
         self.stylesheet_lifecycle
             .ready_stylesheet_link_client_terminals
             .extend(terminals);
@@ -112,7 +116,7 @@ impl DocumentRuntime {
         &mut self,
         candidates: Vec<Arc<StylesheetLinkClient>>,
         active_link_clients: usize,
-    ) -> Vec<StylesheetLinkClientTerminal> {
+    ) -> (Vec<StylesheetLinkClientTerminal>, Vec<LinkStyleSettlement>) {
         #[cfg(test)]
         let trace_enabled = true;
         #[cfg(not(test))]
@@ -121,6 +125,7 @@ impl DocumentRuntime {
         let mut inspected_link_states = 0_u64;
         let mut promoted_clients = 0_u64;
         let mut terminals = Vec::new();
+        let mut settlements = Vec::new();
         for load in candidates {
             if trace_enabled {
                 inspected_link_states += 1;
@@ -130,27 +135,18 @@ impl DocumentRuntime {
             };
             let handle = load.owner();
             let successful = terminal.is_ready();
-            let (accepted, ready) = self
+            let settlement = self
                 .stylesheet_lifecycle
                 .owner_states
                 .link_state_mut(handle)
-                .map(|state| {
-                    let accepted = state.accept_resource_completion(&load, successful);
-                    let ready = accepted.then(|| state.take_ready_event()).flatten();
-                    (accepted, ready)
-                })
-                .unwrap_or((false, None));
-            if accepted {
+                .and_then(|state| state.accept_resource_completion(&load, successful));
+            if let Some(settlement) = settlement {
                 promoted_clients += 1;
                 terminals.push(StylesheetLinkClientTerminal::new(
                     Arc::clone(&load),
                     terminal,
                 ));
-            }
-            if let Some((load, successful)) = ready {
-                self.push_ready_connected_style_load(ReadyConnectedStyleLoad::for_stylesheet_link(
-                    load, successful,
-                ));
+                settlements.push(settlement);
             }
         }
         if let Some(started) = trace_started {
@@ -175,7 +171,7 @@ impl DocumentRuntime {
                 stage = "stylesheet_link_client_promotion_done",
             );
         }
-        terminals
+        (terminals, settlements)
     }
 
     pub(super) fn note_connected_style_import_completion(
@@ -189,26 +185,19 @@ impl DocumentRuntime {
         ));
     }
 
-    pub(super) fn note_stylesheet_link_import_completion(
+    pub(super) fn settle_stylesheet_link_import_completion(
         &mut self,
         load: &Arc<StylesheetLinkClient>,
         successful: bool,
-    ) {
-        let ready = self
-            .stylesheet_lifecycle
+    ) -> Option<LinkStyleSettlement> {
+        self.stylesheet_lifecycle
             .owner_states
             .link_state_mut(load.owner())
             .and_then(|state| {
                 StylesheetLinkClient::ptr_eq(state.active_load(), load)
                     .then(|| state.accept_import_completion(successful))
-                    .filter(|accepted| *accepted)
-                    .and_then(|_| state.take_ready_event())
-            });
-        if let Some((load, successful)) = ready {
-            self.push_ready_connected_style_load(ReadyConnectedStyleLoad::for_stylesheet_link(
-                load, successful,
-            ));
-        }
+                    .flatten()
+            })
     }
 
     pub(in crate::document_runtime) fn apply_network_result_install_authority(
@@ -334,11 +323,7 @@ impl DocumentRuntime {
 
     #[cfg(test)]
     pub(in crate::document_runtime) fn drain_ready_connected_style_load_completions(&mut self) {
-        self.apply_ready_stylesheet_networking_tasks_for_test();
-        let completed_fetches = self.stylesheet_lifecycle.fetches.drain_ready_completions();
-        for fetch in completed_fetches {
-            self.promote_stylesheet_link_clients_for_fetch(&fetch);
-        }
+        self.drain_blocking_stylesheet_completions();
     }
 }
 

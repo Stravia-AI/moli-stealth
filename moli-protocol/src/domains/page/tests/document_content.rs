@@ -2439,7 +2439,7 @@ async fn stylesheet_gated_set_document_content_restores_parser_insertion_point()
         )
         .await,
         json!({
-            "order": ["style-load", "script"],
+            "order": ["script", "style-load"],
             "writtenColor": "rgb(11, 12, 13)",
             "bodyChildren": ["SCRIPT", "gate", "gated-script", "gated-written", "gated-tail"],
         }),
@@ -2449,7 +2449,8 @@ async fn stylesheet_gated_set_document_content_restores_parser_insertion_point()
 }
 
 // A failed script-blocking stylesheet still releases Blink's pending parser
-// script.  Its link error task is observable before the resumed script.
+// script. Resource failure releases the parser before the independent link
+// error task is dispatched.
 #[tokio::test(flavor = "multi_thread")]
 async fn failed_stylesheet_releases_set_document_content_parser_script() {
     let release_stylesheet = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -2531,7 +2532,7 @@ async fn failed_stylesheet_releases_set_document_content_parser_script() {
         )
         .await,
         json!({
-            "order": ["style-error", "script"],
+            "order": ["script", "style-error"],
             "ran": true,
             "tail": "tail",
             "sheets": 1,
@@ -2541,9 +2542,10 @@ async fn failed_stylesheet_releases_set_document_content_parser_script() {
     server.abort();
 }
 
-// Ported from Blink's incremental body-stylesheet parser tests.  Each link
-// owns its load event independently, while the parser-blocking script waits
-// until every stylesheet that precedes it has settled.
+// Ported from Blink's incremental body-stylesheet parser tests. Each link owns
+// its load event independently, while the parser-blocking script waits until
+// every stylesheet that precedes it has settled. The final settlement resumes
+// the parser before that link's independent load task.
 #[tokio::test(flavor = "multi_thread")]
 async fn set_document_content_waits_for_all_prior_stylesheets_but_dispatches_each_load() {
     let release_first = std::sync::Arc::new(tokio::sync::Notify::new());
@@ -2664,7 +2666,7 @@ async fn set_document_content_waits_for_all_prior_stylesheets_but_dispatches_eac
         )
         .await,
         json!({
-            "order": ["first-load", "second-load", "script"],
+            "order": ["first-load", "script", "second-load"],
             "ran": true,
             "tail": "tail",
             "color": "rgb(21, 22, 23)",
@@ -3120,7 +3122,7 @@ async fn stylesheet_blocked_external_set_document_content_script_fetches_in_para
         )
         .await,
         json!({
-            "order": ["style-load", "script-1", "script-1-load"],
+            "order": ["script-1", "script-1-load", "style-load"],
             "color": "rgb(61, 62, 63)",
             "tail": null,
         }),
@@ -3168,9 +3170,9 @@ async fn stylesheet_blocked_external_set_document_content_script_fetches_in_para
         .await,
         json!({
             "order": [
-                "style-load",
                 "script-1",
                 "script-1-load",
+                "style-load",
                 "script-2",
                 "script-2-load",
             ],
@@ -3968,7 +3970,7 @@ async fn document_written_stylesheet_pauses_set_document_content_parser_tail() {
         )
         .await,
         json!({
-            "order": ["script-end", "style-load", "external-script", "external-load"],
+            "order": ["script-end", "external-script", "external-load", "style-load"],
             "after": "after",
             "color": "rgb(101, 102, 103)",
             "scriptColor": "rgb(101, 102, 103)",

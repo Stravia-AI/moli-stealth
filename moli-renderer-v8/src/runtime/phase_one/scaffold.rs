@@ -88,12 +88,18 @@ async fn run_phase_one_creation_session_on_execution_context(
     scope_phase_one_execution_context_backend(&local_executor, async move {
         debug_assert_phase_one_execution_context_for(&run_executor, operation);
         let mut runtime = runtime;
-        if runtime.page_vm.has_ready_page_networking_task()
-            || runtime
-                .page_vm
-                .vm()
-                .document_runtime
-                .has_pending_document_write_external_script_load()
+        let main_parser_continuation_is_admitted = runtime
+            .page_vm
+            .vm()
+            .document_runtime
+            .has_main_parser_continuation_admission();
+        if !main_parser_continuation_is_admitted
+            && (runtime.page_vm.has_ready_page_networking_task()
+                || runtime
+                    .page_vm
+                    .vm()
+                    .document_runtime
+                    .has_pending_document_write_external_script_load())
         {
             // The unique typed consumer already lives in the owner-local
             // isolate reservation. Park creation so the stable Page arbiter

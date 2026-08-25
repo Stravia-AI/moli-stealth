@@ -52,6 +52,23 @@ pub(in crate::document_runtime) struct LinkStyleState {
     event_phase: LinkLoadEventPhase,
 }
 
+/// Element-local consequence of settling one linked stylesheet phase.
+///
+/// The caller snapshots global parser-blocker state before accepting a batch
+/// of these settlements. It can therefore publish a single parser
+/// continuation before enqueueing any independent load/error events from the
+/// batch.
+#[derive(Debug)]
+pub(in crate::document_runtime) struct LinkStyleSettlement {
+    ready_event: Option<(Arc<StylesheetLinkClient>, bool)>,
+}
+
+impl LinkStyleSettlement {
+    pub(super) fn into_ready_event(self) -> Option<(Arc<StylesheetLinkClient>, bool)> {
+        self.ready_event
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkLoadEventPhase {
     WaitingForCompletion,
@@ -92,7 +109,7 @@ impl LinkStyleState {
         self.resource_completion.followed_by(self.import_completion)
     }
 
-    pub(super) fn take_ready_event(&mut self) -> Option<(Arc<StylesheetLinkClient>, bool)> {
+    fn take_ready_event(&mut self) -> Option<(Arc<StylesheetLinkClient>, bool)> {
         if self.event_phase != LinkLoadEventPhase::WaitingForCompletion {
             return None;
         }
@@ -103,10 +120,6 @@ impl LinkStyleState {
         };
         self.event_phase = LinkLoadEventPhase::Posted;
         Some((Arc::clone(&self.active_load), successful))
-    }
-
-    pub(super) fn posted_event_load(&self) -> Option<&Arc<StylesheetLinkClient>> {
-        (self.event_phase == LinkLoadEventPhase::Posted).then_some(&self.active_load)
     }
 
     pub(super) fn consume_posted_event(&mut self, load: &Arc<StylesheetLinkClient>) -> bool {
@@ -123,15 +136,28 @@ impl LinkStyleState {
         &mut self,
         load: &Arc<StylesheetLinkClient>,
         successful: bool,
-    ) -> bool {
+    ) -> Option<LinkStyleSettlement> {
         if !StylesheetLinkClient::ptr_eq(&self.active_load, load) {
-            return false;
+            return None;
         }
-        self.resource_completion.settle(successful)
+        self.resource_completion
+            .settle(successful)
+            .then(|| self.settlement_after_phase_change())
     }
 
-    pub(super) fn accept_import_completion(&mut self, successful: bool) -> bool {
-        self.import_completion.settle(successful)
+    pub(super) fn accept_import_completion(
+        &mut self,
+        successful: bool,
+    ) -> Option<LinkStyleSettlement> {
+        self.import_completion
+            .settle(successful)
+            .then(|| self.settlement_after_phase_change())
+    }
+
+    fn settlement_after_phase_change(&mut self) -> LinkStyleSettlement {
+        LinkStyleSettlement {
+            ready_event: self.take_ready_event(),
+        }
     }
 }
 

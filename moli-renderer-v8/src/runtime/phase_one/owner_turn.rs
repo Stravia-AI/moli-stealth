@@ -51,7 +51,16 @@ impl ConcurrentParseTimeRuntime {
     }
 
     pub(super) async fn drive_owner_step(&mut self) -> Result<OwnerStepProgress> {
-        self.admit_selected_main_parser_continuation();
+        let parser_continuation_admitted = self.admit_selected_main_parser_continuation();
+        if parser_continuation_admitted {
+            // A selected continuation is the sole authority for resuming all
+            // parser residences, including a document.write() insertion
+            // suspended behind stylesheets. Link/style load events remain
+            // independent tasks and never grant parser progress.
+            self.page_vm
+                .run_ready_document_write_stylesheet_blocked_script()
+                .await?;
+        }
         let ConcurrentParseTimeRuntime {
             loader,
             state,

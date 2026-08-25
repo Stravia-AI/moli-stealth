@@ -1725,40 +1725,12 @@ impl PageVm {
         self.vm_mut()
             .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
 
-        let mut progressed = false;
-        loop {
-            let ready = self
-                .vm_mut()
-                .document_runtime
-                .pop_ready_connected_style_load_before_parser_blocking_script();
-            let Some(ready) = ready else {
-                break;
-            };
-            progressed = true;
-            if self
-                .execute_parse_time_on_existing_live_document_on_named_owner_local_task(
-                    ParseTimeLiveExecution::ConnectedStyleLoad { ready },
-                )
-                .await?
-                .navigation_triggered()
-            {
-                return Ok(true);
-            }
-            if !self
-                .vm()
-                .document_runtime
-                .has_pending_document_write_stylesheet_blocked_script()
-            {
-                return Ok(true);
-            }
-        }
-
         if !self
             .vm_mut()
             .document_runtime
             .document_write_stylesheet_blocked_script_is_ready()
         {
-            return Ok(progressed);
+            return Ok(false);
         }
 
         self.vm_mut().sync_live_document_style_sources();
@@ -1769,7 +1741,7 @@ impl PageVm {
             self.vm_mut()
                 .prime_document_lifecycle_processing_and_record_stylesheet_network_results();
         }
-        Ok(progressed || resumed)
+        Ok(resumed)
     }
 
     pub(super) fn devtools_agent_token(&self) -> RendererDevToolsAgentToken {

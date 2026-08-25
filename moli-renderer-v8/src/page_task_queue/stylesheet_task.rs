@@ -352,16 +352,6 @@ pub(crate) struct PageConnectedStyleEventTurnAction {
     pub(crate) target_effect: PageConnectedStyleEventTargetEffect,
 }
 
-impl PageConnectedStyleEventTurnAction {
-    pub(crate) const fn settled_current_owner(self) -> bool {
-        matches!(
-            self.target_effect,
-            PageConnectedStyleEventTargetEffect::DispatchedToCurrentOwner { .. }
-                | PageConnectedStyleEventTargetEffect::CurrentOwnerHadNoEvent { .. }
-        )
-    }
-}
-
 pub(crate) type PageConnectedStyleEventTurnOutcome =
     PageOwnerTurnOutcome<PageConnectedStyleEventTurnAction>;
 

@@ -1477,6 +1477,7 @@ impl DocumentRuntime {
         &mut self,
         handle: DomHandle,
     ) -> Vec<MainDocumentStyleLoadEventBinding> {
+        let had_pending_blocker = !self.parser_blocking_stylesheet_release_is_ready();
         let node_id = NodeId::new(handle.index());
         self.stylesheet_lifecycle
             .pre_initial_scan_processed_owners
@@ -1503,6 +1504,7 @@ impl DocumentRuntime {
         self.invalidate_stylesheet_owner_operations(handle);
         self.modulepreload_invalid_as_link_errors.remove(&handle);
         self.stylesheet_lifecycle.fetches.invalidate_node(node_id);
+        self.request_parser_if_stylesheet_blockers_released(had_pending_blocker);
         canceled_bindings
     }
 
@@ -1661,19 +1663,6 @@ impl DocumentRuntime {
         }
     }
 
-    pub(crate) fn pop_ready_connected_style_load_before_parser_blocking_script(
-        &mut self,
-    ) -> Option<ReadyConnectedStyleLoad> {
-        // A parser-blocking script resumes from the stylesheet gate using the
-        // blocking stylesheet state, while <link>/<style> load events are
-        // tracked by the connected-style lifecycle. Any connected load made
-        // ready by the same completion must run before the script observes the
-        // live DOM.
-        #[cfg(test)]
-        self.apply_ready_stylesheet_networking_tasks_for_test();
-        self.pop_ready_connected_style_load()
-    }
-
     pub(crate) fn accept_native_modulepreload_link_client_terminals(
         &mut self,
         key: &ModuleMapKey,
@@ -1794,7 +1783,7 @@ impl DocumentRuntime {
         self.stylesheet_lifecycle
             .owner_states
             .link_state_mut(handle)
-            .is_some_and(|state| state.accept_resource_completion(load, successful))
+            .is_some_and(|state| state.accept_resource_completion(load, successful).is_some())
     }
 
     #[cfg(test)]
@@ -4143,7 +4132,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn completed_ownerless_failure_keeps_parser_script_behind_link_error_dispatch() {
+    async fn completed_ownerless_failure_releases_parser_before_link_error_dispatch() {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("stylesheet server");
@@ -4205,8 +4194,8 @@ mod tests {
             "the completed failure must settle the physical stylesheet blocker"
         );
         assert!(
-            runtime.has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
-            "the exact posted link error task must remain in the parser script gate"
+            !runtime.has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
+            "a terminal stylesheet failure must release script execution before its error task"
         );
 
         let load = runtime
@@ -4227,7 +4216,7 @@ mod tests {
         );
         assert!(
             !runtime.has_pending_parser_script_blocking_stylesheet_signatures(signatures.iter()),
-            "dispatching the exact link error task must release the parser script gate"
+            "dispatching the exact link error task must not recreate the released script gate"
         );
         assert!(
             runtime.pop_ready_connected_style_load().is_none(),

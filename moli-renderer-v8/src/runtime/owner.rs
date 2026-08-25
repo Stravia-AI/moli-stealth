@@ -327,6 +327,13 @@ enum RenderRuntimeDispatchOutcome {
         token: RendererPageToken,
         failure: PageNavigationOwnerFailure,
     },
+    /// One ordinary Page scheduler turn has restored its stable residence.
+    /// The admission bit is carried across that restore so the owner can join
+    /// a selected parser task directly to its logical phase-one consumer.
+    PageTurnComplete {
+        result: Result<()>,
+        parser_continuation_admitted: bool,
+    },
     ContinueNextTurn(Box<RenderRuntimeTurn>),
     ContinueAfterPageWakeOrDeadline {
         turn: Box<RenderRuntimeTurn>,
@@ -489,6 +496,25 @@ impl RenderRuntimePendingTurnQueue {
         self.page_owner_turn_count -= usize::from(turn.is_page_owner_turn());
         self.owner_maintenance_turn_count -= usize::from(turn.is_owner_maintenance_turn());
         Some(turn)
+    }
+
+    fn promote_phase_one_parser_continuation(&mut self, token: RendererPageToken) -> bool {
+        let Some(index) = self
+            .turns
+            .iter()
+            .position(|pending| pending.turn.is_phase_one_continuation_for(token))
+        else {
+            return false;
+        };
+        let mut pending = self
+            .turns
+            .remove(index)
+            .expect("selected phase-one continuation must remain pending");
+        self.page_owner_turn_count -= usize::from(pending.is_page_owner_turn());
+        self.owner_maintenance_turn_count -= usize::from(pending.is_owner_maintenance_turn());
+        pending.allow_command_overtake = false;
+        self.push_front(pending);
+        true
     }
 
     const fn has_page_owner_turn(&self) -> bool {
@@ -786,6 +812,16 @@ impl RenderRuntimeTurn {
             } => *observer_token == token,
             _ => false,
         }
+    }
+
+    fn is_phase_one_continuation_for(&self, token: RendererPageToken) -> bool {
+        matches!(
+            self,
+            Self::ContinueLivePagePendingLocationNavigationPhaseOne {
+                token: continuation_token,
+                ..
+            } if *continuation_token == token
+        )
     }
 
     fn detach_navigation_command_observer(self) -> (Self, bool) {
@@ -2730,6 +2766,13 @@ impl RendererOwnerHandle {
                     let outcome = self
                         .run_pending_turn_on_owner_local_store(pending_turn.turn)
                         .await;
+                    let parser_continuation_admitted = matches!(
+                        &outcome,
+                        RenderRuntimeDispatchOutcome::PageTurnComplete {
+                            parser_continuation_admitted: true,
+                            ..
+                        }
+                    );
                     match outcome {
                         RenderRuntimeDispatchOutcome::Reply(result) => {
                             let result = merge_command_admission_output_predecessor(
@@ -2810,7 +2853,8 @@ impl RendererOwnerHandle {
                                 }
                             }
                         }
-                        RenderRuntimeDispatchOutcome::BackgroundComplete(result) => {
+                        RenderRuntimeDispatchOutcome::BackgroundComplete(result)
+                        | RenderRuntimeDispatchOutcome::PageTurnComplete { result, .. } => {
                             if let Some(reply_tx) = pending_turn.reply_tx {
                                 let reply = match result {
                                     Ok(()) => Err(anyhow!(
@@ -2915,6 +2959,13 @@ impl RendererOwnerHandle {
                         }
                     }
                     if let Some(token) = completed_page_turn_token {
+                        if parser_continuation_admitted {
+                            self.promote_admitted_phase_one_parser_continuation(
+                                token,
+                                &mut parked_turns,
+                                &mut pending_turns,
+                            );
+                        }
                         // A bounded Page turn may have published the exact
                         // lifecycle milestone page creation is waiting for.
                         // Re-admit only that one-shot observer at this owner
@@ -3123,7 +3174,8 @@ impl RendererOwnerHandle {
                     remove_page_on_bound_owner_local_store(token);
                 }
             }
-            RenderRuntimeDispatchOutcome::BackgroundComplete(result) => {
+            RenderRuntimeDispatchOutcome::BackgroundComplete(result)
+            | RenderRuntimeDispatchOutcome::PageTurnComplete { result, .. } => {
                 let reply = match result {
                     Ok(()) => Err(anyhow!(
                         "renderer command unexpectedly completed as background work"
@@ -3238,6 +3290,7 @@ impl RendererOwnerHandle {
             }
             RenderRuntimeDispatchOutcome::Reply(_)
             | RenderRuntimeDispatchOutcome::BackgroundComplete(_)
+            | RenderRuntimeDispatchOutcome::PageTurnComplete { .. }
             | RenderRuntimeDispatchOutcome::PageCreationNavigationFailurePublished { .. } => {}
         }
     }
@@ -3906,6 +3959,44 @@ impl RendererOwnerHandle {
         admitted != 0
     }
 
+    /// Complete the selected Networking continuation's one-way handoff.
+    ///
+    /// The Page turn only records admission in the resident phase-one parser;
+    /// it must not let another ordinary Page task run before that parser
+    /// consumes the admission. The logical phase-one driver may already be in
+    /// the pending queue (from the producer wake that admitted this Page turn)
+    /// or still be parked on Page activity, so promote either residence to the
+    /// front without changing task-source arbitration globally.
+    fn promote_admitted_phase_one_parser_continuation(
+        &self,
+        token: RendererPageToken,
+        parked_turns: &mut VecDeque<RenderRuntimeParkedTurn>,
+        pending_turns: &mut RenderRuntimePendingTurnQueue,
+    ) {
+        if pending_turns.promote_phase_one_parser_continuation(token) {
+            return;
+        }
+
+        let index = parked_turns
+            .iter()
+            .position(|parked| {
+                parked.wake_token == token && parked.turn.is_phase_one_continuation_for(token)
+            })
+            .expect("an admitted main-parser continuation must retain its phase-one driver");
+        let parked = parked_turns
+            .remove(index)
+            .expect("selected phase-one continuation must remain parked");
+        if let Some(mut pending) = self.pending_turn_from_parked(parked, pending_turns) {
+            pending.allow_command_overtake = false;
+            pending_turns.push_front(pending);
+        } else {
+            // A closed command observer may detach the same continuation into
+            // background work while converting the parked turn. Promote that
+            // detached driver too; a cancelled page legitimately leaves none.
+            let _ = pending_turns.promote_phase_one_parser_continuation(token);
+        }
+    }
+
     fn enqueue_due_parked_turns(
         &self,
         parked_turns: &mut VecDeque<RenderRuntimeParkedTurn>,
@@ -4175,6 +4266,7 @@ impl RendererOwnerHandle {
         mut entry: LivePageEntry,
         source_label: &'static str,
         output_ordering: RendererOutputPublicationOrdering,
+        parser_continuation_admitted: bool,
     ) -> RenderRuntimeDispatchOutcome {
         let has_pending_document_lifecycle_turn =
             entry.pending_document_lifecycle_identity().is_some();
@@ -4194,7 +4286,10 @@ impl RendererOwnerHandle {
             if let Some(output) = concrete_output {
                 self.publish_renderer_output(output);
             }
-            return RenderRuntimeDispatchOutcome::BackgroundComplete(Err(error));
+            return RenderRuntimeDispatchOutcome::PageTurnComplete {
+                result: Err(error),
+                parser_continuation_admitted,
+            };
         }
         let concrete_output = entry
             .page_vm_mut()
@@ -4230,7 +4325,10 @@ impl RendererOwnerHandle {
             ?next_turn,
             "completed one ordinary Page turn"
         );
-        RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()))
+        RenderRuntimeDispatchOutcome::PageTurnComplete {
+            result: Ok(()),
+            parser_continuation_admitted,
+        }
     }
 
     async fn run_one_page_turn(&self, token: RendererPageToken) -> RenderRuntimeDispatchOutcome {
@@ -4293,6 +4391,11 @@ impl RendererOwnerHandle {
         let (mut entry, advance_result) =
             advance_page_owner_one_turn_via_local_task(executor, entry, scheduled_task, loader)
                 .await;
+        let parser_continuation_admitted = entry
+            .page_vm()
+            .vm()
+            .document_runtime
+            .has_main_parser_continuation_admission();
 
         if let Err(error) = advance_result {
             let has_pending_document_lifecycle_turn =
@@ -4326,10 +4429,19 @@ impl RendererOwnerHandle {
                 }
                 PageOwnerNextTurn::None => {}
             }
-            return RenderRuntimeDispatchOutcome::BackgroundComplete(Ok(()));
+            return RenderRuntimeDispatchOutcome::PageTurnComplete {
+                result: Ok(()),
+                parser_continuation_admitted,
+            };
         }
 
-        self.finish_page_turn(token, entry, source_label, output_ordering)
+        self.finish_page_turn(
+            token,
+            entry,
+            source_label,
+            output_ordering,
+            parser_continuation_admitted,
+        )
     }
 
     async fn run_one_owner_maintenance_turn(
@@ -7302,6 +7414,47 @@ mod tests {
         assert!(
             turn.page_turn_should_yield_to_ready_command(),
             "ordinary detached page activity should still let ready commands run between turns"
+        );
+    }
+
+    #[test]
+    fn selected_parser_admission_promotes_its_phase_one_driver() {
+        let parser_token = RendererPageToken::new_for_testing(PageId::new_for_testing(8));
+        let unrelated_token = RendererPageToken::new_for_testing(PageId::new_for_testing(9));
+        let mut pending = RenderRuntimePendingTurnQueue::default();
+        pending.push_back(RenderRuntimePendingTurn {
+            reply_tx: None,
+            turn: RenderRuntimeTurn::RunPageTurn {
+                token: unrelated_token,
+            },
+            allow_command_overtake: true,
+            command_admission_output_predecessor: None,
+        });
+        pending.push_back(RenderRuntimePendingTurn {
+            reply_tx: None,
+            turn: RenderRuntimeTurn::ContinueLivePagePendingLocationNavigationPhaseOne {
+                token: parser_token,
+                follow_count: 0,
+                completion: LivePagePendingNavigationCompletion::Background,
+            },
+            allow_command_overtake: true,
+            command_admission_output_predecessor: None,
+        });
+
+        assert!(pending.promote_phase_one_parser_continuation(parser_token));
+        let promoted = pending
+            .pop_front()
+            .expect("admitted parser must retain its logical driver");
+        assert!(promoted.turn.is_phase_one_continuation_for(parser_token));
+        assert!(
+            !promoted.allow_command_overtake,
+            "no command or unrelated Page turn may split a selected parser task from its phase-one consumer"
+        );
+        assert_eq!(
+            pending
+                .pop_front()
+                .and_then(|pending| pending.page_owner_token()),
+            Some(unrelated_token)
         );
     }
 

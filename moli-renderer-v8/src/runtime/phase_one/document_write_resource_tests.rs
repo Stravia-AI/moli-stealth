@@ -740,9 +740,9 @@ globalThis.__completedPreloadEvents.push('inline-after');
                 assert_eq!(
                     result.get("value").and_then(serde_json::Value::as_str),
                     Some(
-                        r#"{"events":["inline-before","inline-after","external","script-load"],"linkConnected":true,"sheet":"[object CSSStyleSheet]"}"#,
+                        r#"{"events":["inline-before","inline-after","external","script-load","tail"],"linkConnected":true,"sheet":"[object CSSStyleSheet]"}"#,
                     ),
-                    "the external script callback should synchronously install the completed-preload client but keep the following script behind its event"
+                    "the completed-preload client must install synchronously and release the following parser script independently of its event"
                 );
                 assert!(
                     pending
@@ -766,8 +766,8 @@ globalThis.__completedPreloadEvents.push('inline-after');
                 .await;
                 assert_eq!(
                     result.get("value").and_then(serde_json::Value::as_str),
-                    Some("inline-before|inline-after|external|script-load|style-load|tail"),
-                    "the link event must release the parser-inserted script behind the adopted stylesheet"
+                    Some("inline-before|inline-after|external|script-load|tail|style-load"),
+                    "the adopted stylesheet event must remain asynchronous after parser execution resumes"
                 );
                 server
                     .await

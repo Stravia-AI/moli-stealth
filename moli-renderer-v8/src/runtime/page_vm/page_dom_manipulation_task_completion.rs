@@ -17,11 +17,6 @@ impl PageVm {
         action: PageDomManipulationTurnAction,
         loader: &crate::network::ResourceRequestClient,
     ) -> Result<()> {
-        let connected_style_event_settled_current_owner = matches!(
-            action,
-            PageDomManipulationTurnAction::ConnectedStyleEvent(action)
-                if action.settled_current_owner()
-        );
         let completion = match action {
             PageDomManipulationTurnAction::BroadcastChannel(action) => {
                 action.into_page_task_completion()
@@ -56,16 +51,6 @@ impl PageVm {
             }
         };
         self.finish_selected_page_task_completion(completion, loader)
-            .await?;
-        if connected_style_event_settled_current_owner {
-            // The connected-style event is the last observable action owned
-            // by the completed stylesheet. Once it has dispatched and
-            // released its exact load-delay binding, resume a parser parked at
-            // that stylesheet boundary before lifecycle admission is
-            // reconsidered for this owner turn.
-            self.run_ready_document_write_stylesheet_blocked_script()
-                .await?;
-        }
-        Ok(())
+            .await
     }
 }

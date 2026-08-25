@@ -280,11 +280,9 @@ impl DocumentRuntime {
     /// Whether a parser-owned script must still wait for one of the blocking
     /// stylesheet operations captured before it.
     ///
-    /// Physical stylesheet settlement and the connected `<link>` load/error
-    /// task are separate browser-observable boundaries. A speculative fetch
-    /// may already be terminal when the parser creates the real owner, so the
-    /// posted event must remain part of this script gate even though the
-    /// physical blocking state has settled.
+    /// Resource and `@import` completion release this gate. The later
+    /// `<link>` load/error task remains observable and keeps its Document-load
+    /// delay, but does not block parser-owned script execution.
     pub(crate) fn has_pending_parser_script_blocking_stylesheet_signatures<'a>(
         &mut self,
         signatures: impl IntoIterator<Item = &'a DocumentBlockingStylesheetSignature>,
@@ -313,7 +311,7 @@ impl DocumentRuntime {
                 .owner_states
                 .link_states()
                 .any(|(owner, state)| {
-                    (state.is_pending() || state.posted_event_load().is_some())
+                    state.is_pending()
                         && self
                             .stylesheet_lifecycle
                             .fetches
@@ -328,46 +326,48 @@ impl DocumentRuntime {
     pub(crate) fn drain_blocking_stylesheet_completions(&mut self) {
         #[cfg(test)]
         self.apply_ready_stylesheet_networking_tasks_for_test();
+        let mut had_pending_blocker = !self.parser_blocking_stylesheet_release_is_ready();
         let completed_fetches = self.stylesheet_lifecycle.fetches.drain_ready_completions();
         for fetch in completed_fetches {
-            self.promote_stylesheet_link_clients_for_fetch(&fetch);
+            self.promote_stylesheet_link_clients_for_fetch(&fetch, had_pending_blocker);
+            if self.parser_blocking_stylesheet_release_is_ready() {
+                had_pending_blocker = false;
+            }
         }
         self.reconcile_connected_style_imports_with_blocking_stylesheets();
+        self.request_parser_if_stylesheet_blockers_released(had_pending_blocker);
     }
 
     pub(crate) fn apply_blocking_stylesheet_completion(
         &mut self,
         completion: crate::stylesheet_blocking::StylesheetCompletion,
     ) {
-        let had_pending_blocker = self.stylesheet_lifecycle.fetches.has_any_pending_entries();
+        let mut had_pending_blocker = !self.parser_blocking_stylesheet_release_is_ready();
         if let Some(fetch) = self
             .stylesheet_lifecycle
             .fetches
             .apply_completion(completion)
         {
-            self.promote_stylesheet_link_clients_for_fetch(&fetch);
+            self.promote_stylesheet_link_clients_for_fetch(&fetch, had_pending_blocker);
+            if self.parser_blocking_stylesheet_release_is_ready() {
+                had_pending_blocker = false;
+            }
         }
         self.reconcile_connected_style_imports_with_blocking_stylesheets();
-        if had_pending_blocker && !self.stylesheet_lifecycle.fetches.has_any_pending_entries() {
-            // Match Blink's task publication boundary: stylesheet settlement
-            // schedules parser reevaluation even when a blocking <link> event
-            // was posted by the same completion. Phase-one yields to that
-            // stable event source before executing the script.
-            self.request_main_parser_continuation_if_active();
-        }
+        self.request_parser_if_stylesheet_blockers_released(had_pending_blocker);
     }
 
-    fn parser_blocking_stylesheet_release_is_ready(&self) -> bool {
+    pub(super) fn parser_blocking_stylesheet_release_is_ready(&self) -> bool {
         !self.stylesheet_lifecycle.fetches.has_any_pending_entries()
-            && !self.has_unsettled_parser_blocking_link()
+            && !self.has_pending_parser_blocking_link()
     }
 
-    fn has_unsettled_parser_blocking_link(&self) -> bool {
+    fn has_pending_parser_blocking_link(&self) -> bool {
         self.stylesheet_lifecycle
             .owner_states
             .link_states()
             .any(|(owner, state)| {
-                (state.is_pending() || state.posted_event_load().is_some())
+                state.is_pending()
                     && self.stylesheet_lifecycle.fetches.owns_blocking_link_fetch(
                         NodeId::new(owner.index()),
                         state.active_load().fetch(),
@@ -375,22 +375,29 @@ impl DocumentRuntime {
             })
     }
 
-    pub(crate) fn ready_connected_style_load_is_parser_blocking_link_event(
-        &self,
-        ready: &super::ReadyConnectedStyleLoad,
-    ) -> bool {
-        let super::ReadyConnectedStyleLoadOperation::StylesheetLink(load) = ready.operation()
-        else {
-            return false;
-        };
-        self.stylesheet_lifecycle
-            .fetches
-            .owns_blocking_link_fetch(NodeId::new(load.owner().index()), load.fetch())
+    pub(super) fn request_parser_if_stylesheet_blockers_released(&self, had_pending_blocker: bool) {
+        if had_pending_blocker && self.parser_blocking_stylesheet_release_is_ready() {
+            self.request_main_parser_continuation_if_active();
+        }
     }
 
-    pub(crate) fn release_main_parser_after_parser_blocking_link_event_if_ready(&self) {
-        if self.parser_blocking_stylesheet_release_is_ready() {
-            self.request_main_parser_continuation_if_active();
+    /// Finish one atomic stylesheet-state transition in Blink's lifecycle
+    /// order: release script execution first, then enqueue independent element
+    /// events. All clients of one shared physical fetch are published as one
+    /// batch, so iteration order cannot put one of their events ahead of the
+    /// parser continuation.
+    pub(super) fn publish_stylesheet_link_settlements(
+        &mut self,
+        had_pending_blocker: bool,
+        settlements: impl IntoIterator<Item = super::LinkStyleSettlement>,
+    ) {
+        self.request_parser_if_stylesheet_blockers_released(had_pending_blocker);
+        for settlement in settlements {
+            if let Some((load, successful)) = settlement.into_ready_event() {
+                self.push_ready_connected_style_load(
+                    super::ReadyConnectedStyleLoad::for_stylesheet_link(load, successful),
+                );
+            }
         }
     }
 

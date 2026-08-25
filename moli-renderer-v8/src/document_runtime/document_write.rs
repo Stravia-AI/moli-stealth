@@ -1148,20 +1148,6 @@ impl DocumentRuntime {
                 .is_some_and(|pending| !pending.blocking_signatures_before.is_empty())
     }
 
-    pub(crate) fn has_pending_document_write_parser_created_style_import_pause(&self) -> bool {
-        self.pending_document_write_stylesheet_parser_pause
-            .as_ref()
-            .is_some_and(|pending| {
-                !pending.blocking_signatures.is_empty()
-                    && pending.blocking_signatures.iter().all(|signature| {
-                        matches!(
-                            signature,
-                            DocumentBlockingStylesheetSignature::ParserCreatedStyleImport { .. }
-                        )
-                    })
-            })
-    }
-
     pub(crate) fn document_write_stylesheet_blocked_script_is_ready(&mut self) -> bool {
         let Some(signatures) = self
             .pending_document_write_stylesheet_parser_pause
@@ -2023,8 +2009,9 @@ impl DocumentRuntime {
                 pending.ready_completion.take()
             };
             let Some(completion) = ready_completion else {
-                // The stylesheet side is ready and its owner events have run;
-                // the same pending parser script now waits only for its source.
+                // The stylesheet side is ready; the same pending parser script
+                // now waits only for its source. Element events are separate
+                // tasks and do not participate in this gate.
                 return true;
             };
             let pending = self

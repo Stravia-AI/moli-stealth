@@ -38,7 +38,7 @@ pub(crate) use import_graph::fetch_complete_stylesheet_import_graph;
 pub(super) use import_graph::{ConnectedStyleImportReadiness, connected_style_import_readiness};
 pub(super) use import_graph_projection::fetch_observed_stylesheet_import_graph;
 pub(crate) use import_graph_projection::live_stylesheet_import_responses;
-pub(super) use link_state::{LinkStyleState, StylesheetCompletionState};
+pub(super) use link_state::{LinkStyleSettlement, LinkStyleState, StylesheetCompletionState};
 pub(crate) use linked_import_graph::LinkedStylesheetImportGraphCompletion;
 pub(super) use linked_import_graph::{
     LinkedStylesheetImportGraphAdmission, LinkedStylesheetImportGraphs,

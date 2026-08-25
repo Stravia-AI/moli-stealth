@@ -443,9 +443,12 @@ impl DocumentRuntime {
             .filter(|(_, state)| state.active_load().fetch().ptr_eq(fetch))
             .map(|(_, state)| Arc::clone(state.active_load()))
             .collect::<Vec<_>>();
-        for client in clients {
-            self.note_stylesheet_link_import_completion(&client, successful);
-        }
+        let had_pending_blocker = !self.parser_blocking_stylesheet_release_is_ready();
+        let settlements = clients
+            .into_iter()
+            .filter_map(|client| self.settle_stylesheet_link_import_completion(&client, successful))
+            .collect::<Vec<_>>();
+        self.publish_stylesheet_link_settlements(had_pending_blocker, settlements);
     }
 
     pub(crate) fn apply_linked_stylesheet_import_graph_completion(

@@ -34,6 +34,8 @@ use support::FixtureServer;
 use tokio::{io::AsyncReadExt, net::TcpListener, task::JoinHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
+#[path = "fetch_cli/anubis_async_module.rs"]
+mod anubis_async_module;
 #[path = "fetch_cli/disable_js.rs"]
 mod disable_js;
 

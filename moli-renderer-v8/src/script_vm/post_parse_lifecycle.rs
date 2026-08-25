@@ -2220,14 +2220,10 @@ impl ScriptVm {
         &mut self,
         ready: crate::document_runtime::ReadyConnectedStyleLoad,
     ) -> bool {
-        let parser_blocking_link_event = self
-            .document_runtime
-            .ready_connected_style_load_is_parser_blocking_link_event(&ready);
         let context_ptr: *const v8::Global<v8::Context> = &self.page_default_context;
         let context_host = self._context_host.clone();
         let document_runtime = &mut self.document_runtime;
-        let dispatched = self
-            .renderer_document_isolate
+        self.renderer_document_isolate
             .with_renderer_document_isolate_mut(|isolate| {
                 let scope = pin!(v8::HandleScope::new(isolate));
                 let scope = &mut scope.init();
@@ -2240,12 +2236,7 @@ impl ScriptVm {
                     return false;
                 }
                 document_runtime.dispatch_pending_style_load(scope, host_ptr, ready)
-            });
-        if parser_blocking_link_event {
-            self.document_runtime
-                .release_main_parser_after_parser_blocking_link_event_if_ready();
-        }
-        dispatched
+            })
     }
 
     pub(crate) fn apply_pending_stylesheet_source_css_projections(&mut self) {
