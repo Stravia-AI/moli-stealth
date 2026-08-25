@@ -3002,7 +3002,7 @@ async fn page_close_beforeunload_reject_then_accepts_and_unloads_once() {
   globalThis.__closeLifecycle = { beforeunload: 0, pagehide: 0, unload: 0 };
   onbeforeunload = event => {
     __closeLifecycle.beforeunload++;
-    console.log(`close-beforeunload-${__closeLifecycle.beforeunload}`);
+    console.log(`close-beforeunload-${__closeLifecycle.beforeunload}`, document.body);
     event.preventDefault();
     event.returnValue = "stay";
     return "stay";
@@ -3049,6 +3049,24 @@ async fn page_close_beforeunload_reject_then_accepts_and_unloads_once() {
     assert!(
         first_dialog_index < first_response_index,
         "the dialog prefix fence must precede the Page.close response"
+    );
+    let first_beforeunload_console = first_close_messages
+        .iter()
+        .find(|message| {
+            message["method"] == json!("Runtime.consoleAPICalled")
+                && message["params"]["args"][0]["value"] == json!("close-beforeunload-1")
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "first Page.close should publish the beforeunload console event: \
+                 {first_close_messages:?}"
+            )
+        });
+    assert_eq!(
+        first_beforeunload_console["params"]["args"][1]["subtype"],
+        json!("node"),
+        "renderer publication must resolve DOM RemoteObject metadata without a Page round trip: \
+         {first_beforeunload_console:?}"
     );
     assert!(
         ctx.conn

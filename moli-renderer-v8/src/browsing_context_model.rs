@@ -186,29 +186,18 @@ pub(crate) struct DocumentId(pub(crate) u64);
 ///
 /// The current inner LocalWindow may change or disappear while this record and
 /// its browsing-context identity remain stable.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub(crate) struct StableWindowProxyRecord {
     pub(crate) id: WindowProxyId,
     pub(crate) browsing_context_id: BrowsingContextId,
     pub(crate) current_local_window_id: Option<LocalWindowId>,
     pub(crate) reachability: WindowProxyReachability,
-    pub(crate) access: WindowProxyAccess,
 }
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowProxyReachability {
     Live,
     DetachedReachable,
-    NotReachable,
-}
-
-#[allow(dead_code)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum WindowProxyAccess {
-    SameOrigin,
-    CrossOriginRestricted,
 }
 
 /// Origin projection used by WindowProxy access checks.

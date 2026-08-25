@@ -197,7 +197,6 @@ impl NativeBridgeBindings {
     /// require independent wrapper templates for their own `JsContextHost`.
     /// Reusing only the isolate-level Window templates is intentional; every
     /// mutable bridge/cache object below that boundary is rebuilt per realm.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn build_peer_in_scope(&self, scope: &mut v8::PinScope<'_, '_>) -> Self {
         let window_global_template = v8::Local::new(scope, &self.window_global_template);
         let cross_origin_window_global_template =

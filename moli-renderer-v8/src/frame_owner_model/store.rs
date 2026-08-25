@@ -126,7 +126,6 @@ impl FrameOwnerStore {
                 browsing_context_id,
                 current_local_window_id: Some(local_window_id),
                 reachability: WindowProxyReachability::Live,
-                access: WindowProxyAccess::SameOrigin,
             },
         );
         self.scheduler_lanes.insert(
@@ -284,7 +283,6 @@ impl FrameOwnerStore {
                 browsing_context_id,
                 current_local_window_id: None,
                 reachability: WindowProxyReachability::Live,
-                access: WindowProxyAccess::SameOrigin,
             },
         );
         self.scheduler_lanes.insert(

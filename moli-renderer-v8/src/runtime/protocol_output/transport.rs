@@ -379,7 +379,9 @@ impl RendererOutputTransportSender {
         let admitted = self.shared.budget.lock().reserve(class, residence, bytes);
         if !admitted {
             self.terminate();
-            return Err(RendererOutputTransportSendError { message });
+            return Err(RendererOutputTransportSendError {
+                message: Box::new(message),
+            });
         }
         let envelope = RendererOutputTransportEnvelope::Message {
             message,
@@ -394,7 +396,9 @@ impl RendererOutputTransportSender {
             let RendererOutputTransportEnvelope::Message { message, .. } = error.0 else {
                 unreachable!("only concrete renderer output is sent through this branch")
             };
-            RendererOutputTransportSendError { message }
+            RendererOutputTransportSendError {
+                message: Box::new(message),
+            }
         })
     }
 
@@ -478,12 +482,12 @@ impl RendererOutputTransportReceiver {
 }
 
 pub struct RendererOutputTransportSendError {
-    message: RendererOutputTransportMessage,
+    message: Box<RendererOutputTransportMessage>,
 }
 
 impl RendererOutputTransportSendError {
     pub fn into_inner(self) -> RendererOutputTransportMessage {
-        self.message
+        *self.message
     }
 }
 

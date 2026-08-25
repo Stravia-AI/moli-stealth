@@ -3,6 +3,7 @@ use super::context_registry::{
     DocumentInspectorContextGroupId, DocumentInspectorContextRegistrationId,
     DocumentInspectorContextRegistry,
 };
+use super::output_resolution::RendererInspectorMessageFinalizer;
 mod interrupt;
 
 use crate::{
@@ -637,6 +638,19 @@ impl RendererInspectorIsolateBackend {
 
     pub(super) fn devtools_target(&self) -> RendererDevToolsTargetHandle {
         self.target.clone()
+    }
+
+    pub(super) fn message_finalizer(
+        &self,
+        context_group_id: DocumentInspectorContextGroupId,
+        session: &Rc<v8::inspector::V8InspectorSession>,
+    ) -> RendererInspectorMessageFinalizer {
+        RendererInspectorMessageFinalizer::new(
+            unsafe { *self.session_executor.isolate.get() },
+            self.context_registry.clone(),
+            context_group_id,
+            session,
+        )
     }
 
     pub(super) fn register_session_executor_route(

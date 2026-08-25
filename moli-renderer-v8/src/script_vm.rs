@@ -7640,23 +7640,9 @@ impl ScriptVm {
         let output_journal = environment.output_journal();
         let mut pending = output_journal.take_pending_for_resolution()?;
 
-        let current_agent_token = self.page_inspector.agent_token();
         for record in pending.records_mut() {
             record.with_runtime_inspector_batch_mut(|batch| {
-                let raw_messages = batch
-                    .messages
-                    .iter()
-                    .cloned()
-                    .map(RendererRuntimeInspectorMessage::into_v8_inspector_message)
-                    .collect::<Vec<_>>();
-                self.page_inspector
-                    .record_execution_context_state(&raw_messages, self.root_frame_id.as_deref());
-                self.page_isolated_world_contexts
-                    .record_inspector_context_state(&raw_messages, self.root_frame_id.as_deref());
-                if batch.agent_token == current_agent_token {
-                    batch.v8_state_update =
-                        self.inspector_v8_session_state(batch.session.wire_session_id());
-                }
+                self.resolve_runtime_inspector_batch_for_publication(batch);
             });
         }
         Some(pending.finish())

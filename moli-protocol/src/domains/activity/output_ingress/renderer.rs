@@ -238,7 +238,6 @@ async fn project_renderer_output_records_for_route(
                         session_id,
                         &observation,
                     )
-                    .await
                 };
                 barriers
                     .route_publication_outputs(

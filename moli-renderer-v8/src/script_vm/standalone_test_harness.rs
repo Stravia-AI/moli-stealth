@@ -298,7 +298,7 @@ mod tests {
         let page_task_queue = PageTaskQueueTestHarness::new();
         let page_task_tx = page_task_queue.owner_attached_runtime_page_task_sender_for_test();
         let parser_boundary_tx = page_task_queue.parser_boundary_sender();
-        let document = HtmlParser.parse(
+        let document = HtmlParser::SCRIPTING_ENABLED.parse(
             Url::parse("https://prebootstrap.example/").expect("test URL"),
             "<!doctype html><html><head></head><body>initial</body></html>".to_owned(),
         );

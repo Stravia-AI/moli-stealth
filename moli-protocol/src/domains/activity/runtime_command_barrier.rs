@@ -740,8 +740,7 @@ mod tests {
                 &mut conn,
                 Some(SESSION_ID),
                 &observation,
-            )
-            .await;
+            );
         let mut command_context = CommandDispatchContext::default();
 
         barriers

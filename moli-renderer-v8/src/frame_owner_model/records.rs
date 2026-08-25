@@ -2,8 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) use crate::browsing_context_model::{
     BrowsingContextId, DocumentCreationKind, DocumentId, LocalWindowId,
-    StableWindowProxyRecord as WindowProxyRecord, WindowProxyAccess, WindowProxyId,
-    WindowProxyReachability,
+    StableWindowProxyRecord as WindowProxyRecord, WindowProxyId, WindowProxyReachability,
 };
 use crate::browsing_context_model::{
     DocumentExternalStateRetirement, DocumentLocalWindowTransition, DocumentOwnerTransition,

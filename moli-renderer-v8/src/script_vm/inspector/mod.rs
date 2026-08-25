@@ -5,6 +5,7 @@ mod context_registry;
 mod document_backend;
 mod input_state;
 mod outbound;
+mod output_resolution;
 mod v8_backend;
 
 use self::agent::RendererDevToolsAgent;

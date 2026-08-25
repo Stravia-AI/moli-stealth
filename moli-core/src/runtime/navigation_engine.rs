@@ -2905,6 +2905,7 @@ mod tests {
                 None,
                 false,
                 0,
+                Vec::new(),
                 200,
                 vec![("content-type".to_owned(), "text/html".to_owned())],
                 &loader,

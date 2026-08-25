@@ -1515,7 +1515,6 @@ impl RendererPageScriptEnvironment {
     /// The caller owns an already-entered opener scope, so the source Page's
     /// retained membership and bridge templates are the only authorities this
     /// operation may use.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn bootstrap_related_page_document_isolate_in_scope(
         &self,
         scope: &mut v8::PinScope<'_, '_>,

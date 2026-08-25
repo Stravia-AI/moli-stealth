@@ -187,6 +187,7 @@ async fn prepare_test_external_raw_document_with_reservation_and_headers(
             None,
             false,
             0,
+            Vec::new(),
             200,
             response_headers,
             loader,
