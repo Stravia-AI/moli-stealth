@@ -181,6 +181,22 @@ mod tests {
         }))
         .await;
 
+        let issue_index = ctx
+            .sent
+            .iter()
+            .position(|message| message["method"] == json!("Audits.issueAdded"))
+            .expect("live CSP issue should be published");
+        let response_index = ctx
+            .sent
+            .iter()
+            .position(|message| message["id"] == json!(2))
+            .expect("Runtime.evaluate response should be published");
+        assert!(
+            issue_index < response_index,
+            "the live CSP issue must precede the command response: {:?}",
+            ctx.sent
+        );
+
         let issue = ctx.take_first_matching("live CSP issue", |message| {
             message["method"] == json!("Audits.issueAdded")
         });

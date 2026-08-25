@@ -289,7 +289,7 @@ async def _ordered_runtime_fanout(
             expected_ids,
             f"{client_kind} fan-out client {client_index} sent command order",
         )
-    received_messages = await asyncio.gather(
+    received = await asyncio.gather(
         *(
             _receive_ordered_runtime_burst(
                 client,
@@ -304,7 +304,16 @@ async def _ordered_runtime_fanout(
             )
         )
     )
-    for client_index, messages in enumerate(received_messages):
+    observed = await _read_shared_runtime_order(
+        clients[0], session_ids[0], state_name
+    )
+    for client_index, (messages, response_ids) in enumerate(received):
+        if response_ids != expected_ids:
+            raise SmokeError(
+                f"{client_kind} fan-out client {client_index} response order: "
+                f"expected {expected_ids!r}, got {response_ids!r}; "
+                f"shared execution order={observed!r}"
+            )
         own_session_id = session_ids[client_index]
         if own_session_id is None:
             continue
@@ -315,13 +324,7 @@ async def _ordered_runtime_fanout(
                     foreign_session_id,
                     f"{client_kind} fan-out burst {client_index}",
                 )
-    await _assert_shared_runtime_order(
-        clients[0],
-        session_ids[0],
-        client_kind,
-        client_count,
-        state_name,
-    )
+    _assert_shared_runtime_order(observed, client_kind, client_count)
     return burst_start_id
 
 
@@ -360,7 +363,7 @@ async def _receive_ordered_runtime_burst(
     client_count: int,
     client_index: int,
     expected_ids: list[int],
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[int]]:
     expected_id_set = set(expected_ids)
     response_ids: list[int] = []
     messages: list[dict[str, Any]] = []
@@ -372,7 +375,13 @@ async def _receive_ordered_runtime_burst(
                 f"timed out waiting for {client_kind} fan-out client {client_index} "
                 f"ordered responses; ids={response_ids}, messages={messages[-20:]}"
             )
-        message = await asyncio.wait_for(client.recv(), timeout=remaining)
+        try:
+            message = await asyncio.wait_for(client.recv(), timeout=remaining)
+        except TimeoutError as error:
+            raise SmokeError(
+                f"timed out waiting for {client_kind} fan-out client {client_index} "
+                f"ordered responses; ids={response_ids}, messages={messages[-20:]}"
+            ) from error
         messages.append(message)
         message_id = message.get("id")
         if message_id not in expected_id_set:
@@ -399,28 +408,28 @@ async def _receive_ordered_runtime_burst(
             {"client": client_index, "sequence": sequence},
             f"{client_kind} fan-out client {client_index} response payload",
         )
-    assert_equal(
-        response_ids,
-        expected_ids,
-        f"{client_kind} fan-out client {client_index} response order",
-    )
-    return messages
+    return messages, response_ids
 
 
-async def _assert_shared_runtime_order(
+async def _read_shared_runtime_order(
     client: RawCdpClient,
     session_id: str | None,
-    client_kind: str,
-    client_count: int,
     state_name: str,
-) -> None:
+) -> Any:
     read_id = await client.send(
         "Runtime.evaluate",
         {"expression": f"globalThis.{state_name}", "returnByValue": True},
         session_id=session_id,
     )
     response, _ = await client.recv_until_id(read_id, timeout=5)
-    observed = _runtime_value(response)
+    return _runtime_value(response)
+
+
+def _assert_shared_runtime_order(
+    observed: Any,
+    client_kind: str,
+    client_count: int,
+) -> None:
     expected = [
         f"{client_kind}-{client_count}-{client_index}-{sequence}"
         for client_index in range(client_count)
