@@ -903,6 +903,13 @@ pub(crate) fn window_post_message_callback<'s>(
             prepared.data,
             prepared.intended_target_origin,
         );
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                reject_remote_window_post_message(scope, &error);
+                return;
+            }
+        };
         assert!(
             source_host.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
@@ -957,6 +964,13 @@ pub(crate) fn window_post_message_callback<'s>(
             prepared.data,
             prepared.intended_target_origin,
         );
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                reject_remote_window_post_message(scope, &error);
+                return;
+            }
+        };
         assert!(
             source_host.append_live_turn_owner_action(
                 crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
@@ -1076,6 +1090,16 @@ pub(crate) fn window_post_message_callback<'s>(
         );
     }
     rv.set_undefined();
+}
+
+fn reject_remote_window_post_message(scope: &mut v8::PinScope<'_, '_>, error: &anyhow::Error) {
+    tracing::warn!(%error, "rejected RemoteWindowProxy postMessage command");
+    throw_dom_exception(
+        scope,
+        "DataCloneError",
+        25,
+        "Failed to execute 'postMessage' on 'Window': The serialized message could not be sent to the target context.",
+    );
 }
 
 pub(crate) fn signal_pending_window_message_reconsideration(host: &JsContextHost) {

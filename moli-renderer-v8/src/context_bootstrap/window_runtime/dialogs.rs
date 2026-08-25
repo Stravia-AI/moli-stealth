@@ -397,15 +397,21 @@ pub(crate) fn window_open_callback<'s>(
             let command = (unsafe { &*entry_host_ptr })
                 .renderer_remote_javascript_url_source(entry_identity, suppress_referrer)
                 .zip(target.related_remote_top_level_target())
-                .map(|(source, target)| {
-                    crate::runtime::RendererRemoteWindowProxyCommand::navigate_javascript_url(
+                .and_then(|(source, target)| {
+                    match crate::runtime::RendererRemoteWindowProxyCommand::navigate_javascript_url(
                         target.endpoint,
                         target.residence,
                         target.channel,
                         crate::runtime::RendererRemoteWindowProxyNavigationKind::Assign,
                         url.clone(),
                         source,
-                    )
+                    ) {
+                        Ok(command) => Some(command),
+                        Err(error) => {
+                            tracing::warn!(%error, "rejected remote window.open navigation command");
+                            None
+                        }
+                    }
                 });
             if !command.is_some_and(|command| {
                 unsafe { &mut *receiver_host_ptr }.append_live_turn_owner_action(

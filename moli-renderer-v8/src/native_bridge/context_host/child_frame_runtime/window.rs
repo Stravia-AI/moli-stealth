@@ -2853,8 +2853,15 @@ impl CrossOriginWindowObserver {
 
     fn append_remote_command(
         self,
-        command: crate::runtime::RendererRemoteWindowProxyCommand,
+        command: anyhow::Result<crate::runtime::RendererRemoteWindowProxyCommand>,
     ) -> bool {
+        let command = match command {
+            Ok(command) => command,
+            Err(error) => {
+                tracing::warn!(%error, "rejected cross-origin RemoteWindowProxy command");
+                return false;
+            }
+        };
         unsafe { &*self.host_ptr }.append_live_turn_owner_action(
             crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
         )

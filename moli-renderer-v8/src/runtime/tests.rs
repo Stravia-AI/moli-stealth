@@ -5778,7 +5778,8 @@ async fn coop_commit_switches_related_page_group_and_disconnects_old_window_prox
                 .expect("diagnostics should expose the old channel generation"),
         )
         .expect("old channel diagnostics should form a valid identity"),
-    );
+    )
+    .expect("stale focus command should encode");
     let baseline_isolates = runtime.document_isolate_accounting_for_diagnostics();
     let coop_headers = vec![
         ("content-type".to_owned(), "text/html".to_owned()),
@@ -6119,7 +6120,8 @@ async fn dropped_remote_window_proxy_waiter_cancels_queued_target_dispatch() {
             None,
             false,
         ),
-    );
+    )
+    .expect("cancellation probe command should encode");
 
     let (entered_rx, release_tx) = runtime.install_owner_command_dispatch_gate_for_testing();
     let pending = page
@@ -6225,7 +6227,8 @@ async fn cross_origin_related_page_commit_moves_local_window_to_remote_agent_and
                 .expect("diagnostics should expose the channel generation"),
         )
         .expect("diagnostics should form a valid channel"),
-    );
+    )
+    .expect("stale same-group command should encode");
 
     let canceled_reservation = popup
         .reserve_replacement_document_for_navigation()
@@ -6564,6 +6567,35 @@ addEventListener("messageerror", event => {
         Some(serde_json::json!(
             r#"[{"data":{"kind":"g5","nested":[1,2]},"origin":"https://remote-agent-opener.test","sourceType":"object","sourceIsNull":false,"sourceIsOpener":true,"sourceIsInitialOpener":true,"openerIsInitialOpener":true,"sourceClosed":false}]"#
         ))
+    );
+
+    output_rx.drain();
+    let (oversized_message, _) = opener
+        .run_async_command(RendererPageCommand::EvaluateExpression {
+            expression: r#"(() => {
+  const transfers = Array.from({ length: 4097 }, () => new ArrayBuffer(0));
+  try {
+    __g5RemotePopup.postMessage("too-many-attachments", "*", transfers);
+    return "missing-error";
+  } catch (error) {
+    return JSON.stringify([
+      error instanceof DOMException,
+      error.name
+    ]);
+  }
+})()"#
+                .to_owned(),
+            await_promise: false,
+        })
+        .await
+        .expect("remote postMessage transport limits should return to JavaScript");
+    assert_eq!(
+        renderer_json_value(oversized_message),
+        Some(serde_json::json!(r#"[true,"DataCloneError"]"#))
+    );
+    assert!(
+        remote_window_proxy_commands_for_page(&output_rx.drain(), &opener).is_empty(),
+        "a rejected author payload must not enter the browser-owned command stream"
     );
 
     // Chromium does not put v8::CompiledWasmModule attachments on its Mojo

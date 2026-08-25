@@ -217,9 +217,35 @@ impl V8StructuredClonePayload {
     /// receiver dispatches `messageerror` before deserialization, matching
     /// Chromium's Mojo path. Storage capabilities without a browser-side
     /// broker are rejected by `RemoteRuntimeMessage` serialization before
-    /// transfer-list side effects commit, so a failure here is an internal
-    /// invariant violation rather than an author-triggerable partial transfer.
+    /// transfer-list side effects commit. Author-controlled attachment counts
+    /// and retained bytes are bounded here before base64 expansion; callers
+    /// surface those transport-limit failures as `DataCloneError`.
     pub(crate) fn into_remote_wire(self) -> anyhow::Result<RemoteStructuredCloneWirePayload> {
+        validate_remote_attachment_count(self.base.transferred_array_buffers.len(), "ArrayBuffer")?;
+        validate_remote_attachment_count(self.base.transferred_message_ports.len(), "MessagePort")?;
+        validate_remote_attachment_count(self.readable_streams.len(), "ReadableStream")?;
+        validate_remote_attachment_count(self.writable_streams.len(), "WritableStream")?;
+        validate_remote_attachment_count(self.transform_streams.len(), "TransformStream")?;
+        validate_remote_attachment_count(self.blobs.len(), "Blob")?;
+        let mut retained_bytes = self.base.wire_bytes.len();
+        for byte_len in self
+            .base
+            .transferred_array_buffers
+            .iter()
+            .map(|buffer| buffer.bytes.len())
+            .chain(self.blobs.iter().map(|blob| match &blob.payload {
+                BlobClonePayload::Blob { bytes, .. } => bytes.len(),
+                BlobClonePayload::File { file, .. } => file.bytes.len(),
+            }))
+        {
+            retained_bytes = retained_bytes.checked_add(byte_len).ok_or_else(|| {
+                anyhow::anyhow!("remote structured-clone retained-byte count overflow")
+            })?;
+        }
+        anyhow::ensure!(
+            retained_bytes <= MAX_REMOTE_STRUCTURED_CLONE_WIRE_BYTES,
+            "remote structured-clone payload exceeds the transport byte limit"
+        );
         anyhow::ensure!(
             self.file_system_handles.is_empty(),
             "remote structured clone retained a renderer-local FileSystemHandle"

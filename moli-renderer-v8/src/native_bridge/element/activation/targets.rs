@@ -16,6 +16,22 @@ use crate::{
 
 use super::super::super::JsContextHost;
 
+fn append_remote_window_proxy_command(
+    host: &JsContextHost,
+    command: anyhow::Result<crate::runtime::RendererRemoteWindowProxyCommand>,
+) -> bool {
+    let command = match command {
+        Ok(command) => command,
+        Err(error) => {
+            tracing::warn!(%error, "rejected navigation RemoteWindowProxy command");
+            return false;
+        }
+    };
+    host.append_live_turn_owner_action(crate::runtime::RendererOwnerAction::RemoteWindowProxy(
+        command,
+    ))
+}
+
 /// A browsing-context keyword whose meaning is fixed by HTML.
 ///
 /// Parsing happens once, at the DOM navigation boundary. Downstream routing
@@ -262,9 +278,7 @@ impl<'s> NamedBrowsingContextNavigationTarget<'s> {
                         None,
                     )
                 };
-                unsafe { &*source_host_ptr }.append_live_turn_owner_action(
-                    crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
-                )
+                append_remote_window_proxy_command(unsafe { &*source_host_ptr }, command)
             }
             Self::RelatedTopLevel { .. } | Self::RelatedRemoteTopLevel { .. } => false,
         }
@@ -1310,9 +1324,7 @@ fn navigate_resolved_remote_child_form_target(
             Some(scheduler_id),
         )
     };
-    if !unsafe { &*source_host_ptr }.append_live_turn_owner_action(
-        crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
-    ) {
+    if !append_remote_window_proxy_command(unsafe { &*source_host_ptr }, command) {
         return false;
     }
     unsafe { &mut *source_host_ptr }.mark_pending_form_submission_child_navigation(
@@ -1415,9 +1427,7 @@ fn cancel_pending_form_submission_child_navigations<'s>(
                 channel,
                 scheduler_id,
             );
-            let _ = unsafe { &*source_host_ptr }.append_live_turn_owner_action(
-                crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
-            );
+            let _ = append_remote_window_proxy_command(unsafe { &*source_host_ptr }, command);
             continue;
         }
         let target_host_ptr = match target {
@@ -1851,9 +1861,7 @@ fn navigate_element_popup_target<'s, 'entries>(
                 resolved_url.to_owned(),
                 source,
             );
-            if !runtime.append_live_turn_owner_action(
-                crate::runtime::RendererOwnerAction::RemoteWindowProxy(command),
-            ) {
+            if !append_remote_window_proxy_command(runtime, command) {
                 return true;
             }
         }

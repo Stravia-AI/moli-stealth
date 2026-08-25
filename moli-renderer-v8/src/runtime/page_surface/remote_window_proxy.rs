@@ -336,7 +336,7 @@ impl RendererRemoteWindowProxyCommand {
         target_page: RendererResolvedPopupTarget,
         target_channel: RendererRemoteWindowProxyChannel,
         kind: RendererRemoteWindowProxyCommandKind,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_optional_frame(target_endpoint, target_page, target_channel, None, kind)
     }
 
@@ -345,7 +345,7 @@ impl RendererRemoteWindowProxyCommand {
         target_page: RendererResolvedPopupTarget,
         target_channel: RendererRemoteWindowProxyChannel,
         kind: RendererRemoteWindowProxyCommandKind,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_with_optional_frame(
             target_frame.endpoint,
             target_page,
@@ -361,10 +361,9 @@ impl RendererRemoteWindowProxyCommand {
         target_channel: RendererRemoteWindowProxyChannel,
         target_frame: Option<RendererRemoteFrameToken>,
         kind: RendererRemoteWindowProxyCommandKind,
-    ) -> Self {
-        assert_eq!(
-            target_channel.owner_local_host_id(),
-            target_page.owner_local_host_id(),
+    ) -> Result<Self> {
+        ensure!(
+            target_channel.owner_local_host_id() == target_page.owner_local_host_id(),
             "RemoteWindowProxy channel must belong to the selected target owner"
         );
         let route = RendererRemoteWindowProxyRoute {
@@ -374,14 +373,13 @@ impl RendererRemoteWindowProxyCommand {
             target_channel,
             target_frame,
         };
-        let wire = RemoteWindowProxyCommandWire::from_command(route, kind)
-            .expect("renderer-created RemoteWindowProxy command must be wire-safe");
-        let wire_bytes = serde_json::to_vec(&wire)
-            .expect("RemoteWindowProxy wire schema must always serialize as JSON");
-        Self {
+        let wire = RemoteWindowProxyCommandWire::from_command(route, kind)?;
+        let wire_bytes =
+            encode_remote_window_proxy_wire(&wire, MAX_REMOTE_WINDOW_PROXY_WIRE_BYTES)?;
+        Ok(Self {
             route,
             wire_bytes: Arc::from(wire_bytes),
-        }
+        })
     }
 
     pub(crate) fn navigate(
@@ -391,7 +389,7 @@ impl RendererRemoteWindowProxyCommand {
         kind: RendererRemoteWindowProxyNavigationKind,
         url: String,
         source: RendererTopLevelNavigationSource,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             target_endpoint,
             target_page,
@@ -407,7 +405,7 @@ impl RendererRemoteWindowProxyCommand {
         kind: RendererRemoteWindowProxyNavigationKind,
         url: String,
         source: RendererRemoteJavaScriptUrlSource,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             target_endpoint,
             target_page,
@@ -427,7 +425,7 @@ impl RendererRemoteWindowProxyCommand {
         source: RendererRemoteWindowProxySource,
         payload: V8StructuredClonePayload,
         intended_target_origin: Option<String>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             target_endpoint,
             target_page,
@@ -449,7 +447,7 @@ impl RendererRemoteWindowProxyCommand {
         kind: RendererRemoteWindowProxyNavigationKind,
         request: ChildBrowsingContextNavigationRequest,
         scheduler_id: Option<RendererRemoteFrameNavigationId>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_for_frame(
             target_frame,
             target_page,
@@ -470,7 +468,7 @@ impl RendererRemoteWindowProxyCommand {
         request: ChildBrowsingContextNavigationRequest,
         source: RendererRemoteJavaScriptUrlSource,
         scheduler_id: Option<RendererRemoteFrameNavigationId>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_for_frame(
             target_frame,
             target_page,
@@ -489,7 +487,7 @@ impl RendererRemoteWindowProxyCommand {
         target_page: RendererResolvedPopupTarget,
         target_channel: RendererRemoteWindowProxyChannel,
         scheduler_id: RendererRemoteFrameNavigationId,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_for_frame(
             target_frame,
             target_page,
@@ -505,7 +503,7 @@ impl RendererRemoteWindowProxyCommand {
         source: RendererRemoteWindowProxySource,
         payload: V8StructuredClonePayload,
         intended_target_origin: Option<String>,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new_for_frame(
             target_frame,
             target_page,
@@ -524,7 +522,7 @@ impl RendererRemoteWindowProxyCommand {
         target_endpoint: TopLevelWindowProxyEndpointId,
         target_page: RendererResolvedPopupTarget,
         target_channel: RendererRemoteWindowProxyChannel,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             target_endpoint,
             target_page,
@@ -537,7 +535,7 @@ impl RendererRemoteWindowProxyCommand {
         target_endpoint: TopLevelWindowProxyEndpointId,
         target_page: RendererResolvedPopupTarget,
         target_channel: RendererRemoteWindowProxyChannel,
-    ) -> Self {
+    ) -> Result<Self> {
         Self::new(
             target_endpoint,
             target_page,
@@ -605,6 +603,19 @@ impl RendererRemoteWindowProxyCommand {
             wire_bytes: Arc::from(wire_bytes),
         })
     }
+}
+
+fn encode_remote_window_proxy_wire(
+    wire: &RemoteWindowProxyCommandWire,
+    byte_limit: usize,
+) -> Result<Vec<u8>> {
+    let wire_bytes = serde_json::to_vec(wire)
+        .context("RemoteWindowProxy wire schema could not be serialized as JSON")?;
+    ensure!(
+        wire_bytes.len() <= byte_limit,
+        "RemoteWindowProxy wire command exceeds the transport byte limit"
+    );
+    Ok(wire_bytes)
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -1610,7 +1621,8 @@ mod tests {
             test_endpoint(),
             page,
             RendererRemoteWindowProxyChannel::allocate(page),
-        );
+        )
+        .expect("test focus command should encode");
         let mut value: serde_json::Value =
             serde_json::from_slice(&command.wire_bytes).expect("wire JSON");
         value["version"] = serde_json::json!(REMOTE_WINDOW_PROXY_WIRE_VERSION + 1);
@@ -1647,7 +1659,8 @@ mod tests {
             source,
             V8StructuredClonePayload::default(),
             None,
-        );
+        )
+        .expect("test message command should encode");
         let mut value: serde_json::Value =
             serde_json::from_slice(&message.wire_bytes).expect("message wire JSON");
         value["command"]["source"]["serializedOrigin"] =
@@ -1682,7 +1695,8 @@ mod tests {
             source,
             payload,
             Some("https://target.test".to_owned()),
-        );
+        )
+        .expect("test attachment message should encode");
         let decoded = command.kind_for_testing();
         let RendererRemoteWindowProxyCommandKind::PostMessage(message) = decoded else {
             panic!("expected postMessage wire command")
@@ -1716,7 +1730,8 @@ mod tests {
             test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Isolated {
                 grants_universal_access: false,
             }),
-        );
+        )
+        .expect("test javascript navigation should encode");
         let RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { kind, url, source } =
             top.kind_for_testing()
         else {
@@ -1757,7 +1772,8 @@ mod tests {
                 None,
                 RendererRemoteJavaScriptUrlSourceWorld::Main,
             ),
-        );
+        )
+        .expect("test opaque javascript navigation should encode");
         assert!(matches!(
             opaque.kind_for_testing(),
             RendererRemoteWindowProxyCommandKind::NavigateJavaScriptUrl { source, .. }
@@ -1784,7 +1800,8 @@ mod tests {
             ),
             test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Main),
             Some(RendererRemoteFrameNavigationId::allocate()),
-        );
+        )
+        .expect("test frame javascript navigation should encode");
         assert_eq!(frame.target_frame(), Some(target_frame));
         assert!(matches!(
             frame.kind_for_testing(),
@@ -1811,7 +1828,8 @@ mod tests {
                 None,
                 false,
             ),
-        );
+        )
+        .expect("test ordinary navigation should encode");
         let mut ordinary_value: serde_json::Value =
             serde_json::from_slice(&ordinary.wire_bytes).expect("ordinary wire JSON");
         ordinary_value["command"]["url"] =
@@ -1831,7 +1849,8 @@ mod tests {
             RendererRemoteWindowProxyNavigationKind::Assign,
             "javascript:void(0)".to_owned(),
             test_javascript_source(RendererRemoteJavaScriptUrlSourceWorld::Main),
-        );
+        )
+        .expect("test typed javascript navigation should encode");
         let mut group_value: serde_json::Value =
             serde_json::from_slice(&typed.wire_bytes).expect("typed wire JSON");
         group_value["command"]["source"]["windowSource"]["endpoint"]["browsingContextGroupId"] =
@@ -1872,6 +1891,63 @@ mod tests {
         assert!(
             ChildBrowsingContextNavigationRequest::try_from(wire).is_err(),
             "one oversized header must not bypass the per-field wire limit"
+        );
+    }
+
+    #[test]
+    fn remote_window_proxy_outbound_author_data_is_rejected_without_panicking() {
+        let page = test_page();
+        let oversized_url = format!(
+            "https://target.test/{}",
+            "x".repeat(MAX_REMOTE_WINDOW_PROXY_URL_BYTES)
+        );
+        let error = RendererRemoteWindowProxyCommand::navigate(
+            test_endpoint(),
+            page,
+            RendererRemoteWindowProxyChannel::allocate(page),
+            RendererRemoteWindowProxyNavigationKind::Assign,
+            oversized_url,
+            RendererTopLevelNavigationSource::browser_context(
+                "https://source.test/document".to_owned(),
+                None,
+                false,
+            ),
+        )
+        .expect_err("an author-controlled oversized URL must be rejected");
+        assert!(error.to_string().contains("URL limit"));
+
+        let route = RendererRemoteWindowProxyRoute {
+            id: allocate_remote_window_proxy_command_id(),
+            target_endpoint: test_endpoint(),
+            target_page: page,
+            target_channel: RendererRemoteWindowProxyChannel::allocate(page),
+            target_frame: None,
+        };
+        let mut payload = V8StructuredClonePayload::default();
+        payload.base.wire_bytes = vec![7; 256];
+        let wire = RemoteWindowProxyCommandWire::from_command(
+            route,
+            RendererRemoteWindowProxyCommandKind::PostMessage(Box::new(
+                RendererRemoteWindowProxyMessage {
+                    source: RendererRemoteWindowProxySource::new(
+                        test_endpoint(),
+                        page,
+                        "https://source.test".to_owned(),
+                    ),
+                    payload,
+                    intended_target_origin: None,
+                },
+            )),
+        )
+        .expect("bounded test payload should form a wire command");
+        let encoded = serde_json::to_vec(&wire).expect("test wire should encode");
+        let error = encode_remote_window_proxy_wire(&wire, encoded.len() - 1)
+            .expect_err("an encoded payload beyond the configured cap must be rejected");
+        assert!(error.to_string().contains("transport byte limit"));
+        assert_eq!(
+            encode_remote_window_proxy_wire(&wire, encoded.len())
+                .expect("the exact byte limit should admit the payload"),
+            encoded
         );
     }
 }
