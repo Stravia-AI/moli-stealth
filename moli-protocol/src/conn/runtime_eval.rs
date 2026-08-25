@@ -273,7 +273,7 @@ pub(crate) struct ClaimedPendingInspectorAwaitOwner {
     command_id: u64,
     session_id: Option<String>,
     bidi_channel_object_group: Option<String>,
-    renderer_correlation: Option<RendererCommandCorrelation>,
+    renderer_correlation_at_claim: Option<RendererCommandCorrelation>,
 }
 
 impl ClaimedPendingInspectorAwaitOwner {
@@ -285,7 +285,7 @@ impl ClaimedPendingInspectorAwaitOwner {
                 .entry
                 .bidi_channel_listener()
                 .map(|listener| listener.channel_object_group().to_owned()),
-            renderer_correlation: claimed.entry.renderer_correlation(),
+            renderer_correlation_at_claim: claimed.entry.renderer_correlation(),
         }
     }
 
@@ -1428,12 +1428,16 @@ impl CdpConnection {
     ) {
         for owner in owners {
             self.cancel_runtime_await_job(owner.command_id, owner.session_id(), reason);
-            if let Some(correlation) = owner.renderer_correlation {
-                self.discard_renderer_call_for_session_owner_if_matches(
+            // Attachment replacement may have rotated the renderer call after
+            // this scheduler owner was claimed. The terminal owner consumes
+            // the current registration; its snapshot is only a fallback for
+            // marking a response whose correlation was already removed.
+            let terminal_correlation = self
+                .take_renderer_call_for_frontend_for_session_owner(
                     owner.session_id(),
-                    correlation,
-                );
-            }
+                    owner.command_id,
+                )
+                .or(owner.renderer_correlation_at_claim);
             if let Some(object_group) = owner.bidi_channel_object_group.as_deref() {
                 self.unregister_runtime_remote_object_group_for_session_owner(
                     owner.session_id(),
@@ -1446,7 +1450,7 @@ impl CdpConnection {
                 owner.session_id(),
                 Err(reason.to_owned()),
             );
-            if let Some(correlation) = owner.renderer_correlation {
+            if let Some(correlation) = terminal_correlation {
                 response.bind_renderer_call_id(correlation.renderer_call_id());
             }
             background_events.push(BackgroundProtocolEvent::runtime_inspector_response_ready(
@@ -7436,6 +7440,108 @@ mod tests {
         assert_eq!(message["sessionId"], json!("SID-bg"));
         assert!(!conn.has_pending_inspector_awaits());
         assert!(conn.pending_runtime_await_jobs.is_empty());
+    }
+
+    #[test]
+    fn claimed_await_termination_consumes_a_rotated_renderer_correlation() {
+        const SESSION_ID: &str = "SID-rotated-await";
+        const COMMAND_ID: u64 = 41;
+
+        let mut conn = CdpConnection::default();
+        let mut browser_context = BrowserContext::new("BID-rotated-await".to_owned());
+        browser_context.set_active_target_id("TID-rotated-await".to_owned());
+        browser_context.attach_active_session(SESSION_ID.to_owned());
+        conn.browser_context = Some(browser_context);
+
+        conn.try_register_pending_inspector_await_with_object_group(
+            COMMAND_ID,
+            Some(SESSION_ID),
+            None,
+        )
+        .expect("await owner should register before renderer dispatch");
+        let old_attachment = RendererAgentAttachmentId::allocate();
+        let replacement_attachment = RendererAgentAttachmentId::allocate();
+        let prepared = conn
+            .try_register_renderer_call_for_session_owner(
+                Some(SESSION_ID),
+                COMMAND_ID,
+                Some(old_attachment),
+                renderer_command_descriptor_for_test(COMMAND_ID),
+            )
+            .expect("await renderer command should register");
+        let (original_correlation, old_sender, mut response_receiver) = prepared.into_parts();
+        let mut response_receiver = response_receiver
+            .take()
+            .expect("CommandReply delivery should retain one response receiver");
+
+        conn.claim_pending_inspector_await_for_scheduler_deferred_reply(
+            COMMAND_ID,
+            Some(SESSION_ID),
+        )
+        .expect("scheduler should claim the pending await owner");
+
+        let replacements = {
+            let browser_context = conn
+                .browser_context
+                .as_mut()
+                .expect("browser context should remain loaded");
+            crate::conn::state::prepare_renderer_call_replacements_for_devtools_sessions(
+                Some(SESSION_ID),
+                &mut browser_context.devtools_session_state,
+                &mut browser_context.auxiliary_devtools_session_states,
+                old_attachment,
+                replacement_attachment,
+            )
+            .expect("navigation replacement should prepare")
+        };
+        let (_, terminations, replays) = replacements.into_parts();
+        assert_eq!(terminations.len(), 1);
+        assert!(replays.is_empty());
+        let rotated_correlation = conn
+            .renderer_call_for_frontend_for_session_owner(Some(SESSION_ID), COMMAND_ID)
+            .expect("replacement should rotate the live renderer correlation");
+        assert_ne!(rotated_correlation, original_correlation);
+
+        let mut terminal_events = Vec::new();
+        conn.fail_claimed_pending_inspector_awaits_for_session_owner_background_events_into(
+            &mut terminal_events,
+            Some(SESSION_ID),
+            "Inspected target navigated or closed",
+        );
+        assert!(
+            conn.renderer_call_for_frontend_for_session_owner(Some(SESSION_ID), COMMAND_ID)
+                .is_none(),
+            "the claimed terminal owner must consume the rotated correlation"
+        );
+
+        let ready = terminal_events
+            .pop()
+            .expect("claimed await termination should publish one event")
+            .take_runtime_inspector_response_ready()
+            .expect("claimed await termination should publish one typed response");
+        assert!(ready.has_bound_renderer_call_id());
+        assert_eq!(ready.session_id(), Some(SESSION_ID));
+        assert!(terminal_events.is_empty());
+        let response = ready.into_protocol_message_for_typed_runtime_route();
+        assert_eq!(response["id"], json!(COMMAND_ID));
+        assert_eq!(
+            response["error"]["message"],
+            json!("Inspected target navigated or closed")
+        );
+
+        assert!(
+            conn.terminate_prepared_renderer_calls_after_navigation(
+                terminations,
+                "Inspected target navigated or closed",
+            )
+            .is_empty(),
+            "the canceled replacement sender must not publish a second response"
+        );
+        assert!(
+            response_receiver.try_recv().is_err(),
+            "the direct terminal owner must close the obsolete command-reply channel"
+        );
+        drop(old_sender);
     }
 
     #[test]
