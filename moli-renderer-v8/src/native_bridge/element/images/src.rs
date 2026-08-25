@@ -282,6 +282,17 @@ fn image_selected_source_candidate(
 ) -> Option<SelectedImageSource> {
     let node = runtime.dom_host().node(handle)?;
     let element = node.as_element()?;
+    if element.is_svg_element("image") {
+        return element
+            .attribute("href")
+            .or_else(|| element.attribute("xlink:href"))
+            .map(str::trim)
+            .filter(|href| !href.is_empty())
+            .map(|href| SelectedImageSource {
+                url: href.to_owned(),
+                density: 1.0,
+            });
+    }
     if !element.is_html_element("img") {
         return None;
     }
@@ -446,6 +457,16 @@ pub(crate) fn plan_image_attribute_mutation(
         let reloads_image = name.eq_ignore_ascii_case("src")
             || name.eq_ignore_ascii_case("srcset")
             || name.eq_ignore_ascii_case("sizes")
+            || (name.eq_ignore_ascii_case("crossorigin")
+                && ImageRequestCorsMode::from_cross_origin_attribute(
+                    element.attribute("crossorigin"),
+                ) != ImageRequestCorsMode::from_cross_origin_attribute(next_value));
+        return ImageAttributeMutationPlan {
+            targets: reloads_image.then_some(handle).into_iter().collect(),
+        };
+    }
+    if element.is_svg_element("image") {
+        let reloads_image = name.eq_ignore_ascii_case("href")
             || (name.eq_ignore_ascii_case("crossorigin")
                 && ImageRequestCorsMode::from_cross_origin_attribute(
                     element.attribute("crossorigin"),

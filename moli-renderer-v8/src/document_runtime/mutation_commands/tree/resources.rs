@@ -87,7 +87,12 @@ impl DocumentRuntime {
         if let [root] = roots
             && self.dom_host.first_child(*root).is_none()
         {
-            if self.dom_host.is_html_element_named(*root, "img") {
+            if self
+                .dom_host
+                .node(*root)
+                .and_then(Node::as_element)
+                .is_some_and(|element| element.is_image_resource_element())
+            {
                 crate::native_bridge::element::queue_image_load_event_if_needed_with_initiator(
                     scope,
                     host_ptr,
@@ -104,7 +109,7 @@ impl DocumentRuntime {
                 .dom_host
                 .node(handle)
                 .and_then(Node::as_element)
-                .is_some_and(|element| element.is_html_element("img"))
+                .is_some_and(|element| element.is_image_resource_element())
             {
                 images.push(handle);
             }
@@ -127,9 +132,11 @@ impl DocumentRuntime {
             plan.node_count += 1;
             if let Some(element) = self.dom_host.node(handle).and_then(Node::as_element) {
                 plan.details.observe_element(handle, element);
+                if element.is_image_resource_element() {
+                    plan.may_have_images = true;
+                }
                 match element.local_name() {
                     "img" => {
-                        plan.may_have_images = true;
                         plan.may_have_image_relevant_picture_source = true;
                     }
                     "source" => {
@@ -293,7 +300,12 @@ impl DocumentRuntime {
         let mut handles = Vec::new();
         self.collect_subtree_handles_preorder(removal_plan.root, &mut handles);
         for handle in handles {
-            if self.dom_host.is_html_element_named(handle, "img") {
+            if self
+                .dom_host
+                .node(handle)
+                .and_then(Node::as_element)
+                .is_some_and(|element| element.is_image_resource_element())
+            {
                 crate::native_bridge::element::queue_image_load_event_if_needed(
                     scope, host_ptr, handle,
                 );

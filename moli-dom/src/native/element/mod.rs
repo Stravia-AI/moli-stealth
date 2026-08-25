@@ -240,6 +240,14 @@ impl Element {
         self.namespace() == "http://www.w3.org/1999/xhtml" && self.local_name() == local_name
     }
 
+    pub fn is_svg_element(&self, local_name: &str) -> bool {
+        self.namespace() == "http://www.w3.org/2000/svg" && self.local_name() == local_name
+    }
+
+    pub fn is_image_resource_element(&self) -> bool {
+        self.is_html_element("img") || self.is_svg_element("image")
+    }
+
     pub fn is_inline_style_element(&self) -> bool {
         self.local_name() == "style"
             && matches!(

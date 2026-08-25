@@ -800,7 +800,12 @@ impl DocumentRuntime {
         let mut stack = vec![root];
         let mut images = Vec::new();
         while let Some(handle) = stack.pop() {
-            if self.dom_host.is_html_element_named(handle, "img") {
+            if self
+                .dom_host
+                .node(handle)
+                .and_then(Node::as_element)
+                .is_some_and(|element| element.is_image_resource_element())
+            {
                 images.push(handle);
             }
             if let Some(shadow_root) = self.dom_host.shadow_root_handle(handle) {

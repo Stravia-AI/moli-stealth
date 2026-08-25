@@ -199,7 +199,7 @@ pub(crate) fn start_image_element_resource_fetch(
         .dom_host()
         .node(image_handle)
         .and_then(crate::dom::native::Node::as_element)
-        .filter(|element| element.is_html_element("img"))
+        .filter(|element| element.is_image_resource_element())
         .ok_or_else(|| "image element is unavailable".to_owned())?;
     let request_initiator_type = pending.request_initiator_type();
     let (request_mode, credentials_mode) = image_cross_origin_request_modes(element);

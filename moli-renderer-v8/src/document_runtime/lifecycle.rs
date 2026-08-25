@@ -513,7 +513,7 @@ impl DocumentRuntime {
             let Some(element) = node.as_element() else {
                 continue;
             };
-            if !element.is_html_element("img") || element.image_load_dispatched() {
+            if !element.is_image_resource_element() || element.image_load_dispatched() {
                 continue;
             }
             native_bridge::element::queue_image_load_event_if_needed_with_initiator(
