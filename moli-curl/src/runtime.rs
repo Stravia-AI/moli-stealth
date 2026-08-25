@@ -1,5 +1,4 @@
 use std::{
-    cmp::Reverse,
     collections::VecDeque,
     fmt,
     num::NonZeroUsize,
@@ -557,8 +556,8 @@ impl<H: Handler + Send + 'static, C: Send + 'static> CurlRuntimeOwner<H, C> {
         if let Err(error) = multi.perform() {
             debug!("curl multi runtime perform failed: {error}");
         }
-        for (index, result) in completed_transfer_indices(multi, &state.active) {
-            let active = state.active.swap_remove(index);
+        let completed = completed_transfer_indices(multi, &state.active);
+        for (active, result) in take_completed_in_notification_order(&mut state.active, completed) {
             let easy = match multi.remove2(active.handle) {
                 Ok(easy) => Some(easy),
                 Err(error) => {
@@ -801,8 +800,33 @@ fn completed_transfer_indices<H: Handler, C>(
             }
         }
     });
-    completed.sort_by_key(|(index, _)| Reverse(*index));
     completed
+}
+
+/// Removes a completion batch without exposing the active-vector removal
+/// order to clients. `completed` is ordered exactly as libcurl reported its
+/// completion messages, while its indices refer to `active` before any member
+/// of the batch is removed.
+fn take_completed_in_notification_order<T, E>(
+    active: &mut Vec<T>,
+    completed: Vec<(usize, E)>,
+) -> Vec<(T, E)> {
+    let original_active_len = active.len();
+    let mut removed_indices = Vec::with_capacity(completed.len());
+    completed
+        .into_iter()
+        .map(|(original_index, result)| {
+            let removed_before = removed_indices
+                .iter()
+                .filter(|removed_index| **removed_index < original_index)
+                .count();
+            debug_assert!(original_index < original_active_len);
+            debug_assert!(!removed_indices.contains(&original_index));
+            let current_index = original_index - removed_before;
+            removed_indices.push(original_index);
+            (active.remove(current_index), result)
+        })
+        .collect()
 }
 
 fn make_runtime_multi(config: &CurlMultiRuntimeConfig) -> Multi {
@@ -909,6 +933,24 @@ mod tests {
             .map(|job| job.job.label.as_str())
             .collect::<Vec<_>>();
         assert_eq!(labels, ["high-a", "high-b", "auto-a", "auto-b", "low"]);
+    }
+
+    #[test]
+    fn completed_jobs_preserve_libcurl_notification_order() {
+        let mut active = vec!["first", "second", "third", "fourth"];
+
+        // libcurl reported the newest active entry first, followed by the
+        // oldest. Vector-index removal must not reverse that observable order.
+        let completed = take_completed_in_notification_order(
+            &mut active,
+            vec![(3, "fourth-result"), (0, "first-result")],
+        );
+
+        assert_eq!(
+            completed,
+            vec![("fourth", "fourth-result"), ("first", "first-result")]
+        );
+        assert_eq!(active, ["second", "third"]);
     }
 
     #[test]

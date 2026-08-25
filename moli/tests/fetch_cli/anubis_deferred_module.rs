@@ -16,22 +16,22 @@ use std::{
 };
 use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
 
-// Reduced from Anubis 1.26.2 as served by lore.kernel.org. Its async module
-// suspends on a locale fetch while a later inline script is parser-blocked by
-// an earlier stylesheet. Once the stylesheet becomes available, the parser
-// must resume before a later fetch continuation can observe the following DOM.
+// Reduced from the Anubis 1.27 challenge template. Upstream changed the
+// challenge module from `async` to `defer` so it cannot observe DOM that the
+// stylesheet-blocked parser has not created yet.
 const CHALLENGE_PAGE: &str = r#"<!doctype html>
 <html>
   <head>
     <title>local anubis challenge</title>
     <script>globalThis.__anubisOrder = ["bootstrap"];</script>
-    <link rel="stylesheet" href="/anubis/blocked.css" onload="__anubisOrder.push('link-load'); fetch('/anubis/style-activated')">
+    <link rel="stylesheet" href="/anubis/blocked.css">
   </head>
   <body>
     <main id="challenge">
       <p id="status">calculating</p>
-      <script async type="module" src="/anubis/main.mjs"></script>
+      <script defer type="module" src="/anubis/main.mjs"></script>
       <script src="/anubis/parser-continuation.js"></script>
+      <div id="progress"><div class="bar-inner"></div></div>
       <script>document.documentElement.dataset.executionOrder = __anubisOrder.join(',');</script>
     </main>
   </body>
@@ -42,11 +42,12 @@ const locale = await (await fetch('/anubis/locale.json')).json();
 globalThis.__anubisOrder.push('module-continuation');
 const progress = document.getElementById('progress');
 document.documentElement.dataset.progressAtModuleContinuation = progress ? 'present' : 'missing';
-progress.style.display = 'block';
+if (progress) progress.style.display = 'block';
 document.getElementById('status').textContent = locale.ready;
 location.replace(
   '/anubis/passed?order=' + encodeURIComponent(__anubisOrder.join(',')) +
-  '&style=' + encodeURIComponent(document.documentElement.dataset.styleAtParserContinuation || 'missing')
+  '&style=' + encodeURIComponent(document.documentElement.dataset.styleAtParserContinuation || 'missing') +
+  '&progress=' + encodeURIComponent(document.documentElement.dataset.progressAtModuleContinuation)
 );
 "#;
 
@@ -55,10 +56,6 @@ globalThis.__anubisOrder.push('parser-continuation');
 document.documentElement.dataset.parserContinuation = 'ran';
 document.documentElement.dataset.styleAtParserContinuation =
   getComputedStyle(document.getElementById('status')).color;
-const progress = document.createElement('div');
-progress.id = 'progress';
-progress.innerHTML = '<div class="bar-inner"></div>';
-document.currentScript.after(progress);
 "#;
 
 #[derive(Default)]
@@ -89,16 +86,14 @@ impl Event {
 struct FixtureState {
     stylesheet_requested: Arc<Event>,
     parser_continuation_requested: Arc<Event>,
-    locale_requested: Arc<Event>,
-    style_activated: Arc<Event>,
 }
 
-struct AnubisAsyncModuleFixture {
+struct AnubisDeferredModuleFixture {
     base_url: String,
     task: JoinHandle<()>,
 }
 
-impl AnubisAsyncModuleFixture {
+impl AnubisDeferredModuleFixture {
     async fn spawn() -> Result<Self> {
         let state = FixtureState::default();
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -111,14 +106,13 @@ impl AnubisAsyncModuleFixture {
                 get(|| async { javascript_response(MAIN_MODULE) }),
             )
             .route("/anubis/parser-continuation.js", get(parser_continuation))
-            .route("/anubis/style-activated", get(style_activated))
             .route("/anubis/locale.json", get(locale))
             .route("/anubis/passed", get(passed))
             .with_state(state);
         let task = tokio::spawn(async move {
             axum::serve(listener, app)
                 .await
-                .expect("Anubis async-module fixture should serve");
+                .expect("Anubis deferred-module fixture should serve");
         });
         Ok(Self {
             base_url: format!("http://{addr}"),
@@ -138,7 +132,7 @@ async fn passed(uri: Uri) -> Html<String> {
     ))
 }
 
-impl Drop for AnubisAsyncModuleFixture {
+impl Drop for AnubisDeferredModuleFixture {
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -152,7 +146,6 @@ async fn blocked_stylesheet(State(state): State<FixtureState>) -> Response {
     // the stylesheet terminal is released; the test does not depend on a
     // sleep being long enough for the parser to get there.
     state.parser_continuation_requested.wait().await;
-    state.locale_requested.wait().await;
     (
         StatusCode::OK,
         [
@@ -169,20 +162,8 @@ async fn parser_continuation(State(state): State<FixtureState>) -> Response {
     javascript_response(PARSER_CONTINUATION)
 }
 
-async fn style_activated(State(state): State<FixtureState>) -> StatusCode {
-    state.style_activated.signal();
-    StatusCode::NO_CONTENT
-}
-
 async fn locale(State(state): State<FixtureState>) -> Response {
     state.stylesheet_requested.wait().await;
-    state.locale_requested.signal();
-    // Keep the async module suspended until the stylesheet's actual DOM event
-    // runs. The onload confirmation request is a browser-observed causal edge:
-    // it avoids assuming that a server handler returning means response bytes
-    // have already reached the renderer. If link-event work can overtake the
-    // parser, releasing this response exposes the same Anubis failure.
-    state.style_activated.wait().await;
     (
         StatusCode::OK,
         [
@@ -207,9 +188,9 @@ fn javascript_response(source: &'static str) -> Response {
 }
 
 #[test]
-fn cli_async_module_does_not_overtake_stylesheet_unblocked_parser() -> Result<()> {
+fn cli_deferred_module_observes_stylesheet_unblocked_parser_dom() -> Result<()> {
     let runtime = tokio::runtime::Runtime::new()?;
-    let server = runtime.block_on(AnubisAsyncModuleFixture::spawn())?;
+    let server = runtime.block_on(AnubisDeferredModuleFixture::spawn())?;
     let url = server.url("/anubis/challenge");
     let output = Command::new(env!("CARGO_BIN_EXE_moli"))
         .args([
@@ -236,15 +217,19 @@ fn cli_async_module_does_not_overtake_stylesheet_unblocked_parser() -> Result<()
     );
     assert!(
         stdout.contains("id=\"passed\""),
-        "async module resumed before the stylesheet-unblocked parser inserted #progress: stdout={stdout}\nstderr={stderr}"
+        "deferred module did not finish the local challenge: stdout={stdout}\nstderr={stderr}"
     );
     assert!(
-        stdout.contains("order=bootstrap%2Cparser-continuation%2Clink-load%2Cmodule-continuation"),
-        "stylesheet/parser ordering diverged from Chromium: stdout={stdout}\nstderr={stderr}"
+        stdout.contains("order=bootstrap%2Cparser-continuation%2Cmodule-continuation"),
+        "deferred module ran before parsing completed: stdout={stdout}\nstderr={stderr}"
     );
     assert!(
         stdout.contains("style=rgb(1%2C%202%2C%203)"),
         "the parser resumed before the completed stylesheet affected computed style: stdout={stdout}\nstderr={stderr}"
+    );
+    assert!(
+        stdout.contains("progress=present"),
+        "deferred module did not observe parser-created DOM: stdout={stdout}\nstderr={stderr}"
     );
     Ok(())
 }
