@@ -152,11 +152,10 @@ fn response_parser_http_lws_is_only_space_and_tab() {
 }
 
 #[test]
-fn response_parser_ascii_lowercases_charset_without_changing_raw_parameters() {
+fn response_parser_ascii_lowercases_charset() {
     let parsed = parse_response_content_type("text/html; charset=\tX-\u{dc}TF-A\t").unwrap();
 
     assert_eq!(parsed.charset(), Some("x-\u{dc}tf-a"));
-    assert_eq!(parsed.parameter("charset"), Some("X-\u{dc}TF-A"));
 }
 
 #[test]
@@ -252,10 +251,12 @@ fn response_parser_matches_chromium_http_util_regression_matrix() {
         assert_response_content_type(input, mime_type, charset);
     }
 
-    let boundary =
-        parse_response_content_type("text/html; boundary=\"WebKit-ada-df-dsf-adsfadsfs  \"")
-            .unwrap();
-    assert_eq!(boundary.boundary(), Some("WebKit-ada-df-dsf-adsfadsfs"));
+    let parsed = parse_response_content_type(
+        "text/html; boundary=\"WebKit-ada-df-dsf-adsfadsfs  \"; charset=UTF-8; boundary=ignored",
+    )
+    .unwrap();
+    assert_eq!(parsed.charset(), Some("utf-8"));
+    assert_eq!(parsed.boundary(), Some("WebKit-ada-df-dsf-adsfadsfs"));
 }
 
 #[test]

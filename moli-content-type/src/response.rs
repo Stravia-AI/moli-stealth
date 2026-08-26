@@ -2,27 +2,14 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResponseContentType {
     mime_type: String,
-    parameters: Vec<(String, String)>,
     charset: Option<String>,
+    boundary: Option<String>,
 }
 
 impl ResponseContentType {
     /// The lower-case media type Chromium accepted from the response.
     pub fn mime_type(&self) -> &str {
         &self.mime_type
-    }
-
-    /// Parsed parameters in header order.
-    pub fn parameters(&self) -> &[(String, String)] {
-        &self.parameters
-    }
-
-    /// The first parameter with the given ASCII-case-insensitive name.
-    pub fn parameter(&self, name: &str) -> Option<&str> {
-        self.parameters
-            .iter()
-            .find(|(candidate, _)| candidate.eq_ignore_ascii_case(name))
-            .map(|(_, value)| value.as_str())
     }
 
     /// The first `charset` value, with HTTP linear whitespace trimmed and
@@ -33,7 +20,7 @@ impl ResponseContentType {
 
     /// The first `boundary` value, with HTTP linear whitespace trimmed.
     pub fn boundary(&self) -> Option<&str> {
-        self.parameter("boundary").map(trim_http_lws)
+        self.boundary.as_deref()
     }
 }
 
@@ -66,7 +53,8 @@ pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
     }
 
     let mime_type = input[type_start..type_end].to_ascii_lowercase();
-    let mut parameters = Vec::new();
+    let mut charset = None;
+    let mut boundary = None;
     let mut offset = find_from(bytes, type_end, |byte| byte == b';').unwrap_or(input_len);
 
     while offset < input_len {
@@ -80,7 +68,7 @@ pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
             continue;
         }
 
-        let name = input[name_start..offset].to_owned();
+        let name = &input[name_start..offset];
         offset = skip_http_lws(bytes, offset + 1);
         if offset >= input_len || bytes[offset] == b';' {
             continue;
@@ -96,18 +84,17 @@ pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
             let value_end = trim_trailing_http_lws(bytes, value_start, offset);
             input[value_start..value_end].to_owned()
         };
-        parameters.push((name, value));
+        if charset.is_none() && name.eq_ignore_ascii_case("charset") {
+            charset = Some(trim_http_lws(&value).to_ascii_lowercase());
+        } else if boundary.is_none() && name.eq_ignore_ascii_case("boundary") {
+            boundary = Some(trim_http_lws(&value).to_owned());
+        }
     }
-
-    let charset = parameters
-        .iter()
-        .find(|(name, _)| name.eq_ignore_ascii_case("charset"))
-        .map(|(_, value)| trim_http_lws(value).to_ascii_lowercase());
 
     Some(ResponseContentType {
         mime_type,
-        parameters,
         charset,
+        boundary,
     })
 }
 
