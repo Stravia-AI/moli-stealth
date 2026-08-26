@@ -673,7 +673,9 @@ impl HostEventTargetRegistry {
         scope: &mut v8::PinScope<'_, '_>,
         listener: v8::Local<'_, v8::Function>,
     ) -> (String, i32, Option<String>, Option<u32>, Option<u32>) {
-        let function_name = listener.get_name(scope).to_rust_string_lossy(scope);
+        let function_name = v8::Local::<v8::String>::try_from(listener.get_name(scope))
+            .map(|name| name.to_rust_string_lossy(scope))
+            .unwrap_or_default();
         let script_id = listener.script_id();
         let script_url = listener
             .get_script_origin()

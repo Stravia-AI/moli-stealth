@@ -940,6 +940,34 @@ fn event_dispatch_internal_flags_are_not_script_writable() {
 }
 
 #[test]
+fn callable_proxy_event_listener_does_not_require_a_string_function_name() {
+    let mut vm = new_storage_test_vm("https://callable-proxy-event-listener.test/");
+
+    let result = vm
+        .eval(
+            r#"
+            (() => {
+              const target = document.createElement("div");
+              const calls = [];
+              const listener = new Proxy(function(event) {
+                calls.push(event.type);
+              }, {});
+
+              target.addEventListener("probe", listener);
+              target.dispatchEvent(new Event("probe"));
+              target.removeEventListener("probe", listener);
+              target.dispatchEvent(new Event("probe"));
+
+              return `${typeof listener}:${calls.join(",")}`;
+            })()
+            "#,
+        )
+        .expect("callable Proxy listener should register and dispatch");
+
+    assert_eq!(result, "function:probe");
+}
+
+#[test]
 fn document_level_scroll_blocking_listeners_default_to_passive() {
     let mut vm = new_storage_test_vm("https://default-passive-events.test/");
 
