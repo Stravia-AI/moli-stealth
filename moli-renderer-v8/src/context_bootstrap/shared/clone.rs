@@ -8,9 +8,10 @@ use crate::{
     },
     structured_clone::{
         RuntimeMessageAgentCluster, V8StructuredClonePayload, deserialize_from_wire,
-        deserialize_message_event_from_wire, serialize_for_wire_for_remote_runtime_message,
-        serialize_for_wire_for_runtime, serialize_for_wire_for_runtime_message,
-        serialize_for_wire_for_runtime_with_transfers, serialize_for_wire_for_storage,
+        deserialize_message_event_from_wire, remote_structured_clone_attachment_count_is_supported,
+        serialize_for_wire_for_remote_runtime_message, serialize_for_wire_for_runtime,
+        serialize_for_wire_for_runtime_message, serialize_for_wire_for_runtime_with_transfers,
+        serialize_for_wire_for_storage,
     },
     types::MessagePortId,
     util::{context_host_ptr_from_global_bridge, get_private_value, v8_string, v8str},
@@ -232,6 +233,24 @@ fn structured_serialize_value_for_window_post_message_transfers<'s>(
     source_security: RuntimeMessageSourceSecurity,
     transport: WindowPostMessageTransport,
 ) -> Option<V8StructuredClonePayload> {
+    if matches!(transport, WindowPostMessageTransport::RemoteEndpoint)
+        && ![
+            transfers.array_buffers.len(),
+            transfers.message_ports.len(),
+            transfers.readable_streams.len(),
+            transfers.writable_streams.len(),
+            transfers.transform_streams.len(),
+        ]
+        .into_iter()
+        .all(remote_structured_clone_attachment_count_is_supported)
+    {
+        throw_post_message_data_clone_error(
+            scope,
+            "Window",
+            "transfer list exceeds the remote transport attachment limit.",
+        );
+        return None;
+    }
     if is_uncloneable_web_platform_object(scope, value)
         && !transfer_list_contains_stream_value(value, &transfers)
     {

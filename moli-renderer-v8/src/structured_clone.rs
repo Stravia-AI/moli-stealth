@@ -148,6 +148,10 @@ const MAX_REMOTE_STRUCTURED_CLONE_WIRE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_REMOTE_STRUCTURED_CLONE_ATTACHMENTS: usize = 4_096;
 const MAX_REMOTE_STRUCTURED_CLONE_STRING_BYTES: usize = 16 * 1024;
 
+pub(crate) const fn remote_structured_clone_attachment_count_is_supported(count: usize) -> bool {
+    count <= MAX_REMOTE_STRUCTURED_CLONE_ATTACHMENTS
+}
+
 fn encode_remote_bytes(bytes: Vec<u8>) -> String {
     BASE64_STANDARD_NO_PAD.encode(bytes)
 }
@@ -168,7 +172,7 @@ fn decode_remote_bytes(encoded: &str, retained_bytes: &mut usize) -> anyhow::Res
 
 fn validate_remote_attachment_count(count: usize, label: &str) -> anyhow::Result<()> {
     anyhow::ensure!(
-        count <= MAX_REMOTE_STRUCTURED_CLONE_ATTACHMENTS,
+        remote_structured_clone_attachment_count_is_supported(count),
         "remote structured-clone {label} attachment count exceeds the transport limit"
     );
     Ok(())

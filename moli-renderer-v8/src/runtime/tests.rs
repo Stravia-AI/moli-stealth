@@ -6634,14 +6634,16 @@ addEventListener("messageerror", event => {
     let (oversized_message, _) = opener
         .run_async_command(RendererPageCommand::EvaluateExpression {
             expression: r#"(() => {
-  const transfers = Array.from({ length: 4097 }, () => new ArrayBuffer(0));
+  const transfers = Array.from({ length: 4097 }, () => new ArrayBuffer(1));
   try {
     __g5RemotePopup.postMessage("too-many-attachments", "*", transfers);
     return "missing-error";
   } catch (error) {
     return JSON.stringify([
       error instanceof DOMException,
-      error.name
+      error.name,
+      transfers[0].byteLength,
+      transfers.at(-1).byteLength
     ]);
   }
 })()"#
@@ -6652,7 +6654,7 @@ addEventListener("messageerror", event => {
         .expect("remote postMessage transport limits should return to JavaScript");
     assert_eq!(
         renderer_json_value(oversized_message),
-        Some(serde_json::json!(r#"[true,"DataCloneError"]"#))
+        Some(serde_json::json!(r#"[true,"DataCloneError",1,1]"#))
     );
     assert!(
         remote_window_proxy_commands_for_page(&output_rx.drain(), &opener).is_empty(),
