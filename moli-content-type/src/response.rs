@@ -40,9 +40,10 @@ impl ResponseContentType {
 ///
 /// This intentionally accepts malformed values seen on the network, including
 /// an unterminated quoted parameter and an empty subtype. Use this only for
-/// response transport metadata, such as extracting `charset` or multipart
-/// `boundary`; standards-facing MIME operations must use
-/// [`crate::parse_mime_type`].
+/// Chromium transport-metadata behavior, such as selecting a response
+/// `charset` or multipart `boundary`. A value does not belong here merely
+/// because it came from a response header: web-platform MIME classification
+/// and sniffing use [`crate::parse_mime_type`].
 pub fn parse_response_content_type(input: &str) -> Option<ResponseContentType> {
     // Chromium treats an exact bare wildcard as meaningless, while retaining
     // wildcard values that have parameters or even trailing whitespace.

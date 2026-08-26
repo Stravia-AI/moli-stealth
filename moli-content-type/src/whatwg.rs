@@ -47,10 +47,10 @@ impl fmt::Display for MimeType {
 /// Parses a standards-facing MIME value using WHATWG validation,
 /// normalization, and parameter recovery rules.
 ///
-/// Use this for Web API MIME operations and for interpreting an already
-/// selected MIME value. Raw HTTP response `Content-Type` metadata must instead
-/// use [`crate::parse_response_content_type`] so its Chromium network behavior
-/// is preserved.
+/// Use this whenever a web-platform algorithm says to parse a MIME type. That
+/// includes MIME classification and sniffing even when the input originated
+/// in an HTTP response header. Use [`crate::parse_response_content_type`] only
+/// for Chromium's separate transport-metadata interpretation.
 pub fn parse_mime_type(input: &str) -> Option<MimeType> {
     input.parse().ok().map(|inner| MimeType { inner })
 }
